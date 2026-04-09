@@ -215,6 +215,8 @@ pub fn run_pgas_cli(
             let chain_seed = seed ^ (chain_id as u64).wrapping_mul(0x9e3779b97f4a7c15);
             let chain_dir = format!("{}/chain_{}", stage_dir, chain_id + 1);
 
+            let tempering = sc.and_then(|s| s.tempering.clone())
+                .unwrap_or_else(|| vec![1.0]);
             let pgas_config = PGASConfig {
                 n_particles,
                 n_sweeps,
@@ -223,6 +225,7 @@ pub fn run_pgas_cli(
                 dt,
                 use_nuts,
                 dense_mass, // --diagonal-mass to disable
+                tempering,
             };
 
             // Build per-stream observation specs

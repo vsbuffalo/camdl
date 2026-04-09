@@ -45,6 +45,14 @@ pub struct PGASConfig {
     /// Dense handles parameter correlations (e.g., R0-amplitude ridge).
     /// Set false for diagonal-only (handles scale but not correlations).
     pub dense_mass: bool,
+    /// Temperature ladder for parallel tempering (replica exchange).
+    /// Each entry is a β value in (0, 1]. The first entry MUST be 1.0
+    /// (cold chain). Default: `[1.0]` (no tempering, single rung).
+    /// Example: `[1.0, 0.7, 0.4, 0.15]` runs 4 temperature rungs.
+    /// Only the cold (β=1) rung contributes posterior samples and trace output.
+    /// Heated rungs explore a flatter likelihood surface (LL scaled by β)
+    /// and exchange with adjacent rungs via Metropolis swap proposals.
+    pub tempering: Vec<f64>,
 }
 
 /// Per-substep record: minimal information for transition density
@@ -951,8 +959,8 @@ pub fn run_pgas(
 
     // Resume or fresh start
     let start_sweep;
-    let mut trajectory;
-    let mut current_transformed: Vec<f64>;
+    let trajectory;
+    let current_transformed: Vec<f64>;
 
     // Extract resume adaptation state (consumed separately from trajectory/params)
     let resume_nuts = resume_from.as_ref().map(|s| (
@@ -1094,7 +1102,7 @@ pub fn run_pgas(
     };
 
     // Initial complete-data log-likelihood (now includes initial state density)
-    let mut current_ll = complete_data_loglik(
+    let current_ll = complete_data_loglik(
         model, &trajectory, &current_params, observations,
         config.dt, obs_streams, &ivp_mappings,
     )?;
@@ -1115,28 +1123,69 @@ pub fn run_pgas(
         eprintln!("  NUTS enabled (gradient expressions found in IR)");
     }
 
-    // NUTS state — restored from resume or initialized fresh
-    let (mut nuts_mass, mut nuts_step_size, log_proposal_sd_restored,
-         mut total_accepted, current_ll_restored) = if let Some((mass, ss, lpsd, ta, ll)) = resume_nuts {
+    // ── Parallel tempering setup ──
+    let n_rungs = config.tempering.len().max(1);
+    let betas: Vec<f64> = if config.tempering.is_empty() { vec![1.0] } else { config.tempering.clone() };
+    assert!((betas[0] - 1.0).abs() < 1e-12, "first tempering rung must be β=1.0 (cold chain)");
+    for &b in &betas {
+        assert!(b > 0.0 && b <= 1.0, "tempering β values must be in (0, 1], got {}", b);
+    }
+    if n_rungs > 1 {
+        eprintln!("  parallel tempering: {} rungs, β = {:?}", n_rungs, betas);
+    }
+
+    // Per-rung state: rung 0 is cold (β=1), higher indices are hotter.
+    // All rungs start from the same initial state.
+    let mut rung_params: Vec<Vec<f64>> = vec![current_params.clone(); n_rungs];
+    let mut rung_transformed: Vec<Vec<f64>> = vec![current_transformed.clone(); n_rungs];
+    let mut rung_ll: Vec<f64> = vec![current_ll; n_rungs];
+    let mut rung_trajectory: Vec<PGASTrajectory> = vec![trajectory.clone(); n_rungs];
+
+    // NUTS state — restored from resume or initialized fresh (cold rung only,
+    // heated rungs start fresh per the spec).
+    let (nuts_mass_init, nuts_step_size_init, log_proposal_sd_restored,
+         total_accepted_init, current_ll_restored) = if let Some((mass, ss, lpsd, ta, ll)) = resume_nuts {
         (mass, ss, lpsd, ta, Some(ll))
     } else {
         (super::nuts::MassMatrix::identity(d), 0.1, log_proposal_sd, vec![0usize; d], None)
     };
-    let mut log_proposal_sd = log_proposal_sd_restored;
-    let mut nuts_dual_avg = super::nuts::DualAveraging::new(nuts_step_size, 0.80);
 
-    // Collect z-scale samples during burn-in for mass matrix adaptation.
-    let mut welford_n = 0.0_f64;
-    let mut welford_mean = vec![0.0; d];
-    let mut welford_m2 = vec![0.0; d];
-    let mut welford_cov = vec![0.0; d * d];
+    // Per-rung adaptation state
+    let mut rung_nuts_mass: Vec<super::nuts::MassMatrix> = (0..n_rungs)
+        .map(|r| if r == 0 { nuts_mass_init.clone() } else { super::nuts::MassMatrix::identity(d) })
+        .collect();
+    let mut rung_nuts_step_size: Vec<f64> = (0..n_rungs)
+        .map(|r| if r == 0 { nuts_step_size_init } else { 0.1 })
+        .collect();
+    let mut rung_log_proposal_sd: Vec<Vec<f64>> = (0..n_rungs)
+        .map(|r| if r == 0 { log_proposal_sd_restored.clone() } else {
+            // Heated rungs: same initial proposal SD as cold
+            log_proposal_sd_restored.clone()
+        })
+        .collect();
+    let mut rung_total_accepted: Vec<Vec<usize>> = (0..n_rungs)
+        .map(|r| if r == 0 { total_accepted_init.clone() } else { vec![0usize; d] })
+        .collect();
+    let mut rung_nuts_dual_avg: Vec<super::nuts::DualAveraging> = (0..n_rungs)
+        .map(|r| super::nuts::DualAveraging::new(rung_nuts_step_size[r], 0.80))
+        .collect();
+
+    // Per-rung Welford statistics for mass matrix adaptation
+    let mut rung_welford_n: Vec<f64> = vec![0.0; n_rungs];
+    let mut rung_welford_mean: Vec<Vec<f64>> = vec![vec![0.0; d]; n_rungs];
+    let mut rung_welford_m2: Vec<Vec<f64>> = vec![vec![0.0; d]; n_rungs];
+    let mut rung_welford_cov: Vec<Vec<f64>> = vec![vec![0.0; d * d]; n_rungs];
 
     let mut sweeps = Vec::new();
 
-    // Override current_ll if we have a resumed value
+    // Override cold rung LL if we have a resumed value
     if let Some(ll) = current_ll_restored {
-        current_ll = ll;
+        rung_ll[0] = ll;
     }
+
+    // Swap acceptance tracking (n_rungs - 1 adjacent pairs)
+    let mut swap_proposed: Vec<usize> = vec![0; n_rungs.saturating_sub(1)];
+    let mut swap_accepted: Vec<usize> = vec![0; n_rungs.saturating_sub(1)];
 
     if start_sweep >= config.n_sweeps {
         eprintln!("  warning: chain already completed {} sweeps (requested {}). \
@@ -1144,254 +1193,307 @@ pub fn run_pgas(
     }
 
     for sweep in start_sweep..config.n_sweeps {
-        let mut accepted = vec![false; d];
+        // Per-rung accepted flags (only cold rung's is used for output)
+        let mut rung_accepted: Vec<Vec<bool>> = vec![vec![false; d]; n_rungs];
+        // Per-rung CSMC diagnostics (only cold rung's is used for output)
+        let mut rung_csmc_diag: Vec<CSMCDiagnostics> = Vec::with_capacity(n_rungs);
 
-        // Current proposal SDs (from adaptive log scale, MH only)
-        let proposal_sd: Vec<f64> = log_proposal_sd.iter()
-            .map(|&ls| ls.exp())
-            .collect();
+        for rung in 0..n_rungs {
+            let beta = betas[rung];
 
-        // ── Step 1: Update θ | X, y ──
-        // The complete-data log-likelihood is exact (no PF noise).
-        // Two strategies: NUTS (gradient-based, joint proposal) or
-        // MH-within-Gibbs (1D random walk, one-at-a-time).
-        if has_gradients {
-            // NUTS: propose all parameters jointly using gradients.
-            // The closure evaluates the FULL target on z scale. Each component
-            // (LL, prior, Jacobian) returns its own (value, d/dz) pair — no
-            // cross-scale gradient mixing, no manual chain rule at the call site.
-            let param_names: Vec<String> = if2_params.iter().map(|p| p.name.clone()).collect();
-            let param_model_indices: Vec<usize> = if2_params.iter().map(|p| p.index).collect();
+            // Current proposal SDs for this rung (MH only)
+            let proposal_sd: Vec<f64> = rung_log_proposal_sd[rung].iter()
+                .map(|&ls| ls.exp())
+                .collect();
 
-            let log_prob_and_grad = |z: &[f64]| -> (f64, Vec<f64>) {
-                // Transform z → θ (natural scale)
-                let mut params = current_params.clone();
-                for (i, spec) in if2_params.iter().enumerate() {
-                    params[spec.index] = spec.from_transformed(z[i]);
-                }
+            // ── Step 1: Update θ | X, y ──
+            // For heated rungs (β < 1), scale LL and its gradient by β.
+            // Prior and Jacobian are untempered.
+            if has_gradients {
+                let param_names: Vec<String> = if2_params.iter().map(|p| p.name.clone()).collect();
+                let param_model_indices: Vec<usize> = if2_params.iter().map(|p| p.index).collect();
+                let rung_traj = &rung_trajectory[rung];
 
-                // LL + gradient in NATURAL scale (d/dθ)
-                let (ll, ll_grad_theta) = match super::pgas_grad::complete_data_loglik_grad(
-                    model, &trajectory, &params, observations,
-                    config.dt, obs_streams, &ivp_mappings,
-                    &param_names, &param_model_indices,
-                ) {
-                    Ok(r) => r,
-                    Err(_) => return (f64::NEG_INFINITY, vec![0.0; d]),
+                let log_prob_and_grad = |z: &[f64]| -> (f64, Vec<f64>) {
+                    let mut params = rung_params[rung].clone();
+                    for (i, spec) in if2_params.iter().enumerate() {
+                        params[spec.index] = spec.from_transformed(z[i]);
+                    }
+
+                    let (ll, ll_grad_theta) = match super::pgas_grad::complete_data_loglik_grad(
+                        model, rung_traj, &params, observations,
+                        config.dt, obs_streams, &ivp_mappings,
+                        &param_names, &param_model_indices,
+                    ) {
+                        Ok(r) => r,
+                        Err(_) => return (f64::NEG_INFINITY, vec![0.0; d]),
+                    };
+
+                    // Temper: scale LL by β
+                    let mut log_p = beta * ll;
+                    let mut grad_z = vec![0.0; d];
+
+                    for i in 0..d {
+                        let theta = params[if2_params[i].index];
+                        let dtheta_dz = transform_deriv(&if2_params[i], z[i]);
+
+                        // LL gradient: chain rule θ → z, scaled by β
+                        grad_z[i] += beta * ll_grad_theta[i] * dtheta_dz;
+
+                        // Prior: untempered
+                        let (prior_val, prior_grad_z) = prior_log_density_and_grad_z(
+                            &priors[i], &if2_params[i], theta, z[i],
+                        );
+                        log_p += prior_val;
+                        grad_z[i] += prior_grad_z;
+
+                        // Jacobian: untempered
+                        log_p += if2_params[i].log_jacobian(z[i]);
+                        grad_z[i] += if2_params[i].jacobian_grad(z[i]);
+                    }
+
+                    (log_p, grad_z)
                 };
 
-                // Assemble full target on z scale: each component produces (value, d/dz)
-                let mut log_p = ll;
-                let mut grad_z = vec![0.0; d];
+                let (init_log_p, init_grad) = log_prob_and_grad(&rung_transformed[rung]);
 
-                for i in 0..d {
-                    let theta = params[if2_params[i].index];
-                    let dtheta_dz = transform_deriv(&if2_params[i], z[i]);
+                let nuts_config = super::nuts::NUTSConfig {
+                    max_tree_depth: 10,
+                    step_size: rung_nuts_step_size[rung],
+                    mass_matrix: rung_nuts_mass[rung].clone(),
+                };
 
-                    // LL: chain rule θ → z
-                    grad_z[i] += ll_grad_theta[i] * dtheta_dz;
-
-                    // Prior: (value, d/dz) — each variant handles its own scale
-                    let (prior_val, prior_grad_z) = prior_log_density_and_grad_z(
-                        &priors[i], &if2_params[i], theta, z[i],
-                    );
-                    log_p += prior_val;
-                    grad_z[i] += prior_grad_z;
-
-                    // Jacobian: (value, d/dz) — already on z scale
-                    log_p += if2_params[i].log_jacobian(z[i]);
-                    grad_z[i] += if2_params[i].jacobian_grad(z[i]);
-                }
-
-                (log_p, grad_z)
-            };
-
-            let (init_log_p, init_grad) = log_prob_and_grad(&current_transformed);
-
-            let nuts_config = super::nuts::NUTSConfig {
-                max_tree_depth: 10,
-                step_size: nuts_step_size,
-                mass_matrix: nuts_mass.clone(),
-            };
-
-            let result = super::nuts::nuts_step(
-                &current_transformed, init_log_p, &init_grad,
-                &nuts_config, &log_prob_and_grad, &mut rng,
-            );
-
-            if result.accepted {
-                current_transformed.copy_from_slice(&result.params);
-                for (i, spec) in if2_params.iter().enumerate() {
-                    current_params[spec.index] = spec.from_transformed(current_transformed[i]);
-                }
-                // current_ll is recomputed after CSMC (trajectory changes)
-                for a in &mut accepted { *a = true; }
-                for t in &mut total_accepted { *t += 1; }
-            }
-
-            // Two-phase adaptation (matching Stan's warmup schedule):
-            //   Phase 1 (sweeps 0..mass_adapt_end): adapt step size with identity
-            //     mass matrix + collect Welford statistics for mass matrix.
-            //   Phase 2 (sweeps mass_adapt_end..adapt_end): re-adapt step size
-            //     WITH the estimated mass matrix. This is critical — the optimal
-            //     step size changes when the mass matrix changes.
-            let mass_adapt_end = (adapt_end as f64 * 0.7) as usize;
-
-            if sweep < mass_adapt_end {
-                // Phase 1: step size adaptation + covariance collection
-                nuts_step_size = nuts_dual_avg.update(result.mean_accept_prob);
-
-                // Online covariance (Welford for diagonal + cross-products for dense)
-                welford_n += 1.0;
-                let old_mean = welford_mean.clone();
-                for i in 0..d {
-                    let delta = current_transformed[i] - welford_mean[i];
-                    welford_mean[i] += delta / welford_n;
-                    let delta2 = current_transformed[i] - welford_mean[i];
-                    welford_m2[i] += delta * delta2;
-                }
-                // Cross-products for full covariance: C_{ij} += (x_i - mean_old_i)(x_j - mean_new_j)
-                for i in 0..d {
-                    for j in 0..d {
-                        welford_cov[i * d + j] += (current_transformed[i] - old_mean[i])
-                            * (current_transformed[j] - welford_mean[j]);
-                    }
-                }
-            } else if sweep == mass_adapt_end {
-                // Compute mass matrix from burn-in covariance
-                if welford_n > 10.0 {
-                    if config.dense_mass {
-                        // Dense: full empirical covariance → Cholesky
-                        let mut cov = vec![0.0; d * d];
-                        for i in 0..d {
-                            for j in 0..d {
-                                cov[i * d + j] = welford_cov[i * d + j] / (welford_n - 1.0);
-                            }
-                        }
-                        nuts_mass = super::nuts::MassMatrix::dense_from_covariance(&cov, d);
-                        eprintln!("  dense mass matrix estimated (sweep {}):", sweep);
-                        for (i, spec) in if2_params.iter().enumerate() {
-                            let sd = (cov[i * d + i]).max(1e-10).sqrt();
-                            eprintln!("    {:12} sd={:.6}", spec.name, sd);
-                        }
-                        // Print correlations
-                        eprint!("    correlations:");
-                        for i in 0..d {
-                            for j in (i+1)..d {
-                                let r = cov[i * d + j]
-                                    / (cov[i * d + i].max(1e-10).sqrt() * cov[j * d + j].max(1e-10).sqrt());
-                                eprint!(" {}-{}={:.2}", &if2_params[i].name[..3.min(if2_params[i].name.len())],
-                                    &if2_params[j].name[..3.min(if2_params[j].name.len())], r);
-                            }
-                        }
-                        eprintln!();
-                    } else {
-                        // Diagonal: variances only
-                        let variances: Vec<f64> = (0..d).map(|i|
-                            (welford_m2[i] / (welford_n - 1.0)).max(1e-10)
-                        ).collect();
-                        eprintln!("  diagonal mass matrix estimated (sweep {}):", sweep);
-                        for (i, spec) in if2_params.iter().enumerate() {
-                            eprintln!("    {:12} sd={:.6}", spec.name, variances[i].sqrt());
-                        }
-                        nuts_mass = super::nuts::MassMatrix::diagonal(variances);
-                    }
-                }
-                // Reset dual averaging — step size must be re-tuned for new mass matrix
-                nuts_step_size = 0.1;
-                nuts_dual_avg = super::nuts::DualAveraging::new(nuts_step_size, 0.80);
-            } else if sweep < adapt_end {
-                // Phase 2: re-adapt step size WITH the mass matrix
-                nuts_step_size = nuts_dual_avg.update(result.mean_accept_prob);
-            } else if sweep == adapt_end {
-                nuts_step_size = nuts_dual_avg.final_step_size();
-                eprintln!("  NUTS fully adapted (sweep {}):", sweep);
-                eprintln!("    final step_size: {:.6}", nuts_step_size);
-            }
-        } else {
-            // MH-within-Gibbs: one-at-a-time random walk proposals
-            for i in 0..d {
-                let spec = &if2_params[i];
-                let z_old = current_transformed[i];
-                let z_new = z_old + proposal_sd[i] * rng.normal();
-                let theta_new = spec.from_transformed(z_new);
-
-                let mut proposed_params = current_params.clone();
-                proposed_params[spec.index] = theta_new;
-
-                let proposed_ll = complete_data_loglik(
-                    model, &trajectory, &proposed_params, observations,
-                    config.dt, obs_streams, &ivp_mappings,
-                )?;
-
-                let proposed_log_prior_i = priors[i].log_density(theta_new, z_new);
-                let current_log_prior_i = priors[i].log_density(
-                    current_params[spec.index], z_old,
+                let result = super::nuts::nuts_step(
+                    &rung_transformed[rung], init_log_p, &init_grad,
+                    &nuts_config, &log_prob_and_grad, &mut rng,
                 );
-                let proposed_log_jac_i = spec.log_jacobian(z_new);
-                let current_log_jac_i = spec.log_jacobian(z_old);
 
-                let log_alpha = (proposed_ll + proposed_log_prior_i + proposed_log_jac_i)
-                              - (current_ll + current_log_prior_i + current_log_jac_i);
-
-                if log_alpha.is_finite() && rng.uniform().ln() < log_alpha {
-                    current_params[spec.index] = theta_new;
-                    current_transformed[i] = z_new;
-                    current_ll = proposed_ll;
-                    accepted[i] = true;
-                    total_accepted[i] += 1;
+                if result.accepted {
+                    rung_transformed[rung].copy_from_slice(&result.params);
+                    for (i, spec) in if2_params.iter().enumerate() {
+                        rung_params[rung][spec.index] = spec.from_transformed(rung_transformed[rung][i]);
+                    }
+                    for a in &mut rung_accepted[rung] { *a = true; }
+                    for t in &mut rung_total_accepted[rung] { *t += 1; }
                 }
 
-                // Robbins-Monro: adapt proposal SD during burn-in
-                if sweep < adapt_end {
-                    let gamma_rm = ADAPT_C / (1.0 + sweep as f64).sqrt();
-                    let acc_indicator = if accepted[i] { 1.0 } else { 0.0 };
-                    log_proposal_sd[i] += gamma_rm * (acc_indicator - TARGET_ACCEPTANCE);
-                    log_proposal_sd[i] = log_proposal_sd[i].clamp(-20.0, 5.0);
+                // Two-phase adaptation (same schedule as single-rung, per-rung state)
+                let mass_adapt_end = (adapt_end as f64 * 0.7) as usize;
+
+                if sweep < mass_adapt_end {
+                    rung_nuts_step_size[rung] = rung_nuts_dual_avg[rung].update(result.mean_accept_prob);
+
+                    rung_welford_n[rung] += 1.0;
+                    let old_mean = rung_welford_mean[rung].clone();
+                    for i in 0..d {
+                        let delta = rung_transformed[rung][i] - rung_welford_mean[rung][i];
+                        rung_welford_mean[rung][i] += delta / rung_welford_n[rung];
+                        let delta2 = rung_transformed[rung][i] - rung_welford_mean[rung][i];
+                        rung_welford_m2[rung][i] += delta * delta2;
+                    }
+                    for i in 0..d {
+                        for j in 0..d {
+                            rung_welford_cov[rung][i * d + j] +=
+                                (rung_transformed[rung][i] - old_mean[i])
+                                * (rung_transformed[rung][j] - rung_welford_mean[rung][j]);
+                        }
+                    }
+                } else if sweep == mass_adapt_end {
+                    if rung_welford_n[rung] > 10.0 {
+                        if config.dense_mass {
+                            let mut cov = vec![0.0; d * d];
+                            for i in 0..d {
+                                for j in 0..d {
+                                    cov[i * d + j] = rung_welford_cov[rung][i * d + j] / (rung_welford_n[rung] - 1.0);
+                                }
+                            }
+                            rung_nuts_mass[rung] = super::nuts::MassMatrix::dense_from_covariance(&cov, d);
+                            if rung == 0 {
+                                eprintln!("  dense mass matrix estimated (sweep {}):", sweep);
+                                for (i, spec) in if2_params.iter().enumerate() {
+                                    let sd = (cov[i * d + i]).max(1e-10).sqrt();
+                                    eprintln!("    {:12} sd={:.6}", spec.name, sd);
+                                }
+                                eprint!("    correlations:");
+                                for i in 0..d {
+                                    for j in (i+1)..d {
+                                        let r = cov[i * d + j]
+                                            / (cov[i * d + i].max(1e-10).sqrt() * cov[j * d + j].max(1e-10).sqrt());
+                                        eprint!(" {}-{}={:.2}", &if2_params[i].name[..3.min(if2_params[i].name.len())],
+                                            &if2_params[j].name[..3.min(if2_params[j].name.len())], r);
+                                    }
+                                }
+                                eprintln!();
+                            }
+                        } else {
+                            let variances: Vec<f64> = (0..d).map(|i|
+                                (rung_welford_m2[rung][i] / (rung_welford_n[rung] - 1.0)).max(1e-10)
+                            ).collect();
+                            if rung == 0 {
+                                eprintln!("  diagonal mass matrix estimated (sweep {}):", sweep);
+                                for (i, spec) in if2_params.iter().enumerate() {
+                                    eprintln!("    {:12} sd={:.6}", spec.name, variances[i].sqrt());
+                                }
+                            }
+                            rung_nuts_mass[rung] = super::nuts::MassMatrix::diagonal(variances);
+                        }
+                    }
+                    rung_nuts_step_size[rung] = 0.1;
+                    rung_nuts_dual_avg[rung] = super::nuts::DualAveraging::new(rung_nuts_step_size[rung], 0.80);
+                } else if sweep < adapt_end {
+                    rung_nuts_step_size[rung] = rung_nuts_dual_avg[rung].update(result.mean_accept_prob);
+                } else if sweep == adapt_end && rung == 0 {
+                    rung_nuts_step_size[rung] = rung_nuts_dual_avg[rung].final_step_size();
+                    eprintln!("  NUTS fully adapted (sweep {}):", sweep);
+                    eprintln!("    final step_size: {:.6}", rung_nuts_step_size[rung]);
+                } else if sweep == adapt_end {
+                    rung_nuts_step_size[rung] = rung_nuts_dual_avg[rung].final_step_size();
                 }
+            } else {
+                // MH-within-Gibbs: one-at-a-time random walk proposals
+                // For heated rungs, scale LL by β in the MH ratio.
+                for i in 0..d {
+                    let spec = &if2_params[i];
+                    let z_old = rung_transformed[rung][i];
+                    let z_new = z_old + proposal_sd[i] * rng.normal();
+                    let theta_new = spec.from_transformed(z_new);
+
+                    let mut proposed_params = rung_params[rung].clone();
+                    proposed_params[spec.index] = theta_new;
+
+                    let proposed_ll = complete_data_loglik(
+                        model, &rung_trajectory[rung], &proposed_params, observations,
+                        config.dt, obs_streams, &ivp_mappings,
+                    )?;
+
+                    let proposed_log_prior_i = priors[i].log_density(theta_new, z_new);
+                    let current_log_prior_i = priors[i].log_density(
+                        rung_params[rung][spec.index], z_old,
+                    );
+                    let proposed_log_jac_i = spec.log_jacobian(z_new);
+                    let current_log_jac_i = spec.log_jacobian(z_old);
+
+                    // Temper: scale LL difference by β, prior + Jacobian untempered
+                    let log_alpha = beta * (proposed_ll - rung_ll[rung])
+                                  + (proposed_log_prior_i - current_log_prior_i)
+                                  + (proposed_log_jac_i - current_log_jac_i);
+
+                    if log_alpha.is_finite() && rng.uniform().ln() < log_alpha {
+                        rung_params[rung][spec.index] = theta_new;
+                        rung_transformed[rung][i] = z_new;
+                        rung_ll[rung] = proposed_ll;
+                        rung_accepted[rung][i] = true;
+                        rung_total_accepted[rung][i] += 1;
+                    }
+
+                    // Robbins-Monro adaptation (per-rung)
+                    if sweep < adapt_end {
+                        let gamma_rm = ADAPT_C / (1.0 + sweep as f64).sqrt();
+                        let acc_indicator = if rung_accepted[rung][i] { 1.0 } else { 0.0 };
+                        rung_log_proposal_sd[rung][i] += gamma_rm * (acc_indicator - TARGET_ACCEPTANCE);
+                        rung_log_proposal_sd[rung][i] = rung_log_proposal_sd[rung][i].clamp(-20.0, 5.0);
+                    }
+                }
+            }
+
+            // ── Step 2: Update X | θ, y via CSMC-AS ──
+            // CSMC always runs at β=1 — the trajectory must match the data.
+            let csmc_seed = seed ^ ((sweep as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))
+                ^ (rung as u64).wrapping_mul(0x6c62272e07bb0142);
+            let (new_trajectory, csmc_diag) = csmc_as(
+                model, &rung_params[rung], observations, &rung_trajectory[rung],
+                config.n_particles, config.dt, obs_streams,
+                &ivp_mappings, csmc_seed,
+            )?;
+            rung_trajectory[rung] = new_trajectory;
+
+            // Recompute complete-data LL at β=1 (untempered, for swap proposals)
+            rung_ll[rung] = complete_data_loglik(
+                model, &rung_trajectory[rung], &rung_params[rung], observations,
+                config.dt, obs_streams, &ivp_mappings,
+            )?;
+
+            rung_csmc_diag.push(csmc_diag);
+        } // end rung loop
+
+        // ── Replica exchange: swap adjacent rungs ──
+        if n_rungs > 1 {
+            // Even-odd scheme: alternate starting parity each sweep
+            let pair_start = sweep % 2;
+            let mut i = pair_start;
+            while i + 1 < n_rungs {
+                let j = i + 1;
+                swap_proposed[i] += 1;
+
+                // Acceptance: α = min(1, exp((β_i - β_j) * (LL_i - LL_j)))
+                // where LL is the UNTEMPERED complete-data log-likelihood.
+                let log_alpha = (betas[i] - betas[j]) * (rung_ll[i] - rung_ll[j]);
+
+                if log_alpha >= 0.0 || rng.uniform().ln() < log_alpha {
+                    swap_accepted[i] += 1;
+
+                    // Swap all state between rungs i and j
+                    rung_params.swap(i, j);
+                    rung_transformed.swap(i, j);
+                    rung_ll.swap(i, j);
+                    rung_trajectory.swap(i, j);
+                    rung_accepted.swap(i, j);
+
+                    // Adaptation state swaps WITH the parameters (it belongs
+                    // to the parameter state, not the temperature).
+                    rung_nuts_mass.swap(i, j);
+                    rung_nuts_step_size.swap(i, j);
+                    rung_log_proposal_sd.swap(i, j);
+                    rung_total_accepted.swap(i, j);
+                    rung_nuts_dual_avg.swap(i, j);
+                    rung_welford_n.swap(i, j);
+                    rung_welford_mean.swap(i, j);
+                    rung_welford_m2.swap(i, j);
+                    rung_welford_cov.swap(i, j);
+                }
+
+                i += 2;
             }
         }
 
-        // ── Step 2: Update X | θ, y via CSMC-AS ──
-        // The trajectory update is independent of the PF loglik used in step 1.
-        // CSMC-AS conditions on the reference trajectory and produces a new
-        // trajectory sample from p(X | θ, y).
-        let csmc_seed = seed ^ ((sweep as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15));
-        let (new_trajectory, csmc_diag) = csmc_as(
-            model, &current_params, observations, &trajectory,
-            config.n_particles, config.dt, obs_streams,
-            &ivp_mappings, csmc_seed,
-        )?;
-        trajectory = new_trajectory;
-
-        // Recompute complete-data LL with the new trajectory
-        // (the CSMC changed X, so log p(y,X|θ) changes even at the same θ)
-        current_ll = complete_data_loglik(
-            model, &trajectory, &current_params, observations,
-            config.dt, obs_streams, &ivp_mappings,
-        )?;
-
-        // Log adapted proposal SDs at end of burn-in
+        // ── Cold rung (index 0) output ──
+        // Log adapted proposal SDs at end of burn-in (cold rung only)
         if sweep + 1 == adapt_end {
             eprintln!("  proposal SD adapted (end of burn-in):");
             for (i, spec) in if2_params.iter().enumerate() {
-                let acc_rate = total_accepted[i] as f64 / (sweep + 1) as f64;
+                let acc_rate = rung_total_accepted[0][i] as f64 / (sweep + 1) as f64;
                 eprintln!("    {:12} sd={:.6} acc={:.0}%",
-                    spec.name, log_proposal_sd[i].exp(), acc_rate * 100.0);
+                    spec.name, rung_log_proposal_sd[0][i].exp(), acc_rate * 100.0);
             }
-            eprintln!("  trajectory renewal: {:.1}%", csmc_diag.trajectory_renewal * 100.0);
+            eprintln!("  trajectory renewal: {:.1}%", rung_csmc_diag[0].trajectory_renewal * 100.0);
+
+            // Report swap rates at end of burn-in
+            if n_rungs > 1 {
+                eprintln!("  tempering swap rates:");
+                for i in 0..n_rungs - 1 {
+                    let rate = if swap_proposed[i] > 0 {
+                        swap_accepted[i] as f64 / swap_proposed[i] as f64
+                    } else { 0.0 };
+                    eprintln!("    B={:.2} <-> B={:.2}: {:.1}%",
+                        betas[i], betas[i + 1], rate * 100.0);
+                }
+            }
         }
 
+        let cold_proposal_sd: Vec<f64> = rung_log_proposal_sd[0].iter()
+            .map(|&ls| ls.exp())
+            .collect();
+
         let sweep_result = PGASSweep {
-            params: current_params.clone(),
-            log_complete_data_ll: current_ll,
-            accepted,
-            csmc_diag: csmc_diag.clone(),
-            proposal_sds: proposal_sd.clone(),
+            params: rung_params[0].clone(),
+            log_complete_data_ll: rung_ll[0],
+            accepted: rung_accepted[0].clone(),
+            csmc_diag: rung_csmc_diag[0].clone(),
+            proposal_sds: cold_proposal_sd,
         };
 
         if let Some(cb) = on_sweep {
-            cb(sweep, &sweep_result, &trajectory);
+            cb(sweep, &sweep_result, &rung_trajectory[0]);
         }
 
         // Record (respecting burn-in and thinning)
@@ -1400,27 +1502,27 @@ pub fn run_pgas(
         }
     }
 
-    let acceptance_rates: Vec<f64> = total_accepted.iter()
+    let acceptance_rates: Vec<f64> = rung_total_accepted[0].iter()
         .map(|&n| n as f64 / config.n_sweeps as f64)
         .collect();
 
     let resume_state = ChainResumeState {
         config_hash,
         completed_sweeps: config.n_sweeps,
-        params: current_params,
-        transformed: current_transformed,
+        params: rung_params[0].clone(),
+        transformed: rung_transformed[0].clone(),
         param_names: if2_params.iter().map(|p| p.name.clone()).collect(),
-        trajectory: trajectory.clone(),
-        mass_matrix: nuts_mass,
-        nuts_step_size,
-        log_proposal_sd,
-        total_accepted: total_accepted.clone(),
-        current_ll,
+        trajectory: rung_trajectory[0].clone(),
+        mass_matrix: rung_nuts_mass[0].clone(),
+        nuts_step_size: rung_nuts_step_size[0],
+        log_proposal_sd: rung_log_proposal_sd[0].clone(),
+        total_accepted: rung_total_accepted[0].clone(),
+        current_ll: rung_ll[0],
     };
 
     Ok(PGASResult {
         sweeps,
-        final_trajectory: trajectory,
+        final_trajectory: rung_trajectory[0].clone(),
         acceptance_rates,
         resume_state,
     })

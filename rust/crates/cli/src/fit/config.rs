@@ -120,6 +120,11 @@ pub struct PGASSampleConfig {
     /// Evenly spaced across post-burn-in sweeps. Default: 200.
     /// Set to 0 to disable trajectory output.
     pub n_trajectories: Option<usize>,
+    /// Temperature ladder for parallel tempering (replica exchange).
+    /// Each entry is a β value. First entry must be 1.0 (cold chain).
+    /// Example: `[1.0, 0.7, 0.4, 0.15]` runs 4 rungs per chain.
+    /// Default: no tempering (single rung).
+    pub tempering: Option<Vec<f64>>,
 }
 
 impl FitToml {
