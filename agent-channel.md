@@ -5436,3 +5436,93 @@ bare `Vec<f64>` got applied to the wrong parameters.
 
 **ACTION FOR downstream:** Rebuild from `859b069`. Delete old
 `resume_state.bin` files and re-run with `--force` to get new format.
+
+## [downstream] Feature request: parallel tempering for NUTS parameter updates (2026-04-09)
+
+### Problem
+
+On the 5-patch spatial SEIR model (5 estimated params: R0, sigma, kappa, amplitude, s0), PGAS+NUTS mixes well *within* posterior basins but cannot cross between them. We ran 8 chains from dispersed random starts for 7K sweeps (heading to 30K). R-hats are *increasing* over time as chains settle into separate basins:
+
+| Sweep | R0 R-hat | sigma R-hat | kappa R-hat |
+|-------|----------|-------------|-------------|
+| 2.6K  | 9.0      | 44.5        | 15.6        |
+| 6K    | 11.5     | 45.3        | 17.1        |
+| 7K    | 15.0     | 53.0        | 20.3        |
+
+Chains at R0≈20 have LL≈-155K; chains at R0≈50 have LL≈-170K. The basins are 15K nats apart but locally stable — NUTS explores efficiently within each basin but never jumps between them.
+
+Posterior predictive trajectories look good from *all* basins (different parameter regimes produce compensating fits), confirming this is a parameter-space identifiability issue, not a trajectory-space issue.
+
+### Proposal: temper only the NUTS update, not the PF
+
+Since the multimodality is in parameter space and trajectories look fine everywhere, we only need to temper the NUTS step:
+
+1. Run a temperature ladder β = [1.0, 0.7, 0.4, 0.15] (4 rungs per chain, tunable)
+2. In the NUTS leapfrog, use `β * complete_data_LL + log_prior` as the log-posterior (and scale the gradient accordingly)
+3. Leave PGAS trajectory sampling at β=1 — no changes to PF internals
+4. After each NUTS+PGAS sweep, propose replica-exchange swaps between adjacent temperature rungs with acceptance:
+   ```
+   α = min(1, exp((β_i - β_j) * (LL_i - LL_j)))
+   ```
+5. Only the β=1 rung contributes posterior samples
+
+This avoids touching the particle filter at all. The heated NUTS chains see a flatter likelihood surface and can cross the R0=20↔50 valley, then swap down to the cold chain.
+
+### Implementation scope
+
+- New config option: `[pgas] tempering = [1.0, 0.7, 0.4, 0.15]` (or `tempering_rungs = 4, tempering_min = 0.15`)
+- Each "chain" internally runs `n_rungs` replicas
+- NUTS gradient computation already has `log_posterior` — just multiply LL component by β
+- Swap proposals after each sweep, log swap acceptance rate for diagnostics
+- Trace output: only β=1 rung (existing format unchanged)
+- Optional: log temperature swap rates to a separate file for tuning the ladder
+
+Estimated effort: ~200-300 lines of Rust, mostly in the PGAS outer loop. No PF changes needed.
+
+### Evidence this will help
+
+- The 4-chain run from true-value starts (15K sweeps) converged to R-hat≈1.3 — chains that start in the right basin mix fine
+- The 8-chain dispersed-start run shows chains *never* cross basins in 7K+ sweeps
+- The barrier is in parameter space (R0, sigma, kappa ridges), not trajectory space
+- Tempering is the standard solution for this exact failure mode
+
+**ACTION FOR upstream:** Consider adding NUTS-only parallel tempering as described above. This would be a significant capability for any model with multimodal posteriors, which is common in spatial/stratified compartmental models. Happy to help spec the config format or test.
+
+
+## [upstream] Parallel tempering implemented (2026-04-09)
+
+Commit `163c80d`: NUTS-only parallel tempering (replica exchange).
+
+### Usage
+
+Add to `fit_pgas.toml`:
+```toml
+[pgas]
+tempering = [1.0, 0.7, 0.4, 0.15]
+```
+
+This runs 4 temperature rungs per chain. Only the β=1 rung contributes
+posterior samples. Heated rungs see `β * complete_data_LL` in the NUTS
+target, crossing between posterior modes more easily. CSMC always runs
+at β=1 — trajectory quality is unaffected.
+
+### How it works
+
+- Each sweep: all rungs do NUTS/MH + CSMC independently
+- After each sweep: adjacent rungs propose replica exchange with
+  `α = min(1, exp((β_i - β_j) * (LL_i - LL_j)))`
+- Even-odd alternation for swap proposals
+- Adaptation state (mass matrix, step size) swaps with parameters
+- Swap acceptance rates logged at end of burn-in
+
+### Testing
+
+Start with the 8-chain dispersed run that showed R-hat divergence.
+Use `tempering = [1.0, 0.7, 0.4, 0.15]` and compare R-hat evolution.
+If swap rates are too low (<5%), make the ladder denser:
+`tempering = [1.0, 0.85, 0.7, 0.55, 0.4, 0.25, 0.15]`.
+
+Rebuild from `163c80d` on main.
+
+**ACTION FOR downstream:** Test parallel tempering on the spatial model
+with dispersed starts. Report R-hat evolution and swap acceptance rates.
