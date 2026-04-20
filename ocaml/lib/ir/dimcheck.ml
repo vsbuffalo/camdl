@@ -104,6 +104,14 @@ type state = {
   tf_dims : (string, dim) Hashtbl.t;
   (* Cache of per-transition rate dims after inference rounds *)
   rate_cache : (string, dim) Hashtbl.t;
+  (* Permissive-dim mode: observation-likelihood expressions use
+     variance formulas (e.g. He et al. 2010 eq 6) that mix `1 +
+     overdispersion * count` within a single sqrt, so strictly
+     enforcing dimensional homogeneity there rejects standard
+     epidemiological forms. When this flag is set, Add/Sub-mismatches
+     and sqrt-of-odd-dim are silently absorbed (no E302/E304).
+     See gh #4. *)
+  mutable permissive_dim : bool;
 }
 
 let create_state () = {
@@ -115,6 +123,7 @@ let create_state () = {
   table_dims = Hashtbl.create 16;
   tf_dims = Hashtbl.create 16;
   rate_cache = Hashtbl.create 16;
+  permissive_dim = false;
 }
 
 let fresh_var st =
@@ -172,12 +181,13 @@ let unify st ~loc d1 d2 =
           \      then use: I + iota"
         else None
       in
-      emit_error st ~code:"E302"
-        ~message:(Printf.sprintf "dimension mismatch in %s" loc)
-        ~detail:(Printf.sprintf "left has dimension %s, right has dimension %s — cannot combine"
-                   (dim_display v1) (dim_display v2))
-        ?hint
-        ();
+      if not st.permissive_dim then
+        emit_error st ~code:"E302"
+          ~message:(Printf.sprintf "dimension mismatch in %s" loc)
+          ~detail:(Printf.sprintf "left has dimension %s, right has dimension %s — cannot combine"
+                     (dim_display v1) (dim_display v2))
+          ?hint
+          ();
       Known v1
     end
   | Known v, Unknown id | Unknown id, Known v ->
@@ -325,6 +335,7 @@ and infer_unop st ~ctx (u : un_op_expr) : dim =
      | Any -> Any
      | Known v ->
        if dim_is_even v then Known (dim_half v)
+       else if st.permissive_dim then Any
        else begin
          emit_error st ~code:"E304"
            ~message:(Printf.sprintf "sqrt in '%s' requires even dimension exponents" ctx)
@@ -681,7 +692,13 @@ let check_model (m : model) : result =
       propagate st ~ctx eq.derivative rate_total
     ) m.ode_equations;
 
-    (* Observations *)
+    (* Observations — permissive-dim: standard epi variance formulas
+       (He et al. 2010 eq 6: sqrt(rho*m*(1 + rho*psi^2*m))) are not
+       strictly dim-homogeneous under the P-counting convention.
+       Suppress E302/E304 here; downstream likelihood evaluation
+       treats observation expressions as pure floats regardless. *)
+    let prev_permissive = st.permissive_dim in
+    st.permissive_dim <- true;
     List.iter (fun (obs : observation_model) ->
       let ctx = Printf.sprintf "observation '%s'" obs.name in
       (match obs.likelihood with
@@ -697,7 +714,8 @@ let check_model (m : model) : result =
          ignore (infer st ~ctx bb.alpha);
          ignore (infer st ~ctx bb.beta)
        | Bernoulli b -> ignore (infer st ~ctx b.p))
-    ) m.observations
+    ) m.observations;
+    st.permissive_dim <- prev_permissive
   done;
 
   (* Cache inferred rate dims for use in the read-only check phase *)
