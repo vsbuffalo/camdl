@@ -99,7 +99,7 @@ fn find_camdlc() -> Result<std::path::PathBuf, String> {
 }
 
 /// Run camdlc on a .camdl file and return the IR JSON as a string.
-fn run_camdlc(camdl_path: &str) -> Result<String, String> {
+pub(crate) fn run_camdlc(camdl_path: &str) -> Result<String, String> {
     let camdlc = find_camdlc()?;
     let output = std::process::Command::new(&camdlc)
         .arg(camdl_path)

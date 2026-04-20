@@ -1243,6 +1243,17 @@ fn prepare_v1_cell(fit: &FitToml, fit_path: &str, seed: u64) -> (FitToml, std::p
     (reshaped, fit_root)
 }
 
+/// Read an IR JSON string from a model path, compiling .camdl → IR on
+/// the fly. Returns "" on any read/compile failure (callers then skip
+/// hashing, matching the pre-existing `unwrap_or_default` semantics).
+fn read_ir_json_or_empty(model_path: &str) -> String {
+    if model_path.ends_with(".camdl") {
+        crate::util::run_camdlc(model_path).unwrap_or_default()
+    } else {
+        std::fs::read_to_string(model_path).unwrap_or_default()
+    }
+}
+
 /// Build a Run::Fit record from a v1 FitToml. Analogous to
 /// `build_fit_run` for v2; emits the same schema so `camdl list`
 /// treats v1 fits identically.
@@ -1252,7 +1263,8 @@ fn build_v1_fit_run(fit: &FitToml, fit_path: &str) -> crate::run_meta::Run {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
-    let model_ir_json = std::fs::read_to_string(&fit.fit.model).unwrap_or_default();
+    // Same .camdl/IR handling as build_fit_run; see gh #3.
+    let model_ir_json = read_ir_json_or_empty(&fit.fit.model);
     let model_hash = if model_ir_json.is_empty() {
         String::new()
     } else {
@@ -1397,7 +1409,9 @@ fn build_fit_run(config: &config_v2::FitConfigV2, fit_path: &str) -> crate::run_
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
-    let model_ir_json = std::fs::read_to_string(&config.model.camdl).unwrap_or_default();
+    // Resolve .camdl → IR JSON before hashing. Using the raw .camdl
+    // source would panic in model_hash (JSON parse). See gh #3.
+    let model_ir_json = read_ir_json_or_empty(&config.model.camdl);
     let model_hash = if model_ir_json.is_empty() {
         String::new()
     } else {
