@@ -297,7 +297,7 @@ pub fn run_validate(fit: &FitToml, starts_from: &str, seed: u64, force: bool) ->
     eprintln!("  ESS: mean={:.0}, min={:.0}", ess_mean, ess_min);
     eprintln!("  converged: {}", if all_converged { "yes" } else { "NO" });
     eprintln!("  profiles: {}/profiles/", stage_dir);
-    eprintln!("\nnext: camdl experiment run experiment.toml --params {}/mle_params.toml", stage_dir);
+    eprintln!("\nnext: camdl simulate batch sweep.toml --params {}/mle_params.toml", stage_dir);
 
     Ok(())
 }

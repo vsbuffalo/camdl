@@ -1,5 +1,5 @@
 //! Content-addressable storage helpers shared between `camdl simulate --cas`
-//! (one-shot cache opt-in) and `camdl simulate --batch` (bulk experiments).
+//! (one-shot cache opt-in) and `camdl simulate batch` (bulk experiments).
 //!
 //! Canonical layout (as of the 2026-04-19 output-tree unification):
 //!

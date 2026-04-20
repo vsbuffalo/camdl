@@ -8,9 +8,8 @@
 //! N = prior samples, M = MC draws (~1000), |A| = number of actions.
 //!
 //! Pipeline:
-//!   camdl experiment run experiment.toml
-//!   camdl experiment summarize experiment.toml   ← writes designs/*/outputs.tsv
-//!   camdl voi run voi.toml                       ← reads outputs.tsv, writes evsi.tsv
+//!   camdl simulate batch sweep.toml    ← runs the design (gh #2)
+//!   camdl voi run voi.toml             ← reads outputs.tsv, writes evsi.tsv
 
 use std::collections::HashMap;
 use serde::Deserialize;
@@ -27,8 +26,8 @@ struct VoiFile {
 
 #[derive(Deserialize)]
 struct VoiBlock {
-    experiment: String,   // path to experiment.toml
-    design:     String,   // which design's outputs.tsv to use
+    batch:  String,   // path to the simulate-batch sweep.toml
+    design: String,   // which design's outputs.tsv to use
 }
 
 #[derive(Deserialize)]
@@ -264,7 +263,7 @@ fn compute_evsi(
 
 // ─── TSV helpers ──────────────────────────────────────────────────────────────
 
-/// Read outputs.tsv (full-granularity format from `camdl experiment summarize`).
+/// Read outputs.tsv (full-granularity format from `camdl simulate batch`).
 /// Returns: (col_names, rows) where each row is (point_id, scenario, seed, vals).
 fn read_outputs_tsv(path: &str)
     -> Result<(Vec<String>, Vec<(usize, String, u64, Vec<f64>)>), String>
@@ -277,9 +276,9 @@ fn read_outputs_tsv(path: &str)
     let pid_idx  = header.iter().position(|h| *h == "point_id")
         .ok_or("outputs.tsv missing 'point_id' column")?;
     let scen_idx = header.iter().position(|h| *h == "scenario")
-        .ok_or("outputs.tsv missing 'scenario' column — run 'camdl experiment summarize' first")?;
+        .ok_or("outputs.tsv missing 'scenario' column — run 'camdl simulate batch' first")?;
     let seed_idx = header.iter().position(|h| *h == "seed")
-        .ok_or("outputs.tsv missing 'seed' column — run 'camdl experiment summarize' first")?;
+        .ok_or("outputs.tsv missing 'seed' column — run 'camdl simulate batch' first")?;
 
     const META: &[&str] = &["point_id", "scenario", "seed"];
     let data_indices: Vec<usize> = header.iter().enumerate()
@@ -534,21 +533,21 @@ pub fn cmd_voi_run(args: &[String]) {
         std::process::exit(1);
     });
 
-    // Resolve experiment output_dir
-    let exp_toml_src = std::fs::read_to_string(&voi_file.voi.experiment).unwrap_or_else(|e| {
-        eprintln!("error: cannot read experiment '{}': {}", voi_file.voi.experiment, e);
+    // Resolve batch output_dir
+    let batch_toml_src = std::fs::read_to_string(&voi_file.voi.batch).unwrap_or_else(|e| {
+        eprintln!("error: cannot read batch '{}': {}", voi_file.voi.batch, e);
         std::process::exit(1);
     });
-    let exp_info = crate::util::parse_experiment_toml(&exp_toml_src).unwrap_or_else(|e| {
+    let batch_info = crate::util::parse_batch_toml(&batch_toml_src).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
-    let exp_output_dir = exp_info.output_dir;
-    let design_dir = format!("{}/designs/{}", exp_output_dir, voi_file.voi.design);
+    let batch_output_dir = batch_info.output_dir;
+    let design_dir = format!("{}/designs/{}", batch_output_dir, voi_file.voi.design);
 
     // Output directory
     let out_dir = output_override.unwrap_or_else(|| {
-        format!("{}/analysis/voi", exp_output_dir)
+        format!("{}/analysis/voi", batch_output_dir)
     });
     std::fs::create_dir_all(&out_dir).unwrap_or_else(|e| {
         eprintln!("error: cannot create {}: {}", out_dir, e);
@@ -568,7 +567,7 @@ pub fn cmd_voi_run(args: &[String]) {
     let outputs_path = format!("{}/outputs.tsv", design_dir);
     let (col_names, output_rows) = read_outputs_tsv(&outputs_path).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
-        eprintln!("  Run 'camdl experiment summarize {}' first.", voi_file.voi.experiment);
+        eprintln!("  Run 'camdl simulate batch {}' first.", voi_file.voi.batch);
         std::process::exit(1);
     });
 

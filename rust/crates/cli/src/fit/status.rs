@@ -274,7 +274,7 @@ pub fn run_status(fit: &FitToml) -> Result<(), String> {
     // Next step suggestion
     println!();
     if validate_state.is_some() {
-        println!("  Next: camdl experiment run experiment.toml \\");
+        println!("  Next: camdl simulate batch sweep.toml \\");
         println!("          --params {}/validate/mle_params.toml", dir);
     } else if refine_state.is_some() {
         println!("  Next: camdl fit validate fit.toml --starts-from {}/refine/", dir);
