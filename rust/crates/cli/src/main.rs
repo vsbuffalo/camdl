@@ -16,6 +16,7 @@ mod eval;
 mod pfilter; // used internally by fit runner for data loading
 mod data;
 mod fit;
+mod compare;
 pub mod version;
 
 // Modules kept for internal use but with no direct CLI entry points:
@@ -57,6 +58,7 @@ fn print_main_help() -> ! {
     eprintln!("  {}     Standalone particle filter at fixed parameters", b("pfilter"));
     eprintln!("  {}         Standalone iterated filtering (IF2)", b("if2"));
     eprintln!("  {}     Profile likelihood via parallel IF2 over a grid", b("profile"));
+    eprintln!("  {}     Compare fits by prequential scores (elpd, CRPS, PIT)", b("compare"));
     eprintln!("  {}     Compile .camdl → IR JSON", b("compile"));
     eprintln!("  {}       Type-check a .camdl model", b("check"));
     eprintln!("  {}     Print model structure", b("inspect"));
@@ -340,6 +342,9 @@ fn main() {
                 if2_help();
             }
             if2::cmd_if2(&all_args[1..]);
+        }
+        "compare" => {
+            compare::cmd_compare(&all_args[1..]);
         }
         "profile" => {
             // Rewired 2026-04-19 after a camdl-book profile-likelihood
