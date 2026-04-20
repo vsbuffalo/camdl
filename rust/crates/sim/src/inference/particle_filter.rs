@@ -53,6 +53,27 @@ pub struct PFilterResult {
     /// when `SMCConfig.record_ancestry = true`. Feed this to
     /// `ancestor_trace::sample_paths` for smoothing draws.
     pub ancestry: Option<super::ancestor_trace::AncestorTrace>,
+    /// Per-step per-particle predictive samples and log-likelihoods,
+    /// populated when `SMCConfig.record_prequential = true`. Feed to
+    /// `prequential::build_trace` with the observation series to build
+    /// a `PrequentialTrace`.
+    pub prequential: Option<PrequentialRecorded>,
+}
+
+/// Raw per-step ingredients for prequential trace construction.
+///
+/// Captured BEFORE obs-reweight and BEFORE resampling, so particles
+/// are distributed as the one-step-ahead predictive
+/// p(x_t | y_{1:t-1}). In the bootstrap filter the pre-obs weights
+/// are uniform (reset to 0 at the end of the previous step), so the
+/// caller can compute log-score = logsumexp(log_liks) − log N.
+pub struct PrequentialRecorded {
+    /// Observation time for each recorded step, length = n_obs.
+    pub obs_times: Vec<f64>,
+    /// `[obs_idx][particle]` = log p(y_t | x_t^(p), θ).
+    pub log_liks: Vec<Vec<f64>>,
+    /// `[obs_idx][particle]` = sum across streams of ỹ^(p) ∼ p(y | x_t^(p), θ).
+    pub y_pred_samples: Vec<Vec<f64>>,
 }
 
 /// Run the bootstrap particle filter.
@@ -136,6 +157,17 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         Vec::with_capacity(n_obs)
     } else { Vec::new() };
 
+    // Prequential recording (allocated only if requested).
+    let mut preq_times: Vec<f64> = if config.record_prequential {
+        Vec::with_capacity(n_obs)
+    } else { Vec::new() };
+    let mut preq_log_liks: Vec<Vec<f64>> = if config.record_prequential {
+        Vec::with_capacity(n_obs)
+    } else { Vec::new() };
+    let mut preq_samples: Vec<Vec<f64>> = if config.record_prequential {
+        Vec::with_capacity(n_obs)
+    } else { Vec::new() };
+
     for obs_idx in 0..n_obs {
         let obs_time = obs_model.obs_time(obs_idx);
 
@@ -180,6 +212,23 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // Compute log-weights via observation model
         for (i, state) in swarm.states.iter().enumerate() {
             swarm.log_weights[i] = obs_model.log_likelihood(state, obs_idx, params);
+        }
+
+        // Record prequential ingredients BEFORE resampling. Particles
+        // are currently distributed as the one-step-ahead predictive
+        // p(x_t | y_{1:t-1}); pre-obs weights (prior this obs) are
+        // uniform, so the caller computes log-score as
+        // logsumexp(log_liks) − log N. Samples come from the same
+        // particles via obs_model.sample and feed CRPS/PIT.
+        if config.record_prequential {
+            let log_liks: Vec<f64> = swarm.log_weights.clone();
+            let y_draws: Vec<f64> = swarm.states.iter().enumerate()
+                .map(|(i, s)| obs_model.sample(s, obs_idx, params, &mut diag_rngs[i])
+                    .into_iter().sum::<f64>())
+                .collect();
+            preq_times.push(obs_time);
+            preq_log_liks.push(log_liks);
+            preq_samples.push(y_draws);
         }
 
         // Record pre-resample filtering state (states + weights) so
@@ -264,6 +313,16 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         None
     };
 
+    let prequential = if config.record_prequential {
+        Some(PrequentialRecorded {
+            obs_times: preq_times,
+            log_liks: preq_log_liks,
+            y_pred_samples: preq_samples,
+        })
+    } else {
+        None
+    };
+
     Ok(PFilterResult {
         log_likelihood: total_loglik,
         predictions: if has_predictions { Some(predictions) } else { None },
@@ -271,6 +330,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         ll_increments,
         final_states: Some(swarm.states),
         ancestry,
+        prequential,
     })
 }
 

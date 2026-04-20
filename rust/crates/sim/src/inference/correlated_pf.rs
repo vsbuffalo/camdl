@@ -442,6 +442,7 @@ pub fn bootstrap_filter_correlated(
         // this code path out of scope for the 2026-04-19 PF-traj
         // proposal.
         ancestry: None,
+        prequential: None,
     })
 }
 

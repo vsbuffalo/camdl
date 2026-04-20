@@ -184,6 +184,75 @@ pub fn crps_sample(samples: &[f64], y: f64) -> f64 {
     2.0 * acc / (s_f * s_f)
 }
 
+/// Build a `PrequentialTrace` from raw PF recordings and the
+/// observation series.
+///
+/// `recorded` comes from `PFilterResult.prequential` (requires
+/// `SMCConfig.record_prequential = true`). `y_obs` is the observation
+/// values in the same order as `recorded.obs_times`. `ess_trace`
+/// mirrors `PFilterResult.ess_trace`.
+///
+/// `t0` is the number of leading observations skipped (not scored).
+/// Under IC-free inference the first obs is used only to pin x_0;
+/// pass `t0 = 1`. Otherwise `t0 = 0`.
+///
+/// Bootstrap-PF-specific assumption: pre-obs weights are uniform
+/// (reset to zero at the end of the previous step), so log-score
+/// reduces to `logsumexp(log_liks) − log N`. If this filter ever
+/// gains auxiliary weighting, pass weighted log-score here.
+pub fn build_trace(
+    recorded: &super::particle_filter::PrequentialRecorded,
+    y_obs: &[f64],
+    ess_trace: &[f64],
+    t0: usize,
+) -> PrequentialTrace {
+    assert_eq!(recorded.obs_times.len(), y_obs.len(),
+        "y_obs must align 1:1 with recorded obs_times");
+    assert_eq!(recorded.obs_times.len(), ess_trace.len(),
+        "ess_trace must align 1:1 with recorded obs_times");
+
+    let mut steps = Vec::with_capacity(recorded.obs_times.len().saturating_sub(t0));
+    let mut warnings: Vec<PrequentialWarning> = Vec::new();
+    let mut ess_collapse_count = 0usize;
+    const ESS_THRESHOLD: f64 = 10.0;
+
+    for idx in t0..recorded.obs_times.len() {
+        let log_liks = &recorded.log_liks[idx];
+        let samples = &recorded.y_pred_samples[idx];
+        let y = y_obs[idx];
+        let n = log_liks.len() as f64;
+
+        // Uniform-weight log-score (see docstring).
+        let log_score = super::types::log_sum_exp(log_liks) - n.ln();
+        let crps = crps_sample(samples, y);
+        let pit = pit_sample(samples, y);
+        let ess = ess_trace[idx];
+        if ess < ESS_THRESHOLD { ess_collapse_count += 1; }
+
+        steps.push(PrequentialStep {
+            t: recorded.obs_times[idx],
+            y_obs: y,
+            y_pred_samples: samples.clone(),
+            log_score, crps, pit, ess,
+        });
+    }
+
+    if ess_collapse_count > 0 {
+        warnings.push(PrequentialWarning::EssCollapse {
+            step_count: ess_collapse_count,
+            threshold: ESS_THRESHOLD,
+        });
+    }
+
+    PrequentialTrace {
+        schema_version: 1,
+        t0,
+        provenance: Provenance::PlugIn,
+        steps,
+        warnings,
+    }
+}
+
 /// Probability integral transform: empirical CDF of the predictive
 /// samples evaluated at the observation.
 ///
@@ -305,6 +374,60 @@ mod tests {
         // 50% interval = PIT in [0.25, 0.75].
         let cov50 = trace.pit_coverage(0.50);
         assert!(approx_eq(cov50, 0.50, 0.02), "got {}", cov50);
+    }
+
+    #[test]
+    fn build_trace_from_recorded_aligns_with_kernels() {
+        // Hand-rolled PrequentialRecorded with two steps; verify
+        // build_trace computes the same log_score / crps / pit as the
+        // standalone kernels and forwards ess correctly.
+        let recorded = super::super::particle_filter::PrequentialRecorded {
+            obs_times: vec![1.0, 2.0],
+            log_liks: vec![
+                vec![-1.0, -2.0, -0.5, -3.0],
+                vec![-0.1, -0.2, -0.3, -0.4],
+            ],
+            y_pred_samples: vec![
+                vec![1.0, 2.0, 3.0, 4.0],
+                vec![5.5, 5.0, 4.5, 6.0],
+            ],
+        };
+        let y_obs = vec![2.5, 5.2];
+        let ess = vec![100.0, 4.0];  // second step below threshold
+
+        let trace = build_trace(&recorded, &y_obs, &ess, 0);
+        assert_eq!(trace.steps.len(), 2);
+        assert_eq!(trace.t0, 0);
+
+        // Step 0: log_score = logsumexp(log_liks) - log N
+        let expected_ls0 = super::super::types::log_sum_exp(&recorded.log_liks[0])
+            - (4.0_f64).ln();
+        assert!(approx_eq(trace.steps[0].log_score, expected_ls0, 1e-12));
+        // CRPS/PIT agree with kernels.
+        assert!(approx_eq(trace.steps[0].crps,
+            crps_sample(&recorded.y_pred_samples[0], 2.5), 1e-12));
+        assert!(approx_eq(trace.steps[0].pit,
+            pit_sample(&recorded.y_pred_samples[0], 2.5), 1e-12));
+
+        // ESS warning fires for the low-ess second step.
+        assert_eq!(trace.warnings.len(), 1);
+        matches!(trace.warnings[0], PrequentialWarning::EssCollapse { step_count: 1, .. });
+    }
+
+    #[test]
+    fn build_trace_respects_t0_skip() {
+        let recorded = super::super::particle_filter::PrequentialRecorded {
+            obs_times: vec![1.0, 2.0, 3.0],
+            log_liks: vec![vec![-1.0; 4]; 3],
+            y_pred_samples: vec![vec![0.5, 1.0, 1.5, 2.0]; 3],
+        };
+        let y_obs = vec![1.25; 3];
+        let ess = vec![100.0; 3];
+
+        let trace = build_trace(&recorded, &y_obs, &ess, 1);
+        assert_eq!(trace.steps.len(), 2);
+        assert_eq!(trace.t0, 1);
+        assert_eq!(trace.steps[0].t, 2.0);
     }
 
     #[test]
