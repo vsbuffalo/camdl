@@ -39,6 +39,8 @@ pub fn cmd_pfilter(args: &[String]) {
     let mut n_replicates = 1_usize;
     let mut save_paths: Option<(usize, String)> = None;
     let mut save_filtering: Option<String> = None;
+    let mut save_prequential: Option<String> = None;
+    let mut save_samples: bool = true;
 
     let mut i = 0;
     while i < args.len() {
@@ -82,6 +84,8 @@ pub fn cmd_pfilter(args: &[String]) {
                 save_paths = Some((n, path));
             }
             "--save-filtering" => { i += 1; save_filtering = Some(args[i].clone()); }
+            "--save-prequential" => { i += 1; save_prequential = Some(args[i].clone()); }
+            "--no-save-samples"  => { save_samples = false; }
             "--param"     => {
                 i += 1;
                 let kv = &args[i];
@@ -100,6 +104,12 @@ pub fn cmd_pfilter(args: &[String]) {
                 eprintln!("  --save-paths N PATH      Draw N trajectory samples from the smoothing");
                 eprintln!("                           distribution (ancestor tracing). For model-vs-data");
                 eprintln!("                           plots, this is what you want.");
+                eprintln!("  --save-prequential STEM  Write {{STEM}}.tsv + {{STEM}}.json: per-step log");
+                eprintln!("                           score, CRPS, PIT, ESS (one-step-ahead plug-in");
+                eprintln!("                           predictive). See 2026-04-20-prequential-evaluation.md.");
+                eprintln!("  --no-save-samples        With --save-prequential, drop per-particle");
+                eprintln!("                           predictive samples from {{STEM}}.json (keeps");
+                eprintln!("                           scalar scores; shrinks file).");
                 eprintln!("  --save-filtering PATH    Dump per-step particle states + weights. For PF");
                 eprintln!("                           diagnostics (particle degeneracy, obs sanity,");
                 eprintln!("                           implementation debugging). NOT a substitute for");
@@ -255,7 +265,7 @@ pub fn cmd_pfilter(args: &[String]) {
         t_start: compiled.model.simulation.t_start,
         skip_first_obs_from_loglik: false,
         record_ancestry: need_ancestry,
-        record_prequential: false,
+        record_prequential: save_prequential.is_some(),
     };
 
     // --save-filtering caveat log. Fires unconditionally (not quietable)
@@ -388,6 +398,29 @@ pub fn cmd_pfilter(args: &[String]) {
         eprintln!("{} sample paths written to {}", n_paths, path);
     }
 
+    // Save prequential trace (--save-prequential PATH): writes
+    // {PATH}.tsv (per-step scalar scores) + {PATH}.json (full trace,
+    // incl. predictive samples unless --no-save-samples was given).
+    if let Some(ref stem) = save_prequential {
+        let recorded = result.prequential.as_ref().expect(
+            "record_prequential must be true when save_prequential is set");
+        let y_obs: Vec<f64> = observations.iter().map(|o| o.value).collect();
+        let mut trace = sim::inference::prequential::build_trace(
+            recorded, &y_obs, &result.ess_trace, 0);
+        if !save_samples {
+            for step in &mut trace.steps { step.y_pred_samples.clear(); }
+            trace.warnings.push(
+                sim::inference::prequential::PrequentialWarning::SamplesNotSaved);
+        }
+        write_prequential_outputs(stem, &trace).unwrap_or_else(|e| {
+            eprintln!("error writing prequential: {}", e);
+            std::process::exit(1);
+        });
+        eprintln!(
+            "prequential trace written: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
+            trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
+    }
+
     // Save filtering marginals (--save-filtering PATH): per-step
     // pre-resample particle states + log-weights. Caveat log fired
     // earlier at SMCConfig construction.
@@ -416,6 +449,30 @@ pub fn cmd_pfilter(args: &[String]) {
             }
         }
     }
+}
+
+/// Write a `PrequentialTrace` to `{stem}.tsv` + `{stem}.json`.
+/// The `.tsv` is a human-readable per-step table of scalar scores;
+/// `.json` carries the full typed trace including predictive samples
+/// (so downstream tools needn't re-run the filter).
+fn write_prequential_outputs(
+    stem: &str,
+    trace: &sim::inference::prequential::PrequentialTrace,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let tsv_path = format!("{}.tsv", stem);
+    let json_path = format!("{}.json", stem);
+    let mut tsv = std::io::BufWriter::new(std::fs::File::create(&tsv_path)?);
+    writeln!(tsv, "t\ty_obs\tlog_score\tcrps\tpit\tess")?;
+    for s in &trace.steps {
+        writeln!(tsv, "{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.2}",
+            s.t, s.y_obs, s.log_score, s.crps, s.pit, s.ess)?;
+    }
+    drop(tsv);
+    let json = serde_json::to_string_pretty(trace)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(&json_path, json)?;
+    Ok(())
 }
 
 /// Load observation data from a TSV file.
