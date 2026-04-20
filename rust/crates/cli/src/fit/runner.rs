@@ -306,6 +306,7 @@ impl FitRunConfig {
             t_start: self.compiled.model.simulation.t_start,
             skip_first_obs_from_loglik: self.ic_free,
             record_ancestry: false,
+            record_prequential: false,
         }
     }
 }

@@ -255,6 +255,7 @@ pub fn cmd_pfilter(args: &[String]) {
         t_start: compiled.model.simulation.t_start,
         skip_first_obs_from_loglik: false,
         record_ancestry: need_ancestry,
+        record_prequential: false,
     };
 
     // --save-filtering caveat log. Fires unconditionally (not quietable)

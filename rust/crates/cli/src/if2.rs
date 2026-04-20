@@ -439,6 +439,7 @@ pub fn cmd_if2(args: &[String]) {
             t_start: compiled.model.simulation.t_start,
             skip_first_obs_from_loglik: false,
             record_ancestry: false,
+            record_prequential: false,
         };
 
         eprintln!("\nevaluating loglik (every {} iterations, all {} chains)...", eval_interval, n_chains);

@@ -181,4 +181,10 @@ pub struct SMCConfig {
     /// for why this is gated.
     #[doc(alias = "save_trajectories")]
     pub record_ancestry: bool,
+    /// Record the per-step per-particle predictive samples and
+    /// log-likelihoods needed to build a `PrequentialTrace` (log
+    /// score, CRPS, PIT). Roughly N × T f64 per step; cheap
+    /// relative to the filter itself. See
+    /// `docs/dev/proposals/2026-04-20-prequential-evaluation.md`.
+    pub record_prequential: bool,
 }
