@@ -537,7 +537,7 @@ impl Default for SimRun {
             scenario_name: None,
             adhoc_enable: Vec::new(),
             adhoc_disable: Vec::new(),
-            backend: "gillespie".to_string(),
+            backend: "chain_binomial".to_string(),
             dt: 1.0,
             seed: 1,
         }

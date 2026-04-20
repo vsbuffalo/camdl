@@ -36,7 +36,7 @@ struct WasmSimConfig {
 }
 
 fn default_backend() -> String {
-    "gillespie".to_string()
+    "chain_binomial".to_string()
 }
 
 /// Simulate a model from IR JSON.
@@ -56,7 +56,7 @@ fn simulate_inner(ir_json: &str, config_json: &str) -> Result<String, String> {
     let model = ir::from_str(ir_json).map_err(|e| e.to_string())?;
 
     let wasm_cfg: WasmSimConfig = if config_json.is_empty() {
-        WasmSimConfig { backend: "gillespie".to_string(), seed: 42, dt: None, output_dt: None }
+        WasmSimConfig { backend: "chain_binomial".to_string(), seed: 42, dt: None, output_dt: None }
     } else {
         serde_json::from_str(config_json).map_err(|e| e.to_string())?
     };

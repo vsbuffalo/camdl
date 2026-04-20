@@ -311,19 +311,19 @@ fn explicit_backend_overrides_provenance_in_run_json() {
 }
 
 #[test]
-fn standalone_params_preserve_gillespie_default_in_run_json() {
+fn standalone_params_use_chain_binomial_default_in_run_json() {
     // Standalone params file (no [provenance] block) + no --backend:
-    // run.json must record Gillespie (the CLI default), not some
-    // leaked value from a prior run's state. Regression guard on the
-    // "unchanged for non-fit params" claim in the proposal.
+    // run.json must record chain_binomial (the CLI default, matching
+    // `camdl fit`'s default — see the 2026-04-19 incident). Regression
+    // guard on the "no leakage from prior runs" invariant.
     let Some(bin) = skip_if_missing() else { return; };
     let tmp = tempfile::tempdir().unwrap();
     let standalone = tmp.path().join("p.toml");
     std::fs::write(&standalone, "mu = 0.05\n").unwrap();
     let output = run_simulate_cas(&bin, tmp.path(), &standalone, &[]);
     let kind = read_sim_kind(&output);
-    assert_eq!(kind["backend"], "gillespie",
-        "standalone params must preserve Gillespie default; got: {}", kind);
+    assert_eq!(kind["backend"], "chain_binomial",
+        "standalone params must use chain_binomial default; got: {}", kind);
 }
 
 #[test]

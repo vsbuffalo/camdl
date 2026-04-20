@@ -184,7 +184,7 @@ struct ConfigSection {
     seeds: SeedsSection,
 }
 
-fn default_backend() -> String { "gillespie".to_string() }
+fn default_backend() -> String { "chain_binomial".to_string() }
 fn default_dt() -> f64 { 1.0 }
 fn default_output_dir() -> String { "output".to_string() }
 fn default_parallel() -> usize { 1 }

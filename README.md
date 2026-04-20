@@ -185,9 +185,9 @@ camdl simulate MODEL [--backend gillespie|tau_leap|chain_binomial|ode]
 
 | Backend        | Flag                                | Notes                                           |
 | -------------- | ----------------------------------- | ----------------------------------------------- |
-| Gillespie SSA  | `--backend gillespie`               | Exact stochastic; default                       |
+| Chain-binomial | `--backend chain_binomial --dt 1.0` | Euler-multinomial (multinomial competing risks); default — matches `camdl fit` |
+| Gillespie SSA  | `--backend gillespie`               | Exact stochastic                                |
 | Tau-leap       | `--backend tau_leap --dt 0.5`       | Poisson approximation                           |
-| Chain-binomial | `--backend chain_binomial --dt 1.0` | Euler-multinomial (multinomial competing risks) |
 | ODE (RK4)      | `--backend ode --dt 0.1`            | Deterministic                                   |
 
 Same seed + same backend = identical trajectory (Common Random Numbers).

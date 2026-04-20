@@ -120,7 +120,7 @@ fn simulate_help() -> ! {
     eprintln!("  --param NAME=VALUE        Override single parameter (repeatable)");
     eprintln!("  --param-vec PREFIX=FILE   Override indexed params from keyed TSV");
     eprintln!("  --table NAME=FILE         Supply external() table data");
-    eprintln!("  --backend BACKEND         gillespie|tau_leap|chain_binomial|ode (default: gillespie)");
+    eprintln!("  --backend BACKEND         gillespie|tau_leap|chain_binomial|ode (default: chain_binomial)");
     eprintln!("  --dt DT                   Step size for discrete-time backends (default: 1.0)");
     eprintln!("  --seed N                  RNG seed (default: 1)");
     eprintln!("  --seeds SPEC              Multiple seeds: 1:100 or 1,2,42");
@@ -410,7 +410,10 @@ const SEED_MIX_PRIOR: u64  = 0x0014_b1ce;      // prior draws RNG
 
 fn run_simulate(args: &[String]) {
     let mut ir_path:     Option<String> = None;
-    let mut backend    = "gillespie".to_string();
+    // Default backend is chain_binomial — matches `camdl fit`'s default
+    // (see docs/dev/incidents/2026-04-19-backend-default-mismatch.md).
+    // Users who want Gillespie pass --backend gillespie explicitly.
+    let mut backend    = "chain_binomial".to_string();
     let mut dt         = 1.0_f64;
     // Track explicit vs default flags. The backend-provenance
     // guardrail (docs/dev/proposals/2026-04-19-backend-provenance-guardrail.md)

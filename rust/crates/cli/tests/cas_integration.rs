@@ -786,7 +786,7 @@ fn show_prints_metadata() {
     // Check that show emits the key fields
     assert!(stdout.contains("baseline"), "should show scenario");
     assert!(stdout.contains("42"), "should show seed");
-    assert!(stdout.contains("gillespie"), "should show backend");
+    assert!(stdout.contains("chain_binomial"), "should show backend");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
