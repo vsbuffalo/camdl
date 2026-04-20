@@ -962,17 +962,33 @@ pub fn cmd_fit_run_v2(args: &[String]) {
                 let t0 = std::time::Instant::now();
 
                 let mut logliks = Vec::new();
+                // Prequential: record on the first replicate only; scoring
+                // is a property of the point estimate, not a per-rep
+                // quantity. Subsequent reps just build the loglik SD.
+                let mut preq_trace: Option<sim::inference::prequential::PrequentialTrace> = None;
                 for r in 0..n_reps {
                     let pf_seed = seed ^ ((r as u64).wrapping_mul(0x7f4a7c15_u64));
                     let process = run_config.build_process();
                     let obs_model = run_config.build_obs_model();
-                    let smc_config = run_config.smc_config();
+                    let record_preq = r == 0;
+                    let smc_config = sim::inference::traits::SMCConfig {
+                        record_prequential: record_preq,
+                        ..run_config.smc_config()
+                    };
                     let result = sim::inference::bootstrap_filter(
                         &process, &obs_model, &mle_params, &smc_config, pf_seed,
                     ).unwrap_or_else(|e| {
                         eprintln!("pfilter error: {:?}", e);
                         std::process::exit(1);
                     });
+                    if record_preq {
+                        if let Some(ref recorded) = result.prequential {
+                            let y_obs: Vec<f64> = run_config.observations.iter()
+                                .map(|o| o.value).collect();
+                            preq_trace = Some(sim::inference::prequential::build_trace(
+                                recorded, &y_obs, &result.ess_trace, 0));
+                        }
+                    }
                     logliks.push(result.log_likelihood);
                     if n_reps <= 10 || r % (n_reps / 10) == 0 {
                         eprintln!("  pfilter rep {}/{}: loglik={:.1}", r + 1, n_reps, result.log_likelihood);
@@ -998,6 +1014,24 @@ pub fn cmd_fit_run_v2(args: &[String]) {
                     for (i, ll) in logliks.iter().enumerate() {
                         writeln!(f, "{}\t{:.4}", i + 1, ll).unwrap();
                     }
+                }
+
+                // Write prequential trace (plug-in predictive at MLE).
+                // Scoring is point-estimate property — rep 0 only.
+                if let Some(ref trace) = preq_trace {
+                    use std::io::Write;
+                    let tsv_path = format!("{}/prequential.tsv", stage_dir.display());
+                    let mut f = std::fs::File::create(&tsv_path).unwrap();
+                    writeln!(f, "t\ty_obs\tlog_score\tcrps\tpit\tess").unwrap();
+                    for s in &trace.steps {
+                        writeln!(f, "{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.2}",
+                            s.t, s.y_obs, s.log_score, s.crps, s.pit, s.ess).unwrap();
+                    }
+                    let json_path = format!("{}/prequential.json", stage_dir.display());
+                    let json = serde_json::to_string_pretty(trace).unwrap();
+                    std::fs::write(&json_path, json).unwrap();
+                    eprintln!("  prequential: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
+                        trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
                 }
                 stage_best_loglik = Some(mean_ll);
             }
