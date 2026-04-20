@@ -29,6 +29,7 @@ pub mod pgas_grad;
 pub mod nuts;
 pub mod linalg;
 pub mod diagnostic;
+pub mod prequential;
 
 // Re-exports
 pub use types::{ParticleState, ParticleSwarm};
