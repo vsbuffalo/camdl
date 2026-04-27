@@ -90,6 +90,11 @@ fn run_one_chain(
 }
 
 pub fn cmd_if2(a: &crate::args::If2Args) {
+    eprintln!(
+        "[note] 'camdl if2' uses the legacy IF2 argmax estimator and does not \
+         apply clean-eval de-biasing. For production parameter estimates, \
+         use 'camdl fit run' instead."
+    );
     let ir_path = a.model.to_string_lossy().into_owned();
     let data_path = a.data.to_string_lossy().into_owned();
     let dt = a.inference.dt;
@@ -258,14 +263,6 @@ pub fn cmd_if2(a: &crate::args::If2Args) {
             eprintln!("  {:12} rw_sd={:<10.4} ({}, {}, {})", spec.name, spec.rw_sd, transform_name, bounds_str, source);
         }
     }
-
-    // Observation model parameters (used by deprecated --obs-model fallback closures)
-    #[allow(unused_variables)]
-    let rho_idx = compiled.param_index.get("rho").copied();
-    #[allow(unused_variables)]
-    let k_idx = compiled.param_index.get("k").copied();
-    #[allow(unused_variables)]
-    let psi_idx = compiled.param_index.get("psi").copied();
 
     let n_fixed = model.parameters.len() - if2_params.len();
     let regime_name = a.regime.as_deref().unwrap_or("manual");

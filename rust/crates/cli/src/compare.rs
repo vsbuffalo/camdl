@@ -366,14 +366,12 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
 
 fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) {
     use serde_json::json;
+    let want_crps = metrics.iter().any(|m| m == "crps");
+    let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
     let base = &rows[base_idx].trace;
     let entries: Vec<serde_json::Value> = rows.iter().enumerate().map(|(i, r)| {
         let (d_elpd, se_elpd) = if i == base_idx { (f64::NAN, f64::NAN) }
             else { paired_delta(&r.trace, base, Field::LogScore) };
-        let (d_crps, _) = if i == base_idx { (f64::NAN, f64::NAN) }
-            else { paired_delta(&r.trace, base, Field::Crps) };
-        let mean_dcrps = if r.trace.n_scored() == 0 { f64::NAN }
-            else { d_crps / r.trace.n_scored() as f64 };
         let e_t = if d_elpd.is_finite() { d_elpd.exp() } else { f64::NAN };
         // Evidence: Δelpd (nats) → decibans + Jeffreys label. Derived
         // field for human-interpretable consumption; nats remain the
@@ -385,20 +383,28 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) {
         } else {
             (serde_json::Value::Null, serde_json::Value::Null)
         };
-        json!({
-            "name": r.name,
-            "path": r.path,
-            "t_score": r.trace.n_scored(),
-            "elpd": r.trace.elpd(),
-            "delta_elpd": option_finite(d_elpd),
-            "delta_elpd_db": d_elpd_db,
-            "evidence_label": evidence_label,
-            "e_t": option_finite(e_t),
-            "se_delta_elpd": option_finite(se_elpd),
-            "mean_crps": r.trace.mean_crps(),
-            "delta_mean_crps": option_finite(mean_dcrps),
-            "pit_cov90": r.trace.pit_coverage(0.90),
-        })
+        let mut entry = serde_json::Map::new();
+        entry.insert("name".into(), json!(r.name));
+        entry.insert("path".into(), json!(r.path));
+        entry.insert("t_score".into(), json!(r.trace.n_scored()));
+        entry.insert("elpd".into(), json!(r.trace.elpd()));
+        entry.insert("delta_elpd".into(), option_finite(d_elpd));
+        entry.insert("delta_elpd_db".into(), d_elpd_db);
+        entry.insert("evidence_label".into(), evidence_label);
+        entry.insert("e_t".into(), option_finite(e_t));
+        entry.insert("se_delta_elpd".into(), option_finite(se_elpd));
+        if want_crps {
+            let (d_crps, _) = if i == base_idx { (f64::NAN, f64::NAN) }
+                else { paired_delta(&r.trace, base, Field::Crps) };
+            let mean_dcrps = if r.trace.n_scored() == 0 { f64::NAN }
+                else { d_crps / r.trace.n_scored() as f64 };
+            entry.insert("mean_crps".into(), json!(r.trace.mean_crps()));
+            entry.insert("delta_mean_crps".into(), option_finite(mean_dcrps));
+        }
+        if want_pit {
+            entry.insert("pit_cov90".into(), json!(r.trace.pit_coverage(0.90)));
+        }
+        serde_json::Value::Object(entry)
     }).collect();
     let out = json!({
         "baseline": rows[base_idx].name,

@@ -27,6 +27,30 @@ use crate::resolved_expr::eval_resolved;
 use crate::state::{IntState, RealState};
 
 // ═══════════════════════════════════════════════════════════════════
+// Named constants
+// ═══════════════════════════════════════════════════════════════════
+
+/// Fibonacci/Knuth multiplicative hash constant (2^64 / φ). Gives good
+/// avalanche properties for (sweep, rung, rep) seed mixing.
+const SEED_MIX_KNUTH: u64 = 0x9e3779b97f4a7c15;
+/// FNV-1a-derived mixing constant for per-warmup-sweep seed separation.
+const SEED_MIX_WARMUP: u64 = 0x517cc1b727220a95;
+/// FNV-1a-derived mixing constant for per-rung seed separation.
+const SEED_MIX_RUNG: u64 = 0x6c62272e07bb0142;
+/// FNV-derived mixing constant for per-CSMC-rep seed separation.
+const SEED_MIX_REP: u64 = 0xa2ce44bbfe0cf6d5;
+
+/// Fraction of the adaptation window used for mass-matrix estimation.
+/// Stan's dual-averaging schedule uses 0.75 for the equivalent split;
+/// 0.70 gives a longer burn-in window before Cholesky updates begin.
+const MASS_ADAPT_FRAC: f64 = 0.70;
+
+/// Probability-domain clamp to keep values strictly in (0,1) for
+/// numerical stability in log(p) / log(1-p) computations.
+/// Distinct from LOG_PROB_FLOOR which is a log-domain floor.
+const PROB_CLAMP_EPS: f64 = 1e-15;
+
+// ═══════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════
 
@@ -298,7 +322,7 @@ fn exit_and_split_log_density(
     flows: &[u64],
     src_local: usize,
 ) -> f64 {
-    let p_total = (1.0 - (-total_rate * dt).exp()).clamp(1e-15, 1.0 - 1e-15);
+    let p_total = (1.0 - (-total_rate * dt).exp()).clamp(PROB_CLAMP_EPS, 1.0 - PROB_CLAMP_EPS);
     let binom_total = binom_logpmf(n_exit, n_src as u64, p_total);
 
     if !binom_total.is_finite() {
@@ -316,7 +340,7 @@ fn exit_and_split_log_density(
         if k == n_competing - 1 {
             if flows[tr_idx] != remaining { return f64::NEG_INFINITY; }
         } else if remaining > 0 && rate_remaining > 0.0 {
-            let p_split = (eff_rate / rate_remaining).clamp(1e-15, 1.0 - 1e-15);
+            let p_split = (eff_rate / rate_remaining).clamp(PROB_CLAMP_EPS, 1.0 - PROB_CLAMP_EPS);
             log_p += binom_logpmf(flows[tr_idx], remaining, p_split);
             remaining -= flows[tr_idx];
             rate_remaining -= eff_rate;
@@ -1407,8 +1431,8 @@ pub fn run_pgas(
         eprintln!("  trajectory warm-up: {} CSMC-only sweeps", config.trajectory_warmup);
         for warmup_sweep in 0..config.trajectory_warmup {
             for rung in 0..n_rungs {
-                let csmc_seed = seed ^ ((warmup_sweep as u64).wrapping_mul(0x517cc1b727220a95))
-                    ^ (rung as u64).wrapping_mul(0x6c62272e07bb0142);
+                let csmc_seed = seed ^ ((warmup_sweep as u64).wrapping_mul(SEED_MIX_WARMUP))
+                    ^ (rung as u64).wrapping_mul(SEED_MIX_RUNG);
                 let (new_traj, _diag) = csmc_as(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
@@ -1523,7 +1547,7 @@ pub fn run_pgas(
                 }
 
                 // Two-phase adaptation (same schedule as single-rung, per-rung state)
-                let mass_adapt_end = (adapt_end as f64 * 0.7) as usize;
+                let mass_adapt_end = (adapt_end as f64 * MASS_ADAPT_FRAC) as usize;
 
                 if sweep < mass_adapt_end {
                     rungs[rung].nuts_step_size = rungs[rung].nuts_dual_avg.update(result.mean_accept_prob);
@@ -1649,9 +1673,9 @@ pub fn run_pgas(
                 trajectory_renewal: 0.0, n_degenerate: 0, n_substeps: 0,
             };
             for csmc_rep in 0..config.csmc_sweeps_per_nuts {
-                let csmc_seed = seed ^ ((sweep as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))
-                    ^ (rung as u64).wrapping_mul(0x6c62272e07bb0142)
-                    ^ (csmc_rep as u64).wrapping_mul(0xa2ce44bbfe0cf6d5);
+                let csmc_seed = seed ^ ((sweep as u64 + 1).wrapping_mul(SEED_MIX_KNUTH))
+                    ^ (rung as u64).wrapping_mul(SEED_MIX_RUNG)
+                    ^ (csmc_rep as u64).wrapping_mul(SEED_MIX_REP);
                 let (new_trajectory, diag) = csmc_as(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,

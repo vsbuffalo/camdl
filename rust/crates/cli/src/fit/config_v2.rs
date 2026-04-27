@@ -501,7 +501,7 @@ impl Default for CombineMode {
 /// with a high-particle, multi-replicate clean PF before declaring a
 /// winner. Closes the ~40-nat extraction bias from argmax over noisy
 /// 500-particle in-run evaluations. See proposal §Proposal 1.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CleanEvalConfig {
     /// Particle count per clean PF replicate. Must be ≫ in-run scout
     /// particle count to bring SE under control.
@@ -530,7 +530,7 @@ impl Default for CleanEvalConfig {
 /// Compound scout-convergence gate: chain agreement (Â) AND inter-chain
 /// log-likelihood spread (decibans, with an SE-aware floor). See
 /// proposal §Proposal 3.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GateConfig {
     /// Maximum tolerated chain-agreement statistic Â (Gelman–Rubin–style
     /// applied to IF2 chain tails). Pass requires `max(Â) < a_thresh`.
@@ -650,7 +650,15 @@ impl FitConfigV2 {
 
         for (name, stage) in &self.stages {
             match stage {
-                Stage::IF2 { chains, particles, iterations, cooling, .. } => {
+                Stage::IF2 { chains, particles, iterations, cooling, clean_eval, gate, .. } => {
+                    if *clean_eval != CleanEvalConfig::default() || *gate != GateConfig::default() {
+                        eprintln!(
+                            "[warning] to_legacy_toml: stage '{}' has custom clean_eval/gate config \
+                             that the legacy bridge cannot represent — defaults will be used. \
+                             Use 'camdl fit run' to preserve these settings.",
+                            name
+                        );
+                    }
                     let sc = StageConfig {
                         chains: Some(*chains),
                         particles: Some(*particles),

@@ -71,6 +71,10 @@ pub struct Intervention {
     /// If true, this event fires unconditionally (not toggled by scenarios).
     /// Events declared in `events {}` have this set to true.
     /// Interventions declared in `interventions {}` default to false.
-    #[serde(default)]
+    /// Defaults to `true` so that old IR files without this field
+    /// deserialize as unconditional (the original intent).
+    #[serde(default = "bool_true")]
     pub always_active: bool,
 }
+
+fn bool_true() -> bool { true }

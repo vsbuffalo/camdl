@@ -286,7 +286,7 @@ impl Formatter {
             let delta_db = (hi - lo) * NATS_TO_DB;
             let sigma_max = state.chain_clean_ses.iter().cloned()
                 .fold(0.0_f64, f64::max);
-            let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
+            let se_floor_db = crate::fit::gating::SE_FLOOR_K * sigma_max * NATS_TO_DB;
             let threshold_db = gate.decibans_thresh.max(se_floor_db);
             let db_passes = delta_db < threshold_db;
             let db_glyph = if db_passes { self.ok("✓") } else { self.err("✗") };
@@ -428,15 +428,7 @@ impl Formatter {
         // fit_state winner ↔ final_params
         if !state.start_values.is_empty() && final_params.is_some() {
             let f = final_params.as_ref().unwrap();
-            let mut state_matches = true;
-            for (k, fv) in f {
-                if let Some(sv) = state.start_values.get(k) {
-                    if (sv - fv).abs() > 1e-9 * fv.abs().max(1.0) {
-                        state_matches = false;
-                        break;
-                    }
-                }
-            }
+            let state_matches = params_agree(f, &state.start_values);
             if state_matches {
                 s.push_str(&format!("    fit_state.toml ↔ final_params.toml:   {}\n",
                     self.ok("✓ params match")));
@@ -683,7 +675,7 @@ fn stage_report(
             let dd = (hi - lo) * NATS_TO_DB;
             let sm = state.chain_clean_ses.iter().cloned()
                 .fold(0.0_f64, f64::max);
-            let se_floor_db = 8.0 * sm * NATS_TO_DB;
+            let se_floor_db = crate::fit::gating::SE_FLOOR_K * sm * NATS_TO_DB;
             let td = gate_cfg.decibans_thresh.max(se_floor_db);
             (Some(dd), Some(td), Some(sm), Some(dd < td))
         } else {
@@ -743,17 +735,7 @@ fn stage_report(
     };
     let state_matches_final = match &final_params {
         Some(f) if !state.start_values.is_empty() => {
-            let mut ok = true;
-            for (k, fv) in f {
-                if let Some(sv) = state.start_values.get(k) {
-                    let scale = fv.abs().max(1.0);
-                    if (sv - fv).abs() > 1e-9 * scale {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-            Some(ok)
+            Some(params_agree(f, &state.start_values))
         }
         _ => None,
     };
@@ -972,10 +954,9 @@ fn render_latex_stage(stage: &StageReport) -> String {
     s
 }
 
-/// Escape LaTeX-active characters in identifiers / paths. Minimal —
-/// we don't escape `_` inside `\texttt{}` because LaTeX renders
-/// `\texttt{foo_bar}` literally (the `_` in `\texttt` is allowed in
-/// most modern LaTeX engines), but we replace `&`, `%`, `#`, `$`.
+/// Escape LaTeX-active characters in identifiers / paths. Replaces
+/// `&`, `%`, `#`, `$`, `_`, `{`, `}` with their escaped forms.
+/// LaTeX requires _ to be escaped as \_ in tabular cell text.
 fn escape_latex(s: &str) -> String {
     s.chars().map(|c| match c {
         '&' => "\\&".into(),

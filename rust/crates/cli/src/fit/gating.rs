@@ -36,6 +36,12 @@ pub const A_HARD: f64 = 1.10;
 /// green < A_SOFT).
 pub const A_SOFT: f64 = 1.05;
 
+/// Multiplier for the SE-aware decibans floor:
+///   threshold = max(decibans_thresh, SE_FLOOR_K * max(SE) * NATS_TO_DB)
+/// k=8 is the proposal's recommended default — see
+/// docs/dev/proposals/2026-04-24-if2-scout-findings-remediation.md §Proposal 3.
+pub const SE_FLOOR_K: f64 = 8.0;
+
 /// Minimum ε for Gate 2. Scout's noise floor on a typical PF-based
 /// loglik estimator at reasonable particle counts. `epsilon` takes the
 /// max of this and `2 * σ_scout_chains` so multi-modal scout runs (high
@@ -159,7 +165,7 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
 
         let sigma_max = scout.chain_clean_ses.iter().cloned()
             .fold(0.0_f64, f64::max);
-        let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
+        let se_floor_db = SE_FLOOR_K * sigma_max * NATS_TO_DB;
         let threshold_db = gate.decibans_thresh.max(se_floor_db);
 
         if delta_db >= threshold_db {
@@ -233,10 +239,10 @@ pub fn format_decibans_spread_verdict(
     sigma_max: f64,
     chain_logliks: &[f64],
 ) -> String {
-    let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
+    let se_floor_db = SE_FLOOR_K * sigma_max * NATS_TO_DB;
     let floor_source = if se_floor_db >= threshold_db {
-        format!("8 · σ_max · NATS_TO_DB = 8 · {:.2} · {:.3} ≈ {:.1} dB",
-            sigma_max, NATS_TO_DB, se_floor_db)
+        format!("{} · σ_max · NATS_TO_DB = {} · {:.2} · {:.3} ≈ {:.1} dB",
+            SE_FLOOR_K as u64, SE_FLOOR_K as u64, sigma_max, NATS_TO_DB, se_floor_db)
     } else {
         format!("user-configured floor decibans_thresh = {:.1} dB", threshold_db)
     };

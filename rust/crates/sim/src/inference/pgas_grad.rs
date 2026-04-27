@@ -12,6 +12,11 @@
 
 use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
+
+/// Probability-domain clamp to keep values strictly in (0,1) for
+/// numerical stability in log(p) / log(1-p) computations.
+/// Distinct from LOG_PROB_FLOOR which is a log-domain floor.
+const PROB_CLAMP_EPS: f64 = 1e-15;
 use crate::propensity::{eval_propensities, EvalCtx};
 use crate::resolved_expr::{eval_resolved, ResolvedExpr};
 use crate::state::{IntState, RealState};
@@ -162,7 +167,7 @@ pub fn log_transition_density_grad(
         // sampler would hit NaN and ICE; with it the sampler sees
         // a huge-but-finite number, rejects the leapfrog step,
         // and adapts step size down. Tolerated behavior.
-        let p_total = (1.0 - (-total_rate * dt).exp()).clamp(1e-15, 1.0 - 1e-15);
+        let p_total = (1.0 - (-total_rate * dt).exp()).clamp(PROB_CLAMP_EPS, 1.0 - PROB_CLAMP_EPS);
         let n_exit: u64 = probs.iter().map(|&(tr_idx, _, _)| flows[tr_idx]).sum();
         log_p += binom_logpmf(n_exit, n_src as u64, p_total);
 
@@ -192,7 +197,7 @@ pub fn log_transition_density_grad(
                 }
                 // Last category: no density contribution (remainder)
             } else if remaining > 0 && rate_remaining > 0.0 {
-                let p_split = (eff_rate / rate_remaining).clamp(1e-15, 1.0 - 1e-15);
+                let p_split = (eff_rate / rate_remaining).clamp(PROB_CLAMP_EPS, 1.0 - PROB_CLAMP_EPS);
                 let flow_k = flows[tr_idx];
                 log_p += binom_logpmf(flow_k, remaining, p_split);
 
@@ -218,7 +223,13 @@ pub fn log_transition_density_grad(
 
     // Ungrouped / inflow transitions (Poisson)
     for (tr_idx, &rate) in propensities.iter().enumerate() {
-        if handled[tr_idx] || rate <= 0.0 { continue; }
+        if handled[tr_idx]
+            || rate <= crate::chain_binomial::RATE_EPSILON
+            || matches!(
+                model.model.transitions[tr_idx].draw_method,
+                ir::transition::DrawMethod::Deterministic
+            )
+        { continue; }
         let mean = rate * dt;
         let flow = flows[tr_idx] as f64;
 

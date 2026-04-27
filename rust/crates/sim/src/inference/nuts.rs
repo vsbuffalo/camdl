@@ -11,6 +11,10 @@
 use serde::{Serialize, Deserialize};
 use crate::rng::StatefulRng;
 
+/// Tikhonov regularization added to the diagonal of the mass-matrix
+/// Cholesky factor to ensure numerical positive-definiteness.
+const CHOLESKY_REG: f64 = 1e-6;
+
 /// Mass matrix for HMC/NUTS. Controls how momentum translates into movement.
 ///
 /// Diagonal: rescales each parameter independently by its posterior variance.
@@ -50,7 +54,7 @@ impl MassMatrix {
         assert_eq!(cov.len(), d * d);
         let mut reg = cov.to_vec();
         for i in 0..d {
-            reg[i * d + i] += 1e-6; // regularize for numerical stability
+            reg[i * d + i] += CHOLESKY_REG; // regularize for numerical stability
         }
         let l_cov = cholesky_lower(&reg, d);
         MassMatrix::Dense { dim: d, l_cov }

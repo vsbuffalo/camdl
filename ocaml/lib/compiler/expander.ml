@@ -104,28 +104,33 @@ let days_of_date y m d =
 let parse_iso_date s =
   match String.split_on_char '-' s with
   | [ys; ms; ds] ->
-    (try (int_of_string ys, int_of_string ms, int_of_string ds)
-     with _ -> failwith (Printf.sprintf "invalid date literal '%s': components must be integers" s))
-  | _ -> failwith (Printf.sprintf "date literal must be YYYY-MM-DD, got '%s'" s)
+    (match (int_of_string_opt ys, int_of_string_opt ms, int_of_string_opt ds) with
+     | (Some y, Some m, Some d) -> Ok (y, m, d)
+     | _ -> Error (Printf.sprintf "invalid date literal '%s': components must be integers" s))
+  | _ -> Error (Printf.sprintf "date literal must be YYYY-MM-DD, got '%s'" s)
 
 let parse_date_to_float origin_str date_str time_unit =
-  let (oy, om, od) = parse_iso_date origin_str in
-  let (ty, tm, td) = parse_iso_date date_str in
-  let delta = days_of_date ty tm td - days_of_date oy om od in
-  (* days_per is defined below; forward-declare not needed since
-     parse_date_to_float is only called after full initialization.
-     Use the same Gregorian constant (365.2425) everywhere. *)
-  let days = function
-    | Days | PerDay -> 1.0
-    | Weeks | PerWeek -> 7.0
-    | Months | PerMonth -> 365.2425 /. 12.0
-    | Years | PerYear -> 365.2425
-    | Count | Ratio ->
-      (* Unreachable: time_unit is validated to be a time unit at
-         parse time. Non-time unit here means upstream malformed the AST. *)
-      invalid_arg "parse_date_to_float: time_unit must be a time unit"
-  in
-  float_of_int delta /. days time_unit
+  match parse_iso_date origin_str with
+  | Error msg -> Error msg
+  | Ok (oy, om, od) ->
+    match parse_iso_date date_str with
+    | Error msg -> Error msg
+    | Ok (ty, tm, td) ->
+      let delta = days_of_date ty tm td - days_of_date oy om od in
+      (* days_per is defined below; forward-declare not needed since
+         parse_date_to_float is only called after full initialization.
+         Use the same Gregorian constant (365.2425) everywhere. *)
+      let days = function
+        | Days | PerDay -> 1.0
+        | Weeks | PerWeek -> 7.0
+        | Months | PerMonth -> 365.2425 /. 12.0
+        | Years | PerYear -> 365.2425
+        | Count | Ratio ->
+          (* Unreachable: time_unit is validated to be a time unit at
+             parse time. Non-time unit here means upstream malformed the AST. *)
+          invalid_arg "parse_date_to_float: time_unit must be a time unit"
+      in
+      Ok (float_of_int delta /. days time_unit)
 
 (* ── Data loading helpers ─────────────────────────────────────────────────── *)
 
@@ -1068,10 +1073,12 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     in
     (match ctx.origin with
      | Some origin_str ->
-       (try Ir.Const (parse_date_to_float origin_str date_str ctx.time_unit)
-        with Failure msg ->
+       (match parse_date_to_float origin_str date_str ctx.time_unit with
+        | Ok v -> Ir.Const v
+        | Error msg ->
           Diagnostics.error ctx.diags ~code:"E220" ~loc:Diagnostics.no_loc
-            ~message:msg ();
+            ~message:msg
+            ~hint:"Date literals must be in YYYY-MM-DD format with integer components." ();
           Ir.Const 0.0)
      | None ->
        Diagnostics.error ctx.diags ~code:"E220" ~loc:Diagnostics.no_loc
