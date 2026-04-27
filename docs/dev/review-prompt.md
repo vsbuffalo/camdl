@@ -579,6 +579,49 @@ documented, and exercised through a shared helper that makes the variant visible
 Three similar lines is acceptable. The same 20-line block copy-pasted across three
 algorithm files with subtle variations is not.
 
+**7.6 No `#[allow(dead_code)]` without a specific named reason.** Grep the entire
+diff (and any file it touches) for `#[allow(dead_code)]` and `#![allow(dead_code)]`.
+Each annotation must be accompanied by a comment stating *why* the item is kept
+despite being unreachable from a live entry point — e.g., a feature flag, an
+upcoming caller, a WASM-only build path.
+
+A bare `#[allow(dead_code)]` with no comment is a bug. A module-level
+`#![allow(dead_code)]` is always wrong — it hides which specific items are dead
+and makes it impossible to tell which are legitimately kept vs forgotten.
+
+The canonical failure mode: an entry point is removed from the CLI dispatcher, the
+implementation file is kept with a blanket allow, and the file accumulates
+context tax for months until a sweep deletes it. In this codebase, `fit/scout.rs`,
+`fit/refine.rs`, `fit/validate.rs`, and `fit/status.rs` sat dead for weeks behind
+module-level allows before the 2026-04-27 cleanup deleted ~2,000 lines.
+
+**Process:** grep for `allow(dead_code)` in every file changed by the diff, plus
+all files in the same module. For each hit: verify the item has a live caller via
+grep, or flag it for deletion.
+
+Bad:
+```rust
+#[allow(dead_code)]
+pub fn run_scout(a: &ScoutArgs) { ... }   // 250 lines with no callers
+```
+
+Bad:
+```rust
+#![allow(dead_code)]   // module-level blanket — hides all dead items
+```
+
+Good:
+```rust
+// Retained for the WASM build path (wasm feature gate, see lib.rs:42).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn wasm_entry_point() { ... }
+```
+
+Also flag: commented-out `mod` declarations (`// mod voi; // not mature enough`)
+paired with orphan `.rs` files that are never compiled. These files cost context
+without contributing to the build, and should be deleted — `git log -S` recovers
+them if needed.
+
 ---
 
 ## §8 — Performance sensitivity
@@ -682,7 +725,9 @@ Use this as a final pass before approving:
       for user-facing errors? Is there an error fixture for every new code?
 - [ ] §6: Does invalid input produce a clear error, not silent acceptance?
 - [ ] §7: Are all numeric magic values named constants? Is duplicated boilerplate
-      extracted to a shared helper?
+      extracted to a shared helper? Grep for `allow(dead_code)` — each hit has a
+      named reason or is flagged for deletion. No orphan `.rs` files behind
+      commented-out `mod` declarations.
 - [ ] §8: Does anything in a hot path allocate or do a string lookup?
 - [ ] §9: Golden fixture for new feature? Error fixture for new diagnostic code?
       End-to-end test for runtime spec claims? Test suite green before and after?
