@@ -470,6 +470,14 @@ impl Stage {
         matches!(self, Stage::PGAS { .. } | Stage::PMMH { .. })
     }
 
+    /// Return the gate config for IF2 stages; `None` for Bayesian/PFilter.
+    pub fn gate_config(&self) -> Option<&GateConfig> {
+        match self {
+            Stage::IF2 { gate, .. } => Some(gate),
+            _ => None,
+        }
+    }
+
     pub fn chains(&self) -> usize {
         match self {
             Stage::IF2 { chains, .. } => *chains,
@@ -1003,6 +1011,23 @@ impl FitConfigV2 {
                     "estimate.{}: bounds [{}, {}] are empty (lo must be < hi)",
                     name, lo, hi
                 ));
+            }
+        }
+
+        // N2: validate gate configs — a_thresh must be > 1.0 because
+        // Â ≥ 1.0 by construction (it's a convergence ratio), so any
+        // threshold ≤ 1.0 would make Gate 1 always fail.
+        for (stage_name, stage) in &self.stages {
+            if let Some(gate) = stage.gate_config() {
+                if gate.a_thresh <= 1.0 {
+                    return Err(format!(
+                        "stages.{}: gate.a_thresh = {:.4} must be > 1.0 — \
+                         Â ≥ 1.0 by construction so a threshold ≤ 1.0 \
+                         makes Gate 1 permanently fail. \
+                         Try a_thresh = 1.01 (the default).",
+                        stage_name, gate.a_thresh
+                    ));
+                }
             }
         }
 

@@ -2455,6 +2455,7 @@ cooling = 0.5
             chain_logliks: Vec::new(),
             chain_clean_logliks: Vec::new(),
             chain_clean_ses: Vec::new(),
+            soft_warn_params: Vec::new(),
             resolved_gate: None,
             resolved_clean_eval: None,
         };

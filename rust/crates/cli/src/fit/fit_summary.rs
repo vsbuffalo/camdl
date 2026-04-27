@@ -26,8 +26,9 @@
 //! ```
 
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
-use crate::evidence::NATS_TO_DB;
 use crate::fit::config_v2::{CleanEvalConfig, GateConfig};
+use crate::fit::gating::{GateThresholdSource, compute_gate_verdict, load_gate_failure,
+                         GateFailureKind, GateFailureRecord};
 use crate::fit::state::FitState;
 use crate::version;
 use serde::Serialize;
@@ -109,6 +110,12 @@ fn cmd_text(dir: &str, args: &FitSummaryArgs, stages: &[&str], strict: bool) {
     for stage in stages {
         let stage_dir = format!("{}/{}", dir, stage);
         if !Path::new(&stage_dir).join("fit_state.toml").exists() {
+            // M2: check for a gate_failure sidecar so blocked stages
+            // are visible in summary instead of silently absent.
+            if let Some(rec) = load_gate_failure(&stage_dir) {
+                any_rendered = true;
+                print!("{}", fmt.gate_failure_block(stage, &rec));
+            }
             continue;
         }
         any_rendered = true;
@@ -255,50 +262,28 @@ impl Formatter {
         let mut s = String::new();
         s.push_str(&format!("  {}\n", self.bold("compound scout-convergence gate")));
 
-        // Resolve the gate config to render against. Priority:
-        //   1. state.resolved_gate (Phase 3 — the value actually used)
-        //   2. GateConfig::default() with a "(thresholds unknown)" caveat
-        let (gate, threshold_source) = match &state.resolved_gate {
-            Some(g) => (g.clone(), GateThresholdSource::Resolved),
-            None => (GateConfig::default(), GateThresholdSource::DefaultFallback),
-        };
+        let v = compute_gate_verdict(state);
 
         // Â leg
-        let max_a = state.tail_chain_agreement.values().cloned()
-            .fold(0.0_f64, f64::max);
-        let max_a_param = state.tail_chain_agreement.iter()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(k, _)| k.clone()).unwrap_or_else(|| "—".into());
-        let a_passes = max_a < gate.a_thresh;
-        let a_glyph = if a_passes { self.ok("✓") } else { self.err("✗") };
+        let a_glyph = if v.a_passes { self.ok("✓") } else { self.err("✗") };
+        let max_a_param_str = v.max_a_param.as_deref().unwrap_or("—");
         s.push_str(&format!(
             "    Â leg:           max Â = {:.3} ({})  {}  (threshold {:.2})\n",
-            max_a, max_a_param, a_glyph, gate.a_thresh));
+            v.max_a, max_a_param_str, a_glyph, v.a_thresh));
 
         // Decibans leg
-        if state.chain_clean_logliks.len() >= 2
-            && state.chain_clean_ses.len() == state.chain_clean_logliks.len()
+        if let (Some(delta_db), Some(threshold_db), Some(sigma_max), Some(db_passes)) =
+            (v.delta_db, v.threshold_db, v.sigma_max, v.db_passes)
         {
-            let hi = state.chain_clean_logliks.iter().cloned()
-                .fold(f64::NEG_INFINITY, f64::max);
-            let lo = state.chain_clean_logliks.iter().cloned()
-                .fold(f64::INFINITY, f64::min);
-            let delta_db = (hi - lo) * NATS_TO_DB;
-            let sigma_max = state.chain_clean_ses.iter().cloned()
-                .fold(0.0_f64, f64::max);
-            let se_floor_db = crate::fit::gating::SE_FLOOR_K * sigma_max * NATS_TO_DB;
-            let threshold_db = gate.decibans_thresh.max(se_floor_db);
-            let db_passes = delta_db < threshold_db;
             let db_glyph = if db_passes { self.ok("✓") } else { self.err("✗") };
             s.push_str(&format!(
                 "    decibans leg:    Δ = {:.1} dB / threshold {:.1} dB  {}  (σ_max={:.2})\n",
                 delta_db, threshold_db, db_glyph, sigma_max));
 
-            let overall_pass = a_passes && db_passes;
-            let overall = if overall_pass {
-                self.ok("✓ PASS")
-            } else {
-                self.err("✗ FAIL")
+            let overall = match v.overall_pass {
+                Some(true)  => self.ok("✓ PASS"),
+                Some(false) => self.err("✗ FAIL"),
+                None        => self.dim("(indeterminate)").to_string(),
             };
             s.push_str(&format!("    overall:         {}\n", overall));
         } else {
@@ -306,16 +291,79 @@ impl Formatter {
                 self.dim("—")));
         }
 
-        match threshold_source {
-            GateThresholdSource::Resolved => {}
-            GateThresholdSource::DefaultFallback => {
-                s.push_str(&format!("    {}\n", self.warn(
-                    "(thresholds unknown — fit_state.toml predates Phase 3; \
-                     showing GateConfig::default())"
-                )));
+        if v.threshold_source == GateThresholdSource::DefaultFallback {
+            s.push_str(&format!("    {}\n", self.warn(
+                "(thresholds unknown — fit_state.toml predates Phase 3; \
+                 showing GateConfig::default())"
+            )));
+        }
+
+        // G7: surface the clean-eval configuration that produced the scores
+        if let Some(ce) = &state.resolved_clean_eval {
+            s.push_str(&format!("    clean-eval:      {} particles × {} replicates\n",
+                ce.n_particles, ce.n_replicates));
+        }
+
+        // G3: surface soft-warn if it fired before this stage
+        if !state.soft_warn_params.is_empty() {
+            s.push_str(&format!("    {}\n", self.warn(&format!(
+                "⚠ soft-warn fired at gate 1 (Â in soft band): {}",
+                state.soft_warn_params.join(", ")))));
+        }
+
+        s.push('\n');
+        s
+    }
+
+    fn gate_failure_block(&self, stage: &str, rec: &GateFailureRecord) -> String {
+        let mut s = String::new();
+        s.push_str(&format!("══ {} {}\n",
+            self.bold(stage),
+            "═".repeat(74_usize.saturating_sub(stage.len()))));
+        let kind_str = match rec.kind {
+            GateFailureKind::Gate1Hard =>
+                "Gate 1 blocked: Â failed (scout not converged)",
+            GateFailureKind::Gate1DecibansSpread =>
+                "Gate 1 blocked: decibans-spread failed (chains in different basins)",
+            GateFailureKind::Gate2Regression =>
+                "Gate 2 blocked: loglik regressed below prior stage",
+        };
+        s.push_str(&format!("  {}\n", self.err(kind_str)));
+        if let Some(ps) = &rec.prior_stage {
+            s.push_str(&format!("  prior stage:  {}\n", ps));
+        }
+        match rec.kind {
+            GateFailureKind::Gate1Hard => {
+                if let (Some(max_a), Some(thresh)) = (rec.max_a, rec.a_thresh) {
+                    let param = rec.max_a_param.as_deref().unwrap_or("?");
+                    s.push_str(&format!("  max Â = {:.3} ({}) / threshold {:.2}\n",
+                        max_a, param, thresh));
+                }
+                if !rec.failing_params.is_empty() {
+                    s.push_str(&format!("  failing: {}\n",
+                        rec.failing_params.join(", ")));
+                }
+            }
+            GateFailureKind::Gate1DecibansSpread => {
+                if let (Some(dd), Some(td)) = (rec.delta_db, rec.threshold_db) {
+                    s.push_str(&format!("  Δ = {:.1} dB / threshold {:.1} dB\n", dd, td));
+                }
+            }
+            GateFailureKind::Gate2Regression => {
+                if let (Some(scout_ll), Some(stage_ll)) =
+                    (rec.scout_best_loglik, rec.stage_best_loglik)
+                {
+                    s.push_str(&format!("  scout loglik = {:.1}, stage loglik = {:.1}\n",
+                        scout_ll, stage_ll));
+                    if let Some(eps) = rec.regression_epsilon {
+                        s.push_str(&format!("  delta = {:+.1}, ε = {:.1}\n",
+                            stage_ll - scout_ll, eps));
+                    }
+                }
             }
         }
-        s.push('\n');
+        s.push_str(&format!("  [re-run `camdl fit run` to see full error; \
+            hint: `camdl fit summary` above for prior stage details]\n\n"));
         s
     }
 
@@ -463,15 +511,6 @@ struct ProvenanceBlock {
     failed: bool,
 }
 
-enum GateThresholdSource {
-    /// Read from `state.resolved_gate` (Phase 3 — what the run was
-    /// actually judged against).
-    Resolved,
-    /// Legacy fit_state.toml — no resolved_gate. Showing
-    /// `GateConfig::default()` with a caveat.
-    DefaultFallback,
-}
-
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn ci_env_set() -> bool {
@@ -536,6 +575,11 @@ pub struct SchemaInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct StageReport {
     pub name: String,
+    /// Non-null when this stage was blocked by a gate and never ran.
+    /// Values: `"gate1_hard"`, `"gate1_decibans_spread"`, `"gate2_regression"`.
+    /// When present, most other fields contain sentinel/default values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_blocked_reason: Option<String>,
     pub n_chains: usize,
     pub best_loglik: f64,
     pub initial_loglik: Option<f64>,
@@ -565,8 +609,8 @@ pub struct GateReport {
     pub overall_pass: Option<bool>,
     /// `"resolved"` when read from `state.resolved_gate`; `"default_fallback"`
     /// when fit_state.toml predates Phase 3 and we substituted
-    /// `GateConfig::default()`. Critical signal for downstream readers.
-    pub threshold_source: String,
+    /// `GateConfig::default()`. Typed enum; serializes as snake_case string.
+    pub threshold_source: GateThresholdSource,
     pub resolved_gate: Option<GateConfig>,
     pub resolved_clean_eval: Option<CleanEvalConfig>,
 }
@@ -631,6 +675,10 @@ pub fn build_summary_doc(dir: &str, stages: &[&str]) -> FitSummaryDoc {
     for stage in stages {
         let stage_dir = format!("{}/{}", dir, stage);
         if !Path::new(&stage_dir).join("fit_state.toml").exists() {
+            // M2: include blocked stages in structured output as stubs.
+            if let Some(rec) = load_gate_failure(&stage_dir) {
+                out.stages.push(gate_failure_stage_report(stage, &rec));
+            }
             continue;
         }
         let state = match FitState::load(&stage_dir) {
@@ -651,45 +699,21 @@ fn stage_report(
     prev_loglik: Option<f64>,
     prev_stage_name: Option<&str>,
 ) -> StageReport {
-    // Gate analysis — same logic as Formatter::gate_verdict_block but
-    // returning structured data instead of pre-formatted strings.
-    let (gate_cfg, threshold_source) = match &state.resolved_gate {
-        Some(g) => (g.clone(), "resolved".to_string()),
-        None    => (GateConfig::default(), "default_fallback".to_string()),
-    };
-    let max_a = state.tail_chain_agreement.values().cloned()
-        .fold(0.0_f64, f64::max);
-    let max_a_param = state.tail_chain_agreement.iter()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(k, _)| k.clone());
-    let a_passes = max_a < gate_cfg.a_thresh;
-
-    let (delta_db, threshold_db, sigma_max, db_passes) =
-        if state.chain_clean_logliks.len() >= 2
-            && state.chain_clean_ses.len() == state.chain_clean_logliks.len()
-        {
-            let hi = state.chain_clean_logliks.iter().cloned()
-                .fold(f64::NEG_INFINITY, f64::max);
-            let lo = state.chain_clean_logliks.iter().cloned()
-                .fold(f64::INFINITY, f64::min);
-            let dd = (hi - lo) * NATS_TO_DB;
-            let sm = state.chain_clean_ses.iter().cloned()
-                .fold(0.0_f64, f64::max);
-            let se_floor_db = crate::fit::gating::SE_FLOOR_K * sm * NATS_TO_DB;
-            let td = gate_cfg.decibans_thresh.max(se_floor_db);
-            (Some(dd), Some(td), Some(sm), Some(dd < td))
-        } else {
-            (None, None, None, None)
-        };
-    let overall_pass = db_passes.map(|p| p && a_passes);
-
+    // Gate analysis via the single authoritative computation — eliminates
+    // the ClM3 duplication where text and JSON paths independently
+    // re-implemented the same arithmetic.
+    let v = compute_gate_verdict(state);
     let gate = GateReport {
-        max_a_hat: max_a,
-        max_a_param,
-        a_thresh: gate_cfg.a_thresh,
-        a_passes,
-        delta_db, threshold_db, sigma_max, db_passes, overall_pass,
-        threshold_source,
+        max_a_hat: v.max_a,
+        max_a_param: v.max_a_param.clone(),
+        a_thresh: v.a_thresh,
+        a_passes: v.a_passes,
+        delta_db: v.delta_db,
+        threshold_db: v.threshold_db,
+        sigma_max: v.sigma_max,
+        db_passes: v.db_passes,
+        overall_pass: v.overall_pass,
+        threshold_source: v.threshold_source.clone(),
         resolved_gate: state.resolved_gate.clone(),
         resolved_clean_eval: state.resolved_clean_eval.clone(),
     };
@@ -755,16 +779,16 @@ fn stage_report(
         delta_nats: state.best_loglik - prev,
     });
 
-    let overall_status = match overall_pass {
+    let overall_status = match v.overall_pass {
         Some(true)  => "pass".to_string(),
         Some(false) => "fail".to_string(),
         None        => "indeterminate".to_string(),
     };
-    let interpretation = if !a_passes && db_passes == Some(false) {
+    let interpretation = if !v.a_passes && v.db_passes == Some(false) {
         Some("chains disagree on basin (Â and decibans-spread both fail)".to_string())
-    } else if !a_passes {
+    } else if !v.a_passes {
         Some("per-parameter chain agreement insufficient".to_string())
-    } else if db_passes == Some(false) {
+    } else if v.db_passes == Some(false) {
         Some("chains agree per-parameter but disagree on basin quality".to_string())
     } else {
         None
@@ -772,6 +796,7 @@ fn stage_report(
 
     StageReport {
         name: stage.to_string(),
+        gate_blocked_reason: None,
         n_chains: state.n_chains,
         best_loglik: state.best_loglik,
         initial_loglik: if state.initial_loglik.is_finite() {
@@ -784,6 +809,53 @@ fn stage_report(
         chains,
         provenance,
         heuristic: HeuristicReport { overall_status, interpretation },
+    }
+}
+
+/// Build a minimal `StageReport` stub for a gate-blocked stage. The
+/// stage never ran, so most fields are empty/sentinel. The
+/// `gate_blocked_reason` discriminator tells consumers to check that
+/// field first rather than interpreting empty `parameters`/`chains` as
+/// a bug.
+fn gate_failure_stage_report(stage: &str, rec: &GateFailureRecord) -> StageReport {
+    let reason = match rec.kind {
+        GateFailureKind::Gate1Hard           => "gate1_hard",
+        GateFailureKind::Gate1DecibansSpread => "gate1_decibans_spread",
+        GateFailureKind::Gate2Regression     => "gate2_regression",
+    };
+    StageReport {
+        name: stage.to_string(),
+        gate_blocked_reason: Some(reason.to_string()),
+        n_chains: 0,
+        best_loglik: f64::NEG_INFINITY,
+        initial_loglik: None,
+        camdl_version: None,
+        gate: GateReport {
+            max_a_hat: 0.0,
+            max_a_param: rec.max_a_param.clone(),
+            a_thresh: rec.a_thresh.unwrap_or(0.0),
+            a_passes: false,
+            delta_db: rec.delta_db,
+            threshold_db: rec.threshold_db,
+            sigma_max: None,
+            db_passes: None,
+            overall_pass: Some(false),
+            threshold_source: GateThresholdSource::Resolved,
+            resolved_gate: None,
+            resolved_clean_eval: None,
+        },
+        stage_progression: None,
+        parameters: vec![],
+        chains: vec![],
+        provenance: ProvenanceReport {
+            final_params_matches_mle_params: None,
+            fit_state_winner_matches_final_params: None,
+            stale_camdl_version: None,
+        },
+        heuristic: HeuristicReport {
+            overall_status: "blocked".to_string(),
+            interpretation: Some(format!("stage blocked by {}", reason)),
+        },
     }
 }
 
@@ -842,7 +914,7 @@ fn render_md_stage(stage: &StageReport) -> String {
         Some(false) => "✗ FAIL",
         None        => "(indeterminate)",
     }));
-    if stage.gate.threshold_source == "default_fallback" {
+    if stage.gate.threshold_source == GateThresholdSource::DefaultFallback {
         s.push_str("\n> ⚠ thresholds unknown — fit_state.toml predates Phase 3; showing `GateConfig::default()`.\n");
     }
     s.push('\n');
@@ -1061,6 +1133,7 @@ mod tests {
                 -3804.9, -3811.2, -3809.0, -3807.6,
             ],
             chain_clean_ses: vec![1.5, 1.2, 1.8, 1.4, 1.1, 1.6, 1.3, 1.5],
+            soft_warn_params: vec![],
             resolved_gate: Some(GateConfig::default()),
             resolved_clean_eval: Some(CleanEvalConfig::default()),
         }

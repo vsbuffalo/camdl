@@ -19,6 +19,7 @@
 use super::config_v2::GateConfig;
 use super::state::FitState;
 use crate::evidence::NATS_TO_DB;
+use serde::{Deserialize, Serialize};
 
 /// Legacy hard threshold for the chain-agreement Â check. Retained as
 /// a documented constant because it informs the SoftWarn band's upper
@@ -52,9 +53,15 @@ pub const LOGLIK_EPSILON_MIN: f64 = 3.0;
 /// should print the named parameters prominently. `Hard` and
 /// `DecibansSpread` callers should error unless the user passed
 /// `--allow-nonconverged-scout`, in which case downgrade to a warning.
+/// `LegacySkipped` means the prior stage's `fit_state.toml` predates
+/// the tail-chain-agreement field; the caller must warn and proceed.
 #[derive(Debug)]
 pub enum ScoutGateVerdict {
     Ok,
+    /// Prior state has no `tail_chain_agreement` — legacy fit_state
+    /// from before chain-agreement tracking. Gate was skipped entirely;
+    /// caller must warn the user rather than treating this as a pass.
+    LegacySkipped,
     SoftWarn { param_agreement: Vec<(String, f64)> },
     Hard {
         /// All non-IVP params with Â ≥ `gate.a_thresh`. Named and
@@ -65,8 +72,9 @@ pub enum ScoutGateVerdict {
         all_structural: Vec<(String, f64)>,
         /// IVP Â values (reported but not gated).
         ivp: Vec<(String, f64)>,
-        /// Spread across scout's per-chain final logliks. A wide
-        /// spread is the strongest signal of multi-modality.
+        /// Spread across chains using clean-eval logliks when available
+        /// (more accurate than in-run logliks), falling back to
+        /// `chain_logliks`. Wide spread signals multi-modality.
         loglik_spread: f64,
     },
     /// New in §Proposal 3 (Step 8): chain agreement Â passed but the
@@ -78,6 +86,9 @@ pub enum ScoutGateVerdict {
         delta_db: f64,
         threshold_db: f64,
         sigma_max: f64,
+        /// Pre-computed SE-aware floor: `SE_FLOOR_K * sigma_max * NATS_TO_DB`.
+        /// Carried here so display formatters don't recompute it.
+        se_floor_db: f64,
         chain_logliks: Vec<f64>,
     },
 }
@@ -96,14 +107,16 @@ pub enum ScoutGateVerdict {
 ///    spread alone could explain the observed log-lik spread.
 ///    Failure → `DecibansSpread`.
 ///
-/// Legacy fit_state files (no `tail_chain_agreement`) return `Ok` —
-/// the caller is expected to warn and proceed. Same fall-through for
-/// missing `chain_clean_*` (the decibans check simply isn't run).
+/// Legacy fit_state files (no `tail_chain_agreement`) return
+/// `LegacySkipped` — the caller must warn the user rather than
+/// treating it as a pass. Same fall-through for missing `chain_clean_*`
+/// (the decibans check simply isn't run).
 pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGateVerdict {
     // Absent tail_chain_agreement means legacy fit_state — can't gate.
-    // Caller handles the warn-and-proceed branch.
+    // Return LegacySkipped so the caller can warn explicitly rather
+    // than silently treating absent data as a convergence pass.
     if scout.tail_chain_agreement.is_empty() {
-        return ScoutGateVerdict::Ok;
+        return ScoutGateVerdict::LegacySkipped;
     }
 
     let ivp_set: std::collections::HashSet<&str> = scout.ivp_params.iter()
@@ -128,7 +141,16 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
         let failing: Vec<(String, f64)> = structural.iter()
             .filter(|(_, r)| *r >= gate.a_thresh)
             .cloned().collect();
-        let loglik_spread = if scout.chain_logliks.len() >= 2 {
+        // Prefer de-biased clean-eval spread (less noisy than in-run
+        // logliks at typical particle counts). Fall back to chain_logliks
+        // when clean-eval data is absent (legacy or pre-§Proposal 1 runs).
+        let loglik_spread = if scout.chain_clean_logliks.len() >= 2 {
+            let hi = scout.chain_clean_logliks.iter().cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let lo = scout.chain_clean_logliks.iter().cloned()
+                .fold(f64::INFINITY, f64::min);
+            hi - lo
+        } else if scout.chain_logliks.len() >= 2 {
             let hi = scout.chain_logliks.iter().cloned()
                 .fold(f64::NEG_INFINITY, f64::max);
             let lo = scout.chain_logliks.iter().cloned()
@@ -173,6 +195,7 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
                 delta_db,
                 threshold_db,
                 sigma_max,
+                se_floor_db,
                 chain_logliks: scout.chain_clean_logliks.clone(),
             };
         }
@@ -184,6 +207,10 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
 /// Compute the ε tolerance for Gate 2: `max(LOGLIK_EPSILON_MIN,
 /// 2 · σ(scout.chain_logliks))`. A wider scout spread (more evidence
 /// of multi-modality) gives refine proportionally more room.
+///
+/// Uses **sample** standard deviation (Bessel-corrected, `/(n-1)`), not
+/// population SD. For two chains this gives `|ll_1 - ll_2|`, which is
+/// the natural pairwise spread — a sensible choice even at n=2.
 pub fn loglik_regression_epsilon(scout_chain_logliks: &[f64]) -> f64 {
     if scout_chain_logliks.len() < 2 {
         return LOGLIK_EPSILON_MIN;
@@ -233,13 +260,18 @@ pub fn check_loglik_regression(
 /// Names the spread, the threshold (and which limb of `max(...)` it
 /// came from), and the per-chain logliks in nats and decibans so the
 /// user can see whether one chain is the obvious outlier.
+///
+/// `se_floor_db` must equal `SE_FLOOR_K * sigma_max * NATS_TO_DB` —
+/// the caller (always `check_scout_convergence`) computes it once and
+/// the `DecibansSpread` variant carries it, avoiding a third site for
+/// this formula.
 pub fn format_decibans_spread_verdict(
     delta_db: f64,
     threshold_db: f64,
     sigma_max: f64,
+    se_floor_db: f64,
     chain_logliks: &[f64],
 ) -> String {
-    let se_floor_db = SE_FLOOR_K * sigma_max * NATS_TO_DB;
     let floor_source = if se_floor_db >= threshold_db {
         format!("{} · σ_max · NATS_TO_DB = {} · {:.2} · {:.3} ≈ {:.1} dB",
             SE_FLOOR_K as u64, SE_FLOOR_K as u64, sigma_max, NATS_TO_DB, se_floor_db)
@@ -322,9 +354,167 @@ pub fn format_hard_verdict(
     }
     msg.push_str("- mark weakly-identified params as `ivp = true`\n      \
                   (reported but not gated)\n\n  \
+                  Note: decibans-spread check skipped — fix Â first,\n  \
+                  then re-run (you may see a second gate failure on spread).\n\n  \
                   To run refine anyway (results may launder multi-modality):\n    \
                   camdl fit run fit.toml --allow-nonconverged-scout");
     msg
+}
+
+// ── Post-run gate summary types (ClM3) ─────────────────────────────
+
+/// Where the gate thresholds used in a `GateVerdictSummary` came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateThresholdSource {
+    /// Read from `state.resolved_gate` — thresholds reflect what the
+    /// run was actually judged against.
+    Resolved,
+    /// Legacy `fit_state.toml` without `resolved_gate`. Showing
+    /// `GateConfig::default()` with a caveat.
+    DefaultFallback,
+}
+
+/// Pre-computed gate verdict for a completed stage. Computed once from
+/// a `FitState` by `compute_gate_verdict` and consumed by all rendering
+/// paths (text, JSON, MD, LaTeX) so that the arithmetic lives in exactly
+/// one place and can't diverge between formats (ClM3).
+///
+/// All `Option` fields are `None` when the decibans leg can't be
+/// evaluated (missing `chain_clean_logliks` / `chain_clean_ses`).
+/// `overall_pass = None` when data is incomplete.
+#[derive(Debug, Clone)]
+pub struct GateVerdictSummary {
+    pub max_a: f64,
+    pub max_a_param: Option<String>,
+    pub a_thresh: f64,
+    pub a_passes: bool,
+    pub delta_db: Option<f64>,
+    pub threshold_db: Option<f64>,
+    pub sigma_max: Option<f64>,
+    pub db_passes: Option<bool>,
+    pub overall_pass: Option<bool>,
+    pub threshold_source: GateThresholdSource,
+}
+
+/// Compute the gate verdict once from a `FitState`. All rendering paths
+/// must call this rather than re-implementing the gate arithmetic.
+pub fn compute_gate_verdict(state: &FitState) -> GateVerdictSummary {
+    let (gate, threshold_source) = match &state.resolved_gate {
+        Some(g) => (g.clone(), GateThresholdSource::Resolved),
+        None    => (GateConfig::default(), GateThresholdSource::DefaultFallback),
+    };
+
+    let max_a = state.tail_chain_agreement.values().cloned()
+        .fold(0.0_f64, f64::max);
+    let max_a_param = state.tail_chain_agreement.iter()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(k, _)| k.clone());
+    let a_passes = max_a < gate.a_thresh;
+
+    let (delta_db, threshold_db, sigma_max, db_passes) =
+        if state.chain_clean_logliks.len() >= 2
+            && state.chain_clean_ses.len() == state.chain_clean_logliks.len()
+        {
+            let hi = state.chain_clean_logliks.iter().cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let lo = state.chain_clean_logliks.iter().cloned()
+                .fold(f64::INFINITY, f64::min);
+            let dd = (hi - lo) * NATS_TO_DB;
+            let sm = state.chain_clean_ses.iter().cloned().fold(0.0_f64, f64::max);
+            let floor = SE_FLOOR_K * sm * NATS_TO_DB;
+            let td = gate.decibans_thresh.max(floor);
+            (Some(dd), Some(td), Some(sm), Some(dd < td))
+        } else {
+            (None, None, None, None)
+        };
+
+    let overall_pass = db_passes.map(|p| p && a_passes);
+
+    GateVerdictSummary {
+        max_a, max_a_param, a_thresh: gate.a_thresh, a_passes,
+        delta_db, threshold_db, sigma_max, db_passes, overall_pass,
+        threshold_source,
+    }
+}
+
+// ── Gate failure sidecar (M2 / M3) ─────────────────────────────────
+
+/// Which gate blocked this stage — written to `gate_failure.toml` in
+/// the blocked stage directory so `camdl fit summary` can show the
+/// reason even when `fit_state.toml` is absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateFailureKind {
+    /// Gate 1 Hard: max(Â) ≥ a_thresh on a non-IVP param.
+    Gate1Hard,
+    /// Gate 1 DecibansSpread: Â passed but inter-chain clean-eval
+    /// loglik spread exceeded the SE-adaptive threshold.
+    Gate1DecibansSpread,
+    /// Gate 2 regression: stage best_loglik regressed below the prior
+    /// stage's best_loglik by more than ε.
+    Gate2Regression,
+}
+
+/// Sidecar written to a stage directory when a gate blocks it. Lets
+/// `camdl fit summary` surface the failure reason without requiring the
+/// user to have kept the `camdl fit run` terminal output.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GateFailureRecord {
+    pub kind: GateFailureKind,
+    pub prior_stage: Option<String>,
+    pub timestamp: String,
+    // Gate 1 Hard fields
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a_thresh: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_a: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_a_param: Option<String>,
+    /// Failing params as "name=value" strings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing_params: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loglik_spread: Option<f64>,
+    // Gate 1 DecibansSpread fields
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_db: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_db: Option<f64>,
+    // Gate 2 regression fields
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scout_best_loglik: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_best_loglik: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regression_epsilon: Option<f64>,
+}
+
+/// Write a `gate_failure.toml` sidecar into `dir`. Creates `dir` if it
+/// doesn't exist (Gate 1 blocks before the stage dir is created).
+/// Errors are non-fatal — if we can't write the sidecar the gate
+/// message itself still appeared on stderr.
+pub fn write_gate_failure(dir: &std::path::Path, record: &GateFailureRecord) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("warning: could not create {} for gate_failure.toml: {}", dir.display(), e);
+        return;
+    }
+    let path = dir.join("gate_failure.toml");
+    match toml::to_string_pretty(record) {
+        Ok(body) => {
+            let _ = std::fs::write(&path,
+                format!("# gate_failure.toml — written by camdl on gate block\n{}", body));
+        }
+        Err(e) => eprintln!("warning: could not serialize gate_failure.toml: {}", e),
+    }
+}
+
+/// Load a `gate_failure.toml` from a stage directory. Returns `None`
+/// when the file is absent (stage completed normally or never started).
+pub fn load_gate_failure(dir: &str) -> Option<GateFailureRecord> {
+    let path = format!("{}/gate_failure.toml", dir);
+    let body = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&body).ok()
 }
 
 #[cfg(test)]
@@ -358,6 +548,7 @@ mod tests {
             chain_logliks: chain_logliks.to_vec(),
             chain_clean_logliks: vec![],
             chain_clean_ses: vec![],
+            soft_warn_params: vec![],
             resolved_gate: None,
             resolved_clean_eval: None,
         }
@@ -435,14 +626,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_state_with_no_agreement_returns_ok() {
+    fn legacy_state_with_no_agreement_returns_legacy_skipped() {
         // Absent tail_chain_agreement (legacy fit_state from pre-2026-04-19):
-        // caller treats this as "unknown, warn and proceed" via the
-        // Ok verdict.
+        // caller must warn and proceed — distinguished from a genuine Ok
+        // by the LegacySkipped variant so the warning is explicit.
         let s = make_state(&[], &[], &[-60.0], -60.0);
         match check_scout_convergence(&s, &legacy_gate()) {
-            ScoutGateVerdict::Ok => (),
-            other => panic!("legacy state → Ok, got {:?}", other),
+            ScoutGateVerdict::LegacySkipped => (),
+            other => panic!("legacy state → LegacySkipped, got {:?}", other),
         }
     }
 
@@ -487,7 +678,7 @@ mod tests {
         let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
         match check_scout_convergence(&s, &gate) {
             ScoutGateVerdict::DecibansSpread {
-                delta_db, threshold_db, sigma_max, chain_logliks,
+                delta_db, threshold_db, sigma_max, se_floor_db, chain_logliks,
             } => {
                 assert!((delta_db - 100.0).abs() < 0.5,
                     "delta_db ≈ 100 dB; got {}", delta_db);
@@ -496,6 +687,11 @@ mod tests {
                     threshold_db);
                 assert!((sigma_max - 0.5).abs() < 1e-12);
                 assert_eq!(chain_logliks.len(), 2);
+                // se_floor_db = 8 * 0.5 * NATS_TO_DB ≈ 17.4
+                let expected_floor = SE_FLOOR_K * 0.5 * NATS_TO_DB;
+                assert!((se_floor_db - expected_floor).abs() < 1e-9,
+                    "se_floor_db must equal SE_FLOOR_K*sigma*NATS_TO_DB: {} vs {}",
+                    se_floor_db, expected_floor);
             }
             other => panic!("expected DecibansSpread, got {:?}", other),
         }
@@ -581,5 +777,110 @@ mod tests {
              tight={:.2}, wide={:.2}", eps_tight, eps_wide);
         assert!(eps_tight >= LOGLIK_EPSILON_MIN,
             "ε must never drop below the floor: {}", eps_tight);
+    }
+
+    // ── TsN3: compound-gate quadrant tests ─────────────────────────
+    // All four (Â pass/fail) × (decibans pass/fail) combinations must
+    // produce the right compute_gate_verdict output. Catches desync
+    // between check_scout_convergence and compute_gate_verdict.
+
+    fn make_state_with_clean_eval(
+        a_val: f64, clean_spread_db: f64, clean_se: f64, gate: &GateConfig,
+    ) -> (FitState, GateConfig) {
+        let mut s = make_state(&[("beta", a_val)], &[], &[-60.0, -60.0], -60.0);
+        s.resolved_gate = Some(gate.clone());
+        let lo = -60.0_f64;
+        let hi = lo + clean_spread_db / NATS_TO_DB;
+        s.chain_clean_logliks = vec![lo, hi];
+        s.chain_clean_ses = vec![clean_se, clean_se];
+        (s, gate.clone())
+    }
+
+    /// Q1: Â passes, decibans passes → overall pass
+    #[test]
+    fn quadrant_a_pass_db_pass() {
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        // Â = 1.001 < 1.10; spread = 5 dB < 30 dB
+        let (s, _) = make_state_with_clean_eval(1.001, 5.0, 0.5, &gate);
+        let v = compute_gate_verdict(&s);
+        assert!(v.a_passes, "Â must pass: a={}", v.max_a);
+        assert_eq!(v.db_passes, Some(true));
+        assert_eq!(v.overall_pass, Some(true));
+    }
+
+    /// Q2: Â fails, decibans passes → overall fail (Â is the failing leg)
+    #[test]
+    fn quadrant_a_fail_db_pass() {
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        // Â = 1.15 > 1.10; spread = 5 dB < 30 dB
+        let (s, _) = make_state_with_clean_eval(1.15, 5.0, 0.5, &gate);
+        let v = compute_gate_verdict(&s);
+        assert!(!v.a_passes, "Â must fail: a={}", v.max_a);
+        assert_eq!(v.db_passes, Some(true));
+        assert_eq!(v.overall_pass, Some(false));
+    }
+
+    /// Q3: Â passes, decibans fails → overall fail (decibans is the failing leg)
+    #[test]
+    fn quadrant_a_pass_db_fail() {
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        // Â = 1.001 < 1.10; spread = 100 dB > 30 dB; SE floor < 30 dB
+        let (s, _) = make_state_with_clean_eval(1.001, 100.0, 0.5, &gate);
+        let v = compute_gate_verdict(&s);
+        assert!(v.a_passes, "Â must pass: a={}", v.max_a);
+        assert_eq!(v.db_passes, Some(false));
+        assert_eq!(v.overall_pass, Some(false));
+    }
+
+    /// Q4: both Â and decibans fail → overall fail
+    #[test]
+    fn quadrant_a_fail_db_fail() {
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        // Â = 1.15 > 1.10; spread = 100 dB > 30 dB
+        let (s, _) = make_state_with_clean_eval(1.15, 100.0, 0.5, &gate);
+        let v = compute_gate_verdict(&s);
+        assert!(!v.a_passes, "Â must fail: a={}", v.max_a);
+        assert_eq!(v.db_passes, Some(false));
+        assert_eq!(v.overall_pass, Some(false));
+    }
+
+    /// compute_gate_verdict is pure — calling it twice on the same
+    /// FitState produces identical results.
+    #[test]
+    fn compute_gate_verdict_is_pure() {
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        let (s, _) = make_state_with_clean_eval(1.001, 5.0, 0.5, &gate);
+        let v1 = compute_gate_verdict(&s);
+        let v2 = compute_gate_verdict(&s);
+        assert_eq!(v1.a_passes, v2.a_passes);
+        assert_eq!(v1.db_passes, v2.db_passes);
+        assert_eq!(v1.overall_pass, v2.overall_pass);
+        assert!((v1.max_a - v2.max_a).abs() < 1e-12);
+    }
+
+    /// GateFailureRecord round-trips through TOML.
+    #[test]
+    fn gate_failure_record_round_trips_toml() {
+        let rec = GateFailureRecord {
+            kind: GateFailureKind::Gate1Hard,
+            prior_stage: Some("scout".into()),
+            timestamp: "2026-04-27T00:00:00Z".into(),
+            a_thresh: Some(1.01),
+            max_a: Some(3.5),
+            max_a_param: Some("beta".into()),
+            failing_params: vec!["beta=3.50".into()],
+            loglik_spread: Some(794.4),
+            delta_db: None,
+            threshold_db: None,
+            scout_best_loglik: None,
+            stage_best_loglik: None,
+            regression_epsilon: None,
+        };
+        let body = toml::to_string_pretty(&rec).expect("serialize");
+        let loaded: GateFailureRecord = toml::from_str(&body).expect("deserialize");
+        assert_eq!(loaded.kind, GateFailureKind::Gate1Hard);
+        assert_eq!(loaded.prior_stage.as_deref(), Some("scout"));
+        assert!((loaded.max_a.unwrap() - 3.5).abs() < 1e-9);
+        assert_eq!(loaded.failing_params, vec!["beta=3.50"]);
     }
 }

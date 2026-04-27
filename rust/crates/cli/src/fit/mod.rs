@@ -592,6 +592,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     state::FitState::load(dir).ok()
                 });
 
+                // G6: announce effective gate thresholds at stage start
+                // so users know what they're being judged against before
+                // seeing results. Only when a prior stage exists (Gate 1
+                // will fire); a scout with no predecessor is ungated.
+                if effective_starts.is_some() {
+                    eprintln!("  gate thresholds:  Â < {:.3}; decibans spread < {:.1} dB (or SE-adaptive floor if higher)",
+                        effective_gate.a_thresh, effective_gate.decibans_thresh);
+                }
+
                 // Gate 1 — pre-stage: if this stage consumes a prior
                 // stage (starts_from), refuse to run when the prior
                 // stage's tail Â failed convergence on any
@@ -599,6 +608,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // (this stage is itself the scout). Overridable via
                 // --allow-nonconverged-scout. See proposal
                 // docs/dev/proposals/2026-04-19-refine-gates-scout-convergence.md.
+                let mut soft_warn_params: Vec<String> = vec![];
                 let (scout_best_for_gate2, scout_chain_logliks_for_gate2):
                     (Option<f64>, Vec<f64>) = match prior_state.as_ref() {
                     Some(ps) => {
@@ -611,6 +621,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         // `effective_gate` above (Step 4).
                         match gating::check_scout_convergence(ps, &effective_gate) {
                             ScoutGateVerdict::Ok => {}
+                            // Mi1: legacy state skipped gate — warn explicitly
+                            // so the user knows convergence was not verified.
+                            ScoutGateVerdict::LegacySkipped => {
+                                eprintln!("\x1b[33m  warning:\x1b[0m prior stage \
+                                           fit_state.toml predates chain-agreement tracking — \
+                                           Gate 1 skipped (convergence unverified). \
+                                           Re-run scout to populate Â data.");
+                            }
                             ScoutGateVerdict::SoftWarn { param_agreement } => {
                                 eprintln!("\x1b[33m  warning:\x1b[0m prior stage tail Â in \
                                            SoftWarn band ([{:.2}, {:.2})) for: {}",
@@ -618,11 +636,49 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                                     param_agreement.iter()
                                         .map(|(n, r)| format!("{} (Â={:.2})", n, r))
                                         .collect::<Vec<_>>().join(", "));
+                                // G3: record soft-warn params so fit_state persists them
+                                soft_warn_params = param_agreement.iter()
+                                    .map(|(n, r)| format!("{} (Â={:.2})", n, r))
+                                    .collect();
                             }
-                            ScoutGateVerdict::Hard { failing, all_structural, ivp, loglik_spread } => {
+                            ScoutGateVerdict::Hard { ref failing, ref all_structural, ref ivp, loglik_spread } => {
+                                // M1: build per-param best-chain values from the prior
+                                // stage's winning θ̂. These are the "copy into [estimate.*]
+                                // bounds" hint — the most operationally useful guidance on
+                                // a Hard failure and previously always None.
+                                let best_vals: Vec<(String, f64)> = all_structural.iter()
+                                    .filter_map(|(name, _)| {
+                                        ps.start_values.get(name)
+                                            .map(|&v| (name.clone(), v))
+                                    })
+                                    .collect();
+                                let best_vals_ref: Option<&[(String, f64)]> =
+                                    if best_vals.is_empty() { None }
+                                    else { Some(&best_vals) };
                                 let msg = gating::format_hard_verdict(
-                                    &failing, &all_structural, &ivp,
-                                    loglik_spread, ps.best_loglik, None);
+                                    failing, all_structural, ivp,
+                                    loglik_spread, ps.best_loglik, best_vals_ref);
+                                // M2: write gate_failure.toml so fit summary can surface
+                                // the reason even without the terminal output.
+                                let gfr = gating::GateFailureRecord {
+                                    kind: gating::GateFailureKind::Gate1Hard,
+                                    prior_stage: prior_state.as_ref()
+                                        .map(|p| p.stage.clone()),
+                                    timestamp: crate::cas::iso8601_utc(
+                                        std::time::SystemTime::now()),
+                                    a_thresh: Some(effective_gate.a_thresh),
+                                    max_a: failing.iter().map(|(_, r)| *r)
+                                        .reduce(f64::max),
+                                    max_a_param: failing.first().map(|(n, _)| n.clone()),
+                                    failing_params: failing.iter()
+                                        .map(|(n, r)| format!("{}={:.3}", n, r))
+                                        .collect(),
+                                    loglik_spread: Some(loglik_spread),
+                                    delta_db: None, threshold_db: None,
+                                    scout_best_loglik: None, stage_best_loglik: None,
+                                    regression_epsilon: None,
+                                };
+                                gating::write_gate_failure(&stage_dir, &gfr);
                                 if allow_nonconverged_scout {
                                     eprintln!("\x1b[33m  warning:\x1b[0m {}", msg);
                                     eprintln!("\n  --allow-nonconverged-scout: proceeding anyway.");
@@ -644,10 +700,26 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                                 }
                             }
                             ScoutGateVerdict::DecibansSpread {
-                                delta_db, threshold_db, sigma_max, chain_logliks,
+                                delta_db, threshold_db, sigma_max, se_floor_db, ref chain_logliks,
                             } => {
                                 let msg = gating::format_decibans_spread_verdict(
-                                    delta_db, threshold_db, sigma_max, &chain_logliks);
+                                    delta_db, threshold_db, sigma_max, se_floor_db, chain_logliks);
+                                // M2: write gate_failure.toml for decibans-spread block
+                                let gfr = gating::GateFailureRecord {
+                                    kind: gating::GateFailureKind::Gate1DecibansSpread,
+                                    prior_stage: prior_state.as_ref()
+                                        .map(|p| p.stage.clone()),
+                                    timestamp: crate::cas::iso8601_utc(
+                                        std::time::SystemTime::now()),
+                                    a_thresh: None, max_a: None, max_a_param: None,
+                                    failing_params: vec![],
+                                    loglik_spread: None,
+                                    delta_db: Some(delta_db),
+                                    threshold_db: Some(threshold_db),
+                                    scout_best_loglik: None, stage_best_loglik: None,
+                                    regression_epsilon: None,
+                                };
+                                gating::write_gate_failure(&stage_dir, &gfr);
                                 if allow_nonconverged_scout {
                                     eprintln!("\x1b[33m  warning:\x1b[0m {}", msg);
                                     eprintln!("\n  --allow-nonconverged-scout: proceeding anyway.");
@@ -720,6 +792,26 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         scout_best, chain_results.best_loglik,
                         &scout_chain_logliks_for_gate2,
                     ) {
+                        // M3: persist the regression failure so fit summary
+                        // can surface the reason without requiring the user
+                        // to have kept the terminal output.
+                        let eps = gating::loglik_regression_epsilon(
+                            &scout_chain_logliks_for_gate2);
+                        let gfr = gating::GateFailureRecord {
+                            kind: gating::GateFailureKind::Gate2Regression,
+                            prior_stage: prior_state.as_ref()
+                                .map(|p| p.stage.clone()),
+                            timestamp: crate::cas::iso8601_utc(
+                                std::time::SystemTime::now()),
+                            a_thresh: None, max_a: None, max_a_param: None,
+                            failing_params: vec![],
+                            loglik_spread: None,
+                            delta_db: None, threshold_db: None,
+                            scout_best_loglik: Some(scout_best),
+                            stage_best_loglik: Some(chain_results.best_loglik),
+                            regression_epsilon: Some(eps),
+                        };
+                        gating::write_gate_failure(&stage_dir, &gfr);
                         if has_sweep {
                             // Sweep-gate fix 2026-04-19 (testing camdl-book): same
                             // non-halting treatment as the scout gate.
@@ -803,6 +895,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         .map(|(_, r)| r.final_loglik).collect(),
                     chain_clean_logliks: chain_results.chain_clean_logliks(),
                     chain_clean_ses: chain_results.chain_clean_ses(),
+                    // G3: record soft-warn params so fit summary can note
+                    // them even after a successful run.
+                    soft_warn_params,
                     // Persist the gate / clean-eval config that was
                     // *actually in force* — `effective_gate` and
                     // `effective_clean_eval` above already collapsed the

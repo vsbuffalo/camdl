@@ -71,6 +71,14 @@ pub struct FitState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain_clean_ses: Vec<f64>,
 
+    /// Params that soft-warned (Â in `[A_SOFT, a_thresh)`) at Gate 1
+    /// when this stage started. Persisted so `camdl fit summary` can
+    /// note the warning even after the run completes successfully.
+    /// Empty when no soft-warn fired or when this is a scout stage
+    /// (no prior stage to gate on).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub soft_warn_params: Vec<String>,
+
     /// Resolved compound-gate configuration as it was applied at the
     /// end of this stage. "Resolved" = the value that was actually in
     /// force at runtime, after the priority chain `CLI flag >
@@ -149,6 +157,7 @@ mod tests {
             chain_logliks: vec![-130.0, -123.45],
             chain_clean_logliks: vec![-128.7, -123.1],
             chain_clean_ses: vec![1.5, 0.8],
+            soft_warn_params: vec![],
             resolved_gate: Some(GateConfig::default()),
             resolved_clean_eval: Some(CleanEvalConfig::default()),
         }
