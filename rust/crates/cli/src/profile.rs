@@ -1176,6 +1176,60 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let _ = pr.write(&umbrella_dir);
     }
 
+    // ── Deterministic-chain convergence gate (gh#40) ──────────────
+    //
+    // Per gh#40 proposal §"Convergence diagnostics for deterministic
+    // chains", chain-agreement Â on per-iteration trajectories
+    // doesn't carry the same meaning when the inner loop is a
+    // deterministic NLopt instance — there are no IF2 iterations to
+    // watch, only the final params. Replacement gate has two legs:
+    //
+    //   Leg 1 (basin agreement): compare final parameter vectors
+    //     across N starts. Report rel_range = max range / bound width
+    //     AND abs_range = max range in natural-scale units. Refuse
+    //     ONLY if both exceed thresholds — wide bounds make tiny
+    //     spread look big-relative, tight bounds make trivial spread
+    //     look bad-absolute, so a single number can't gate.
+    //
+    //   Leg 2 (basin quality): loglik decibans-spread across the N
+    //     converged starts. Reuses the existing decibans gate
+    //     constants (`evidence::NATS_TO_DB`, `gating::DECIBANS_THRESH`)
+    //     for cross-method consistency. SE-aware floor; for a
+    //     deterministic optimiser SE = 0 typically, so the threshold
+    //     reduces to the configured decibans gate directly.
+    //
+    // Skipped under chain_binomial (the existing IF2 gate at fit-side
+    // covers that path; profile-side IF2 has historically had no
+    // per-cell verdict line and we don't add one in this PR).
+    if matches!(a.backend, ProfileBackend::Ode) && n_starts >= 2 {
+        let mut n_pass: usize = 0;
+        let mut n_fail: usize = 0;
+        // Project focal-grid metadata into a name+param-idx tuple
+        // form the verdict helper can consume without needing the
+        // private FocalGrid type.
+        let focal_meta: Vec<(String, Vec<f64>)> = focal_grids.iter()
+            .map(|fg| (fg.name.clone(), fg.values.clone()))
+            .collect();
+        eprintln!("\nprofile (--backend ode): per-cell convergence verdict");
+        eprintln!("  (Leg 1: rel-range vs bound width AND abs-range; \
+                       Leg 2: loglik dB across {} starts)", n_starts);
+        for seed_dir in &seed_dirs {
+            for gi in 0..grid_points.len() {
+                let pass = emit_det_convergence_verdict(
+                    seed_dir, gi, &focal_meta, &if2_params,
+                );
+                if pass { n_pass += 1; } else { n_fail += 1; }
+            }
+        }
+        eprintln!("convergence-gate summary: {} pass, {} fail \
+                   (out of {} cells × {} seeds)",
+            n_pass, n_fail, grid_points.len(), seeds.len());
+        if n_fail > 0 {
+            eprintln!("  cells failing the gate are flagged ✗ above; \
+                       inspect their rollup MLE rows for divergent starts.");
+        }
+    }
+
     // Mirror the user-facing TSV: the umbrella's summary.tsv is the
     // universal artifact — for N=1 it's a one-row aggregate of the
     // single seed; for N>1 it's the cross-seed sensitivity summary.
@@ -1191,6 +1245,163 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     } else {
         eprintln!("output: {}", mirror_src.display());
     }
+}
+
+/// Default thresholds for the deterministic-chain Leg-1 / Leg-2 gate.
+///
+/// `rel_range_thresh` (Leg 1a): max-range/bound-width ratio above which
+/// chains are deemed to have landed in different basins. 5% (0.05) is
+/// the proposal's working threshold — wide enough to tolerate
+/// finite-precision NLopt convergence, tight enough to flag genuine
+/// multi-modality.
+///
+/// `abs_range_thresh` (Leg 1b): max-range in natural-scale units,
+/// catches "starts agreed on the basin but the basin is wider than my
+/// downstream tolerance." 10× the optimiser's xtol_rel-implied
+/// resolution is a sane default; user can override later if the
+/// thresholds prove tight in practice (proposal §"Acknowledged
+/// tradeoffs": thresholds may need re-tuning).
+///
+/// `decibans_thresh` (Leg 2): same constant the fit-side gating uses
+/// for cross-method consistency.
+const DET_REL_RANGE_THRESH: f64 = 0.05;
+const DET_ABS_RANGE_FLOOR:  f64 = 1.0e-3;
+const DET_DECIBANS_THRESH:  f64 = 5.0;
+
+/// Emit one verdict line per (seed, grid-cell) pair and return the
+/// pass/fail boolean. Reads the per-start `mle.toml` files written by
+/// the parallel loop, computes the two-leg gate from them, and prints
+/// the formatted verdict to stderr.
+///
+/// gh#40 proposal §"Convergence diagnostics for deterministic chains"
+/// — the verdict line shape is fixed by the proposal:
+///
+/// ```text
+/// chain-agreement: rel range = X% bound | abs range = Y nat. units   ✓/✗
+/// loglik-eval:     Δ = X dB / threshold Y dB                         ✓/✗
+/// ```
+///
+/// Refusal rule: Leg 1 fails ONLY if both rel-range and abs-range
+/// exceed thresholds (one or the other can be small for benign
+/// reasons; both at once means the starts genuinely disagreed).
+/// Leg 2 fails when the loglik decibans-spread exceeds
+/// `DET_DECIBANS_THRESH`. Cell passes iff both legs pass.
+fn emit_det_convergence_verdict(
+    seed_dir: &Path,
+    grid_idx: usize,
+    focal_meta: &[(String, Vec<f64>)],
+    if2_params: &[sim::inference::if2::EstimatedParam],
+) -> bool {
+    use crate::evidence::NATS_TO_DB;
+    let point_dir = profile_point_dir(seed_dir, grid_idx);
+    let Ok(dir_iter) = std::fs::read_dir(&point_dir) else {
+        eprintln!("  cell {}: missing point dir, skipping verdict", grid_idx);
+        return false;
+    };
+
+    // Collect (loglik, mle-vector) for every start that finished.
+    let mut starts: Vec<(f64, Vec<f64>)> = Vec::new();
+    let focal_names: Vec<String> = focal_meta.iter().map(|(n, _)| n.clone()).collect();
+    for entry in dir_iter.flatten() {
+        let fname = entry.file_name();
+        let name = fname.to_string_lossy();
+        if !name.starts_with("start_") { continue; }
+        let mle_path = entry.path().join("mle.toml");
+        let Ok(text) = std::fs::read_to_string(&mle_path) else { continue; };
+        let Some(parsed) = parse_mle_toml(&text, if2_params, &focal_names) else { continue; };
+        if !parsed.final_loglik.is_finite() { continue; }
+        starts.push((parsed.final_loglik, parsed.mle));
+    }
+
+    let focal_label: String = focal_meta.iter().enumerate()
+        .map(|(fi, (name, _))| {
+            let val = focal_meta[fi].1.get(grid_idx_axis_value(grid_idx, focal_meta, fi))
+                .copied().unwrap_or(f64::NAN);
+            format!("{}={:.4}", name, val)
+        })
+        .collect::<Vec<_>>().join(", ");
+
+    if starts.len() < 2 {
+        eprintln!("  cell [{}]: only {} converged start(s) — verdict skipped",
+            focal_label, starts.len());
+        return false;
+    }
+
+    // Leg 1: per-parameter range across starts, normalised by bound width.
+    let mut worst_rel: f64 = 0.0;
+    let mut worst_abs: f64 = 0.0;
+    let mut worst_rel_param: &str = "";
+    let mut worst_abs_param: &str = "";
+    for spec in if2_params {
+        let vals: Vec<f64> = starts.iter()
+            .map(|(_, mle)| mle[spec.index]).collect();
+        let lo = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let abs_range = hi - lo;
+        let bound_width = if spec.upper.is_finite() && spec.lower.is_finite() {
+            spec.upper - spec.lower
+        } else { f64::INFINITY };
+        let rel_range = if bound_width.is_finite() && bound_width > 0.0 {
+            abs_range / bound_width
+        } else { 0.0 };
+        if rel_range > worst_rel {
+            worst_rel = rel_range;
+            worst_rel_param = spec.name.as_str();
+        }
+        if abs_range > worst_abs {
+            worst_abs = abs_range;
+            worst_abs_param = spec.name.as_str();
+        }
+    }
+
+    // Leg 1 refusal rule: BOTH numbers must exceed their thresholds.
+    let rel_fail = worst_rel >= DET_REL_RANGE_THRESH;
+    let abs_fail = worst_abs >= DET_ABS_RANGE_FLOOR;
+    let leg1_pass = !(rel_fail && abs_fail);
+    let leg1_mark = if leg1_pass { "✓" } else { "✗" };
+
+    // Leg 2: loglik decibans-spread.
+    let lls: Vec<f64> = starts.iter().map(|(ll, _)| *ll).collect();
+    let ll_lo = lls.iter().cloned().fold(f64::INFINITY, f64::min);
+    let ll_hi = lls.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let delta_db = (ll_hi - ll_lo) * NATS_TO_DB;
+    // SE-aware floor: deterministic optimiser SE is typically 0
+    // (single eval per chain), but keep the formula explicit so the
+    // threshold tightens automatically if a future change introduces
+    // per-chain Monte-Carlo error.
+    let sigma_max = 0.0_f64;
+    let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
+    let leg2_threshold = DET_DECIBANS_THRESH.max(se_floor_db);
+    let leg2_pass = delta_db < leg2_threshold;
+    let leg2_mark = if leg2_pass { "✓" } else { "✗" };
+
+    eprintln!("  cell [{}] (n={} starts):", focal_label, starts.len());
+    eprintln!("    chain-agreement: rel range = {:.3}% bound \
+               (worst: {}) | abs range = {:.4} nat. units (worst: {})  {}",
+        worst_rel * 100.0, worst_rel_param,
+        worst_abs, worst_abs_param,
+        leg1_mark);
+    eprintln!("    loglik-eval:     Δ = {:.3} dB / threshold {:.3} dB \
+               (loglik range {:.3} … {:.3})  {}",
+        delta_db, leg2_threshold, ll_lo, ll_hi, leg2_mark);
+
+    leg1_pass && leg2_pass
+}
+
+/// Compute which axis-value slot a given linearised grid_idx
+/// corresponds to for axis `axis_idx`. Mirrors the Cartesian-product
+/// expansion in `cmd_profile`'s grid construction: outer (first) axes
+/// vary slowest, inner (last) axes fastest. For a 2D grid with sizes
+/// [3, 2] the linear order is (a0v0,a1v0), (a0v0,a1v1), (a0v1,a1v0)…
+/// so axis `axis_idx` value index = (grid_idx / product-of-later-sizes)
+/// modulo its own size.
+fn grid_idx_axis_value(grid_idx: usize, focal_meta: &[(String, Vec<f64>)], axis_idx: usize) -> usize {
+    let later_product: usize = focal_meta.iter().enumerate()
+        .filter(|(i, _)| *i > axis_idx)
+        .map(|(_, (_, vs))| vs.len())
+        .product();
+    let own_size = focal_meta[axis_idx].1.len().max(1);
+    (grid_idx / later_product.max(1)) % own_size
 }
 
 /// Render a per-start MLE TOML file. Human-readable; also the format
