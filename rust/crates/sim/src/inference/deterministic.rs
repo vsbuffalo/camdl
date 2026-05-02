@@ -260,22 +260,35 @@ pub fn optimize_det(
     // Validate bounds before the optimiser sees them — NLopt errors
     // out at optimize-time on inverted bounds, but a clear pre-flight
     // diagnostic is cheaper for the user than a `nlopt::FailState`
-    // with no parameter name attached.
+    // with no parameter name attached. NLopt's local derivative-free
+    // algorithms (Sbplx, Bobyqa, Cobyla) accept ±∞ as "unbounded";
+    // the global algorithms (Isres, Crs2) do not. We surface the
+    // distinction so the user gets a clean diagnostic when --optimizer
+    // isres/crs2 is passed against a model whose bounds the IR
+    // populates as `[0, ∞]` by default (typical for unbounded rate
+    // parameters declared without explicit `bounds: ...`).
+    let global_optimizer = matches!(
+        config.algorithm,
+        DetAlgorithm::Isres | DetAlgorithm::Crs2,
+    );
     for spec in estimated {
-        if !(spec.lower.is_finite() && spec.upper.is_finite()) {
-            return Err(format!(
-                "deterministic optimiser: parameter '{}' has non-finite \
-                 bounds (lower={}, upper={}); declare finite [lower, \
-                 upper] in the model or fit config",
-                spec.name, spec.lower, spec.upper,
-            ));
-        }
         if spec.lower >= spec.upper {
             return Err(format!(
                 "deterministic optimiser: parameter '{}' has \
                  lower={} >= upper={} — bounds must be strictly \
                  increasing",
                 spec.name, spec.lower, spec.upper,
+            ));
+        }
+        if global_optimizer && !(spec.lower.is_finite() && spec.upper.is_finite()) {
+            return Err(format!(
+                "deterministic optimiser ({:?}): parameter '{}' has \
+                 non-finite bounds (lower={}, upper={}); global \
+                 algorithms require finite [lower, upper]. Declare \
+                 explicit bounds in the model, pass --fixed {} to \
+                 hold this parameter constant, or switch to a local \
+                 optimiser (sbplx, bobyqa, cobyla)",
+                config.algorithm, spec.name, spec.lower, spec.upper, spec.name,
             ));
         }
     }
@@ -335,6 +348,22 @@ pub fn optimize_det(
         .map_err(|e| format!("nlopt set_lower_bounds failed: {:?}", e))?;
     opt.set_upper_bounds(&upper)
         .map_err(|e| format!("nlopt set_upper_bounds failed: {:?}", e))?;
+    // Initial step: NLopt's local derivative-free algorithms (Sbplx,
+    // Bobyqa, Cobyla) default the first probe step to `(upper - lower)
+    // / 4`, which is +∞ when either bound is non-finite. Provide a
+    // sensible default per dimension: 10% of bound width if both
+    // finite, otherwise 10% of the initial value (or 0.1 if x = 0).
+    // This keeps the optimiser exploring at a reasonable scale even
+    // when the model declares an unbounded rate parameter.
+    let initial_step: Vec<f64> = estimated.iter().enumerate().map(|(i, spec)| {
+        if spec.lower.is_finite() && spec.upper.is_finite() {
+            ((spec.upper - spec.lower) * 0.1).max(1e-6)
+        } else {
+            (x[i].abs() * 0.1).max(0.1)
+        }
+    }).collect();
+    opt.set_initial_step(&initial_step)
+        .map_err(|e| format!("nlopt set_initial_step failed: {:?}", e))?;
     opt.set_xtol_rel(config.xtol_rel)
         .map_err(|e| format!("nlopt set_xtol_rel failed: {:?}", e))?;
     if let Some(ftol) = config.ftol_rel {

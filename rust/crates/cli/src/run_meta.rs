@@ -190,6 +190,11 @@ pub enum MethodKind {
     Pgas,
     Pmmh,
     Pfilter,
+    /// Deterministic ODE-backed NLopt optimisation (gh#40). Tagged as
+    /// "det" in run.json. Currently only emitted by `camdl profile
+    /// --backend ode`; fit-side integration is deferred per the
+    /// gh#40 proposal.
+    Det,
 }
 
 impl MethodKind {
@@ -201,6 +206,7 @@ impl MethodKind {
             MethodKind::Pgas    => "pgas",
             MethodKind::Pmmh    => "pmmh",
             MethodKind::Pfilter => "pfilter",
+            MethodKind::Det     => "det",
         }
     }
 }

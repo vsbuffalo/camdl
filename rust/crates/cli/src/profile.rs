@@ -360,6 +360,63 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         .unwrap_or_else(|e| { eprintln!("{:?}", e); std::process::exit(1); }));
     let base_params = compiled.default_params.clone();
 
+    // ── Backend dispatch: ODE capability check + --particles guard ────
+    //
+    // gh#40 step 4: when --backend ode is selected, the inner
+    // reoptimisation runs deterministic ODE forward sims under NLopt.
+    // Two early-exit checks belong here, BEFORE any per-cell setup or
+    // optimiser construction:
+    //
+    //   1. Structural capability mismatch (e.g. overdispersed
+    //      transitions): the same `Capabilities::OVERDISPERSION`
+    //      check `camdl simulate --backend ode` already enforces.
+    //      We reuse it via `OdeSim.capabilities()` rather than a new
+    //      parallel check, so the diagnostic is verbatim what users
+    //      see elsewhere.
+    //   2. `--particles N` with N > 1 has no defined meaning under
+    //      ODE: the marginal likelihood is exact at N=1, and N>1
+    //      would just run the same forward sim N times. Warn and
+    //      proceed with N effectively=1.
+    if matches!(a.backend, ProfileBackend::Ode) {
+        use sim::Simulate;
+        let req = compiled.required_capabilities();
+        let supported = sim::OdeSim.capabilities();
+        let unsupported = req - supported;
+        if !unsupported.is_empty() {
+            let mut features = Vec::new();
+            if unsupported.contains(sim::Capabilities::OVERDISPERSION) {
+                features.push(
+                    "OVERDISPERSION: this model uses `overdispersed(rate, σ²)` \
+                     transitions (NegBinomial draws). The ODE backend cannot \
+                     represent process noise — pass --backend chain_binomial, \
+                     or remove the overdispersion modifiers if the noise is \
+                     negligible at this population size."
+                );
+            }
+            if unsupported.contains(sim::Capabilities::REAL_COMPARTMENTS) {
+                features.push(
+                    "REAL_COMPARTMENTS: real-valued compartments are supported \
+                     by ODE in principle but profile dispatch hasn't validated \
+                     this combination. File an issue if you need it."
+                );
+            }
+            eprintln!(
+                "error: --backend ode cannot run this model. Required \
+                 capabilities not supported by ODE:\n  - {}",
+                features.join("\n  - "),
+            );
+            std::process::exit(1);
+        }
+        if n_particles > 1 {
+            eprintln!(
+                "warning: --backend ode ignores --particles {} (N=1 is the \
+                 exact deterministic limit; N>1 wastes time running the \
+                 same forward sim N times).",
+                n_particles,
+            );
+        }
+    }
+
     // ── Resolve --obs against the IR's observation list ─────────────
     //
     // gh#38: profile must walk the *full* indexed observation family
@@ -801,6 +858,62 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let focal_names_ordered: Vec<String> =
         focal_grids.iter().map(|fg| fg.name.clone()).collect();
 
+    // ── Per-cell ODE dispatch config (only used when --backend ode) ──
+    //
+    // Built once here so the parallel loop can clone it cheaply per
+    // job. t_start comes from the model's IR (same as IF2's source);
+    // t_end is the largest observation time (we never need to simulate
+    // past the data); ode dt is the user-supplied --dt (same flag IF2
+    // uses for its filtering step).
+    let det_t_start = compiled.model.simulation.t_start;
+    let det_t_end = observations.iter()
+        .map(|o| o.time).fold(det_t_start, f64::max);
+    let det_optimizer = a.optimizer.unwrap_or(crate::args::ProfileOptimizer::Sbplx);
+    let det_algorithm = match det_optimizer {
+        crate::args::ProfileOptimizer::Sbplx  => sim::inference::deterministic::DetAlgorithm::Sbplx,
+        crate::args::ProfileOptimizer::Bobyqa => sim::inference::deterministic::DetAlgorithm::Bobyqa,
+        crate::args::ProfileOptimizer::Cobyla => sim::inference::deterministic::DetAlgorithm::Cobyla,
+        crate::args::ProfileOptimizer::Isres  => sim::inference::deterministic::DetAlgorithm::Isres,
+        crate::args::ProfileOptimizer::Crs2   => sim::inference::deterministic::DetAlgorithm::Crs2,
+    };
+    // The MultiStreamObsModel built above already implements
+    // ObservationModel<ParticleState> for IF2; the deterministic path
+    // needs a concrete `Arc<MultiStreamObsModel>` because
+    // `optimize_det` types on the concrete struct (it calls
+    // `log_likelihood_from_flows_and_counts`, not the trait method).
+    // Build a parallel Arc<MultiStreamObsModel> once.
+    let det_obs_model: Arc<sim::inference::MultiStreamObsModel> = {
+        let obs_times: Vec<f64> = observations.iter().map(|o| o.time).collect();
+        let mut stream_specs = Vec::with_capacity(resolved_obs.len());
+        for (obs, stream_obs) in resolved_obs.iter().zip(per_stream_obs.iter()) {
+            let projection = if resolved_obs.len() == 1 && flow_name.is_some() {
+                sim::inference::multi_stream_obs::StreamProjection::FlowSum(
+                    flow_indices.to_vec(),
+                )
+            } else {
+                sim::inference::multi_stream_obs::StreamProjection::from_ir(
+                    &obs.projection, &compiled, &obs.name,
+                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+            };
+            stream_specs.push(StreamSpec {
+                projection,
+                ir_model: (*obs).clone(),
+                observations: stream_obs.iter().map(|o| o.value).collect(),
+                obs_times: obs_times.clone(),
+            });
+        }
+        Arc::new(sim::inference::MultiStreamObsModel::new(stream_specs, compiled.clone())
+            .unwrap_or_else(|e| {
+                eprintln!("error: observation model construction failed: {:?}", e);
+                std::process::exit(1);
+            }))
+    };
+    let det_compiled = Arc::clone(&compiled);
+    let det_max_evals = a.max_evals;
+    let det_xtol_rel = a.xtol_rel;
+    let det_dt = dt;
+    let backend_kind = a.backend;
+
     // ── Run remaining jobs in parallel ──────────────────────────────
     remaining.par_iter().for_each(|&(seed_idx, grid_idx, start_idx)| {
         let process = Arc::clone(&process);
@@ -815,22 +928,92 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             params[idx] = val;
         }
 
-        let config = IF2Config {
-            n_particles, n_iterations,
-            cooling_fraction: cooling, cooling_target_iters: n_iterations, dt,
-            t_start: process.compiled.model.simulation.t_start,
-            simplex_groups: vec![],
-            skip_first_obs_from_loglik: false,
-        };
         // job_seed derives from this REPLICATE's seed, not a global
         // seed_base — different seeds in --seeds drive distinct IF2
-        // noise (the whole point of multi-seed sensitivity).
+        // noise (the whole point of multi-seed sensitivity). Under
+        // --backend ode the seed is ignored (the objective is
+        // deterministic) but multi-start spread comes from the
+        // start_idx-derived initial values, same as IF2.
         let job_seed = seed ^ (grid_idx as u64 * 1000 + start_idx as u64);
         let job_t0 = std::time::Instant::now();
 
-        let result = run_if2(
-            &*process, &*obs_model_obj, &params, &if2_params, &config, job_seed,
-        );
+        let (result_loglik, result_mle, det_n_evals, det_converged):
+            (f64, Vec<f64>, Option<usize>, Option<bool>) = match backend_kind {
+            ProfileBackend::ChainBinomial => {
+                let config = IF2Config {
+                    n_particles, n_iterations,
+                    cooling_fraction: cooling, cooling_target_iters: n_iterations, dt,
+                    t_start: process.compiled.model.simulation.t_start,
+                    simplex_groups: vec![],
+                    skip_first_obs_from_loglik: false,
+                };
+                match run_if2(
+                    &*process, &*obs_model_obj, &params, &if2_params, &config, job_seed,
+                ) {
+                    Ok(r) => (r.final_loglik, r.mle, None, None),
+                    Err(_) => (f64::NEG_INFINITY, params.clone(), None, None),
+                }
+            }
+            ProfileBackend::Ode => {
+                use sim::inference::deterministic::{
+                    DetOptConfig, optimize_det,
+                };
+                use sim::OdeConfig;
+                // For multi-start the i-th start should not all
+                // collapse to identical IF2-mean → identical
+                // optimiser trajectories. Per-start dispersion comes
+                // from the EstimatedParam's `.initial`, which is
+                // built upstream by `build_if2_params_from_specs`
+                // from the user's --rw-sd auto / explicit. For a
+                // first-pass dispatch we use the initial values from
+                // `if2_params` directly (same as the IF2 path), which
+                // means starts 0..N produce identical optima at
+                // every cell in the deterministic case. That makes
+                // multi-start cheap and well-defined for diagnostic
+                // purposes (Leg-2 SE = 0), but loses the "different
+                // basins from different starts" sensitivity that
+                // matters under ISRES/CRS2 — flagged as future work
+                // in the proposal.
+                let cfg = DetOptConfig {
+                    algorithm: det_algorithm,
+                    xtol_rel:  det_xtol_rel,
+                    ftol_rel:  None,
+                    max_evals: det_max_evals,
+                    ode: OdeConfig {
+                        t_start: det_t_start,
+                        t_end:   det_t_end,
+                        dt:      det_dt,
+                    },
+                };
+                // Pin focal params on top of base, then call optimise.
+                // The estimated-params slice has indices into the
+                // full params vector; `optimize_det` scatters back.
+                match optimize_det(
+                    Arc::clone(&det_compiled),
+                    Arc::clone(&det_obs_model),
+                    &params,
+                    &if2_params,
+                    &cfg,
+                ) {
+                    Ok(r) => {
+                        // Scatter optimised values into the full
+                        // parameter vector for downstream serialisation.
+                        let mut mle = params.clone();
+                        for (i, e) in if2_params.iter().enumerate() {
+                            mle[e.index] = r.params[i];
+                        }
+                        let ll = if r.loglik.is_finite() { r.loglik } else { f64::NEG_INFINITY };
+                        (ll, mle, Some(r.n_evals), Some(r.converged))
+                    }
+                    Err(e) => {
+                        eprintln!("warning: cell ({}, start={}) ODE \
+                                   optimisation failed: {}",
+                            grid_idx, start_idx, e);
+                        (f64::NEG_INFINITY, params.clone(), Some(0), Some(false))
+                    }
+                }
+            }
+        };
         let elapsed = job_t0.elapsed().as_secs_f64();
 
         let seed_dir = &seed_dirs[seed_idx];
@@ -840,10 +1023,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             return;
         }
 
-        let (final_loglik, mle_params): (f64, Vec<f64>) = match result {
-            Ok(r) => (r.final_loglik, r.mle),
-            Err(_) => (f64::NEG_INFINITY, params.clone()),
-        };
+        let final_loglik = result_loglik;
+        let mle_params = result_mle;
 
         let mle_toml = render_mle_toml(&if2_params, &focal_values,
             &focal_grids.iter().map(|fg| fg.name.as_str()).collect::<Vec<_>>(),
@@ -861,6 +1042,35 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         );
         let start_hash = ContentHash::from_bytes(start_hash_input.as_bytes())
             .full().to_string();
+        // Method tag + algorithm metadata branches on the backend so a
+        // run.json under --backend ode is self-describing (no stale
+        // "method=if2" line on a cell that never ran an IF2 chain).
+        // No backwards-compat shim — the new variant `MethodKind::Det`
+        // landed atomically with this dispatch (CLAUDE.md).
+        let (method, stage, algo_json) = match backend_kind {
+            ProfileBackend::ChainBinomial => (
+                crate::run_meta::MethodKind::If2,
+                "if2".to_string(),
+                serde_json::json!({
+                    "particles":  n_particles,
+                    "iterations": n_iterations,
+                    "cooling":    cooling,
+                    "dt":         dt,
+                }),
+            ),
+            ProfileBackend::Ode => (
+                crate::run_meta::MethodKind::Det,
+                "det".to_string(),
+                serde_json::json!({
+                    "optimizer": det_optimizer.to_string(),
+                    "xtol_rel":  det_xtol_rel,
+                    "max_evals": det_max_evals,
+                    "dt":        det_dt,
+                    "n_evals":   det_n_evals.unwrap_or(0),
+                    "converged": det_converged.unwrap_or(false),
+                }),
+            ),
+        };
         let start_run = Run {
             hash: start_hash,
             version: crate::version::VERSION_SHORT.to_string(),
@@ -870,16 +1080,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             label: None,
             kind: RunKind::FitStage(FitStageMeta {
                 fit_hash: String::new(),
-                stage: "if2".to_string(),
-                method: crate::run_meta::MethodKind::If2,
+                stage,
+                method,
                 seed: job_seed,
                 n_chains: 1,
-                algorithm: serde_json::json!({
-                    "particles":  n_particles,
-                    "iterations": n_iterations,
-                    "cooling":    cooling,
-                    "dt":         dt,
-                }),
+                algorithm: algo_json,
                 best_loglik: if final_loglik.is_finite() { Some(final_loglik) } else { None },
                 best_chain:  Some(0),
                 starts_from: None,
