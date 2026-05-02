@@ -849,10 +849,73 @@ pub struct If2Args {
 
 // ─── profile ──────────────────────────────────────────────────────────────────
 
+/// Inner-loop optimisation backend for `camdl profile`.
+///
+/// Two backends ship in v1; the choice corresponds to *two different
+/// likelihoods*, not just two implementations of the same one (gh#40
+/// proposal §"Two likelihoods, not one optimiser for one likelihood"):
+///
+/// - `chain_binomial` (default) — IF2 on a stochastic chain-binomial
+///   forward model. Likelihood is `p(y|θ)` with process noise as part
+///   of the generative model.
+/// - `ode` — deterministic ODE forward sim + NLopt optimisation.
+///   Likelihood is `p(y|θ, deterministic skeleton)` — a different
+///   statistical object from chain_binomial. In low-noise regimes
+///   the two converge empirically; verify, don't assume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProfileBackend {
+    #[value(name = "chain_binomial", alias = "chain-binomial")]
+    ChainBinomial,
+    #[value(name = "ode")]
+    Ode,
+}
+
+impl Default for ProfileBackend {
+    fn default() -> Self { Self::ChainBinomial }
+}
+
+impl std::fmt::Display for ProfileBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChainBinomial => f.write_str("chain_binomial"),
+            Self::Ode           => f.write_str("ode"),
+        }
+    }
+}
+
+/// NLopt algorithm choice for `--backend ode`. See proposal §"Algorithm
+/// choice": Sbplx is the recommended default because compartmental
+/// likelihoods are smooth in the interior but non-smooth at parameter
+/// boundaries; BOBYQA's quadratic trust region fails badly when
+/// smoothness breaks. Use BOBYQA only when you know the objective is
+/// smooth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProfileOptimizer {
+    /// LN_SBPLX — robust Nelder-Mead variant (default).
+    #[value(name = "sbplx")]
+    Sbplx,
+    /// LN_BOBYQA — derivative-free quadratic; faster on smooth objectives.
+    #[value(name = "bobyqa")]
+    Bobyqa,
+    /// LN_COBYLA — supports active linear-inequality constraints.
+    #[value(name = "cobyla")]
+    Cobyla,
+    /// GN_ISRES — global, multi-modal "is this the basin?" pass. Slow.
+    #[value(name = "isres")]
+    Isres,
+    /// GN_CRS2_LM — global, controlled random search; faster than ISRES.
+    #[value(name = "crs2", alias = "crs2_lm", alias = "crs2-lm")]
+    Crs2,
+}
+
+impl Default for ProfileOptimizer {
+    fn default() -> Self { Self::Sbplx }
+}
+
 #[derive(Args)]
 #[command(after_help = colored_help!("\
 Examples:
-  # 1D profile likelihood for R0 via parallel IF2
+  # 1D profile likelihood for R0 via parallel IF2 (default chain_binomial)
   camdl profile sir.camdl --data cases.tsv \\
       --param R0 --grid 0.5:5:20 --particles 2000
 
@@ -860,6 +923,12 @@ Examples:
   camdl profile sir.camdl --data cases.tsv \\
       --param R0 --grid 0.5:5:10 \\
       --param sigma --grid 0.1:1.0:10
+
+  # Deterministic ODE-backed profile via NLopt (Sbplx default)
+  # Computes p(y|θ, deterministic skeleton) — a different likelihood
+  # from chain_binomial; in low-noise regimes the two converge.
+  camdl profile sir.camdl --data cases.tsv --backend ode \\
+      --param R0 --grid 0.5:5:20 --particles 1
 "))]
 pub struct ProfileArgs {
     /// IR JSON or .camdl model file
@@ -925,6 +994,49 @@ pub struct ProfileArgs {
     /// applies to the umbrella; per-seed children remain unlabelled.
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
+
+    /// Inner-optimisation backend.
+    ///
+    /// `chain_binomial` (default) runs IF2 on a stochastic
+    /// chain-binomial forward model — the same likelihood `camdl fit`
+    /// uses today. `ode` runs deterministic ODE forward sims + NLopt
+    /// optimisation, computing `p(y|θ, deterministic skeleton)` —
+    /// a *different* likelihood (gh#40 proposal §"Two likelihoods").
+    /// In low-noise regimes (large per-cell populations,
+    /// near-deterministic trajectories) the two converge empirically;
+    /// verify, don't assume.
+    #[arg(long, value_enum, default_value_t = ProfileBackend::ChainBinomial)]
+    pub backend: ProfileBackend,
+
+    /// NLopt algorithm for `--backend ode`.
+    ///
+    /// `sbplx` (default) — robust Nelder-Mead variant; recommended for
+    /// the typical compartmental likelihood, which is smooth in the
+    /// interior of the parameter box but non-smooth at boundaries.
+    /// `bobyqa` — faster on truly smooth objectives, but fails badly
+    /// when smoothness breaks; use only when you know the objective
+    /// is smooth. `cobyla` — handles active linear-inequality
+    /// constraints. `isres` / `crs2` — global "is this the basin?"
+    /// passes; slow.
+    ///
+    /// Only meaningful with `--backend ode`. Passing `--optimizer X
+    /// --backend chain_binomial` is rejected as a configuration error
+    /// (loose-semantics rule, CLAUDE.md). Defaults to `sbplx` when
+    /// `--backend ode` and unspecified.
+    #[arg(long, value_enum)]
+    pub optimizer: Option<ProfileOptimizer>,
+
+    /// Relative-step convergence tolerance for the deterministic
+    /// optimiser (`--backend ode`). NLopt's `xtol_rel`. Default 1e-4.
+    #[arg(long, default_value_t = 1.0e-4)]
+    pub xtol_rel: f64,
+
+    /// Hard cap on objective evaluations per cell for `--backend ode`.
+    /// Hitting the cap is a soft failure — the cell is reported with
+    /// `converged=false` and the convergence-gate will reject if too
+    /// many cells fail.
+    #[arg(long, default_value_t = 500)]
+    pub max_evals: usize,
 }
 
 // ─── eval ─────────────────────────────────────────────────────────────────────

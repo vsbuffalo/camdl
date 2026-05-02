@@ -274,6 +274,24 @@ impl CasInputs for ProfileInputs {
 }
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
+    // ── Backend / optimizer cross-flag validation (gh#40) ──────────
+    //
+    // CLAUDE.md "no loose semantics": never silently accept a flag
+    // combination whose meaning is ambiguous. `--optimizer` is only
+    // meaningful with `--backend ode` — passing it under
+    // `--backend chain_binomial` is a configuration error, not a
+    // hint we should silently honour or ignore.
+    use crate::args::{ProfileBackend, ProfileOptimizer};
+    if matches!(a.backend, ProfileBackend::ChainBinomial) && a.optimizer.is_some() {
+        eprintln!(
+            "error: --optimizer is only meaningful with --backend ode \
+             (passed --optimizer {:?} but --backend chain_binomial). \
+             Drop --optimizer, or pass --backend ode if you intended \
+             the deterministic ODE-backed profile.",
+            a.optimizer.unwrap_or(ProfileOptimizer::Sbplx),
+        );
+        std::process::exit(1);
+    }
     let ir_path = a.model.to_string_lossy().into_owned();
     let data_path = a.data.to_string_lossy().into_owned();
     let n_particles = a.inference.particles;
