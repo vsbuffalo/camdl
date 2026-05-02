@@ -31,6 +31,7 @@ pub mod nuts;
 pub mod linalg;
 pub mod diagnostic;
 pub mod prequential;
+pub mod deterministic;
 
 // Re-exports
 pub use types::{ParticleState, ParticleSwarm};
