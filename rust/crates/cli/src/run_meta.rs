@@ -127,6 +127,12 @@ pub enum RunKind {
     /// each child has its own `run.json` of the underlying kind.
     /// See docs/dev/proposals/2026-04-28-cas-typed-runs-and-profile-stages.md.
     ReplicateSet(crate::cas::typed::ReplicateSetMeta),
+    /// A likelihood-landscape diagnostic: N Latin-hypercube points
+    /// across declared parameter bounds, evaluated via PF or single
+    /// simulation, written to `landscape.tsv`. NOT a fitting routine
+    /// — produces no MLE artifact. See
+    /// docs/dev/proposals/2026-05-03-survey-subcommand.md.
+    Survey(SurveyMeta),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,6 +307,86 @@ pub struct ProfileMeta {
 pub struct GridAxis {
     pub param: String,
     pub values: Vec<f64>,
+}
+
+/// How `camdl survey` evaluates the marginal log-likelihood at each
+/// LHS point. The default is `Pfilter` (handles process noise via a
+/// PMMH-style MC estimator); `Simulate` is an opt-in fast path for
+/// known-deterministic models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+#[clap(rename_all = "lowercase")]
+pub enum SurveyEvalMethod {
+    /// Bootstrap particle filter, K replicates → logmeanexp combiner.
+    /// Estimates p(y|θ) under the chain-binomial process; the safe
+    /// default for inference-grade likelihood evaluation. Doucet et
+    /// al. 2015 (Biometrika) gives the rule for trustworthy ranks:
+    /// per-point loglik SE ≤ ~1.7 nats.
+    Pfilter,
+    /// Single deterministic simulation per point. 1-sample MC estimator
+    /// of the same quantity; cheap (~10× faster than Pfilter at
+    /// modest particles/replicates) but biased toward "lucky outliers"
+    /// when process noise is non-trivial. Andrieu & Roberts 2009 frame
+    /// the failure mode.
+    Simulate,
+}
+
+impl SurveyEvalMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SurveyEvalMethod::Pfilter  => "pfilter",
+            SurveyEvalMethod::Simulate => "simulate",
+        }
+    }
+}
+
+impl std::fmt::Display for SurveyEvalMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Metadata for a `RunKind::Survey` run. Mirrors `ProfileMeta`'s
+/// shape: model + content hashes + the canonical-hashed inputs that
+/// determine the LHS box (`bounds`), the evaluator config
+/// (`eval_method`/`eval_particles`/`eval_replicates`), the seed, and
+/// any fixed / scenario context used to populate the rest of the
+/// parameter vector at each LHS point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurveyMeta {
+    /// Model file path (display only — not a hash input).
+    pub model: String,
+    /// Full SHA-256 of the IR JSON.
+    pub model_hash: String,
+    /// Per-stream data file content hashes. Same shape as `FitMeta` —
+    /// content-only, so editing the TSV invalidates the cache (gh#39).
+    pub data_hashes: HashMap<String, String>,
+    /// LHS box: parameter name → (lo, hi). Resolved per the proposal's
+    /// "fit.toml > model" priority. Canonical-hashed by sorting names.
+    pub bounds: HashMap<String, (f64, f64)>,
+    /// Number of LHS points evaluated.
+    pub n_points: usize,
+    /// PF or single-simulate.
+    pub eval_method: SurveyEvalMethod,
+    /// PF particle count (per replicate). Diagnostic when
+    /// `eval_method = Simulate`.
+    pub eval_particles: usize,
+    /// PF replicates per LHS point (logmeanexp combiner). Diagnostic
+    /// when `eval_method = Simulate` (always 1 in that case).
+    pub eval_replicates: usize,
+    /// LHS / PF base seed.
+    pub seed: u64,
+    /// Resolved fixed parameters (name → value). Canonical-hashed.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub fixed: HashMap<String, f64>,
+    /// Named scenario applied before the survey. `None` for the
+    /// baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<String>,
+    /// Names of estimated parameters in declaration order — drives
+    /// the column order of `landscape.tsv`. Bounds key + this slice
+    /// together fix the LHS layout deterministically.
+    pub estimated: Vec<String>,
 }
 
 /// Stable reference to a parent stage. Uses the stage *name* plus its
@@ -748,6 +834,59 @@ mod tests {
             }
             _ => panic!("expected Profile kind"),
         }
+    }
+
+    #[test]
+    fn survey_run_roundtrip() {
+        let mut bounds = HashMap::new();
+        bounds.insert("beta".into(), (0.001_f64, 1.0_f64));
+        bounds.insert("gamma".into(), (0.01_f64, 0.5_f64));
+        let mut data_hashes = HashMap::new();
+        data_hashes.insert("cases".into(), "0123abcd".repeat(8));
+        let r = Run {
+            hash: "fa".repeat(32),
+            version: "v".into(),
+            created_at: "2026-05-03T00:00:00Z".into(),
+            argv: vec!["camdl".into(), "survey".into(), "sir.camdl".into()],
+            status: RunStatus::Completed { wall_time_seconds: 12.5 },
+            label: None,
+            kind: RunKind::Survey(SurveyMeta {
+                model: "sir.camdl".into(),
+                model_hash: "f00d".repeat(16),
+                data_hashes,
+                bounds,
+                n_points: 1000,
+                eval_method: SurveyEvalMethod::Pfilter,
+                eval_particles: 200,
+                eval_replicates: 3,
+                seed: 42,
+                fixed: HashMap::new(),
+                scenario: None,
+                estimated: vec!["beta".into(), "gamma".into()],
+            }),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""kind":"survey""#),
+            "kind discriminator missing from JSON: {}", json);
+        let parsed: Run = serde_json::from_str(&json).unwrap();
+        match parsed.kind {
+            RunKind::Survey(m) => {
+                assert_eq!(m.n_points, 1000);
+                assert_eq!(m.eval_method, SurveyEvalMethod::Pfilter);
+                assert_eq!(m.eval_particles, 200);
+                assert_eq!(m.eval_replicates, 3);
+                assert_eq!(m.estimated, vec!["beta", "gamma"]);
+            }
+            _ => panic!("expected Survey"),
+        }
+    }
+
+    #[test]
+    fn survey_eval_method_serializes_lowercase() {
+        let p = SurveyEvalMethod::Pfilter;
+        assert_eq!(serde_json::to_string(&p).unwrap(), r#""pfilter""#);
+        let s = SurveyEvalMethod::Simulate;
+        assert_eq!(serde_json::to_string(&s).unwrap(), r#""simulate""#);
     }
 
     #[test]

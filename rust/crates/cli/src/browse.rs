@@ -69,15 +69,16 @@ fn load_sim_entry(dir: &Path, cwd: &Path) -> Option<RunEntry> {
 
 // ── cmd_list ─────────────────────────────────────────────────────────────────
 
-/// `--kind` filter: which of sims / fits / profiles to surface.
-/// `All` is the default and includes all three.
+/// `--kind` filter: which of sims / fits / profiles / surveys to
+/// surface. `All` is the default and includes all four.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KindFilter { Sim, Fit, Profile, All }
+enum KindFilter { Sim, Fit, Profile, Survey, All }
 
 impl KindFilter {
     fn includes_sims(self)     -> bool { matches!(self, Self::Sim     | Self::All) }
     fn includes_fits(self)     -> bool { matches!(self, Self::Fit     | Self::All) }
     fn includes_profiles(self) -> bool { matches!(self, Self::Profile | Self::All) }
+    fn includes_surveys(self)  -> bool { matches!(self, Self::Survey  | Self::All) }
 }
 
 pub fn cmd_list(a: &crate::args::ListArgs) {
@@ -96,6 +97,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         "sim" | "simulate"      => KindFilter::Sim,
         "fit"                   => KindFilter::Fit,
         "profile" | "profiles"  => KindFilter::Profile,
+        "survey" | "surveys"    => KindFilter::Survey,
         _                       => KindFilter::All,
     };
     let format_json = a.format.as_deref() == Some("json");
@@ -114,6 +116,11 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         Vec::new()
     } else {
         discover_profiles(&root).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+    };
+    let surveys = if !filter_kind.includes_surveys() {
+        Vec::new()
+    } else {
+        discover_surveys(&root).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
     };
 
     let now = SystemTime::now();
@@ -147,18 +154,32 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         .collect();
     filtered_profiles.sort_by(|x, y| y.created.cmp(&x.created));
 
+    let mut filtered_surveys: Vec<SurveyEntry> = surveys.into_iter()
+        .filter(|s| a.model.as_deref().is_none_or(|m| s.model.contains(m)))
+        .filter(|_| a.scenario.is_none())
+        .filter(|s| match filter_since {
+            Some(dur) => now.duration_since(s.created).is_ok_and(|d| d <= dur),
+            None => true,
+        })
+        .collect();
+    filtered_surveys.sort_by(|x, y| y.created.cmp(&x.created));
+
     if !a.all {
         filtered_runs.truncate(a.limit);
         filtered_fits.truncate(a.limit);
         filtered_profiles.truncate(a.limit);
+        filtered_surveys.truncate(a.limit);
     }
 
     if format_json {
         print_json(&filtered_runs);
         print_fits_json(&filtered_fits);
         print_profiles_json(&filtered_profiles);
+        print_surveys_json(&filtered_surveys);
     } else {
-        let any_other = !filtered_fits.is_empty() || !filtered_profiles.is_empty();
+        let any_other = !filtered_fits.is_empty()
+            || !filtered_profiles.is_empty()
+            || !filtered_surveys.is_empty();
         if !filtered_fits.is_empty() {
             eprintln!("{}", "fits".bold());
             print_fits_table(&filtered_fits, now);
@@ -167,6 +188,11 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         if !filtered_profiles.is_empty() {
             eprintln!("{}", "profiles".bold());
             print_profiles_table(&filtered_profiles, now);
+            eprintln!();
+        }
+        if !filtered_surveys.is_empty() {
+            eprintln!("{}", "surveys".bold());
+            print_surveys_table(&filtered_surveys, now);
             eprintln!();
         }
         if !filtered_runs.is_empty() || !any_other {
@@ -313,6 +339,7 @@ fn show(r: &ResolvedRun) {
         RunKind::FitStage(_)     => show_fit_stage(r),
         RunKind::Profile(_)      => show_profile_leaf(r),
         RunKind::ReplicateSet(_) => show_replicate_set(r),
+        RunKind::Survey(_)       => show_survey(r),
     }
 }
 
@@ -486,6 +513,71 @@ fn show_replicate_set(r: &ResolvedRun) {
     show_footer(r);
 }
 
+fn show_survey(r: &ResolvedRun) {
+    let RunKind::Survey(m) = &r.run.kind else { unreachable!() };
+    show_header(r);
+    println!("{}", "model".bright_black()); println!("  {}", m.model);
+    println!("{}", "estimated".bright_black());
+    println!("  {}", m.estimated.join(", "));
+    println!("{}", "bounds".bright_black());
+    let mut bounds: Vec<(&String, &(f64, f64))> = m.bounds.iter().collect();
+    bounds.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, (lo, hi)) in &bounds {
+        println!("  {}: [{}, {}]", name, lo, hi);
+    }
+    if !m.fixed.is_empty() {
+        let mut fx: Vec<(&String, &f64)> = m.fixed.iter().collect();
+        fx.sort_by(|a, b| a.0.cmp(b.0));
+        let items: Vec<String> = fx.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+        println!("{}", "fixed".bright_black()); println!("  {}", items.join(", "));
+    }
+    if let Some(ref s) = m.scenario {
+        println!("{}", "scenario".bright_black()); println!("  {}", s);
+    }
+    println!("{}", "n_points".bright_black()); println!("  {}", m.n_points);
+    println!("{}", "eval".bright_black());
+    match m.eval_method {
+        crate::run_meta::SurveyEvalMethod::Pfilter =>
+            println!("  pfilter ({} particles × {} replicates)",
+                m.eval_particles, m.eval_replicates),
+        crate::run_meta::SurveyEvalMethod::Simulate =>
+            println!("  simulate (single trajectory per point)"),
+    }
+    println!("{}", "seed".bright_black()); println!("  {}", m.seed);
+    let landscape = r.abs_path.join("landscape.tsv");
+    if landscape.exists() {
+        let bytes = std::fs::metadata(&landscape).map(|m| m.len()).unwrap_or(0);
+        println!("{}", "landscape".bright_black());
+        println!("  landscape.tsv ({} bytes)", bytes);
+    }
+    let summary = r.abs_path.join("summary.json");
+    if summary.exists() {
+        // Inline the top-loglik / SE-quartile fields if available.
+        if let Ok(s) = std::fs::read_to_string(&summary) {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(top) = j.get("top_loglik").and_then(|v| v.as_f64()) {
+                    println!("{}", "top loglik".bright_black());
+                    println!("  {:.2}", top);
+                }
+                if let Some(se_q) = j.get("loglik_se_quartiles") {
+                    println!("{}", "loglik_se quartiles".bright_black());
+                    println!("  {}", se_q);
+                }
+            }
+        }
+    }
+    let html = r.abs_path.join("landscape.html");
+    if html.exists() {
+        let bytes = std::fs::metadata(&html).map(|m| m.len()).unwrap_or(0);
+        println!("{}", "rendered".bright_black());
+        println!("  landscape.html ({} bytes)", bytes);
+    }
+    println!("{}", "hashes".bright_black());
+    println!("  survey {}", r.run.hash.dimmed());
+    println!("  model  {}", m.model_hash.dimmed());
+    show_footer(r);
+}
+
 // ── cmd_cat ──────────────────────────────────────────────────────────────────
 
 pub fn cmd_cat(a: &crate::args::CatArgs) {
@@ -554,6 +646,20 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                        directly.",
                       resolved.rel_path);
             std::process::exit(1);
+        }
+        RunKind::Survey(_) => {
+            let landscape = resolved.abs_path.join("landscape.tsv");
+            if !landscape.exists() {
+                eprintln!("error: 'camdl cat' on a survey expects \
+                    landscape.tsv, which has not been written yet for {}.",
+                    resolved.rel_path);
+                std::process::exit(1);
+            }
+            let bytes = std::fs::read(&landscape).unwrap_or_else(|e| {
+                eprintln!("error reading {}: {}", landscape.display(), e);
+                std::process::exit(1);
+            });
+            let _ = std::io::stdout().write_all(&bytes);
         }
     }
 }
@@ -699,6 +805,95 @@ fn format_grid_shape(
     format!("{} starts={}", dims.join("×"), n_starts)
 }
 
+// ── Survey listings ──────────────────────────────────────────────────────────
+
+/// One discovered survey run. Surveys live at
+/// `<root>/surveys/<stem>-<hash[:8]>/` with a `run.json` of kind
+/// `Survey(SurveyMeta)`. Display-only fields surfaced in `camdl list`.
+#[derive(Debug, Clone)]
+struct SurveyEntry {
+    run: Run,
+    rel_path: String,
+    created: SystemTime,
+    /// Display model path (from `SurveyMeta.model`).
+    model: String,
+    /// Comma-separated estimated parameter names.
+    estimated: String,
+    /// "pfilter Px×Rk" or "simulate".
+    eval: String,
+    /// Number of LHS points.
+    n_points: usize,
+    /// Best loglik in `landscape.tsv`. `None` when the artifact is
+    /// missing (interrupted run).
+    top_loglik: Option<f64>,
+}
+
+/// Walk `<root>/surveys/` one level deep. Each child dir is a
+/// survey-run directory.
+fn discover_surveys(root: &str) -> Result<Vec<SurveyEntry>, String> {
+    let surveys_root = Path::new(root).join("surveys");
+    if !surveys_root.exists() { return Ok(Vec::new()); }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let entries = std::fs::read_dir(&surveys_root)
+        .map_err(|e| format!("cannot read {}: {}", surveys_root.display(), e))?;
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() { continue; }
+        let Some((run, created, rel_path)) = load_run_common(&dir, &cwd) else { continue; };
+        let RunKind::Survey(m) = &run.kind else { continue };
+        let eval = match m.eval_method {
+            crate::run_meta::SurveyEvalMethod::Pfilter =>
+                format!("pfilter {}p×{}r", m.eval_particles, m.eval_replicates),
+            crate::run_meta::SurveyEvalMethod::Simulate => "simulate".to_string(),
+        };
+        // Read top loglik from summary.json when present.
+        let top_loglik = std::fs::read_to_string(dir.join("summary.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|j| j.get("top_loglik").and_then(|v| v.as_f64()));
+        out.push(SurveyEntry {
+            model: m.model.clone(),
+            estimated: m.estimated.join(","),
+            eval,
+            n_points: m.n_points,
+            top_loglik,
+            run, rel_path, created,
+        });
+    }
+    Ok(out)
+}
+
+fn print_surveys_table(surveys: &[SurveyEntry], now: SystemTime) {
+    let mut t = comfy_table::Table::new();
+    t.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
+    t.set_header(vec!["model", "estimate", "n_points", "eval", "top_loglik", "age", "path"]);
+    for s in surveys {
+        let age = fmt_relative_time(s.created, now);
+        let ll = s.top_loglik
+            .map(|x| format!("{:.2}", x))
+            .unwrap_or_else(|| "—".into());
+        t.add_row(vec![
+            s.model.clone(),
+            s.estimated.clone(),
+            s.n_points.to_string(),
+            s.eval.clone(),
+            ll,
+            age,
+            s.rel_path.clone(),
+        ]);
+    }
+    println!("{t}");
+}
+
+fn print_surveys_json(surveys: &[SurveyEntry]) {
+    let runs: Vec<&Run> = surveys.iter().map(|s| &s.run).collect();
+    match serde_json::to_string_pretty(&runs) {
+        Ok(s) => println!("{}", s),
+        Err(e) => eprintln!("json error: {}", e),
+    }
+}
+
 /// Walk `root/fits/` one level deep — each immediate child is a fit
 /// directory (`<stem>-<hash[:8]>/`). Stage-level run.json records live
 /// deeper and are not surfaced by `camdl list`.
@@ -777,7 +972,7 @@ fn resolve_any(root: &str, key: &str) -> Result<ResolvedRun, String> {
         .and_then(|s| s.parse().ok());
 
     let mut matches: Vec<ResolvedRun> = Vec::new();
-    for top in ["sims", "fits", "profiles"] {
+    for top in ["sims", "fits", "profiles", "surveys"] {
         let subroot = Path::new(root).join(top);
         if !subroot.exists() { continue; }
         for dir in walkdir_all(&subroot) {
@@ -826,6 +1021,7 @@ fn kind_label(kind: &RunKind) -> &'static str {
         RunKind::FitStage(_)     => "fit-stage",
         RunKind::Profile(_)      => "profile",
         RunKind::ReplicateSet(_) => "replicate-set",
+        RunKind::Survey(_)       => "survey",
     }
 }
 

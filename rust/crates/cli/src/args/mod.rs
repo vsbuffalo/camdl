@@ -948,6 +948,202 @@ pub struct ProfileArgs {
     pub label: Option<String>,
 }
 
+// ─── survey ───────────────────────────────────────────────────────────────────
+
+#[derive(Args)]
+#[command(after_help = colored_help!("\
+EXAMPLES
+
+  # Fit-aware: read [estimate] bounds and [data] from fit.toml
+  camdl survey model.camdl --fit fit.toml
+
+  # Inline bounds, data file specified directly
+  camdl survey model.camdl --data cases.tsv \\
+      --estimate \"beta=0.001:1.0\" --estimate \"gamma=0.01:0.5\"
+
+  # Fast deterministic-only mode (skip PF; not safe for stochastic models)
+  camdl survey model.camdl --fit fit.toml --eval simulate
+
+  # Render the interactive HTML alongside the TSV
+  camdl survey model.camdl --fit fit.toml --render
+
+WHAT THIS IS
+
+  A diagnostic tool that draws N Latin-hypercube points across the
+  declared parameter bounds, evaluates the marginal log-likelihood
+  at each, and writes a TSV (and optionally an interactive HTML
+  pair-plot) to surface identifiability structure. It is intended
+  to be run BEFORE camdl fit, to answer:
+
+    - Is this model identifiable from this data?
+    - Are there ridges or multiple basins?
+    - Are the high-loglik regions biologically plausible?
+    - Where do likely basins concentrate? (informs scout bounds)
+
+  Survey is NOT a fitting routine. It does not produce an MLE.
+  The output cannot substitute for camdl fit.
+
+WHEN TO TRUST THE OUTPUT
+
+  Survey works well when:
+    - Process noise is small (deterministic-skeleton regime),
+      or `--eval pfilter` is used with adequate
+      particles/replicates
+    - Parameter dimension d <= 8 (pair-plots are visually parseable)
+    - Bounds reflect informed prior plausibility (not \"throw a
+      wide net\")
+    - Dynamics are not strongly chaotic (seasonally-forced SEIR
+      with high R0 may produce intrinsically jagged landscapes)
+
+KNOWN LIMITATIONS
+
+  Stochastic deceiver (mitigated by --eval pfilter):
+    Single-trajectory loglik is a 1-sample Monte Carlo estimate of
+    p(y|theta) with variance proportional to the model's process
+    noise. With high noise (e.g. multiplicative gamma white noise
+    on transmission, sigma_se > ~1) the rank of N points by
+    single-trajectory loglik is biased toward \"lucky outliers\"
+    (Andrieu & Roberts 2009; Doucet et al. 2015, Biometrika). The
+    default --eval pfilter substantially mitigates this; survey
+    will warn at run end if the per-point loglik SE distribution
+    indicates unreliable ranks.
+
+  Chaotic dynamics:
+    Seasonally-forced SEIR and similar systems have positive
+    Lyapunov exponents in much of parameter space (Earn et al.
+    2000; Bauch & Earn 2003). Small delta-theta produces wildly
+    divergent deterministic trajectories. The landscape will be
+    intrinsically jagged regardless of eval method. Interpret
+    such surveys cautiously: the diagnostic is correctly
+    reporting \"this is hard,\" not \"your model is broken.\"
+
+  Bounds dependence:
+    Survey ranks are conditional on the bounds you give. Wide
+    bounds dilute (the \"top 10%\" may be marginally-less-bad
+    rather than meaningfully-good). Narrow bounds may exclude
+    the true basin entirely with no signal that this happened.
+    Bound choice is a load-bearing modelling decision; survey
+    cannot rescue a poorly-specified bounds box.
+
+  Curse of dimensionality:
+    Pair-plots project 2D marginals from a d-dimensional joint
+    distribution. High-loglik points concentrating in a 2D
+    pair may reflect tight conditioning on unshown parameters
+    not visible in that view. Past d ~= 8 this becomes hard to
+    interpret. Survey emits warnings at d > 6 and d > 10;
+    consider camdl profile for higher-dimensional
+    identifiability questions.
+
+  Misspecification != identifiability:
+    A tight, well-clustered top-K is a necessary but not
+    sufficient condition for trusting the resulting fit. A
+    misspecified model can have a tight likelihood at a
+    wrong-but-best-fitting theta. Posterior predictive checks
+    against held-out data are the orthogonal validation;
+    survey cannot substitute.
+
+  Silent miss case:
+    With N points in d dimensions, LHS may not hit a true basin
+    that occupies a small fraction of the bounds box. The
+    landscape would then show structure of wrong basins with
+    no signal that the right one was missed. If results look
+    surprising, increase --n-points and re-run.
+
+CITED REFERENCES
+
+  Andrieu, C. & Roberts, G. O. (2009). The pseudo-marginal
+    approach for efficient Monte Carlo computations. Annals of
+    Statistics, 37(2), 697-725.
+  Doucet, A., Pitt, M. K., Deligiannidis, G. & Kohn, R. (2015).
+    Efficient implementation of MCMC when using an unbiased
+    likelihood estimator. Biometrika, 102(2), 295-313.
+  Earn, D. J. D., Rohani, P., Bolker, B. M. & Grenfell, B. T.
+    (2000). A simple model for complex dynamical transitions in
+    epidemics. Science, 287(5453), 667-670.
+"))]
+pub struct SurveyArgs {
+    /// IR JSON or .camdl model file
+    pub model: PathBuf,
+
+    /// fit.toml supplying [estimate] bounds and [data] (fit-aware mode).
+    /// Mutually exclusive with --estimate / --data; pass exactly one.
+    #[arg(long, conflicts_with_all = ["estimate", "data"])]
+    pub fit: Option<PathBuf>,
+
+    /// Inline LHS bounds, e.g. --estimate "beta=0.001:1.0" (repeat).
+    /// Required when --fit is not given.
+    #[arg(long, value_name = "NAME=LO:HI")]
+    pub estimate: Vec<types::EstimateBoundsSpec>,
+
+    /// Inline observation data TSV. Required when --fit is not given.
+    #[arg(long)]
+    pub data: Option<PathBuf>,
+
+    /// Inline fixed parameters (NAME=VALUE), repeat. Useful in
+    /// inline mode to pin parameters not in --estimate at a known
+    /// value rather than the model default.
+    #[arg(long, value_name = "NAME=VALUE")]
+    pub fixed: Vec<types::ParamOverride>,
+
+    /// Named scenario from the model. Applies the scenario's
+    /// enable/disable lists and param overrides before survey.
+    #[arg(long)]
+    pub scenario: Option<String>,
+
+    /// Number of Latin-hypercube points to evaluate. Defaults to 1000;
+    /// proposal §"Defaults" balances coverage vs cost for d <= 8.
+    #[arg(long, default_value_t = 1000)]
+    pub n_points: usize,
+
+    /// Likelihood evaluation method. Default `pfilter` handles
+    /// process noise via PMMH-style MC estimator; `simulate` is a
+    /// faster fast-path for known-deterministic models (warns at
+    /// start; not safe for high-noise models).
+    #[arg(long, default_value_t = crate::run_meta::SurveyEvalMethod::Pfilter)]
+    pub eval: crate::run_meta::SurveyEvalMethod,
+
+    /// Particle count for `--eval pfilter`. 200 is adequate for
+    /// `sigma_se <= 1` on weekly data per the proposal's per-point
+    /// cost table.
+    #[arg(long, default_value_t = 200)]
+    pub eval_particles: usize,
+
+    /// PF replicates per LHS point (logmeanexp combiner). 3 reps
+    /// cuts SE by ~sqrt(3) vs 1 rep. Always 1 with `--eval simulate`.
+    #[arg(long, default_value_t = 3)]
+    pub eval_replicates: usize,
+
+    /// LHS / PF base seed.
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+
+    /// Render an interactive HTML pair-plot (`landscape.html`)
+    /// alongside the TSV. Off by default — TSV is the canonical
+    /// artifact, HTML is opt-in (proposal §"Default behaviour").
+    #[arg(long)]
+    pub render: bool,
+
+    /// Output root directory (default: ./results, matches the rest
+    /// of camdl).
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// User-supplied display label for this survey run. Validated
+    /// against `^[a-zA-Z0-9 ,._-]{1,64}$` after trim. Surfaced in
+    /// `camdl list` and `camdl show`.
+    #[arg(long, value_name = "TEXT")]
+    pub label: Option<String>,
+
+    /// Force re-evaluation of all LHS points; bypass the cache (the
+    /// CAS layout still applies — same hash, fresh artifacts).
+    #[arg(long)]
+    pub force: bool,
+
+    /// Rayon thread count (0 = all available cores).
+    #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
+    pub parallel: usize,
+}
+
 // ─── eval ─────────────────────────────────────────────────────────────────────
 
 #[derive(Args)]

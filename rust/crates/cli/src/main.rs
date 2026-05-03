@@ -16,6 +16,8 @@ mod if2;
 mod profile;
 mod progress;
 mod evidence;
+mod survey;
+mod landscape_html;
 pub mod version;
 
 /// Terminal formatting helpers. Pure ANSI SGR codes, no dependencies.
@@ -105,6 +107,14 @@ pub(crate) enum Command {
 
     /// Profile likelihood via parallel IF2 over a parameter grid
     Profile(args::ProfileArgs),
+
+    /// Likelihood-landscape diagnostic via Latin-hypercube sampling.
+    ///
+    /// Diagnostic, NOT a fitting routine — answers "is my model
+    /// identifiable from this data?" before burning hours on IF2.
+    /// See `camdl survey --help` for full notes on when to trust
+    /// the output and the known limitations.
+    Survey(args::SurveyArgs),
 
     /// Evaluate time-dependent expressions against a model
     Eval(args::EvalArgs),
@@ -311,6 +321,7 @@ fn main() {
         Command::Pfilter(a)             => pfilter::cmd_pfilter(&a),
         Command::If2(a)                 => if2::cmd_if2(&a),
         Command::Profile(a)             => profile::cmd_profile(&a),
+        Command::Survey(a)              => survey::cmd_survey(&a),
         Command::Eval(a)                => eval::cmd_eval(&a),
         Command::Data(DataCmd::Split(a))=> data::cmd_data_split(&a),
         Command::List(a)                => browse::cmd_list(&a),

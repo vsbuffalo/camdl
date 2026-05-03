@@ -367,6 +367,49 @@ impl FromStr for ParamVecSpec {
     }
 }
 
+// ─── EstimateBoundsSpec ───────────────────────────────────────────────────────
+
+/// `--estimate NAME=LO:HI` for `camdl survey` inline mode.
+///
+/// e.g. `--estimate "beta=0.001:1.0"`. The colon separator avoids
+/// confusion with `--param NAME=VALUE` (single value, no range) and
+/// matches the `--sweep NAME=lin(...)` spirit of compositional CLI
+/// surfaces. Survey uses these directly as the LHS box.
+#[derive(Clone, Debug)]
+pub struct EstimateBoundsSpec {
+    pub name: String,
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl FromStr for EstimateBoundsSpec {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (name, range) = s.split_once('=')
+            .ok_or_else(|| format!(
+                "expected NAME=LO:HI, got '{}'", s))?;
+        let (lo_s, hi_s) = range.split_once(':')
+            .ok_or_else(|| format!(
+                "expected NAME=LO:HI (with `:` between bounds), got '{}'", s))?;
+        let lo = lo_s.parse::<f64>()
+            .map_err(|_| format!(
+                "'{}' is not a valid float in --estimate {}", lo_s, name))?;
+        let hi = hi_s.parse::<f64>()
+            .map_err(|_| format!(
+                "'{}' is not a valid float in --estimate {}", hi_s, name))?;
+        if !(lo.is_finite() && hi.is_finite()) {
+            return Err(format!(
+                "--estimate {}={}:{}: bounds must both be finite", name, lo, hi));
+        }
+        if lo >= hi {
+            return Err(format!(
+                "--estimate {}={}:{}: lower bound must be < upper bound",
+                name, lo, hi));
+        }
+        Ok(Self { name: name.to_string(), lo, hi })
+    }
+}
+
 // ─── ListDuration ─────────────────────────────────────────────────────────────
 
 /// `--since 1h` / `30m` / `2d`  (for `camdl list`)
