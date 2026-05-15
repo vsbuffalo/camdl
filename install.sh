@@ -7,6 +7,7 @@
 set -euo pipefail
 
 OCAML_SWITCH_VERSION="${OCAML_SWITCH_VERSION:-5.2.0}"
+NO_SANDBOX="${NO_SANDBOX:-0}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!! \033[0m %s\n' "$*" >&2; }
@@ -130,7 +131,31 @@ ensure_ocaml_switch() {
 
     # opam init is idempotent with --reinit guard via root presence
     if [[ ! -d "${OPAMROOT:-$HOME/.opam}" ]]; then
-        opam init --bare --disable-sandboxing -y
+        if [[ "$NO_SANDBOX" == "1" ]]; then
+            warn "Initializing opam without sandboxing (NO_SANDBOX=1)."
+            warn "Every future 'opam install' in this switch will run build"
+            warn "scripts without filesystem isolation."
+            opam init --bare --disable-sandboxing -y
+        elif ! opam init --bare -y; then
+            cat >&2 <<'EOF'
+Sandboxed opam init failed.
+
+Most common cause on Linux: bubblewrap isn't installed,
+or your kernel doesn't allow unprivileged user namespaces.
+
+To proceed, either:
+  1. Install bubblewrap and re-run:
+       sudo apt-get install bubblewrap   # Debian/Ubuntu
+       sudo dnf install bubblewrap       # Fedora/RHEL
+       sudo pacman -S bubblewrap         # Arch
+  2. Or skip sandboxing explicitly:
+       NO_SANDBOX=1 ./install.sh
+     (this reduces supply-chain protection on every package
+     you install via opam in this switch — recommended only
+     if option 1 isn't available)
+EOF
+            err "opam init failed without sandboxing fallback."
+        fi
     fi
 
     # Load opam env into this shell
@@ -173,6 +198,16 @@ build_project() {
     make install
 }
 
+verify_install() {
+    log "Verifying install..."
+    export PATH="$HOME/.local/bin:$PATH"
+    have camdlc || err "camdlc isn't on PATH after install."
+    have camdl  || err "camdl isn't on PATH after install."
+    camdlc --camdl-version >/dev/null || err "camdlc was installed but won't execute."
+    camdl  --version       >/dev/null || err "camdl was installed but won't execute."
+    log "Verified: $(camdl --version 2>&1 | head -1)"
+}
+
 final_notes() {
     cat <<'EOF'
 
@@ -204,6 +239,7 @@ main() {
     ensure_rust
     install_ocaml_deps
     build_project
+    verify_install
     final_notes
 }
 

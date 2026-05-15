@@ -51,6 +51,15 @@ manager (apt / dnf / yum / pacman / zypper on Linux, Homebrew on
 macOS, installing brew + Xcode CLT if absent). Override the OCaml
 switch version with `OCAML_SWITCH_VERSION=5.2.1 ./install.sh`.
 
+The script initializes opam with sandboxing enabled (via
+`bubblewrap` on Linux, `sandbox-exec` on macOS). If sandboxed init
+fails — typically because `bubblewrap` isn't installed or your
+kernel disallows unprivileged user namespaces — the script will
+abort with instructions. You can re-run with `NO_SANDBOX=1
+./install.sh` to disable sandboxing, but this reduces supply-chain
+protection on every package installed via opam in this switch and
+is recommended only when installing `bubblewrap` isn't an option.
+
 If you'd rather wire the toolchain by hand, follow the manual steps
 below.
 
