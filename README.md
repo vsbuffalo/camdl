@@ -35,6 +35,25 @@ model.camdl ──→ camdlc ──→ model.ir.json
 
 ## Install
 
+### Quick install (Linux / macOS)
+
+For a fresh machine, the `install.sh` script at the repo root installs
+both toolchains (OCaml ≥ 5.2 via opam, Rust stable via rustup),
+fetches OCaml package dependencies, and runs `make build && make
+install`:
+
+```bash
+./install.sh
+```
+
+It's idempotent — safe to re-run — and uses your system package
+manager (apt / dnf / yum / pacman / zypper on Linux, Homebrew on
+macOS, installing brew + Xcode CLT if absent). Override the OCaml
+switch version with `OCAML_SWITCH_VERSION=5.2.1 ./install.sh`.
+
+If you'd rather wire the toolchain by hand, follow the manual steps
+below.
+
 ### Prerequisites
 
 camdl has two language runtimes. You need both available before
