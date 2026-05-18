@@ -5,30 +5,53 @@ name: CI
 # billed 10× and Windows 2× the Linux rate, and the Rust code is
 # platform-invariant (no OS-conditional cfgs).
 #
-# Doc-only and fixture-only changes skip this workflow.
+# Structure: `changes` decides whether non-doc code changed; `test`
+# (the real suite) runs only when it did; `ci` is a tiny always-runs
+# gate that is the REQUIRED status check. This keeps doc-only changes
+# cheap (test is skipped) without deadlocking branch protection — the
+# `ci` check always reports a verdict even when `test` is skipped. Do
+# not make `test` the required check directly; make `ci` required.
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - 'examples/**'
-      - 'README.md'
-      - '**/*.md'
-      - '.gitignore'
-      - 'LICENSE'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - 'examples/**'
-      - 'README.md'
-      - '**/*.md'
-      - '.gitignore'
-      - 'LICENSE'
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.f.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: f
+        name: Detect whether non-doc code changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+            if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
+            fi
+          fi
+          changed="$(git diff --name-only "$base" HEAD)"
+          echo "base=$base"
+          echo "changed files:"
+          echo "$changed"
+          # code=true if ANY changed path is not doc/fixture/meta.
+          if echo "$changed" | grep -qvE '^(docs/|examples/|.*\.md$|\.gitignore$|LICENSE$)'; then
+            echo "code=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,3 +108,24 @@ jobs:
 
       - name: Integration tests
         run: opam exec -- make test-integration
+
+  ci:
+    # The REQUIRED status check (point branch protection at `ci`, not
+    # `test`). Always runs so protection always gets a verdict; fails
+    # only if `test` actually failed/was cancelled — a skipped `test`
+    # (legitimate for doc-only changes) passes the gate.
+    needs: [changes, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate
+        run: |
+          echo "changes.code = ${{ needs.changes.outputs.code }}"
+          echo "test.result  = ${{ needs.test.result }}"
+          case "${{ needs.test.result }}" in
+            failure|cancelled)
+              echo "::error::test job ${{ needs.test.result }}"
+              exit 1 ;;
+            *)
+              echo "CI gate passed (test: ${{ needs.test.result }})" ;;
+          esac
