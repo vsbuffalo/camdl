@@ -53,5 +53,20 @@ bitflags::bitflags! {
         /// model with `balance{}` produced a different trajectory on
         /// each backend with no warning.
         const BALANCE           = 1 << 2;
+        /// Individual-sampling / lineage tracking (2026-05-19 proposal).
+        /// Declared by backends that can attach a `TransitionObserver`
+        /// to the event loop and emit a line list. Gillespie, tau-leap,
+        /// and chain-binomial declare it; ODE does not (no individuals).
+        ///
+        /// Unlike OVERDISPERSION / REAL_COMPARTMENTS / BALANCE, this is
+        /// NOT auto-derived by `CompiledModel::required_capabilities()`
+        /// from the IR — a model carrying `#[lineage]` annotations still
+        /// runs identically with or without tracking. The requirement is
+        /// raised only when `--lineages` is explicitly requested, so the
+        /// CLI checks `backend.capabilities().contains(LINEAGES)` at the
+        /// point of the request rather than via the IR scan.
+        const LINEAGES          = 1 << 3;
     }
 }
+
+pub mod lineage;

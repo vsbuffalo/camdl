@@ -33,7 +33,9 @@ impl Simulate for TauLeapSim {
     }
 
     fn capabilities(&self) -> crate::Capabilities {
-        crate::Capabilities::OVERDISPERSION | crate::Capabilities::REAL_COMPARTMENTS
+        crate::Capabilities::OVERDISPERSION
+            | crate::Capabilities::REAL_COMPARTMENTS
+            | crate::Capabilities::LINEAGES
     }
 
     fn name(&self) -> &'static str { "tau_leap" }

@@ -99,6 +99,7 @@ impl Simulate for ChainBinomialSim {
         crate::Capabilities::OVERDISPERSION
             | crate::Capabilities::REAL_COMPARTMENTS
             | crate::Capabilities::BALANCE  // gh#audit-C3
+            | crate::Capabilities::LINEAGES
     }
 
     fn name(&self) -> &'static str { "chain_binomial" }

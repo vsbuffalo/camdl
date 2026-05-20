@@ -14,6 +14,12 @@ ir = { path = "../ir" }
 libm = "0.2"
 log = "0.4"
 nlopt = { version = "0.8", optional = true }
+# Lineage line-list Parquet output (2026-05-19 individual-sampling layer).
+# Pinned; large dependency tree (see proposal report). Behind the default-on
+# `lineage-parquet` feature so minimal builds (`--no-default-features`) keep
+# only the dependency-free TSV writer.
+arrow = { version = "53", optional = true, default-features = false }
+parquet = { version = "53", optional = true, default-features = false, features = ["arrow"] }
 rand = "0.8"
 rand_chacha = { version = "0.3", features = ["serde1"] }
 rand_distr = "0.4"
@@ -23,7 +29,11 @@ serde_json = "1"
 thiserror = "1"
 
 [features]
-default = ["ode"]
+default = ["ode", "lineage-parquet"]
+# Parquet line-list output for the individual-sampling layer. Default-on so
+# normal builds get the production format; the TSV writer is always available
+# regardless. Disable with `--no-default-features` for a parquet-free build.
+lineage-parquet = ["dep:arrow", "dep:parquet"]
 # `ode` gates the NLopt-backed deterministic-inference algorithms
 # (nl-sbplx, nl-bobyqa) and — in later phases — `mh` and `nuts`.
 # Default-on so install scripts and dev builds pick it up; can be

@@ -4,6 +4,7 @@ use crate::{
     rng::StatefulRng,
     error::SimError,
     intervention::{all_intervention_times, apply_interventions_at},
+    lineage::TransitionObserver,
     ode_integrator::rk4_step,
     output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
@@ -36,8 +37,10 @@ impl Simulate for GillespieSim {
         run_gillespie(model, params, seed, cfg)
     }
 
+    // capabilities() / name() below.
+
     fn capabilities(&self) -> crate::Capabilities {
-        crate::Capabilities::REAL_COMPARTMENTS
+        crate::Capabilities::REAL_COMPARTMENTS | crate::Capabilities::LINEAGES
     }
 
     fn name(&self) -> &'static str { "gillespie" }
@@ -50,11 +53,29 @@ fn eval_one(tr_idx: usize, ctx: &EvalCtx<'_>) -> f64 {
     eval_resolved(&ctx.model.resolved.rates[tr_idx], ctx).max(0.0)
 }
 
-fn run_gillespie(
+pub fn run_gillespie(
     model: &CompiledModel,
     params: &[f64],
     seed: u64,
     cfg: &GillespieConfig,
+) -> Result<Trajectory, SimError> {
+    run_gillespie_with_observer(model, params, seed, cfg, None)
+}
+
+/// Gillespie run with an optional [`TransitionObserver`] attached to the event
+/// loop (individual-sampling layer, 2026-05-19 proposal).
+///
+/// `observer = None` reproduces [`run_gillespie`] byte-for-byte: the observer
+/// is only consulted *after* the simulation RNG has selected the firing
+/// transition and is passed the pre-stoichiometry state, so it cannot reorder
+/// or add draws to the simulation's `StatefulRng`. This is the load-bearing
+/// trajectory-invariance invariant (validation Tier 2a).
+pub fn run_gillespie_with_observer(
+    model: &CompiledModel,
+    params: &[f64],
+    seed: u64,
+    cfg: &GillespieConfig,
+    mut observer: Option<&mut dyn TransitionObserver>,
 ) -> Result<Trajectory, SimError> {
     let (mut int_s, mut real_s) = model.initial_state(params)?;
 
@@ -237,6 +258,14 @@ fn run_gillespie(
 
         // Record firing diagnostics
         diag_vec[fired_idx].record_firing(t, propensities[fired_idx]);
+
+        // Lineage observer: called AFTER the simulation RNG picked the firing
+        // transition, with the pre-stoichiometry (event-instant) state. The
+        // observer owns its own RNG stream, so it cannot perturb the count
+        // trajectory. Single-population slice → deme 0, multiplicity 1.
+        if let Some(obs) = observer.as_deref_mut() {
+            obs.on_fired(fired_idx, 0, 1, t, &int_s, &real_s, params)?;
+        }
 
         // Apply stoichiometry
         for &(local, delta) in &model.transition_stoich[fired_idx] {
