@@ -1,0 +1,65 @@
+# Two-patch SIR with #[lineage] transmission and an ASYMMETRIC contact /
+# coupling matrix. Source for the `spatial_lineage` fixture; the committed
+# IR JSON is produced by `camdlc spatial_lineage.camdl`.
+#
+# This is the Phase-2 stratified-attribution test model (2026-05-19
+# individual-sampling-layer proposal, §"Mathematical structure" — stratified
+# case, and §"Validation" Tier 2b).
+#
+# Force of infection into patch a:
+#   beta * S[a] * sum(b in patch, C[a,b] * I[b] / N[b])
+#
+# After compile-time expansion of sum(b in patch, ...) the per-patch rate is a
+# sum of explicit C[a,b]*I[b]/N[b] terms, so `parent_pool_weights` lists each
+# I[b] with weight  beta * C[a,b] * S[a] / N[b]  — the per-stratum (patch)
+# decomposition. The matrix is deliberately ASYMMETRIC (C[a,b] != C[b,a]) and
+# the initial infectious counts are unequal across patches, so the
+# attribution frequencies P(b) = w_b * I[b] / sum_b' w_b' * I[b'] differ
+# sharply from a uniform-over-all-infectious null. Tier 2b asserts the
+# empirical frequencies match this prediction within Monte-Carlo error.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+dimensions {
+  patch = [a, b]
+}
+
+stratify(by = patch)
+
+parameters {
+  beta  : rate in [0.0, 5.0]
+  gamma : rate in [0.0, 1.0]
+}
+
+tables {
+  # Asymmetric mixing: C[p, q] = contact weight that patch-p susceptibles
+  # have with patch-q infectious. Row p, column q. C[a,b]=0.3 != C[b,a]=1.5.
+  C : patch × patch = [[1.0, 0.3],
+                        [1.5, 0.2]]
+}
+
+let N[p in patch] = S[p] + I[p] + R[p]
+
+transitions {
+  #[lineage]
+  infection[p in patch] : S[p] --> I[p]
+    @ beta * S[p] * sum(q in patch, C[p, q] * I[q] / N[q])
+
+  recovery[p in patch]  : I[p] --> R[p]  @ gamma * I[p]
+}
+
+init {
+  # Unequal infectious seeds across patches so weight*count masses differ even
+  # at t=0: patch a starts with more susceptibles, patch b with more infectious.
+  S[a] = 4000
+  I[a] = 5
+  S[b] = 2000
+  I[b] = 40
+}
+
+simulate {
+  from = 0 'days
+  to   = 40 'days
+}
