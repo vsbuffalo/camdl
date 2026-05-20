@@ -28,8 +28,15 @@ pub struct LineListEntry {
     pub individual: IndividualId,
     pub source: Option<CompartmentId>,
     pub destination: Option<CompartmentId>,
+    /// The focal (child) individual's deme — its stratum / patch. For a
+    /// lineage event this is the destination stratum `a`; for a simple
+    /// transition the source/destination stratum.
     pub deme: DemeId,
     pub parent: ParentRef,
+    /// The parent individual's deme — its stratum / patch `b`. Populated only
+    /// at lineage events (`parent = Individual(..)`); `None` otherwise. The
+    /// pair (`parent_deme`, `deme`) is the contact-structured edge `b → a`.
+    pub parent_deme: Option<DemeId>,
 }
 
 /// Which on-disk format the line list is written in.
@@ -92,6 +99,12 @@ fn comp_column(c: Option<CompartmentId>) -> i64 {
     c.map_or(-1, |g| g as i64)
 }
 
+/// Column value for an `Option<DemeId>`: the deme or `-1` if absent (a
+/// non-lineage event has no parent deme).
+fn deme_column(d: Option<DemeId>) -> i64 {
+    d.map_or(-1, |g| g as i64)
+}
+
 /// The fixed column order shared by both formats (and the tree reader).
 pub const COLUMNS: &[&str] = &[
     "time",
@@ -102,6 +115,7 @@ pub const COLUMNS: &[&str] = &[
     "deme",
     "parent_kind",
     "parent_id",
+    "parent_deme",
 ];
 
 // ── TSV ─────────────────────────────────────────────────────────────────────
@@ -129,7 +143,7 @@ impl LineListWriter for TsvLineListWriter {
         let (kind, pid) = parent_columns(e.parent);
         writeln!(
             self.out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             e.time,
             e.transition,
             e.individual.0,
@@ -138,6 +152,7 @@ impl LineListWriter for TsvLineListWriter {
             e.deme,
             kind,
             pid,
+            deme_column(e.parent_deme),
         )
         .map_err(|e| SimError::Validation(format!("line list write: {}", e)))
     }
@@ -176,6 +191,7 @@ mod parquet_impl {
         deme: Vec<u32>,
         parent_kind: Vec<&'static str>,
         parent_id: Vec<i64>,
+        parent_deme: Vec<i64>,
     }
 
     impl Buffer {
@@ -189,6 +205,7 @@ mod parquet_impl {
                 deme: Vec::with_capacity(BATCH_ROWS),
                 parent_kind: Vec::with_capacity(BATCH_ROWS),
                 parent_id: Vec::with_capacity(BATCH_ROWS),
+                parent_deme: Vec::with_capacity(BATCH_ROWS),
             }
         }
 
@@ -205,6 +222,7 @@ mod parquet_impl {
             self.deme.clear();
             self.parent_kind.clear();
             self.parent_id.clear();
+            self.parent_deme.clear();
         }
     }
 
@@ -224,6 +242,7 @@ mod parquet_impl {
             Field::new("deme", DataType::UInt32, false),
             Field::new("parent_kind", DataType::Utf8, false),
             Field::new("parent_id", DataType::Int64, false),
+            Field::new("parent_deme", DataType::Int64, false),
         ])
     }
 
@@ -262,6 +281,7 @@ mod parquet_impl {
                     Arc::new(UInt32Array::from(self.buf.deme.clone())),
                     Arc::new(StringArray::from(self.buf.parent_kind.clone())),
                     Arc::new(Int64Array::from(self.buf.parent_id.clone())),
+                    Arc::new(Int64Array::from(self.buf.parent_deme.clone())),
                 ],
             )
             .map_err(|e| SimError::Validation(format!("parquet batch build: {}", e)))?;
@@ -290,6 +310,7 @@ mod parquet_impl {
             self.buf.deme.push(e.deme);
             self.buf.parent_kind.push(kind);
             self.buf.parent_id.push(pid);
+            self.buf.parent_deme.push(deme_column(e.parent_deme));
             if self.buf.len() >= BATCH_ROWS {
                 self.flush_batch()?;
             }
@@ -329,6 +350,7 @@ mod tests {
                 destination: Some(1),
                 deme: 0,
                 parent: ParentRef::Individual(IndividualId(3)),
+                parent_deme: Some(1),
             })
             .unwrap();
             w.write(&LineListEntry {
@@ -339,6 +361,7 @@ mod tests {
                 destination: None,
                 deme: 0,
                 parent: ParentRef::None,
+                parent_deme: None,
             })
             .unwrap();
             w.finish().unwrap();
@@ -346,8 +369,10 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines[0], COLUMNS.join("\t"));
-        assert!(lines[1].starts_with("1.5\t0\t7\t0\t1\t0\tindividual\t3"));
-        assert!(lines[2].starts_with("2\t2\t8\t2\t-1\t0\tnone\t-1"));
+        // child deme 0, parent deme 1 (cross-stratum edge 1 → 0).
+        assert!(lines[1].starts_with("1.5\t0\t7\t0\t1\t0\tindividual\t3\t1"));
+        // non-lineage event: parent_deme sentinel -1.
+        assert!(lines[2].starts_with("2\t2\t8\t2\t-1\t0\tnone\t-1\t-1"));
         std::fs::remove_file(&path).ok();
     }
 }

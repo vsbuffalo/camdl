@@ -382,6 +382,11 @@ pub fn read_tsv(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimError> 
                 )))
             }
         };
+        // parent_deme: -1 sentinel → None (non-lineage event).
+        let parent_deme = match parse_i64(f[8])? {
+            v if v < 0 => None,
+            v => Some(v as u32),
+        };
         out.push(LineListEntry {
             time,
             transition,
@@ -390,6 +395,7 @@ pub fn read_tsv(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimError> 
             destination,
             deme,
             parent,
+            parent_deme,
         });
     }
     Ok(out)
@@ -421,6 +427,7 @@ pub fn read_parquet(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimErr
         let deme = col(5).as_any().downcast_ref::<UInt32Array>().unwrap();
         let parent_kind = col(6).as_any().downcast_ref::<StringArray>().unwrap();
         let parent_id = col(7).as_any().downcast_ref::<Int64Array>().unwrap();
+        let parent_deme = col(8).as_any().downcast_ref::<Int64Array>().unwrap();
         let comp_opt = |v: i64| if v < 0 { None } else { Some(v as usize) };
         for r in 0..batch.num_rows() {
             let parent = match parent_kind.value(r) {
@@ -428,6 +435,10 @@ pub fn read_parquet(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimErr
                 "import" => ParentRef::Import,
                 "seed" => ParentRef::Seed,
                 _ => ParentRef::None,
+            };
+            let pdeme = match parent_deme.value(r) {
+                v if v < 0 => None,
+                v => Some(v as u32),
             };
             out.push(LineListEntry {
                 time: time.value(r),
@@ -437,6 +448,7 @@ pub fn read_parquet(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimErr
                 destination: comp_opt(destination.value(r)),
                 deme: deme.value(r),
                 parent,
+                parent_deme: pdeme,
             });
         }
     }
@@ -456,6 +468,7 @@ mod tests {
             destination: Some(dst),
             deme: 0,
             parent: ParentRef::Individual(IndividualId(parent)),
+            parent_deme: Some(0),
         }
     }
 

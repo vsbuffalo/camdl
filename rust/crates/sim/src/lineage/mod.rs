@@ -19,12 +19,25 @@
 //!
 //! ## Scope of this slice
 //!
-//! Gillespie + single population only. tau-leap / chain-binomial declare the
+//! Gillespie only. tau-leap / chain-binomial declare the
 //! [`crate::Capabilities::LINEAGES`] flag (so the capability check passes) but
 //! tracking is not yet wired into their loops — requesting `--lineages` on
-//! those backends returns a clear "not yet implemented" error at the CLI.
-//! Stratified / multi-deme attribution is Phase 2.
+//! those backends returns a clear "not yet implemented" error at the CLI
+//! (Phase 3).
+//!
+//! ## Phase 2: stratified / spatial attribution
+//!
+//! Demes are real (see [`deme::DemeMap`]). A `#[lineage]` event in stratum `a`
+//! samples its parent stratum `b` with probability `∝ weight_b · count_b`,
+//! where `weight_b` is the per-class weight the OCaml compiler emitted for the
+//! parent compartment `I[b]` (for stratified frequency-dependent transmission,
+//! `weight_b = β·C[a,b]·S[a]/N[b]`). The parent is then sampled uniformly
+//! within the `(b, I[b])` pool and the line list records `parent_deme = b`,
+//! child `deme = a`. Because the expanded IR gives each stratum its own
+//! compartment (`I_a`, `I_b`), the per-stratum pools are distinguished by
+//! compartment id; the deme is the compartment's stratum index.
 
+pub mod deme;
 pub mod writer;
 pub mod tree;
 
@@ -38,6 +51,7 @@ use crate::error::SimError;
 use crate::propensity::{eval_expr, EvalCtx};
 use crate::state::{IntState, RealState};
 
+pub use deme::DemeMap;
 pub use writer::{LineListEntry, LineListFormat, LineListWriter, TsvLineListWriter};
 #[cfg(feature = "lineage-parquet")]
 pub use writer::ParquetLineListWriter;
@@ -52,9 +66,11 @@ pub const LINEAGE_RNG_OFFSET: u64 = 0x5ca1ab1e_d15ea5e5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IndividualId(pub u64);
 
-/// Deme (spatial/stratum) identifier. Always 0 in the single-population slice;
-/// carried through the line list so Phase 2 can populate it without a schema
-/// change.
+/// Deme (spatial/stratum) identifier — the stratum index of a compartment in
+/// the cartesian product of the model's dimensions (see [`deme::DemeMap`]).
+/// 0 for unstratified compartments and every compartment in a single-
+/// population model, so the single-population slice is the `DemeId = 0`
+/// special case.
 pub type DemeId = u32;
 
 /// Compartment identifier — the *global* compartment index in the model's
@@ -257,7 +273,9 @@ pub struct LineageObserver<'m, W: LineListWriter> {
     routes: Vec<TransitionRoute>,
     /// Global compartment ids that carry tracked IDs.
     tracked: Vec<CompartmentId>,
-    deme: DemeId,
+    /// Per-compartment deme (stratum) assignment. The pool key for a
+    /// compartment `c` is `(deme_map.deme_of(c), c)`.
+    deme_map: DemeMap,
 }
 
 impl<'m, W: LineListWriter> LineageObserver<'m, W> {
@@ -272,7 +290,9 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
         initial_int: &IntState,
         mut writer: W,
     ) -> Result<Self, SimError> {
-        let deme: DemeId = 0;
+        // Per-compartment deme (stratum) assignment. 0 everywhere for an
+        // unstratified / single-population model — the Phase-1 special case.
+        let deme_map = DemeMap::build(&model.model, &model.comp_index);
 
         // Resolve the tracked-compartment names to global indices.
         let mut tracked: Vec<CompartmentId> = Vec::new();
@@ -335,10 +355,11 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
         }
 
         let mut identity = IdentityState::new();
-        // Seed initial pools for tracked compartments from their t=0 counts.
+        // Seed initial pools for tracked compartments from their t=0 counts,
+        // each in its own stratum's deme.
         for &g in &tracked {
             if let Some(local) = model.global_to_int[g] {
-                identity.seed_pool(deme, g, initial_int.counts[local]);
+                identity.seed_pool(deme_map.deme_of(g), g, initial_int.counts[local]);
             }
         }
 
@@ -352,7 +373,7 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
             writer,
             routes,
             tracked,
-            deme,
+            deme_map,
         })
     }
 
@@ -369,10 +390,16 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
     }
 
     /// Sample a parent pool `b ∝ weight_b · count_b` (uniform within pool).
-    /// Returns the chosen parent individual. Errors if every pool is empty or
-    /// all weights are zero — a structural inconsistency, since a `#[lineage]`
-    /// transition only fires when its rate (and thus some `weight·count`) is
-    /// positive.
+    /// Returns the chosen parent individual *and its deme* (its stratum). Each
+    /// candidate compartment `I[b]` lives in its own stratum's pool
+    /// `(deme_of(I[b]), I[b])`, so the per-stratum weight `weight_b` is paired
+    /// with the per-stratum count `count_b` — this is the contact-structured
+    /// attribution: a stratum with higher `C[a,b]·I[b]/N[b]` wins
+    /// proportionally more parents, NOT uniform over all infectious.
+    ///
+    /// Errors if every pool is empty or all weights are zero — a structural
+    /// inconsistency, since a `#[lineage]` transition only fires when its rate
+    /// (and thus some `weight·count`) is positive.
     fn sample_parent(
         &mut self,
         weights: &[(CompartmentId, ir::expr::Expr)],
@@ -381,7 +408,7 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
         params: &[f64],
         time: f64,
         tr_idx: TransitionId,
-    ) -> Result<IndividualId, SimError> {
+    ) -> Result<(IndividualId, DemeId), SimError> {
         let ctx = EvalCtx {
             model: self.model,
             int_s: pre_int,
@@ -393,15 +420,17 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
             int_float_override: None,
         };
 
-        // Per-pool unnormalised mass = weight_b · count_b.
-        let mut masses: Vec<(CompartmentId, f64)> = Vec::with_capacity(weights.len());
+        // Per-pool unnormalised mass = weight_b · count_b, with count_b taken
+        // from the parent compartment's own stratum pool.
+        let mut masses: Vec<(CompartmentId, DemeId, f64)> = Vec::with_capacity(weights.len());
         let mut total = 0.0;
         for (g, weight_expr) in weights {
+            let parent_deme = self.deme_map.deme_of(*g);
             let w = eval_expr(weight_expr, &ctx)?.max(0.0);
-            let count = self.identity.pool_len(self.deme, *g) as f64;
+            let count = self.identity.pool_len(parent_deme, *g) as f64;
             let mass = w * count;
             total += mass;
-            masses.push((*g, mass));
+            masses.push((*g, parent_deme, mass));
         }
 
         if total <= 0.0 {
@@ -416,11 +445,15 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
         // Select pool by cumulative mass against a uniform draw.
         let u = self.rng.uniform() * total;
         let mut cumulative = 0.0;
-        let mut chosen = masses[masses.len() - 1].0;
-        for (g, mass) in &masses {
+        let (mut chosen, mut chosen_deme) = {
+            let last = &masses[masses.len() - 1];
+            (last.0, last.1)
+        };
+        for (g, d, mass) in &masses {
             cumulative += *mass;
             if cumulative >= u {
                 chosen = *g;
+                chosen_deme = *d;
                 break;
             }
         }
@@ -430,17 +463,17 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
         let pool = self
             .identity
             .pools
-            .get(&(self.deme, chosen))
+            .get(&(chosen_deme, chosen))
             .filter(|p| !p.is_empty())
             .ok_or_else(|| {
                 SimError::Validation(format!(
-                    "lineage transition '{}': chosen parent pool (comp {}) is \
-                     empty at t={}",
-                    self.model.model.transitions[tr_idx].name, chosen, time
+                    "lineage transition '{}': chosen parent pool (comp {}, deme {}) \
+                     is empty at t={}",
+                    self.model.model.transitions[tr_idx].name, chosen, chosen_deme, time
                 ))
             })?;
         let idx = self.rng.below(pool.len());
-        Ok(pool[idx])
+        Ok((pool[idx], chosen_deme))
     }
 }
 
@@ -449,14 +482,17 @@ impl<'m, W: LineListWriter> TransitionObserver for LineageObserver<'m, W> {
     fn on_fired(
         &mut self,
         transition: TransitionId,
-        deme: DemeId,
+        _deme: DemeId,
         multiplicity: u64,
         time: f64,
         pre_int: &IntState,
         pre_real: &RealState,
         params: &[f64],
     ) -> Result<(), SimError> {
-        debug_assert_eq!(deme, self.deme, "single-population slice tracks deme 0 only");
+        // The caller's `deme` hint is not used for pool keying: in the fully-
+        // expanded IR every stratum is its own compartment, so a compartment's
+        // deme is read from `deme_map`, not from the firing. The backend has
+        // no separate notion of which deme fired.
 
         let route = &self.routes[transition];
         if !route.touches_tracked {
@@ -471,13 +507,21 @@ impl<'m, W: LineListWriter> TransitionObserver for LineageObserver<'m, W> {
         let destination = route.destination;
         let parent_weights = route.parent_weights.clone();
 
+        // The focal individual's deme is its compartment's stratum: the
+        // destination for an inflow/move, else the source for an outflow.
+        let child_deme = match (source, destination) {
+            (_, Some(dst)) => self.deme_map.deme_of(dst),
+            (Some(src), None) => self.deme_map.deme_of(src),
+            (None, None) => 0,
+        };
+
         for _ in 0..multiplicity {
-            let (individual, parent, src_for_record, dst_for_record) =
+            let (individual, parent, parent_deme, src_for_record, dst_for_record) =
                 if let Some(weights) = &parent_weights {
-                    // Lineage event: sample a parent from the weighted pools,
-                    // mint a fresh child in the destination, move/remove the
-                    // source individual.
-                    let parent_id =
+                    // Lineage event: sample a parent (and its stratum) from the
+                    // per-stratum weighted pools, mint a fresh child in the
+                    // destination's stratum, move/remove the source individual.
+                    let (parent_id, parent_deme) =
                         self.sample_parent(weights, pre_int, pre_real, params, time, transition)?;
 
                     // The focal (child) individual: a new ID minted in the
@@ -487,41 +531,53 @@ impl<'m, W: LineListWriter> TransitionObserver for LineageObserver<'m, W> {
                     if let Some(src) = source {
                         if self.tracked.contains(&src) {
                             // S is rarely tracked, but if a cycle pulled it in,
-                            // remove the source individual.
-                            let _ = self.identity.remove_uniform(deme, src, &mut self.rng);
+                            // remove the source individual from its stratum pool.
+                            let src_deme = self.deme_map.deme_of(src);
+                            let _ = self.identity.remove_uniform(src_deme, src, &mut self.rng);
                         }
                     }
                     let child = self.identity.mint();
                     if let Some(dst) = destination {
-                        self.identity.push(deme, dst, child);
+                        self.identity.push(self.deme_map.deme_of(dst), dst, child);
                     }
-                    (child, ParentRef::Individual(parent_id), source, destination)
+                    (
+                        child,
+                        ParentRef::Individual(parent_id),
+                        Some(parent_deme),
+                        source,
+                        destination,
+                    )
                 } else {
                     match (source, destination) {
                         (Some(src), Some(dst)) => {
-                            // Progression: move one ID from source to destination.
-                            // If the source pool is empty (e.g. an untracked
-                            // source feeding a tracked destination), mint instead.
-                            let id = match self.identity.remove_uniform(deme, src, &mut self.rng) {
-                                Some(id) => id,
-                                None => self.identity.mint(),
-                            };
-                            self.identity.push(deme, dst, id);
-                            (id, ParentRef::None, Some(src), Some(dst))
+                            // Progression: move one ID from the source stratum to
+                            // the destination stratum. If the source pool is empty
+                            // (untracked source feeding a tracked destination),
+                            // mint instead.
+                            let src_deme = self.deme_map.deme_of(src);
+                            let dst_deme = self.deme_map.deme_of(dst);
+                            let id =
+                                match self.identity.remove_uniform(src_deme, src, &mut self.rng) {
+                                    Some(id) => id,
+                                    None => self.identity.mint(),
+                                };
+                            self.identity.push(dst_deme, dst, id);
+                            (id, ParentRef::None, None, Some(src), Some(dst))
                         }
                         (Some(src), None) => {
-                            // Outflow (death): remove one ID from the source.
+                            // Outflow (death): remove one ID from the source stratum.
+                            let src_deme = self.deme_map.deme_of(src);
                             let id = self
                                 .identity
-                                .remove_uniform(deme, src, &mut self.rng)
+                                .remove_uniform(src_deme, src, &mut self.rng)
                                 .unwrap_or_else(|| self.identity.mint());
-                            (id, ParentRef::None, Some(src), None)
+                            (id, ParentRef::None, None, Some(src), None)
                         }
                         (None, Some(dst)) => {
                             // Inflow (import): mint a new ID with no parent.
                             let id = self.identity.mint();
-                            self.identity.push(deme, dst, id);
-                            (id, ParentRef::Import, None, Some(dst))
+                            self.identity.push(self.deme_map.deme_of(dst), dst, id);
+                            (id, ParentRef::Import, None, None, Some(dst))
                         }
                         (None, None) => {
                             // Nothing routable — shouldn't happen for a tracked
@@ -537,8 +593,9 @@ impl<'m, W: LineListWriter> TransitionObserver for LineageObserver<'m, W> {
                 individual,
                 source: src_for_record,
                 destination: dst_for_record,
-                deme,
+                deme: child_deme,
                 parent,
+                parent_deme,
             })?;
         }
 
