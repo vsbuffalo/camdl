@@ -1,0 +1,173 @@
+{
+  "ir_version": "0.5",
+  "validated_by": "ocaml-compiler-v0.5",
+  "model": {
+    "name": "sir_lineage",
+    "version": "0.3",
+    "time_unit": "days",
+    "description": null,
+    "compartments": [
+      { "name": "S", "kind": "integer" },
+      { "name": "I", "kind": "integer" },
+      { "name": "R", "kind": "integer" }
+    ],
+    "transitions": [
+      {
+        "name": "infection",
+        "stoichiometry": [ [ "S", -1 ], [ "I", 1 ] ],
+        "rate": {
+          "bin_op": {
+            "op": "div",
+            "left": {
+              "bin_op": {
+                "op": "mul",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": { "param": "beta" },
+                    "right": { "pop": "S" }
+                  }
+                },
+                "right": { "pop": "I" }
+              }
+            },
+            "right": { "pop_sum": [ "S", "I", "R" ] }
+          }
+        },
+        "metadata": {
+          "origin_kind": "transmission",
+          "source_compartment": "S",
+          "dest_compartment": "I"
+        },
+        "rate_grad": {
+          "beta": {
+            "bin_op": {
+              "op": "div",
+              "left": {
+                "bin_op": {
+                  "op": "mul",
+                  "left": {
+                    "bin_op": {
+                      "op": "mul",
+                      "left": { "pop": "S" },
+                      "right": { "pop": "I" }
+                    }
+                  },
+                  "right": { "pop_sum": [ "S", "I", "R" ] }
+                }
+              },
+              "right": {
+                "bin_op": {
+                  "op": "mul",
+                  "left": { "pop_sum": [ "S", "I", "R" ] },
+                  "right": { "pop_sum": [ "S", "I", "R" ] }
+                }
+              }
+            }
+          }
+        },
+        "lineage": {
+          "is_lineage_event": true,
+          "parent_pool_weights": [
+            [
+              "I",
+              {
+                "bin_op": {
+                  "op": "div",
+                  "left": {
+                    "bin_op": {
+                      "op": "mul",
+                      "left": { "param": "beta" },
+                      "right": { "pop": "S" }
+                    }
+                  },
+                  "right": { "pop_sum": [ "S", "I", "R" ] }
+                }
+              }
+            ]
+          ]
+        }
+      },
+      {
+        "name": "recovery",
+        "stoichiometry": [ [ "I", -1 ], [ "R", 1 ] ],
+        "rate": {
+          "bin_op": {
+            "op": "mul",
+            "left": { "param": "gamma" },
+            "right": { "pop": "I" }
+          }
+        },
+        "metadata": {
+          "origin_kind": "intrinsic",
+          "source_compartment": "I",
+          "dest_compartment": "R"
+        },
+        "rate_grad": { "gamma": { "pop": "I" } }
+      }
+    ],
+    "ode_equations": [],
+    "time_functions": [],
+    "tables": [],
+    "interventions": [],
+    "observations": [],
+    "parameters": [
+      {
+        "name": "beta",
+        "value": null,
+        "bounds": [ 0.001, 5.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "rate",
+        "param_dim": null
+      },
+      {
+        "name": "gamma",
+        "value": null,
+        "bounds": [ 0.01, 1.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "rate",
+        "param_dim": null
+      },
+      {
+        "name": "N0",
+        "value": null,
+        "bounds": [ 100.0, 10000.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "count",
+        "param_dim": null
+      }
+    ],
+    "initial_conditions": { "explicit": { "S": 499.0, "I": 1.0 } },
+    "output": {
+      "times": { "regular": { "start": 0.0, "step": 1.0, "end": 60.0 } },
+      "format": "tsv",
+      "trajectory": true,
+      "observations": true
+    },
+    "simulation": {
+      "t_start": 0.0,
+      "t_end": 60.0,
+      "time_semantics": "continuous",
+      "dt": null,
+      "rng_seed": null
+    },
+    "scenarios": [],
+    "model_structure": {
+      "dimensions": [],
+      "compartment_dims": { "S": [], "I": [], "R": [] },
+      "base_compartments": [ "S", "I", "R" ],
+      "transmission_transitions": [ "infection" ],
+      "infectious_compartments": [ "I" ]
+    },
+    "identity_tracked_compartments": [ "I", "R" ]
+  }
+}

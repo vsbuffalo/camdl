@@ -1,0 +1,75 @@
+{
+  "ir_version": "0.5",
+  "validated_by": "ocaml-compiler-v0.5",
+  "model": {
+    "name": "yule",
+    "version": "0.3",
+    "time_unit": "days",
+    "description": null,
+    "compartments": [ { "name": "Y", "kind": "integer" } ],
+    "transitions": [
+      {
+        "name": "birth",
+        "stoichiometry": [ [ "Y", 1 ] ],
+        "rate": {
+          "bin_op": {
+            "op": "mul",
+            "left": { "param": "lambda" },
+            "right": { "pop": "Y" }
+          }
+        },
+        "metadata": {
+          "origin_kind": "inflow",
+          "source_compartment": null,
+          "dest_compartment": "Y"
+        },
+        "rate_grad": { "lambda": { "pop": "Y" } },
+        "lineage": {
+          "is_lineage_event": true,
+          "parent_pool_weights": [ [ "Y", { "param": "lambda" } ] ]
+        }
+      }
+    ],
+    "ode_equations": [],
+    "time_functions": [],
+    "tables": [],
+    "interventions": [],
+    "observations": [],
+    "parameters": [
+      {
+        "name": "lambda",
+        "value": null,
+        "bounds": [ 0.0, 5.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "rate",
+        "param_dim": null
+      }
+    ],
+    "initial_conditions": { "explicit": { "Y": 3.0 } },
+    "output": {
+      "times": { "regular": { "start": 0.0, "step": 1.0, "end": 8.0 } },
+      "format": "tsv",
+      "trajectory": true,
+      "observations": true
+    },
+    "simulation": {
+      "t_start": 0.0,
+      "t_end": 8.0,
+      "time_semantics": "continuous",
+      "dt": null,
+      "rng_seed": null
+    },
+    "scenarios": [],
+    "model_structure": {
+      "dimensions": [],
+      "compartment_dims": { "Y": [] },
+      "base_compartments": [ "Y" ],
+      "transmission_transitions": [],
+      "infectious_compartments": []
+    },
+    "identity_tracked_compartments": [ "Y" ]
+  }
+}
