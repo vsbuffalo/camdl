@@ -211,6 +211,7 @@ mod tests {
                 None => ParentRef::None,
             },
             parent_deme: lineage_parent.map(|_| 0),
+            attribution_logprob: 0.0,
         }
     }
 

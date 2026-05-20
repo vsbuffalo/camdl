@@ -1,43 +1,51 @@
-//! Individual-sampling (lineage) layer — runtime + offline projection.
+//! Three-layer lineage architecture — event log → line list → tree.
 //!
-//! Implements the Phase-1 slice of the 2026-05-19 individual-sampling-layer
-//! proposal (`docs/dev/proposals/2026-05-19-individual-sampling-layer.md`):
-//! Gillespie + single-population linear-rate lineage tracking, a streamed
-//! append-only line-list writer (TSV + Parquet), and a pure offline pruner
-//! that projects a line list to a transmission tree in Newick form.
+//! Implements Layers 1–2 of the 2026-05-20 proposal
+//! (`docs/dev/proposals/2026-05-20-lineage-resampling-and-likelihood.md`),
+//! refactoring the shipped two-layer (inline-attribution) design:
 //!
-//! ## The load-bearing invariant: a separate RNG stream
+//! - **Layer 1 — [`event_log`]:** the simulation records an [`EventLog`] (the
+//!   ordered event sequence + evaluated per-pool FOI masses at `#[lineage]`
+//!   events). It draws *no* identities. `simulate --event-log` writes it.
+//! - **Layer 2 — [`realize`]:** an offline replay (`camdl lineage realize`)
+//!   reads the event log, maintains the per-pool [`IdentityState`], samples
+//!   *which individuals* at each event from the recorded masses, mints IDs, and
+//!   writes a [`LineListEntry`] line list — accumulating the §4a attribution
+//!   log-probability per event.
+//! - **Layer 3 (downstream, unchanged):** [`tree`] / [`project`] consume the
+//!   realized line list (transmission tree, sojourn, cohort).
 //!
-//! Identity-attribution draws (which parent pool, which individual within the
-//! pool) come from [`LineageRng`], an *independent* ChaCha8 stream seeded
-//! `main_seed ⊕ LINEAGE_RNG_OFFSET`. The simulation's own `StatefulRng` is
-//! never touched by the observer. Consequence: a run with `--lineages`
-//! produces a count trajectory byte-identical to the same run without it
-//! (validation Tier 2a). The observer's [`TransitionObserver::on_fired`] is
-//! called by the core loop *after* it has drawn its own RNG and decided what
-//! fired, so it cannot reorder the simulation RNG.
+//! ## The factorization (why the split)
 //!
-//! ## Scope of this slice
+//! `P(augmented) = P(counts) × P(identities | counts)`. The simulation draws
+//! the first factor; identity attribution is a separate stochastic layer drawn
+//! during replay. One expensive epidemic (event log) → many cheap identity
+//! realizations (line lists), each an i.i.d. draw from `P(identities | events)`
+//! seeded by `--identity-seed`.
 //!
-//! Gillespie only. tau-leap / chain-binomial declare the
-//! [`crate::Capabilities::LINEAGES`] flag (so the capability check passes) but
-//! tracking is not yet wired into their loops — requesting `--lineages` on
-//! those backends returns a clear "not yet implemented" error at the CLI
-//! (Phase 3).
+//! ## The separate RNG stream
 //!
-//! ## Phase 2: stratified / spatial attribution
+//! Identity draws (which parent pool, which individual) come from
+//! [`LineageRng`], an *independent* ChaCha8 stream seeded `seed ⊕
+//! LINEAGE_RNG_OFFSET`. In the refactored design the *count* simulation draws
+//! no identities at all (the recorder is identity-free), so a `--event-log`
+//! run's count trajectory is byte-identical to a plain run at the same seed —
+//! trivially, because the simulation is literally unchanged (Tier 2a).
+//!
+//! ## Stratified / spatial attribution
 //!
 //! Demes are real (see [`deme::DemeMap`]). A `#[lineage]` event in stratum `a`
-//! samples its parent stratum `b` with probability `∝ weight_b · count_b`,
-//! where `weight_b` is the per-class weight the OCaml compiler emitted for the
-//! parent compartment `I[b]` (for stratified frequency-dependent transmission,
-//! `weight_b = β·C[a,b]·S[a]/N[b]`). The parent is then sampled uniformly
-//! within the `(b, I[b])` pool and the line list records `parent_deme = b`,
-//! child `deme = a`. Because the expanded IR gives each stratum its own
-//! compartment (`I_a`, `I_b`), the per-stratum pools are distinguished by
-//! compartment id; the deme is the compartment's stratum index.
+//! samples its parent stratum `b` with probability `∝ w_b·X_b`, where `w_b` is
+//! the per-class weight the OCaml compiler emitted for the parent compartment
+//! `I[b]` (for stratified frequency-dependent transmission,
+//! `w_b = β·C[a,b]·S[a]/N[b]`). The parent is then sampled uniformly within the
+//! `(b, I[b])` pool. The event recorder evaluates and stores `w_b·X_b`; realize
+//! resamples pool-then-individual from those recorded masses.
 
 pub mod deme;
+pub mod event_log;
+pub mod event_log_io;
+pub mod realize;
 pub mod writer;
 pub mod tree;
 pub mod project;
@@ -47,12 +55,12 @@ use std::collections::HashMap;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
-use crate::propensity::{eval_expr, EvalCtx};
 use crate::state::{IntState, RealState};
 
 pub use deme::DemeMap;
+pub use event_log::{EventLog, EventRecord, EventRecorder, RouteInfo};
+pub use realize::{realize, RealizeSummary};
 pub use writer::{LineListEntry, LineListFormat, LineListWriter, TsvLineListWriter};
 #[cfg(feature = "lineage-parquet")]
 pub use writer::ParquetLineListWriter;
@@ -161,7 +169,7 @@ impl IdentityState {
         IdentityState { pools: HashMap::new(), next: 0 }
     }
 
-    fn mint(&mut self) -> IndividualId {
+    pub(crate) fn mint(&mut self) -> IndividualId {
         let id = IndividualId(self.next);
         self.next = self.next.checked_add(1).expect("IndividualId counter overflow");
         id
@@ -176,6 +184,13 @@ impl IdentityState {
         self.pools.get(&(deme, comp)).map_or(0, |v| v.len())
     }
 
+    /// The `idx`-th live member of a pool. Caller guarantees `idx < pool_len`.
+    /// Used by [`realize`] for the uniform-within-pool parent draw (the parent
+    /// is *not* consumed — only the source individual moves).
+    pub(crate) fn pool_member(&self, deme: DemeId, comp: CompartmentId, idx: usize) -> IndividualId {
+        self.pools[&(deme, comp)][idx]
+    }
+
     /// Total minted IDs (== next counter).
     pub fn total_minted(&self) -> u64 {
         self.next
@@ -183,7 +198,7 @@ impl IdentityState {
 
     /// Mint `count` fresh IDs into a pool (used for t=0 seeding). Returns
     /// nothing; the IDs are appended to the pool.
-    fn seed_pool(&mut self, deme: DemeId, comp: CompartmentId, count: i64) {
+    pub(crate) fn seed_pool(&mut self, deme: DemeId, comp: CompartmentId, count: i64) {
         if count <= 0 {
             return;
         }
@@ -197,7 +212,7 @@ impl IdentityState {
     /// Remove a uniformly-chosen individual from a pool and return it.
     /// Returns `None` if the pool is empty (a structural error the caller
     /// surfaces).
-    fn remove_uniform(&mut self, deme: DemeId, comp: CompartmentId, rng: &mut LineageRng) -> Option<IndividualId> {
+    pub(crate) fn remove_uniform(&mut self, deme: DemeId, comp: CompartmentId, rng: &mut LineageRng) -> Option<IndividualId> {
         let pool = self.pools.get_mut(&(deme, comp))?;
         if pool.is_empty() {
             return None;
@@ -207,44 +222,13 @@ impl IdentityState {
     }
 
     /// Push an existing individual into a pool.
-    fn push(&mut self, deme: DemeId, comp: CompartmentId, id: IndividualId) {
+    pub(crate) fn push(&mut self, deme: DemeId, comp: CompartmentId, id: IndividualId) {
         self.pool_mut(deme, comp).push(id);
     }
 
     /// Is `id` currently live in `(deme, comp)`? Used by structural tests.
     pub fn contains(&self, deme: DemeId, comp: CompartmentId, id: IndividualId) -> bool {
         self.pools.get(&(deme, comp)).is_some_and(|v| v.contains(&id))
-    }
-
-    /// A frozen snapshot of the current pools, for batch (tau-leap /
-    /// chain-binomial) parent sampling. See [`PoolSnapshot`].
-    fn snapshot(&self) -> PoolSnapshot {
-        PoolSnapshot { pools: self.pools.clone() }
-    }
-}
-
-/// A frozen clone of the identity pools, taken at the start of a batch step.
-///
-/// tau-leap and chain-binomial fire `k` events against rates and pools frozen
-/// at step start. Parent sampling for those `k` events must read parent pools
-/// from this snapshot, NOT from the live pools that the step's own child
-/// minting mutates — otherwise a child minted earlier this step could be
-/// recorded as a same-step parent, an edge the frozen approximation cannot
-/// resolve. Gillespie samples from live pools (exact, sequential) and uses no
-/// snapshot.
-pub struct PoolSnapshot {
-    pools: HashMap<(DemeId, CompartmentId), Vec<IndividualId>>,
-}
-
-impl PoolSnapshot {
-    /// Number of IDs that were in `(deme, comp)` at snapshot time.
-    fn pool_len(&self, deme: DemeId, comp: CompartmentId) -> usize {
-        self.pools.get(&(deme, comp)).map_or(0, |v| v.len())
-    }
-
-    /// The frozen member list for `(deme, comp)`, if any.
-    fn pool(&self, deme: DemeId, comp: CompartmentId) -> Option<&Vec<IndividualId>> {
-        self.pools.get(&(deme, comp)).filter(|p| !p.is_empty())
     }
 }
 
@@ -256,12 +240,16 @@ impl Default for IdentityState {
 
 /// The seam the core simulation loop calls into. The default `None` path is
 /// today's behaviour, byte-for-byte. `on_fired` is invoked after the loop has
-/// drawn its own RNG and applied stoichiometry-determining decisions.
+/// drawn its own RNG and applied stoichiometry-determining decisions. The
+/// concrete implementor is [`EventRecorder`] (Layer 1): it records each firing
+/// (and the evaluated per-pool weights at lineage events) but draws no
+/// identities, so it cannot perturb the count trajectory.
 pub trait TransitionObserver {
     /// One transition fired. `multiplicity` is the number of identical firings
-    /// (always 1 for Gillespie; > 1 reserved for tau-leap). `pre_state` is the
+    /// (always 1 for Gillespie; > 1 for the batched backends). `pre_int` is the
     /// integer state *before* the stoichiometry of these firings was applied —
-    /// so weight expressions and pool sampling see the event-instant state.
+    /// so weight expressions see the event-instant (Gillespie) /
+    /// start-of-step (batched) state, and `X_b == pre_int.counts[b]`.
     //
     // The argument list mirrors the proposal's `TransitionObserver` seam
     // (transition / deme / multiplicity / time / pre-state / params); bundling
@@ -280,451 +268,14 @@ pub trait TransitionObserver {
 
     /// Begin a batch step (tau-leap / chain-binomial): the backend has frozen
     /// rates and pools at step start and will feed `on_fired` with `multiplicity
-    /// > 1`. Default no-op — only the lineage observer freezes a pool snapshot.
+    /// >= 1` and `batched = true`. Default no-op — the [`EventRecorder`] flips
+    /// its `in_batch` flag so replay can reproduce the frozen-pool semantics.
     fn begin_batch_step(&mut self) {}
 
     /// End a batch step. Default no-op.
     fn end_batch_step(&mut self) {}
 }
 
-/// Per-transition precomputed routing: which integer-local compartment is the
-/// source (delta < 0) and which is the destination (delta > 0), if any, plus
-/// the global indices and the lineage decomposition.
-struct TransitionRoute {
-    /// Global compartment id of the source (the `-1` stoichiometry), if any.
-    source: Option<CompartmentId>,
-    /// Global compartment id of the destination (the `+1` stoichiometry), if any.
-    destination: Option<CompartmentId>,
-    /// `true` if this transition's source/destination touches a tracked comp.
-    touches_tracked: bool,
-    /// `Some(weights)` for a `#[lineage]` event: `(global_comp_id, weight_expr)`
-    /// pairs, the linear decomposition of the rate over parent pools. Sampling
-    /// picks pool `b ∝ weight_b · count_b`, then uniform within pool.
-    parent_weights: Option<Vec<(CompartmentId, ir::expr::Expr)>>,
-}
-
-/// The concrete observer: owns the identity pools, the separate RNG stream, and
-/// the line-list writer. Built once per run from a [`CompiledModel`].
-pub struct LineageObserver<'m, W: LineListWriter> {
-    model: &'m CompiledModel,
-    identity: IdentityState,
-    rng: LineageRng,
-    writer: W,
-    routes: Vec<TransitionRoute>,
-    /// Global compartment ids that carry tracked IDs.
-    tracked: Vec<CompartmentId>,
-    /// Per-compartment deme (stratum) assignment. The pool key for a
-    /// compartment `c` is `(deme_map.deme_of(c), c)`.
-    deme_map: DemeMap,
-    /// `Some` only during a batch (tau-leap / chain-binomial) step: a frozen
-    /// clone of the pools at step start, used for parent sampling so within-step
-    /// minting cannot create a same-step parent edge. `None` for Gillespie
-    /// (exact, sequential live-pool sampling).
-    snapshot: Option<PoolSnapshot>,
-    /// Sub-`dt` bias estimator (batch backends only). `edges` counts every
-    /// transmission edge (child born at a lineage event); `sub_dt_edges`
-    /// accumulates the edge-weighted same-step-parent share. The reported
-    /// fraction `sub_dt_edges / edges` is the fraction of edges the frozen
-    /// approximation cannot temporally resolve. Exactly 0 for Gillespie.
-    edges: u64,
-    sub_dt_edges: f64,
-}
-
-impl<'m, W: LineListWriter> LineageObserver<'m, W> {
-    /// Build the observer and seed the initial identity pools at t=0.
-    ///
-    /// Only `model.identity_tracked_compartments` are seeded; their initial
-    /// counts come from `initial_int`. IDs minted at t=0 carry parent
-    /// [`ParentRef::Seed`] in any subsequent event.
-    pub fn new(
-        model: &'m CompiledModel,
-        sim_seed: u64,
-        initial_int: &IntState,
-        mut writer: W,
-    ) -> Result<Self, SimError> {
-        // Per-compartment deme (stratum) assignment. 0 everywhere for an
-        // unstratified / single-population model — the Phase-1 special case.
-        let deme_map = DemeMap::build(&model.model, &model.comp_index);
-
-        // Resolve the tracked-compartment names to global indices.
-        let mut tracked: Vec<CompartmentId> = Vec::new();
-        for name in &model.model.identity_tracked_compartments {
-            let g = model
-                .comp_index
-                .get(name.as_str())
-                .copied()
-                .ok_or_else(|| SimError::UnknownCompartment(name.clone()))?;
-            tracked.push(g);
-        }
-        let is_tracked = |g: CompartmentId| tracked.contains(&g);
-
-        // Precompute per-transition routing.
-        let mut routes = Vec::with_capacity(model.model.transitions.len());
-        for (tr_idx, tr) in model.model.transitions.iter().enumerate() {
-            // Find source (delta < 0) and destination (delta > 0) among integer
-            // compartments. Single-source/single-destination is the common case;
-            // for multi-entry stoichiometry we take the first of each sign, which
-            // matches the simple-transition attribution rule (one ID moves).
-            let mut source: Option<CompartmentId> = None;
-            let mut destination: Option<CompartmentId> = None;
-            for &(local, delta) in &model.transition_stoich[tr_idx] {
-                let g = model.int_local_to_global[local];
-                if delta < 0 && source.is_none() {
-                    source = Some(g);
-                } else if delta > 0 && destination.is_none() {
-                    destination = Some(g);
-                }
-            }
-
-            let parent_weights = match &tr.lineage {
-                Some(l) if l.is_lineage_event => {
-                    let mut pairs = Vec::with_capacity(l.parent_pool_weights.len());
-                    for (comp_name, weight) in &l.parent_pool_weights {
-                        let g = model
-                            .comp_index
-                            .get(comp_name.as_str())
-                            .copied()
-                            .ok_or_else(|| SimError::UnknownCompartment(comp_name.clone()))?;
-                        pairs.push((g, weight.clone()));
-                    }
-                    Some(pairs)
-                }
-                _ => None,
-            };
-
-            let touches_tracked = source.is_some_and(is_tracked)
-                || destination.is_some_and(is_tracked)
-                || parent_weights
-                    .as_ref()
-                    .is_some_and(|w| w.iter().any(|(g, _)| is_tracked(*g)));
-
-            routes.push(TransitionRoute {
-                source,
-                destination,
-                touches_tracked,
-                parent_weights,
-            });
-        }
-
-        let mut identity = IdentityState::new();
-        // Seed initial pools for tracked compartments from their t=0 counts,
-        // each in its own stratum's deme.
-        for &g in &tracked {
-            if let Some(local) = model.global_to_int[g] {
-                identity.seed_pool(deme_map.deme_of(g), g, initial_int.counts[local]);
-            }
-        }
-
-        // Initialise the writer (writes header / schema).
-        writer.init()?;
-
-        Ok(LineageObserver {
-            model,
-            identity,
-            rng: LineageRng::from_sim_seed(sim_seed),
-            writer,
-            routes,
-            tracked,
-            deme_map,
-            snapshot: None,
-            edges: 0,
-            sub_dt_edges: 0.0,
-        })
-    }
-
-    /// The sub-`dt` bias fraction accumulated over the run: the edge-weighted
-    /// fraction of transmission edges the frozen-pool approximation cannot
-    /// temporally resolve (a same-step parent that, under an exact sequential
-    /// process, might have been a child born earlier in the same step). Exactly
-    /// 0.0 for Gillespie (no batch steps) and for a run with no lineage edges.
-    pub fn sub_dt_fraction(&self) -> f64 {
-        if self.edges == 0 {
-            0.0
-        } else {
-            self.sub_dt_edges / self.edges as f64
-        }
-    }
-
-    /// Total transmission edges (children born at lineage events) recorded.
-    pub fn lineage_edge_count(&self) -> u64 {
-        self.edges
-    }
-
-    /// Finish writing and return the underlying writer (flushed). Call after
-    /// the simulation loop completes.
-    pub fn finish(mut self) -> Result<W, SimError> {
-        self.writer.finish()?;
-        Ok(self.writer)
-    }
-
-    /// Borrow the identity state (structural tests).
-    pub fn identity(&self) -> &IdentityState {
-        &self.identity
-    }
-
-    /// Sample a parent pool `b ∝ weight_b · count_b` (uniform within pool).
-    /// Returns the chosen parent individual *and its deme* (its stratum). Each
-    /// candidate compartment `I[b]` lives in its own stratum's pool
-    /// `(deme_of(I[b]), I[b])`, so the per-stratum weight `weight_b` is paired
-    /// with the per-stratum count `count_b` — this is the contact-structured
-    /// attribution: a stratum with higher `C[a,b]·I[b]/N[b]` wins
-    /// proportionally more parents, NOT uniform over all infectious.
-    ///
-    /// Errors if every pool is empty or all weights are zero — a structural
-    /// inconsistency, since a `#[lineage]` transition only fires when its rate
-    /// (and thus some `weight·count`) is positive.
-    fn sample_parent(
-        &mut self,
-        weights: &[(CompartmentId, ir::expr::Expr)],
-        pre_int: &IntState,
-        pre_real: &RealState,
-        params: &[f64],
-        time: f64,
-        tr_idx: TransitionId,
-    ) -> Result<(IndividualId, DemeId), SimError> {
-        let ctx = EvalCtx {
-            model: self.model,
-            int_s: pre_int,
-            real_s: pre_real,
-            params,
-            t: time,
-            dt: self.model.model.simulation.dt.unwrap_or(1.0),
-            projected: None,
-            int_float_override: None,
-        };
-
-        // Per-pool unnormalised mass = weight_b · count_b, with count_b taken
-        // from the parent compartment's own stratum pool. In a batch step the
-        // pool is read from the frozen snapshot (start-of-step state), so all
-        // firings this step see the same parent pools — a child minted earlier
-        // this step is invisible as a parent. Gillespie (no snapshot) reads the
-        // live pool, which is the exact sequential behaviour.
-        let mut masses: Vec<(CompartmentId, DemeId, f64)> = Vec::with_capacity(weights.len());
-        let mut total = 0.0;
-        for (g, weight_expr) in weights {
-            let parent_deme = self.deme_map.deme_of(*g);
-            let w = eval_expr(weight_expr, &ctx)?.max(0.0);
-            let count = match &self.snapshot {
-                Some(snap) => snap.pool_len(parent_deme, *g),
-                None => self.identity.pool_len(parent_deme, *g),
-            } as f64;
-            let mass = w * count;
-            total += mass;
-            masses.push((*g, parent_deme, mass));
-        }
-
-        if total <= 0.0 {
-            return Err(SimError::Validation(format!(
-                "lineage transition '{}' fired at t={} but every parent pool has \
-                 zero weight·count mass; the identity-pool bookkeeping has \
-                 diverged from the count state",
-                self.model.model.transitions[tr_idx].name, time
-            )));
-        }
-
-        // Select pool by cumulative mass against a uniform draw.
-        let u = self.rng.uniform() * total;
-        let mut cumulative = 0.0;
-        let (mut chosen, mut chosen_deme) = {
-            let last = &masses[masses.len() - 1];
-            (last.0, last.1)
-        };
-        for (g, d, mass) in &masses {
-            cumulative += *mass;
-            if cumulative >= u {
-                chosen = *g;
-                chosen_deme = *d;
-                break;
-            }
-        }
-
-        // Uniform within the chosen pool — but do NOT remove (the parent is
-        // not consumed by a lineage event; only the source individual moves).
-        // Read members from the snapshot in a batch step, the live pool
-        // otherwise (mirrors the count source above).
-        let pool = match &self.snapshot {
-            Some(snap) => snap.pool(chosen_deme, chosen),
-            None => self
-                .identity
-                .pools
-                .get(&(chosen_deme, chosen))
-                .filter(|p| !p.is_empty()),
-        }
-        .ok_or_else(|| {
-            SimError::Validation(format!(
-                "lineage transition '{}': chosen parent pool (comp {}, deme {}) \
-                 is empty at t={}",
-                self.model.model.transitions[tr_idx].name, chosen, chosen_deme, time
-            ))
-        })?;
-        let idx = self.rng.below(pool.len());
-        Ok((pool[idx], chosen_deme))
-    }
-}
-
-impl<'m, W: LineListWriter> TransitionObserver for LineageObserver<'m, W> {
-    /// Freeze the current pools so all firings this batch step sample parents
-    /// from start-of-step state. Gillespie never calls this — it samples live.
-    fn begin_batch_step(&mut self) {
-        self.snapshot = Some(self.identity.snapshot());
-    }
-
-    /// Drop the frozen snapshot; subsequent `on_fired` calls sample live pools.
-    fn end_batch_step(&mut self) {
-        self.snapshot = None;
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn on_fired(
-        &mut self,
-        transition: TransitionId,
-        _deme: DemeId,
-        multiplicity: u64,
-        time: f64,
-        pre_int: &IntState,
-        pre_real: &RealState,
-        params: &[f64],
-    ) -> Result<(), SimError> {
-        // The caller's `deme` hint is not used for pool keying: in the fully-
-        // expanded IR every stratum is its own compartment, so a compartment's
-        // deme is read from `deme_map`, not from the firing. The backend has
-        // no separate notion of which deme fired.
-
-        let route = &self.routes[transition];
-        if !route.touches_tracked {
-            return Ok(()); // Untracked transition — no overhead beyond the flag check.
-        }
-
-        // The pre_state passed in already reflects state before *this* firing's
-        // stoichiometry. Within a single firing the pools and counts agree.
-        // Borrow-checker note: clone the small route fields we need so we can
-        // mutate identity/writer afterward.
-        let source = route.source;
-        let destination = route.destination;
-        let parent_weights = route.parent_weights.clone();
-
-        // The focal individual's deme is its compartment's stratum: the
-        // destination for an inflow/move, else the source for an outflow.
-        let child_deme = match (source, destination) {
-            (_, Some(dst)) => self.deme_map.deme_of(dst),
-            (Some(src), None) => self.deme_map.deme_of(src),
-            (None, None) => 0,
-        };
-
-        // Sub-`dt` bias accounting (batch backends only — a snapshot is active).
-        // This lineage step mints `m = multiplicity` children into the
-        // destination pool, which held `p` IDs at step start (snapshot count).
-        // Under the frozen approximation none of those `m` same-step children
-        // can be sampled as a parent this step; under exact sequential dynamics
-        // a fraction `m/(p+m)` of would-be-live parents are precisely those
-        // unresolvable same-step children. Each of the `m` edges therefore
-        // carries that share. Accumulating edge-weighted gives
-        // `Σ m·(m/(p+m))`; the reported `sub_dt_fraction` is this over total
-        // edges. Exactly 0 for Gillespie (no snapshot, m=1 per call, but the
-        // branch is gated on `snapshot`).
-        if parent_weights.is_some() {
-            // Every lineage firing is a transmission edge, counted in both the
-            // exact (Gillespie) and approximate (batch) paths so the reported
-            // edge total is honest. Only the batch path (snapshot active) adds
-            // sub-dt mass; Gillespie's sub_dt_edges stays 0 → fraction 0.0.
-            self.edges += multiplicity;
-            if let (Some(snap), Some(dst)) = (self.snapshot.as_ref(), destination) {
-                let m = multiplicity as f64;
-                let dst_deme = self.deme_map.deme_of(dst);
-                let p = snap.pool_len(dst_deme, dst) as f64;
-                if p + m > 0.0 {
-                    self.sub_dt_edges += m * (m / (p + m));
-                }
-            }
-        }
-
-        for _ in 0..multiplicity {
-            let (individual, parent, parent_deme, src_for_record, dst_for_record) =
-                if let Some(weights) = &parent_weights {
-                    // Lineage event: sample a parent (and its stratum) from the
-                    // per-stratum weighted pools, mint a fresh child in the
-                    // destination's stratum, move/remove the source individual.
-                    let (parent_id, parent_deme) =
-                        self.sample_parent(weights, pre_int, pre_real, params, time, transition)?;
-
-                    // The focal (child) individual: a new ID minted in the
-                    // destination. The source individual (e.g. an S) is consumed
-                    // — it leaves the source pool but is not itself tracked into
-                    // the destination (the destination gets a *new* infectee ID).
-                    if let Some(src) = source {
-                        if self.tracked.contains(&src) {
-                            // S is rarely tracked, but if a cycle pulled it in,
-                            // remove the source individual from its stratum pool.
-                            let src_deme = self.deme_map.deme_of(src);
-                            let _ = self.identity.remove_uniform(src_deme, src, &mut self.rng);
-                        }
-                    }
-                    let child = self.identity.mint();
-                    if let Some(dst) = destination {
-                        self.identity.push(self.deme_map.deme_of(dst), dst, child);
-                    }
-                    (
-                        child,
-                        ParentRef::Individual(parent_id),
-                        Some(parent_deme),
-                        source,
-                        destination,
-                    )
-                } else {
-                    match (source, destination) {
-                        (Some(src), Some(dst)) => {
-                            // Progression: move one ID from the source stratum to
-                            // the destination stratum. If the source pool is empty
-                            // (untracked source feeding a tracked destination),
-                            // mint instead.
-                            let src_deme = self.deme_map.deme_of(src);
-                            let dst_deme = self.deme_map.deme_of(dst);
-                            let id =
-                                match self.identity.remove_uniform(src_deme, src, &mut self.rng) {
-                                    Some(id) => id,
-                                    None => self.identity.mint(),
-                                };
-                            self.identity.push(dst_deme, dst, id);
-                            (id, ParentRef::None, None, Some(src), Some(dst))
-                        }
-                        (Some(src), None) => {
-                            // Outflow (death): remove one ID from the source stratum.
-                            let src_deme = self.deme_map.deme_of(src);
-                            let id = self
-                                .identity
-                                .remove_uniform(src_deme, src, &mut self.rng)
-                                .unwrap_or_else(|| self.identity.mint());
-                            (id, ParentRef::None, None, Some(src), None)
-                        }
-                        (None, Some(dst)) => {
-                            // Inflow (import): mint a new ID with no parent.
-                            let id = self.identity.mint();
-                            self.identity.push(self.deme_map.deme_of(dst), dst, id);
-                            (id, ParentRef::Import, None, None, Some(dst))
-                        }
-                        (None, None) => {
-                            // Nothing routable — shouldn't happen for a tracked
-                            // transition, but emit no record rather than guess.
-                            continue;
-                        }
-                    }
-                };
-
-            self.writer.write(&LineListEntry {
-                time,
-                transition,
-                individual,
-                source: src_for_record,
-                destination: dst_for_record,
-                deme: child_deme,
-                parent,
-                parent_deme,
-            })?;
-        }
-
-        Ok(())
-    }
-}
 
 #[cfg(test)]
 mod tests {

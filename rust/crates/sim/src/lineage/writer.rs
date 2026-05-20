@@ -37,6 +37,18 @@ pub struct LineListEntry {
     /// at lineage events (`parent = Individual(..)`); `None` otherwise. The
     /// pair (`parent_deme`, `deme`) is the contact-structured edge `b → a`.
     pub parent_deme: Option<DemeId>,
+    /// The log-probability of *this event's* identity attribution, given the
+    /// event log (§4a of the 2026-05-20 three-layer proposal):
+    ///   - transmission (parent = individual in pool `b`): `log(w_b / Λ)`,
+    ///     where `Λ = Σ_b' w_b' X_b'` is the realized total FOI mass and the
+    ///     within-pool `1/X_b` cancels the pool-count factor;
+    ///   - recovery / progression (uniform within the source pool of size
+    ///     `|I_b|`): `log(1/|I_b|)`;
+    ///   - import / seed / non-routable: `0.0` (no attribution choice).
+    /// Summing this column over a line list gives
+    /// `log P(line list | event log)` — the only clean exact likelihood the
+    /// architecture provides.
+    pub attribution_logprob: f64,
 }
 
 /// Which on-disk format the line list is written in.
@@ -116,6 +128,7 @@ pub const COLUMNS: &[&str] = &[
     "parent_kind",
     "parent_id",
     "parent_deme",
+    "attribution_logprob",
 ];
 
 // ── TSV ─────────────────────────────────────────────────────────────────────
@@ -143,7 +156,7 @@ impl LineListWriter for TsvLineListWriter {
         let (kind, pid) = parent_columns(e.parent);
         writeln!(
             self.out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             e.time,
             e.transition,
             e.individual.0,
@@ -153,6 +166,7 @@ impl LineListWriter for TsvLineListWriter {
             kind,
             pid,
             deme_column(e.parent_deme),
+            e.attribution_logprob,
         )
         .map_err(|e| SimError::Validation(format!("line list write: {}", e)))
     }
@@ -192,6 +206,7 @@ mod parquet_impl {
         parent_kind: Vec<&'static str>,
         parent_id: Vec<i64>,
         parent_deme: Vec<i64>,
+        attribution_logprob: Vec<f64>,
     }
 
     impl Buffer {
@@ -206,6 +221,7 @@ mod parquet_impl {
                 parent_kind: Vec::with_capacity(BATCH_ROWS),
                 parent_id: Vec::with_capacity(BATCH_ROWS),
                 parent_deme: Vec::with_capacity(BATCH_ROWS),
+                attribution_logprob: Vec::with_capacity(BATCH_ROWS),
             }
         }
 
@@ -223,6 +239,7 @@ mod parquet_impl {
             self.parent_kind.clear();
             self.parent_id.clear();
             self.parent_deme.clear();
+            self.attribution_logprob.clear();
         }
     }
 
@@ -243,6 +260,7 @@ mod parquet_impl {
             Field::new("parent_kind", DataType::Utf8, false),
             Field::new("parent_id", DataType::Int64, false),
             Field::new("parent_deme", DataType::Int64, false),
+            Field::new("attribution_logprob", DataType::Float64, false),
         ])
     }
 
@@ -282,6 +300,7 @@ mod parquet_impl {
                     Arc::new(StringArray::from(self.buf.parent_kind.clone())),
                     Arc::new(Int64Array::from(self.buf.parent_id.clone())),
                     Arc::new(Int64Array::from(self.buf.parent_deme.clone())),
+                    Arc::new(Float64Array::from(self.buf.attribution_logprob.clone())),
                 ],
             )
             .map_err(|e| SimError::Validation(format!("parquet batch build: {}", e)))?;
@@ -311,6 +330,7 @@ mod parquet_impl {
             self.buf.parent_kind.push(kind);
             self.buf.parent_id.push(pid);
             self.buf.parent_deme.push(deme_column(e.parent_deme));
+            self.buf.attribution_logprob.push(e.attribution_logprob);
             if self.buf.len() >= BATCH_ROWS {
                 self.flush_batch()?;
             }
@@ -351,6 +371,7 @@ mod tests {
                 deme: 0,
                 parent: ParentRef::Individual(IndividualId(3)),
                 parent_deme: Some(1),
+                attribution_logprob: -1.25,
             })
             .unwrap();
             w.write(&LineListEntry {
@@ -362,6 +383,7 @@ mod tests {
                 deme: 0,
                 parent: ParentRef::None,
                 parent_deme: None,
+                attribution_logprob: -0.5,
             })
             .unwrap();
             w.finish().unwrap();
@@ -369,10 +391,11 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines[0], COLUMNS.join("\t"));
-        // child deme 0, parent deme 1 (cross-stratum edge 1 → 0).
-        assert!(lines[1].starts_with("1.5\t0\t7\t0\t1\t0\tindividual\t3\t1"));
+        // child deme 0, parent deme 1 (cross-stratum edge 1 → 0); attribution
+        // log-prob in the trailing column.
+        assert!(lines[1].starts_with("1.5\t0\t7\t0\t1\t0\tindividual\t3\t1\t-1.25"));
         // non-lineage event: parent_deme sentinel -1.
-        assert!(lines[2].starts_with("2\t2\t8\t2\t-1\t0\tnone\t-1\t-1"));
+        assert!(lines[2].starts_with("2\t2\t8\t2\t-1\t0\tnone\t-1\t-1\t-0.5"));
         std::fs::remove_file(&path).ok();
     }
 }

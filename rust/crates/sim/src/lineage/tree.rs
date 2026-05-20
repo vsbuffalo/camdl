@@ -387,6 +387,9 @@ pub fn read_tsv(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimError> 
             v if v < 0 => None,
             v => Some(v as u32),
         };
+        let attribution_logprob: f64 = f[9].parse().map_err(|e| {
+            SimError::Validation(format!("line list attribution_logprob '{}': {}", f[9], e))
+        })?;
         out.push(LineListEntry {
             time,
             transition,
@@ -396,6 +399,7 @@ pub fn read_tsv(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimError> 
             deme,
             parent,
             parent_deme,
+            attribution_logprob,
         });
     }
     Ok(out)
@@ -428,6 +432,7 @@ pub fn read_parquet(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimErr
         let parent_kind = col(6).as_any().downcast_ref::<StringArray>().unwrap();
         let parent_id = col(7).as_any().downcast_ref::<Int64Array>().unwrap();
         let parent_deme = col(8).as_any().downcast_ref::<Int64Array>().unwrap();
+        let attribution_logprob = col(9).as_any().downcast_ref::<Float64Array>().unwrap();
         let comp_opt = |v: i64| if v < 0 { None } else { Some(v as usize) };
         for r in 0..batch.num_rows() {
             let parent = match parent_kind.value(r) {
@@ -449,6 +454,7 @@ pub fn read_parquet(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimErr
                 deme: deme.value(r),
                 parent,
                 parent_deme: pdeme,
+                attribution_logprob: attribution_logprob.value(r),
             });
         }
     }
@@ -469,6 +475,7 @@ mod tests {
             deme: 0,
             parent: ParentRef::Individual(IndividualId(parent)),
             parent_deme: Some(0),
+            attribution_logprob: 0.0,
         }
     }
 
