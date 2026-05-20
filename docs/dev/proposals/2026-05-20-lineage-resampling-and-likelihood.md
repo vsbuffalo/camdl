@@ -8,11 +8,8 @@ that document's implementation (count-level lineage tracking, stratified
 attribution, three backends, projections, validation) is the foundation this
 refactors, not work to discard.
 
-> Citations were verified against primary sources (2026-05-20); volume/page are
-> pinned inline. One **[verify]** remains — whether VGsim's backward genealogy
-> pass is exact-conditional or diffusion-approximate (Tier 5, §10) — flagged at
-> its use site; it is a factual question about VGsim's algorithm, not a
-> bibliographic gap.
+> Citations verified against primary sources (2026-05-20); volume/page pinned
+> inline.
 
 ---
 
@@ -512,20 +509,21 @@ replay; the logic is identical, only its location changes.
   N flaky).
 - **Tier 5 — External oracle (validates the simulator).** Cross-validate a
   stratified scenario against an independent **exact-forward** lineage-aware
-  simulator. **MASTER** (Vaughan & Drummond — exact Gillespie for compartmental
-  models; VGsim itself validates against it) is the primary, best-matched
-  oracle. **VGsim** (a forward Gillespie event chain + a *backward* genealogy
-  pass over the *same* compartmental model class — a near-cousin of camdl's
-  three-layer design) is a candidate **pending [verify]**: whether its backward
-  pass is an *exact-conditional* sampler of
-  $P(\text{genealogy} \mid \text{event chain})$ or uses *diffusion-limit*
-  coalescent rates. Exact-conditional → valid Tier-5 oracle (same distribution
-  as camdl's forward attribution). Diffusion-approximate → comparing
-  camdl-exact to VGsim-approximate conflates Tier 5 (simulator correctness)
-  with Tier 6 (approximation error) — the exact failure the Tier-5/6 split
-  exists to prevent. See the parked oracle-landscape survey in
-  `2026-05-19-individual-sampling-layer.md`. Gated behind realistic sampling
-  (leaf-only Flat trees are not comparable to all-case samplers).
+  simulator. **MASTER** (Vaughan & Drummond 2013, *MBE* 30(6):1480; exact
+  Gillespie for compartmental models — VGsim itself validates against it) is
+  the primary, best-matched oracle: you specify the exact stratified reactions,
+  so the contact-matrix semantic match is provable. **VGsim** (Shchur et al.
+  2022) is also exact-forward — it runs an exact (hierarchical-Gillespie) event
+  chain and samples the genealogy *backward conditioned on that realized chain*
+  (exact-conditional, **not** the structured-coalescent diffusion approximation,
+  which replaces the stochastic trajectory with a deterministic ODE — something
+  VGsim does not do) — so it too tests the *forward model*, keeping Tier 5
+  distinct from Tier 6. VGsim's advantage is scale (millions of tips); its
+  limitation for this check is that its migration-based population structure may
+  not express camdl's arbitrary asymmetric contact matrix cleanly. Gated behind
+  realistic sampling (leaf-only Flat trees are not comparable to all-case
+  samplers). See the oracle-landscape survey in
+  `2026-05-19-individual-sampling-layer.md`.
 - **Tier 6 — Forward reference vs analytic approximation (validates the
   approximation).** On small trees (4c exact regime) or via summaries (§8),
   compare the forward reference against the structured-coalescent analytic

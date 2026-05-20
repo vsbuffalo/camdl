@@ -502,14 +502,22 @@ camdl's frequency-dependent contact-matrix rate `β·C[a,b]/N_b` — an
 oracle that "agrees" with a different generative model proves nothing,
 and one that "disagrees" doesn't indict camdl. On that criterion:
 - **VGsim** ([Shchur et al. 2022](https://doi.org/10.1371/journal.pcbi.1010409))
-  is scalable but builds the tree by a *backward coalescent* on a
-  migration/immunity-typed model — coercing it to an arbitrary
-  asymmetric contact matrix may not be possible. Lower priority.
-- **MASTER** (BEAST2; *cite to verify*) lets you specify the exact
-  stratified reactions, so the semantic match is provable. **nosoi**
-  (R; *cite to verify*) is forward and individual-based, matching
-  camdl's generative approach directly. Both are better-matched
-  candidates than VGsim for this check.
+  is *exact-forward* — an exact (hierarchical-Gillespie) event chain, then a
+  genealogy sampled backward *conditioned on that realized chain*
+  (exact-conditional, not a diffusion approximation), over the same
+  compartmental class. So it is not "a backward coalescent on a different
+  model." Its limitation for *this* check is the **semantic match**: its
+  population structure is migration-based, so expressing camdl's arbitrary
+  asymmetric contact matrix `β·C[a,b]/N_b` in it may be awkward. Strong at
+  scale (millions of tips).
+- **MASTER** (Vaughan & Drummond 2013, *MBE* 30(6):1480; BEAST2) lets you
+  specify the exact stratified reactions, so the semantic match is provable —
+  the cleanest oracle for the contact-matrix check. **nosoi** (Lequime et al.
+  2020, *Methods Ecol. Evol.* 11:1002; R) is forward and individual-based,
+  matching camdl's generative approach directly. Both are better-matched than
+  VGsim *for the contact-structure check specifically* — not because VGsim is
+  approximate (it isn't), but because their model parameterization matches
+  camdl's contact form more directly.
 
 Note Tier 5 is a *strengthening*, not load-bearing: Tier 2b already
 validates attribution against the closed-form `C[a,b]·I[b]/Σ`
