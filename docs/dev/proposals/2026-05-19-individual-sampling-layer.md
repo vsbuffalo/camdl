@@ -475,15 +475,41 @@ statistic: distribution of coalescent intervals at time `t` matches
 **for population sizes N ≥ 10⁴** — the diffusion approximation has
 O(1/N) bias that makes the test flaky at smaller populations.
 
-**Tier 5 — External oracle.** Cross-validate a *stratified* scenario
-against an independent lineage-aware simulator (VGsim or MASTER,
-pinned versions), run as a CI gate. Same pattern as the existing
-pomp / scipy / numpy oracle tests.
+**Tier 5 — External oracle (PARKED — pending oracle-landscape survey).**
+Cross-validate a *stratified* scenario against an independent
+lineage-aware simulator, run as a committed-fixture CI gate (same
+offline pattern as the existing pomp / scipy / numpy oracles). Status
+as of 2026-05-20: scaffolded (generator script + placeholder fixture +
+skip-on-placeholder test on `feature/lineages`), but the *choice of
+oracle* is deliberately deferred pending a proper survey of the
+landscape.
 
-Tier 2b and Tier 5 on the stratified case are the real deliverables:
-anyone can get the well-mixed tree right; the value (and the
-silent-wrong-answer risk) is contact-structured, time-varying parent
-attribution.
+Selection criterion: the oracle must be able to realize **exactly**
+camdl's frequency-dependent contact-matrix rate `β·C[a,b]/N_b` — an
+oracle that "agrees" with a different generative model proves nothing,
+and one that "disagrees" doesn't indict camdl. On that criterion:
+- **VGsim** ([Shchur et al. 2022](https://doi.org/10.1371/journal.pcbi.1010409))
+  is scalable but builds the tree by a *backward coalescent* on a
+  migration/immunity-typed model — coercing it to an arbitrary
+  asymmetric contact matrix may not be possible. Lower priority.
+- **MASTER** (BEAST2; *cite to verify*) lets you specify the exact
+  stratified reactions, so the semantic match is provable. **nosoi**
+  (R; *cite to verify*) is forward and individual-based, matching
+  camdl's generative approach directly. Both are better-matched
+  candidates than VGsim for this check.
+
+Note Tier 5 is a *strengthening*, not load-bearing: Tier 2b already
+validates attribution against the closed-form `C[a,b]·I[b]/Σ`
+prediction. Tier 5's only added value is catching a shared error
+between the runtime and that analytic expectation. If no cleanly
+semantics-matched oracle is readily available, leaving Tier 5
+scaffolded-and-skipped is preferable to a poorly-matched comparison
+that yields an uninterpretable number.
+
+Tier 2b on the stratified case is the real deliverable: anyone can get
+the well-mixed tree right; the value (and the silent-wrong-answer
+risk) is contact-structured, time-varying parent attribution. Tier 5
+hardens it once the right oracle is chosen.
 
 ## Phasing
 
