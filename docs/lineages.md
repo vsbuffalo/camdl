@@ -31,12 +31,12 @@ camdl therefore separates three stages, each independently cacheable:
 |---|---|---|
 | **1. Event log** | `simulate --event-log` | the epidemic: ordered events, identity-free |
 | **2. Line list** | `lineage realize --identity-seed` | one genealogy realization + its log-probability |
-| **3. Tree** | `lineage tree --scheme --sample-seed` | a sampled, pruned, Newick transmission tree |
+| **3. Tree** | `lineage tree --scheme --sample-seed` | a sampled, pruned, Newick transmission tree (sampling over all individuals, pendant tips at sampling time) |
 
 ```bash
 camdl simulate model.camdl --params p.toml --seed 42 --event-log epi.parquet
 camdl lineage realize epi.parquet --identity-seed 7 -o line_list.parquet
-camdl lineage tree    line_list.parquet --scheme flat:0.1 --seed 3 -o tree.nwk
+camdl lineage tree    line_list.parquet --scheme flat:0.1 --sample-seed 3 -o tree.nwk
 ```
 
 One expensive epidemic → many cheap identity realizations → many cheap trees.
@@ -130,14 +130,16 @@ summary-statistic synthetic-likelihood route.
 line list.
 
 ```bash
-camdl lineage tree    line_list.parquet --scheme flat:0.1 --seed 3 -o tree.nwk
+camdl lineage tree    line_list.parquet --scheme flat:0.1 --sample-seed 3 -o tree.nwk
 camdl lineage sojourn line_list.parquet --compartment 1            # I dwell-time dist
 camdl lineage cohort  line_list.parquet --event infection --window 7
 ```
 
-`lineage tree` builds the parent→child forest, samples observed tips, prunes to
-the minimal subtree spanning them (suppressing unary nodes), and emits Newick
-with **time-calibrated branch lengths**.
+`lineage tree` builds the parent→child forest, samples observed tips from **all**
+individuals (placing each pendant tip at its sampling time), prunes to the
+minimal subtree spanning them (suppressing unsampled unary nodes), and emits
+Newick with **time-calibrated branch lengths** (tip branches reach the sampling
+time). See [Sampling](#sampling-current-and-planned) for the schemes.
 
 ### Forest vs. tree
 
@@ -150,17 +152,38 @@ root.
 
 ## Sampling (current and planned)
 
-**Today:** only `flat:RATE`, drawing candidates from the forest **leaves**
-(individuals who infected nobody), tips placed at *infection* time. So a
-`flat:RATE` tree is a constant-probability sample of transmission-chain
-*endpoints* — **not** realistic surveillance (which samples *any* case,
-including infectors, at its *sampling* time). Tree-shape statistics from
-`flat:RATE` are biased relative to a realistically-sampled tree.
+Sampling draws from **all** individuals — an infector can be sampled, not only
+chain endpoints — and places each sampled individual's pendant tip at its
+**sampling time**: its removal time (the last progression / recovery / death
+event in which it is the focal individual), or the simulation horizon if it was
+never removed. A sampled infector becomes an internal node *plus* a pendant tip
+at its sampling time; its onward-transmission subtree is preserved. This matches
+realistic surveillance (cases are sampled at observation time, regardless of
+whether they later transmit), unlike the old leaf-only / infection-time scheme.
 
-**Planned (sampling milestone).** A `SamplingScheme` over *all* individuals with
-pendant tips at sampling time; the scheme declared structurally in the model
+Two projection-time schemes (`--sample-seed` controls the draw):
+
+- **`flat:RATE`** — each individual sampled i.i.d. with probability `RATE`, over
+  all individuals. `flat:1.0` samples everyone.
+
+  ```bash
+  camdl lineage tree line_list.tsv --scheme flat:0.1 --sample-seed 3
+  ```
+
+- **`stratified:idx=rate,...,default=rate`** — each individual sampled at its
+  **deme**'s rate (read from the line list `deme` column), falling back to
+  `default` (absent → 0). Rates are keyed on the **integer deme index**:
+
+  ```bash
+  # deme 0 sampled at 0.5, deme 1 at 0.05, every other deme at 0.1
+  camdl lineage tree line_list.tsv --scheme stratified:0=0.5,1=0.05,default=0.1
+  ```
+
+**Planned (sampling milestone).** Declaring the scheme structurally in the model
 (`lineage { sampling { scheme, condition, by, rate } }`) with rates as ordinary
-parameters. See the design proposal.
+parameters and stratum **names** (rather than the integer deme index used here).
+This page documents the projection-time path; the model-block declaration is the
+later full milestone. See the design proposal.
 
 ## Caching / provenance
 
@@ -178,11 +201,15 @@ Three keys, one expensive step.
 cohort) across all three stochastic backends; the exact line-list likelihood;
 stratified contact-weighted attribution; overdispersed processes; validation
 against Yule statistics and the SIR structured-coalescent rate
-(`λ = 2f/I² = 2βS/(NI)`).
+(`λ = 2f/I² = 2βS/(NI)`); **sampling realism at projection time** —
+all-individuals sampling with pendant tips at sampling (removal) time, `flat`
+and `stratified` (per-deme index) schemes.
 
 **Coming next / not yet built** (don't rely on these):
-- **Sampling realism** — all-individuals sampling, pendant tips at sampling
-  time, the `lineage { sampling }` block. Replaces leaf-only `flat:RATE`.
+- **`lineage { sampling }` model block** — declaring the scheme structurally in
+  the model with rates as ordinary parameters and stratum **names** (the
+  projection-time `flat` / `stratified:idx=rate` path is shipped; the model-block
+  declaration is the remaining milestone).
 - **`Tree`/`SyntheticTree` no-cheating split** — an observable `Tree` boundary
   type for the inference-validation loop.
 - **`lineage loglik`** — tree-likelihood scoring; only the line-list logprob
