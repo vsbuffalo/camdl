@@ -165,6 +165,23 @@ the parent pool; v1's linearity restriction removes those cases by
 construction. The wrapper returns in Phase 4 alongside nonlinear rate
 support and its accompanying modeling-choice documentation.
 
+**`Cond` handling (deferred refinement).** The initial implementation
+classifies `Cond` (if/then/else) as a nonlinear use, so a `#[lineage]`
+rate whose parent appears inside one is rejected — including the
+common divide-by-zero guard `if N > 0 then β·S·I/N else 0`. There is a
+clean resolution, deferred to a near-term follow-up rather than
+blocking the foundation: classify each branch independently (the same
+linear-in-parents rule with denominator precedence), treat the
+predicate as a *guard* (a parent reference in `N > 0` selects a
+branch, it does not weight the rate), and extract the weight piecewise
+as `Cond{ pred; then = weight(then_); else = weight(else_) }` — a
+frozen-coefficient expression evaluated at the event instant. Under
+this rule `if N > 0 then β·S·I/N else 0` compiles (then-branch linear
+in `I`, denominator frozen; else-branch weight 0); only a *branch*
+that is itself nonlinear in the parent (e.g. `then (I+ι)^α`) is a
+genuine rejection. Until this lands, a guarded force of infection must
+be written in its unguarded form to use `#[lineage]`.
+
 ### Lexer rule
 
 The `#` character begins a comment that extends to end of line,
