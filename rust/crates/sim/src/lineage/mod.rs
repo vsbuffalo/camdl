@@ -623,11 +623,15 @@ impl<'m, W: LineListWriter> TransitionObserver for LineageObserver<'m, W> {
         // edges. Exactly 0 for Gillespie (no snapshot, m=1 per call, but the
         // branch is gated on `snapshot`).
         if parent_weights.is_some() {
+            // Every lineage firing is a transmission edge, counted in both the
+            // exact (Gillespie) and approximate (batch) paths so the reported
+            // edge total is honest. Only the batch path (snapshot active) adds
+            // sub-dt mass; Gillespie's sub_dt_edges stays 0 → fraction 0.0.
+            self.edges += multiplicity;
             if let (Some(snap), Some(dst)) = (self.snapshot.as_ref(), destination) {
                 let m = multiplicity as f64;
                 let dst_deme = self.deme_map.deme_of(dst);
                 let p = snap.pool_len(dst_deme, dst) as f64;
-                self.edges += multiplicity;
                 if p + m > 0.0 {
                     self.sub_dt_edges += m * (m / (p + m));
                 }
