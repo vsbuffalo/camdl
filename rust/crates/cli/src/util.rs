@@ -794,8 +794,13 @@ impl Default for SimRun {
     }
 }
 
-/// Run a simulation and return the full trajectory.
-pub fn run_simulation(run: &SimRun) -> Result<(Trajectory, ir::Model), String> {
+/// Resolve a `SimRun` to a compiled model + parameter vector, applying the
+/// full scenario / --params / --param-vec / --param / --table precedence
+/// pipeline (docs/camdl-run-spec.md §1.3). Shared by the count-trajectory
+/// path ([`run_simulation`]) and the lineage path
+/// ([`run_simulation_lineage`]) so both see byte-identical parameter
+/// resolution.
+pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), String> {
     // Load IR source (handles .camdl compilation via camdlc)
     let (ir_path_resolved, _tmpfile) = resolve_ir_path(&run.ir_path)?;
 
@@ -994,6 +999,13 @@ pub fn run_simulation(run: &SimRun) -> Result<(Trajectory, ir::Model), String> {
 
     let compiled = CompiledModel::new(model.clone())
         .map_err(|e| format!("model compile error: {:?}", e))?;
+
+    Ok((compiled, model))
+}
+
+/// Run a simulation and return the full trajectory.
+pub fn run_simulation(run: &SimRun) -> Result<(Trajectory, ir::Model), String> {
+    let (compiled, model) = resolve_run_model(run)?;
     let params  = compiled.default_params.clone();
     let t_start = model.simulation.t_start;
     let t_end   = model.simulation.t_end;
@@ -1030,6 +1042,99 @@ pub fn run_simulation(run: &SimRun) -> Result<(Trajectory, ir::Model), String> {
 
     let traj = backend.run(&compiled, &params, run.seed, &config)
         .map_err(|e| format!("simulation error: {:?}", e))?;
+
+    Ok((traj, model))
+}
+
+/// Run a simulation with individual-sampling (lineage) tracking attached, and
+/// return the count trajectory plus the resolved model. The line list is
+/// streamed to `writer`; on success the writer is flushed and closed.
+///
+/// This slice supports **Gillespie only**. tau-leap / chain-binomial declare
+/// the LINEAGES capability but their loops are not yet observer-aware
+/// (Phase 3), so requesting lineages on them returns a "not yet implemented"
+/// error rather than producing an untracked-but-silent line list.
+///
+/// The count trajectory is byte-identical to the same run without `--lineages`
+/// (validation Tier 2a): the observer reads its own RNG stream and is invoked
+/// only after the simulation RNG has decided each firing.
+pub fn run_simulation_lineage(
+    run: &SimRun,
+    writer: Box<dyn sim::lineage::LineListWriter>,
+) -> Result<(Trajectory, ir::Model), String> {
+    use crate::args::types::Backend;
+    use sim::lineage::LineageObserver;
+
+    // Lineage tracking is meaningful only for backends with the LINEAGES
+    // capability; only Gillespie actually performs the tracking in this slice.
+    match run.backend {
+        Backend::Gillespie => {}
+        Backend::TauLeap | Backend::ChainBinomial => {
+            return Err(format!(
+                "lineage tracking on the '{}' backend is not yet implemented \
+                 (Phase 3). Use --backend gillespie for trustworthy lineage \
+                 trees; tau-leap / chain-binomial would systematically lose \
+                 parent–child edges shorter than dt.",
+                match run.backend {
+                    Backend::TauLeap => "tau_leap",
+                    Backend::ChainBinomial => "chain_binomial",
+                    _ => unreachable!(),
+                }
+            ));
+        }
+        Backend::Ode => {
+            return Err(
+                "lineage tracking is incompatible with the ODE backend: ODE \
+                 tracks continuous densities, not individuals. Use \
+                 --backend gillespie."
+                    .to_string(),
+            );
+        }
+    }
+
+    let (compiled, model) = resolve_run_model(run)?;
+
+    if model.identity_tracked_compartments.is_empty() {
+        return Err(
+            "--lineages requires a model with at least one #[lineage] \
+             transition. This model has no lineage annotations, so there is \
+             nothing to track. Remove --lineages, or annotate a transition \
+             with #[lineage]."
+                .to_string(),
+        );
+    }
+
+    // Capability gate (mirrors the OVERDISPERSION / REAL_COMPARTMENTS pattern):
+    // the chosen backend must declare LINEAGES. Gillespie does; this is a
+    // belt-and-braces check against a future backend dispatch change.
+    if !GillespieSim.capabilities().contains(sim::Capabilities::LINEAGES) {
+        return Err("internal error: Gillespie backend lost LINEAGES capability".to_string());
+    }
+
+    let params = compiled.default_params.clone();
+    let t_start = model.simulation.t_start;
+    let t_end = model.simulation.t_end;
+    let cfg = GillespieConfig { t_start, t_end, output_dt: None };
+
+    // Seed the observer from the initial state so t=0 pools are correct.
+    let (initial_int, _initial_real) = compiled
+        .initial_state(&params)
+        .map_err(|e| format!("initial state error: {:?}", e))?;
+    let mut observer = LineageObserver::new(&compiled, run.seed, &initial_int, writer)
+        .map_err(|e| format!("lineage observer init error: {:?}", e))?;
+
+    let traj = sim::gillespie::run_gillespie_with_observer(
+        &compiled,
+        &params,
+        run.seed,
+        &cfg,
+        Some(&mut observer),
+    )
+    .map_err(|e| format!("simulation error: {:?}", e))?;
+
+    observer
+        .finish()
+        .map_err(|e| format!("line list finalize error: {:?}", e))?;
 
     Ok((traj, model))
 }

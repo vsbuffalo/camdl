@@ -18,6 +18,7 @@ mod progress;
 mod evidence;
 mod survey;
 mod landscape_html;
+mod lineage;        // individual-sampling layer: --lineages run + offline tree
 pub mod version;
 
 /// Terminal formatting helpers. Pure ANSI SGR codes, no dependencies.
@@ -172,6 +173,10 @@ Examples:
 "))]
     Check(Passthrough),
 
+    /// Offline lineage projections (transmission tree, …) over a line list
+    #[command(subcommand)]
+    Lineage(LineageCmd),
+
     /// Print model structure (delegates to camdlc)
     #[command(after_help = colored_help!("\
 This subcommand forwards all arguments verbatim to the OCaml compiler
@@ -264,6 +269,22 @@ pub(crate) enum DataCmd {
     Split(args::DataSplitArgs),
 }
 
+/// Offline lineage projections. Pure functions over a line-list file produced
+/// by `camdl simulate --lineages` — no simulation re-run. Phase 1 ships the
+/// transmission-tree projection; `sojourn` / `cohort` are reserved (Phase 3).
+#[derive(Subcommand)]
+#[command(arg_required_else_help = true,
+          after_help = colored_help!("\
+Examples:
+  # Build a transmission tree from a line list, flat 10% sampling
+  camdl lineage tree line_list.parquet --scheme flat:0.1 --output tree.newick
+
+See `camdl lineage <subcommand> --help` for full options."))]
+pub(crate) enum LineageCmd {
+    /// Project a line list to a sampled transmission tree (Newick)
+    Tree(args::LineageTreeArgs),
+}
+
 /// Captures all remaining argv tokens verbatim. Used only by Compile/Check/Inspect
 /// which forward raw argv to camdlc and don't benefit from typed parsing.
 #[derive(clap::Args)]
@@ -327,6 +348,7 @@ fn main() {
         Command::Survey(a)              => survey::cmd_survey(&a),
         Command::Eval(a)                => eval::cmd_eval(&a),
         Command::Data(DataCmd::Split(a))=> data::cmd_data_split(&a),
+        Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),
         Command::List(a)                => browse::cmd_list(&a),
         Command::Show(a)                => browse::cmd_show(&a),
         Command::Cat(a)                 => browse::cmd_cat(&a),
@@ -534,6 +556,19 @@ fn run_simulate(a: &args::SimulateArgs) {
         dt,
         seed, // overridden per-replicate below
     };
+
+    // ── Lineage tracking path (individual-sampling layer) ───────────────────
+    // `--lineages` is single-run only (conflicts with --seeds / --replicates /
+    // --draws, enforced by clap). Handle it in a focused path that streams a
+    // line list to disk and still emits the count trajectory if requested. The
+    // count trajectory is byte-identical to the non-lineage run (Tier 2a).
+    if a.lineages {
+        let mut run = base_sim_run;
+        run.scenario_name = scenario_list.first().cloned().flatten();
+        run.seed = seed;
+        lineage::run_simulate_lineages(a, &run);
+        return;
+    }
 
     // ── Pre-flight: validate obs model availability ─────────────────────────
     // We need the model to check observation blocks, but we don't want to

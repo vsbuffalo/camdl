@@ -38,13 +38,18 @@ clap = { version = "4", features = ["derive", "env"] }
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 
 [features]
-default = ["ode"]
+default = ["ode", "lineage-parquet"]
 # `ode` enables the deterministic-inference algorithms (nl-sbplx, nl-bobyqa
 # in Phase 1; mh, nuts in later phases) by turning on sim's `ode` feature
 # (which pulls in the `nlopt` C-FFI dep). Default-on so install scripts and
 # dev builds pick it up; `--no-default-features` produces a minimal binary
 # without those algorithms.
 ode = ["sim/ode"]
+# `lineage-parquet` enables Parquet line-list output for the individual-
+# sampling layer (forwards to sim's feature, which pulls arrow + parquet —
+# a large dependency tree, ~54 transitive crates). Default-on for the
+# production binary; `--no-default-features` keeps only the TSV writer.
+lineage-parquet = ["sim/lineage-parquet"]
 
 [dev-dependencies]
 tempfile = "3"

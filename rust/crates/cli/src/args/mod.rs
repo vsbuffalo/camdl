@@ -226,6 +226,28 @@ pub struct SimulateArgs {
     /// applies to each per-seed run.
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
+
+    /// Enable individual-sampling (lineage) tracking and stream a line
+    /// list to disk (2026-05-19 individual-sampling layer). Requires a
+    /// model with `#[lineage]` annotations and a backend that declares
+    /// the LINEAGES capability (Gillespie in this version). Single-run
+    /// only — conflicts with --seeds / --replicates / --draws.
+    #[arg(long, conflicts_with_all = ["seeds", "replicates", "draws"])]
+    pub lineages: bool,
+
+    /// Line-list output path (with --lineages). Defaults to
+    /// `line_list.<ext>` in the current directory.
+    #[arg(long, value_name = "FILE", requires = "lineages")]
+    pub lineage_out: Option<PathBuf>,
+
+    /// Line-list format: `parquet` (default, production) or `tsv`
+    /// (dependency-free, debug). With --lineages.
+    #[arg(long, value_name = "FMT", requires = "lineages", conflicts_with = "tsv")]
+    pub format: Option<String>,
+
+    /// Shorthand for `--format tsv` (with --lineages).
+    #[arg(long, requires = "lineages")]
+    pub tsv: bool,
 }
 
 // ─── batch ────────────────────────────────────────────────────────────────────
@@ -1336,6 +1358,39 @@ pub struct DataSplitArgs {
     /// Holdout set output path
     #[arg(long)]
     pub holdout: Option<PathBuf>,
+}
+
+// ─── lineage ────────────────────────────────────────────────────────────────────
+
+/// `camdl lineage tree LINE_LIST [...]` — project a line list to a sampled
+/// transmission tree (Newick). Pure offline; reads the line-list file (TSV or
+/// Parquet, auto-detected by extension) and emits Newick.
+#[derive(Args)]
+#[command(after_help = colored_help!("\
+Examples:
+  # Flat 10% tip sampling, write Newick
+  camdl lineage tree line_list.parquet --scheme flat:0.1 --output tree.newick
+
+  # TSV line list, all tips (rate 1.0), to stdout
+  camdl lineage tree line_list.tsv
+"))]
+pub struct LineageTreeArgs {
+    /// Line-list file (.tsv or .parquet). Format auto-detected by extension.
+    pub line_list: PathBuf,
+
+    /// Sampling scheme. Phase 1 supports `flat:RATE` (e.g. `flat:0.1`) —
+    /// each candidate tip sampled i.i.d. with probability RATE. Default:
+    /// `flat:1.0` (all tips).
+    #[arg(long, default_value = "flat:1.0")]
+    pub scheme: String,
+
+    /// Newick output path (default: stdout).
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// RNG seed for the sampling scheme (default: 1).
+    #[arg(long, default_value_t = 1)]
+    pub seed: u64,
 }
 
 // ─── browse ───────────────────────────────────────────────────────────────────
