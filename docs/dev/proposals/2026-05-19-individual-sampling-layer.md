@@ -526,21 +526,32 @@ hardens it once the right oracle is chosen.
 
 ## Phasing
 
-**Phase 1.** Observer seam + separate RNG stream + Gillespie +
-single-population linear rates + streamed Parquet line list +
-`#[lineage]` parsing + identity-tracked subgraph inference + offline
-tree pruner + Newick output + Tier 1 / 2a / 2b / 3 tests. Proves
-the architecture and the attribution-correctness guarantees.
+**Phases 1–3 — shipped** (on `feature/lineages`):
 
-**Phase 2.** Stratified / spatial parent attribution + multi-class
-linear decomposition + external-oracle CI gate (Tier 5). The
-scientifically hard part, deliberately isolated.
+- **Phase 1.** Observer seam + separate RNG stream + Gillespie +
+  single-population linear rates + streamed TSV/Parquet line list +
+  `#[lineage]` parsing + identity-tracked subgraph + offline tree
+  pruner + Newick + Tiers 1 / 2a / 3.
+- **Phase 2.** Stratified / spatial parent attribution + multi-class
+  linear decomposition + **Tier 2b** (contact-weighted, verified
+  >10σ from the uniform null). Tier-5 external oracle deferred (see
+  the sampling milestone and the parked oracle survey).
+- **Phase 3.** tau-leap / chain-binomial backends + sub-`dt` bias
+  diagnostic + sojourn/cohort projections + **Tier 4** (coalescent,
+  validated against the corrected `2f/I²` rate) + offspring check.
 
-**Phase 3.** tau-leap / chain-binomial backends (with documented
-`dt`-bias diagnostic) + additional offline projections (sojourn
-analysis, cohort summaries).
+**Sampling milestone — NEXT** (the actual benchmark-realism work, not
+a Phase-2 redo — stratified *attribution* already shipped). Delivers
+realistic sampling per Open Question 2: the
+`SamplingScheme`/`IndividualSummary` trait, sampling over *all*
+individuals with pendant tips at sampling time, the
+`lineage { sampling { } }` model block (rates as parameters), and the
+`Stratified` / `ConditionalOnRemoval` schemes. **Tier 5 (external
+oracle) is gated behind this** — MASCOT/VGsim sample all cases, so
+comparing them to a leaf-only-`Flat` tree is mismatched by
+construction.
 
-**Phase 4.** Nonlinear-in-parents rate support: `infector(...)`
+**Phase 4 — deferred.** Nonlinear-in-parents rate support: `infector(...)`
 wrapper for explicit attribution semantics, partial-derivative-based
 between-pool weighting with symbolic sign-check, documented
 modeling-choice semantics for within-pool sampling (principle of
@@ -583,16 +594,85 @@ the IR schema" procedure.
 
 ## Open questions
 
-1. **`#[transmission]` alias.** Ship with just `#[lineage]` and add
-   the alias if users ask. The generality framing argues for
-   `#[lineage]`; the epi-specific readability case is real but
-   probably not load-bearing.
+1. **Vocabulary — RESOLVED to `lineage`.** Ship `#[lineage]` only; no
+   `#[transmission]` alias. The top-level `lineage { }` block, the
+   `camdl lineage` CLI namespace, the `--lineages` flag, and
+   `IndividualSummary` make "lineage" the consistent vocabulary across
+   the feature.
 
-2. **Sampling scheme interface.** Phase 1 ships with `Flat(rate)`.
-   Realistic uses need richer schemes (per-deme rates, time-varying
-   rates, conditional-on-removal sampling, AFP-style surveillance for
-   polio). Draft the `SamplingScheme` trait in Phase 1 even if only
-   `Flat` is implemented, so the shape is locked.
+2. **Sampling — the next milestone (committed design).** Today's
+   `Flat` samples only forest *leaves* (transmission-chain endpoints)
+   and places tips at *infection* time — not realistic surveillance,
+   and it makes a Tier-5 external-oracle comparison meaningless
+   (MASCOT/VGsim sample all cases). The milestone:
+
+   - **`SamplingScheme` trait** —
+     `sample(&IndividualSummary, rng) -> Option<f64>`, returning the
+     sampling *time* (a pendant tip placed there; `None` excludes the
+     individual). `IndividualSummary` carries the individual's strata,
+     infection time, removal time (`None` if never removed),
+     transmission count, and final compartment — derived by replaying
+     the line list per individual. Sampling draws over **all**
+     individuals, not just leaves (fixes both current biases:
+     leaf-only candidates, and infection-time tips).
+   - **Implementations:** `Flat { rate }` over all individuals (tip at
+     removal time, or sim end if never removed); `Stratified`
+     (per-stratum rates); `ConditionalOnRemoval` (only removed
+     individuals, at removal time). `TimeVarying<S>` wraps any of them.
+   - **Structure in the model; values as parameters.** A top-level
+     `lineage { sampling { scheme, condition, by, rate } }` block
+     declares the *structure* of the observation process — a
+     model-level claim that travels with the model and is committed to
+     `model_hash`. The sampling `rate` is an ordinary indexed
+     **parameter** (priors, bounds, jointly fittable, scenario-able,
+     supplied via `--params`), not a separate config format — which
+     preserves the `model_hash → model` invariant while letting rates
+     vary like any β/γ/ρ:
+
+     ```camdl
+     lineage {
+       sampling {
+         scheme    = stratified
+         condition = at_removal           # or `any`, or `at_event(<transition>)`
+         by        = [patch, age]         # strata the rate keys on
+         rate      = surveillance_rate    # a parameter
+       }
+     }
+     parameters {
+       surveillance_rate[patch, age] : probability in [0, 1] ~ beta(2, 20)
+     }
+     ```
+
+   - **Projection-time scheme override.** The model's
+     `lineage { sampling }` is the *canonical* observation process;
+     `camdl lineage tree` uses it by default but accepts an explicit
+     override for observation-process scenarios on the *same* line
+     list. The override flows into the **tree's** provenance hash,
+     never the model's — so `model_hash` stays canonical while one
+     line list re-projects under several observation designs without
+     re-simulating: `tree_hash = f(line list, effective scheme,
+     sampling params, seed)`.
+
+   - **Spec points to nail when implementing:**
+     1. `condition`: `at_removal` (tip at removal time; an individual
+        never removed by sim end is *excluded* — use `any` to include
+        sim-end), `any`, `at_event(<transition>)`.
+     2. `by` dimensions must equal the `rate` parameter's index
+        dimensions — a compile-time consistency check (own E-code).
+     3. `at_event(<transition>)` resolves a transition by name —
+        existence checked at compile time.
+     4. Sampling-only state the dynamics don't reference is
+        expressible *today* as a free stratification dimension
+        (`stratify(by = detection, only = [I])`; partial-compartment
+        stratification and free-dimension summing both exist — §5 of
+        the language spec). This is the *escape hatch* for an
+        explicitly-modeled detection sub-process, **not the primary
+        mechanism**: per-deme / per-age / by-compartment /
+        conditional-on-removal sampling all read state already in the
+        line list and need no new dimension. Surface free dimensions
+        in `camdl inspect` on demand ("dimensions with no rate
+        dependence: …"), not as a compile-time diagnostic (which would
+        false-positive on every legitimate sampling-only dimension).
 
 3. **Documentation discipline for the linear restriction.** v1's
    restriction will surprise users with He et al. style models. Worth
