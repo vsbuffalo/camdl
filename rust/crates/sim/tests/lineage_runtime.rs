@@ -20,7 +20,7 @@ use sim::{
     compiled_model::CompiledModel,
     config::{GillespieConfig, SimConfig},
     lineage::{
-        tree::{Flat, SamplingScheme, TransmissionForest},
+        tree::{summarize, select_samples, Flat, TransmissionForest},
         IndividualId, LineListEntry, ParentRef,
     },
     state::Trajectory,
@@ -174,8 +174,10 @@ fn tier1_pruned_tips_equal_sampled_set_and_no_unary_nodes() {
     let (_, entries) = run_with_lineage(m, 5, 60.0);
 
     let forest = TransmissionForest::from_entries(&entries);
+    let (summaries, sim_end) = summarize(&entries);
     let mut rng = sim::rng::StatefulRng::new(3);
-    let sampled = Flat::new(0.3).select(&forest, &mut rng);
+    // All-individuals candidate set (not leaf-only): each individual i.i.d. 0.3.
+    let sampled = select_samples(&Flat::new(0.3, sim_end), &summaries, &mut rng);
     assert!(!sampled.is_empty(), "expected a non-empty sample");
 
     let trees = forest.prune_to(&sampled);
@@ -184,11 +186,16 @@ fn tier1_pruned_tips_equal_sampled_set_and_no_unary_nodes() {
     let mut tips: HashSet<u64> = HashSet::new();
     fn collect_tips(n: &sim::lineage::tree::PrunedNode, tips: &mut HashSet<u64>) {
         if n.children.is_empty() {
+            // Every leaf is a pendant tip for a sampled individual.
+            assert!(n.is_sampled_tip, "leaf {} must be a sampled tip", n.id.0);
             tips.insert(n.id.0);
         } else {
-            // No unary internal nodes after pruning.
+            // No unsampled unary internal nodes after pruning. A sampled
+            // infector is rendered as an (unlabelled) internal node with its
+            // pendant tip as one of ≥ 2 children, so internal nodes always have
+            // ≥ 2 children.
             assert!(
-                n.children.len() >= 2 || n.is_sampled_tip,
+                n.children.len() >= 2,
                 "internal node {} has {} children — unary node not suppressed",
                 n.id.0,
                 n.children.len()
@@ -202,7 +209,7 @@ fn tier1_pruned_tips_equal_sampled_set_and_no_unary_nodes() {
         collect_tips(t, &mut tips);
     }
 
-    let sampled_ids: HashSet<u64> = sampled.iter().map(|s| s.0).collect();
+    let sampled_ids: HashSet<u64> = sampled.keys().map(|s| s.0).collect();
     assert_eq!(tips, sampled_ids, "pruned tips must equal the sampled set");
 }
 
@@ -378,12 +385,17 @@ fn tier3_pure_birth_tree_statistics() {
         );
 
         // Sackin index is well-defined and non-negative for a full sample.
-        let sampled: HashSet<IndividualId> = forest.leaves().into_iter().collect();
+        // Under all-individuals sampling at rate 1.0, EVERY individual becomes a
+        // pendant tip — so #tips == #nodes, not #leaves.
+        let (summaries, sim_end) = summarize(&entries);
+        let mut rng = sim::rng::StatefulRng::new(seed);
+        let sampled = select_samples(&Flat::new(1.0, sim_end), &summaries, &mut rng);
         let trees = forest.prune_to(&sampled);
         let sackin: usize = trees.iter().map(|t| t.sackin()).sum();
         let tips: usize = trees.iter().map(|t| t.tip_count()).sum();
-        assert_eq!(tips, n_leaves, "pruned tips (rate 1.0) must equal all leaves");
+        assert_eq!(tips, n_nodes, "pruned tips (rate 1.0) must equal all individuals");
         assert!(sackin >= tips, "Sackin >= #tips for a non-degenerate tree");
+        let _ = n_leaves;
     }
     assert!(replicates >= 5, "expected several non-trivial Yule replicates");
     let mean_births = total_births as f64 / replicates as f64;
@@ -403,17 +415,26 @@ fn lineage_line_list_is_reproducible() {
     assert_eq!(e1, e2, "same seed must yield identical line lists");
 }
 
-/// Flat scheme covers all tips at rate 1.0 (sampling-scheme sanity).
+/// Flat scheme at rate 1.0 samples ALL individuals (not just leaves) — the
+/// all-individuals candidate set (sampling-scheme sanity).
 #[test]
-fn flat_rate_one_samples_all_leaves() {
+fn flat_rate_one_samples_all_individuals() {
     let mut m = load_fixture("sir_lineage");
     set_params(&mut m, &[("beta", 0.7), ("gamma", 0.2), ("N0", 500.0)]);
     let (_, entries) = run_with_lineage(m, 9, 50.0);
     let forest = TransmissionForest::from_entries(&entries);
-    let all_leaves: HashSet<IndividualId> = forest.leaves().into_iter().collect();
+    let (summaries, sim_end) = summarize(&entries);
+    let all_individuals: HashSet<IndividualId> = forest.nodes.keys().copied().collect();
     let mut rng = sim::rng::StatefulRng::new(1);
-    let sampled = Flat::new(1.0).select(&forest, &mut rng);
-    assert_eq!(sampled, all_leaves);
+    let sampled = select_samples(&Flat::new(1.0, sim_end), &summaries, &mut rng);
+    let sampled_ids: HashSet<IndividualId> = sampled.keys().copied().collect();
+    assert_eq!(sampled_ids, all_individuals);
+    // Sanity: there is at least one infector (internal node) in the sampled set,
+    // confirming the candidate set is genuinely all-individuals, not leaf-only.
+    assert!(
+        forest.nodes.values().any(|n| !n.children.is_empty()),
+        "fixture should produce at least one infector"
+    );
 }
 
 // ── Layer-1/2 explicit: event-log invariance + identity-seed independence ───────

@@ -9,12 +9,17 @@
 //!   1. [`TransmissionForest::from_entries`] — build parent→child edges from
 //!      lineage events (`parent_kind == "individual"`). Each child has exactly
 //!      one parent; seed / import individuals are roots.
-//!   2. [`SamplingScheme`] — select observed tips. Phase 1 ships [`Flat`]
-//!      (each candidate tip sampled i.i.d. with a fixed probability).
-//!   3. [`TransmissionForest::prune_to`] — restrict to the minimal subtree
-//!      spanning the sampled tips, suppressing unary internal nodes.
-//!   4. [`PrunedTree::to_newick`] — render Newick with branch lengths in time
-//!      units.
+//!   2. [`IndividualSummary`] / [`summarize`] — per-individual infection time,
+//!      removal time, and deme, derived from the line list. The candidate set
+//!      for sampling is **all** individuals, not just leaves.
+//!   3. [`SamplingScheme`] — decide, per individual, whether it is sampled and
+//!      at what *sampling time* a pendant tip is placed. Ships [`Flat`] (i.i.d.
+//!      probability over all individuals) and [`Stratified`] (per-deme rates).
+//!   4. [`TransmissionForest::prune_to`] — restrict to the minimal subtree
+//!      spanning the sampled tips, placing each sampled individual's pendant tip
+//!      at its sampling time and suppressing unsampled unary internal nodes.
+//!   5. [`PrunedTree::to_newick`] — render Newick with branch lengths in time
+//!      units (tip branches reach the sampling time).
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,7 +27,7 @@ use crate::error::SimError;
 use crate::rng::StatefulRng;
 
 use super::writer::LineListEntry;
-use super::{IndividualId, ParentRef};
+use super::{DemeId, IndividualId, ParentRef};
 
 /// A single node in the raw transmission forest: an individual, the time it
 /// was born (its lineage-event time), and its parent (if any).
@@ -124,15 +129,23 @@ impl TransmissionForest {
         v
     }
 
-    /// Prune the forest to the minimal subtree spanning `sampled`, suppressing
-    /// unary internal nodes (degree-2 path compression). Branch lengths
-    /// accumulate the birth-time differences across suppressed nodes.
+    /// Prune the forest to the minimal subtree spanning the sampled
+    /// individuals, suppressing unsampled unary internal nodes (degree-2 path
+    /// compression). `sampled` maps each sampled individual to its **sampling
+    /// time** — the time its pendant tip reaches.
+    ///
+    /// A sampled individual always contributes exactly one tip:
+    ///   - if it has no retained children it is a leaf, placed at its sampling
+    ///     time;
+    ///   - if it is an infector with retained children (an internal node), it
+    ///     becomes an internal node *plus* an extra pendant-tip child placed at
+    ///     its sampling time. Its onward-transmission subtree is preserved.
     ///
     /// Returns one [`PrunedTree`] per root that retains ≥ 1 sampled descendant.
-    pub fn prune_to(&self, sampled: &HashSet<IndividualId>) -> Vec<PrunedTree> {
-        // Mark every ancestor of a sampled tip as "retained".
+    pub fn prune_to(&self, sampled: &HashMap<IndividualId, f64>) -> Vec<PrunedTree> {
+        // Mark every ancestor of a sampled individual as "retained".
         let mut retained: HashSet<IndividualId> = HashSet::new();
-        for &s in sampled {
+        for &s in sampled.keys() {
             let mut cur = Some(s);
             while let Some(id) = cur {
                 if !retained.insert(id) {
@@ -155,11 +168,11 @@ impl TransmissionForest {
     }
 
     /// Recursively build a path-compressed pruned subtree rooted at `id`.
-    /// Returns `None` if the subtree contains no sampled tip.
+    /// Returns `None` if the subtree contains no sampled individual.
     fn build_pruned(
         &self,
         id: IndividualId,
-        sampled: &HashSet<IndividualId>,
+        sampled: &HashMap<IndividualId, f64>,
         retained: &HashSet<IndividualId>,
     ) -> Option<PrunedNode> {
         let node = self.nodes.get(&id)?;
@@ -170,7 +183,8 @@ impl TransmissionForest {
             .filter(|c| retained.contains(c))
             .collect();
 
-        let is_sampled_tip = sampled.contains(&id);
+        let sampling_time = sampled.get(&id).copied();
+        let is_sampled = sampling_time.is_some();
 
         // Build retained children subtrees.
         let mut child_subtrees: Vec<PrunedNode> = Vec::new();
@@ -180,37 +194,74 @@ impl TransmissionForest {
             }
         }
 
-        // Path compression: a node that is not a sampled tip and has exactly
-        // one retained child collapses into that child, summing branch lengths.
-        if !is_sampled_tip && child_subtrees.len() == 1 {
+        // Path compression: an *unsampled* node with exactly one retained child
+        // collapses into that child, summing branch lengths.
+        if !is_sampled && child_subtrees.len() == 1 {
             let mut only = child_subtrees.pop().unwrap();
             // Add this node's own incoming branch length onto the child by
-            // shifting the child's birth reference up to this node's parent.
+            // shifting the child's branch reference up to this node's parent.
             only.branch_from = node.parent.and_then(|p| self.nodes.get(&p)).map(|p| p.birth_time);
             return Some(only);
         }
 
-        if !is_sampled_tip && child_subtrees.is_empty() {
+        if !is_sampled && child_subtrees.is_empty() {
             return None;
         }
 
         let branch_from = node.parent.and_then(|p| self.nodes.get(&p)).map(|p| p.birth_time);
+
+        if let Some(t_sample) = sampling_time {
+            if child_subtrees.is_empty() {
+                // A sampled leaf: the node *is* the tip, ending at its sampling
+                // time. Branch length spans birth → sampling.
+                return Some(PrunedNode {
+                    id,
+                    node_time: t_sample,
+                    branch_from,
+                    children: Vec::new(),
+                    is_sampled_tip: true,
+                });
+            }
+            // A sampled infector (internal node): keep the transmission subtree
+            // and add a pendant tip at the sampling time. The internal node sits
+            // at the infection (birth) time; the pendant tip hangs off it with
+            // branch length (sampling − birth).
+            child_subtrees.push(PrunedNode {
+                id,
+                node_time: t_sample,
+                branch_from: Some(node.birth_time),
+                children: Vec::new(),
+                is_sampled_tip: true,
+            });
+            return Some(PrunedNode {
+                id,
+                node_time: node.birth_time,
+                branch_from,
+                children: child_subtrees,
+                is_sampled_tip: false,
+            });
+        }
+
+        // Unsampled internal node with ≥ 2 retained children: a real coalescence
+        // at its birth (transmission) time.
         Some(PrunedNode {
             id,
-            birth_time: node.birth_time,
+            node_time: node.birth_time,
             branch_from,
             children: child_subtrees,
-            is_sampled_tip,
+            is_sampled_tip: false,
         })
     }
 }
 
-/// A node in a pruned tree. `branch_from` is the birth time of the most-recent
-/// retained ancestor (for branch-length computation); `None` at the root.
+/// A node in a pruned tree. `node_time` is the node's calendar time: a sampled
+/// tip's *sampling* time, an internal node's transmission (birth) time.
+/// `branch_from` is the calendar time of the most-recent retained ancestor (for
+/// branch-length computation); `None` at the root.
 #[derive(Debug, Clone)]
 pub struct PrunedNode {
     pub id: IndividualId,
-    pub birth_time: f64,
+    pub node_time: f64,
     pub branch_from: Option<f64>,
     pub children: Vec<PrunedNode>,
     pub is_sampled_tip: bool,
@@ -220,8 +271,9 @@ pub struct PrunedNode {
 pub type PrunedTree = PrunedNode;
 
 impl PrunedNode {
-    /// Render Newick. Tips are labelled `ind<id>`; internal nodes are unlabelled.
-    /// Branch lengths are `birth_time − branch_from` (0 at the root).
+    /// Render Newick. Tips (leaves) are labelled `ind<id>`; internal nodes are
+    /// unlabelled. Branch lengths are `node_time − branch_from` (0 at the root),
+    /// so a sampled tip's branch reaches its sampling time.
     pub fn to_newick(&self) -> String {
         let mut s = String::new();
         self.write_newick(&mut s);
@@ -241,11 +293,8 @@ impl PrunedNode {
                 c.write_newick(out);
             }
             out.push(')');
-            // Internal nodes are unlabelled; label sampled internal tips for
-            // completeness (rare: a sampled individual that also infected).
-            if self.is_sampled_tip {
-                out.push_str(&format!("ind{}", self.id.0));
-            }
+            // Internal nodes are unlabelled. A sampled infector contributes its
+            // own tip as a pendant-leaf child, so it is never labelled here.
         }
         let bl = self.branch_length();
         out.push_str(&format!(":{}", bl));
@@ -254,7 +303,7 @@ impl PrunedNode {
     /// Branch length subtending this node (0 at a root).
     pub fn branch_length(&self) -> f64 {
         match self.branch_from {
-            Some(from) => (self.birth_time - from).max(0.0),
+            Some(from) => (self.node_time - from).max(0.0),
             None => 0.0,
         }
     }
@@ -284,36 +333,176 @@ impl PrunedNode {
     }
 }
 
-/// A scheme that selects which candidate tips become observed samples. Phase 1
-/// implements only [`Flat`]; the trait fixes the shape so later schemes
-/// (per-deme, time-varying, conditional-on-removal) slot in without changing
-/// callers.
-pub trait SamplingScheme {
-    /// Given the full forest and a deterministic RNG, return the set of
-    /// individuals selected as observed tips.
-    fn select(&self, forest: &TransmissionForest, rng: &mut StatefulRng) -> HashSet<IndividualId>;
+/// Per-individual facts derived from the line list, independent of the forest
+/// topology. The sampling layer draws on these (deme + removal time); the tree
+/// builder uses the resulting per-individual sampling time to place pendant
+/// tips.
+///
+/// - `infection_time`: when the individual was born — its earliest focal event
+///   time (the lineage event that created it, or its seed/import time). Equal to
+///   the forest [`Node::birth_time`].
+/// - `removal_time`: when the individual stopped being infectious — the latest
+///   time at which it is the focal individual of a *non-lineage* event
+///   (progression / recovery / death; `parent_kind == none`). `None` if it never
+///   appears in such an event (still infected at the simulation horizon).
+/// - `deme`: the individual's stratum, read from the `deme` column of its birth
+///   event (its destination stratum at infection / seeding).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndividualSummary {
+    pub id: IndividualId,
+    pub infection_time: f64,
+    pub removal_time: Option<f64>,
+    pub deme: DemeId,
 }
 
-/// Flat sampling: each leaf of the full forest is sampled i.i.d. with
-/// probability `rate`.
+impl IndividualSummary {
+    /// The sampling time to use when this individual is observed but never
+    /// removed: fall back to the simulation horizon `sim_end` so the pendant tip
+    /// reaches the end of observation rather than its (unknown) removal.
+    pub fn removal_or(&self, sim_end: f64) -> f64 {
+        self.removal_time.unwrap_or(sim_end)
+    }
+}
+
+/// Build the per-individual summaries from a line list and report the
+/// simulation horizon (the maximum event time, used as the sampling time for
+/// never-removed individuals). Returns `(summaries, sim_end)`.
+///
+/// Every individual that appears as a focal individual gets a summary; so do
+/// pure-parent seeds (individuals that only ever appear as a `parent_id`), with
+/// `infection_time = 0` and `removal_time = None` — matching the forest's
+/// treatment of seed roots.
+pub fn summarize(entries: &[LineListEntry]) -> (HashMap<IndividualId, IndividualSummary>, f64) {
+    let mut map: HashMap<IndividualId, IndividualSummary> = HashMap::new();
+    let mut sim_end = 0.0_f64;
+
+    for e in entries {
+        sim_end = sim_end.max(e.time);
+        let is_lineage = matches!(e.parent, ParentRef::Individual(_));
+
+        // Focal individual: born at its earliest focal-event time; the deme at
+        // that earliest event is its stratum.
+        let s = map.entry(e.individual).or_insert(IndividualSummary {
+            id: e.individual,
+            infection_time: e.time,
+            removal_time: None,
+            deme: e.deme,
+        });
+        if e.time < s.infection_time {
+            s.infection_time = e.time;
+            s.deme = e.deme;
+        }
+        // A non-lineage focal event is a progression / removal: take the latest
+        // such time as the removal time.
+        if !is_lineage {
+            s.removal_time = Some(match s.removal_time {
+                Some(t) => t.max(e.time),
+                None => e.time,
+            });
+        }
+
+        // Ensure a pure-parent seed (only ever a parent_id) exists as a root
+        // individual: infection_time 0, never removed, deme from parent_deme.
+        if let ParentRef::Individual(p) = e.parent {
+            map.entry(p).or_insert(IndividualSummary {
+                id: p,
+                infection_time: 0.0,
+                removal_time: None,
+                deme: e.parent_deme.unwrap_or(0),
+            });
+        }
+    }
+
+    (map, sim_end)
+}
+
+/// A scheme that decides, per individual, whether it is sampled and the
+/// *sampling time* at which its pendant tip is placed. The candidate set is
+/// **all** individuals (an infector can be a tip), not just chain endpoints.
+/// The trait fixes the shape so later schemes (time-varying, conditional-on-
+/// removal) slot in without changing callers.
+pub trait SamplingScheme {
+    /// Given an individual's summary and a deterministic RNG, return its
+    /// sampling time (a pendant tip is placed there) or `None` if excluded.
+    fn sample(&self, s: &IndividualSummary, rng: &mut StatefulRng) -> Option<f64>;
+}
+
+/// Apply a [`SamplingScheme`] to every individual in `summaries`, returning the
+/// map `sampled individual → sampling time`. Individuals are visited in id order
+/// so the RNG draw order — and therefore the sampled set for a given seed — is
+/// deterministic regardless of `HashMap` iteration order.
+pub fn select_samples(
+    scheme: &dyn SamplingScheme,
+    summaries: &HashMap<IndividualId, IndividualSummary>,
+    rng: &mut StatefulRng,
+) -> HashMap<IndividualId, f64> {
+    let mut ids: Vec<IndividualId> = summaries.keys().copied().collect();
+    ids.sort();
+    let mut out = HashMap::new();
+    for id in ids {
+        if let Some(t) = scheme.sample(&summaries[&id], rng) {
+            out.insert(id, t);
+        }
+    }
+    out
+}
+
+/// Flat sampling: each individual is sampled i.i.d. with probability `rate`,
+/// over **all** individuals (not just leaves). A sampled individual's tip is
+/// placed at its removal time (or the simulation horizon if it was never
+/// removed). `sim_end` is the horizon from [`summarize`].
 pub struct Flat {
     pub rate: f64,
+    pub sim_end: f64,
 }
 
 impl Flat {
-    pub fn new(rate: f64) -> Self {
-        Flat { rate }
+    pub fn new(rate: f64, sim_end: f64) -> Self {
+        Flat { rate, sim_end }
     }
 }
 
 impl SamplingScheme for Flat {
-    fn select(&self, forest: &TransmissionForest, rng: &mut StatefulRng) -> HashSet<IndividualId> {
+    fn sample(&self, s: &IndividualSummary, rng: &mut StatefulRng) -> Option<f64> {
         let p = self.rate.clamp(0.0, 1.0);
-        forest
-            .leaves()
-            .into_iter()
-            .filter(|_| rng.uniform() < p)
-            .collect()
+        if rng.uniform() < p {
+            Some(s.removal_or(self.sim_end))
+        } else {
+            None
+        }
+    }
+}
+
+/// Stratified sampling: each individual is sampled at its deme's rate (falling
+/// back to `default` for demes without an explicit rate). Sampling time = the
+/// individual's removal time (or the horizon if never removed). Rates are keyed
+/// on the integer deme index; the model-block path that resolves stratum
+/// *names* and rates-as-parameters is a future milestone.
+pub struct Stratified {
+    pub rates: HashMap<DemeId, f64>,
+    pub default: f64,
+    pub sim_end: f64,
+}
+
+impl Stratified {
+    pub fn new(rates: HashMap<DemeId, f64>, default: f64, sim_end: f64) -> Self {
+        Stratified { rates, default, sim_end }
+    }
+
+    /// The sampling probability that applies to deme `d`.
+    pub fn rate_for(&self, d: DemeId) -> f64 {
+        self.rates.get(&d).copied().unwrap_or(self.default).clamp(0.0, 1.0)
+    }
+}
+
+impl SamplingScheme for Stratified {
+    fn sample(&self, s: &IndividualSummary, rng: &mut StatefulRng) -> Option<f64> {
+        let p = self.rate_for(s.deme);
+        if rng.uniform() < p {
+            Some(s.removal_or(self.sim_end))
+        } else {
+            None
+        }
     }
 }
 
@@ -466,17 +655,44 @@ mod tests {
     use super::*;
 
     fn lineage_entry(t: f64, ind: u64, parent: u64, dst: usize) -> LineListEntry {
+        lineage_entry_deme(t, ind, parent, dst, 0)
+    }
+
+    fn lineage_entry_deme(t: f64, ind: u64, parent: u64, dst: usize, deme: u32) -> LineListEntry {
         LineListEntry {
             time: t,
             transition: 0,
             individual: IndividualId(ind),
             source: Some(0),
             destination: Some(dst),
-            deme: 0,
+            deme,
             parent: ParentRef::Individual(IndividualId(parent)),
             parent_deme: Some(0),
             attribution_logprob: 0.0,
         }
+    }
+
+    /// A non-lineage focal event (progression / recovery / removal): focal
+    /// individual moves `src -> dst`, no parent. Used to give individuals a
+    /// removal time.
+    fn removal_entry(t: f64, ind: u64, src: usize, dst: Option<usize>) -> LineListEntry {
+        LineListEntry {
+            time: t,
+            transition: 1,
+            individual: IndividualId(ind),
+            source: Some(src),
+            destination: dst,
+            deme: 0,
+            parent: ParentRef::None,
+            parent_deme: None,
+            attribution_logprob: 0.0,
+        }
+    }
+
+    /// Sampled set with all sampling times equal to `t` (a convenience for
+    /// structural prune tests where the exact tip time is not under test).
+    fn sampled_at(ids: &[u64], t: f64) -> HashMap<IndividualId, f64> {
+        ids.iter().map(|&i| (IndividualId(i), t)).collect()
     }
 
     #[test]
@@ -523,8 +739,7 @@ mod tests {
             lineage_entry(1.5, 4, 0, 1),
         ];
         let f = TransmissionForest::from_entries(&entries);
-        let sampled: HashSet<IndividualId> =
-            [IndividualId(3), IndividualId(4)].into_iter().collect();
+        let sampled = sampled_at(&[3, 4], 5.0);
         let trees = f.prune_to(&sampled);
         assert_eq!(trees.len(), 1);
         let t = &trees[0];
@@ -553,11 +768,152 @@ mod tests {
             lineage_entry(2.0, 2, 0, 1),
             lineage_entry(3.0, 3, 1, 1),
         ];
-        let f = TransmissionForest::from_entries(&entries);
+        let (summaries, sim_end) = summarize(&entries);
         let mut r1 = StatefulRng::new(123);
         let mut r2 = StatefulRng::new(123);
-        let s1 = Flat::new(0.5).select(&f, &mut r1);
-        let s2 = Flat::new(0.5).select(&f, &mut r2);
+        let s1 = select_samples(&Flat::new(0.5, sim_end), &summaries, &mut r1);
+        let s2 = select_samples(&Flat::new(0.5, sim_end), &summaries, &mut r2);
         assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn summarize_infection_removal_and_deme() {
+        // 0 -> 1 (infected t=1, deme 0), 1 recovers at t=4 (I->R).
+        // 0 -> 2 (infected t=2, deme 1), never recovers.
+        let entries = vec![
+            lineage_entry_deme(1.0, 1, 0, 1, 0),
+            removal_entry(4.0, 1, 1, Some(2)),
+            lineage_entry_deme(2.0, 2, 0, 1, 1),
+        ];
+        let (s, sim_end) = summarize(&entries);
+        assert_eq!(sim_end, 4.0);
+        let s1 = &s[&IndividualId(1)];
+        assert_eq!(s1.infection_time, 1.0);
+        assert_eq!(s1.removal_time, Some(4.0));
+        assert_eq!(s1.deme, 0);
+        let s2 = &s[&IndividualId(2)];
+        assert_eq!(s2.infection_time, 2.0);
+        assert_eq!(s2.removal_time, None);
+        assert_eq!(s2.deme, 1);
+        // Never-removed individual falls back to sim_end.
+        assert_eq!(s2.removal_or(sim_end), 4.0);
+        // Seed (pure parent) exists as a root with infection_time 0.
+        let s0 = &s[&IndividualId(0)];
+        assert_eq!(s0.infection_time, 0.0);
+        assert_eq!(s0.removal_time, None);
+    }
+
+    #[test]
+    fn flat_all_individuals_can_sample_an_infector() {
+        // Chain 0 -> 1 -> 2. Individual 1 is an infector (internal node).
+        // With rate 1.0 over ALL individuals, 1 must be in the sampled set —
+        // impossible under the old leaf-only scheme.
+        let entries = vec![lineage_entry(1.0, 1, 0, 1), lineage_entry(2.0, 2, 1, 1)];
+        let (summaries, sim_end) = summarize(&entries);
+        let mut rng = StatefulRng::new(1);
+        let sampled = select_samples(&Flat::new(1.0, sim_end), &summaries, &mut rng);
+        assert!(sampled.contains_key(&IndividualId(1)), "infector must be sampleable");
+
+        let f = TransmissionForest::from_entries(&entries);
+        // Confirm 1 is genuinely an infector (has a child) in the full forest.
+        assert!(!f.nodes[&IndividualId(1)].children.is_empty());
+
+        // In the pruned tree, sampling {1, 2} makes 1 an internal node with a
+        // pendant tip plus its child subtree (tip for 2).
+        let sel = sampled_at(&[1, 2], 5.0);
+        let trees = f.prune_to(&sel);
+        assert_eq!(trees.len(), 1);
+        let t = &trees[0];
+        // Tips equal the sampled set {1, 2}.
+        let mut tip_ids = collect_tip_ids(t);
+        tip_ids.sort();
+        assert_eq!(tip_ids, vec![1, 2], "pruned tips must equal the sampled set");
+    }
+
+    #[test]
+    fn pendant_tip_is_placed_at_sampling_time() {
+        // 0 -> 1 (infected t=1), 1 recovers (removed) at t=6. Sample {1}.
+        // Its tip branch must reach the removal time (6), not the infection
+        // time (1).
+        let entries = vec![lineage_entry(1.0, 1, 0, 1), removal_entry(6.0, 1, 1, Some(2))];
+        let f = TransmissionForest::from_entries(&entries);
+        let (summaries, sim_end) = summarize(&entries);
+        let t_sample = summaries[&IndividualId(1)].removal_or(sim_end);
+        assert_eq!(t_sample, 6.0);
+
+        let sel: HashMap<IndividualId, f64> = [(IndividualId(1), t_sample)].into_iter().collect();
+        let trees = f.prune_to(&sel);
+        assert_eq!(trees.len(), 1);
+        // The single tip's node_time is the sampling (removal) time.
+        let tip = find_tip(&trees[0], IndividualId(1)).expect("tip 1 present");
+        assert_eq!(tip.node_time, 6.0, "tip placed at sampling time, not infection time");
+    }
+
+    #[test]
+    fn stratified_rates_skew_tip_composition() {
+        // Two demes: 100 individuals each. Deme 0 sampled at 0.5, deme 1 at
+        // 0.05. Over many seeds, observed per-deme frequencies match the rates
+        // and the tip stratum is skewed toward deme 0.
+        let mut entries = Vec::new();
+        // All infected by a single seed (0), so they are all candidate tips.
+        for i in 1..=100u64 {
+            entries.push(lineage_entry_deme(1.0, i, 0, 1, 0)); // deme 0
+        }
+        for i in 101..=200u64 {
+            entries.push(lineage_entry_deme(1.0, i, 0, 1, 1)); // deme 1
+        }
+        let (summaries, sim_end) = summarize(&entries);
+        let rates: HashMap<DemeId, f64> = [(0u32, 0.5), (1u32, 0.05)].into_iter().collect();
+        let scheme = Stratified::new(rates, 0.0, sim_end);
+
+        let trials = 400;
+        let mut sum_d0 = 0usize;
+        let mut sum_d1 = 0usize;
+        for seed in 0..trials {
+            let mut rng = StatefulRng::new(seed);
+            let sampled = select_samples(&scheme, &summaries, &mut rng);
+            for id in sampled.keys() {
+                if summaries[id].deme == 0 {
+                    sum_d0 += 1;
+                } else {
+                    sum_d1 += 1;
+                }
+            }
+        }
+        // Observed per-deme frequency = sampled / (trials * pop_per_deme).
+        let n_per_deme = 100.0 * trials as f64;
+        let freq_d0 = sum_d0 as f64 / n_per_deme;
+        let freq_d1 = sum_d1 as f64 / n_per_deme;
+        // 3σ MC tolerance: sigma = sqrt(p(1-p)/N).
+        let sigma = |p: f64| (p * (1.0 - p) / n_per_deme).sqrt();
+        assert!(
+            (freq_d0 - 0.5).abs() < 3.0 * sigma(0.5),
+            "deme-0 freq {} not within 3σ of 0.5",
+            freq_d0
+        );
+        assert!(
+            (freq_d1 - 0.05).abs() < 3.0 * sigma(0.05),
+            "deme-1 freq {} not within 3σ of 0.05",
+            freq_d1
+        );
+        // Composition skewed: ~10x more deme-0 tips than deme-1.
+        assert!(sum_d0 > 5 * sum_d1, "tip composition must skew toward deme 0");
+    }
+
+    // ── helpers for tree-shape assertions ─────────────────────────────────
+
+    fn collect_tip_ids(n: &PrunedNode) -> Vec<u64> {
+        if n.children.is_empty() {
+            vec![n.id.0]
+        } else {
+            n.children.iter().flat_map(collect_tip_ids).collect()
+        }
+    }
+
+    fn find_tip<'a>(n: &'a PrunedNode, id: IndividualId) -> Option<&'a PrunedNode> {
+        if n.children.is_empty() {
+            return if n.id == id { Some(n) } else { None };
+        }
+        n.children.iter().find_map(|c| find_tip(c, id))
     }
 }
