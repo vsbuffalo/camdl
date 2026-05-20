@@ -1393,6 +1393,69 @@ pub struct LineageTreeArgs {
     pub seed: u64,
 }
 
+/// `camdl lineage sojourn LINE_LIST --compartment ID` — dwell-time distribution
+/// in a compartment. Pure offline over the line list. The compartment is given
+/// by its **global id** (the integer column index in the `camdl simulate`
+/// trajectory, the same id the line list records in `source` / `destination`).
+#[derive(Args)]
+#[command(after_help = colored_help!("\
+Examples:
+  # Dwell time in compartment 1 (e.g. the I compartment of an SIR)
+  camdl lineage sojourn line_list.tsv --compartment 1
+
+  # Write per-individual sojourns to a TSV
+  camdl lineage sojourn line_list.parquet --compartment 1 --output sojourn.tsv
+"))]
+pub struct LineageSojournArgs {
+    /// Line-list file (.tsv or .parquet). Format auto-detected by extension.
+    pub line_list: PathBuf,
+
+    /// Global compartment id whose dwell-time distribution to compute. This is
+    /// the integer compartment index (matching the line list's source /
+    /// destination columns), not the compartment name.
+    #[arg(long)]
+    pub compartment: usize,
+
+    /// Output TSV path for the per-individual sojourns (default: stdout). A
+    /// summary (count, censored, mean, quantiles) is always printed to stderr.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
+/// `camdl lineage cohort LINE_LIST --event infection` — per-time-window event
+/// summary (incidence + cumulative). Pure offline over the line list.
+#[derive(Args)]
+#[command(after_help = colored_help!("\
+Examples:
+  # Infection incidence in 7-day windows
+  camdl lineage cohort line_list.tsv --event infection --window 7
+
+  # Events of a specific transition id, daily windows, to a file
+  camdl lineage cohort line_list.parquet --event 2 --window 1 --output cohort.tsv
+"))]
+pub struct LineageCohortArgs {
+    /// Line-list file (.tsv or .parquet). Format auto-detected by extension.
+    pub line_list: PathBuf,
+
+    /// Which events to count. `infection` counts all transmission (lineage)
+    /// events — identifiable from the line list with no model. Alternatively a
+    /// transition id (integer) counts events of that transition.
+    #[arg(long, default_value = "infection")]
+    pub event: String,
+
+    /// Time-window width (default: 1.0).
+    #[arg(long, default_value_t = 1.0)]
+    pub window: f64,
+
+    /// Align windows to t=0 (default) rather than to the first matching event.
+    #[arg(long, default_value_t = true)]
+    pub align_zero: bool,
+
+    /// Output TSV path (default: stdout).
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
 // ─── browse ───────────────────────────────────────────────────────────────────
 
 #[derive(Args)]

@@ -16,7 +16,7 @@ use sim::lineage::{
     LineListFormat, LineListWriter, TsvLineListWriter,
 };
 
-use crate::args::{LineageTreeArgs, SimulateArgs};
+use crate::args::{LineageCohortArgs, LineageSojournArgs, LineageTreeArgs, SimulateArgs};
 use crate::util::SimRun;
 
 /// Resolve the requested line-list format from `--format` / `--tsv`.
@@ -275,5 +275,98 @@ pub fn cmd_lineage_tree(a: &LineageTreeArgs) {
         forest.leaves().len(),
         sampled.len(),
         trees.len()
+    );
+}
+
+/// `camdl lineage sojourn LINE_LIST --compartment ID` — dwell-time distribution.
+pub fn cmd_lineage_sojourn(a: &LineageSojournArgs) {
+    let entries = read_line_list(&a.line_list).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+
+    let result = sim::lineage::project::sojourn(&entries, a.compartment);
+
+    // Per-individual sojourns to stdout / --output (TSV).
+    let mut out: Box<dyn Write> = match &a.output {
+        Some(p) => Box::new(std::io::BufWriter::new(
+            std::fs::File::create(p).unwrap_or_else(|e| {
+                eprintln!("error: cannot create {}: {}", p.display(), e);
+                std::process::exit(1);
+            }),
+        )),
+        None => Box::new(std::io::stdout()),
+    };
+    writeln!(out, "individual\tentry\texit\tdwell").ok();
+    for s in &result.completed {
+        writeln!(out, "{}\t{}\t{}\t{}", s.individual, s.entry, s.exit, s.dwell).ok();
+    }
+    out.flush().ok();
+
+    // Summary to stderr (always).
+    eprintln!(
+        "lineage sojourn (compartment {}): {} completed, {} right-censored; \
+         mean dwell {:.4}, median {:.4}, p90 {:.4}",
+        a.compartment,
+        result.completed.len(),
+        result.censored,
+        result.mean_dwell(),
+        result.dwell_quantile(0.5),
+        result.dwell_quantile(0.9),
+    );
+}
+
+/// `camdl lineage cohort LINE_LIST --event infection` — per-time-window summary.
+pub fn cmd_lineage_cohort(a: &LineageCohortArgs) {
+    use sim::lineage::project::CohortEvent;
+
+    let entries = read_line_list(&a.line_list).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+
+    if a.window <= 0.0 {
+        eprintln!("error: --window must be positive, got {}", a.window);
+        std::process::exit(1);
+    }
+
+    // `infection` (the model-independent lineage-event filter) or a transition id.
+    let event = if a.event.eq_ignore_ascii_case("infection") {
+        CohortEvent::Infection
+    } else {
+        match a.event.parse::<usize>() {
+            Ok(t) => CohortEvent::Transition(t),
+            Err(_) => {
+                eprintln!(
+                    "error: --event must be 'infection' or a transition id (integer), got '{}'",
+                    a.event
+                );
+                std::process::exit(1);
+            }
+        }
+    };
+
+    let bins = sim::lineage::project::cohort(&entries, event, a.window, a.align_zero);
+
+    let mut out: Box<dyn Write> = match &a.output {
+        Some(p) => Box::new(std::io::BufWriter::new(
+            std::fs::File::create(p).unwrap_or_else(|e| {
+                eprintln!("error: cannot create {}: {}", p.display(), e);
+                std::process::exit(1);
+            }),
+        )),
+        None => Box::new(std::io::stdout()),
+    };
+    writeln!(out, "window_start\twindow_end\tincidence\tcumulative").ok();
+    for b in &bins {
+        writeln!(out, "{}\t{}\t{}\t{}", b.start, b.end, b.incidence, b.cumulative).ok();
+    }
+    out.flush().ok();
+
+    let total: u64 = bins.last().map_or(0, |b| b.cumulative);
+    eprintln!(
+        "lineage cohort: {} window(s), {} total events",
+        bins.len(),
+        total
     );
 }

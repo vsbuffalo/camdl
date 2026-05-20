@@ -40,6 +40,7 @@
 pub mod deme;
 pub mod writer;
 pub mod tree;
+pub mod project;
 
 use std::collections::HashMap;
 

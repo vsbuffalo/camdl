@@ -270,8 +270,7 @@ pub(crate) enum DataCmd {
 }
 
 /// Offline lineage projections. Pure functions over a line-list file produced
-/// by `camdl simulate --lineages` — no simulation re-run. Phase 1 ships the
-/// transmission-tree projection; `sojourn` / `cohort` are reserved (Phase 3).
+/// by `camdl simulate --lineages` — no simulation re-run.
 #[derive(Subcommand)]
 #[command(arg_required_else_help = true,
           after_help = colored_help!("\
@@ -279,10 +278,20 @@ Examples:
   # Build a transmission tree from a line list, flat 10% sampling
   camdl lineage tree line_list.parquet --scheme flat:0.1 --output tree.newick
 
+  # Dwell-time distribution in compartment 1
+  camdl lineage sojourn line_list.tsv --compartment 1
+
+  # Infection incidence in 7-day windows
+  camdl lineage cohort line_list.tsv --event infection --window 7
+
 See `camdl lineage <subcommand> --help` for full options."))]
 pub(crate) enum LineageCmd {
     /// Project a line list to a sampled transmission tree (Newick)
     Tree(args::LineageTreeArgs),
+    /// Dwell-time distribution in a compartment
+    Sojourn(args::LineageSojournArgs),
+    /// Per-time-window event summary (incidence + cumulative)
+    Cohort(args::LineageCohortArgs),
 }
 
 /// Captures all remaining argv tokens verbatim. Used only by Compile/Check/Inspect
@@ -349,6 +358,8 @@ fn main() {
         Command::Eval(a)                => eval::cmd_eval(&a),
         Command::Data(DataCmd::Split(a))=> data::cmd_data_split(&a),
         Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),
+        Command::Lineage(LineageCmd::Sojourn(a)) => lineage::cmd_lineage_sojourn(&a),
+        Command::Lineage(LineageCmd::Cohort(a)) => lineage::cmd_lineage_cohort(&a),
         Command::List(a)                => browse::cmd_list(&a),
         Command::Show(a)                => browse::cmd_show(&a),
         Command::Cat(a)                 => browse::cmd_cat(&a),
