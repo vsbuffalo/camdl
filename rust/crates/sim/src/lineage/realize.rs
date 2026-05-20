@@ -32,11 +32,39 @@
 //! clean exact likelihood (§4a). [`realize`] returns the running total
 //! alongside the per-entry column.
 
+use std::collections::HashMap;
+
 use crate::error::SimError;
 
 use super::event_log::{EventLog, EventRecord, RouteInfo};
 use super::writer::{LineListEntry, LineListWriter};
-use super::{DemeId, IdentityState, IndividualId, LineageRng, ParentRef};
+use super::{CompartmentId, DemeId, IdentityState, IndividualId, LineageRng, ParentRef};
+
+/// A frozen clone of the parent pools at the start of a batched step.
+///
+/// tau-leap / chain-binomial fire `k` events against rates and pools frozen at
+/// step start. The shipped observer sampled all `k` *parents* from a snapshot
+/// taken at step start, so a child minted earlier in the step is invisible as a
+/// same-step parent (proposal §11 open-question 3). Realize reproduces this:
+/// during a batched step it reads parent-pool membership (and the within-pool
+/// size used in the §4a `1/X_b`) from this snapshot; removals and mints still
+/// apply to the live [`IdentityState`]. Gillespie events are each their own
+/// step (one event), so they sample the live pool with no snapshot.
+struct StepSnapshot {
+    pools: HashMap<(DemeId, CompartmentId), Vec<IndividualId>>,
+}
+
+impl StepSnapshot {
+    fn of(identity: &IdentityState) -> Self {
+        StepSnapshot { pools: identity.pools_clone() }
+    }
+    fn pool_len(&self, deme: DemeId, comp: CompartmentId) -> usize {
+        self.pools.get(&(deme, comp)).map_or(0, |v| v.len())
+    }
+    fn member(&self, deme: DemeId, comp: CompartmentId, idx: usize) -> Option<IndividualId> {
+        self.pools.get(&(deme, comp)).and_then(|v| v.get(idx).copied())
+    }
+}
 
 /// Outcome of a realize pass over an event log.
 #[derive(Debug, Clone)]
@@ -80,29 +108,54 @@ pub fn realize(
     let mut sub_dt_edges = 0.0;
     let mut any_batched = false;
 
+    // Frozen start-of-step parent pools for the batched step currently being
+    // replayed (`None` outside a batched step / for Gillespie). Refreshed when
+    // the `step` index changes on a batched event.
+    let mut snapshot: Option<StepSnapshot> = None;
+    let mut snapshot_step: Option<u64> = None;
+
     for rec in &log.events {
         let route = &log.transitions[rec.transition];
         any_batched |= rec.batched;
 
+        if rec.batched {
+            // Take the snapshot once per batched step (at its first event).
+            if snapshot_step != Some(rec.step) {
+                snapshot = Some(StepSnapshot::of(&identity));
+                snapshot_step = Some(rec.step);
+            }
+        } else {
+            snapshot = None;
+            snapshot_step = None;
+        }
+
         // Sub-`dt` bias accounting, mirroring the shipped observer: only the
         // batched path accumulates mass. `p` is the destination pool size at
-        // step start, which the realize pools hold (start-of-step state for a
-        // batched step — replay is sequential within a step, but the batched
-        // children of THIS event have not yet been minted when we read it).
+        // *step start* — read from the frozen snapshot so later events in a
+        // multi-event step still see the start-of-step count (children minted
+        // earlier in the step are excluded, exactly as the shipped observer's
+        // snapshot did).
         if rec.lineage_weights.is_some() {
             edges += rec.multiplicity;
-            if rec.batched {
-                if let Some(dst) = route.destination {
-                    let m = rec.multiplicity as f64;
-                    let p = identity.pool_len(route.destination_deme, dst) as f64;
-                    if p + m > 0.0 {
-                        sub_dt_edges += m * (m / (p + m));
-                    }
+            if let (true, Some(dst), Some(snap)) = (rec.batched, route.destination, snapshot.as_ref())
+            {
+                let m = rec.multiplicity as f64;
+                let p = snap.pool_len(route.destination_deme, dst) as f64;
+                if p + m > 0.0 {
+                    sub_dt_edges += m * (m / (p + m));
                 }
             }
         }
 
-        realize_event(rec, route, &mut identity, &mut rng, writer, &mut total_logprob)?;
+        realize_event(
+            rec,
+            route,
+            &mut identity,
+            snapshot.as_ref(),
+            &mut rng,
+            writer,
+            &mut total_logprob,
+        )?;
     }
 
     writer.finish()?;
@@ -123,6 +176,7 @@ fn realize_event(
     rec: &EventRecord,
     route: &RouteInfo,
     identity: &mut IdentityState,
+    snapshot: Option<&StepSnapshot>,
     rng: &mut LineageRng,
     writer: &mut dyn LineListWriter,
     total_logprob: &mut f64,
@@ -135,9 +189,11 @@ fn realize_event(
         let (individual, parent, parent_deme, src_for_record, dst_for_record, logp) =
             if let Some(masses) = &rec.lineage_weights {
                 // Transmission: sample the parent pool `b ∝ w_b·X_b`, then
-                // uniform within pool. Accumulate `log(w_b/Λ)`.
+                // uniform within pool. Accumulate `log(w_b/Λ)`. During a batched
+                // step the within-pool member + size come from the frozen
+                // snapshot (same-step children invisible as parents).
                 let (parent_id, parent_deme, logp) =
-                    sample_parent(masses, route, identity, rng)?;
+                    sample_parent(masses, route, identity, snapshot, rng)?;
 
                 // The source individual (e.g. an S) is consumed if tracked; the
                 // child is a fresh ID in the destination. A non-empty source
@@ -227,6 +283,7 @@ fn sample_parent(
     masses: &[f64],
     route: &RouteInfo,
     identity: &IdentityState,
+    snapshot: Option<&StepSnapshot>,
     rng: &mut LineageRng,
 ) -> Result<(IndividualId, DemeId, f64), SimError> {
     debug_assert_eq!(
@@ -266,7 +323,14 @@ fn sample_parent(
         }
     }
 
-    let pool_len = identity.pool_len(chosen_deme, chosen);
+    // Within-pool size + member: the frozen snapshot during a batched step
+    // (start-of-step membership; same-step children excluded), the live pool
+    // for Gillespie. The size used here is the same `X_b` baked into the
+    // recorded `mass_b = w_b·X_b`, so the `1/X_b` cancels to give `w_b/Λ` (§4a).
+    let pool_len = match snapshot {
+        Some(snap) => snap.pool_len(chosen_deme, chosen),
+        None => identity.pool_len(chosen_deme, chosen),
+    };
     if pool_len == 0 {
         return Err(SimError::Validation(format!(
             "realize: chosen parent pool (comp {}, deme {}) is empty — the event \
@@ -275,7 +339,15 @@ fn sample_parent(
         )));
     }
     let idx = rng.below(pool_len);
-    let parent = identity.pool_member(chosen_deme, chosen, idx);
+    let parent = match snapshot {
+        Some(snap) => snap.member(chosen_deme, chosen, idx).ok_or_else(|| {
+            SimError::Validation(format!(
+                "realize: snapshot parent pool (comp {}, deme {}) member {} out of range",
+                chosen, chosen_deme, idx
+            ))
+        })?,
+        None => identity.pool_member(chosen_deme, chosen, idx),
+    };
 
     // §4a: P = (mass_b/Λ) · (1/|pool_b|) = w_b/Λ.
     let logp = chosen_mass.ln() - (pool_len as f64).ln() - total.ln();

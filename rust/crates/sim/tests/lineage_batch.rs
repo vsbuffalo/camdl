@@ -182,13 +182,18 @@ fn tier1_batch_parent_never_a_same_step_child() {
                     e.individual.0,
                     e.time
                 );
-                // The parent must have been born at an earlier step. With a
-                // frozen snapshot, the parent was in the pool at step start, so
-                // its birth time is strictly less than this edge's time (events
-                // born this same step are invisible as parents).
+                // The parent must have been born at a STRICTLY earlier step.
+                // With the frozen start-of-step snapshot, the parent was in the
+                // pool at step start, so a same-step child (born at this same
+                // step time) is invisible as a parent. Because all events in a
+                // batched step share the step time, "earlier step" ⇒ strictly
+                // smaller birth time. A non-strict check would silently admit a
+                // same-step-parent regression.
                 assert!(
-                    parent_born.unwrap() < e.time + 1e-12,
-                    "{:?}: parent {} born at {} not before child edge at {}",
+                    parent_born.unwrap() < e.time - 1e-12,
+                    "{:?}: parent {} born at {} is not from a strictly earlier \
+                     step than the child edge at {} — same-step parenthood means \
+                     the frozen-pool snapshot leaked",
                     backend_name(backend),
                     p.0,
                     parent_born.unwrap(),

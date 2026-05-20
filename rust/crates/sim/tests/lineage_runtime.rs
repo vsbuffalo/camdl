@@ -514,6 +514,7 @@ fn attribution_logprob_matches_analytic_sum() {
                 transition: 0,
                 multiplicity: 1,
                 batched: false,
+                step: 1,
                 lineage_weights: Some(vec![4.0]),
             },
             EventRecord {
@@ -521,6 +522,7 @@ fn attribution_logprob_matches_analytic_sum() {
                 transition: 1,
                 multiplicity: 1,
                 batched: false,
+                step: 2,
                 lineage_weights: None,
             },
             EventRecord {
@@ -528,6 +530,7 @@ fn attribution_logprob_matches_analytic_sum() {
                 transition: 0,
                 multiplicity: 1,
                 batched: false,
+                step: 3,
                 lineage_weights: Some(vec![10.0]),
             },
         ],

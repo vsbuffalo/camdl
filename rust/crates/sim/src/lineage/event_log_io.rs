@@ -43,7 +43,8 @@ fn parse_weights_cell(s: &str) -> Result<Option<Vec<f64>>, SimError> {
         .map_err(|e| SimError::Validation(format!("event log: bad lineage_weights cell '{}': {}", s, e)))
 }
 
-const EVENT_COLUMNS: &[&str] = &["time", "transition", "multiplicity", "batched", "lineage_weights"];
+const EVENT_COLUMNS: &[&str] =
+    &["time", "transition", "multiplicity", "batched", "step", "lineage_weights"];
 
 /// Write the event log as TSV.
 pub fn write_tsv(log: &EventLog, path: &Path) -> Result<(), SimError> {
@@ -66,11 +67,12 @@ pub fn write_tsv(log: &EventLog, path: &Path) -> Result<(), SimError> {
     for e in &log.events {
         writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             e.time,
             e.transition,
             e.multiplicity,
             e.batched,
+            e.step,
             weights_cell(&e.lineage_weights),
         )
         .map_err(|er| SimError::Validation(format!("event log write: {}", er)))?;
@@ -155,8 +157,11 @@ pub fn read_tsv(path: &Path) -> Result<EventLog, SimError> {
         let batched: bool = f[3]
             .parse()
             .map_err(|e| SimError::Validation(format!("event log batched '{}': {}", f[3], e)))?;
-        let lineage_weights = parse_weights_cell(f[4])?;
-        events.push(EventRecord { time, transition, multiplicity, batched, lineage_weights });
+        let step: u64 = f[4]
+            .parse()
+            .map_err(|e| SimError::Validation(format!("event log step '{}': {}", f[4], e)))?;
+        let lineage_weights = parse_weights_cell(f[5])?;
+        events.push(EventRecord { time, transition, multiplicity, batched, step, lineage_weights });
     }
 
     Ok(EventLog {
@@ -243,6 +248,7 @@ mod parquet_impl {
             Field::new("transition", DataType::UInt64, false),
             Field::new("multiplicity", DataType::UInt64, false),
             Field::new("batched", DataType::Boolean, false),
+            Field::new("step", DataType::UInt64, false),
             // JSON array of f64 at lineage events; null otherwise.
             Field::new("lineage_weights", DataType::Utf8, true),
         ])
@@ -270,6 +276,7 @@ mod parquet_impl {
         let transition: Vec<u64> = log.events.iter().map(|e| e.transition as u64).collect();
         let multiplicity: Vec<u64> = log.events.iter().map(|e| e.multiplicity).collect();
         let batched: Vec<bool> = log.events.iter().map(|e| e.batched).collect();
+        let step: Vec<u64> = log.events.iter().map(|e| e.step).collect();
         let weights: Vec<Option<String>> = log
             .events
             .iter()
@@ -283,6 +290,7 @@ mod parquet_impl {
                 Arc::new(UInt64Array::from(transition)),
                 Arc::new(UInt64Array::from(multiplicity)),
                 Arc::new(BooleanArray::from(batched)),
+                Arc::new(UInt64Array::from(step)),
                 Arc::new(StringArray::from(weights)),
             ],
         )
@@ -333,7 +341,8 @@ mod parquet_impl {
             let transition = batch.column(1).as_any().downcast_ref::<UInt64Array>().unwrap();
             let multiplicity = batch.column(2).as_any().downcast_ref::<UInt64Array>().unwrap();
             let batched = batch.column(3).as_any().downcast_ref::<BooleanArray>().unwrap();
-            let weights = batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
+            let step = batch.column(4).as_any().downcast_ref::<UInt64Array>().unwrap();
+            let weights = batch.column(5).as_any().downcast_ref::<StringArray>().unwrap();
             for r in 0..batch.num_rows() {
                 let lineage_weights = if weights.is_null(r) {
                     None
@@ -349,6 +358,7 @@ mod parquet_impl {
                     transition: transition.value(r) as usize,
                     multiplicity: multiplicity.value(r),
                     batched: batched.value(r),
+                    step: step.value(r),
                     lineage_weights,
                 });
             }
@@ -392,6 +402,7 @@ mod tests {
                     transition: 0,
                     multiplicity: 1,
                     batched: false,
+                    step: 1,
                     lineage_weights: Some(vec![2.5, 0.3]),
                 },
                 EventRecord {
@@ -399,6 +410,7 @@ mod tests {
                     transition: 1,
                     multiplicity: 3,
                     batched: true,
+                    step: 2,
                     lineage_weights: None,
                 },
             ],

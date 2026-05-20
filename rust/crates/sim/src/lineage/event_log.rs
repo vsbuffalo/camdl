@@ -83,6 +83,15 @@ pub struct EventRecord {
     /// uses this to reproduce the shipped sub-`dt` bias accounting and to
     /// sample all `k` attributions against the start-of-step pools.
     pub batched: bool,
+    /// Monotone batched-step index. All events sharing a `step` value fired in
+    /// the same tau-leap / chain-binomial step and must, in replay, sample
+    /// their identity attributions against the **frozen start-of-step** identity
+    /// pools (mirroring the shipped observer's per-step pool snapshot — see
+    /// proposal §11 open-question 3: "all attributions in a batched step use
+    /// start-of-step pool membership"). Gillespie events are each their own
+    /// step (one event per step), so this never groups them. `0` for the first
+    /// step / for un-batched events that precede any batched step.
+    pub step: u64,
     /// `Some` only at `#[lineage]` events: the evaluated per-pool FOI masses
     /// `w_b·X_b`, aligned to the transition's [`RouteInfo::parent_pools`]. The
     /// realized total `Λ = Σ_b' w_b'·X_b'` is their sum. `None` otherwise.
@@ -116,6 +125,10 @@ pub struct EventRecorder<'m> {
     /// Active during a batched step (set by `begin_batch_step`); gates the
     /// `batched` flag on recorded events.
     in_batch: bool,
+    /// Monotone step counter. Incremented at every `begin_batch_step` (one per
+    /// batched step) and, for Gillespie, once per recorded event (so each
+    /// Gillespie event is its own step — they never share frozen pools).
+    step: u64,
 }
 
 impl<'m> EventRecorder<'m> {
@@ -216,6 +229,7 @@ impl<'m> EventRecorder<'m> {
             initial_pools,
             events: Vec::new(),
             in_batch: false,
+            step: 0,
         })
     }
 
@@ -231,7 +245,10 @@ impl<'m> EventRecorder<'m> {
 
 impl TransitionObserver for EventRecorder<'_> {
     fn begin_batch_step(&mut self) {
+        // A new batched step: all events recorded until `end_batch_step` share
+        // this step index and (in replay) the same frozen start-of-step pools.
         self.in_batch = true;
+        self.step = self.step.wrapping_add(1);
     }
 
     fn end_batch_step(&mut self) {
@@ -285,11 +302,18 @@ impl TransitionObserver for EventRecorder<'_> {
             None
         };
 
+        // Step index: a batched step's events all share `self.step` (set at
+        // `begin_batch_step`). A Gillespie event is its own step, so bump the
+        // counter per recorded event — they never share frozen pools.
+        if !self.in_batch {
+            self.step = self.step.wrapping_add(1);
+        }
         self.events.push(EventRecord {
             time,
             transition,
             multiplicity,
             batched: self.in_batch,
+            step: self.step,
             lineage_weights,
         });
         Ok(())

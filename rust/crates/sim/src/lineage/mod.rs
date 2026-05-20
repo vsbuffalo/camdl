@@ -191,6 +191,12 @@ impl IdentityState {
         self.pools[&(deme, comp)][idx]
     }
 
+    /// Clone the full pool map — for the realize layer's start-of-batched-step
+    /// frozen snapshot (so same-step children are invisible as parents).
+    pub(crate) fn pools_clone(&self) -> HashMap<(DemeId, CompartmentId), Vec<IndividualId>> {
+        self.pools.clone()
+    }
+
     /// Total minted IDs (== next counter).
     pub fn total_minted(&self) -> u64 {
         self.next
