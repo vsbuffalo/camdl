@@ -39,6 +39,28 @@ fn resolve_format(tsv: bool, format: &Option<String>) -> Result<LineListFormat, 
     }
 }
 
+/// Resolve the artifact format honoring the output path: explicit `--tsv` /
+/// `--format` wins, else infer from the explicit output path's extension
+/// (so `--event-log foo.tsv` writes TSV, mirroring how the read side
+/// auto-detects), else Parquet (production default).
+fn resolve_format_with_path(
+    tsv: bool,
+    format: &Option<String>,
+    explicit_out: Option<&Path>,
+) -> Result<LineListFormat, String> {
+    if tsv || format.is_some() {
+        return resolve_format(tsv, format);
+    }
+    if let Some(p) = explicit_out {
+        match p.extension().and_then(|e| e.to_str()) {
+            Some("tsv") => return Ok(LineListFormat::Tsv),
+            Some("parquet") => return Ok(LineListFormat::Parquet),
+            _ => {}
+        }
+    }
+    Ok(LineListFormat::Parquet)
+}
+
 /// Default output path for a given format and stem, when no explicit output is
 /// requested.
 fn default_out(stem: &str, format: LineListFormat) -> PathBuf {
@@ -81,15 +103,16 @@ fn build_writer(
 
 /// `camdl simulate --event-log` — Layer 1: record the identity-free event log.
 pub fn run_simulate_event_log(a: &SimulateArgs, run: &SimRun) {
-    let format = resolve_format(a.tsv, &a.format).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
-    let out_path = a
+    let explicit_out = a
         .event_log
         .clone()
-        .filter(|p| p.as_os_str() != "auto")
-        .unwrap_or_else(|| default_out("event_log", format));
+        .filter(|p| p.as_os_str() != "auto");
+    let format = resolve_format_with_path(a.tsv, &a.format, explicit_out.as_deref())
+        .unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+    let out_path = explicit_out.unwrap_or_else(|| default_out("event_log", format));
 
     let (traj, model, event_log, exact) =
         crate::util::run_simulation_event_log(run).unwrap_or_else(|e| {
@@ -202,22 +225,11 @@ pub fn cmd_lineage_realize(a: &LineageRealizeArgs) {
         std::process::exit(1);
     });
 
-    // Output format: explicit --format / --tsv, else inferred from the output
-    // path extension, else Parquet.
-    let format = if a.tsv || a.format.is_some() {
-        resolve_format(a.tsv, &a.format).unwrap_or_else(|e| {
+    let format = resolve_format_with_path(a.tsv, &a.format, a.output.as_deref())
+        .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
             std::process::exit(1);
-        })
-    } else if let Some(out) = &a.output {
-        match out.extension().and_then(|e| e.to_str()) {
-            Some("tsv") => LineListFormat::Tsv,
-            _ => LineListFormat::Parquet,
-        }
-    } else {
-        LineListFormat::Parquet
-    };
-
+        });
     let out_path = a
         .output
         .clone()
