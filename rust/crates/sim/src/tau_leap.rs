@@ -4,6 +4,7 @@ use crate::{
     rng::StatefulRng,
     error::SimError,
     intervention::{all_intervention_times, apply_interventions_at},
+    lineage::TransitionObserver,
     ode_integrator::rk4_step,
     output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
@@ -41,11 +42,29 @@ impl Simulate for TauLeapSim {
     fn name(&self) -> &'static str { "tau_leap" }
 }
 
-fn run_tau_leap(
+pub fn run_tau_leap(
     model: &CompiledModel,
     params: &[f64],
     seed: u64,
     cfg: &TauLeapConfig,
+) -> Result<Trajectory, SimError> {
+    run_tau_leap_with_observer(model, params, seed, cfg, None)
+}
+
+/// Tau-leap run with an optional [`TransitionObserver`] (individual-sampling
+/// layer, Phase 3). `observer = None` reproduces [`run_tau_leap`] byte-for-byte
+/// — the observer reads its own RNG stream and is invoked only after the
+/// simulation RNG has drawn each transition's count, passing the
+/// **start-of-step** state. This is the trajectory-invariance invariant
+/// (Tier 2a). Because tau-leap fires `k` events of a transition against frozen
+/// start-of-step rates, the observer is told `multiplicity = k` and samples
+/// parents from a frozen pool snapshot (the `dt`-bias the diagnostic measures).
+pub fn run_tau_leap_with_observer(
+    model: &CompiledModel,
+    params: &[f64],
+    seed: u64,
+    cfg: &TauLeapConfig,
+    mut observer: Option<&mut dyn TransitionObserver>,
 ) -> Result<Trajectory, SimError> {
     let (mut int_s, mut real_s) = model.initial_state(params)?;
     let n_transitions = model.model.transitions.len();
@@ -140,6 +159,15 @@ fn run_tau_leap(
         // keep the standard tau-leap independent Poisson draw.
         let mut handled = vec![false; n_transitions];
         let mut pending_deltas: Vec<(usize, i64)> = Vec::new();
+        // Per-transition fired counts this step (for the lineage observer). Only
+        // populated when an observer is attached; the observer is fed these
+        // *after* all draws but *before* deltas are applied, so it sees the
+        // start-of-step state. Zero-cost when no observer.
+        let mut fired_counts: Vec<u64> = if observer.is_some() {
+            vec![0; n_transitions]
+        } else {
+            Vec::new()
+        };
         for &(src_local, ref group) in &model.source_groups {
             let n_src = int_s.counts[src_local].max(0);
             if n_src == 0 {
@@ -190,6 +218,7 @@ fn run_tau_leap(
                     pending_deltas.push((local, delta * count as i64));
                 }
                 current_flows.add(tr_idx, count);
+                if !fired_counts.is_empty() { fired_counts[tr_idx] += count; }
                 handled[tr_idx] = true;
             }
         }
@@ -208,6 +237,21 @@ fn run_tau_leap(
                 pending_deltas.push((local, delta * count as i64));
             }
             current_flows.add(i, count);
+            if !fired_counts.is_empty() { fired_counts[i] += count; }
+        }
+
+        // Lineage observer: fed each transition's fired count for this step
+        // BEFORE deltas are applied, so the observer sees the start-of-step
+        // (frozen) state and pools. The observer owns a separate RNG stream, so
+        // these calls cannot perturb the count trajectory (Tier 2a).
+        if let Some(obs) = observer.as_deref_mut() {
+            obs.begin_batch_step();
+            for (tr_idx, &count) in fired_counts.iter().enumerate() {
+                if count > 0 {
+                    obs.on_fired(tr_idx, 0, count, t, &int_s, &real_s, params)?;
+                }
+            }
+            obs.end_batch_step();
         }
 
         for (local, delta) in pending_deltas.drain(..) {

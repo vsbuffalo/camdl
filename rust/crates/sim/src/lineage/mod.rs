@@ -214,6 +214,37 @@ impl IdentityState {
     pub fn contains(&self, deme: DemeId, comp: CompartmentId, id: IndividualId) -> bool {
         self.pools.get(&(deme, comp)).is_some_and(|v| v.contains(&id))
     }
+
+    /// A frozen snapshot of the current pools, for batch (tau-leap /
+    /// chain-binomial) parent sampling. See [`PoolSnapshot`].
+    fn snapshot(&self) -> PoolSnapshot {
+        PoolSnapshot { pools: self.pools.clone() }
+    }
+}
+
+/// A frozen clone of the identity pools, taken at the start of a batch step.
+///
+/// tau-leap and chain-binomial fire `k` events against rates and pools frozen
+/// at step start. Parent sampling for those `k` events must read parent pools
+/// from this snapshot, NOT from the live pools that the step's own child
+/// minting mutates — otherwise a child minted earlier this step could be
+/// recorded as a same-step parent, an edge the frozen approximation cannot
+/// resolve. Gillespie samples from live pools (exact, sequential) and uses no
+/// snapshot.
+pub struct PoolSnapshot {
+    pools: HashMap<(DemeId, CompartmentId), Vec<IndividualId>>,
+}
+
+impl PoolSnapshot {
+    /// Number of IDs that were in `(deme, comp)` at snapshot time.
+    fn pool_len(&self, deme: DemeId, comp: CompartmentId) -> usize {
+        self.pools.get(&(deme, comp)).map_or(0, |v| v.len())
+    }
+
+    /// The frozen member list for `(deme, comp)`, if any.
+    fn pool(&self, deme: DemeId, comp: CompartmentId) -> Option<&Vec<IndividualId>> {
+        self.pools.get(&(deme, comp)).filter(|p| !p.is_empty())
+    }
 }
 
 impl Default for IdentityState {
@@ -245,6 +276,14 @@ pub trait TransitionObserver {
         pre_real: &RealState,
         params: &[f64],
     ) -> Result<(), SimError>;
+
+    /// Begin a batch step (tau-leap / chain-binomial): the backend has frozen
+    /// rates and pools at step start and will feed `on_fired` with `multiplicity
+    /// > 1`. Default no-op — only the lineage observer freezes a pool snapshot.
+    fn begin_batch_step(&mut self) {}
+
+    /// End a batch step. Default no-op.
+    fn end_batch_step(&mut self) {}
 }
 
 /// Per-transition precomputed routing: which integer-local compartment is the
@@ -276,6 +315,18 @@ pub struct LineageObserver<'m, W: LineListWriter> {
     /// Per-compartment deme (stratum) assignment. The pool key for a
     /// compartment `c` is `(deme_map.deme_of(c), c)`.
     deme_map: DemeMap,
+    /// `Some` only during a batch (tau-leap / chain-binomial) step: a frozen
+    /// clone of the pools at step start, used for parent sampling so within-step
+    /// minting cannot create a same-step parent edge. `None` for Gillespie
+    /// (exact, sequential live-pool sampling).
+    snapshot: Option<PoolSnapshot>,
+    /// Sub-`dt` bias estimator (batch backends only). `edges` counts every
+    /// transmission edge (child born at a lineage event); `sub_dt_edges`
+    /// accumulates the edge-weighted same-step-parent share. The reported
+    /// fraction `sub_dt_edges / edges` is the fraction of edges the frozen
+    /// approximation cannot temporally resolve. Exactly 0 for Gillespie.
+    edges: u64,
+    sub_dt_edges: f64,
 }
 
 impl<'m, W: LineListWriter> LineageObserver<'m, W> {
@@ -374,7 +425,28 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
             routes,
             tracked,
             deme_map,
+            snapshot: None,
+            edges: 0,
+            sub_dt_edges: 0.0,
         })
+    }
+
+    /// The sub-`dt` bias fraction accumulated over the run: the edge-weighted
+    /// fraction of transmission edges the frozen-pool approximation cannot
+    /// temporally resolve (a same-step parent that, under an exact sequential
+    /// process, might have been a child born earlier in the same step). Exactly
+    /// 0.0 for Gillespie (no batch steps) and for a run with no lineage edges.
+    pub fn sub_dt_fraction(&self) -> f64 {
+        if self.edges == 0 {
+            0.0
+        } else {
+            self.sub_dt_edges / self.edges as f64
+        }
+    }
+
+    /// Total transmission edges (children born at lineage events) recorded.
+    pub fn lineage_edge_count(&self) -> u64 {
+        self.edges
     }
 
     /// Finish writing and return the underlying writer (flushed). Call after
@@ -421,13 +493,20 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
         };
 
         // Per-pool unnormalised mass = weight_b · count_b, with count_b taken
-        // from the parent compartment's own stratum pool.
+        // from the parent compartment's own stratum pool. In a batch step the
+        // pool is read from the frozen snapshot (start-of-step state), so all
+        // firings this step see the same parent pools — a child minted earlier
+        // this step is invisible as a parent. Gillespie (no snapshot) reads the
+        // live pool, which is the exact sequential behaviour.
         let mut masses: Vec<(CompartmentId, DemeId, f64)> = Vec::with_capacity(weights.len());
         let mut total = 0.0;
         for (g, weight_expr) in weights {
             let parent_deme = self.deme_map.deme_of(*g);
             let w = eval_expr(weight_expr, &ctx)?.max(0.0);
-            let count = self.identity.pool_len(parent_deme, *g) as f64;
+            let count = match &self.snapshot {
+                Some(snap) => snap.pool_len(parent_deme, *g),
+                None => self.identity.pool_len(parent_deme, *g),
+            } as f64;
             let mass = w * count;
             total += mass;
             masses.push((*g, parent_deme, mass));
@@ -460,24 +539,40 @@ impl<'m, W: LineListWriter> LineageObserver<'m, W> {
 
         // Uniform within the chosen pool — but do NOT remove (the parent is
         // not consumed by a lineage event; only the source individual moves).
-        let pool = self
-            .identity
-            .pools
-            .get(&(chosen_deme, chosen))
-            .filter(|p| !p.is_empty())
-            .ok_or_else(|| {
-                SimError::Validation(format!(
-                    "lineage transition '{}': chosen parent pool (comp {}, deme {}) \
-                     is empty at t={}",
-                    self.model.model.transitions[tr_idx].name, chosen, chosen_deme, time
-                ))
-            })?;
+        // Read members from the snapshot in a batch step, the live pool
+        // otherwise (mirrors the count source above).
+        let pool = match &self.snapshot {
+            Some(snap) => snap.pool(chosen_deme, chosen),
+            None => self
+                .identity
+                .pools
+                .get(&(chosen_deme, chosen))
+                .filter(|p| !p.is_empty()),
+        }
+        .ok_or_else(|| {
+            SimError::Validation(format!(
+                "lineage transition '{}': chosen parent pool (comp {}, deme {}) \
+                 is empty at t={}",
+                self.model.model.transitions[tr_idx].name, chosen, chosen_deme, time
+            ))
+        })?;
         let idx = self.rng.below(pool.len());
         Ok((pool[idx], chosen_deme))
     }
 }
 
 impl<'m, W: LineListWriter> TransitionObserver for LineageObserver<'m, W> {
+    /// Freeze the current pools so all firings this batch step sample parents
+    /// from start-of-step state. Gillespie never calls this — it samples live.
+    fn begin_batch_step(&mut self) {
+        self.snapshot = Some(self.identity.snapshot());
+    }
+
+    /// Drop the frozen snapshot; subsequent `on_fired` calls sample live pools.
+    fn end_batch_step(&mut self) {
+        self.snapshot = None;
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn on_fired(
         &mut self,
@@ -514,6 +609,29 @@ impl<'m, W: LineListWriter> TransitionObserver for LineageObserver<'m, W> {
             (Some(src), None) => self.deme_map.deme_of(src),
             (None, None) => 0,
         };
+
+        // Sub-`dt` bias accounting (batch backends only — a snapshot is active).
+        // This lineage step mints `m = multiplicity` children into the
+        // destination pool, which held `p` IDs at step start (snapshot count).
+        // Under the frozen approximation none of those `m` same-step children
+        // can be sampled as a parent this step; under exact sequential dynamics
+        // a fraction `m/(p+m)` of would-be-live parents are precisely those
+        // unresolvable same-step children. Each of the `m` edges therefore
+        // carries that share. Accumulating edge-weighted gives
+        // `Σ m·(m/(p+m))`; the reported `sub_dt_fraction` is this over total
+        // edges. Exactly 0 for Gillespie (no snapshot, m=1 per call, but the
+        // branch is gated on `snapshot`).
+        if parent_weights.is_some() {
+            if let (Some(snap), Some(dst)) = (self.snapshot.as_ref(), destination) {
+                let m = multiplicity as f64;
+                let dst_deme = self.deme_map.deme_of(dst);
+                let p = snap.pool_len(dst_deme, dst) as f64;
+                self.edges += multiplicity;
+                if p + m > 0.0 {
+                    self.sub_dt_edges += m * (m / (p + m));
+                }
+            }
+        }
 
         for _ in 0..multiplicity {
             let (individual, parent, parent_deme, src_for_record, dst_for_record) =

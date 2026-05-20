@@ -4,6 +4,7 @@ use crate::{
     rng::StatefulRng,
     error::SimError,
     intervention::{all_intervention_times, apply_interventions_at},
+    lineage::TransitionObserver,
     ode_integrator::rk4_step,
     output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
@@ -105,11 +106,30 @@ impl Simulate for ChainBinomialSim {
     fn name(&self) -> &'static str { "chain_binomial" }
 }
 
-fn run_chain_binomial(
+pub fn run_chain_binomial(
     model: &CompiledModel,
     params: &[f64],
     seed: u64,
     cfg: &ChainBinomialConfig,
+) -> Result<Trajectory, SimError> {
+    run_chain_binomial_with_observer(model, params, seed, cfg, None)
+}
+
+/// Chain-binomial run with an optional [`TransitionObserver`] (individual-
+/// sampling layer, Phase 3). `observer = None` reproduces
+/// [`run_chain_binomial`] byte-for-byte: the observer reads its own RNG stream
+/// and is fed each transition's per-step flow count *after* `step_one` has
+/// drawn it, against the **start-of-step** state captured before `step_one`
+/// mutated the counts. This is the trajectory-invariance invariant (Tier 2a).
+/// Like tau-leap, chain-binomial fires `k` events per transition per step
+/// against frozen start-of-step rates, so the observer samples parents from a
+/// frozen pool snapshot — the `dt`-bias the diagnostic measures.
+pub fn run_chain_binomial_with_observer(
+    model: &CompiledModel,
+    params: &[f64],
+    seed: u64,
+    cfg: &ChainBinomialConfig,
+    mut observer: Option<&mut dyn TransitionObserver>,
 ) -> Result<Trajectory, SimError> {
     let (mut int_s, mut real_s) = model.initial_state(params)?;
     let n_transitions = model.model.transitions.len();
@@ -145,6 +165,15 @@ fn run_chain_binomial(
         let dt = cfg.dt.min(cfg.t_end - t);
         if dt <= 1e-15 { break; }
 
+        // Capture start-of-step state for the lineage observer (before RK4 and
+        // step_one mutate it). Only when an observer is attached — zero cost
+        // otherwise. The observer is fed this frozen state plus the per-step
+        // transition flows that step_one draws, so it cannot perturb the count
+        // trajectory (Tier 2a).
+        let pre_step: Option<(IntState, RealState)> = observer
+            .as_ref()
+            .map(|_| (int_s.clone(), real_s.clone()));
+
         // Euler step for real compartments (before binomial draws)
         if n_real > 0 {
             rk4_step(model, &int_s, &mut real_s, params, t, dt)?;
@@ -159,6 +188,19 @@ fn run_chain_binomial(
         // See docs/dev/incidents/2026-04-17-chain-binomial-double-fire.md.
         flows.fill(0);
         step_one(model, &mut int_s.counts, &mut flows, params, t, dt, &mut rng, &mut scratch, &fire_steps)?;
+
+        // Lineage observer: feed each transition's per-step flow count against
+        // the frozen start-of-step state. step_one has already drawn from the
+        // simulation RNG; the observer uses its own stream.
+        if let (Some(obs), Some((pre_int, pre_real))) = (observer.as_deref_mut(), pre_step.as_ref()) {
+            obs.begin_batch_step();
+            for (tr_idx, &count) in flows.iter().enumerate() {
+                if count > 0 {
+                    obs.on_fired(tr_idx, 0, count, t, pre_int, pre_real, params)?;
+                }
+            }
+            obs.end_batch_step();
+        }
 
         // Accumulate flows into output FlowVec
         for (i, &f) in flows.iter().enumerate() {

@@ -87,7 +87,7 @@ pub fn run_simulate_lineages(a: &SimulateArgs, run: &SimRun) {
         std::process::exit(1);
     });
 
-    let (traj, model) = crate::util::run_simulation_lineage(run, writer).unwrap_or_else(|e| {
+    let (traj, model, diag) = crate::util::run_simulation_lineage(run, writer).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
@@ -100,6 +100,25 @@ pub fn run_simulate_lineages(a: &SimulateArgs, run: &SimRun) {
             LineListFormat::Parquet => "parquet",
         }
     );
+
+    // Surface the sub-dt bias diagnostic. Gillespie is exact (fraction 0);
+    // tau-leap / chain-binomial report the edge-weighted fraction of
+    // transmission edges whose sub-dt ordering the frozen-pool approximation
+    // could not resolve. A non-trivial fraction is a signal to shrink dt or use
+    // Gillespie for trustworthy benchmark trees.
+    if diag.exact {
+        eprintln!(
+            "lineage sub-dt bias: 0.000 (exact — Gillespie; {} transmission edges)",
+            diag.edges
+        );
+    } else {
+        eprintln!(
+            "lineage sub-dt bias: {:.3} ({} transmission edges; frozen-pool \
+             approximation — shrink --dt or use --backend gillespie for \
+             trustworthy trees)",
+            diag.fraction, diag.edges
+        );
+    }
 
     // Count trajectory output (stdout or --output). The trajectory is
     // byte-identical to a run without --lineages at the same seed.

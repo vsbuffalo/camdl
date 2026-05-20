@@ -1046,14 +1046,26 @@ pub fn run_simulation(run: &SimRun) -> Result<(Trajectory, ir::Model), String> {
     Ok((traj, model))
 }
 
+/// The sub-`dt` bias diagnostic returned alongside a lineage run. `fraction` is
+/// the edge-weighted fraction of transmission edges the frozen-pool
+/// approximation could not temporally resolve (0.0 for Gillespie); `edges` is
+/// the total lineage edge count it was computed over.
+pub struct LineageDiagnostic {
+    pub fraction: f64,
+    pub edges: u64,
+    pub exact: bool,
+}
+
 /// Run a simulation with individual-sampling (lineage) tracking attached, and
-/// return the count trajectory plus the resolved model. The line list is
-/// streamed to `writer`; on success the writer is flushed and closed.
+/// return the count trajectory, resolved model, and the sub-`dt` bias
+/// diagnostic. The line list is streamed to `writer`; on success the writer is
+/// flushed and closed.
 ///
-/// This slice supports **Gillespie only**. tau-leap / chain-binomial declare
-/// the LINEAGES capability but their loops are not yet observer-aware
-/// (Phase 3), so requesting lineages on them returns a "not yet implemented"
-/// error rather than producing an untracked-but-silent line list.
+/// Supported backends: **Gillespie** (exact, sub-`dt` fraction 0.0), **tau-leap**
+/// and **chain-binomial** (approximate — parents are sampled from a frozen
+/// start-of-step pool snapshot, and the returned diagnostic quantifies the
+/// fraction of edges that loses sub-`dt` temporal ordering). ODE is incompatible
+/// (no individuals).
 ///
 /// The count trajectory is byte-identical to the same run without `--lineages`
 /// (validation Tier 2a): the observer reads its own RNG stream and is invoked
@@ -1061,36 +1073,27 @@ pub fn run_simulation(run: &SimRun) -> Result<(Trajectory, ir::Model), String> {
 pub fn run_simulation_lineage(
     run: &SimRun,
     writer: Box<dyn sim::lineage::LineListWriter>,
-) -> Result<(Trajectory, ir::Model), String> {
+) -> Result<(Trajectory, ir::Model, LineageDiagnostic), String> {
     use crate::args::types::Backend;
     use sim::lineage::LineageObserver;
 
     // Lineage tracking is meaningful only for backends with the LINEAGES
-    // capability; only Gillespie actually performs the tracking in this slice.
-    match run.backend {
-        Backend::Gillespie => {}
-        Backend::TauLeap | Backend::ChainBinomial => {
-            return Err(format!(
-                "lineage tracking on the '{}' backend is not yet implemented \
-                 (Phase 3). Use --backend gillespie for trustworthy lineage \
-                 trees; tau-leap / chain-binomial would systematically lose \
-                 parent–child edges shorter than dt.",
-                match run.backend {
-                    Backend::TauLeap => "tau_leap",
-                    Backend::ChainBinomial => "chain_binomial",
-                    _ => unreachable!(),
-                }
-            ));
-        }
+    // capability. ODE is the lone incompatible backend (continuous densities,
+    // no individuals).
+    let backend: &dyn Simulate = match run.backend {
+        Backend::Gillespie => &GillespieSim,
+        Backend::TauLeap => &TauLeapSim,
+        Backend::ChainBinomial => &ChainBinomialSim,
         Backend::Ode => {
             return Err(
                 "lineage tracking is incompatible with the ODE backend: ODE \
                  tracks continuous densities, not individuals. Use \
-                 --backend gillespie."
+                 --backend gillespie (exact), or tau_leap / chain_binomial \
+                 (approximate, with a reported sub-dt bias)."
                     .to_string(),
             );
         }
-    }
+    };
 
     let (compiled, model) = resolve_run_model(run)?;
 
@@ -1105,16 +1108,17 @@ pub fn run_simulation_lineage(
     }
 
     // Capability gate (mirrors the OVERDISPERSION / REAL_COMPARTMENTS pattern):
-    // the chosen backend must declare LINEAGES. Gillespie does; this is a
-    // belt-and-braces check against a future backend dispatch change.
-    if !GillespieSim.capabilities().contains(sim::Capabilities::LINEAGES) {
-        return Err("internal error: Gillespie backend lost LINEAGES capability".to_string());
+    // the chosen backend must declare LINEAGES.
+    if !backend.capabilities().contains(sim::Capabilities::LINEAGES) {
+        return Err(format!(
+            "internal error: backend '{}' lacks LINEAGES capability",
+            backend.name()
+        ));
     }
 
     let params = compiled.default_params.clone();
     let t_start = model.simulation.t_start;
     let t_end = model.simulation.t_end;
-    let cfg = GillespieConfig { t_start, t_end, output_dt: None };
 
     // Seed the observer from the initial state so t=0 pools are correct.
     let (initial_int, _initial_real) = compiled
@@ -1123,20 +1127,40 @@ pub fn run_simulation_lineage(
     let mut observer = LineageObserver::new(&compiled, run.seed, &initial_int, writer)
         .map_err(|e| format!("lineage observer init error: {:?}", e))?;
 
-    let traj = sim::gillespie::run_gillespie_with_observer(
-        &compiled,
-        &params,
-        run.seed,
-        &cfg,
-        Some(&mut observer),
-    )
+    let traj = match run.backend {
+        Backend::Gillespie => {
+            let cfg = GillespieConfig { t_start, t_end, output_dt: None };
+            sim::gillespie::run_gillespie_with_observer(
+                &compiled, &params, run.seed, &cfg, Some(&mut observer),
+            )
+        }
+        Backend::TauLeap => {
+            let cfg = TauLeapConfig { t_start, t_end, dt: run.dt };
+            sim::tau_leap::run_tau_leap_with_observer(
+                &compiled, &params, run.seed, &cfg, Some(&mut observer),
+            )
+        }
+        Backend::ChainBinomial => {
+            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt };
+            sim::chain_binomial::run_chain_binomial_with_observer(
+                &compiled, &params, run.seed, &cfg, Some(&mut observer),
+            )
+        }
+        Backend::Ode => unreachable!("ODE rejected above"),
+    }
     .map_err(|e| format!("simulation error: {:?}", e))?;
+
+    let diag = LineageDiagnostic {
+        fraction: observer.sub_dt_fraction(),
+        edges: observer.lineage_edge_count(),
+        exact: matches!(run.backend, Backend::Gillespie),
+    };
 
     observer
         .finish()
         .map_err(|e| format!("line list finalize error: {:?}", e))?;
 
-    Ok((traj, model))
+    Ok((traj, model, diag))
 }
 
 /// Write a trajectory to a TSV file (same format as `camdl simulate` stdout).
