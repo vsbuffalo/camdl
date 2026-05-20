@@ -231,7 +231,7 @@ fn lineage_end_to_end_tsv_and_parquet() {
     let t3 = run(
         &camdl,
         &[
-            "lineage", "tree", ll_tsv_s, "--scheme", "flat:0.3", "--seed", "3",
+            "lineage", "tree", ll_tsv_s, "--scheme", "flat:0.3", "--sample-seed", "3",
             "--output", tree_sub_s,
         ],
     );

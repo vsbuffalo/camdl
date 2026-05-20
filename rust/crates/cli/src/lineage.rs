@@ -16,9 +16,11 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use std::collections::HashMap;
+
 use sim::lineage::{
-    tree::{Flat, SamplingScheme, TransmissionForest},
-    LineListFormat, LineListWriter, TsvLineListWriter,
+    tree::{select_samples, summarize, Flat, SamplingScheme, Stratified, TransmissionForest},
+    DemeId, LineListFormat, LineListWriter, TsvLineListWriter,
 };
 
 use crate::args::{
@@ -269,20 +271,72 @@ pub fn cmd_lineage_realize(a: &LineageRealizeArgs) {
     }
 }
 
-/// Parse a `--scheme` string. Phase 1: only `flat:RATE`.
-fn parse_scheme(s: &str) -> Result<Box<dyn SamplingScheme>, String> {
-    if let Some(rest) = s.strip_prefix("flat:") {
-        let rate: f64 = rest
-            .parse()
-            .map_err(|e| format!("invalid flat sampling rate '{}': {}", rest, e))?;
-        if !(0.0..=1.0).contains(&rate) {
-            return Err(format!("flat sampling rate must be in [0, 1], got {}", rate));
+/// Validate a sampling rate in `[0, 1]`, naming `what` in the error.
+fn parse_rate(s: &str, what: &str) -> Result<f64, String> {
+    let rate: f64 = s
+        .parse()
+        .map_err(|e| format!("invalid {} '{}': {}", what, s, e))?;
+    if !(0.0..=1.0).contains(&rate) {
+        return Err(format!("{} must be in [0, 1], got {}", what, rate));
+    }
+    Ok(rate)
+}
+
+/// Parse the `stratified:` spec `idx=rate,...,default=rate` keyed on integer
+/// deme index. `default` is optional (absent → 0.0 for unlisted demes).
+/// Returns `(per-deme rates, default)`.
+fn parse_stratified_spec(spec: &str) -> Result<(HashMap<DemeId, f64>, f64), String> {
+    let mut rates: HashMap<DemeId, f64> = HashMap::new();
+    let mut default = 0.0_f64;
+    let mut default_set = false;
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
         }
-        Ok(Box::new(Flat::new(rate)))
+        let (key, val) = part.split_once('=').ok_or_else(|| {
+            format!(
+                "stratified entry '{}' must be 'idx=rate' (or 'default=rate')",
+                part
+            )
+        })?;
+        let key = key.trim();
+        if key.eq_ignore_ascii_case("default") {
+            default = parse_rate(val.trim(), "stratified default rate")?;
+            default_set = true;
+        } else {
+            let idx: DemeId = key
+                .parse()
+                .map_err(|e| format!("invalid deme index '{}': {}", key, e))?;
+            let rate = parse_rate(val.trim(), &format!("stratified rate for deme {}", idx))?;
+            rates.insert(idx, rate);
+        }
+    }
+    if rates.is_empty() && !default_set {
+        return Err(format!(
+            "stratified spec '{}' has no rates; expected \
+             'idx=rate,...,default=rate' (e.g. stratified:0=0.5,1=0.05,default=0.1)",
+            spec
+        ));
+    }
+    Ok((rates, default))
+}
+
+/// Parse a `--scheme` string into a sampling scheme. `sim_end` is the
+/// simulation horizon (the sampling time for never-removed individuals).
+/// Supports `flat:RATE` and `stratified:idx=rate,...,default=rate`.
+fn parse_scheme(s: &str, sim_end: f64) -> Result<Box<dyn SamplingScheme>, String> {
+    if let Some(rest) = s.strip_prefix("flat:") {
+        let rate = parse_rate(rest, "flat sampling rate")?;
+        Ok(Box::new(Flat::new(rate, sim_end)))
+    } else if let Some(spec) = s.strip_prefix("stratified:") {
+        let (rates, default) = parse_stratified_spec(spec)?;
+        Ok(Box::new(Stratified::new(rates, default, sim_end)))
     } else {
         Err(format!(
-            "unknown sampling scheme '{}'. Phase 1 supports 'flat:RATE' \
-             (e.g. flat:0.1).",
+            "unknown sampling scheme '{}'. Supported: 'flat:RATE' \
+             (e.g. flat:0.1) and 'stratified:idx=rate,...,default=rate' \
+             (e.g. stratified:0=0.5,1=0.05,default=0.1).",
             s
         ))
     }
@@ -318,26 +372,34 @@ fn read_line_list(path: &Path) -> Result<Vec<sim::lineage::LineListEntry>, Strin
 }
 
 /// `camdl lineage tree LINE_LIST` — offline transmission-tree projection.
+///
+/// Sampling draws from **all** individuals (not just chain endpoints); a
+/// sampled individual's pendant tip is placed at its removal time (or the
+/// simulation horizon if never removed).
 pub fn cmd_lineage_tree(a: &LineageTreeArgs) {
     let entries = read_line_list(&a.line_list).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
 
-    let scheme = parse_scheme(&a.scheme).unwrap_or_else(|e| {
+    // Per-individual summaries (deme + removal time) and the horizon — the
+    // candidate set is every individual.
+    let (summaries, sim_end) = summarize(&entries);
+
+    let scheme = parse_scheme(&a.scheme, sim_end).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
 
     let forest = TransmissionForest::from_entries(&entries);
-    let mut rng = sim::rng::StatefulRng::new(a.seed);
-    let sampled = scheme.select(&forest, &mut rng);
+    let mut rng = sim::rng::StatefulRng::new(a.sample_seed);
+    let sampled = select_samples(scheme.as_ref(), &summaries, &mut rng);
 
     if sampled.is_empty() {
         eprintln!(
-            "warning: sampling scheme selected 0 tips from {} candidate leaves; \
-             no tree to emit",
-            forest.leaves().len()
+            "warning: sampling scheme selected 0 tips from {} candidate \
+             individuals; no tree to emit",
+            summaries.len()
         );
     }
 
@@ -359,8 +421,8 @@ pub fn cmd_lineage_tree(a: &LineageTreeArgs) {
     out.flush().ok();
 
     eprintln!(
-        "lineage tree: {} candidate leaves, {} sampled tips, {} tree(s)",
-        forest.leaves().len(),
+        "lineage tree: {} candidate individuals, {} sampled tips, {} tree(s)",
+        summaries.len(),
         sampled.len(),
         trees.len()
     );
@@ -457,4 +519,51 @@ pub fn cmd_lineage_cohort(a: &LineageCohortArgs) {
         bins.len(),
         total
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flat_scheme_parses() {
+        assert!(parse_scheme("flat:0.1", 10.0).is_ok());
+        assert!(parse_scheme("flat:1.0", 10.0).is_ok());
+        // Out-of-range and malformed rates are rejected.
+        assert!(parse_scheme("flat:1.5", 10.0).is_err());
+        assert!(parse_scheme("flat:abc", 10.0).is_err());
+    }
+
+    #[test]
+    fn stratified_spec_parses_indices_and_default() {
+        let (rates, default) =
+            parse_stratified_spec("0=0.5,1=0.05,default=0.1").unwrap();
+        assert_eq!(rates.get(&0), Some(&0.5));
+        assert_eq!(rates.get(&1), Some(&0.05));
+        assert_eq!(default, 0.1);
+        // Whitespace tolerated.
+        let (rates, default) = parse_stratified_spec(" 2 = 0.2 , default = 0.3 ").unwrap();
+        assert_eq!(rates.get(&2), Some(&0.2));
+        assert_eq!(default, 0.3);
+    }
+
+    #[test]
+    fn stratified_default_optional_defaults_to_zero() {
+        let (rates, default) = parse_stratified_spec("0=0.4").unwrap();
+        assert_eq!(rates.get(&0), Some(&0.4));
+        assert_eq!(default, 0.0);
+    }
+
+    #[test]
+    fn stratified_spec_rejects_garbage() {
+        assert!(parse_stratified_spec("").is_err()); // no rates
+        assert!(parse_stratified_spec("0").is_err()); // missing '='
+        assert!(parse_stratified_spec("0=2.0").is_err()); // rate out of range
+        assert!(parse_stratified_spec("x=0.1").is_err()); // non-integer index
+    }
+
+    #[test]
+    fn unknown_scheme_is_rejected() {
+        assert!(parse_scheme("random:0.1", 10.0).is_err());
+    }
 }

@@ -1404,19 +1404,31 @@ pub struct LineageRealizeArgs {
 #[derive(Args)]
 #[command(after_help = colored_help!("\
 Examples:
-  # Flat 10% tip sampling, write Newick
+  # Flat 10% sampling over ALL individuals, write Newick
   camdl lineage tree line_list.parquet --scheme flat:0.1 --output tree.newick
 
-  # TSV line list, all tips (rate 1.0), to stdout
+  # TSV line list, sample everyone (rate 1.0), to stdout
   camdl lineage tree line_list.tsv
+
+  # Per-deme rates: deme 0 sampled at 0.5, deme 1 at 0.05, rest at 0.1
+  camdl lineage tree line_list.tsv --scheme stratified:0=0.5,1=0.05,default=0.1
 "))]
 pub struct LineageTreeArgs {
     /// Line-list file (.tsv or .parquet). Format auto-detected by extension.
     pub line_list: PathBuf,
 
-    /// Sampling scheme. Phase 1 supports `flat:RATE` (e.g. `flat:0.1`) —
-    /// each candidate tip sampled i.i.d. with probability RATE. Default:
-    /// `flat:1.0` (all tips).
+    /// Sampling scheme over **all** individuals (an infector can be a tip).
+    /// A sampled individual's tip is placed at its removal time (or the
+    /// simulation horizon if it was never removed). Supported:
+    ///   - `flat:RATE` — each individual sampled i.i.d. with probability RATE
+    ///     (e.g. `flat:0.1`).
+    ///   - `stratified:idx=rate,...,default=rate` — each individual sampled at
+    ///     its deme's rate (integer deme index), falling back to `default`
+    ///     (e.g. `stratified:0=0.5,1=0.05,default=0.1`). Stratum *names* and
+    ///     rates-as-parameters via a `lineage { sampling }` model block are a
+    ///     future milestone; this is the projection-time path keyed on the deme
+    ///     index.
+    /// Default: `flat:1.0` (sample everyone).
     #[arg(long, default_value = "flat:1.0")]
     pub scheme: String,
 
@@ -1424,9 +1436,9 @@ pub struct LineageTreeArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// RNG seed for the sampling scheme (default: 1).
+    /// RNG seed for the sampling draw (default: 1).
     #[arg(long, default_value_t = 1)]
-    pub seed: u64,
+    pub sample_seed: u64,
 }
 
 /// `camdl lineage sojourn LINE_LIST --compartment ID` — dwell-time distribution
