@@ -51,8 +51,34 @@ pub struct Transition {
     /// Maps parameter name → derivative expression.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub rate_grad:      std::collections::HashMap<String, Expr>,
+    /// Lineage annotation for `#[lineage]` transitions. `None` for ordinary
+    /// transitions (the common case), and omitted from the JSON then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage:        Option<TransitionLineage>,
 }
 
 fn is_poisson(m: &DrawMethod) -> bool {
     matches!(m, DrawMethod::Poisson)
+}
+
+/// Lineage (individual-sampling) annotation for a `#[lineage]` transition.
+///
+/// Emitted by the OCaml compiler for transitions marked `#[lineage]` that
+/// pass the linear-in-parents check (2026-05-19 individual-sampling-layer
+/// proposal). `None` on [`Transition::lineage`] for ordinary transitions.
+///
+/// `parent_pool_weights` is the linear decomposition of the rate over parent
+/// pools: `(parent_compartment, per_pool_weight_expr)` pairs. For `β·S·I/N`
+/// with parent `I` this is `[("I", β·S/N)]`. The runtime samples parent pool
+/// `b` with probability ∝ `weight_b · count_b`, then samples uniformly within
+/// the chosen pool. The weight is a frozen coefficient at the event instant
+/// (normalizers like `1/N` are evaluated at the current state), so it does
+/// not itself depend linearly on the parent count — that dependence has been
+/// factored out into the per-pool entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitionLineage {
+    pub is_lineage_event:    bool,
+    /// `(compartment, weight_expr)` pairs. Serialised as a JSON array of
+    /// two-element `[name, expr]` arrays to mirror the OCaml side.
+    pub parent_pool_weights: Vec<(String, Expr)>,
 }

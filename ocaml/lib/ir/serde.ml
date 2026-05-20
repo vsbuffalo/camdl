@@ -268,6 +268,24 @@ let draw_method_of_json j =
   | `Assoc [("overdispersed", e)] -> Ir.DrawOverdispersed (expr_of_json e)
   | _ -> fail "draw_method must be \"poisson\", \"deterministic\", or {\"overdispersed\": expr}"
 
+let transition_lineage_to_json (l : transition_lineage) : Yojson.Safe.t =
+  obj [
+    ("is_lineage_event", bool l.is_lineage_event);
+    ("parent_pool_weights",
+     arr (List.map (fun (comp, e) -> arr [str comp; expr_to_json e])
+            l.parent_pool_weights));
+  ]
+
+let transition_lineage_of_json j : transition_lineage =
+  { is_lineage_event = as_bool (member "is_lineage_event" j);
+    parent_pool_weights =
+      List.map (fun pair ->
+        match as_list pair with
+        | [comp; e] -> (as_string comp, expr_of_json e)
+        | _ -> fail "parent_pool_weights entry must be a 2-element [comp, expr] array")
+        (as_list (member "parent_pool_weights" j));
+  }
+
 let transition_to_json (t : transition) : Yojson.Safe.t =
   obj (
     [ ("name",         str t.name);
@@ -281,6 +299,9 @@ let transition_to_json (t : transition) : Yojson.Safe.t =
     @ (match t.rate_grad with
        | [] -> []
        | grads -> [("rate_grad", obj (List.map (fun (p, e) -> (p, expr_to_json e)) grads))])
+    @ (match t.lineage with
+       | None   -> []
+       | Some l -> [("lineage", transition_lineage_to_json l)])
   )
 
 let transition_of_json j =
@@ -298,6 +319,9 @@ let transition_of_json j =
                     | Some (`Assoc pairs) ->
                       List.map (fun (name, expr_j) -> (name, expr_of_json expr_j)) pairs
                     | Some _ -> []);
+    lineage      = (match member_opt "lineage" j with
+                    | None | Some `Null -> None
+                    | Some l -> Some (transition_lineage_of_json l));
   }
 
 (* ── ODE equation ────────────────────────────────────────────────────────── *)
@@ -976,6 +1000,9 @@ let model_to_json (m : model) : Yojson.Safe.t =
            ("target", str bs.balance_target);
            ("expr",   expr_to_json bs.balance_expr);
          ])])
+    @ (match m.identity_tracked_compartments with
+       | [] -> []
+       | cs -> [("identity_tracked_compartments", arr (List.map str cs))])
   )
 
 let model_of_json (j : Yojson.Safe.t) : model =
@@ -1007,6 +1034,10 @@ let model_of_json (j : Yojson.Safe.t) : model =
           balance_target = member "target" v |> as_string;
           balance_expr   = member "expr"   v |> expr_of_json;
         });
+    identity_tracked_compartments =
+      (match member_opt "identity_tracked_compartments" j with
+       | None | Some `Null -> []
+       | Some v -> List.map as_string (as_list v));
   }
 
 (* gh#audit-C8. IR schema version baked at build time from `ir/VERSION`

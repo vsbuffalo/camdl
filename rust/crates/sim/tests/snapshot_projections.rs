@@ -85,7 +85,7 @@ fn model_with_obs(
             dt: Some(1.0), rng_seed: Some(42),
         },
         presets: vec![],
-        model_structure: None, balance: None,
+        model_structure: None, balance: None, identity_tracked_compartments: vec![],
     }
 }
 
@@ -348,7 +348,7 @@ fn snapshot_reads_post_intervention_state() {
             dt: Some(1.0), rng_seed: Some(1),
         },
         presets: vec![],
-        model_structure: None, balance: None,
+        model_structure: None, balance: None, identity_tracked_compartments: vec![],
     };
 
     let compiled = Arc::new(CompiledModel::new(model).unwrap());

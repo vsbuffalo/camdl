@@ -3760,6 +3760,239 @@ let test_diagnostic_test_missing_kwargs () =
   |} in
   compile_expect_error_code ~code:"E254" ~contains:"diagnostic_test" src
 
+(* ── #[lineage] individual-sampling layer (2026-05-19 proposal) ──────────────
+   Foundation slice: lexer attribute opener, `#[lineage]` parse (both
+   forms), linear-in-parents classifier (accept/reject with E601),
+   parent_pool_weights extraction, and identity-tracked-subgraph
+   reachability (incl. SIRS cycle). ──────────────────────────────────────── *)
+
+let lineage_of (t : Ir.transition) = t.Ir.lineage
+
+let find_lineage m name =
+  match (find_transition m name).Ir.lineage with
+  | Some l -> l
+  | None   -> Alcotest.failf "transition %s has no lineage annotation" name
+
+(* SEIR with #[lineage] above the transition. *)
+let seir_lineage_src ~inline =
+  let attr_line = if inline then "  #[lineage] infection : S --> E  @ beta * S * I / N"
+                  else "  #[lineage]\n  infection : S --> E  @ beta * S * I / N" in
+  Printf.sprintf {|
+    compartments { S, E, I, R, V }
+    parameters {
+      beta : rate  sigma : rate  gamma : rate  nu : rate
+      N0 : count  I0 : count
+    }
+    let N = S + E + I + R + V
+    transitions {
+%s
+      progression : E --> I  @ sigma * E
+      recovery    : I --> R  @ gamma * I
+      vaccination : S --> V  @ nu * S
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 120 'days }
+  |} attr_line
+
+(* (a) Both attribute forms parse and produce identical IR. *)
+let test_lineage_parses_both_forms () =
+  let m_block  = compile_expect_ok (seir_lineage_src ~inline:false) in
+  let m_inline = compile_expect_ok (seir_lineage_src ~inline:true)  in
+  (* The infection transition carries a lineage annotation in both. *)
+  let lb = find_lineage m_block  "infection" in
+  let li = find_lineage m_inline "infection" in
+  Alcotest.(check bool) "block form is_lineage_event" true lb.Ir.is_lineage_event;
+  Alcotest.(check bool) "inline form is_lineage_event" true li.Ir.is_lineage_event;
+  (* Identical IR: the whole transition list must match. *)
+  Alcotest.(check bool) "both forms produce identical IR"
+    true (m_block.Ir.transitions = m_inline.Ir.transitions);
+  (* Ordinary transitions carry no lineage annotation. *)
+  Alcotest.(check bool) "recovery has no lineage"
+    true (lineage_of (find_transition m_block "recovery") = None)
+
+(* (b) Classifier ACCEPTS frequency-dependent β·S·I/N. The denominator
+   appearance of I (in N) is exempt; I is the sole linear parent. *)
+let test_lineage_accepts_freq_dependent () =
+  let m = compile_expect_ok (seir_lineage_src ~inline:false) in
+  let l = find_lineage m "infection" in
+  let comps = List.map fst l.Ir.parent_pool_weights in
+  Alcotest.(check (list string)) "single parent pool I" ["I"] comps
+
+(* (b) Classifier ACCEPTS multi-pool β·S·(β_I·I + β_A·A)/N. *)
+let multi_pool_src = {|
+    compartments { S, E, I, A, R }
+    parameters {
+      beta : rate  beta_i : probability  beta_a : probability
+      sigma : rate  gamma : rate  N0 : count  I0 : count
+    }
+    let N = S + E + I + A + R
+    transitions {
+      #[lineage]
+      infection : S --> E  @ beta * S * (beta_i * I + beta_a * A) / N
+      progression : E --> I  @ sigma * E
+      recovery : I --> R @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days to = 120 'days }
+  |}
+
+let test_lineage_accepts_multi_pool () =
+  let m = compile_expect_ok multi_pool_src in
+  let l = find_lineage m "infection" in
+  let comps = List.sort compare (List.map fst l.Ir.parent_pool_weights) in
+  Alcotest.(check (list string)) "two parent pools A, I" ["A"; "I"] comps
+
+(* (b) Classifier ACCEPTS a stratified contact-matrix rate
+   S[a] · Σ_b C[a,b]·I[b]/N[b]. *)
+let age_lineage_src = {|
+    time_unit = 'days
+    compartments { S, E, I, R }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    let N_local[a in age] = S[a] + E[a] + I[a] + R[a]
+    parameters { beta : rate  sigma : rate  gamma : rate }
+    tables { C_age : age × age = [[12.0, 4.0], [4.0, 8.0]] }
+    transitions {
+      #[lineage]
+      infection[a in age] : S[a] --> E[a]
+        @ beta * S[a] * sum(b in age, C_age[a, b] * I[b] / N_local[b])
+      progression[a in age] : E[a] --> I[a]  @ sigma * E[a]
+      recovery[a in age]    : I[a] --> R[a]  @ gamma * I[a]
+    }
+    init { S[child] = 4990  S[adult] = 5000  I[child] = 10 }
+    simulate { from = 0 'days  to = 100 'days }
+  |}
+
+let test_lineage_accepts_stratified () =
+  let m = compile_expect_ok age_lineage_src in
+  (* infection_child draws from both I_child and I_adult. *)
+  let lc = find_lineage m "infection_child" in
+  let comps = List.sort compare (List.map fst lc.Ir.parent_pool_weights) in
+  Alcotest.(check (list string)) "infection_child pools" ["I_adult"; "I_child"] comps;
+  let la = find_lineage m "infection_adult" in
+  let comps_a = List.sort compare (List.map fst la.Ir.parent_pool_weights) in
+  Alcotest.(check (list string)) "infection_adult pools" ["I_adult"; "I_child"] comps_a
+
+(* (c) Classifier REJECTS β·S·(I+ι)^α/N with E601, pointing at the
+   nonlinear subterm. *)
+let test_lineage_rejects_nonlinear_e601 () =
+  let src = {|
+    compartments { S, E, I, R }
+    parameters {
+      beta : rate  sigma : rate  gamma : rate
+      alpha : positive  iota : count  N0 : count  I0 : count
+    }
+    let N = S + E + I + R
+    transitions {
+      #[lineage]
+      infection : S --> E  @ beta * S * (I + iota)^alpha / N
+      progression : E --> I  @ sigma * E
+      recovery : I --> R @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days to = 120 'days }
+  |} in
+  (* Error code E601 fires, and the message names the nonlinear subterm. *)
+  compile_expect_error_code ~code:"E601" ~contains:"I + iota" src
+
+(* (d) parent_pool_weights extraction emits the expected weight ASTs.
+   For β·S·I/N (N = S+E+I+R+V), weight(I) = β·S/N. *)
+let test_lineage_weight_freq_dependent () =
+  let m = compile_expect_ok (seir_lineage_src ~inline:false) in
+  let l = find_lineage m "infection" in
+  let open Ir in
+  let expected =
+    BinOp { op = Div;
+            left  = BinOp { op = Mul; left = Param "beta"; right = Pop "S" };
+            right = PopSum ["S"; "E"; "I"; "R"; "V"] }
+  in
+  match l.parent_pool_weights with
+  | [("I", w)] ->
+    Alcotest.(check bool) "weight(I) = beta*S/N" true (w = expected)
+  | other ->
+    Alcotest.failf "expected single I weight, got %d pools" (List.length other)
+
+(* (d) Multi-pool weights: weight(I) = β·β_I·S/N, weight(A) = β·β_A·S/N. *)
+let test_lineage_weight_multi_pool () =
+  let m = compile_expect_ok multi_pool_src in
+  let l = find_lineage m "infection" in
+  let open Ir in
+  let denom = PopSum ["S"; "E"; "I"; "A"; "R"] in
+  let expect_for p =
+    (* β·S·p / N, with the multiplication associated as ((β*S)*p). *)
+    BinOp { op = Div;
+            left  = BinOp { op = Mul;
+                            left  = BinOp { op = Mul; left = Param "beta"; right = Pop "S" };
+                            right = Param p };
+            right = denom }
+  in
+  let wi = List.assoc "I" l.parent_pool_weights in
+  let wa = List.assoc "A" l.parent_pool_weights in
+  Alcotest.(check bool) "weight(I) = beta*S*beta_i/N" true (wi = expect_for "beta_i");
+  Alcotest.(check bool) "weight(A) = beta*S*beta_a/N" true (wa = expect_for "beta_a")
+
+(* (e) Identity-tracked subgraph: SEIR with #[lineage] on S→E tracks
+   {E, I, R}; S and V are untracked. *)
+let test_lineage_identity_subgraph_seir () =
+  let m = compile_expect_ok (seir_lineage_src ~inline:false) in
+  Alcotest.(check (list string)) "tracked = E,I,R"
+    ["E"; "I"; "R"] m.Ir.identity_tracked_compartments
+
+(* (e) Cyclic SIRS: R→S waning pulls S into the tracked set without
+   infinite recursion; all of S,I,R tracked. *)
+let test_lineage_identity_subgraph_sirs_cycle () =
+  let src = {|
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate  omega : rate  N0 : count  I0 : count }
+    let N = S + I + R
+    transitions {
+      #[lineage]
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+      waning    : R --> S  @ omega * R
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 120 'days }
+  |} in
+  let m = compile_expect_ok src in
+  Alcotest.(check (list string)) "SIRS cycle tracks S,I,R"
+    ["S"; "I"; "R"] m.Ir.identity_tracked_compartments
+
+(* No #[lineage] anywhere ⇒ inert: empty identity set, no lineage on any
+   transition. *)
+let test_lineage_inert_when_absent () =
+  let m = compile_expect_ok {|
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate  N0 : count  I0 : count }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 120 'days }
+  |} in
+  Alcotest.(check (list string)) "no tracked compartments" [] m.Ir.identity_tracked_compartments;
+  Alcotest.(check bool) "infection has no lineage"
+    true (lineage_of (find_transition m "infection") = None)
+
+(* Lexer: unknown attribute name is a hard error (E110), not a silent
+   no-op. *)
+let test_lineage_unknown_attribute_e110 () =
+  let src = {|
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate  N0 : count  I0 : count }
+    let N = S + I + R
+    transitions {
+      #[transmission]
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 120 'days }
+  |} in
+  compile_expect_error_code ~code:"E110" ~contains:"transmission" src
+
 let () =
   Alcotest.run "compiler" [
     "golden", [
@@ -4019,5 +4252,18 @@ let () =
       Alcotest.test_case "bernoulli base supported"                        `Quick test_diagnostic_test_bernoulli;
       Alcotest.test_case "E253 rejects unsupported base (poisson)"        `Quick test_diagnostic_test_bad_base;
       Alcotest.test_case "E254 rejects missing kwargs"                    `Quick test_diagnostic_test_missing_kwargs;
+    ];
+    "lineage_individual_sampling", [
+      Alcotest.test_case "#[lineage] parses (both forms) → identical IR"   `Quick test_lineage_parses_both_forms;
+      Alcotest.test_case "accepts β·S·I/N (freq-dependent)"               `Quick test_lineage_accepts_freq_dependent;
+      Alcotest.test_case "accepts multi-pool β·S·(β_I·I+β_A·A)/N"         `Quick test_lineage_accepts_multi_pool;
+      Alcotest.test_case "accepts stratified contact-matrix rate"          `Quick test_lineage_accepts_stratified;
+      Alcotest.test_case "E601 rejects β·S·(I+ι)^α/N at nonlinear subterm" `Quick test_lineage_rejects_nonlinear_e601;
+      Alcotest.test_case "weight(I) = β·S/N for freq-dependent"            `Quick test_lineage_weight_freq_dependent;
+      Alcotest.test_case "multi-pool weights β·β_I·S/N, β·β_A·S/N"         `Quick test_lineage_weight_multi_pool;
+      Alcotest.test_case "identity subgraph SEIR S→E tracks {E,I,R}"       `Quick test_lineage_identity_subgraph_seir;
+      Alcotest.test_case "identity subgraph SIRS cycle tracks {S,I,R}"     `Quick test_lineage_identity_subgraph_sirs_cycle;
+      Alcotest.test_case "inert when no #[lineage] annotations"            `Quick test_lineage_inert_when_absent;
+      Alcotest.test_case "E110 unknown attribute #[transmission]"          `Quick test_lineage_unknown_attribute_e110;
     ];
   ]

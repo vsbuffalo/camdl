@@ -123,6 +123,14 @@ type transition_decl = {
   trrate    : expr;
   trguard   : guard option;
   trtag     : string option;
+  (* `#[lineage]` attribute (individual-sampling layer, 2026-05-19
+     proposal). True ⇒ this transition has parent-child lineage
+     semantics: at firing time a parent is sampled from the
+     linear-decomposition parent pool and a tracked child is minted
+     in the destination. The compiler verifies the rate is
+     linear-in-parents (E601) and emits per-pool weight expressions
+     into the IR. *)
+  trlineage : bool;
   trloc     : loc;
 }
 

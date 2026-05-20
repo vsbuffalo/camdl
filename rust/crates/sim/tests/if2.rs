@@ -79,7 +79,7 @@ fn sir_model() -> (CompiledModel, Vec<f64>) {
                     right: Box::new(Expr::PopSum(PopSumExpr { pop_sum: vec!["S".into(), "I".into(), "R".into()] })),
                 }}),
                 metadata: None,
-                draw_method: DrawMethod::Poisson, rate_grad: Default::default(),
+                draw_method: DrawMethod::Poisson, rate_grad: Default::default(), lineage: None,
             },
             Transition {
                 name: "recovery".into(),
@@ -93,7 +93,7 @@ fn sir_model() -> (CompiledModel, Vec<f64>) {
                     right: Box::new(Expr::Pop(PopExpr { pop: "I".into() })),
                 }}),
                 metadata: None,
-                draw_method: DrawMethod::Poisson, rate_grad: Default::default(),
+                draw_method: DrawMethod::Poisson, rate_grad: Default::default(), lineage: None,
             },
         ],
         ode_equations: vec![],
@@ -123,7 +123,7 @@ fn sir_model() -> (CompiledModel, Vec<f64>) {
             dt: Some(1.0), rng_seed: Some(42),
         },
         presets: vec![],
-        model_structure: None, balance: None,
+        model_structure: None, balance: None, identity_tracked_compartments: vec![],
     };
 
     let compiled = CompiledModel::new(model).unwrap();

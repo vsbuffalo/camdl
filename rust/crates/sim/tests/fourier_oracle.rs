@@ -76,7 +76,7 @@ fn compile_fourier(period: f64, harmonics: &[(f64, f64)]) -> CompiledTimeFuncKin
             dt: None, rng_seed: Some(42),
         },
         presets: vec![],
-        model_structure: None, balance: None,
+        model_structure: None, balance: None, identity_tracked_compartments: vec![],
     };
     let cm = CompiledModel::new(m).unwrap();
     cm.time_func_cache[0].kind.clone()

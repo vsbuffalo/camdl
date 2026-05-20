@@ -68,7 +68,13 @@
 
     "output": { "$ref": "#/definitions/output_config" },
 
-    "simulation": { "$ref": "#/definitions/simulation_config" }
+    "simulation": { "$ref": "#/definitions/simulation_config" },
+
+    "identity_tracked_compartments": {
+      "description": "Compartments whose individuals carry tracked IDs (individual-sampling layer). Forward-reachable closure from `#[lineage]` event destinations and parent pools. Absent/empty when no `#[lineage]` annotations exist.",
+      "type": "array",
+      "items": { "type": "string" }
+    }
   },
 
   "definitions": {
@@ -231,8 +237,37 @@
             { "type": "null" },
             { "$ref": "#/definitions/transition_metadata" }
           ]
+        },
+        "lineage": {
+          "description": "Lineage (individual-sampling) annotation for `#[lineage]` transitions. Absent for ordinary transitions.",
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/transition_lineage" }
+          ]
         }
       }
+    },
+
+    "transition_lineage": {
+      "type": "object",
+      "required": ["is_lineage_event", "parent_pool_weights"],
+      "properties": {
+        "is_lineage_event": { "type": "boolean" },
+        "parent_pool_weights": {
+          "description": "Linear decomposition of the rate over parent pools: (compartment, per-pool weight expression) pairs. For `beta*S*I/N` with parent I this is [[\"I\", <beta*S/N>]].",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": [
+              { "type": "string" },
+              { "$ref": "#/definitions/expr" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
     },
 
     "ode_equation": {

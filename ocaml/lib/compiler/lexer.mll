@@ -132,7 +132,21 @@ let int_lit = digit+ ('_'+ digit+)*
 rule token = parse
   | ws+               { token lexbuf }
   | '\n'              { Lexing.new_line lexbuf; token lexbuf }
-  | '#' [^'\n']*      { token lexbuf }   (* line comment *)
+
+  (* Attribute opener: `#[` with NO intervening space begins an
+     attribute (e.g. `#[lineage]`). One-character lookahead. The
+     comment rules below are written so they never match a `#`
+     immediately followed by `[`, so `# [` (with space) and `#foo`
+     stay comments. The attribute name is lexed as a following IDENT
+     by the parser.
+
+     ocamllex picks the longest match, so the comment rule must be
+     structured to NOT consume `#[…]`. We do this by splitting the
+     comment alternatives: a bare `#` at end-of-line, or `#` followed
+     by a non-`[` character then arbitrary rest-of-line. *)
+  | "#["              { HASH_LBRACKET }
+  | '#'                       { token lexbuf }   (* lone `#` (e.g. end of line) *)
+  | '#' [^'\n' '['] [^'\n']*  { token lexbuf }   (* line comment, first char not `[` *)
 
   (* Unit literals: 'days, 'per_day, etc. *)
   | "'days"      { UNIT_IDENT "days" }

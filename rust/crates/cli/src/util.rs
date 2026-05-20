@@ -1526,7 +1526,7 @@ mod tests {
                 dt: None, rng_seed: None,
             },
             interventions: ivs,
-            presets: vec![], model_structure: None, balance: None,
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
         }
     }
 
@@ -1738,6 +1738,7 @@ mod tests {
             presets: Vec::new(),
             model_structure: None,
             balance: None,
+            identity_tracked_compartments: vec![],
         }
     }
 

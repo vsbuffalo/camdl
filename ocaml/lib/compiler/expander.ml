@@ -1577,6 +1577,43 @@ let expand_transitions_counted ctx =
             | None -> base_name
             | Some s -> base_name ^ "_" ^ s
           in
+          (* Lineage analysis (#[lineage], 2026-05-19 proposal). Runs on
+             the resolved/normalized IR rate so Pop names are fully
+             qualified after stratification, and the source set is the
+             expanded source compartments. A nonlinear use of a parent
+             count is rejected with E601 pointing at the transition. *)
+          let lineage =
+            if not tr.trlineage then None
+            else begin
+              let cls = Lineage.classify_parents ~sources:src_names rate in
+              match cls.Lineage.nonlinear with
+              | Some nl ->
+                Diagnostics.error ctx.diags
+                  ~code:"E601"
+                  ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
+                  ~message:(Printf.sprintf
+                    "lineage tracking on transition '%s' requires linear \
+                     dependence on parent compartments. Found nonlinear use \
+                     of '%s' in the rate expression (inside %s)."
+                    tr_name nl.Lineage.comp
+                    (Pp_expr.to_string nl.Lineage.context))
+                  ~hint:"options: (1) rewrite the rate so the parent appears \
+                         as a top-level linear factor, absorbing the \
+                         nonlinearity into other parameters; (2) remove the \
+                         #[lineage] annotation — v1 lineage tracking does not \
+                         support nonlinear parent dependence; (3) wait for \
+                         Phase 4 lineage support (nonlinear rates with \
+                         explicit attribution semantics)."
+                  ();
+                (* Emit a structurally-valid lineage record so compilation
+                   continues to collect further diagnostics; the error above
+                   blocks a successful compile. *)
+                Some { Ir.is_lineage_event = true; Ir.parent_pool_weights = [] }
+              | None ->
+                let weights = Lineage.parent_pool_weights ~sources:src_names rate in
+                Some { Ir.is_lineage_event = true; Ir.parent_pool_weights = weights }
+            end
+          in
           {
             Ir.name            = tr_name;
             Ir.stoichiometry   = stoich;
@@ -1588,6 +1625,7 @@ let expand_transitions_counted ctx =
             };
             Ir.draw_method     = draw_method;
             Ir.rate_grad       = [];  (* populated later by autodiff pass *)
+            Ir.lineage         = lineage;
           }
         in
         (* Dispatch on destination form.
@@ -3665,6 +3703,63 @@ let lint_l401 ctx (expanded_trs : Ir.transition list) =
       end)
   ) expanded_trs
 
+(** Compute the identity-tracked subgraph (2026-05-19 proposal,
+    §"Identity-tracked subgraph (inferred)").
+
+    1. Seed: destinations of `#[lineage]` events ∪ parent-pool
+       compartments of `#[lineage]` events.
+    2. Close under: for every transition c1 → c2, if c1 is tracked, add c2.
+    3. Result: every compartment whose individuals should carry IDs.
+
+    Forward reachability over the transition graph, closed under cycles
+    (SIRS R→S waning: once R is tracked, R→S pulls S in; the worklist
+    fixpoint terminates because the tracked set is bounded by the
+    compartment set). Returns the tracked compartments in stable
+    (compartment-declaration) order. Empty when there are no `#[lineage]`
+    transitions — the lineage subsystem is then statically inert. *)
+let compute_identity_tracked
+    (compartments : Ir.compartment list)
+    (transitions  : Ir.transition list) : string list =
+  let module SS = Set.Make (String) in
+  (* Seed from lineage events: destinations + parent pools. *)
+  let seed =
+    List.fold_left (fun acc (t : Ir.transition) ->
+      match t.Ir.lineage with
+      | None -> acc
+      | Some l ->
+        let acc =
+          match t.Ir.metadata with
+          | Some { Ir.dest_compartment = Some d; _ } -> SS.add d acc
+          | _ -> acc
+        in
+        List.fold_left (fun acc (comp, _) -> SS.add comp acc)
+          acc l.Ir.parent_pool_weights
+    ) SS.empty transitions
+  in
+  (* Forward closure: c1 → c2 edges from transition metadata. Iterate to
+     a fixpoint (handles cycles without infinite recursion). *)
+  let edges =
+    List.filter_map (fun (t : Ir.transition) ->
+      match t.Ir.metadata with
+      | Some { Ir.source_compartment = Some s; Ir.dest_compartment = Some d; _ } ->
+        Some (s, d)
+      | _ -> None
+    ) transitions
+  in
+  let rec close tracked =
+    let tracked' =
+      List.fold_left (fun acc (s, d) ->
+        if SS.mem s acc then SS.add d acc else acc
+      ) tracked edges
+    in
+    if SS.equal tracked tracked' then tracked else close tracked'
+  in
+  let tracked = close seed in
+  (* Stable order: follow compartment declaration order. *)
+  List.filter_map (fun (c : Ir.compartment) ->
+    if SS.mem c.Ir.name tracked then Some c.Ir.name else None
+  ) compartments
+
 let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (decls : declaration list)
     : Ir.model * context * model_summary =
   let ctx = empty_context ~source_dir ~filename () in
@@ -3710,6 +3805,8 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
           Ir.balance_target = bd.bcomp;
           Ir.balance_expr   = resolve_expr ctx [] bd.bexpr;
         });
+    Ir.identity_tracked_compartments =
+      compute_identity_tracked expanded_comps expanded_trs;
   } in
   let summary = {
     base_compartment_count     = List.length ctx.comp_decls;

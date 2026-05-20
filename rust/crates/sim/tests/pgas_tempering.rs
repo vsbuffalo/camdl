@@ -48,7 +48,7 @@ fn pure_death_model() -> (Arc<CompiledModel>, Vec<f64>) {
                     },
                 }),
                 metadata: None,
-                draw_method: DrawMethod::Poisson, rate_grad: Default::default(),
+                draw_method: DrawMethod::Poisson, rate_grad: Default::default(), lineage: None,
             },
         ],
         ode_equations: vec![],
@@ -76,7 +76,7 @@ fn pure_death_model() -> (Arc<CompiledModel>, Vec<f64>) {
             rng_seed: Some(42),
         },
         presets: vec![],
-        model_structure: None, balance: None,
+        model_structure: None, balance: None, identity_tracked_compartments: vec![],
     };
 
     let compiled = Arc::new(CompiledModel::new(model).unwrap());

@@ -54,7 +54,7 @@ fn minimal_model(compartments: Vec<Compartment>, params: Vec<Parameter>) -> Mode
             rng_seed: Some(42),
         },
         presets: vec![],
-        model_structure: None, balance: None,
+        model_structure: None, balance: None, identity_tracked_compartments: vec![],
     }
 }
 

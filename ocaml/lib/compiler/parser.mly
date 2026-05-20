@@ -28,6 +28,7 @@
 %token NEQ         (* != *)
 %token LT GT LE GE
 %token CROSS       (* × *)
+%token HASH_LBRACKET (* #[ — attribute opener *)
 
 (* ── Keywords ───────────────────────────────────────────────────────────── *)
 %token TIME_UNIT COMPARTMENTS PARAMETERS TABLES FORCING
@@ -327,25 +328,47 @@ transition_list:
   | trs = list(transition_decl) { trs }
 
 transition_decl:
-  (* inline: name[...] : srcs --> dsts @ rate where guard *)
-  | name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list AT rate = expr guard = where_clause_opt
+  (* inline: [#[lineage]] name[...] : srcs --> dsts @ rate where guard.
+     The optional `#[lineage]` attribute may sit on its own line above
+     the transition or inline immediately before it — camdl has no
+     statement separators, so both forms are the same production and
+     produce identical IR. *)
+  | lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list AT rate = expr guard = where_clause_opt
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
-          trrate = rate; trguard = guard; trtag = None;
+          trrate = rate; trguard = guard; trtag = None; trlineage = lin;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
-  (* block form: name[...] : srcs --> dsts { rate = ...; tag = ... } *)
-  | name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list LBRACE tbody = transition_body RBRACE
+  (* block form: [#[lineage]] name[...] : srcs --> dsts { rate = ...; tag = ... } *)
+  | lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list LBRACE tbody = transition_body RBRACE
       { let (rate, guard, tag) = tbody in
         { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
-          trrate = rate; trguard = guard; trtag = tag;
+          trrate = rate; trguard = guard; trtag = tag; trlineage = lin;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
-  (* branching: name[...] : srcs --> { D1 : w1, D2 : w2, ... } @ rate where guard *)
-  | name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW LBRACE branches = separated_nonempty_list(COMMA, branch_entry) RBRACE AT rate = expr guard = where_clause_opt
+  (* branching: [#[lineage]] name[...] : srcs --> { D1 : w1, ... } @ rate where guard *)
+  | lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW LBRACE branches = separated_nonempty_list(COMMA, branch_entry) RBRACE AT rate = expr guard = where_clause_opt
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstBranch branches;
-          trrate = rate; trguard = guard; trtag = None;
+          trrate = rate; trguard = guard; trtag = None; trlineage = lin;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+
+(* Optional transition attribute. Only `#[lineage]` is recognized in
+   v1. An unknown attribute name (e.g. `#[transmission]`) is a hard
+   error (E110) rather than a silent no-op — "no loose semantics":
+   if a construct looks like it means something, it must mean exactly
+   that or produce a clear error. *)
+lineage_attr_opt:
+  | (* empty *) { false }
+  | HASH_LBRACKET name = IDENT RBRACKET
+      { if name = "lineage" then true
+        else begin
+          Parser_errors.push_error ~sp:$startpos ~ep:$endpos
+            ~code:"E110"
+            ~msg:(Printf.sprintf
+              "unknown transition attribute '#[%s]': the only attribute \
+               supported in v1 is '#[lineage]'" name);
+          false
+        end }
 
 stoich_ref_list:
   | (* empty *)                                           { [] }

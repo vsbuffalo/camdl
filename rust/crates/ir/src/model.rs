@@ -153,4 +153,11 @@ pub struct Model {
     pub model_structure:    Option<ModelStructure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance:            Option<BalanceSpec>,
+    /// Compartments whose individuals carry tracked IDs (individual-sampling
+    /// layer, 2026-05-19 proposal). Forward-reachable closure from
+    /// `#[lineage]` event destinations ∪ parent pools. Empty when no
+    /// `#[lineage]` annotations exist — the lineage subsystem is then
+    /// statically inert. Cached here so the runtime does not recompute it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_tracked_compartments: Vec<String>,
 }

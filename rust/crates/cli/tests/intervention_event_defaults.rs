@@ -30,7 +30,7 @@ fn mixed_model_ir() -> String {
     // gh#audit-C8. Wrap in IR envelope so the binary's
     // envelope-aware deserializer (ir::from_str) accepts it.
     r#"{
-      "ir_version": "0.4",
+      "ir_version": "0.5",
       "validated_by": "test-fixture",
       "model": {
         "name": "mixed", "version": "0.3", "time_unit": "days",

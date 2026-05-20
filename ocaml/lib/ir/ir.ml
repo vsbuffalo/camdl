@@ -64,6 +64,25 @@ type draw_method =
   | DrawOverdispersed of expr
   | DrawDeterministic
 
+(* Lineage (individual-sampling) annotation, emitted for `#[lineage]`
+   transitions (2026-05-19 proposal). Present iff the transition was
+   marked `#[lineage]` and passed the linear-in-parents check.
+
+   [parent_pool_weights] is the linear decomposition of the rate over
+   parent pools: a list of (parent compartment, per-pool weight
+   expression) pairs. For `β·S·I/N` with parent I this is
+   [("I", β·S/N)]; multi-pool `β·S·(β_I·I + β_A·A)/N` →
+   [("I", β·β_I·S/N); ("A", β·β_A·S/N)]. The runtime samples parent
+   pool b with P(b) ∝ weight_b · count_b, then uniform within the
+   pool. The weight expression is a frozen coefficient at the event
+   instant (normalizers like 1/N are evaluated at the current state),
+   so it must NOT itself reference the parent count linearly — that
+   linear dependence has been factored out into the per-pool entry. *)
+type transition_lineage = {
+  is_lineage_event:    bool;
+  parent_pool_weights: (string * expr) list;
+}
+
 type transition = {
   name:            string;
   stoichiometry:   stoichiometry_entry list;
@@ -71,6 +90,7 @@ type transition = {
   metadata:        transition_metadata option;
   draw_method:     draw_method;
   rate_grad:       (string * expr) list;  (** ∂rate/∂param for each estimated param. Empty if not computed. *)
+  lineage:         transition_lineage option;  (** Some iff `#[lineage]`; None for ordinary transitions. *)
 }
 
 (* ── ODE equation ────────────────────────────────────────────────────────────── *)
@@ -381,4 +401,11 @@ type model = {
   presets:            preset list;
   model_structure:    model_structure option;
   balance:            balance_spec option;
+  (* Compartments whose individuals carry tracked IDs, computed by
+     forward reachability from {lineage-event destinations ∪ parent
+     pools} closed under transitions (2026-05-19 proposal, §Identity-
+     tracked subgraph). Empty when no `#[lineage]` annotations exist —
+     in that case the lineage subsystem is statically inert. Cached
+     here so the runtime does not recompute it. *)
+  identity_tracked_compartments: string list;
 }

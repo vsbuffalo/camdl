@@ -50,7 +50,7 @@ fn model_with_periodic(period: f64, values: Vec<f64>) -> CompiledModel {
             dt: None, rng_seed: Some(42),
         },
         presets: vec![],
-        model_structure: None, balance: None,
+        model_structure: None, balance: None, identity_tracked_compartments: vec![],
     };
     CompiledModel::new(model).unwrap()
 }
@@ -164,7 +164,7 @@ fn model_with_kind(kind: TimeFuncKind) -> CompiledModel {
             dt: None, rng_seed: Some(42),
         },
         presets: vec![],
-        model_structure: None, balance: None,
+        model_structure: None, balance: None, identity_tracked_compartments: vec![],
     };
     CompiledModel::new(model).unwrap()
 }

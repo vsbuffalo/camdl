@@ -2195,7 +2195,7 @@ mod tests {
                         right: Box::new(Expr::Pop(PopExpr { pop: "I".into() })),
                     }}),
                     metadata: None, draw_method: ir::transition::DrawMethod::Poisson,
-                    rate_grad: Default::default(),
+                    rate_grad: Default::default(), lineage: None,
                 },
                 Transition {
                     name: "recovery".into(),
@@ -2206,7 +2206,7 @@ mod tests {
                         right: Box::new(Expr::Pop(PopExpr { pop: "I".into() })),
                     }}),
                     metadata: None, draw_method: ir::transition::DrawMethod::Poisson,
-                    rate_grad: Default::default(),
+                    rate_grad: Default::default(), lineage: None,
                 },
             ],
             ode_equations: vec![], time_functions: vec![], tables: vec![],
@@ -2224,7 +2224,7 @@ mod tests {
             }),
             output: OutputConfig { times: OutputSchedule::AtTimes(vec![0.0, 80.0]), format: "tsv".into(), trajectory: true, observations: false },
             simulation: SimulationConfig { t_start: 0.0, t_end: 80.0, time_semantics: "continuous".into(), dt: Some(1.0), rng_seed: Some(42) },
-            presets: vec![], model_structure: None, balance: None,
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
         };
 
         let compiled = CompiledModel::new(model).unwrap();
@@ -2398,7 +2398,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(42),
             },
-            presets: vec![], model_structure: None, balance: None,
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
         };
         let compiled = CompiledModel::new(model).unwrap();
 
@@ -2503,7 +2503,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(42),
             },
-            presets: vec![], model_structure: None, balance: None,
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
         };
         let compiled = CompiledModel::new(model).unwrap();
 
@@ -2646,7 +2646,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: None, rng_seed: None,
             },
-            presets: vec![], model_structure: None, balance: None,
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
         };
 
         let est_with_normal = |name: &str, mean: f64, sd: f64| {
@@ -3197,7 +3197,7 @@ dt = 1.0
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(42),
             },
-            presets: vec![], model_structure: None, balance: None,
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
         };
         let compiled = sim::CompiledModel::new(model.clone()).expect("compile");
         (model, compiled)

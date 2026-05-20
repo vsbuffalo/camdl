@@ -69,6 +69,7 @@ let empty_model
     presets = [];
     model_structure = None;
     balance;
+    identity_tracked_compartments = [];
   }
 
 let mk_compartment name : compartment = { name; kind = Integer }
@@ -79,7 +80,7 @@ let mk_param ?(kind = None) ?(dim = None) ?(value = None) name : parameter =
 
 let mk_transition ?(stoich = []) name rate : transition =
   { name; stoichiometry = stoich; rate;
-    metadata = None; draw_method = DrawPoisson; rate_grad = [] }
+    metadata = None; draw_method = DrawPoisson; rate_grad = []; lineage = None }
 
 (* Shorthand constructors for expressions *)
 let pop s = Pop s

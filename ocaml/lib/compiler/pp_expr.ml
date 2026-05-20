@@ -160,6 +160,11 @@ and pp_inner ~mode ~split ~ascii ppf = function
     pp ~mode ~split ~ascii ppf u.inner;
     Fmt.pf ppf ", dim = (%d,%d))" u.dim_p u.dim_t
 
+(** Render an IR expression to a plain (ASCII, IR-name) string. Used by
+    diagnostics that need to quote a sub-expression in error text. *)
+let to_string (e : Ir.expr) : string =
+  Format.asprintf "%a" (pp ~mode:Ir ~split:no_split ~ascii:true) e
+
 (* ── Convenience: build split_fn from a model + stratification info ──────── *)
 
 (** Build a split function from a flat map of expanded_name → (base, dim_values).

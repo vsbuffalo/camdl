@@ -191,7 +191,7 @@ fn test_overdispersion_variance_tau_leap() {
                 metadata: None,
                 draw_method: ir::transition::DrawMethod::Overdispersed(
                     Expr::Param(ParamExpr { param: "sigma_sq".into() })),
-                rate_grad: Default::default(),
+                rate_grad: Default::default(), lineage: None,
             },
         ],
         ode_equations: vec![],
@@ -221,7 +221,7 @@ fn test_overdispersion_variance_tau_leap() {
             rng_seed: Some(42),
         },
         presets: vec![],
-        model_structure: None, balance: None,
+        model_structure: None, balance: None, identity_tracked_compartments: vec![],
     };
 
     let compiled = CompiledModel::new(model).unwrap();
@@ -308,7 +308,7 @@ fn test_fraction_transfer_edge_cases() {
                 time_semantics: "continuous".into(), dt: None, rng_seed: Some(42),
             },
             presets: vec![],
-            model_structure: None, balance: None,
+            model_structure: None, balance: None, identity_tracked_compartments: vec![],
         };
         let compiled = CompiledModel::new(model).unwrap();
         let params = compiled.default_params.clone();

@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.4",
-  "validated_by": "ocaml-compiler-v0.4",
+  "ir_version": "0.5",
+  "validated_by": "ocaml-compiler-v0.5",
   "model": {
     "name": "seir_erlang",
     "version": "0.3",
