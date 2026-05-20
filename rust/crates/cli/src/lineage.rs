@@ -1,12 +1,17 @@
-//! CLI glue for the individual-sampling (lineage) layer.
+//! CLI glue for the three-layer lineage architecture (Layers 1–2).
 //!
-//! Two entry points:
-//!   - [`run_simulate_lineages`]: the `camdl simulate --lineages` path. Picks
-//!     the line-list format (Parquet default, TSV via `--tsv` / `--format
-//!     tsv`), runs Gillespie with the lineage observer attached, and writes the
-//!     count trajectory (unless suppressed) plus the streamed line list.
-//!   - [`cmd_lineage_tree`]: the offline `camdl lineage tree` projection. Pure
-//!     function over a line-list file → sampled transmission tree → Newick.
+//! Entry points:
+//!   - [`run_simulate_event_log`]: the `camdl simulate --event-log` path
+//!     (Layer 1). Runs the chosen backend with the identity-free event
+//!     *recorder* attached, writes the recorded [`sim::lineage::EventLog`] to
+//!     disk (TSV / Parquet), and emits the count trajectory (unless
+//!     suppressed). The simulation draws no identities.
+//!   - [`cmd_lineage_realize`]: the offline `camdl lineage realize` path
+//!     (Layer 2). Replays an event log at `--identity-seed`, sampling identity
+//!     attributions from the recorded weights, and writes a line list with the
+//!     §4a attribution log-probability.
+//!   - [`cmd_lineage_tree`] / [`cmd_lineage_sojourn`] / [`cmd_lineage_cohort`]:
+//!     offline projections over a realized line list (unchanged).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,27 +21,30 @@ use sim::lineage::{
     LineListFormat, LineListWriter, TsvLineListWriter,
 };
 
-use crate::args::{LineageCohortArgs, LineageSojournArgs, LineageTreeArgs, SimulateArgs};
+use crate::args::{
+    LineageCohortArgs, LineageRealizeArgs, LineageSojournArgs, LineageTreeArgs, SimulateArgs,
+};
 use crate::util::SimRun;
 
-/// Resolve the requested line-list format from `--format` / `--tsv`.
+/// Resolve the requested artifact format from `--format` / `--tsv`.
 /// Default is Parquet (production), per the proposal.
-fn resolve_format(a: &SimulateArgs) -> Result<LineListFormat, String> {
-    if a.tsv {
+fn resolve_format(tsv: bool, format: &Option<String>) -> Result<LineListFormat, String> {
+    if tsv {
         return Ok(LineListFormat::Tsv);
     }
-    match &a.format {
+    match format {
         None => Ok(LineListFormat::Parquet),
         Some(s) => LineListFormat::parse(s)
             .ok_or_else(|| format!("unknown --format '{}'; expected 'parquet' or 'tsv'", s)),
     }
 }
 
-/// Default output path for a given format, when `--lineage-out` is absent.
-fn default_out(format: LineListFormat) -> PathBuf {
+/// Default output path for a given format and stem, when no explicit output is
+/// requested.
+fn default_out(stem: &str, format: LineListFormat) -> PathBuf {
     match format {
-        LineListFormat::Tsv => PathBuf::from("line_list.tsv"),
-        LineListFormat::Parquet => PathBuf::from("line_list.parquet"),
+        LineListFormat::Tsv => PathBuf::from(format!("{stem}.tsv")),
+        LineListFormat::Parquet => PathBuf::from(format!("{stem}.parquet")),
     }
 }
 
@@ -71,29 +79,51 @@ fn build_writer(
     }
 }
 
-/// `camdl simulate --lineages` — run Gillespie with lineage tracking.
-pub fn run_simulate_lineages(a: &SimulateArgs, run: &SimRun) {
-    let format = resolve_format(a).unwrap_or_else(|e| {
+/// `camdl simulate --event-log` — Layer 1: record the identity-free event log.
+pub fn run_simulate_event_log(a: &SimulateArgs, run: &SimRun) {
+    let format = resolve_format(a.tsv, &a.format).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
     let out_path = a
-        .lineage_out
+        .event_log
         .clone()
-        .unwrap_or_else(|| default_out(format));
+        .filter(|p| p.as_os_str() != "auto")
+        .unwrap_or_else(|| default_out("event_log", format));
 
-    let writer = build_writer(format, &out_path).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
+    let (traj, model, event_log, exact) =
+        crate::util::run_simulation_event_log(run).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+
+    sim::lineage::event_log_io::write(&event_log, &out_path, format).unwrap_or_else(|e| {
+        eprintln!("error: writing event log: {:?}", e);
         std::process::exit(1);
     });
 
-    let (traj, model, diag) = crate::util::run_simulation_lineage(run, writer).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
-
+    let n_lineage = event_log
+        .events
+        .iter()
+        .filter(|e| e.lineage_weights.is_some())
+        .count();
     eprintln!(
-        "lineage tracking: wrote line list to {} ({})",
+        "event log: wrote {} events ({} lineage) to {} ({}); {}",
+        event_log.events.len(),
+        n_lineage,
+        out_path.display(),
+        match format {
+            LineListFormat::Tsv => "tsv",
+            LineListFormat::Parquet => "parquet",
+        },
+        if exact {
+            "exact (Gillespie)".to_string()
+        } else {
+            "batched — sub-dt bias is reported by `lineage realize`".to_string()
+        },
+    );
+    eprintln!(
+        "  next: camdl lineage realize {} --identity-seed <N> -o line_list.{}",
         out_path.display(),
         match format {
             LineListFormat::Tsv => "tsv",
@@ -101,27 +131,8 @@ pub fn run_simulate_lineages(a: &SimulateArgs, run: &SimRun) {
         }
     );
 
-    // Surface the sub-dt bias diagnostic. Gillespie is exact (fraction 0);
-    // tau-leap / chain-binomial report the edge-weighted fraction of
-    // transmission edges whose sub-dt ordering the frozen-pool approximation
-    // could not resolve. A non-trivial fraction is a signal to shrink dt or use
-    // Gillespie for trustworthy benchmark trees.
-    if diag.exact {
-        eprintln!(
-            "lineage sub-dt bias: 0.000 (exact — Gillespie; {} transmission edges)",
-            diag.edges
-        );
-    } else {
-        eprintln!(
-            "lineage sub-dt bias: {:.3} ({} transmission edges; frozen-pool \
-             approximation — shrink --dt or use --backend gillespie for \
-             trustworthy trees)",
-            diag.fraction, diag.edges
-        );
-    }
-
     // Count trajectory output (stdout or --output). The trajectory is
-    // byte-identical to a run without --lineages at the same seed.
+    // byte-identical to a run without --event-log at the same seed.
     let output_path = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
     let suppress_traj = a.obs_only.is_some();
     if suppress_traj {
@@ -179,6 +190,71 @@ pub fn run_simulate_lineages(a: &SimulateArgs, run: &SimRun) {
         writeln!(out).ok();
     }
     out.flush().ok();
+}
+
+/// `camdl lineage realize EVENT_LOG --identity-seed N -o LINE_LIST` — Layer 2:
+/// replay the event log into a line list, drawing identity attributions from
+/// the recorded per-pool weights. Different `--identity-seed`s give i.i.d.
+/// draws from `P(identities | event log)`.
+pub fn cmd_lineage_realize(a: &LineageRealizeArgs) {
+    let event_log = sim::lineage::event_log_io::read(&a.event_log).unwrap_or_else(|e| {
+        eprintln!("error: reading event log {}: {:?}", a.event_log.display(), e);
+        std::process::exit(1);
+    });
+
+    // Output format: explicit --format / --tsv, else inferred from the output
+    // path extension, else Parquet.
+    let format = if a.tsv || a.format.is_some() {
+        resolve_format(a.tsv, &a.format).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        })
+    } else if let Some(out) = &a.output {
+        match out.extension().and_then(|e| e.to_str()) {
+            Some("tsv") => LineListFormat::Tsv,
+            _ => LineListFormat::Parquet,
+        }
+    } else {
+        LineListFormat::Parquet
+    };
+
+    let out_path = a
+        .output
+        .clone()
+        .unwrap_or_else(|| default_out("line_list", format));
+
+    let mut writer = build_writer(format, &out_path).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+
+    let summary =
+        sim::lineage::realize(&event_log, a.identity_seed, writer.as_mut()).unwrap_or_else(|e| {
+            eprintln!("error: realize: {:?}", e);
+            std::process::exit(1);
+        });
+
+    eprintln!(
+        "lineage realize: wrote line list to {} ({}); identity-seed {}, {} edges, \
+         log P(line list | event log) = {:.6}",
+        out_path.display(),
+        match format {
+            LineListFormat::Tsv => "tsv",
+            LineListFormat::Parquet => "parquet",
+        },
+        a.identity_seed,
+        summary.edges,
+        summary.total_logprob,
+    );
+    if summary.exact {
+        eprintln!("  sub-dt bias: 0.000 (exact — Gillespie event log)");
+    } else {
+        eprintln!(
+            "  sub-dt bias: {:.3} (batched event log; shrink --dt or use \
+             --backend gillespie at record time for trustworthy trees)",
+            summary.sub_dt_fraction
+        );
+    }
 }
 
 /// Parse a `--scheme` string. Phase 1: only `flat:RATE`.

@@ -1,75 +1,34 @@
-//! Acceptance tests for lineage tracking on the **batch** backends — tau-leap
-//! and chain-binomial (2026-05-19 individual-sampling-layer proposal, Phase 3).
+//! Acceptance tests for the lineage path on the **batch** backends — tau-leap
+//! and chain-binomial (2026-05-20 three-layer proposal). These now go through
+//! the Layer-1 event recorder → Layer-2 `realize` path; the assertions are
+//! unchanged.
 //!
-//! The critical invariant for these backends is the same separate-RNG-stream
-//! guarantee Gillespie has (Tier 2a): attaching the lineage observer must NOT
-//! change the count trajectory by a single byte at a fixed seed, because the
-//! observer draws only from its own `LineageRng`. The batch backends additionally
-//! sample parents from a *frozen start-of-step pool snapshot* (so a child minted
-//! this step cannot be its own same-step parent) and accumulate the sub-`dt`
-//! bias diagnostic. We test:
-//!   - Tier 2a (load-bearing): byte-identity with/without observer, both backends,
-//!     many seeds.
-//!   - Tier 1: structural invariants on the produced line list.
-//!   - sub-`dt` diagnostic: 0 ≤ fraction ≤ 1, grows with dt, positive for a real
-//!     epidemic on chain-binomial.
+//! The critical invariant is the same Tier 2a guarantee Gillespie has:
+//! attaching the event recorder must NOT change the count trajectory by a
+//! single byte at a fixed seed — now trivially true, the recorder draws no
+//! randomness. The batch backends record `multiplicity` and a `batched` flag
+//! per event; `realize` samples all `k` attributions against the start-of-step
+//! pools (so a child minted this step cannot be its own same-step parent) and
+//! accumulates the sub-`dt` bias diagnostic. We test:
+//!   - Tier 2a: byte-identity with/without recorder, both backends, many seeds.
+//!   - Tier 1: structural invariants on the realized line list.
+//!   - sub-`dt` diagnostic (now computed by `realize`): 0 ≤ fraction ≤ 1, grows
+//!     with dt, positive for a real epidemic on chain-binomial.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::rc::Rc;
 
 use sim::{
-    chain_binomial::run_chain_binomial_with_observer,
     compiled_model::CompiledModel,
     config::{ChainBinomialConfig, SimConfig, TauLeapConfig},
-    lineage::{LineListEntry, LineListWriter, LineageObserver, ParentRef},
+    lineage::{LineListEntry, ParentRef},
     state::Trajectory,
-    tau_leap::run_tau_leap_with_observer,
     ChainBinomialSim, Simulate, TauLeapSim,
 };
 
-fn fixtures_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("tests/fixtures")
-}
+mod lineage_helpers;
+use lineage_helpers::{load_fixture, record_event_log, realize_log, set_params};
 
-fn load_fixture(name: &str) -> ir::Model {
-    let path = fixtures_dir().join(format!("{}.ir.json", name));
-    let contents =
-        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("cannot read fixture {}", name));
-    ir::from_str(&contents).unwrap_or_else(|e| panic!("parse {}: {}", name, e))
-}
-
-fn set_params(m: &mut ir::Model, vals: &[(&str, f64)]) {
-    for p in &mut m.parameters {
-        if let Some((_, v)) = vals.iter().find(|(n, _)| *n == p.name) {
-            p.value = Some(*v);
-        }
-    }
-}
-
-#[derive(Clone)]
-struct VecWriter {
-    entries: Rc<RefCell<Vec<LineListEntry>>>,
-}
-impl VecWriter {
-    fn new() -> Self {
-        VecWriter { entries: Rc::new(RefCell::new(Vec::new())) }
-    }
-}
-impl LineListWriter for VecWriter {
-    fn init(&mut self) -> Result<(), sim::SimError> {
-        Ok(())
-    }
-    fn write(&mut self, e: &LineListEntry) -> Result<(), sim::SimError> {
-        self.entries.borrow_mut().push(e.clone());
-        Ok(())
-    }
-    fn finish(&mut self) -> Result<(), sim::SimError> {
-        Ok(())
-    }
-}
-
+/// Which batch backend a test runs under.
 #[derive(Clone, Copy)]
 enum Backend {
     TauLeap,
@@ -83,7 +42,7 @@ fn traj_signature(t: &Trajectory) -> Vec<(String, Vec<i64>, Vec<u64>)> {
         .collect()
 }
 
-/// Baseline run (no observer) via the public `Simulate` dispatch.
+/// Baseline run (no recorder) via the public `Simulate` dispatch.
 fn run_baseline(m: &ir::Model, backend: Backend, seed: u64, dt: f64) -> Trajectory {
     let compiled = CompiledModel::new(m.clone()).unwrap();
     let params = compiled.default_params.clone();
@@ -104,44 +63,23 @@ fn run_baseline(m: &ir::Model, backend: Backend, seed: u64, dt: f64) -> Trajecto
     }
 }
 
-/// Observer run; returns (trajectory, line list, sub-dt fraction, edges).
+/// Record an event log under the given batch backend, then realize it at
+/// `identity_seed == seed`. Returns (trajectory, line list, sub-dt fraction,
+/// edges) — the sub-dt diagnostic now comes from `realize`, not the recorder.
 fn run_with_lineage(
     m: &ir::Model,
     backend: Backend,
     seed: u64,
     dt: f64,
 ) -> (Trajectory, Vec<LineListEntry>, f64, u64) {
-    let compiled = CompiledModel::new(m.clone()).unwrap();
-    let params = compiled.default_params.clone();
-    let t_start = m.simulation.t_start;
     let t_end = m.simulation.t_end;
-    let (initial_int, _) = compiled.initial_state(&params).unwrap();
-    let collector = VecWriter::new();
-    let buf = collector.entries.clone();
-    let mut observer = LineageObserver::new(&compiled, seed, &initial_int, collector).unwrap();
-    let traj = match backend {
-        Backend::TauLeap => run_tau_leap_with_observer(
-            &compiled,
-            &params,
-            seed,
-            &TauLeapConfig { t_start, t_end, dt },
-            Some(&mut observer),
-        )
-        .unwrap(),
-        Backend::ChainBinomial => run_chain_binomial_with_observer(
-            &compiled,
-            &params,
-            seed,
-            &ChainBinomialConfig { t_start, t_end, dt },
-            Some(&mut observer),
-        )
-        .unwrap(),
+    let helper_backend = match backend {
+        Backend::TauLeap => lineage_helpers::Backend::TauLeap { dt },
+        Backend::ChainBinomial => lineage_helpers::Backend::ChainBinomial { dt },
     };
-    let frac = observer.sub_dt_fraction();
-    let edges = observer.lineage_edge_count();
-    observer.finish().unwrap();
-    let entries = buf.borrow().clone();
-    (traj, entries, frac, edges)
+    let (traj, log) = record_event_log(m, helper_backend, seed, t_end);
+    let (entries, summary) = realize_log(&log, seed);
+    (traj, entries, summary.sub_dt_fraction, summary.edges)
 }
 
 // ── Tier 2a — trajectory byte-identity, BOTH batch backends ─────────────────────

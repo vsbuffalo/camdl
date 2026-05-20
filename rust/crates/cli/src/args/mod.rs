@@ -227,26 +227,24 @@ pub struct SimulateArgs {
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
 
-    /// Enable individual-sampling (lineage) tracking and stream a line
-    /// list to disk (2026-05-19 individual-sampling layer). Requires a
-    /// model with `#[lineage]` annotations and a backend that declares
-    /// the LINEAGES capability (Gillespie in this version). Single-run
-    /// only — conflicts with --seeds / --replicates / --draws.
-    #[arg(long, conflicts_with_all = ["seeds", "replicates", "draws"])]
-    pub lineages: bool,
+    /// Record the Layer-1 lineage **event log** to disk (2026-05-20
+    /// three-layer architecture). Requires a model with `#[lineage]`
+    /// annotations and a backend that declares the LINEAGES capability
+    /// (Gillespie / tau-leap / chain-binomial). The event log is
+    /// identity-free; realize it into a line list with `camdl lineage
+    /// realize`. Pass a path, or `auto` for `event_log.<ext>` in the
+    /// current directory. Single-run only — conflicts with --seeds /
+    /// --replicates / --draws.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["seeds", "replicates", "draws"])]
+    pub event_log: Option<PathBuf>,
 
-    /// Line-list output path (with --lineages). Defaults to
-    /// `line_list.<ext>` in the current directory.
-    #[arg(long, value_name = "FILE", requires = "lineages")]
-    pub lineage_out: Option<PathBuf>,
-
-    /// Line-list format: `parquet` (default, production) or `tsv`
-    /// (dependency-free, debug). With --lineages.
-    #[arg(long, value_name = "FMT", requires = "lineages", conflicts_with = "tsv")]
+    /// Event-log format: `parquet` (default, production) or `tsv`
+    /// (dependency-free, debug). With --event-log.
+    #[arg(long, value_name = "FMT", requires = "event_log", conflicts_with = "tsv")]
     pub format: Option<String>,
 
-    /// Shorthand for `--format tsv` (with --lineages).
-    #[arg(long, requires = "lineages")]
+    /// Shorthand for `--format tsv` (with --event-log).
+    #[arg(long, requires = "event_log")]
     pub tsv: bool,
 }
 
@@ -1361,6 +1359,44 @@ pub struct DataSplitArgs {
 }
 
 // ─── lineage ────────────────────────────────────────────────────────────────────
+
+/// `camdl lineage realize EVENT_LOG --identity-seed N -o LINE_LIST` — Layer 2:
+/// replay a recorded event log into a line list, drawing the identity
+/// attributions (which infector, which recoverer) from the recorded per-pool
+/// weights. Each `--identity-seed` is an i.i.d. draw from
+/// `P(identities | event log)`. Pure offline; reads the event-log file (TSV or
+/// Parquet, auto-detected by extension).
+#[derive(Args)]
+#[command(after_help = colored_help!("\
+Examples:
+  # Realize one line list from an event log
+  camdl lineage realize event_log.parquet --identity-seed 7 -o line_list.parquet
+
+  # A second i.i.d. identity draw from the SAME epidemic
+  camdl lineage realize event_log.parquet --identity-seed 8 -o line_list_2.parquet
+"))]
+pub struct LineageRealizeArgs {
+    /// Event-log file (.tsv or .parquet). Format auto-detected by extension.
+    pub event_log: PathBuf,
+
+    /// RNG seed for the identity attribution stream. Different seeds give
+    /// i.i.d. draws from P(identities | event log). Default: 1.
+    #[arg(long, default_value_t = 1)]
+    pub identity_seed: u64,
+
+    /// Line-list output path (default: `line_list.<ext>`). Extension picks the
+    /// format unless `--format` / `--tsv` is given.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Line-list format: `parquet` (default) or `tsv`. Overrides the extension.
+    #[arg(long, value_name = "FMT", conflicts_with = "tsv")]
+    pub format: Option<String>,
+
+    /// Shorthand for `--format tsv`.
+    #[arg(long)]
+    pub tsv: bool,
+}
 
 /// `camdl lineage tree LINE_LIST [...]` — project a line list to a sampled
 /// transmission tree (Newick). Pure offline; reads the line-list file (TSV or

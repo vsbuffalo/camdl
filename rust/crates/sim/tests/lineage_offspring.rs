@@ -23,71 +23,20 @@
 //! Verified empirically before locking the tolerance: born∈[2,6) gives observed
 //! ≈ predicted to ~1% (e.g. 2.83 vs 2.85, 2.22 vs 2.21).
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::rc::Rc;
 
 use sim::{
-    compiled_model::CompiledModel,
-    config::GillespieConfig,
-    gillespie::run_gillespie_with_observer,
-    lineage::{LineListEntry, LineListWriter, LineageObserver, ParentRef},
+    lineage::{LineListEntry, ParentRef},
     state::Trajectory,
 };
 
-fn fixtures_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("tests/fixtures")
-}
-fn load_fixture(name: &str) -> ir::Model {
-    let path = fixtures_dir().join(format!("{}.ir.json", name));
-    let contents =
-        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("cannot read fixture {}", name));
-    ir::from_str(&contents).unwrap_or_else(|e| panic!("parse {}: {}", name, e))
-}
-fn set_params(m: &mut ir::Model, vals: &[(&str, f64)]) {
-    for p in &mut m.parameters {
-        if let Some((_, v)) = vals.iter().find(|(n, _)| *n == p.name) {
-            p.value = Some(*v);
-        }
-    }
-}
+mod lineage_helpers;
+use lineage_helpers::{load_fixture, run_with_lineage, set_params};
 
-#[derive(Clone)]
-struct VecWriter {
-    entries: Rc<RefCell<Vec<LineListEntry>>>,
-}
-impl VecWriter {
-    fn new() -> Self {
-        VecWriter { entries: Rc::new(RefCell::new(Vec::new())) }
-    }
-}
-impl LineListWriter for VecWriter {
-    fn init(&mut self) -> Result<(), sim::SimError> {
-        Ok(())
-    }
-    fn write(&mut self, e: &LineListEntry) -> Result<(), sim::SimError> {
-        self.entries.borrow_mut().push(e.clone());
-        Ok(())
-    }
-    fn finish(&mut self) -> Result<(), sim::SimError> {
-        Ok(())
-    }
-}
-
+/// Record an event log (Gillespie) and realize it at `identity_seed == seed`,
+/// reproducing the shipped observer's line list for the same seed.
 fn run(m: &ir::Model, seed: u64, t_end: f64) -> (Trajectory, Vec<LineListEntry>) {
-    let compiled = CompiledModel::new(m.clone()).unwrap();
-    let params = compiled.default_params.clone();
-    let (initial_int, _) = compiled.initial_state(&params).unwrap();
-    let collector = VecWriter::new();
-    let buf = collector.entries.clone();
-    let mut observer = LineageObserver::new(&compiled, seed, &initial_int, collector).unwrap();
-    let cfg = GillespieConfig { t_start: 0.0, t_end, output_dt: None };
-    let traj =
-        run_gillespie_with_observer(&compiled, &params, seed, &cfg, Some(&mut observer)).unwrap();
-    observer.finish().unwrap();
-    let entries = buf.borrow().clone();
-    (traj, entries)
+    run_with_lineage(m.clone(), seed, t_end)
 }
 
 const COMP_I: usize = 1;

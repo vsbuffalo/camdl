@@ -1,7 +1,8 @@
-//! End-to-end integration test for the individual-sampling (lineage) layer.
+//! End-to-end integration test for the three-layer lineage path (Layers 1–2).
 //!
-//! A `.camdl` model with `#[lineage]` → compile → `simulate --lineages` (TSV
-//! and Parquet) → `lineage tree` → Newick → assert tree properties.
+//! A `.camdl` model with `#[lineage]` → compile → `simulate --event-log` (TSV
+//! and Parquet) → `lineage realize` (→ line list) → `lineage tree` → Newick →
+//! assert tree properties.
 //!
 //! Silent-skip if the release `camdl` binary is not built or the colocated
 //! `camdlc` version mismatches (same convention as `compile_output_flag.rs`).
@@ -104,39 +105,39 @@ fn lineage_end_to_end_tsv_and_parquet() {
         "gamma=0.2",
         "--param",
         "N0=500",
-        "--lineages",
     ];
 
-    // 2a. TSV line list.
-    let ll_tsv = tmp.join("ll.tsv");
+    // 2a. TSV event log (Layer 1) + emit the count trajectory.
+    let ev_tsv = tmp.join("event_log.tsv");
     let traj_tsv = tmp.join("traj_lin.tsv");
-    let mut args: Vec<&str> = common.to_vec();
-    let ll_tsv_s = ll_tsv.to_str().unwrap();
+    let ev_tsv_s = ev_tsv.to_str().unwrap();
     let traj_tsv_s = traj_tsv.to_str().unwrap();
-    args.extend(["--tsv", "--lineage-out", ll_tsv_s, "--output", traj_tsv_s]);
+    let mut args: Vec<&str> = common.to_vec();
+    args.extend(["--event-log", ev_tsv_s, "--tsv", "--output", traj_tsv_s]);
     let out_tsv = run(&camdl, &args);
     assert!(
         out_tsv.status.success(),
-        "simulate --lineages --tsv failed: {}",
+        "simulate --event-log --tsv failed: {}",
         String::from_utf8_lossy(&out_tsv.stderr)
     );
-    assert!(ll_tsv.exists(), "TSV line list not written");
+    assert!(ev_tsv.exists(), "TSV event log not written");
 
-    // 2b. Parquet line list.
-    let ll_pq = tmp.join("ll.parquet");
+    // 2b. Parquet event log.
+    let ev_pq = tmp.join("event_log.parquet");
+    let ev_pq_s = ev_pq.to_str().unwrap();
     let mut args2: Vec<&str> = common.to_vec();
-    let ll_pq_s = ll_pq.to_str().unwrap();
-    args2.extend(["--lineage-out", ll_pq_s, "--obs-only", "/dev/null"]);
+    args2.extend(["--event-log", ev_pq_s, "--obs-only", "/dev/null"]);
     let out_pq = run(&camdl, &args2);
     assert!(
         out_pq.status.success(),
-        "simulate --lineages (parquet) failed: {}",
+        "simulate --event-log (parquet) failed: {}",
         String::from_utf8_lossy(&out_pq.stderr)
     );
-    assert!(ll_pq.exists(), "Parquet line list not written");
+    assert!(ev_pq.exists(), "Parquet event log not written");
 
     // 3. Trajectory byte-identity (Tier 2a) at the CLI level: a run WITHOUT
-    //    --lineages must produce the same trajectory bytes.
+    //    --event-log must produce the same trajectory bytes (the recorder draws
+    //    no identities, so the simulation is literally unchanged).
     let traj_base = tmp.join("traj_base.tsv");
     let traj_base_s = traj_base.to_str().unwrap();
     let base = run(
@@ -152,8 +153,36 @@ fn lineage_end_to_end_tsv_and_parquet() {
     let lin_bytes = std::fs::read(&traj_tsv).unwrap();
     assert_eq!(
         base_bytes, lin_bytes,
-        "CLI: count trajectory must be byte-identical with and without --lineages"
+        "CLI: count trajectory must be byte-identical with and without --event-log"
     );
+
+    // 3b. Realize each event log (Layer 2) into a line list. TSV log →
+    //     TSV line list; Parquet log → Parquet line list. Same identity seed.
+    let ll_tsv = tmp.join("ll.tsv");
+    let ll_tsv_s = ll_tsv.to_str().unwrap();
+    let r1 = run(
+        &camdl,
+        &["lineage", "realize", ev_tsv_s, "--identity-seed", "7", "-o", ll_tsv_s],
+    );
+    assert!(
+        r1.status.success(),
+        "lineage realize (tsv) failed: {}",
+        String::from_utf8_lossy(&r1.stderr)
+    );
+    assert!(ll_tsv.exists(), "TSV line list not written by realize");
+
+    let ll_pq = tmp.join("ll.parquet");
+    let ll_pq_s = ll_pq.to_str().unwrap();
+    let r2 = run(
+        &camdl,
+        &["lineage", "realize", ev_pq_s, "--identity-seed", "7", "-o", ll_pq_s],
+    );
+    assert!(
+        r2.status.success(),
+        "lineage realize (parquet) failed: {}",
+        String::from_utf8_lossy(&r2.stderr)
+    );
+    assert!(ll_pq.exists(), "Parquet line list not written by realize");
 
     // 4. Offline tree from TSV at flat:1.0 (all tips).
     let tree_tsv = tmp.join("tree_tsv.nwk");
@@ -216,7 +245,7 @@ fn lineage_end_to_end_tsv_and_parquet() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// ODE + --lineages must hard-error (capability gate), not silently produce
+/// ODE + --event-log must hard-error (capability gate), not silently produce
 /// nothing.
 #[test]
 fn lineage_on_ode_is_rejected() {
@@ -237,11 +266,10 @@ fn lineage_on_ode_is_rejected() {
         &[
             "simulate", ir.to_str().unwrap(), "--backend", "ode", "--seed", "1",
             "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "N0=500",
-            "--lineages", "--tsv", "--lineage-out",
-            tmp.join("x.tsv").to_str().unwrap(),
+            "--event-log", tmp.join("x.tsv").to_str().unwrap(), "--tsv",
         ],
     );
-    assert!(!out.status.success(), "ODE + --lineages must fail");
+    assert!(!out.status.success(), "ODE + --event-log must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("ODE") || stderr.contains("incompatible"),

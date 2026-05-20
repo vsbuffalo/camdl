@@ -22,45 +22,15 @@
 //! moment a human runs the generator and commits a real fixture (which drops
 //! the marker), this test ACTIVATES with no code change.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::path::Path;
 
-use sim::{
-    compiled_model::CompiledModel,
-    config::GillespieConfig,
-    gillespie::run_gillespie_with_observer,
-    lineage::{LineListEntry, LineListWriter, LineageObserver, ParentRef},
-};
+use sim::lineage::ParentRef;
 
-fn fixtures_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("tests/fixtures")
-}
-
-#[derive(Clone)]
-struct VecWriter {
-    entries: Rc<RefCell<Vec<LineListEntry>>>,
-}
-impl VecWriter {
-    fn new() -> Self {
-        VecWriter { entries: Rc::new(RefCell::new(Vec::new())) }
-    }
-}
-impl LineListWriter for VecWriter {
-    fn init(&mut self) -> Result<(), sim::SimError> {
-        Ok(())
-    }
-    fn write(&mut self, e: &LineListEntry) -> Result<(), sim::SimError> {
-        self.entries.borrow_mut().push(e.clone());
-        Ok(())
-    }
-    fn finish(&mut self) -> Result<(), sim::SimError> {
-        Ok(())
-    }
-}
+mod lineage_helpers;
+use lineage_helpers::{fixtures_dir, record_event_log, realize_log, Backend};
 
 /// True if the fixture is the un-generated placeholder (line 1 carries the
 /// `# PLACEHOLDER` marker). When true, the test skips.
@@ -111,17 +81,9 @@ fn camdl_conditional_distribution() -> BTreeMap<(u32, u32), f64> {
     // counts[(focal, parent)] = number of transmission events.
     let mut counts: BTreeMap<(u32, u32), u64> = BTreeMap::new();
     for seed in 0..2_000u64 {
-        let compiled = CompiledModel::new(m.clone()).unwrap();
-        let params = compiled.default_params.clone();
-        let (initial_int, _) = compiled.initial_state(&params).unwrap();
-        let collector = VecWriter::new();
-        let buf = collector.entries.clone();
-        let mut observer =
-            LineageObserver::new(&compiled, seed, &initial_int, collector).unwrap();
-        let cfg = GillespieConfig { t_start: 0.0, t_end: 8.0, output_dt: None };
-        run_gillespie_with_observer(&compiled, &params, seed, &cfg, Some(&mut observer)).unwrap();
-        observer.finish().unwrap();
-        for e in buf.borrow().iter() {
+        let (_, log) = record_event_log(&m, Backend::Gillespie, seed, 8.0);
+        let (entries, _) = realize_log(&log, seed);
+        for e in entries.iter() {
             if let ParentRef::Individual(_) = e.parent {
                 let parent = e.parent_deme.unwrap();
                 *counts.entry((e.deme, parent)).or_default() += 1;

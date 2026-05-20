@@ -1,10 +1,12 @@
-//! Acceptance tests for the individual-sampling (lineage) runtime — Gillespie,
-//! single population (2026-05-19 individual-sampling-layer proposal, Phase 1).
+//! Acceptance tests for the three-layer lineage path — Gillespie, single
+//! population (2026-05-20 proposal). These now go through the refactored
+//! Layer-1 (record an event log) → Layer-2 (`realize` into a line list) path
+//! rather than the removed inline observer; the assertions are unchanged.
 //!
-//! Tiers (proposal §"Validation"):
-//!   - Tier 2a — trajectory byte-identity (the load-bearing separate-RNG-stream
-//!     invariant): a `--lineages` run's count trajectory equals the run without
-//!     it, byte-for-byte, same seed.
+//! Tiers (proposal §10 "Validation"):
+//!   - Tier 2a — trajectory invariance: a `--event-log` run's count trajectory
+//!     equals the run without it, byte-for-byte, same seed. Now trivially true
+//!     (the recorder draws no identities), but tested.
 //!   - Tier 1 — structural invariants: every lineage child has exactly one
 //!     parent; the parent is live in its pool at the child's event time;
 //!     pruned tips = sampled set; no unary nodes after pruning.
@@ -12,87 +14,26 @@
 //!     Monte-Carlo tolerance.
 //!   - Single-pool / multi-pool parent sampling frequencies (sanity).
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::rc::Rc;
 
 use sim::{
     compiled_model::CompiledModel,
     config::{GillespieConfig, SimConfig},
-    gillespie::run_gillespie_with_observer,
     lineage::{
         tree::{Flat, SamplingScheme, TransmissionForest},
-        IndividualId, LineListEntry, LineListWriter, LineageObserver, ParentRef,
+        IndividualId, LineListEntry, ParentRef,
     },
     state::Trajectory,
     GillespieSim, Simulate,
 };
 
-fn fixtures_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("tests/fixtures")
-}
-
-fn load_fixture(name: &str) -> ir::Model {
-    let path = fixtures_dir().join(format!("{}.ir.json", name));
-    let contents =
-        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("cannot read fixture {}", name));
-    ir::from_str(&contents).unwrap_or_else(|e| panic!("parse {}: {}", name, e))
-}
-
-fn set_params(m: &mut ir::Model, vals: &[(&str, f64)]) {
-    for p in &mut m.parameters {
-        if let Some((_, v)) = vals.iter().find(|(n, _)| *n == p.name) {
-            p.value = Some(*v);
-        }
-    }
-}
-
-/// In-memory line-list collector for tests. Shares its buffer via Rc<RefCell>
-/// so the test can read the entries after the observer (which owns the writer)
-/// has been moved into the run.
-#[derive(Clone)]
-struct VecWriter {
-    entries: Rc<RefCell<Vec<LineListEntry>>>,
-}
-
-impl VecWriter {
-    fn new() -> Self {
-        VecWriter { entries: Rc::new(RefCell::new(Vec::new())) }
-    }
-}
-
-impl LineListWriter for VecWriter {
-    fn init(&mut self) -> Result<(), sim::SimError> {
-        Ok(())
-    }
-    fn write(&mut self, e: &LineListEntry) -> Result<(), sim::SimError> {
-        self.entries.borrow_mut().push(e.clone());
-        Ok(())
-    }
-    fn finish(&mut self) -> Result<(), sim::SimError> {
-        Ok(())
-    }
-}
+mod lineage_helpers;
+use lineage_helpers::{
+    load_fixture, record_event_log, realize_log, run_with_lineage, set_params, Backend,
+};
 
 fn gillespie_cfg(t_end: f64) -> SimConfig {
     SimConfig::Gillespie(GillespieConfig { t_start: 0.0, t_end, output_dt: None })
-}
-
-/// Run with an observer and return (trajectory, line list).
-fn run_with_lineage(m: ir::Model, seed: u64, t_end: f64) -> (Trajectory, Vec<LineListEntry>) {
-    let compiled = CompiledModel::new(m).unwrap();
-    let params = compiled.default_params.clone();
-    let (initial_int, _) = compiled.initial_state(&params).unwrap();
-    let collector = VecWriter::new();
-    let buf = collector.entries.clone();
-    let mut observer = LineageObserver::new(&compiled, seed, &initial_int, collector).unwrap();
-    let cfg = GillespieConfig { t_start: 0.0, t_end, output_dt: None };
-    let traj =
-        run_gillespie_with_observer(&compiled, &params, seed, &cfg, Some(&mut observer)).unwrap();
-    observer.finish().unwrap();
-    let entries = buf.borrow().clone();
-    (traj, entries)
 }
 
 fn traj_signature(t: &Trajectory) -> Vec<(String, Vec<i64>, Vec<u64>)> {
@@ -473,4 +414,155 @@ fn flat_rate_one_samples_all_leaves() {
     let mut rng = sim::rng::StatefulRng::new(1);
     let sampled = Flat::new(1.0).select(&forest, &mut rng);
     assert_eq!(sampled, all_leaves);
+}
+
+// ── Layer-1/2 explicit: event-log invariance + identity-seed independence ───────
+
+/// Tier 2a (explicit): the count trajectory from the Layer-1 `record_event_log`
+/// path is byte-identical to a plain run at the same seed, AND realizing the
+/// SAME event log at different identity seeds leaves the trajectory untouched
+/// while producing distinct line lists. This is the structural proof of the
+/// factorization `P(augmented) = P(counts) × P(identities | counts)`.
+#[test]
+fn event_log_trajectory_invariant_under_identity_seed() {
+    // A vigorous epidemic so there are many choice points (multiple infectives
+    // live at transmission/recovery events) — guarantees the identity layer has
+    // something to sample.
+    let mut m = load_fixture("sir_lineage");
+    set_params(&mut m, &[("beta", 1.5), ("gamma", 0.2), ("N0", 1000.0)]);
+    let seed = 7u64;
+
+    // Plain run (no recorder).
+    let compiled = CompiledModel::new(m.clone()).unwrap();
+    let params = compiled.default_params.clone();
+    let baseline = GillespieSim.run(&compiled, &params, seed, &gillespie_cfg(60.0)).unwrap();
+
+    // Record once.
+    let (traj, log) = record_event_log(&m, Backend::Gillespie, seed, 60.0);
+    assert_eq!(
+        traj_signature(&baseline),
+        traj_signature(&traj),
+        "event-log run trajectory must be byte-identical to a plain run"
+    );
+
+    // Realize the SAME event log at several identity seeds. The trajectory is a
+    // shared artifact; the identity realizations are i.i.d. draws and must not
+    // all coincide (proof the second factor is actually sampled).
+    let realizations: Vec<Vec<LineListEntry>> =
+        (200u64..205).map(|s| realize_log(&log, s).0).collect();
+    assert!(!realizations[0].is_empty(), "expected line-list entries");
+    let all_equal = realizations.iter().all(|r| *r == realizations[0]);
+    assert!(
+        !all_equal,
+        "distinct identity seeds should give distinct identity realizations; \
+         if all equal the identity layer is not actually sampling"
+    );
+    // Same identity seed reproduces the same line list (determinism).
+    let again = realize_log(&log, 200).0;
+    assert_eq!(realizations[0], again, "same identity seed must reproduce the line list");
+}
+
+// ── Attribution log-probability (§4a) — hand-checkable ──────────────────────────
+
+/// On a hand-built tiny event log, the accumulated per-line-list log-probability
+/// equals the analytic sum of per-event `log P(attribution)` (§4a):
+/// transmission `log(w_b/Λ)`, recovery `log(1/|I_b|)`.
+#[test]
+fn attribution_logprob_matches_analytic_sum() {
+    use sim::lineage::{realize, EventLog, EventRecord, RouteInfo};
+
+    // Model shape: comp 1 = I (tracked, deme 0), comp 2 = R. Transition 0 is a
+    // transmission whose single parent pool is I (comp 1); transition 1 is
+    // recovery I → R.
+    //
+    // Seed 2 infectives. Events:
+    //   t=1.0  transmission, mass(I)=4.0, X_I=2  → child minted in I, |I| = 3
+    //   t=2.0  recovery from I (|I| = 3 → 2)
+    //   t=3.0  transmission, mass(I)=10.0, X_I=2 → child minted, |I| = 3
+    //
+    // Λ = sum of recorded masses = the single pool's mass (one parent pool).
+    // Transmission term: log(w_b/Λ) = log(mass / X_I / Λ) where the within-pool
+    // 1/X_I cancels mass/Λ's X_I — but with ONE pool, mass == Λ, so
+    // log(w_b/Λ) = log(mass / |I|) − log(mass) = −log|I|. We use a SINGLE-pool
+    // event log so Λ = mass and the transmission term reduces to −log|I| at the
+    // event-instant pool size, which is exactly hand-checkable.
+    let log = EventLog {
+        initial_pools: vec![(0, 1, 2)],
+        transitions: vec![
+            RouteInfo {
+                source: None,
+                source_deme: 0,
+                destination: Some(1),
+                destination_deme: 0,
+                child_deme: 0,
+                touches_tracked: true,
+                parent_pools: vec![(1, 0)],
+            },
+            RouteInfo {
+                source: Some(1),
+                source_deme: 0,
+                destination: Some(2),
+                destination_deme: 0,
+                child_deme: 0,
+                touches_tracked: true,
+                parent_pools: vec![],
+            },
+        ],
+        events: vec![
+            EventRecord {
+                time: 1.0,
+                transition: 0,
+                multiplicity: 1,
+                batched: false,
+                lineage_weights: Some(vec![4.0]),
+            },
+            EventRecord {
+                time: 2.0,
+                transition: 1,
+                multiplicity: 1,
+                batched: false,
+                lineage_weights: None,
+            },
+            EventRecord {
+                time: 3.0,
+                transition: 0,
+                multiplicity: 1,
+                batched: false,
+                lineage_weights: Some(vec![10.0]),
+            },
+        ],
+    };
+
+    let collector = lineage_helpers::VecWriter::new();
+    let buf = collector.entries.clone();
+    let mut writer = collector;
+    let summary = realize(&log, 12345, &mut writer).unwrap();
+    let entries = buf.borrow().clone();
+
+    // Analytic per-event log-probabilities, in event order:
+    //   t=1: single-pool transmission, |I| = 2 → log(mass/|I|/Λ) with Λ=mass=4
+    //        → log(4 / 2 / 4) = log(1/2) = −ln 2.
+    //   t=2: recovery, |I| = 3 (2 seeds + 1 born at t=1) → −ln 3.
+    //   t=3: transmission, |I| = 2 (3 − 1 recovered) → log(10/2/10) = −ln 2.
+    let expected = vec![-(2f64.ln()), -(3f64.ln()), -(2f64.ln())];
+    assert_eq!(entries.len(), 3, "one entry per event");
+    for (e, &exp) in entries.iter().zip(expected.iter()) {
+        assert!(
+            (e.attribution_logprob - exp).abs() < 1e-12,
+            "per-event attribution_logprob {} != analytic {} (t={})",
+            e.attribution_logprob,
+            exp,
+            e.time
+        );
+    }
+    let analytic_total: f64 = expected.iter().sum();
+    assert!(
+        (summary.total_logprob - analytic_total).abs() < 1e-12,
+        "summary total {} != analytic sum {}",
+        summary.total_logprob,
+        analytic_total
+    );
+    // And the per-entry column sums to the same total.
+    let column_sum: f64 = entries.iter().map(|e| e.attribution_logprob).sum();
+    assert!((column_sum - analytic_total).abs() < 1e-12);
 }

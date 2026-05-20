@@ -1046,38 +1046,26 @@ pub fn run_simulation(run: &SimRun) -> Result<(Trajectory, ir::Model), String> {
     Ok((traj, model))
 }
 
-/// The sub-`dt` bias diagnostic returned alongside a lineage run. `fraction` is
-/// the edge-weighted fraction of transmission edges the frozen-pool
-/// approximation could not temporally resolve (0.0 for Gillespie); `edges` is
-/// the total lineage edge count it was computed over.
-pub struct LineageDiagnostic {
-    pub fraction: f64,
-    pub edges: u64,
-    pub exact: bool,
-}
-
-/// Run a simulation with individual-sampling (lineage) tracking attached, and
-/// return the count trajectory, resolved model, and the sub-`dt` bias
-/// diagnostic. The line list is streamed to `writer`; on success the writer is
-/// flushed and closed.
+/// Run a simulation with the Layer-1 lineage **event recorder** attached, and
+/// return the count trajectory, resolved model, the recorded [`EventLog`], and
+/// whether the backend was exact (Gillespie). The recorder draws no identities;
+/// identity attribution happens later in `camdl lineage realize`.
 ///
-/// Supported backends: **Gillespie** (exact, sub-`dt` fraction 0.0), **tau-leap**
-/// and **chain-binomial** (approximate — parents are sampled from a frozen
-/// start-of-step pool snapshot, and the returned diagnostic quantifies the
-/// fraction of edges that loses sub-`dt` temporal ordering). ODE is incompatible
-/// (no individuals).
+/// Supported backends: **Gillespie** (exact), **tau-leap** and
+/// **chain-binomial** (batched — the event log records `multiplicity` and a
+/// `batched` flag per event so replay reproduces the frozen-pool sub-`dt`
+/// semantics). ODE is incompatible (no individuals).
 ///
-/// The count trajectory is byte-identical to the same run without `--lineages`
-/// (validation Tier 2a): the observer reads its own RNG stream and is invoked
-/// only after the simulation RNG has decided each firing.
-pub fn run_simulation_lineage(
+/// The count trajectory is byte-identical to the same run without
+/// `--event-log` at the same seed (validation Tier 2a): the recorder consumes
+/// no randomness, so the simulation is literally unchanged.
+pub fn run_simulation_event_log(
     run: &SimRun,
-    writer: Box<dyn sim::lineage::LineListWriter>,
-) -> Result<(Trajectory, ir::Model, LineageDiagnostic), String> {
+) -> Result<(Trajectory, ir::Model, sim::lineage::EventLog, bool), String> {
     use crate::args::types::Backend;
-    use sim::lineage::LineageObserver;
+    use sim::lineage::EventRecorder;
 
-    // Lineage tracking is meaningful only for backends with the LINEAGES
+    // Event-log recording is meaningful only for backends with the LINEAGES
     // capability. ODE is the lone incompatible backend (continuous densities,
     // no individuals).
     let backend: &dyn Simulate = match run.backend {
@@ -1086,10 +1074,10 @@ pub fn run_simulation_lineage(
         Backend::ChainBinomial => &ChainBinomialSim,
         Backend::Ode => {
             return Err(
-                "lineage tracking is incompatible with the ODE backend: ODE \
+                "the event log is incompatible with the ODE backend: ODE \
                  tracks continuous densities, not individuals. Use \
                  --backend gillespie (exact), or tau_leap / chain_binomial \
-                 (approximate, with a reported sub-dt bias)."
+                 (batched, with a reported sub-dt bias in `lineage realize`)."
                     .to_string(),
             );
         }
@@ -1099,9 +1087,9 @@ pub fn run_simulation_lineage(
 
     if model.identity_tracked_compartments.is_empty() {
         return Err(
-            "--lineages requires a model with at least one #[lineage] \
+            "--event-log requires a model with at least one #[lineage] \
              transition. This model has no lineage annotations, so there is \
-             nothing to track. Remove --lineages, or annotate a transition \
+             nothing to record. Remove --event-log, or annotate a transition \
              with #[lineage]."
                 .to_string(),
         );
@@ -1120,47 +1108,39 @@ pub fn run_simulation_lineage(
     let t_start = model.simulation.t_start;
     let t_end = model.simulation.t_end;
 
-    // Seed the observer from the initial state so t=0 pools are correct.
+    // Seed the recorder's initial-pool table from the t=0 state.
     let (initial_int, _initial_real) = compiled
         .initial_state(&params)
         .map_err(|e| format!("initial state error: {:?}", e))?;
-    let mut observer = LineageObserver::new(&compiled, run.seed, &initial_int, writer)
-        .map_err(|e| format!("lineage observer init error: {:?}", e))?;
+    let mut recorder = EventRecorder::new(&compiled, &initial_int)
+        .map_err(|e| format!("event recorder init error: {:?}", e))?;
 
     let traj = match run.backend {
         Backend::Gillespie => {
             let cfg = GillespieConfig { t_start, t_end, output_dt: None };
             sim::gillespie::run_gillespie_with_observer(
-                &compiled, &params, run.seed, &cfg, Some(&mut observer),
+                &compiled, &params, run.seed, &cfg, Some(&mut recorder),
             )
         }
         Backend::TauLeap => {
             let cfg = TauLeapConfig { t_start, t_end, dt: run.dt };
             sim::tau_leap::run_tau_leap_with_observer(
-                &compiled, &params, run.seed, &cfg, Some(&mut observer),
+                &compiled, &params, run.seed, &cfg, Some(&mut recorder),
             )
         }
         Backend::ChainBinomial => {
             let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt };
             sim::chain_binomial::run_chain_binomial_with_observer(
-                &compiled, &params, run.seed, &cfg, Some(&mut observer),
+                &compiled, &params, run.seed, &cfg, Some(&mut recorder),
             )
         }
         Backend::Ode => unreachable!("ODE rejected above"),
     }
     .map_err(|e| format!("simulation error: {:?}", e))?;
 
-    let diag = LineageDiagnostic {
-        fraction: observer.sub_dt_fraction(),
-        edges: observer.lineage_edge_count(),
-        exact: matches!(run.backend, Backend::Gillespie),
-    };
-
-    observer
-        .finish()
-        .map_err(|e| format!("line list finalize error: {:?}", e))?;
-
-    Ok((traj, model, diag))
+    let exact = matches!(run.backend, Backend::Gillespie);
+    let event_log = recorder.into_event_log();
+    Ok((traj, model, event_log, exact))
 }
 
 /// Write a trajectory to a TSV file (same format as `camdl simulate` stdout).

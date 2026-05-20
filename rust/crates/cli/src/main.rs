@@ -18,7 +18,7 @@ mod progress;
 mod evidence;
 mod survey;
 mod landscape_html;
-mod lineage;        // individual-sampling layer: --lineages run + offline tree
+mod lineage;        // three-layer lineage: --event-log record + realize + tree
 pub mod version;
 
 /// Terminal formatting helpers. Pure ANSI SGR codes, no dependencies.
@@ -269,12 +269,16 @@ pub(crate) enum DataCmd {
     Split(args::DataSplitArgs),
 }
 
-/// Offline lineage projections. Pure functions over a line-list file produced
-/// by `camdl simulate --lineages` — no simulation re-run.
+/// Offline lineage commands. `realize` replays an event log (from `camdl
+/// simulate --event-log`) into a line list; the projections are pure functions
+/// over a realized line list — no simulation re-run.
 #[derive(Subcommand)]
 #[command(arg_required_else_help = true,
           after_help = colored_help!("\
 Examples:
+  # Replay an event log into a line list (identity-seed picks the draw)
+  camdl lineage realize event_log.parquet --identity-seed 7 -o line_list.parquet
+
   # Build a transmission tree from a line list, flat 10% sampling
   camdl lineage tree line_list.parquet --scheme flat:0.1 --output tree.newick
 
@@ -286,6 +290,8 @@ Examples:
 
 See `camdl lineage <subcommand> --help` for full options."))]
 pub(crate) enum LineageCmd {
+    /// Replay an event log into a line list (Layer 2; --identity-seed)
+    Realize(args::LineageRealizeArgs),
     /// Project a line list to a sampled transmission tree (Newick)
     Tree(args::LineageTreeArgs),
     /// Dwell-time distribution in a compartment
@@ -357,6 +363,7 @@ fn main() {
         Command::Survey(a)              => survey::cmd_survey(&a),
         Command::Eval(a)                => eval::cmd_eval(&a),
         Command::Data(DataCmd::Split(a))=> data::cmd_data_split(&a),
+        Command::Lineage(LineageCmd::Realize(a)) => lineage::cmd_lineage_realize(&a),
         Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),
         Command::Lineage(LineageCmd::Sojourn(a)) => lineage::cmd_lineage_sojourn(&a),
         Command::Lineage(LineageCmd::Cohort(a)) => lineage::cmd_lineage_cohort(&a),
@@ -568,16 +575,18 @@ fn run_simulate(a: &args::SimulateArgs) {
         seed, // overridden per-replicate below
     };
 
-    // ── Lineage tracking path (individual-sampling layer) ───────────────────
-    // `--lineages` is single-run only (conflicts with --seeds / --replicates /
-    // --draws, enforced by clap). Handle it in a focused path that streams a
-    // line list to disk and still emits the count trajectory if requested. The
-    // count trajectory is byte-identical to the non-lineage run (Tier 2a).
-    if a.lineages {
+    // ── Lineage event-log path (three-layer architecture, Layer 1) ──────────
+    // `--event-log` is single-run only (conflicts with --seeds / --replicates /
+    // --draws, enforced by clap). Records the identity-free event log to disk
+    // and still emits the count trajectory if requested. The count trajectory
+    // is byte-identical to the run without --event-log (Tier 2a) — the recorder
+    // draws no randomness. Realize the log into a line list with
+    // `camdl lineage realize`.
+    if a.event_log.is_some() {
         let mut run = base_sim_run;
         run.scenario_name = scenario_list.first().cloned().flatten();
         run.seed = seed;
-        lineage::run_simulate_lineages(a, &run);
+        lineage::run_simulate_event_log(a, &run);
         return;
     }
 
