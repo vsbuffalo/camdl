@@ -470,10 +470,23 @@ forms — assert against them.
 **Tier 4 — Large-N coalescent limit.** Under homogeneous mixing the
 SIR transmission tree converges to the structured-coalescent
 prediction (Volz 2009 / Rasmussen–Volz line). Specific testable
-statistic: distribution of coalescent intervals at time `t` matches
-`Exp(C(k,2) · 2 β S(t) I(t) / N(t)²)` within 2σ over 10⁴ replicates,
-**for population sizes N ≥ 10⁴** — the diffusion approximation has
-O(1/N) bias that makes the test flaky at smaller populations.
+statistic: the per-pair coalescence rate at time `t` is `2·f(t)/I(t)²`
+where `f(t) = β·S(t)·I(t)/N(t)` is the incidence — i.e. the
+coalescent-interval distribution at lineage-count `k` is
+`Exp(C(k,2) · 2·f/I²) = Exp(C(k,2) · 2 β S(t) / (N(t)·I(t)))`, within
+~3σ over ~10⁴ samples, **for population sizes N ≥ 10⁴** (the diffusion
+approximation has O(1/N) bias that makes the test flaky at smaller
+populations).
+
+> **Correction (2026-05-20):** an earlier draft of this line gave the
+> rate as `2 β S I / N²`, which is wrong by a factor of `I²/N` (~1400×
+> at N≈10⁴, I≈3.7k). The correct SIR coalescent per-pair rate is
+> `2 f / I² = 2 β S / (N I)` (Volz 2009): each transmission event
+> (rate `f`) coalesces a given pair only if one lineage is the infectee
+> and the other the infector, probability `~2/I²` per event. The
+> Phase-3 Tier-4 test validates against this corrected rate and the
+> runtime — which samples infectors uniformly within `I` — reproduces
+> it empirically. The error was in the prose, not the implementation.
 
 **Tier 5 — External oracle (PARKED — pending oracle-landscape survey).**
 Cross-validate a *stratified* scenario against an independent
