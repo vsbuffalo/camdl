@@ -187,3 +187,97 @@ fn gh20_gamma_density_grad_matches_fd_large_sigma() {
     // digamma + ln(g) terms in a regime where each contribution is non-trivial.
     run_gh20_check(1.0, 44, 1.0);
 }
+
+/// gh#76 cleanup, concern (D). Multi-overdispersed-transition lockstep.
+///
+/// The `sir_overdispersion.ir.json` fixture has ONE overdispersed
+/// transition per source group — value (`pgas::complete_data_loglik`)
+/// and gradient (`pgas_grad::log_gamma_density_grad_substep`) maintain
+/// independent `gamma_idx` counters that walk `model.source_groups` in
+/// the same order. With one overdispersed transition per group, the two
+/// counters are guaranteed to track each other byte-for-byte even if
+/// the per-transition advance logic drifts.
+///
+/// `sir_two_overdispersed.ir.json` has TWO overdispersed transitions
+/// out of the same source compartment (S → I and S → V), each with its
+/// own σ² parameter (`sigma_inf` and `sigma_loss`). The chain-binomial
+/// substep records both gammas back-to-back in `rec.gammas`. If the
+/// gradient's iteration drifts vs the value's — e.g. advances `gamma_idx`
+/// once per source group rather than once per overdispersed transition,
+/// or skips overdispersed transitions that the value didn't skip —
+/// σ²-gradient terms get attributed to the wrong σ² and FD-vs-analytic
+/// disagrees.
+///
+/// FD-tests both σ² gradients at multiple σ values to exercise the
+/// digamma + ln(g) terms across the regimes used in practice. Acceptance
+/// bar 1e-4 relative, same as the single-overdispersed test.
+fn run_gh76_cleanup_two_overdisp_check(sigma_inf: f64, sigma_loss: f64, seed: u64, dt: f64) {
+    let mut model = load_model("../../../ocaml/golden/sir_two_overdispersed.ir.json");
+    set_param_defaults(&mut model, &[
+        ("beta", 0.3), ("gamma", 0.1), ("mu", 0.05),
+        ("sigma_inf", sigma_inf), ("sigma_loss", sigma_loss),
+        ("N0", 1000.0), ("I0", 10.0),
+    ]);
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let (params, param_names) = build_params_and_names(&compiled);
+
+    let t_end = compiled.model.simulation.t_end;
+    let mut rng = StatefulRng::new(seed);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+
+    // Sanity: each substep should record exactly 2 gammas (one per
+    // overdispersed transition out of S), at least when S > 0 with both
+    // rates above RATE_EPSILON. At least some substeps must have 2.
+    let max_gammas_in_substep: usize = trajectory.substeps.iter().map(|s| s.gammas.len()).max().unwrap_or(0);
+    assert!(max_gammas_in_substep >= 2,
+        "two-overdispersed fixture must produce ≥ 2 gammas in at least one substep; \
+         max observed = {}. If this fails the test is degenerate (only one transition \
+         is firing) and won't actually exercise the lockstep.", max_gammas_in_substep);
+
+    let observations: Vec<Observation> = vec![];
+    let obs_model = MultiStreamObsModel::empty(compiled.clone());
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let sigma_inf_idx  = compiled.param_index["sigma_inf"];
+    let sigma_loss_idx = compiled.param_index["sigma_loss"];
+    let beta_idx       = compiled.param_index["beta"];
+    let gamma_idx      = compiled.param_index["gamma"];
+    let mu_idx         = compiled.param_index["mu"];
+
+    fd_check(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices,
+        // sigma_inf, sigma_loss are the two σ² gradients — the iterator
+        // lockstep check. If gamma_idx drifts in the gradient, these
+        // get attributed to the wrong σ² and FD disagrees.
+        // beta, gamma, mu are regression checks on the rate-density gradient.
+        &[sigma_inf_idx, sigma_loss_idx, beta_idx, gamma_idx, mu_idx],
+        dt, 1e-4,
+        &format!("gh76_two_overdisp_sigma_inf={}_sigma_loss={}_seed={}",
+                 sigma_inf, sigma_loss, seed),
+    );
+}
+
+#[test]
+fn gh76_cleanup_two_overdisp_grad_matches_fd_small_sigma() {
+    run_gh76_cleanup_two_overdisp_check(0.01, 0.01, 42, 1.0);
+}
+
+#[test]
+fn gh76_cleanup_two_overdisp_grad_matches_fd_medium_sigma() {
+    run_gh76_cleanup_two_overdisp_check(0.1, 0.1, 43, 1.0);
+}
+
+#[test]
+fn gh76_cleanup_two_overdisp_grad_matches_fd_asymmetric_sigma() {
+    // Different σ²'s — the gradient must distinguish them. If the
+    // iterator drifts so σ_inf and σ_loss get swapped, this test catches
+    // it (the two gradients would be flipped).
+    run_gh76_cleanup_two_overdisp_check(0.05, 0.3, 44, 1.0);
+}
+
+#[test]
+fn gh76_cleanup_two_overdisp_grad_matches_fd_large_sigma() {
+    run_gh76_cleanup_two_overdisp_check(1.0, 1.0, 45, 1.0);
+}

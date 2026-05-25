@@ -1,0 +1,72 @@
+# SIR with TWO overdispersed transitions sharing the same source group.
+#
+# gh#76 cleanup (concern D). Pinned regression for the gamma-density
+# gradient iterator alignment. `pgas::complete_data_loglik` and
+# `pgas_grad::log_gamma_density_grad_substep` each maintain their own
+# `gamma_idx` counter and walk `model.source_groups` in lockstep. The
+# original `sir_overdispersion.camdl` only had one overdispersed
+# transition per source group, so the two counters were guaranteed to
+# track even if the per-transition advance logic drifted.
+#
+# This fixture forces both transitions out of S to be overdispersed:
+#
+#   infection : S --> I  @ overdispersed(beta * S * I / N, sigma_inf)
+#   loss      : S --> V  @ overdispersed(mu * S,           sigma_loss)
+#
+# At every substep the chain-binomial code (a) consumes one gamma for
+# infection and one for loss within S's source group, in that order, and
+# (b) records both gammas back-to-back in `rec.gammas`. If the gradient
+# helper's `gamma_idx` advances at a different rate (or in a different
+# order), σ²-gradient terms get attributed to the wrong transition and
+# FD-vs-analytic disagrees.
+#
+# Both σ²'s are estimated independently; the FD test pins
+# d(ll)/d(sigma_inf) and d(ll)/d(sigma_loss) at multiple σ values to
+# catch any per-source-group iterator misalignment.
+
+time_unit = 'days
+
+compartments { S, I, R, V }
+
+parameters {
+  beta       : rate     in [0.001, 2.0]
+  gamma      : rate     in [0.001, 1.0]
+  mu         : rate     in [0.001, 1.0]
+  sigma_inf  : positive in [0.001, 2.0]
+  sigma_loss : positive in [0.001, 2.0]
+  N0         : count    in [100, 100000]
+  I0         : count    in [1, 1000]
+}
+
+let N = S + I + R + V
+
+transitions {
+  infection : S --> I @ overdispersed(beta * S * I / N, sigma_inf)
+  loss      : S --> V @ overdispersed(mu * S,           sigma_loss)
+  recovery  : I --> R @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+
+scenarios {
+  baseline {
+    label = "two overdispersed S transitions"
+    set = {
+      beta       = 0.3
+      gamma      = 0.1
+      mu         = 0.05
+      sigma_inf  = 0.1
+      sigma_loss = 0.1
+      N0         = 1000
+      I0         = 10
+    }
+  }
+}
