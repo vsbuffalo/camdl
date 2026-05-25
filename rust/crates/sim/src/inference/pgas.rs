@@ -312,9 +312,23 @@ fn compute_source_group_probs(
         let rate = propensities[tr_idx];
         if rate <= RATE_EPSILON {
             if flows[tr_idx] > 0 && rate <= 0.0 {
-                log::warn!(
-                    "transition index {} has rate=0 but flow={}. \
-                     Add a seeding term (iota) to avoid this impossible state.",
+                // gh#80: this branch fires *correctly* during CSMC ancestor
+                // sampling whenever a free particle's pre-step state has
+                // n_src=0 (or otherwise zero rate) for a transition that
+                // fired in the reference's flow record. The conditional
+                // density IS mathematically zero and the particle is
+                // legitimately excluded from the ancestor categorical.
+                // log::warn! was misleading here — the previous text
+                // suggested adding an `iota` term, which is correct only
+                // when the *trajectory's own* (counts_before, flows) pair
+                // disagrees, not for ancestor-sampling state/flow pairings
+                // across particles. Demoted to debug! to keep production
+                // logs clean; the math is unchanged.
+                log::debug!(
+                    "log_transition_density_substep: transition {} has rate=0 \
+                     against this counts_before but flow={} in the scored record \
+                     — returning -inf (legitimate density of zero, e.g. ancestor \
+                     sampling pairing a particle's state with the reference's flows).",
                     tr_idx, flows[tr_idx],
                 );
                 return Err(f64::NEG_INFINITY);
@@ -1307,22 +1321,55 @@ pub fn run_pgas(
         start_sweep = 0;
 
         // Sanity check: the trajectory must have finite density at its own params
-        // (before IVP mapping, which adds initial state density)
-        let sanity_ll = complete_data_loglik(
+        // (before IVP mapping, which adds initial state density).
+        //
+        // gh#80: distinguish the failure modes. -inf in the *transition* term
+        // is a step_one/density-evaluator disagreement (a real bug). -inf in
+        // the *observation* term is "this starting point is incompatible with
+        // the data" — common when a chain initialises with a `tau` (or any
+        // hard model parameter) outside a feasible region. The original
+        // single-line "BUG: simulate_reference trajectory has -inf density at
+        // own params" message lumped both together and accused step_one even
+        // when the obs term was the cause.
+        let sanity = complete_data_loglik(
             model, &trajectory, &current_params, observations,
             config.dt, obs_model, &[],  // empty IVP mappings
             &obs_at_substep,
-        )?.total;
-        if !sanity_ll.is_finite() {
-            eprintln!("  BUG: simulate_reference trajectory has -inf density at own params.");
+        )?;
+        if !sanity.total.is_finite() {
+            let trans_inf = !sanity.transition.is_finite();
+            let obs_inf   = !sanity.observation.is_finite();
+            if trans_inf {
+                eprintln!("  BUG: simulate_reference trajectory has non-finite \
+                          *transition* log-density at own params (transition_ll = {}).",
+                          sanity.transition);
+                eprintln!("  This indicates a mismatch between step_one and \
+                           log_transition_density_substep.");
+                eprintln!("  Run with CAMDL_TRACE_STEPS=1 for detailed per-substep \
+                           diagnostics.");
+            }
+            if obs_inf {
+                eprintln!("  WARNING: simulate_reference predicts observed data with \
+                          probability 0 (observation_ll = {}).", sanity.observation);
+                eprintln!("  This is the data-vs-model side, NOT a step_one bug — the \
+                           predicted trajectory at these starting parameters cannot \
+                           explain the observed values.");
+                eprintln!("  Common cause: a discrete-event parameter (e.g. `tau`) is \
+                           outside the simulation window, so the seeding mechanism \
+                           never fires and predicted incidence is 0 while real data has \
+                           cases. Adjust starting bounds, or rely on NUTS / MH to \
+                           propose into a feasible region.");
+            }
             eprintln!("  params used:");
             for p in &model.model.parameters {
                 if let Some(&idx) = model.param_index.get(p.name.as_str()) {
                     eprintln!("    {} = {}", p.name, current_params[idx]);
                 }
             }
+            eprintln!("  components: transition={:.1}, observation={:.1}, ivp={:.1}",
+                sanity.transition, sanity.observation, sanity.ivp);
         } else {
-            eprintln!("  simulate_reference LL sanity check: {:.1} (finite ✓)", sanity_ll);
+            eprintln!("  simulate_reference LL sanity check: {:.1} (finite ✓)", sanity.total);
         }
     }
 
@@ -1388,15 +1435,44 @@ pub fn run_pgas(
     };
 
     // Initial complete-data log-likelihood (now includes initial state density)
-    let current_ll = complete_data_loglik(
+    //
+    // gh#80: same split-by-component diagnostic as the sanity check above —
+    // distinguish a step_one/density mismatch (transition term) from a
+    // data-vs-model incompatibility (observation term).
+    let current_components = complete_data_loglik(
         model, &trajectory, &current_params, observations,
         config.dt, obs_model, &ivp_mappings, &obs_at_substep,
-    )?.total;
+    )?;
+    let current_ll = current_components.total;
     eprintln!("  initial complete-data ll: {:.1}", current_ll);
     if !current_ll.is_finite() {
-        eprintln!("  WARNING: initial complete-data LL is -inf at the trajectory's own params.");
-        eprintln!("  This indicates a mismatch between step_one and log_transition_density_substep.");
-        eprintln!("  Run with CAMDL_TRACE_STEPS=1 for detailed per-substep diagnostics.");
+        let trans_inf = !current_components.transition.is_finite();
+        let obs_inf   = !current_components.observation.is_finite();
+        let ivp_inf   = !current_components.ivp.is_finite();
+        if trans_inf {
+            eprintln!("  WARNING: initial *transition* log-density is non-finite \
+                       (transition_ll = {}).", current_components.transition);
+            eprintln!("  This indicates a mismatch between step_one and \
+                       log_transition_density_substep — run with \
+                       CAMDL_TRACE_STEPS=1 for per-substep diagnostics.");
+        }
+        if obs_inf {
+            eprintln!("  WARNING: initial *observation* log-density is non-finite \
+                       (observation_ll = {}). The reference trajectory cannot \
+                       explain the observed data at these starting parameters; \
+                       NUTS / MH will propose into a feasible region if one exists.",
+                       current_components.observation);
+        }
+        if ivp_inf {
+            eprintln!("  WARNING: initial *IVP* log-density is non-finite \
+                       (ivp_ll = {}) — initial-state Binom is incompatible \
+                       with the IVP fraction parameter.",
+                       current_components.ivp);
+        }
+        eprintln!("  components: transition={:.1}, observation={:.1}, ivp={:.1}",
+            current_components.transition,
+            current_components.observation,
+            current_components.ivp);
         eprintln!("  Model has {} transitions, {} source groups",
             model.model.transitions.len(),
             model.source_groups.len());
