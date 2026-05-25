@@ -575,6 +575,83 @@ fn gh76_discretized_normal_obs_grad_matches_fd_tail_8sigma() {
     run_discretized_normal_grad_fd(8.0, "gh76_discretized_normal_obs_tail_8σ");
 }
 
+/// Build a Binomial-obs version of seir_observations programmatically.
+///
+/// Models reported cases as `k ~ Binomial(n = incidence, p = rho)` —
+/// `rho` is the per-case reporting probability. Used by gh#76 cleanup
+/// concern (E) to exercise the Binomial dispatch arm in
+/// `eval_likelihood_resolved_grad` (which had no FD coverage in the
+/// gh#76 commit).
+fn build_binomial_seir() -> ir::Model {
+    use ir::expr::*;
+    use ir::observation::*;
+    let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");
+    model.observations.retain(|o| o.name == "weekly_cases");
+    for om in &mut model.observations {
+        if let Likelihood::NegBinomial(_) = &om.likelihood {
+            // n = projected (weekly incidence — the FlowSum). p = rho.
+            // Mean is n·p = projected·rho, matching the NegBin source's
+            // mean of `rho * projected`.
+            om.likelihood = Likelihood::Binomial(BinomialLikelihood {
+                n: Expr::Projected(ProjectedExpr { projected: () }),
+                p: Expr::Param(ParamExpr { param: "rho".to_string() }),
+            });
+        }
+    }
+    model
+}
+
+#[test]
+fn gh76_binomial_obs_grad_matches_fd() {
+    // gh#76 cleanup concern (E). The Binomial dispatch arm at
+    // `obs_model.rs:204-218` was wired in the gh#76 commit but had no
+    // FD test exercising it end-to-end through
+    // `complete_data_loglik_grad`. The existing NegBin/Poisson/Normal
+    // tests don't cover Binomial's chain-rule form
+    //   d/dp [log C(n,k) + k·log(p) + (n−k)·log(1−p)] = k/p − (n−k)/(1−p)
+    // multiplied by d(p)/d(θ_k) through `eval_resolved_deriv`.
+    let mut model = build_binomial_seir();
+    set_param_defaults(&mut model, &[
+        ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
+        ("rho", 0.5), ("k", 5.0), ("p_detect", 0.8),
+        ("N0", 10000.0), ("I0", 10.0),
+    ]);
+    model.simulation.t_end = 60.0;
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let (params, param_names) = build_params_and_names(&compiled);
+
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let dt = 1.0;
+    let mut rng = StatefulRng::new(47);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let n_substeps = trajectory.substeps.len();
+
+    let (substep_idx, obs_times) = obs_substep_indices_regular(
+        t_start, dt, n_substeps, 7.0, 7.0, t_end,
+    );
+
+    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+    let observations: Vec<Observation> = obs_times.iter()
+        .map(|&t| Observation { time: t, value: 0.0 }).collect();
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let rho_idx = compiled.param_index["rho"];
+    let beta_idx = compiled.param_index["beta"];
+
+    fd_check(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices,
+        // rho is the new term (Binomial's `p` arg). beta is the
+        // regression check that the rate-density gradient still works.
+        &[rho_idx, beta_idx],
+        dt, 1e-4,
+        "gh76_binomial_obs",
+    );
+}
+
 fn run_discretized_normal_grad_fd(tail_sigmas: f64, name: &str) {
     let mut model = build_discretized_normal_seir();
     set_param_defaults(&mut model, &[
