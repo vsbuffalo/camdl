@@ -26,6 +26,52 @@ use crate::propensity::{eval_propensities, EvalCtx};
 use crate::resolved_expr::eval_resolved;
 use crate::state::{IntState, RealState};
 
+/// Walk every `Expr` inside an obs `Likelihood` and apply `f`. Used by the
+/// narrowed C1 preflight gate (gh#76 follow-up) to detect estimated
+/// parameters whose reachability path traverses an uncovered gradient arm.
+fn for_each_likelihood_expr<F: FnMut(&ir::expr::Expr)>(
+    lh: &ir::observation::Likelihood,
+    mut f: F,
+) {
+    use ir::observation::Likelihood::*;
+    match lh {
+        Poisson(l)      => f(&l.rate),
+        NegBinomial(l)  => { f(&l.mean); f(&l.dispersion); }
+        Normal(l)       => { f(&l.mean); f(&l.sd); }
+        Binomial(l)     => { f(&l.n); f(&l.p); }
+        BetaBinomial(l) => { f(&l.n); f(&l.alpha); f(&l.beta); }
+        Bernoulli(l)    => f(&l.p),
+    }
+}
+
+/// Collect names of every `Param` referenced by an expression tree.
+/// Used by the narrowed C1 preflight gate (gh#76 follow-up).
+fn collect_param_refs(e: &ir::expr::Expr, out: &mut std::collections::HashSet<String>) {
+    match e {
+        ir::expr::Expr::Param(p) => { out.insert(p.param.clone()); }
+        ir::expr::Expr::BinOp(w) => {
+            collect_param_refs(&w.bin_op.left,  out);
+            collect_param_refs(&w.bin_op.right, out);
+        }
+        ir::expr::Expr::UnOp(w) => collect_param_refs(&w.un_op.arg, out),
+        ir::expr::Expr::Cond(w) => {
+            collect_param_refs(&w.cond.pred,  out);
+            collect_param_refs(&w.cond.then,  out);
+            collect_param_refs(&w.cond.else_, out);
+        }
+        ir::expr::Expr::PopSum(_) | ir::expr::Expr::Pop(_)
+        | ir::expr::Expr::Const(_) | ir::expr::Expr::Time(_)
+        | ir::expr::Expr::Dt(_)   | ir::expr::Expr::TimeFunc(_)
+        | ir::expr::Expr::Projected(_) => {}
+        ir::expr::Expr::TableLookup(w) => {
+            for ix in &w.table_lookup.indices {
+                collect_param_refs(ix, out);
+            }
+        }
+        ir::expr::Expr::UncheckedDim(w) => collect_param_refs(&w.unchecked_dim.inner, out),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════
@@ -1448,11 +1494,71 @@ pub fn run_pgas(
                    Increase sweeps in fit.toml to continue.", start_sweep, config.n_sweeps);
     }
 
-    // The audit-C1 preflight gate that previously blocked obs-likelihood
-    // and σ²-overdispersion parameters from NUTS estimation was removed
-    // by gh#20 (σ² gradient) and gh#76 (obs gradient). The
-    // `complete_data_loglik_grad` function now propagates the full set
-    // of analytic gradients required by NUTS.
+    // gh#audit-C1 preflight gate, narrowed by gh#20 + gh#76 + the
+    // gh#76 cleanup follow-up. The gradient now covers most arms:
+    //
+    //   • σ² (overdispersion) — wired via `log_gamma_density_grad_substep`.
+    //   • NegBinomial, Normal, Poisson, Binomial, Bernoulli obs likelihoods
+    //     — wired via `eval_likelihood_resolved_grad`.
+    //
+    // Two arms remain uncovered (silent-zero gradient):
+    //
+    //   • `BetaBinomial` obs likelihood — no helper in `obs_loglik.rs`.
+    //   • `DerivedExpr` obs *projection* that depends on parameters — the
+    //     chain-rule term ∂L/∂(projected) · ∂(projected)/∂θ is omitted
+    //     (see derivation note 2026-05-25-pgas-obs-grad-derivation.md).
+    //
+    // Either route lands the user in the silent-zero regime gh#76 was
+    // filed against. Refuse `if2_params` whose reachability path
+    // touches one of these arms with a clear error.
+    {
+        use std::collections::HashSet;
+
+        let mut betabinomial_refs: HashSet<String> = HashSet::new();
+        let mut parametric_derived_proj_refs: HashSet<String> = HashSet::new();
+
+        for om in &model.model.observations {
+            // (a) BetaBinomial likelihood args.
+            if let ir::observation::Likelihood::BetaBinomial(_) = &om.likelihood {
+                for_each_likelihood_expr(&om.likelihood,
+                    |e| collect_param_refs(e, &mut betabinomial_refs));
+            }
+            // (b) DerivedExpr projections that depend on any parameter.
+            if let ir::observation::Projection::DerivedExpr(e) = &om.projection {
+                collect_param_refs(e, &mut parametric_derived_proj_refs);
+            }
+        }
+
+        let mut blocked: Vec<String> = Vec::new();
+        for spec in if2_params.iter() {
+            let name = spec.name.as_str();
+            let in_bb = betabinomial_refs.contains(name);
+            let in_derived = parametric_derived_proj_refs.contains(name);
+            if in_bb || in_derived {
+                let where_ = match (in_bb, in_derived) {
+                    (true,  true)  => "both a BetaBinomial likelihood arg and a parametric DerivedExpr projection",
+                    (true,  false) => "a BetaBinomial likelihood arg",
+                    (false, true)  => "a parametric DerivedExpr projection",
+                    (false, false) => unreachable!(),
+                };
+                blocked.push(format!("'{}' (in {})", name, where_));
+            }
+        }
+        if !blocked.is_empty() {
+            return Err(crate::error::SimError::Validation(format!(
+                "PGAS+NUTS gradient does not cover BetaBinomial obs likelihoods \
+                 or parametric DerivedExpr projections (gh#76 follow-up). \
+                 Estimating these parameters with NUTS would produce silently \
+                 biased posteriors because the gradient is identically zero on \
+                 the affected coordinate. Blocked parameters: {}. Either fix \
+                 these parameters (move from `[estimate.X]` to `[fixed.X]` in \
+                 fit.toml), switch to a non-gradient method (IF2, PMMH), or \
+                 wait for the missing gradient arm to land (BetaBinomial helper \
+                 / projection chain-rule term).",
+                blocked.join(", ")
+            )));
+        }
+    }
 
     // Pre-resolve rate_grad indices once for the entire run (avoids O(n_params)
     // string scans per gradient term per substep in the NUTS hot path).
