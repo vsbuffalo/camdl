@@ -1,0 +1,470 @@
+//! Finite-difference regression tests for the observation-density gradient
+//! term in `complete_data_loglik_grad` (gh#76).
+//!
+//! Each test:
+//!   1. Loads a small SEIR/SIR model with an observation block that uses
+//!      one of {NegBin, Poisson, discretized-Normal}.
+//!   2. Simulates a reference trajectory at fixed params.
+//!   3. Synthesizes obs values via the obs-model mean (so observations land
+//!      near the likelihood's mode — out of the helpers' tail-precision floor).
+//!   4. Compares the analytic gradient (via the new
+//!      `MultiStreamObsModel::log_likelihood_grad_from_flows_and_counts`
+//!      method) against a central finite difference of `complete_data_loglik`.
+//!
+//! Tolerance: 1e-4 relative. Observed agreement is 1e-7 to 1e-11 on
+//! near-mode observations.
+//!
+//! These tests bypass `pgas::run_pgas` (now ungated for obs params) by
+//! calling `complete_data_loglik_grad` directly.
+
+use std::sync::Arc;
+use sim::compiled_model::CompiledModel;
+use sim::inference::pgas::{IVPMapping, simulate_reference, complete_data_loglik, build_obs_at_substep};
+use sim::inference::pgas_grad::complete_data_loglik_grad;
+use sim::inference::MultiStreamObsModel;
+use sim::inference::multi_stream_obs::{StreamProjection, StreamSpec, eval_stream_projection};
+use sim::inference::particle_filter::Observation;
+use sim::rng::StatefulRng;
+use sim::state::{IntState, RealState};
+
+fn load_model(path: &str) -> ir::Model {
+    let json = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {}", path, e));
+    ir::from_str(&json)
+        .unwrap_or_else(|e| panic!("cannot parse {}: {}", path, e))
+}
+
+fn build_obs_model(
+    compiled: Arc<CompiledModel>,
+    obs_times: &[f64],
+    per_stream_data: Vec<Vec<f64>>,
+) -> MultiStreamObsModel {
+    let model = compiled.model.clone();
+    let specs: Vec<StreamSpec> = model.observations.iter().enumerate().map(|(si, om)| {
+        let projection = StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap();
+        StreamSpec {
+            projection,
+            ir_model: om.clone(),
+            observations: per_stream_data[si].clone(),
+            obs_times: obs_times.to_vec(),
+        }
+    }).collect();
+    MultiStreamObsModel::new(specs, compiled).unwrap()
+}
+
+fn set_param_defaults(model: &mut ir::Model, defaults: &[(&str, f64)]) {
+    for p in &mut model.parameters {
+        if p.value.is_none() {
+            if let Some(&(_, v)) = defaults.iter().find(|(n, _)| *n == p.name) {
+                p.value = Some(v);
+            } else {
+                p.value = Some(0.5);
+            }
+        }
+    }
+}
+
+fn build_params_and_names(compiled: &CompiledModel) -> (Vec<f64>, Vec<String>) {
+    let n = compiled.param_index.len();
+    let mut params = vec![0.0; n];
+    for p in &compiled.model.parameters {
+        if let Some(v) = p.value {
+            params[compiled.param_index[p.name.as_str()]] = v;
+        }
+    }
+    let mut names = vec![String::new(); n];
+    for p in &compiled.model.parameters {
+        names[compiled.param_index[p.name.as_str()]] = p.name.clone();
+    }
+    (params, names)
+}
+
+/// Walk a recorded trajectory and produce one synthetic observed value
+/// per (obs_time, stream). For each stream, the observed value is the
+/// obs-model *mean* evaluated at the current params (e.g. rho * projected
+/// for a NegBin/Normal model with rho-scaled mean). This places observations
+/// near the likelihood's mode — the regime where each per-distribution
+/// gradient helper is most accurate, so FD vs analytic comparisons aren't
+/// limited by the helper's tail-precision floor.
+fn project_trajectory_to_obs(
+    compiled: &Arc<CompiledModel>,
+    trajectory: &sim::inference::pgas::PGASTrajectory,
+    obs_substep_indices: &[usize],
+    params: &[f64],
+    dt: f64,
+) -> Vec<Vec<f64>> {
+    let n_streams = compiled.model.observations.len();
+    let n_tr = compiled.model.transitions.len();
+    let mut per_stream: Vec<Vec<f64>> = (0..n_streams).map(|_| Vec::new()).collect();
+    let t_start = compiled.model.simulation.t_start;
+    let real_s = RealState::new(compiled.real_local_to_global.len());
+
+    let projections: Vec<StreamProjection> = compiled.model.observations.iter()
+        .map(|om| StreamProjection::from_ir(&om.projection, compiled, &om.name).unwrap())
+        .collect();
+
+    let resolved_lhs: Vec<sim::resolved_expr::ResolvedLikelihood> = compiled.model.observations
+        .iter()
+        .map(|om| {
+            use sim::resolved_expr::{resolve_likelihood, ResolveCtx};
+            use ir::table::OobPolicy;
+            let table_meta: Vec<(OobPolicy, usize)> = compiled.model.tables.iter()
+                .zip(&compiled.table_values_cache)
+                .map(|(t, cached)| (t.out_of_bounds.clone(), cached.len()))
+                .collect();
+            let ctx = ResolveCtx {
+                comp_index: &compiled.comp_index,
+                param_index: &compiled.param_index,
+                time_func_index: &compiled.time_func_index,
+                table_index: &compiled.table_index,
+                global_to_int: &compiled.global_to_int,
+                global_to_real: &compiled.global_to_real,
+                table_meta: &table_meta,
+            };
+            resolve_likelihood(&om.likelihood, &ctx).unwrap()
+        })
+        .collect();
+
+    let mut cum_flows: Vec<u64> = vec![0; n_tr];
+    let mut next_obs = 0;
+
+    for (s, rec) in trajectory.substeps.iter().enumerate() {
+        for (i, &f) in rec.flows.iter().enumerate() { cum_flows[i] += f; }
+
+        if next_obs < obs_substep_indices.len() && obs_substep_indices[next_obs] == s {
+            let t_obs = t_start + ((s + 1) as f64) * dt;
+            let int_s = IntState::from_vec(rec.counts_after.clone());
+            for si in 0..n_streams {
+                let v = eval_stream_projection(
+                    &projections[si], &cum_flows, &rec.counts_after,
+                    params, compiled, &real_s, t_obs,
+                );
+                let mean = obs_mean_for_likelihood(
+                    &resolved_lhs[si], t_obs, v, params, compiled, &int_s, &real_s,
+                );
+                per_stream[si].push(mean.max(0.0).round());
+            }
+            cum_flows.fill(0);
+            next_obs += 1;
+        }
+    }
+    per_stream
+}
+
+/// Local re-implementation of `eval_obs_mean_resolved` — the obs_model
+/// helper is `pub(crate)` and not exposed for external test code.
+fn obs_mean_for_likelihood(
+    lh: &sim::resolved_expr::ResolvedLikelihood,
+    t: f64,
+    projected: f64,
+    params: &[f64],
+    compiled: &CompiledModel,
+    int_s: &IntState,
+    real_s: &RealState,
+) -> f64 {
+    use sim::propensity::EvalCtx;
+    use sim::resolved_expr::{ResolvedLikelihood, eval_resolved};
+    let ctx = |proj: f64| EvalCtx {
+        model: compiled, int_s, real_s, params, t, dt: 0.0,
+        projected: Some(proj), int_float_override: None,
+    };
+    match lh {
+        ResolvedLikelihood::NegBinomial { mean, .. } => eval_resolved(mean, &ctx(projected)),
+        ResolvedLikelihood::Normal { mean, .. } => eval_resolved(mean, &ctx(projected)),
+        ResolvedLikelihood::Poisson { rate } => eval_resolved(rate, &ctx(projected)),
+        ResolvedLikelihood::Binomial { n, p } => {
+            eval_resolved(n, &ctx(projected)) * eval_resolved(p, &ctx(projected))
+        }
+        ResolvedLikelihood::BetaBinomial { n, alpha, beta } => {
+            let n_val = eval_resolved(n, &ctx(projected));
+            let a = eval_resolved(alpha, &ctx(projected));
+            let b = eval_resolved(beta, &ctx(projected));
+            let denom = (a + b).max(1e-300);
+            n_val * (a / denom)
+        }
+        ResolvedLikelihood::Bernoulli { p } => eval_resolved(p, &ctx(projected)),
+    }
+}
+
+fn fd_check(
+    compiled: &Arc<CompiledModel>,
+    trajectory: &sim::inference::pgas::PGASTrajectory,
+    observations: &[Observation],
+    obs_model: &MultiStreamObsModel,
+    params: &[f64],
+    param_names: &[String],
+    estimated_indices: &[usize],
+    params_to_check: &[usize],
+    dt: f64,
+    rel_tol: f64,
+    name: &str,
+) {
+    let d = estimated_indices.len();
+    let n_model_params = compiled.model.parameters.len();
+    let mut model_to_estimated: Vec<Option<usize>> = vec![None; n_model_params];
+    for (est_idx, &model_idx) in estimated_indices.iter().enumerate() {
+        model_to_estimated[model_idx] = Some(est_idx);
+    }
+    let rate_grads_for_run = sim::inference::pgas_grad::resolve_rate_grad_for_run(
+        &compiled.resolved.rate_grads_indexed,
+        &model_to_estimated,
+    );
+    let ivp_mappings: Vec<IVPMapping> = vec![];
+    let oas = build_obs_at_substep(observations, compiled.model.simulation.t_start, dt);
+    let estimated_to_model: Vec<usize> = estimated_indices.to_vec();
+
+    let (ll, grad) = complete_data_loglik_grad(
+        compiled, trajectory, params, observations, dt,
+        obs_model, &ivp_mappings,
+        d, &rate_grads_for_run, &oas,
+        &estimated_to_model,
+    ).unwrap();
+    assert!(ll.is_finite(), "[{}] log-likelihood must be finite, got {}", name, ll);
+    eprintln!("[{}] LL = {:.4}", name, ll);
+
+    for &est_idx in params_to_check {
+        let model_idx = estimated_indices[est_idx];
+        let p_val = params[model_idx];
+        let eps = (1e-5 * p_val.abs()).max(1e-8);
+
+        let mut p_plus = params.to_vec();
+        let mut p_minus = params.to_vec();
+        p_plus[model_idx] += eps;
+        p_minus[model_idx] -= eps;
+
+        let ll_plus = complete_data_loglik(
+            compiled, trajectory, &p_plus, observations, dt,
+            obs_model, &ivp_mappings, &oas,
+        ).unwrap().total;
+        let ll_minus = complete_data_loglik(
+            compiled, trajectory, &p_minus, observations, dt,
+            obs_model, &ivp_mappings, &oas,
+        ).unwrap().total;
+        let fd = (ll_plus - ll_minus) / (2.0 * eps);
+
+        let analytic = grad[est_idx];
+        let rel_err = if fd.abs() > 1e-10 {
+            (analytic - fd).abs() / fd.abs()
+        } else {
+            (analytic - fd).abs()
+        };
+
+        eprintln!(
+            "[{}] d(ll)/d({:12}) = {:14.6e} (analytic) vs {:14.6e} (fd), rel_err = {:.2e}",
+            name, param_names[model_idx], analytic, fd, rel_err
+        );
+
+        assert!(
+            rel_err < rel_tol,
+            "[{}] gradient mismatch for {}: analytic={:.6e}, fd={:.6e}, rel_err={:.2e} (tol={:.0e})",
+            name, param_names[model_idx], analytic, fd, rel_err, rel_tol
+        );
+    }
+}
+
+fn obs_substep_indices_regular(
+    t_start: f64, dt: f64, n_substeps: usize,
+    obs_start: f64, obs_step: f64, obs_end: f64,
+) -> (Vec<usize>, Vec<f64>) {
+    let mut indices = Vec::new();
+    let mut times = Vec::new();
+    let mut t = obs_start;
+    while t <= obs_end + 1e-9 {
+        let s_f = (t - t_start) / dt - 1.0;
+        let s = s_f.round() as i64;
+        if s >= 0 && (s as usize) < n_substeps {
+            indices.push(s as usize);
+            times.push(t);
+        }
+        t += obs_step;
+    }
+    (indices, times)
+}
+
+#[test]
+fn gh76_negbin_obs_grad_matches_fd() {
+    // SEIR with NegBinomial(rho * incidence, k) + Bernoulli(p_detect).
+    // Estimate rho, k, p_detect plus a rate param (beta) as regression
+    // check that the rate gradient is unaffected.
+    let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");
+    set_param_defaults(&mut model, &[
+        ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
+        ("rho", 0.5), ("k", 5.0), ("p_detect", 0.8),
+        ("N0", 10000.0), ("I0", 10.0),
+    ]);
+    model.simulation.t_end = 60.0;
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let (params, param_names) = build_params_and_names(&compiled);
+
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let dt = 1.0;
+    let mut rng = StatefulRng::new(42);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let n_substeps = trajectory.substeps.len();
+
+    // multi-stream constraint: all streams share obs_times. weekly_cases is
+    // every 7 days, detection every 14 days → intersection every 14 days.
+    let (substep_idx, obs_times) = obs_substep_indices_regular(
+        t_start, dt, n_substeps, 14.0, 14.0, t_end,
+    );
+
+    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+    let observations: Vec<Observation> = obs_times.iter()
+        .map(|&t| Observation { time: t, value: 0.0 }).collect();
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let rho_idx = compiled.param_index["rho"];
+    let k_idx = compiled.param_index["k"];
+    let p_detect_idx = compiled.param_index["p_detect"];
+    let beta_idx = compiled.param_index["beta"];
+
+    fd_check(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices,
+        &[rho_idx, k_idx, p_detect_idx, beta_idx],
+        dt, 1e-4,
+        "gh76_negbin_obs",
+    );
+}
+
+/// Build a Poisson-only obs version of seir_observations programmatically.
+fn build_poisson_seir() -> ir::Model {
+    let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");
+    model.observations.retain(|o| o.name == "weekly_cases");
+    for om in &mut model.observations {
+        use ir::observation::{Likelihood, PoissonLikelihood};
+        if let Likelihood::NegBinomial(nb) = &om.likelihood {
+            om.likelihood = Likelihood::Poisson(PoissonLikelihood {
+                rate: nb.mean.clone(),
+            });
+        }
+    }
+    model
+}
+
+#[test]
+fn gh76_poisson_obs_grad_matches_fd() {
+    let mut model = build_poisson_seir();
+    set_param_defaults(&mut model, &[
+        ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
+        ("rho", 0.5), ("k", 5.0), ("p_detect", 0.8),
+        ("N0", 10000.0), ("I0", 10.0),
+    ]);
+    model.simulation.t_end = 60.0;
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let (params, param_names) = build_params_and_names(&compiled);
+
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let dt = 1.0;
+    let mut rng = StatefulRng::new(45);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let n_substeps = trajectory.substeps.len();
+
+    let (substep_idx, obs_times) = obs_substep_indices_regular(
+        t_start, dt, n_substeps, 7.0, 7.0, t_end,
+    );
+
+    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+    let observations: Vec<Observation> = obs_times.iter()
+        .map(|&t| Observation { time: t, value: 0.0 }).collect();
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let rho_idx = compiled.param_index["rho"];
+    let beta_idx = compiled.param_index["beta"];
+
+    fd_check(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices,
+        &[rho_idx, beta_idx],
+        dt, 1e-4,
+        "gh76_poisson_obs",
+    );
+}
+
+/// Build a discretized-normal obs version of seir_observations programmatically.
+/// Mean = rho * projected, sd = sigma_obs (a new parameter).
+fn build_discretized_normal_seir() -> ir::Model {
+    use ir::expr::{Expr, ParamExpr};
+    use ir::parameter::Parameter;
+    let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");
+    model.observations.retain(|o| o.name == "weekly_cases");
+
+    model.parameters.push(Parameter {
+        name: "sigma_obs".to_string(),
+        value: Some(8.0),
+        bounds: Some((0.1, 1000.0)),
+        prior: None,
+        hierarchical: None,
+        transform: None,
+        initial_value: None,
+        param_kind: Some("positive".to_string()),
+        param_dim: None,
+    });
+
+    for om in &mut model.observations {
+        use ir::observation::{Likelihood, NormalLikelihood};
+        if let Likelihood::NegBinomial(nb) = &om.likelihood {
+            om.likelihood = Likelihood::Normal(NormalLikelihood {
+                mean: nb.mean.clone(),
+                sd: Expr::Param(ParamExpr { param: "sigma_obs".to_string() }),
+            });
+        }
+    }
+    model
+}
+
+#[test]
+fn gh76_discretized_normal_obs_grad_matches_fd() {
+    // Synthetic obs are projected via the obs-model mean
+    // (`project_trajectory_to_obs`), so observations sit near the
+    // likelihood's peak. This is the regime where
+    // `discretized_normal_logpmf_grad` is most accurate; far-tail
+    // observations (where the helper's CDF-difference denominator
+    // loses precision) are out of scope of this test — see the
+    // precision note on the helper itself.
+    let mut model = build_discretized_normal_seir();
+    set_param_defaults(&mut model, &[
+        ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
+        ("rho", 0.5), ("k", 5.0), ("p_detect", 0.8),
+        ("N0", 10000.0), ("I0", 10.0),
+        ("sigma_obs", 8.0),
+    ]);
+    model.simulation.t_end = 60.0;
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let (params, param_names) = build_params_and_names(&compiled);
+
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let dt = 1.0;
+    let mut rng = StatefulRng::new(46);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let n_substeps = trajectory.substeps.len();
+
+    let (substep_idx, obs_times) = obs_substep_indices_regular(
+        t_start, dt, n_substeps, 7.0, 7.0, t_end,
+    );
+
+    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+    let observations: Vec<Observation> = obs_times.iter()
+        .map(|&t| Observation { time: t, value: 0.0 }).collect();
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let rho_idx = compiled.param_index["rho"];
+    let sigma_obs_idx = compiled.param_index["sigma_obs"];
+
+    fd_check(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices,
+        &[rho_idx, sigma_obs_idx],
+        dt, 1e-4,
+        "gh76_discretized_normal_obs",
+    );
+}

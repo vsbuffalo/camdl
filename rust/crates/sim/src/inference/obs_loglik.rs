@@ -91,6 +91,13 @@ pub fn normal_logpdf_grad(y: f64, mu: f64, sigma: f64) -> (f64, f64) {
 }
 
 /// Gradient of discretized_normal_logpmf w.r.t. (mean, variance).
+///
+/// Precision note (gh#76): in the deep tails where both Φ values are
+/// numerically near 0 or near 1, the `prob = Φ(z_hi) - Φ(z_lo)`
+/// denominator loses precision; the analytic gradient then disagrees
+/// with FD beyond the helper's nominal 1e-3 bar. A future asymptotic
+/// rewrite (analogous to the LL's erfc-difference form, but adapted
+/// to the gradient) could tighten this; tracked as a follow-up to gh#76.
 pub fn discretized_normal_logpmf_grad(
     y: f64, mu: f64, variance: f64, tol: f64,
 ) -> (f64, f64) {

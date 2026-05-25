@@ -7,9 +7,14 @@ use std::sync::Arc;
 use crate::compiled_model::CompiledModel;
 use crate::rng::StatefulRng;
 use crate::propensity::EvalCtx;
-use crate::resolved_expr::{ResolvedLikelihood, ResolveCtx, resolve_likelihood, eval_resolved};
+use crate::resolved_expr::{
+    ResolvedLikelihood, ResolveCtx, resolve_likelihood, eval_resolved, eval_resolved_deriv,
+};
 use crate::state::{IntState, RealState};
-use crate::inference::obs_loglik::{negbin_logpmf, discretized_normal_logpmf_tol, poisson_logpmf, DEFAULT_TOL};
+use crate::inference::obs_loglik::{
+    negbin_logpmf, discretized_normal_logpmf_tol, poisson_logpmf, DEFAULT_TOL,
+    negbin_logpmf_grad, discretized_normal_logpmf_grad, poisson_logpmf_grad,
+};
 use crate::inference::types::LOG_PROB_FLOOR;
 use ir::observation::ObservationModel;
 use rand::prelude::Distribution;
@@ -124,6 +129,116 @@ pub(crate) fn eval_likelihood_resolved(
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             if observed > 0.5 { p_val.max(LOG_PROB_FLOOR).ln() }
             else              { (1.0 - p_val).max(LOG_PROB_FLOOR).ln() }
+        }
+    }
+}
+
+/// Gradient of `eval_likelihood_resolved` w.r.t. estimated parameters.
+///
+/// Accumulates into `grad[i] += d(log L)/d(θ_i)` for each estimated parameter,
+/// chain-ruling through every likelihood-argument expression that may depend
+/// on θ. Mirrors `eval_likelihood_resolved` exactly so the gradient and the
+/// scalar match. (gh#76)
+///
+/// Caveat — projection dependence. If a stream's `projection` is a
+/// `DerivedExpr` that depends on parameters, the resulting d(projected)/dθ is
+/// **not** propagated here — the likelihood args are differentiated assuming
+/// `projected` is a constant. For `FlowSum` and `IntCompSum` projections (the
+/// common case), `projected` does not depend on θ, so this is exact. For
+/// `DerivedExpr` projections referencing θ, the gradient is missing a term;
+/// see docs/dev/notes/2026-05-25-pgas-obs-grad-derivation.md. Issue gh#76's
+/// reproducer (rho, k_obs, σ_obs) does not exercise that case.
+pub(crate) fn eval_likelihood_resolved_grad(
+    likelihood: &ResolvedLikelihood,
+    t: f64,
+    projected: f64,
+    observed: f64,
+    params: &[f64],
+    compiled: &CompiledModel,
+    int_s: &IntState,
+    real_s: &RealState,
+    estimated_to_model: &[usize],
+    grad: &mut [f64],
+) {
+    let ctx_at = |proj: f64| EvalCtx {
+        model: compiled, int_s, real_s, params, t, dt: 0.0,
+        projected: Some(proj), int_float_override: None,
+    };
+    let ctx = ctx_at(projected);
+
+    match likelihood {
+        ResolvedLikelihood::NegBinomial { mean, dispersion } => {
+            let m = eval_resolved(mean, &ctx);
+            let k = eval_resolved(dispersion, &ctx);
+            let (d_mu, d_k) = negbin_logpmf_grad(observed, m, k);
+            for (i, &model_idx) in estimated_to_model.iter().enumerate() {
+                let dm = eval_resolved_deriv(mean, model_idx, &ctx);
+                let dk = eval_resolved_deriv(dispersion, model_idx, &ctx);
+                grad[i] += d_mu * dm + d_k * dk;
+            }
+        }
+        ResolvedLikelihood::Normal { mean, sd } => {
+            // Discretized-normal in the implementation; gradients w.r.t.
+            // (mean, variance) come from `discretized_normal_logpmf_grad`,
+            // then chain-ruled to (mean, sd) via d(var)/d(sd) = 2·sd.
+            let m = eval_resolved(mean, &ctx);
+            let s = eval_resolved(sd, &ctx);
+            let var = s * s;
+            let (d_mu, d_var) = discretized_normal_logpmf_grad(observed, m, var, DEFAULT_TOL);
+            // d(log L)/d(sd) = d(log L)/d(var) · d(var)/d(sd) = d_var · 2·sd
+            let d_sd = d_var * 2.0 * s;
+            for (i, &model_idx) in estimated_to_model.iter().enumerate() {
+                let dm = eval_resolved_deriv(mean, model_idx, &ctx);
+                let ds = eval_resolved_deriv(sd, model_idx, &ctx);
+                grad[i] += d_mu * dm + d_sd * ds;
+            }
+        }
+        ResolvedLikelihood::Poisson { rate } => {
+            let r = eval_resolved(rate, &ctx);
+            let d_rate = poisson_logpmf_grad(observed, r);
+            for (i, &model_idx) in estimated_to_model.iter().enumerate() {
+                let dr = eval_resolved_deriv(rate, model_idx, &ctx);
+                grad[i] += d_rate * dr;
+            }
+        }
+        ResolvedLikelihood::Binomial { n, p } => {
+            // log p(k|n,p) = log C(n,k) + k·log(p) + (n-k)·log(1-p)
+            // n is integer-valued (rounded); treat n as constant w.r.t. θ.
+            // d/dp = k/p - (n-k)/(1-p)
+            let n_val = eval_resolved(n, &ctx);
+            let p_val = eval_resolved(p, &ctx);
+            let n_int = n_val.round().max(0.0) as u64;
+            let k_obs = observed.round().max(0.0) as u64;
+            if p_val > 0.0 && p_val < 1.0 && k_obs <= n_int {
+                let d_p = k_obs as f64 / p_val - (n_int - k_obs) as f64 / (1.0 - p_val);
+                for (i, &model_idx) in estimated_to_model.iter().enumerate() {
+                    let dp = eval_resolved_deriv(p, model_idx, &ctx);
+                    grad[i] += d_p * dp;
+                }
+            }
+        }
+        ResolvedLikelihood::BetaBinomial { n: _, alpha: _, beta: _ } => {
+            // BetaBinomial gradient not yet implemented in obs_loglik.
+            // gh#76's reproducer does not exercise BetaBinomial. Estimating a
+            // BetaBinomial-bound param with PGAS+NUTS would land in the same
+            // silent-zero-gradient regime that gh#76 was filed against, but
+            // is rare in practice. Tracked as a follow-up to gh#76.
+            //
+            // No-op: leave grad unchanged.
+        }
+        ResolvedLikelihood::Bernoulli { p } => {
+            // log L = log(p)         if observed > 0.5
+            //       = log(1 - p)     otherwise
+            // Outside [0,1] the clamp in eval_likelihood_resolved fires,
+            // so the in-domain gradient is exact only when 0 < p < 1.
+            let p_val = eval_resolved(p, &ctx);
+            if p_val > 0.0 && p_val < 1.0 {
+                let d_log = if observed > 0.5 { 1.0 / p_val } else { -1.0 / (1.0 - p_val) };
+                for (i, &model_idx) in estimated_to_model.iter().enumerate() {
+                    let dp = eval_resolved_deriv(p, model_idx, &ctx);
+                    grad[i] += d_log * dp;
+                }
+            }
         }
     }
 }

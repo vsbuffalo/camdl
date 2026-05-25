@@ -26,25 +26,6 @@ use crate::propensity::{eval_propensities, EvalCtx};
 use crate::resolved_expr::eval_resolved;
 use crate::state::{IntState, RealState};
 
-/// gh#audit-C1 → gh#76 follow-up. Helper for the C1 preflight gate.
-/// Walks every Expr inside a Likelihood (each variant has 1-3
-/// expression-valued args) and applies `f` to each. Used to collect
-/// parameter references for the obs-gradient-coverage check.
-fn for_each_likelihood_expr<F: FnMut(&ir::expr::Expr)>(
-    lh: &ir::observation::Likelihood,
-    mut f: F,
-) {
-    use ir::observation::Likelihood::*;
-    match lh {
-        Poisson(l)      => f(&l.rate),
-        NegBinomial(l)  => { f(&l.mean); f(&l.dispersion); }
-        Normal(l)       => { f(&l.mean); f(&l.sd); }
-        Binomial(l)     => { f(&l.n); f(&l.p); }
-        BetaBinomial(l) => { f(&l.n); f(&l.alpha); f(&l.beta); }
-        Bernoulli(l)    => f(&l.p),
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════
@@ -1467,62 +1448,11 @@ pub fn run_pgas(
                    Increase sweeps in fit.toml to continue.", start_sweep, config.n_sweeps);
     }
 
-    // gh#audit-C1 preflight gate (narrowed by gh#20). The σ²
-    // (overdispersion) gradient is now wired via
-    // `pgas_grad::log_gamma_density_grad_substep`; estimating σ² with PGAS
-    // is safe. The observation-likelihood gradient is still missing —
-    // gh#76 — so block any parameter that appears in an obs-likelihood
-    // argument until that lands.
-    {
-        use std::collections::HashSet;
-        fn collect_param_refs(e: &ir::expr::Expr, out: &mut HashSet<String>) {
-            match e {
-                ir::expr::Expr::Param(p) => { out.insert(p.param.clone()); }
-                ir::expr::Expr::BinOp(w) => {
-                    collect_param_refs(&w.bin_op.left,  out);
-                    collect_param_refs(&w.bin_op.right, out);
-                }
-                ir::expr::Expr::UnOp(w) => collect_param_refs(&w.un_op.arg, out),
-                ir::expr::Expr::Cond(w) => {
-                    collect_param_refs(&w.cond.pred,  out);
-                    collect_param_refs(&w.cond.then,  out);
-                    collect_param_refs(&w.cond.else_, out);
-                }
-                ir::expr::Expr::PopSum(_) | ir::expr::Expr::Pop(_)
-                | ir::expr::Expr::Const(_) | ir::expr::Expr::Time(_)
-                | ir::expr::Expr::Dt(_)   | ir::expr::Expr::TimeFunc(_)
-                | ir::expr::Expr::Projected(_) => {}
-                ir::expr::Expr::TableLookup(w) => {
-                    for ix in &w.table_lookup.indices {
-                        collect_param_refs(ix, out);
-                    }
-                }
-                ir::expr::Expr::UncheckedDim(w) => collect_param_refs(&w.unchecked_dim.inner, out),
-            }
-        }
-        let mut obs_param_refs: HashSet<String> = HashSet::new();
-        for om in &model.model.observations {
-            for_each_likelihood_expr(&om.likelihood, |e| collect_param_refs(e, &mut obs_param_refs));
-        }
-        let mut blocked: Vec<String> = Vec::new();
-        for spec in if2_params.iter() {
-            if obs_param_refs.contains(spec.name.as_str()) {
-                blocked.push(format!("'{}' (in an observation likelihood)", spec.name));
-            }
-        }
-        if !blocked.is_empty() {
-            return Err(crate::error::SimError::Validation(format!(
-                "PGAS gradient does not yet include observation-likelihood \
-                 derivatives (gh#76). Estimating these parameters with PGAS \
-                 would produce silently biased posteriors because NUTS sees \
-                 zero gradient on the affected coordinate. Blocked parameters: \
-                 {}. Until gh#76 lands, either fix these parameters (move from \
-                 `[estimate.X]` to `[fixed.X]` in fit.toml) or fit them with a \
-                 non-gradient method (IF2, PMMH).",
-                blocked.join(", ")
-            )));
-        }
-    }
+    // The audit-C1 preflight gate that previously blocked obs-likelihood
+    // and σ²-overdispersion parameters from NUTS estimation was removed
+    // by gh#20 (σ² gradient) and gh#76 (obs gradient). The
+    // `complete_data_loglik_grad` function now propagates the full set
+    // of analytic gradients required by NUTS.
 
     // Pre-resolve rate_grad indices once for the entire run (avoids O(n_params)
     // string scans per gradient term per substep in the NUTS hot path).

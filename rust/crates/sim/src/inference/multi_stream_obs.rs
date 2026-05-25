@@ -62,6 +62,7 @@ use super::traits::ObservationModel;
 use super::types::ParticleState;
 use super::obs_model::{
     resolve_likelihood_from_model, eval_likelihood_resolved,
+    eval_likelihood_resolved_grad,
     sample_obs_resolved, eval_obs_mean_resolved,
 };
 
@@ -370,6 +371,39 @@ impl MultiStreamObsModel {
     ) -> f64 {
         let zeros = vec![0i64; self.compiled.int_local_to_global.len()];
         self.log_likelihood_from_flows_and_counts(cum_flows, &zeros, obs_idx, params)
+    }
+
+    /// Gradient of `log_likelihood_from_flows_and_counts` w.r.t. estimated
+    /// parameters. Used by `pgas_grad::complete_data_loglik_grad` to wire
+    /// the obs-density gradient term (gh#76). Returns a fresh `Vec<f64>` of
+    /// length `estimated_to_model.len()`; sums across all streams.
+    ///
+    /// Mirrors `log_likelihood_from_flows_and_counts` exactly in stream
+    /// iteration order and projection evaluation; only the inner per-stream
+    /// step changes from "score" to "score-grad".
+    pub fn log_likelihood_grad_from_flows_and_counts(
+        &self,
+        cum_flows: &[u64],
+        counts: &[i64],
+        obs_idx: usize,
+        params: &[f64],
+        estimated_to_model: &[usize],
+    ) -> Vec<f64> {
+        let d = estimated_to_model.len();
+        let mut grad = vec![0.0; d];
+        let t = self.obs_times[obs_idx];
+        for si in 0..self.streams.len() {
+            let projected = self.project_stream_with_params(si, cum_flows, counts, params, t);
+            let s = &self.streams[si];
+            with_scratch_int_from_counts(counts, |int_s| {
+                eval_likelihood_resolved_grad(
+                    &s.resolved, t, projected, s.observations[obs_idx],
+                    params, &self.compiled, int_s, &self.real_s,
+                    estimated_to_model, &mut grad,
+                );
+            });
+        }
+        grad
     }
 }
 

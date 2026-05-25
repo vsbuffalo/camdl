@@ -340,20 +340,19 @@ fn log_gamma_density_grad_substep(
 
 /// Gradient of the complete-data log-likelihood over all substeps.
 ///
-/// Returns (log_p, grad) summed over:
-/// - Initial state Binom density (IVP params).
-/// - Transition rate density (via `rate_grad` and Binom chain rule).
-/// - Gamma-multiplier density (gh#20) — wired through σ² resolved expressions.
-/// - Observation density (gh#76) — wired through per-distribution gradient
-///   helpers in `obs_loglik.rs` and `eval_resolved_deriv` on each likelihood
-///   argument expression.
+/// Returns (log_p, grad) summed over four terms (all wired as of gh#76):
+/// 1. Initial-state Binom density gradient (IVP params).
+/// 2. Transition rate-density gradient (via compiler-emitted `rate_grad` and
+///    the binomial-chain-rule machinery in `log_transition_density_grad`).
+/// 3. Gamma-multiplier-density gradient w.r.t. σ² (gh#20) — chain rule through
+///    the σ² resolved expression via `eval_resolved_deriv`.
+/// 4. Observation-density gradient w.r.t. obs-model params (gh#76) — chain
+///    rule through each likelihood-argument expression via the per-distribution
+///    gradient helpers in `obs_loglik.rs`.
 ///
 /// `estimated_to_model[i]` is the model-param index of the i-th estimated
 /// parameter (the inverse of `model_to_estimated` used to build
-/// `rate_grads_for_run`). Required by the gamma-density and observation-
-/// density gradient terms, which evaluate `d(σ²)/dθ_k` and
-/// `d(likelihood_arg)/dθ_k` via `eval_resolved_deriv` on the σ² and
-/// likelihood-argument trees respectively.
+/// `rate_grads_for_run`). Required by terms 3 and 4.
 pub fn complete_data_loglik_grad(
     model: &CompiledModel,
     trajectory: &PGASTrajectory,
@@ -426,14 +425,21 @@ pub fn complete_data_loglik_grad(
             cum_flows[i] += f;
         }
 
-        // Observation density. Snapshot projections read post-step state
-        // from the trajectory record. Observation-density gradient w.r.t.
-        // obs-model params is added in gh#76 (a follow-up commit); the
-        // gate in `pgas::run_pgas` blocks obs-param estimation with NUTS
-        // until that lands.
+        // gh#76: observation density + its gradient.
+        // Snapshot projections read post-step state from the trajectory record.
         if let Some(&obs_idx) = obs_at_substep.get(&s) {
             log_p += obs_model.log_likelihood_from_flows_and_counts(
                 &cum_flows, &rec.counts_after, obs_idx, params);
+
+            // Per-distribution gradient helpers in `obs_loglik.rs` give
+            // d(log L)/d(mean), d(log L)/d(k), etc.; the per-stream method
+            // chain-rules through each likelihood arg expression via
+            // `eval_resolved_deriv` to reach the estimated parameters.
+            let obs_grad = obs_model.log_likelihood_grad_from_flows_and_counts(
+                &cum_flows, &rec.counts_after, obs_idx, params, estimated_to_model,
+            );
+            for i in 0..d { grad[i] += obs_grad[i]; }
+
             cum_flows.fill(0);
         }
     }
