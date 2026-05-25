@@ -841,12 +841,35 @@ Fix: add a small seeding term to the infection rate:
 $\beta \cdot S_i \cdot (I_i + \iota) / N_i$ where $\iota \approx 10^{-6}$. This
 ensures the infection rate is never exactly zero, allowing importation-driven
 infections to have finite (though very small) density. pomp spatial models use
-the same pattern. If camdl detects a zero-rate transition with nonzero flow
-during PGAS, it emits a warning suggesting this fix.
+the same pattern.
 
 Not all spatial models need iota. Models with constant importation via
 `events {}` blocks, or models where the rate expression already includes an
 additive term, are fine without it.
+
+#### Discrete-event seeding and PGAS
+
+Discrete seeding via `events { ... add(E, n_seed) at [tau] }` is supported by
+PGAS as of 2026-05-25 (gh#80). The chain-binomial simulator and the density
+evaluator are consistent at the event substep: at substep $s_{\text{event}}$,
+`counts_before` is the pre-event state, all stochastic flows are drawn from
+pre-event rates (which are zero for the seeded compartment's downstream
+transitions), and the event delta is applied atomically with transition deltas
+at end-of-substep. The transition log-density at that substep is exactly zero
+(finite). No Gaussian-pulse workaround is needed.
+
+If a chain initialises with an event-time parameter (e.g., `tau`) outside the
+simulation window, the seed never fires within the simulation, predicted
+incidence stays zero, and the *observation* density goes to $-\infty$ against
+real data with nonzero cases. camdl prints a split-by-component diagnostic at
+startup so the failure mode is identifiable (transition_ll vs observation_ll vs
+ivp_ll); the chain will still run if NUTS or MH can propose into a feasible
+region.
+
+During CSMC ancestor sampling on event-using models, the density evaluator
+returns $-\infty$ for a free particle whose pre-step state has zero rate for a
+transition that fired in the reference's flow record. This is correct: the
+free particle cannot be the ancestor and is excluded from the categorical.
 
 **Time step size.** The Euler-multinomial approximation assumes exit
 probabilities are small per substep. In spatial models with high $R_0$ and
