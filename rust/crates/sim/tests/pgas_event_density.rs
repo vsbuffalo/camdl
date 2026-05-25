@@ -43,7 +43,11 @@ use ir::{
     Model,
 };
 use sim::compiled_model::CompiledModel;
-use sim::inference::pgas::{log_transition_density_substep, simulate_reference};
+use sim::inference::if2::{EstimatedParam, Transform};
+use sim::inference::multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec};
+use sim::inference::particle_filter::Observation;
+use sim::inference::pgas::{log_transition_density_substep, run_pgas, simulate_reference, PGASConfig};
+use sim::inference::pmmh::Prior;
 use sim::rng::StatefulRng;
 
 fn int_comp(name: &str) -> Compartment {
@@ -308,4 +312,128 @@ fn pgas_simulate_reference_finite_density_on_seir_event_model() {
     }
     assert!(event_substep_seen, "the event-firing substep should appear in the trajectory");
     assert!(total_ll.is_finite());
+}
+
+/// gh#80 smoke: PGAS+NUTS on SEIR with a discrete seed event runs cleanly
+/// (no -inf density, NUTS adapts to a non-trivial step size, MH acceptance
+/// > 0). Marked `#[ignore]` — multi-minute compute, not for every-PR runs.
+///
+/// To run:
+///   cargo test --release -p sim --test pgas_event_density \
+///     pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event \
+///     -- --ignored --nocapture
+#[test]
+#[ignore]
+fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
+    let model = seir_with_seed_event(5, 10.0);  // event at t=10 (within [0, 30])
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let n_params = compiled.param_index.len();
+    let mut params = vec![0.0; n_params];
+    for p in &compiled.model.parameters {
+        if let Some(v) = p.value {
+            params[compiled.param_index[p.name.as_str()]] = v;
+        }
+    }
+
+    // Truth trajectory under the seed event.
+    let dt = 0.5;
+    let t_end = compiled.model.simulation.t_end;
+    let mut rng = StatefulRng::new(101);
+    let truth = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+
+    // Daily-cadence observations of incidence(infection) = transition 0.
+    // Sum daily flows on integer days, dropping noise (NegBin obs noise
+    // would add variance unrelated to gh#80 — the smoke is about whether
+    // the chain *runs cleanly*, not about parameter recovery precision).
+    let mut cum_infection: u64 = 0;
+    let mut obs: Vec<Observation> = Vec::new();
+    for (s, rec) in truth.substeps.iter().enumerate() {
+        cum_infection += rec.flows[0];
+        let t = ((s + 1) as f64) * dt;
+        // Daily observation
+        if (t - t.round()).abs() < 1e-9 && t > 0.0 {
+            obs.push(Observation { time: t, value: cum_infection as f64 });
+            cum_infection = 0;
+        }
+    }
+
+    // NegBin obs model.
+    let obs_model = MultiStreamObsModel::new(
+        vec![StreamSpec {
+            projection: StreamProjection::FlowSum(vec![0]),  // infection
+            ir_model: ir::observation::ObservationModel {
+                name: "cases".into(),
+                data_stream: "cases".into(),
+                schedule: ir::observation::ObservationSchedule::FromData,
+                projection: ir::observation::Projection::CumulativeFlow("infection".into()),
+                likelihood: ir::observation::Likelihood::NegBinomial(
+                    ir::observation::NegBinomialLikelihood {
+                        mean: ir::expr::Expr::BinOp(ir::expr::BinOpWrap {
+                            bin_op: ir::expr::BinOpExpr {
+                                op: ir::expr::BinOp::Add,
+                                left: Box::new(ir::expr::Expr::Projected(
+                                    ir::expr::ProjectedExpr { projected: () })),
+                                right: Box::new(ir::expr::Expr::Const(
+                                    ir::expr::ConstExpr { value: 0.1 })),
+                            },
+                        }),
+                        dispersion: ir::expr::Expr::Const(ir::expr::ConstExpr { value: 10.0 }),
+                    }),
+            },
+            observations: obs.iter().map(|o| o.value).collect(),
+            obs_times: obs.iter().map(|o| o.time).collect(),
+        }],
+        compiled.clone(),
+    ).unwrap();
+
+    let if2_params = vec![
+        EstimatedParam {
+            name: "beta".into(),
+            index: compiled.param_index["beta"],
+            initial: 0.5,
+            rw_sd: 0.05,
+            transform: Transform::Log { lo: 0.1, hi: 2.0 },
+            lower: 0.1, upper: 2.0,
+            rw_sd_auto: false, ivp: false,
+        },
+    ];
+    let priors = vec![Prior::Flat];
+
+    let config = PGASConfig {
+        n_particles: 50,
+        n_sweeps: 50,
+        burn_in: 15,
+        thin: 1,
+        dt,
+        use_nuts: true,
+        dense_mass: false,
+        max_tree_depth: 8,
+        tempering: vec![1.0],
+        trajectory_warmup: 0,
+        csmc_sweeps_per_nuts: 1,
+    };
+
+    let result = run_pgas(
+        &compiled, &if2_params, &priors, &params,
+        &config, &obs, &obs_model, 4242, None, None, "gh80_smoke".into(),
+    ).unwrap();
+
+    let final_ll = result.sweeps.last().unwrap().log_complete_data_ll;
+    assert!(final_ll.is_finite(), "final LL must be finite, got {}", final_ll);
+
+    let post_burn = &result.sweeps[config.burn_in..];
+    let accept_count: usize = post_burn.iter()
+        .map(|s| s.accepted.iter().filter(|&&x| x).count()).sum();
+    let total_props: usize = post_burn.iter().map(|s| s.accepted.len()).sum();
+    let accept_rate = accept_count as f64 / total_props.max(1) as f64;
+
+    eprintln!("[gh#80 smoke] final LL: {:.2}", final_ll);
+    eprintln!("[gh#80 smoke] post-burn acceptance: {:.3}", accept_rate);
+    eprintln!("[gh#80 smoke] adapted NUTS step: {:.4}",
+        result.resume_state.nuts_step_size);
+
+    assert!(accept_rate > 0.0, "NUTS acceptance must be > 0");
+    assert!(result.resume_state.nuts_step_size > 1e-8,
+        "adapted step size must be > 1e-8 (got {:.2e})",
+        result.resume_state.nuts_step_size);
 }
