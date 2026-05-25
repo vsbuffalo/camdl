@@ -405,6 +405,26 @@ pub fn eval_propensities(
     dt: f64,
     out: &mut Vec<f64>,
 ) -> Result<(), SimError> {
+    // gh#81 Phase 2. Detect non-finite parameter values BEFORE rate eval
+    // runs — they propagate into every rate expression that touches them
+    // and surface downstream as a generic NumericalCollapse{DivByZero}
+    // that blames the rate expression. The actual fault is upstream:
+    // a NUTS leapfrog step or PMMH proposal produced a NaN/Inf param.
+    // Naming the offending parameter here turns a misleading message
+    // ("DivByZero in rate expression at t=…") into the precise one
+    // ("parameter `beta` is non-finite at t=…"), which surfaces the
+    // actual proposal-mechanism failure to the user.
+    for (name, &idx) in model.param_index.iter() {
+        let v = params[idx];
+        if !v.is_finite() {
+            return Err(SimError::NonFiniteParameter {
+                name: name.clone(),
+                value: v,
+                t,
+            });
+        }
+    }
+
     let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, int_float_override: None };
     out.clear();
     for (i, tr) in model.model.transitions.iter().enumerate() {

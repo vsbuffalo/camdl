@@ -62,6 +62,38 @@ pub enum SimError {
         t: f64,
         cause: NegativeCountCause,
     },
+
+    /// gh#81 Phase 2. A model parameter reached the rate evaluator
+    /// already non-finite (NaN / ±Inf). The rate expression itself is
+    /// innocent — propagating NaN through `beta * S * I / N` produces
+    /// NaN downstream, which the legacy NaN-propagation guard at
+    /// `eval_propensities` then surfaced as a generic
+    /// `NumericalCollapse { kind: DivByZero }`. That diagnostic blamed
+    /// the rate expression and the simulation time, hiding the actual
+    /// upstream fault: a NUTS leapfrog step or PMMH random-walk proposal
+    /// produced a non-finite parameter (typically from step-size
+    /// adaptation going pathological, or a transform-vs-bounds violation
+    /// at the edge of f64 range).
+    ///
+    /// Classified as per-particle recoverable: inference proposal
+    /// mechanisms must reject the offending proposal and continue,
+    /// not tear down the chain. Forward-sim CLI propagates as a
+    /// user-facing error with the parameter name.
+    #[error("parameter `{name}` is non-finite (value: {value}) at t = {t}.\n\
+             This is upstream of rate evaluation — a NUTS leapfrog step or PMMH proposal\n\
+             produced a NaN/Inf parameter, which would then propagate into every rate\n\
+             expression that references it. The error is in the proposal mechanism, not\n\
+             in the rate expression. The chain rejects this proposal and continues; if\n\
+             you see thousands of these warnings, NUTS step-size adaptation is unstable\n\
+             on this model. Consider:\n  \
+               - init_method = \"survey_top_k\" for better starting points (gh#51)\n  \
+               - increasing n_particles if PMMH; pinning some params if PGAS\n  \
+               - investigating gradient stability via --check-grads (gh#78, not yet implemented)")]
+    NonFiniteParameter {
+        name: String,
+        value: f64,
+        t: f64,
+    },
 }
 
 /// gh#audit-C6 / S1. Specific numerical-degeneracy mode that
@@ -96,9 +128,11 @@ impl SimError {
     /// whole filter run.
     ///
     /// Recoverable: NumericalCollapse (DivByZero, PowNanInf, UnOpNan,
-    /// SqrtNegative, ModByZero) and NegativeCount with cause
-    /// BinomialOvershoot — these arise from particles exploring
-    /// extreme parameter regions.
+    /// SqrtNegative, ModByZero), NegativeCount with cause
+    /// BinomialOvershoot, and NonFiniteParameter (gh#81 Phase 2 — a
+    /// NUTS/PMMH proposal produced a NaN/Inf parameter) — these all
+    /// arise from particles or proposals exploring extreme parameter
+    /// regions and should reject-and-continue rather than die.
     ///
     /// Not recoverable: structural errors (UnknownCompartment,
     /// UnknownParameter, ConfigMismatch, …), AbsorbingState (model-
@@ -109,6 +143,7 @@ impl SimError {
             self,
             SimError::NumericalCollapse { .. }
             | SimError::NegativeCount { cause: NegativeCountCause::BinomialOvershoot, .. }
+            | SimError::NonFiniteParameter { .. }
         )
     }
 }
