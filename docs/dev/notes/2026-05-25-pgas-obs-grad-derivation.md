@@ -343,3 +343,31 @@ Follow-ups filed:
 - (existing) BetaBinomial gradient helper and parametric
   DerivedExpr-projection chain-rule term — the two arms the new
   C1 gate refuses.
+
+## gh#80 cross-reference (2026-05-25, follow-up branch)
+
+gh#80 originally proposed making `log_transition_density_substep`
+event-aware to fix a claimed `simulate_reference` -inf-density
+mismatch on models with `events { add(...) at [...] }`. Tracing the
+data flow showed the math is already consistent (full diagnosis in
+`docs/dev/notes/2026-05-25-pgas-event-density-diagnosis.md`):
+
+* `simulate_reference` records `counts_before` *before* `step_one`
+  runs; both stochastic-transition rates AND the event delta act on
+  this same snapshot inside `step_one`. The event delta goes
+  through `pending_deltas` directly to `counts`, never to `flows`.
+* `log_transition_density_substep` recomputes rates from
+  `counts_before` and scores the recorded flows — consistent with
+  the simulator. At an event substep all flows are 0 and all
+  pre-event rates are 0; density is 0 (finite).
+
+The user-visible symptoms attributed to the bug came from
+distinct UX issues: the "BUG: simulate_reference -inf density"
+diagnostic conflated obs-density -inf with transition-density -inf,
+and the "rate=0 but flow=N" warning at `compute_source_group_probs`
+was firing legitimately during CSMC ancestor sampling (mathematically
+correct -inf for a free particle that can't have been the ancestor
+of the reference's flows). The gh#80 branch addresses both as UX
+fixes — neither touches `complete_data_loglik_grad` or any term in
+this derivation. The `gradient_check_overdisp` / `gradient_check_obs`
+tests pinned here pass byte-identical post-fix.
