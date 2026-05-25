@@ -90,14 +90,26 @@ pub fn normal_logpdf_grad(y: f64, mu: f64, sigma: f64) -> (f64, f64) {
     (d_mu, d_sigma)
 }
 
-/// Gradient of discretized_normal_logpmf w.r.t. (mean, variance).
+/// Gradient of `discretized_normal_logpmf_tol` w.r.t. (mean, variance).
 ///
-/// Precision note (gh#76): in the deep tails where both Φ values are
-/// numerically near 0 or near 1, the `prob = Φ(z_hi) - Φ(z_lo)`
-/// denominator loses precision; the analytic gradient then disagrees
-/// with FD beyond the helper's nominal 1e-3 bar. A future asymptotic
-/// rewrite (analogous to the LL's erfc-difference form, but adapted
-/// to the gradient) could tighten this; tracked as a follow-up to gh#76.
+/// gh#76 cleanup: this helper now uses the *same* erfc-stable `prob`
+/// expression as `discretized_normal_logpmf_tol`. The two functions are
+/// numerically symmetric: a NUTS Hamiltonian sees the same potential and
+/// gradient regardless of which routine evaluates which term. The prior
+/// asymmetry (value used erfc-difference, gradient used Φ-difference) was
+/// a classical recipe for energy non-conservation and spurious divergences
+/// in the tails.
+///
+/// Symbolically: d/dθ log P = (1/P) · dP/dθ. The numerator `dP/dθ` stays
+/// in the φ-difference form (φ is well-conditioned across the real line,
+/// and the gradient is *correctly* small when both φ values are tiny —
+/// no rewrite needed). The denominator P uses the corrected erfc-stable
+/// branches from `discretized_normal_logpmf_tol`.
+///
+/// Tol-floor behaviour: when `prob` clamps to `tol`, `log(prob) = log(tol)`
+/// is a constant in θ, so the gradient is 0. This matches what a clean
+/// FD against the value function would compute, restoring symmetry in the
+/// regime where the value is at the floor.
 pub fn discretized_normal_logpmf_grad(
     y: f64, mu: f64, variance: f64, tol: f64,
 ) -> (f64, f64) {
@@ -105,11 +117,29 @@ pub fn discretized_normal_logpmf_grad(
     let y = y.round().max(0.0);
     let z_hi = (y + 0.5 - mu) / sigma;
     let z_lo = (y - 0.5 - mu) / sigma;
-    let phi_hi = normal_cdf(z_hi);
-    let phi_lo = if y <= 0.5 { 0.0 } else { normal_cdf(z_lo) };
-    let prob = (phi_hi - phi_lo).max(tol);
 
     let npdf = |z: f64| (-0.5 * z * z).exp() / (2.0 * PI).sqrt();
+
+    // erfc-stable prob — matches `discretized_normal_logpmf_tol` (q.v.
+    // for the derivation of the corrected branches).
+    let prob_raw = if y <= 0.5 {
+        normal_cdf(z_hi)
+    } else if z_lo + z_hi >= 0.0 {
+        // Upper tail — Q-form: 0.5·(erfc(z_lo/√2) − erfc(z_hi/√2)).
+        0.5 * (libm::erfc(z_lo / std::f64::consts::SQRT_2)
+             - libm::erfc(z_hi / std::f64::consts::SQRT_2))
+    } else {
+        // Lower tail — P-form: 0.5·(erfc(−z_hi/√2) − erfc(−z_lo/√2)).
+        0.5 * (libm::erfc(-z_hi / std::f64::consts::SQRT_2)
+             - libm::erfc(-z_lo / std::f64::consts::SQRT_2))
+    };
+
+    // Tol-floor symmetry with the value function: when `prob` floors, the
+    // value is the constant log(tol) in θ and the gradient is zero.
+    if prob_raw <= tol {
+        return (0.0, 0.0);
+    }
+    let prob = prob_raw;
 
     let dp_dmu = if y <= 0.5 {
         -npdf(z_hi) / sigma
@@ -216,28 +246,44 @@ pub fn discretized_normal_logpmf_tol(y: f64, mean: f64, variance: f64, tol: f64)
     let sd = variance.max(1e-30).sqrt();
     let y = y.round().max(0.0);
 
-    // gh#audit-H2. erfc-based interval that avoids subtracting two
-    // near-1 values when both endpoints are in the upper tail (or
-    // two near-0 values when both are in the lower tail). For
-    // z_lo = (y - 0.5 - μ) / σ and z_hi = (y + 0.5 - μ) / σ:
-    //   * if z_lo + z_hi ≥ 0 (upper tail): use 0.5*(erfc(-z_hi/√2) - erfc(-z_lo/√2))
-    //     equivalently 0.5*(erfc(a) - erfc(b)) with a < b in upper tail
-    //   * if z_lo + z_hi < 0 (lower tail): use 0.5*(erfc(z_lo/√2) - erfc(z_hi/√2))
-    // Either form subtracts two small numbers rather than two near-
-    // 1 values. The Φ_hi - Φ_lo formulation collapses to noise when
-    // both Φ values are within 1e-7 of 0 or 1 (audit example: AFP
-    // surveillance).
+    // gh#audit-H2 + gh#76 cleanup. erfc-based interval that subtracts
+    // two *small* values rather than two *near-1* values:
+    //
+    //   For z ≥ 0:  Φ(z) = 1 − 0.5·erfc(z/√2),  Q(z) := 0.5·erfc(z/√2) is small.
+    //   For z ≤ 0:  Φ(z) = 0.5·erfc(−z/√2),    P(z) := 0.5·erfc(−z/√2) is small.
+    //
+    //   * Upper tail (z_lo + z_hi ≥ 0): Φ(z_hi) − Φ(z_lo)
+    //     = (1 − Q(z_hi)) − (1 − Q(z_lo)) = Q(z_lo) − Q(z_hi)
+    //     = 0.5·(erfc(z_lo/√2) − erfc(z_hi/√2))
+    //   * Lower tail (z_lo + z_hi < 0): Φ(z_hi) − Φ(z_lo) = P(z_hi) − P(z_lo)
+    //     = 0.5·(erfc(−z_hi/√2) − erfc(−z_lo/√2))
+    //
+    // Both forms feed erfc with *positive* arguments — erfc(large positive)
+    // is tiny, no cancellation against 2.0. Verified against an mpmath-
+    // precise reference: at z_lo=9.5, z_hi=10 the prior form returned 0
+    // (cancellation against 2.0); this form returns 1.04e-21 (correct).
+    //
+    // The prior audit-H2 (b981d60^) branches had the formulas swapped —
+    // both branches called erfc with negative args, which gives erfc ≈
+    // 2 − tiny → cancellation when subtracted, defeating the audit-H2
+    // intent. See docs/dev/notes/2026-05-25-pgas-obs-grad-derivation.md
+    // for the diagnostic that surfaced this during the gh#76 cleanup.
     let prob = if y > 0.0 {
         let z_lo = (y - 0.5 - mean) / sd;
         let z_hi = (y + 0.5 - mean) / sd;
         let p = if z_lo + z_hi >= 0.0 {
-            // Upper tail — both Φ values near 1. Use erfc(positive args).
-            0.5 * (libm::erfc(-z_hi / std::f64::consts::SQRT_2)
-                 - libm::erfc(-z_lo / std::f64::consts::SQRT_2))
-        } else {
-            // Lower tail — both Φ values near 0. Use erfc(negative args).
+            // Upper tail — both Φ values near 1. Use Q-form: erfc of
+            // positive args (since z_lo + z_hi ≥ 0 ⇒ z_hi > 0; z_lo
+            // may be ≤ 0 in the straddle case, where Q(z_lo) = 1 − tiny,
+            // still no cancellation against the small Q(z_hi)).
             0.5 * (libm::erfc(z_lo / std::f64::consts::SQRT_2)
                  - libm::erfc(z_hi / std::f64::consts::SQRT_2))
+        } else {
+            // Lower tail — both Φ values near 0. Use P-form: erfc of
+            // negated args (since z_lo + z_hi < 0 ⇒ z_lo < 0; the −z's
+            // are positive, erfc returns tiny values).
+            0.5 * (libm::erfc(-z_hi / std::f64::consts::SQRT_2)
+                 - libm::erfc(-z_lo / std::f64::consts::SQRT_2))
         };
         p.max(tol)
     } else {
@@ -506,6 +552,60 @@ mod tests {
             "d_mu: {} vs fd {}", d_mu, fd_mu);
         assert!((d_var - fd_var).abs() / fd_var.abs().max(1e-10) < 1e-3,
             "d_var: {} vs fd {}", d_var, fd_var);
+    }
+
+    /// gh#76 cleanup: tail FD points exercise the regime where the prior
+    /// Φ-difference denominator collapsed to numerical noise (audit-H2 on
+    /// the value side; ported here on the gradient side). After the port,
+    /// the value and the gradient share the same erfc-stable `prob`, so
+    /// FD-vs-analytic must agree at the same 1e-4 bar that the near-mode
+    /// test holds at.
+    ///
+    /// μ = 50, σ² = 4 (σ = 2). Tail points at 3σ, 5σ, 8σ on the upper
+    /// side; the lower-tail mirror is exercised by `_lower_tail` below.
+    #[test]
+    fn test_discretized_normal_grad_vs_fd_upper_tail_3sigma() {
+        check_discretized_normal_grad_tail(50.0 + 3.0 * 2.0, 50.0, 4.0, 1e-4);
+    }
+
+    #[test]
+    fn test_discretized_normal_grad_vs_fd_upper_tail_5sigma() {
+        check_discretized_normal_grad_tail(50.0 + 5.0 * 2.0, 50.0, 4.0, 1e-4);
+    }
+
+    #[test]
+    fn test_discretized_normal_grad_vs_fd_upper_tail_8sigma() {
+        check_discretized_normal_grad_tail(50.0 + 8.0 * 2.0, 50.0, 4.0, 1e-4);
+    }
+
+    #[test]
+    fn test_discretized_normal_grad_vs_fd_lower_tail_5sigma() {
+        // y > 0 lower-tail branch (z_lo + z_hi < 0). μ large enough that
+        // y = μ − 5σ is still positive (and rounds to a positive integer).
+        check_discretized_normal_grad_tail(50.0 - 5.0 * 2.0, 50.0, 4.0, 1e-4);
+    }
+
+    fn check_discretized_normal_grad_tail(y: f64, mu: f64, var: f64, rel_tol: f64) {
+        let tol = 1e-30;
+        // FD step chosen relative to the parameter being varied, not the
+        // value being observed.
+        let eps_mu  = 1e-5 * mu.abs().max(1.0);
+        let eps_var = 1e-5 * var.abs().max(1.0);
+
+        let (d_mu, d_var) = discretized_normal_logpmf_grad(y, mu, var, tol);
+        let fd_mu = (discretized_normal_logpmf_tol(y, mu + eps_mu, var, tol)
+                   - discretized_normal_logpmf_tol(y, mu - eps_mu, var, tol)) / (2.0 * eps_mu);
+        let fd_var = (discretized_normal_logpmf_tol(y, mu, var + eps_var, tol)
+                    - discretized_normal_logpmf_tol(y, mu, var - eps_var, tol)) / (2.0 * eps_var);
+
+        let rel = |a: f64, b: f64| (a - b).abs() / b.abs().max(1e-10);
+        let r_mu  = rel(d_mu, fd_mu);
+        let r_var = rel(d_var, fd_var);
+        eprintln!("[tail-grad] y={:.2}, μ={:.2}, σ²={:.2}", y, mu, var);
+        eprintln!("  d/dμ:   analytic={:.6e}  fd={:.6e}  rel={:.2e}", d_mu, fd_mu, r_mu);
+        eprintln!("  d/dσ²:  analytic={:.6e}  fd={:.6e}  rel={:.2e}", d_var, fd_var, r_var);
+        assert!(r_mu  < rel_tol, "d/dμ at y={}: rel_err {:.2e} > tol {:.0e}",  y, r_mu,  rel_tol);
+        assert!(r_var < rel_tol, "d/dσ² at y={}: rel_err {:.2e} > tol {:.0e}", y, r_var, rel_tol);
     }
 
     #[test]

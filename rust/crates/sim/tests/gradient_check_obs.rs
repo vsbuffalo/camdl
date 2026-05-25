@@ -151,6 +151,132 @@ fn project_trajectory_to_obs(
     per_stream
 }
 
+/// Like `project_trajectory_to_obs` but shifts each synthetic obs by
+/// `tail_sigmas · sd` (using a likelihood-specific sd) — places observations
+/// in the tail of the obs likelihood instead of at the mode.
+///
+/// gh#76 cleanup: this exercises the regime where the prior φ-difference
+/// gradient denominator on `discretized_normal_logpmf_grad` collapsed to
+/// noise; after the audit-H2 port the gradient should match FD at 1e-4.
+fn project_trajectory_to_obs_shifted(
+    compiled: &Arc<CompiledModel>,
+    trajectory: &sim::inference::pgas::PGASTrajectory,
+    obs_substep_indices: &[usize],
+    params: &[f64],
+    dt: f64,
+    tail_sigmas: f64,
+) -> Vec<Vec<f64>> {
+    let n_streams = compiled.model.observations.len();
+    let n_tr = compiled.model.transitions.len();
+    let mut per_stream: Vec<Vec<f64>> = (0..n_streams).map(|_| Vec::new()).collect();
+    let t_start = compiled.model.simulation.t_start;
+    let real_s = RealState::new(compiled.real_local_to_global.len());
+
+    let projections: Vec<StreamProjection> = compiled.model.observations.iter()
+        .map(|om| StreamProjection::from_ir(&om.projection, compiled, &om.name).unwrap())
+        .collect();
+
+    let resolved_lhs: Vec<sim::resolved_expr::ResolvedLikelihood> = compiled.model.observations
+        .iter()
+        .map(|om| {
+            use sim::resolved_expr::{resolve_likelihood, ResolveCtx};
+            use ir::table::OobPolicy;
+            let table_meta: Vec<(OobPolicy, usize)> = compiled.model.tables.iter()
+                .zip(&compiled.table_values_cache)
+                .map(|(t, cached)| (t.out_of_bounds.clone(), cached.len()))
+                .collect();
+            let ctx = ResolveCtx {
+                comp_index: &compiled.comp_index,
+                param_index: &compiled.param_index,
+                time_func_index: &compiled.time_func_index,
+                table_index: &compiled.table_index,
+                global_to_int: &compiled.global_to_int,
+                global_to_real: &compiled.global_to_real,
+                table_meta: &table_meta,
+            };
+            resolve_likelihood(&om.likelihood, &ctx).unwrap()
+        })
+        .collect();
+
+    let mut cum_flows: Vec<u64> = vec![0; n_tr];
+    let mut next_obs = 0;
+
+    for (s, rec) in trajectory.substeps.iter().enumerate() {
+        for (i, &f) in rec.flows.iter().enumerate() { cum_flows[i] += f; }
+
+        if next_obs < obs_substep_indices.len() && obs_substep_indices[next_obs] == s {
+            let t_obs = t_start + ((s + 1) as f64) * dt;
+            let int_s = IntState::from_vec(rec.counts_after.clone());
+            for si in 0..n_streams {
+                let v = eval_stream_projection(
+                    &projections[si], &cum_flows, &rec.counts_after,
+                    params, compiled, &real_s, t_obs,
+                );
+                let mean = obs_mean_for_likelihood(
+                    &resolved_lhs[si], t_obs, v, params, compiled, &int_s, &real_s,
+                );
+                let sd = obs_sd_for_likelihood(
+                    &resolved_lhs[si], t_obs, v, params, compiled, &int_s, &real_s,
+                );
+                let shifted = (mean + tail_sigmas * sd).max(0.0).round();
+                per_stream[si].push(shifted);
+            }
+            cum_flows.fill(0);
+            next_obs += 1;
+        }
+    }
+    per_stream
+}
+
+/// Per-likelihood standard deviation at the obs mean. Used to shift obs into
+/// the tail by k · sd in `project_trajectory_to_obs_shifted`. The numbers
+/// don't need to be exact — they just need to put the obs in a regime that
+/// exercises the gradient's tail precision.
+fn obs_sd_for_likelihood(
+    lh: &sim::resolved_expr::ResolvedLikelihood,
+    t: f64,
+    projected: f64,
+    params: &[f64],
+    compiled: &CompiledModel,
+    int_s: &IntState,
+    real_s: &RealState,
+) -> f64 {
+    use sim::propensity::EvalCtx;
+    use sim::resolved_expr::{ResolvedLikelihood, eval_resolved};
+    let ctx = |proj: f64| EvalCtx {
+        model: compiled, int_s, real_s, params, t, dt: 0.0,
+        projected: Some(proj), int_float_override: None,
+    };
+    match lh {
+        ResolvedLikelihood::NegBinomial { mean, dispersion } => {
+            // var = μ + μ²/k → sd = √(μ + μ²/k)
+            let m = eval_resolved(mean, &ctx(projected));
+            let k = eval_resolved(dispersion, &ctx(projected)).max(1e-30);
+            (m + m * m / k).max(0.0).sqrt()
+        }
+        ResolvedLikelihood::Normal { sd, .. } => eval_resolved(sd, &ctx(projected)),
+        ResolvedLikelihood::Poisson { rate } => eval_resolved(rate, &ctx(projected)).max(0.0).sqrt(),
+        ResolvedLikelihood::Binomial { n, p } => {
+            let n_val = eval_resolved(n, &ctx(projected));
+            let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
+            (n_val * p_val * (1.0 - p_val)).max(0.0).sqrt()
+        }
+        ResolvedLikelihood::BetaBinomial { n, alpha, beta } => {
+            let n_val = eval_resolved(n, &ctx(projected));
+            let a = eval_resolved(alpha, &ctx(projected)).max(1e-30);
+            let b = eval_resolved(beta, &ctx(projected)).max(1e-30);
+            let denom = (a + b).max(1e-30);
+            let p = a / denom;
+            let var = n_val * p * (1.0 - p) * (a + b + n_val) / (a + b + 1.0);
+            var.max(0.0).sqrt()
+        }
+        ResolvedLikelihood::Bernoulli { p } => {
+            let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
+            (p_val * (1.0 - p_val)).max(0.0).sqrt()
+        }
+    }
+}
+
 /// Local re-implementation of `eval_obs_mean_resolved` — the obs_model
 /// helper is `pub(crate)` and not exposed for external test code.
 fn obs_mean_for_likelihood(
@@ -421,13 +547,35 @@ fn build_discretized_normal_seir() -> ir::Model {
 
 #[test]
 fn gh76_discretized_normal_obs_grad_matches_fd() {
-    // Synthetic obs are projected via the obs-model mean
-    // (`project_trajectory_to_obs`), so observations sit near the
-    // likelihood's peak. This is the regime where
-    // `discretized_normal_logpmf_grad` is most accurate; far-tail
-    // observations (where the helper's CDF-difference denominator
-    // loses precision) are out of scope of this test — see the
-    // precision note on the helper itself.
+    // Synthetic obs are projected via the obs-model mean — observations
+    // sit near the likelihood's peak. The tail-shifted variants below
+    // (`_tail_3sigma`, `_tail_5sigma`, `_tail_8sigma`) exercise the
+    // tail-precision regime where the prior φ-difference denominator
+    // collapsed to noise; after the gh#76-cleanup erfc port both regimes
+    // agree at 1e-4.
+    run_discretized_normal_grad_fd(0.0, "gh76_discretized_normal_obs");
+}
+
+/// gh#76 cleanup: tail FD points. After the audit-H2 port into
+/// `discretized_normal_logpmf_grad`, the gradient and the value share the
+/// same erfc-stable `prob`, so FD-vs-analytic must hold at 1e-4 in the
+/// regime where the prior implementation degraded to ~1e-3 (or worse).
+#[test]
+fn gh76_discretized_normal_obs_grad_matches_fd_tail_3sigma() {
+    run_discretized_normal_grad_fd(3.0, "gh76_discretized_normal_obs_tail_3σ");
+}
+
+#[test]
+fn gh76_discretized_normal_obs_grad_matches_fd_tail_5sigma() {
+    run_discretized_normal_grad_fd(5.0, "gh76_discretized_normal_obs_tail_5σ");
+}
+
+#[test]
+fn gh76_discretized_normal_obs_grad_matches_fd_tail_8sigma() {
+    run_discretized_normal_grad_fd(8.0, "gh76_discretized_normal_obs_tail_8σ");
+}
+
+fn run_discretized_normal_grad_fd(tail_sigmas: f64, name: &str) {
     let mut model = build_discretized_normal_seir();
     set_param_defaults(&mut model, &[
         ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
@@ -450,7 +598,13 @@ fn gh76_discretized_normal_obs_grad_matches_fd() {
         t_start, dt, n_substeps, 7.0, 7.0, t_end,
     );
 
-    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    let per_stream = if tail_sigmas == 0.0 {
+        project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt)
+    } else {
+        project_trajectory_to_obs_shifted(
+            &compiled, &trajectory, &substep_idx, &params, dt, tail_sigmas,
+        )
+    };
     let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
     let observations: Vec<Observation> = obs_times.iter()
         .map(|&t| Observation { time: t, value: 0.0 }).collect();
@@ -465,6 +619,6 @@ fn gh76_discretized_normal_obs_grad_matches_fd() {
         &params, &param_names, &estimated_indices,
         &[rho_idx, sigma_obs_idx],
         dt, 1e-4,
-        "gh76_discretized_normal_obs",
+        name,
     );
 }
