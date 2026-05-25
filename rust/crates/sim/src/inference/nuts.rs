@@ -283,13 +283,35 @@ pub fn nuts_step(
     // to land on a numerically-equal proposal reports "rejected."
     // Vanishingly improbable; the correct notion — "some actual move
     // happened" — matches in practice.
-    let accepted = z_proposal != current_z;
+    //
+    // gh#81 Phase 2. Defense in depth: refuse to "accept" a proposal
+    // whose z components or log_p are non-finite. The build_tree
+    // slice-indicator already drops NaN-energy leaves from n_valid
+    // (so z_proposal usually stays at current_z), but that is a
+    // happy side-effect rather than an enforced invariant. The
+    // explicit finiteness gate here documents the invariant: a
+    // committed NUTS proposal MUST be finite. Without it, a future
+    // refactor that changes the slice-indicator branch (or an
+    // implementation choice where n_valid defaults to 1) would
+    // silently regress this safety property.
+    let proposal_finite = log_p_proposal.is_finite()
+        && z_proposal.iter().all(|x| x.is_finite());
+    let accepted = proposal_finite && z_proposal != current_z;
     let mean_accept_prob = if n_accept_steps > 0 {
         sum_accept_prob / n_accept_steps as f64
     } else { 0.0 };
 
+    // If the proposal is non-finite, return the current state instead
+    // of the corrupted one. Callers reading `result.params` blindly
+    // (e.g. for adaptation Welford updates) get a usable f64 vector.
+    let (out_params, out_log_p) = if proposal_finite {
+        (z_proposal, log_p_proposal)
+    } else {
+        (current_z.to_vec(), current_log_p)
+    };
+
     NUTSStepResult {
-        params: z_proposal, log_posterior: log_p_proposal, accepted,
+        params: out_params, log_posterior: out_log_p, accepted,
         n_leapfrog, tree_depth, divergent, mean_accept_prob,
     }
 }
@@ -334,9 +356,20 @@ fn build_tree(
             leapfrog(z, p, grad, eps, direction, mass, log_prob_and_grad);
 
         let h_new = -log_p_new + mass.kinetic_energy(&p_new);
-        let n_valid = if log_slice <= -h_new { 1 } else { 0 };
-        let divergent = (h_new - h0).abs() > delta_max;
-        let accept_prob = ((-h_new + h0).exp()).min(1.0);
+        // gh#81 Phase 2. A non-finite proposal energy is ALWAYS
+        // divergent. The legacy check `(h_new - h0).abs() > delta_max`
+        // evaluates to `false` for NaN h_new (IEEE-754 unordered
+        // comparison), so a NaN-energy leaf was reported as
+        // non-divergent and the doubling tree happily continued past
+        // it. The corollary at the top of `nuts_step` (slice indicator
+        // `log_slice <= -h_new` also returns false for NaN h_new) just
+        // happened to drop NaN proposals from the multinomial choice,
+        // but the divergence flag itself was wrong — under-reporting
+        // chain pathology to the adaptation loop and to the user.
+        let energy_nonfinite = !h_new.is_finite();
+        let n_valid = if !energy_nonfinite && log_slice <= -h_new { 1 } else { 0 };
+        let divergent = energy_nonfinite || (h_new - h0).abs() > delta_max;
+        let accept_prob = if energy_nonfinite { 0.0 } else { ((-h_new + h0).exp()).min(1.0) };
 
         return (z_new.clone(), p_new, grad_new, z_new, log_p_new,
                 n_valid, divergent, divergent, 1, accept_prob, 1);
