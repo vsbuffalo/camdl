@@ -77,10 +77,12 @@ fn test_gradient_vs_finite_differences_sir() {
     let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt);
 
     // Analytical gradient
+    let estimated_to_model: Vec<usize> = (0..n_params).collect();
     let (ll, grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
         &obs_model, &ivp_mappings,
         n_params, &rate_grads_for_run, &oas,
+        &estimated_to_model,
     ).unwrap();
 
     eprintln!("  log-likelihood: {:.4}", ll);
@@ -196,6 +198,8 @@ fn test_nuts_target_gradient_on_z_scale() {
         .map(|p| p.to_transformed(base_params[p.index]))
         .collect();
 
+    let estimated_to_model_nuts: Vec<usize> = if2_params.iter().map(|p| p.index).collect();
+
     // Build the FULL NUTS target closure (same structure as run_pgas)
     let log_prob_and_grad = |z_val: &[f64]| -> (f64, Vec<f64>) {
         let mut params = base_params.clone();
@@ -207,6 +211,7 @@ fn test_nuts_target_gradient_on_z_scale() {
             &compiled, &trajectory, &params, &observations, dt,
             &obs_model, &ivp_mappings,
             d_nuts, &rate_grads_for_run_nuts, &oas,
+            &estimated_to_model_nuts,
         ).unwrap_or((f64::NEG_INFINITY, vec![0.0; d_nuts]));
 
         let mut log_p = ll;

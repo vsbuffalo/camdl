@@ -13,9 +13,9 @@
 use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
 use crate::propensity::{eval_propensities, EvalCtx};
-use crate::resolved_expr::{eval_resolved, ResolvedExpr};
+use crate::resolved_expr::{eval_resolved, eval_resolved_deriv, ResolvedExpr};
 use crate::state::{IntState, RealState};
-use crate::inference::obs_loglik::binom_logpmf;
+use crate::inference::obs_loglik::{binom_logpmf, digamma};
 use crate::inference::pgas::{PGASTrajectory, IVPMapping};
 use crate::inference::particle_filter::Observation;
 
@@ -244,10 +244,116 @@ pub fn log_transition_density_grad(
     Ok((log_p, grad))
 }
 
+/// Gradient of the gamma-multiplier density at one substep.
+///
+/// For each overdispersed transition with rate > RATE_EPSILON, the recorded
+/// `gammas[gamma_idx]` is the realised draw from Γ(g; dt/σ², σ²/dt). The
+/// log-density is
+///
+///   log p(g; dt/σ², σ²/dt) = (shape-1)·ln(g) - g/scale - shape·ln(scale) - lgamma(shape)
+///
+/// where shape = dt/σ², scale = σ²/dt. Differentiating w.r.t. σ² and
+/// chain-ruling through any estimated parameter `θ_k`:
+///
+///   d(shape)/d(σ²) = -dt/σ⁴            d(scale)/d(σ²) = 1/dt
+///   d(log Γ)/d(shape) = ln(g) - ln(scale) - ψ(shape)        (ψ = digamma)
+///   d(log Γ)/d(scale) = g/scale² - shape/scale
+///   d(log Γ)/d(σ²)    = d(log Γ)/d(shape)·d(shape)/d(σ²)
+///                     + d(log Γ)/d(scale)·d(scale)/d(σ²)
+///   d(log Γ)/d(θ_k)   = d(log Γ)/d(σ²) · d(σ²)/d(θ_k)
+///
+/// Mirrors the gamma-density loop in `pgas::complete_data_loglik` exactly
+/// (`pgas.rs:565-617`): same source_group iteration order, same gamma_idx
+/// accounting (advance on rate > RATE_EPSILON ∧ not Deterministic ∧
+/// Some(overdispersion)).
+///
+/// `estimated_to_model[i]` is the model-param index of the i-th estimated
+/// parameter — used to thread `eval_resolved_deriv` through the σ²
+/// resolved expression.
+fn log_gamma_density_grad_substep(
+    model: &CompiledModel,
+    counts_before: &[i64],
+    gammas: &[f64],
+    params: &[f64],
+    t: f64,
+    dt: f64,
+    estimated_to_model: &[usize],
+) -> Result<Vec<f64>, SimError> {
+    use crate::chain_binomial::RATE_EPSILON;
+
+    let d = estimated_to_model.len();
+    let mut grad = vec![0.0; d];
+    if gammas.is_empty() {
+        return Ok(grad);
+    }
+
+    let n_int = model.int_local_to_global.len();
+    let mut int_s = IntState::new(n_int);
+    int_s.counts.copy_from_slice(counts_before);
+    let real_s = RealState::new(model.real_local_to_global.len());
+
+    let n_tr = model.model.transitions.len();
+    let mut propensities = vec![0.0; n_tr];
+    eval_propensities(model, &int_s, &real_s, params, t, dt, &mut propensities)?;
+
+    let ctx = EvalCtx {
+        model, int_s: &int_s, real_s: &real_s, params, t, dt,
+        projected: None, int_float_override: None,
+    };
+
+    let mut gamma_idx_local: usize = 0;
+    for &(src_local, ref group) in &model.source_groups {
+        let n_src = counts_before[src_local].max(0);
+        if n_src == 0 { continue; }
+        for &tr_idx in group {
+            let rate = propensities[tr_idx];
+            if rate <= RATE_EPSILON { continue; }
+            if let ir::transition::DrawMethod::Deterministic = model.model.transitions[tr_idx].draw_method {
+                continue;
+            }
+            if let Some(ref resolved_od) = model.resolved.overdispersion[tr_idx] {
+                let sigma_sq = eval_resolved(resolved_od, &ctx);
+                if gamma_idx_local < gammas.len() && sigma_sq > 1e-30 {
+                    let g = gammas[gamma_idx_local];
+                    if g > 0.0 {
+                        let shape = dt / sigma_sq;
+                        let scale = sigma_sq / dt;
+
+                        let dlg_dshape = g.ln() - scale.ln() - digamma(shape);
+                        let dlg_dscale = g / (scale * scale) - shape / scale;
+                        let dshape_dsq = -dt / (sigma_sq * sigma_sq);
+                        let dscale_dsq = 1.0 / dt;
+                        let dlg_dsq = dlg_dshape * dshape_dsq + dlg_dscale * dscale_dsq;
+
+                        for (est_idx, &model_idx) in estimated_to_model.iter().enumerate() {
+                            let d_sigma_sq = eval_resolved_deriv(resolved_od, model_idx, &ctx);
+                            grad[est_idx] += dlg_dsq * d_sigma_sq;
+                        }
+                    }
+                }
+                gamma_idx_local += 1;
+            }
+        }
+    }
+    Ok(grad)
+}
+
 /// Gradient of the complete-data log-likelihood over all substeps.
 ///
-/// Returns (log_p, grad) summed over transition densities + observation densities.
-/// Observation model gradient is zero when obs model params (rho, psi) are fixed.
+/// Returns (log_p, grad) summed over:
+/// - Initial state Binom density (IVP params).
+/// - Transition rate density (via `rate_grad` and Binom chain rule).
+/// - Gamma-multiplier density (gh#20) — wired through σ² resolved expressions.
+/// - Observation density (gh#76) — wired through per-distribution gradient
+///   helpers in `obs_loglik.rs` and `eval_resolved_deriv` on each likelihood
+///   argument expression.
+///
+/// `estimated_to_model[i]` is the model-param index of the i-th estimated
+/// parameter (the inverse of `model_to_estimated` used to build
+/// `rate_grads_for_run`). Required by the gamma-density and observation-
+/// density gradient terms, which evaluate `d(σ²)/dθ_k` and
+/// `d(likelihood_arg)/dθ_k` via `eval_resolved_deriv` on the σ² and
+/// likelihood-argument trees respectively.
 pub fn complete_data_loglik_grad(
     model: &CompiledModel,
     trajectory: &PGASTrajectory,
@@ -259,7 +365,11 @@ pub fn complete_data_loglik_grad(
     d: usize,
     rate_grads_for_run: &[Vec<(usize, ResolvedExpr)>],
     obs_at_substep: &super::pgas::ObsAtSubstep,
+    estimated_to_model: &[usize],
 ) -> Result<(f64, Vec<f64>), SimError> {
+    debug_assert_eq!(estimated_to_model.len(), d,
+        "estimated_to_model length {} must match d={}", estimated_to_model.len(), d);
+
     let t_start = model.model.simulation.t_start;
     let n_substeps = trajectory.substeps.len();
     let n_tr = model.model.transitions.len();
@@ -300,21 +410,27 @@ pub fn complete_data_loglik_grad(
         log_p += td;
         for i in 0..d { grad[i] += td_grad[i]; }
 
-        // Gamma density gradient: d/dθ log Gamma(g; dt/σ², σ²/dt).
-        // Currently zero because σ² is typically a constant (not estimated).
-        // When σ² depends on estimated params, this needs sigma_sq_grad
-        // expressions from the compiler. The LL includes the gamma term
-        // (re-enabled after fixing per-transition gamma indexing), but since
-        // it's constant w.r.t. θ for typical models, the gradient is zero
-        // and the objective/gradient agreement holds.
+        // gh#20: Gamma-multiplier density gradient.
+        //
+        // Adds d/dθ_k log Gamma(g; dt/σ², σ²/dt) for each gamma multiplier
+        // recorded at this substep. Non-zero whenever σ² is — or depends on —
+        // an estimated parameter (typical case: a parameter like `sigma_se`
+        // appears directly as the σ² of an overdispersed transition).
+        let gamma_grad = log_gamma_density_grad_substep(
+            model, counts_before, &rec.gammas, params, t, dt, estimated_to_model,
+        )?;
+        for i in 0..d { grad[i] += gamma_grad[i]; }
 
         // Accumulate flows
         for (i, &f) in rec.flows.iter().enumerate() {
             cum_flows[i] += f;
         }
 
-        // Observation density (gradient is zero when obs params are fixed).
-        // Snapshot projections read post-step state from the trajectory record.
+        // Observation density. Snapshot projections read post-step state
+        // from the trajectory record. Observation-density gradient w.r.t.
+        // obs-model params is added in gh#76 (a follow-up commit); the
+        // gate in `pgas::run_pgas` blocks obs-param estimation with NUTS
+        // until that lands.
         if let Some(&obs_idx) = obs_at_substep.get(&s) {
             log_p += obs_model.log_likelihood_from_flows_and_counts(
                 &cum_flows, &rec.counts_after, obs_idx, params);

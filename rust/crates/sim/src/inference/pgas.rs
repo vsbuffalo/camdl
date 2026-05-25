@@ -26,10 +26,10 @@ use crate::propensity::{eval_propensities, EvalCtx};
 use crate::resolved_expr::eval_resolved;
 use crate::state::{IntState, RealState};
 
-/// gh#audit-C1. Helper for the C1 preflight gate. Walks every Expr
-/// inside a Likelihood (each variant has 1-3 expression-valued args)
-/// and applies `f` to each. Used to collect parameter references
-/// for the gradient-coverage check.
+/// gh#audit-C1 → gh#76 follow-up. Helper for the C1 preflight gate.
+/// Walks every Expr inside a Likelihood (each variant has 1-3
+/// expression-valued args) and applies `f` to each. Used to collect
+/// parameter references for the obs-gradient-coverage check.
 fn for_each_likelihood_expr<F: FnMut(&ir::expr::Expr)>(
     lh: &ir::observation::Likelihood,
     mut f: F,
@@ -1467,18 +1467,12 @@ pub fn run_pgas(
                    Increase sweeps in fit.toml to continue.", start_sweep, config.n_sweeps);
     }
 
-    // gh#audit-C1 preflight gate. complete_data_loglik_grad
-    // (pgas_grad.rs:298-317) drops obs-likelihood derivatives — its
-    // own inline comment says "currently zero because σ² is typically
-    // a constant (not estimated)" and "gradient is zero when obs
-    // params are fixed." When the estimated set includes any
-    // parameter that appears in an obs-likelihood arg expression OR
-    // in an Overdispersed(σ²) expression, NUTS sees zero gradient
-    // for that coordinate while the log-posterior responds — the
-    // chain barely moves on that coordinate, the marginal posterior
-    // regresses to the initial value silently. Fail-fast here until
-    // the full obs-likelihood gradient threading lands (proposal
-    // Sprint 5 day 2-5).
+    // gh#audit-C1 preflight gate (narrowed by gh#20). The σ²
+    // (overdispersion) gradient is now wired via
+    // `pgas_grad::log_gamma_density_grad_substep`; estimating σ² with PGAS
+    // is safe. The observation-likelihood gradient is still missing —
+    // gh#76 — so block any parameter that appears in an obs-likelihood
+    // argument until that lands.
     {
         use std::collections::HashSet;
         fn collect_param_refs(e: &ir::expr::Expr, out: &mut HashSet<String>) {
@@ -1510,35 +1504,21 @@ pub fn run_pgas(
         for om in &model.model.observations {
             for_each_likelihood_expr(&om.likelihood, |e| collect_param_refs(e, &mut obs_param_refs));
         }
-        let mut sigma_sq_param_refs: HashSet<String> = HashSet::new();
-        for tr in &model.model.transitions {
-            if let ir::transition::DrawMethod::Overdispersed(ref sigma_sq) = tr.draw_method {
-                collect_param_refs(sigma_sq, &mut sigma_sq_param_refs);
-            }
-        }
         let mut blocked: Vec<String> = Vec::new();
         for spec in if2_params.iter() {
-            let in_obs = obs_param_refs.contains(spec.name.as_str());
-            let in_sigma = sigma_sq_param_refs.contains(spec.name.as_str());
-            if in_obs || in_sigma {
-                let where_ = match (in_obs, in_sigma) {
-                    (true, true)   => "both an observation likelihood and an overdispersion σ²",
-                    (true, false)  => "an observation likelihood",
-                    (false, true)  => "an overdispersion σ²",
-                    (false, false) => unreachable!(),
-                };
-                blocked.push(format!("'{}' (in {})", spec.name, where_));
+            if obs_param_refs.contains(spec.name.as_str()) {
+                blocked.push(format!("'{}' (in an observation likelihood)", spec.name));
             }
         }
         if !blocked.is_empty() {
             return Err(crate::error::SimError::Validation(format!(
-                "PGAS gradient does not yet include obs-likelihood or overdispersion-σ² \
-                 derivatives (audit C1). Estimating these parameters with PGAS would \
-                 produce silently biased posteriors because NUTS sees zero gradient on \
-                 the affected coordinate. Blocked parameters: {}. Until the full \
-                 obs-likelihood gradient threading lands, either fix these parameters \
-                 (move from `[estimate.X]` to `[fixed.X]` in fit.toml) or fit them with \
-                 a non-gradient method (IF2, PMMH).",
+                "PGAS gradient does not yet include observation-likelihood \
+                 derivatives (gh#76). Estimating these parameters with PGAS \
+                 would produce silently biased posteriors because NUTS sees \
+                 zero gradient on the affected coordinate. Blocked parameters: \
+                 {}. Until gh#76 lands, either fix these parameters (move from \
+                 `[estimate.X]` to `[fixed.X]` in fit.toml) or fit them with a \
+                 non-gradient method (IF2, PMMH).",
                 blocked.join(", ")
             )));
         }
@@ -1558,6 +1538,11 @@ pub fn run_pgas(
             &model_to_estimated,
         )
     };
+
+    // Inverse map: estimated_to_model[est_idx] = model_param_idx. Used by
+    // gh#20 (gamma-density gradient) and gh#76 (obs-density gradient) to
+    // thread `eval_resolved_deriv` through σ² and likelihood-arg expressions.
+    let estimated_to_model: Vec<usize> = if2_params.iter().map(|spec| spec.index).collect();
 
     // ── Trajectory warm-up: CSMC-only sweeps before parameter updates ──
     if config.trajectory_warmup > 0 && start_sweep == 0 {
@@ -1618,6 +1603,7 @@ pub fn run_pgas(
                         model, rung_traj, &params, observations,
                         config.dt, obs_model, &ivp_mappings,
                         d, &rate_grads_for_run, &obs_at_substep,
+                        &estimated_to_model,
                     ) {
                         Ok(r) => r,
                         Err(_) => return (f64::NEG_INFINITY, vec![0.0; d]),
