@@ -1,0 +1,97 @@
+# SEIR with a piecewise-linear time-varying transmission factor.
+#
+# Pattern: hold at the baseline R until t = ramp_start, then linearly
+# decline to the post-intervention level by t = ramp_end, then hold flat.
+# Encoded as one `interpolated 'ratio` forcing with four breakpoints
+# (start, ramp_start, ramp_end, horizon) and equal first/last value pairs.
+#
+# Use this template whenever a scenario has a flat → ramp → flat trajectory
+# (NPI rollout, gradual control measure, behaviour-change ramp). The same
+# shape with `method = "constant"` is a step change; with the file-backed
+# variant (data = "..." time_col = ... value_col = ...) the schedule lives
+# in a TSV instead of inline.
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+let N = S + E + I + R
+
+parameters {
+  beta_baseline : rate        in [0.05, 1.0]    # transmission at no intervention
+  sigma         : rate        in [0.05, 1.0]    # 1 / latent period
+  gamma         : rate        in [0.05, 1.0]    # 1 / infectious period
+  R_final       : positive    in [0.0,  2.0]    # post-intervention reduction (multiplier)
+  ramp_start    : real        in [0.0, 90.0]    # day intervention begins
+  ramp_end      : real        in [0.0, 180.0]   # day intervention completes
+  N0            : count       in [1000, 1000000]
+  I0            : count       in [1,    1000]
+}
+
+forcing {
+  intervention : interpolated 'ratio {
+    times  = [0.0, ramp_start, ramp_end, 365.0]
+    values = [1.0, 1.0,        R_final,  R_final]
+    method = "linear"
+  }
+}
+
+transitions {
+  infection   : S --> E  @ beta_baseline * intervention * S * I / N
+  progression : E --> I  @ sigma * E
+  recovery    : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0   'days
+  to   = 180 'days
+}
+
+scenarios {
+  no_intervention {
+    label = "no intervention  (flat at R0)"
+    set = {
+      beta_baseline = 0.5
+      sigma         = 0.2
+      gamma         = 0.1
+      R_final       = 1.0
+      ramp_start    = 14.0
+      ramp_end      = 56.0
+      N0            = 100000
+      I0            = 10
+    }
+  }
+
+  fast_rollout {
+    label = "fast NPI rollout  (ramp d14-d56)"
+    set = {
+      beta_baseline = 0.5
+      sigma         = 0.2
+      gamma         = 0.1
+      R_final       = 0.3
+      ramp_start    = 14.0
+      ramp_end      = 56.0
+      N0            = 100000
+      I0            = 10
+    }
+  }
+
+  slow_rollout {
+    label = "slow NPI rollout  (ramp d28-d112)"
+    set = {
+      beta_baseline = 0.5
+      sigma         = 0.2
+      gamma         = 0.1
+      R_final       = 0.3
+      ramp_start    = 28.0
+      ramp_end      = 112.0
+      N0            = 100000
+      I0            = 10
+    }
+  }
+}

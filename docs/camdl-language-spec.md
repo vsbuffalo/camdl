@@ -915,7 +915,19 @@ built-in types cover real-world needs:
 - `sinusoidal` — smooth seasonal forcing
 - `periodic` — repeating step function (day-of-week, month-of-year effects)
 - `piecewise` — non-repeating step function (policy changes, campaign windows)
-- `interpolated` — data-driven time series (empirical covariates)
+- `interpolated` — piecewise-linear, cubic-spline, or constant interpolation
+  through `(time, value)` pairs, either inline or loaded from a TSV
+  (empirical covariates, scenario R(t) trajectories, scheduled NPI ramps)
+
+**Picking a kind** — common shapes map to specific kinds:
+
+| Desired shape                                | Kind & options                                       |
+|----------------------------------------------|------------------------------------------------------|
+| Smooth seasonal cycle                        | `sinusoidal`                                         |
+| Repeating calendar (school terms, weekdays)  | `periodic`                                           |
+| Step changes at known dates (lockdown on/off)| `piecewise`                                          |
+| One-sided ramp between flat segments         | `interpolated` with `method = "linear"`              |
+| Empirical time series from a TSV             | `interpolated` with `data = "…"`                     |
 
 ```camdl
 forcing {
@@ -930,6 +942,15 @@ forcing {
     breakpoints = [60 'days, 120 'days],
     values      = [1.0, 0.3, 1.0]
   )
+
+  # Inline piecewise-linear: flat at 1.0 until t=14, linear ramp down to
+  # R_final by t=56, flat at R_final after. Use this template for any
+  # flat → ramp → flat scenario (NPI rollout, gradual behaviour change).
+  intervention : interpolated 'ratio {
+    times  = [0.0, 14.0, 56.0, 180.0]
+    values = [1.0, 1.0,  R_final, R_final]
+    method = "linear"
+  }
 
   pop_trend : interpolated {
     data      = "data/nga_pop.csv"

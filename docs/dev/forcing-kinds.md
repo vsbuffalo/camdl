@@ -48,14 +48,27 @@ schedule is known and not estimable.
 
 ### Fixed, aperiodic
 
-`interpolated`: load `times[]` and `values[]` from a TSV (or
-inline); interpolate with `method = "linear" | "spline" |
-"constant"`. Common use: demographic covariates (pop(t),
-birthrate(t)) from census data.
+`interpolated`: pairs of `(time, value)` knots interpolated with
+`method = "linear" | "spline" | "constant"`. Two equivalent forms:
+
+- **Inline** — `times = [...]  values = [...]` directly in the
+  forcing block. Use when the schedule is short and lives with the
+  model (scenario R(t), NPI ramp, one-shot calendar). See
+  `ocaml/golden/seir_npi_ramp.camdl` for a flat → ramp → flat
+  template.
+- **File-backed** — `data = "…"  time_col = …  value_col = …`
+  reads a TSV at compile time. Use for empirical covariates
+  (`pop(t)`, `birthrate(t)`) from census data.
+
+A flat-then-ramp-then-flat trajectory is encoded with four knots
+and `method = "linear"`: `times = [0, t1, t2, T]`,
+`values = [v0, v0, v1, v1]`. The repeated first and last values
+hold the segments flat.
 
 `piecewise`: inline step-function with explicit `breakpoints[]`
-and `values[]`. Use when the schedule is short enough to fit in
-the model file and a covariate file would be overkill.
+and `values[]`. Use when the schedule is a sequence of
+instantaneous policy changes (step on / step off) rather than a
+graded ramp.
 
 ## Dimensional units
 

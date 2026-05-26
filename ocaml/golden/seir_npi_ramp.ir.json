@@ -1,0 +1,321 @@
+{
+  "ir_version": "0.6",
+  "validated_by": "ocaml-compiler-v0.6",
+  "model": {
+    "name": "seir_npi_ramp",
+    "version": "0.3",
+    "time_unit": "days",
+    "description": null,
+    "compartments": [
+      { "name": "S", "kind": "integer" },
+      { "name": "E", "kind": "integer" },
+      { "name": "I", "kind": "integer" },
+      { "name": "R", "kind": "integer" }
+    ],
+    "transitions": [
+      {
+        "name": "infection",
+        "stoichiometry": [ [ "S", -1 ], [ "E", 1 ] ],
+        "rate": {
+          "bin_op": {
+            "op": "div",
+            "left": {
+              "bin_op": {
+                "op": "mul",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": { "param": "beta_baseline" },
+                        "right": { "time_func": { "name": "intervention" } }
+                      }
+                    },
+                    "right": { "pop": "S" }
+                  }
+                },
+                "right": { "pop": "I" }
+              }
+            },
+            "right": { "pop_sum": [ "S", "E", "I", "R" ] }
+          }
+        },
+        "metadata": {
+          "origin_kind": "transmission",
+          "source_compartment": "S",
+          "dest_compartment": "E"
+        },
+        "rate_grad": {
+          "beta_baseline": {
+            "bin_op": {
+              "op": "div",
+              "left": {
+                "bin_op": {
+                  "op": "mul",
+                  "left": {
+                    "bin_op": {
+                      "op": "mul",
+                      "left": {
+                        "bin_op": {
+                          "op": "mul",
+                          "left": { "time_func": { "name": "intervention" } },
+                          "right": { "pop": "S" }
+                        }
+                      },
+                      "right": { "pop": "I" }
+                    }
+                  },
+                  "right": { "pop_sum": [ "S", "E", "I", "R" ] }
+                }
+              },
+              "right": {
+                "bin_op": {
+                  "op": "mul",
+                  "left": { "pop_sum": [ "S", "E", "I", "R" ] },
+                  "right": { "pop_sum": [ "S", "E", "I", "R" ] }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "progression",
+        "stoichiometry": [ [ "E", -1 ], [ "I", 1 ] ],
+        "rate": {
+          "bin_op": {
+            "op": "mul",
+            "left": { "param": "sigma" },
+            "right": { "pop": "E" }
+          }
+        },
+        "metadata": {
+          "origin_kind": "intrinsic",
+          "source_compartment": "E",
+          "dest_compartment": "I"
+        },
+        "rate_grad": { "sigma": { "pop": "E" } }
+      },
+      {
+        "name": "recovery",
+        "stoichiometry": [ [ "I", -1 ], [ "R", 1 ] ],
+        "rate": {
+          "bin_op": {
+            "op": "mul",
+            "left": { "param": "gamma" },
+            "right": { "pop": "I" }
+          }
+        },
+        "metadata": {
+          "origin_kind": "intrinsic",
+          "source_compartment": "I",
+          "dest_compartment": "R"
+        },
+        "rate_grad": { "gamma": { "pop": "I" } }
+      }
+    ],
+    "ode_equations": [],
+    "time_functions": [
+      {
+        "name": "intervention",
+        "kind": {
+          "interpolated": {
+            "times": [
+              { "const": 0.0 },
+              { "param": "ramp_start" },
+              { "param": "ramp_end" },
+              { "const": 365.0 }
+            ],
+            "values": [
+              { "const": 1.0 },
+              { "const": 1.0 },
+              { "param": "R_final" },
+              { "param": "R_final" }
+            ],
+            "method": "linear"
+          }
+        },
+        "dim": [ 0, 0 ]
+      }
+    ],
+    "tables": [],
+    "interventions": [],
+    "observations": [],
+    "parameters": [
+      {
+        "name": "beta_baseline",
+        "value": null,
+        "bounds": [ 0.05, 1.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "rate",
+        "param_dim": null
+      },
+      {
+        "name": "sigma",
+        "value": null,
+        "bounds": [ 0.05, 1.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "rate",
+        "param_dim": null
+      },
+      {
+        "name": "gamma",
+        "value": null,
+        "bounds": [ 0.05, 1.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "rate",
+        "param_dim": null
+      },
+      {
+        "name": "R_final",
+        "value": null,
+        "bounds": [ 0.0, 2.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "positive",
+        "param_dim": null
+      },
+      {
+        "name": "ramp_start",
+        "value": null,
+        "bounds": [ 0.0, 90.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "real",
+        "param_dim": null
+      },
+      {
+        "name": "ramp_end",
+        "value": null,
+        "bounds": [ 0.0, 180.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "real",
+        "param_dim": null
+      },
+      {
+        "name": "N0",
+        "value": null,
+        "bounds": [ 1000.0, 1000000.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "count",
+        "param_dim": null
+      },
+      {
+        "name": "I0",
+        "value": null,
+        "bounds": [ 1.0, 1000.0 ],
+        "prior": null,
+        "hierarchical": null,
+        "transform": null,
+        "initial_value": null,
+        "param_kind": "count",
+        "param_dim": null
+      }
+    ],
+    "initial_conditions": {
+      "parameterized": {
+        "S": {
+          "bin_op": {
+            "op": "sub",
+            "left": { "param": "N0" },
+            "right": { "param": "I0" }
+          }
+        },
+        "I": { "param": "I0" }
+      }
+    },
+    "output": {
+      "times": { "regular": { "start": 0.0, "step": 1.0, "end": 180.0 } },
+      "format": "tsv",
+      "trajectory": true,
+      "observations": true
+    },
+    "simulation": {
+      "t_start": 0.0,
+      "t_end": 180.0,
+      "time_semantics": "continuous",
+      "dt": null,
+      "rng_seed": null
+    },
+    "scenarios": [
+      {
+        "name": "no_intervention",
+        "label": "no intervention  (flat at R0)",
+        "params": {
+          "beta_baseline": 0.5,
+          "sigma": 0.2,
+          "gamma": 0.1,
+          "R_final": 1.0,
+          "ramp_start": 14.0,
+          "ramp_end": 56.0,
+          "N0": 100000.0,
+          "I0": 10.0
+        },
+        "enable": [],
+        "disable": [],
+        "t_end": null
+      },
+      {
+        "name": "fast_rollout",
+        "label": "fast NPI rollout  (ramp d14-d56)",
+        "params": {
+          "beta_baseline": 0.5,
+          "sigma": 0.2,
+          "gamma": 0.1,
+          "R_final": 0.3,
+          "ramp_start": 14.0,
+          "ramp_end": 56.0,
+          "N0": 100000.0,
+          "I0": 10.0
+        },
+        "enable": [],
+        "disable": [],
+        "t_end": null
+      },
+      {
+        "name": "slow_rollout",
+        "label": "slow NPI rollout  (ramp d28-d112)",
+        "params": {
+          "beta_baseline": 0.5,
+          "sigma": 0.2,
+          "gamma": 0.1,
+          "R_final": 0.3,
+          "ramp_start": 28.0,
+          "ramp_end": 112.0,
+          "N0": 100000.0,
+          "I0": 10.0
+        },
+        "enable": [],
+        "disable": [],
+        "t_end": null
+      }
+    ],
+    "model_structure": {
+      "dimensions": [],
+      "compartment_dims": { "S": [], "E": [], "I": [], "R": [] },
+      "base_compartments": [ "S", "E", "I", "R" ],
+      "transmission_transitions": [ "infection" ],
+      "infectious_compartments": [ "I" ]
+    }
+  }
+}
