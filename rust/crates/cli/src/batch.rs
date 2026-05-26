@@ -40,6 +40,37 @@ struct ExperimentToml {
     sweep: HashMap<String, SweepSpec>,
     #[serde(default)]
     design: HashMap<String, DesignBlock>,
+    #[serde(default)]
+    source: SourceSection,
+}
+
+// ─── Source specification ─────────────────────────────────────────────────────
+//
+// A `[source.from_csv]` block reads one parameter point per CSV/TSV row, so
+// an externally-produced posterior (or any list of paired parameter draws)
+// can drive an experiment without going through the cartesian `[sweep]` or
+// the prior-sampling `[design.*]` paths. Columns and TOML keys map row-wise:
+// row i of the file → run i of the experiment.
+
+#[derive(Debug, Deserialize, Default)]
+struct SourceSection {
+    #[serde(default)]
+    from_csv: Option<FromCsvSpec>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct FromCsvSpec {
+    /// Path to the CSV/TSV file, resolved relative to the experiment TOML.
+    file: String,
+    /// Optional `model_param = "csv_column"` mapping. When omitted, every
+    /// column is passed through as a parameter override using its header
+    /// name verbatim.
+    #[serde(default)]
+    map: Option<HashMap<String, String>>,
+    /// Explicit field separator. When absent, picked from the file extension:
+    /// `.tsv` → tab, anything else → comma.
+    #[serde(default)]
+    delimiter: Option<String>,
 }
 
 // ─── Design specification ─────────────────────────────────────────────────────
@@ -137,6 +168,107 @@ impl SweepSpec {
             }
         }
     }
+}
+
+/// Resolve a `delimiter` setting (explicit or inferred from extension) to
+/// the actual byte separator.
+fn from_csv_separator(spec: &FromCsvSpec, resolved_file: &str) -> char {
+    if let Some(d) = &spec.delimiter {
+        // The user gave us a delimiter. Accept the conventional escape
+        // strings (`\t`) for TOML's lack of a tab literal in single quotes.
+        return match d.as_str() {
+            "\\t" | "\t" => '\t',
+            other => other.chars().next().unwrap_or(','),
+        };
+    }
+    if resolved_file.to_ascii_lowercase().ends_with(".tsv") { '\t' } else { ',' }
+}
+
+/// Load parameter points from a `[source.from_csv]` block. Each non-comment,
+/// non-header row produces one `HashMap<param_name, value>`. Rows are emitted
+/// in file order so seeds and content-addressed hashing stay deterministic.
+///
+/// File format:
+/// - Lines starting with `#` are skipped (Stan output preamble, comments).
+/// - First non-comment line is the header (column names).
+/// - Each subsequent non-empty line is one parameter draw.
+///
+/// Mapping:
+/// - If `spec.map` is set, only the listed columns are pulled, renamed to
+///   the TOML key (model parameter name).
+/// - If `spec.map` is absent, every column is passed through under its
+///   header name. The downstream simulator errors on unknown parameters,
+///   so Stan-style diagnostic columns (`lp__`, `divergent__`, ...) should
+///   be filtered out of the file or routed through an explicit `map`.
+fn load_from_csv_points(
+    spec: &FromCsvSpec,
+    toml_path: &std::path::Path,
+) -> Result<Vec<HashMap<String, f64>>, String> {
+    let resolved = crate::util::resolve_relative_to_toml(toml_path, &spec.file);
+    let sep = from_csv_separator(spec, &resolved);
+    let content = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("[source.from_csv]: cannot read '{}': {}", resolved, e))?;
+
+    let mut header: Option<Vec<String>> = None;
+    let mut points: Vec<HashMap<String, f64>> = Vec::new();
+    for (lineno_zero, raw) in content.lines().enumerate() {
+        let lineno = lineno_zero + 1;
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+
+        let fields: Vec<&str> = line.split(sep).map(|s| s.trim()).collect();
+
+        match &header {
+            None => {
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                for col in &fields {
+                    if !seen.insert(col.as_ref()) {
+                        return Err(format!(
+                            "[source.from_csv] '{}' line {}: duplicate column '{}' in header",
+                            resolved, lineno, col));
+                    }
+                }
+                header = Some(fields.iter().map(|s| s.to_string()).collect());
+            }
+            Some(cols) => {
+                if fields.len() != cols.len() {
+                    return Err(format!(
+                        "[source.from_csv] '{}' line {}: expected {} fields, got {}",
+                        resolved, lineno, cols.len(), fields.len()));
+                }
+                let mut row: HashMap<&str, f64> = HashMap::with_capacity(cols.len());
+                for (col, raw) in cols.iter().zip(fields.iter()) {
+                    let v: f64 = raw.parse().map_err(|_| format!(
+                        "[source.from_csv] '{}' line {}: column '{}' is not a number ('{}')",
+                        resolved, lineno, col, raw))?;
+                    row.insert(col.as_str(), v);
+                }
+
+                let point = match &spec.map {
+                    Some(mapping) => {
+                        let mut out: HashMap<String, f64> = HashMap::with_capacity(mapping.len());
+                        for (param, src_col) in mapping {
+                            let v = *row.get(src_col.as_str()).ok_or_else(|| format!(
+                                "[source.from_csv] '{}': column '{}' (mapped from parameter '{}') is not in the header",
+                                resolved, src_col, param))?;
+                            out.insert(param.clone(), v);
+                        }
+                        out
+                    }
+                    None => row.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+                };
+                points.push(point);
+            }
+        }
+    }
+
+    if header.is_none() {
+        return Err(format!("[source.from_csv] '{}': file has no header line", resolved));
+    }
+    if points.is_empty() {
+        return Err(format!("[source.from_csv] '{}': header present but no data rows", resolved));
+    }
+    Ok(points)
 }
 
 /// Expand the full `[sweep]` section into a list of parameter override maps.
@@ -452,19 +584,26 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         std::process::exit(1);
     });
 
-    // Validate [sweep] and [design.*] are mutually exclusive.
-    if !exp.sweep.is_empty() && !exp.design.is_empty() {
-        eprintln!("error: [sweep] and [design.*] are mutually exclusive.");
-        eprintln!("  [sweep] — deterministic grid for specific parameter values");
-        eprintln!("  [design.*] — space-filling for sensitivity/VOI analysis");
-        eprintln!("  Use one or the other in a single experiment file.");
+    // Validate [sweep], [design.*], and [source.from_csv] are pairwise exclusive —
+    // each defines a different point-generation strategy and combining them
+    // has no well-defined semantics.
+    let has_sweep_block  = !exp.sweep.is_empty();
+    let has_design_block = !exp.design.is_empty();
+    let has_from_csv     = exp.source.from_csv.is_some();
+    let chosen = [has_sweep_block, has_design_block, has_from_csv].iter().filter(|b| **b).count();
+    if chosen > 1 {
+        eprintln!("error: [sweep], [design.*], and [source.from_csv] are mutually exclusive.");
+        eprintln!("  [sweep]              — deterministic cartesian grid over named values");
+        eprintln!("  [design.*]           — space-filling sampling from priors (sobol/lhs/random)");
+        eprintln!("  [source.from_csv]    — one run per row of an external CSV/TSV");
+        eprintln!("  Use exactly one in a single experiment file.");
         std::process::exit(1);
     }
 
     let params_file_opt = exp.config.params.clone();
 
     // Expand [design.*] blocks into parameter points (writes parameter_points.tsv per design).
-    if !exp.design.is_empty() {
+    if has_design_block {
         // Resolve scenarios before consuming exp
         let scenarios: Vec<ScenarioEntry> = if exp.scenario.is_empty() {
             vec![ScenarioEntry { name: "baseline".to_string(), params: HashMap::new(), enable: vec![], disable: vec![] }]
@@ -476,9 +615,20 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         return;
     }
 
-    // Expand [sweep] into parameter points (empty sweep → one null point).
-    let sweep_points = expand_sweep(&exp.sweep);
-    let has_sweep = !exp.sweep.is_empty();
+    // Resolve the per-run parameter overrides. Three sources, already enforced
+    // mutually exclusive above:
+    //   - [source.from_csv]: one point per CSV row (paired columns, no expansion)
+    //   - [sweep]:           cartesian product of named values
+    //   - none:              single empty point (one run per scenario × seed)
+    let sweep_points = if let Some(ref spec) = exp.source.from_csv {
+        match load_from_csv_points(spec, std::path::Path::new(&toml_path)) {
+            Ok(pts) => pts,
+            Err(e)  => { eprintln!("error: {}", e); std::process::exit(1); }
+        }
+    } else {
+        expand_sweep(&exp.sweep)
+    };
+    let has_sweep = has_sweep_block || has_from_csv;
 
     let scenarios: Vec<ScenarioEntry> = if exp.scenario.is_empty() {
         vec![ScenarioEntry { name: "baseline".to_string(), params: HashMap::new(), enable: vec![], disable: vec![] }]
@@ -524,7 +674,8 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
     };
 
     if has_sweep {
-        eprintln!("Sweep: {} parameter points", sweep_points.len());
+        let label = if has_from_csv { "Source [from_csv]" } else { "Sweep" };
+        eprintln!("{}: {} parameter points", label, sweep_points.len());
         for (i, pt) in sweep_points.iter().enumerate().take(3) {
             let desc: Vec<String> = pt.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
             eprintln!("  point {}: {}", i, desc.join(", "));
@@ -915,7 +1066,16 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
                     exp.scenario
                 };
                 let seeds   = exp.config.seeds.resolve().unwrap_or_default();
-                let sweep_points = expand_sweep(&exp.sweep);
+                // Mirror cmd_batch_run's point-source resolution so the live
+                // count reflects from_csv runs too. On error we fall back to
+                // an empty sweep — status is read-only so erroring out would
+                // be worse than reporting "0 points".
+                let sweep_points = if let Some(ref spec) = exp.source.from_csv {
+                    load_from_csv_points(spec, std::path::Path::new(&toml_path))
+                        .unwrap_or_else(|e| { eprintln!("warning: {}", e); Vec::new() })
+                } else {
+                    expand_sweep(&exp.sweep)
+                };
                 let runs_dir = format!("{}/sims", output_dir);
                 let cache_stem = crate::hashing::path_stem_slug(&exp.config.model);
                 let plans   = plan_runs(&scenarios, &sweep_points, &seeds, &shash,
@@ -1312,5 +1472,194 @@ mod tests {
         let plans = plan_runs(&[sc("baseline"), sc("with_sia")], &points, &[1, 2, 3],
             "aaaa1111bbbb2222", None, dir.path().to_str().unwrap(), false);
         assert_eq!(plans.len(), 30);
+    }
+
+    // ── [source.from_csv] ────────────────────────────────────────────────────
+
+    /// Write `body` to `<tmp>/draws.<ext>` and return the synthesized TOML
+    /// path that `load_from_csv_points` uses to anchor relative paths.
+    fn write_csv_fixture(dir: &tempfile::TempDir, name: &str, body: &str)
+        -> (std::path::PathBuf, std::path::PathBuf)
+    {
+        let csv_path = dir.path().join(name);
+        std::fs::write(&csv_path, body).unwrap();
+        // Anchor TOML in the same dir so relative resolution lands on csv_path.
+        let toml_path = dir.path().join("exp.toml");
+        std::fs::write(&toml_path, "").unwrap();
+        (toml_path, csv_path)
+    }
+
+    #[test]
+    fn from_csv_basic_csv_with_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "R,sigma,gamma\n2.5,0.2,0.1\n2.7,0.18,0.11\n");
+        let mut map = HashMap::new();
+        map.insert("R0".to_string(),    "R".to_string());
+        map.insert("sigma".to_string(), "sigma".to_string());
+        let spec = FromCsvSpec {
+            file: "draws.csv".to_string(),
+            map: Some(map),
+            delimiter: None,
+        };
+        let pts = load_from_csv_points(&spec, &toml).unwrap();
+        assert_eq!(pts.len(), 2);
+        assert!((pts[0]["R0"]    - 2.5).abs() < 1e-12);
+        assert!((pts[0]["sigma"] - 0.2).abs() < 1e-12);
+        assert!((pts[1]["R0"]    - 2.7).abs() < 1e-12);
+        // gamma was not in the map → not propagated.
+        assert!(!pts[0].contains_key("gamma"));
+        assert!(!pts[1].contains_key("gamma"));
+    }
+
+    #[test]
+    fn from_csv_default_mapping_passes_all_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "R0,gamma\n2.5,0.1\n3.0,0.12\n");
+        let spec = FromCsvSpec { file: "draws.csv".to_string(), map: None, delimiter: None };
+        let pts = load_from_csv_points(&spec, &toml).unwrap();
+        assert_eq!(pts.len(), 2);
+        assert_eq!(pts[0].len(), 2, "all columns become params when map is absent");
+        assert!((pts[1]["gamma"] - 0.12).abs() < 1e-12);
+    }
+
+    #[test]
+    fn from_csv_tsv_extension_picks_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.tsv",
+            "R0\tgamma\n2.5\t0.1\n");
+        let spec = FromCsvSpec { file: "draws.tsv".to_string(), map: None, delimiter: None };
+        let pts = load_from_csv_points(&spec, &toml).unwrap();
+        assert_eq!(pts.len(), 1);
+        assert!((pts[0]["R0"] - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn from_csv_explicit_delimiter_overrides_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "R0|gamma\n2.5|0.1\n");
+        let spec = FromCsvSpec {
+            file: "draws.csv".to_string(),
+            map: None,
+            delimiter: Some("|".to_string()),
+        };
+        let pts = load_from_csv_points(&spec, &toml).unwrap();
+        assert!((pts[0]["R0"] - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn from_csv_skips_hash_comment_lines() {
+        // Mimics Stan output preamble: `# stan_version=2.x`, `# model=...`.
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "# Inference configuration\n# Stan version 2.34\n\nR0,gamma\n2.5,0.1\n3.0,0.12\n");
+        let spec = FromCsvSpec { file: "draws.csv".to_string(), map: None, delimiter: None };
+        let pts = load_from_csv_points(&spec, &toml).unwrap();
+        assert_eq!(pts.len(), 2);
+        assert!((pts[0]["R0"] - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn from_csv_row_order_preserved() {
+        // Determinism: the cartesian-product `expand_sweep` keeps a stable
+        // order; from_csv must too, or content-addressed caching breaks for
+        // anyone iterating posterior draws in a fixed order.
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "R0\n2.5\n2.7\n2.6\n3.0\n");
+        let spec = FromCsvSpec { file: "draws.csv".to_string(), map: None, delimiter: None };
+        let pts = load_from_csv_points(&spec, &toml).unwrap();
+        let xs: Vec<f64> = pts.iter().map(|p| p["R0"]).collect();
+        assert_eq!(xs, vec![2.5, 2.7, 2.6, 3.0]);
+    }
+
+    #[test]
+    fn from_csv_errors_on_mapped_column_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "R,sigma\n2.5,0.2\n");
+        let mut map = HashMap::new();
+        map.insert("R0".to_string(),    "R".to_string());
+        // 'kappa' isn't in the header — should error with a useful message
+        map.insert("kappa".to_string(), "kappa_col".to_string());
+        let spec = FromCsvSpec {
+            file: "draws.csv".to_string(),
+            map: Some(map),
+            delimiter: None,
+        };
+        let err = load_from_csv_points(&spec, &toml).unwrap_err();
+        assert!(err.contains("kappa_col"), "error must name the missing column: {}", err);
+        assert!(err.contains("kappa"),     "error should name the mapped parameter too: {}", err);
+    }
+
+    #[test]
+    fn from_csv_errors_on_non_numeric_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "R0\n2.5\nnot-a-number\n");
+        let spec = FromCsvSpec { file: "draws.csv".to_string(), map: None, delimiter: None };
+        let err = load_from_csv_points(&spec, &toml).unwrap_err();
+        assert!(err.contains("not a number"), "{}", err);
+        assert!(err.contains("R0"),           "{}", err);
+    }
+
+    #[test]
+    fn from_csv_errors_on_ragged_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "R0,gamma\n2.5,0.1\n2.7\n");
+        let spec = FromCsvSpec { file: "draws.csv".to_string(), map: None, delimiter: None };
+        let err = load_from_csv_points(&spec, &toml).unwrap_err();
+        assert!(err.contains("expected 2 fields, got 1"), "{}", err);
+    }
+
+    #[test]
+    fn from_csv_errors_on_header_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv", "R0,gamma\n");
+        let spec = FromCsvSpec { file: "draws.csv".to_string(), map: None, delimiter: None };
+        let err = load_from_csv_points(&spec, &toml).unwrap_err();
+        assert!(err.contains("no data rows"), "{}", err);
+    }
+
+    #[test]
+    fn from_csv_errors_on_duplicate_header_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "R0,R0\n1.0,2.0\n");
+        let spec = FromCsvSpec { file: "draws.csv".to_string(), map: None, delimiter: None };
+        let err = load_from_csv_points(&spec, &toml).unwrap_err();
+        assert!(err.contains("duplicate column"), "{}", err);
+    }
+
+    #[test]
+    fn from_csv_drives_plan_runs_without_cartesian_blowup() {
+        // Three CSV rows + two scenarios + two seeds = exactly 12 plans.
+        // If from_csv accidentally went through expand_sweep's cartesian
+        // path, the test for n_scenarios × n_seeds × n_csv_cols would fail.
+        let dir = tempfile::tempdir().unwrap();
+        let (toml, _csv) = write_csv_fixture(&dir, "draws.csv",
+            "R0,gamma\n2.5,0.10\n2.7,0.11\n3.0,0.12\n");
+        let spec = FromCsvSpec { file: "draws.csv".to_string(), map: None, delimiter: None };
+        let points = load_from_csv_points(&spec, &toml).unwrap();
+        assert_eq!(points.len(), 3);
+
+        let plans = plan_runs(
+            &[sc("baseline"), sc("with_sia")],
+            &points,
+            &[1, 2],
+            "aaaa1111bbbb2222",
+            None,
+            dir.path().to_str().unwrap(),
+            false,
+        );
+        assert_eq!(plans.len(), 12, "3 csv rows × 2 scenarios × 2 seeds");
+        // Each plan carries the matching row's overrides.
+        let r0_values: std::collections::HashSet<u64> = plans.iter()
+            .map(|p| (p.sweep_overrides["R0"] * 100.0).round() as u64)
+            .collect();
+        assert_eq!(r0_values.len(), 3, "three distinct R0 values, each appearing on multiple plans");
     }
 }

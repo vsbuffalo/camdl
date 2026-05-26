@@ -1026,7 +1026,36 @@ gamma = { logspace = { min = 0.01, max = 1.0, n = 5 } }
 ```
 
 ```toml
-# batches/ppc.toml — posterior predictive check
+# batches/posterior_propagation.toml — one run per row of a CSV
+# Use this when an external tool (Stan, NumPy ABC, hand-written) has
+# already produced a posterior or scenario draw set, and you want to
+# propagate it row-paired through the simulator. Rows stay paired —
+# no cartesian product across columns.
+model = "models/sir.camdl"
+seeds = { n = 1 }
+
+[source.from_csv]
+file = "posterior_draws.csv"
+# Optional: rename columns. Without `map`, every column is passed
+# through under its header name (the simulator errors on unknown
+# parameters, so prune diagnostic columns or use map to whitelist).
+map  = { R0 = "R", gamma = "gamma", sigma = "sigma" }
+# delimiter is auto-picked from the extension (.tsv → tab, else comma);
+# override with `delimiter = "\t"` or any single character.
+
+[[scenario]]
+name = "baseline"
+
+[[scenario]]
+name = "with_intervention"
+enable = ["npi"]
+# Total: n_rows × 2 scenarios × 1 seed
+```
+
+```toml
+# batches/ppc.toml — posterior predictive check (spec; not yet
+# implemented — the broader `[draws]` design that subsumes
+# `[source.from_csv]` plus a `source = "prior"` mode).
 model = "models/sir.camdl"
 obs = "results/ppc/obs.tsv"
 
