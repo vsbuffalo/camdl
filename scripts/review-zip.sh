@@ -32,6 +32,18 @@ cd "$(git rev-parse --show-toplevel)"
 OUTDIR="${REVIEW_OUTDIR:-review-zips}"
 DATE=$(date +%Y%m%d)
 
+# Global exclusions — paths stripped from every zip, applied via
+# git-archive pathspec magic (':!path'). These are internal-only
+# artifacts not appropriate to send to an external reviewer:
+#   - docs/dev/proposals/ — in-flight RFCs
+#   - docs/dev/incidents/ — internal post-mortems
+# Subsystem include lists may still mention these paths; the
+# exclusion wins.
+REVIEW_EXCLUDES=(
+    ':!docs/dev/proposals/'
+    ':!docs/dev/incidents/'
+)
+
 # ─── Subsystem file lists ─────────────────────────────────────────────
 #
 # Each subsystem declares an array of paths (files or dirs) that
@@ -160,7 +172,6 @@ INFERENCE=(
     docs/camdl-inference-spec.md
     docs/camdl-run-spec.md
     docs/inference.md
-    docs/dev/incidents/
     CLAUDE.md
 )
 
@@ -202,7 +213,7 @@ DOCS=(
 estimate_tokens() {
     # Approximation: 1 token ≈ 4 bytes of source text. Good enough for
     # deciding which zips to hand a reviewer in what order.
-    git archive HEAD -- "$@" 2>/dev/null \
+    git archive HEAD -- "$@" "${REVIEW_EXCLUDES[@]}" 2>/dev/null \
         | tar -xf - -O 2>/dev/null \
         | wc -c \
         | awk '{printf "%.0fK", $1/4/1000}'
@@ -212,7 +223,7 @@ make_zip() {
     local name=$1; shift
     local out="$OUTDIR/review-$name-$DATE.zip"
     mkdir -p "$OUTDIR"
-    git archive HEAD --prefix="camdl/" -o "$out" -- "$@"
+    git archive HEAD --prefix="camdl/" -o "$out" -- "$@" "${REVIEW_EXCLUDES[@]}"
     local tokens
     tokens=$(estimate_tokens "$@")
     local bytes
@@ -243,7 +254,7 @@ case "$cmd" in
         # contributor onboarding, bisection across subsystems).
         out="$OUTDIR/review-full-$DATE.zip"
         mkdir -p "$OUTDIR"
-        git archive HEAD --prefix="camdl/" -o "$out"
+        git archive HEAD --prefix="camdl/" -o "$out" -- ":/" "${REVIEW_EXCLUDES[@]}"
         tokens=$(estimate_tokens ":/")
         bytes=$(ls -l "$out" | awk '{print $5}')
         printf "  %-10s → %s (~%s tokens, %sB)\n" "full" "$out" "$tokens" "$bytes"
