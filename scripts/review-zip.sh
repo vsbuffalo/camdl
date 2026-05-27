@@ -47,15 +47,95 @@ DATE=$(date +%Y%m%d)
 CLI_PLUMBING=(
     rust/crates/cli/src/main.rs
     rust/crates/cli/src/browse.rs
-    rust/crates/cli/src/cas.rs
+    rust/crates/cli/src/cas/
     rust/crates/cli/src/run_meta.rs
     rust/crates/cli/src/run_paths.rs
     rust/crates/cli/src/hashing.rs
     rust/crates/cli/src/batch.rs
-    rust/crates/cli/src/serve.rs
     rust/crates/cli/src/util.rs
     rust/crates/cli/src/version.rs
-    rust/crates/cli/tests/
+)
+
+# Inference-relevant tests only — exercises PF / IF2 / PMMH / PGAS / NUTS,
+# observation models, priors, profile/fit CLI, and the seam between them.
+# Engine smoke tests and lineage/intervention/forcing oracles live in
+# ENGINE_TESTS so the inference reviewer isn't paying ~100K tokens for
+# tests outside their scope.
+INFERENCE_TESTS=(
+    rust/crates/sim/tests/if2.rs
+    rust/crates/sim/tests/pmmh.rs
+    rust/crates/sim/tests/pmmh_hierarchical.rs
+    rust/crates/sim/tests/pgas_resume.rs
+    rust/crates/sim/tests/pgas_tempering.rs
+    rust/crates/sim/tests/particle_filter.rs
+    rust/crates/sim/tests/obs_level_params.rs
+    rust/crates/sim/tests/obs_time_dependence.rs
+    rust/crates/sim/tests/hierarchical_log_density.rs
+    rust/crates/sim/tests/gradient_check.rs
+    rust/crates/sim/tests/multi_stream_obs.rs
+    rust/crates/cli/tests/fit_experiment_management.rs
+    rust/crates/cli/tests/fit_priors.rs
+    rust/crates/cli/tests/synthetic_fit_grid.rs
+    rust/crates/cli/tests/profile_priors.rs
+    rust/crates/cli/tests/profile_diagnostics.rs
+    rust/crates/cli/tests/profile_pmmh.rs
+    rust/crates/cli/tests/profile_multi_stream.rs
+    rust/crates/cli/tests/survey_top_k_pmmh.rs
+    rust/crates/cli/tests/survey_top_k_pgas.rs
+    rust/crates/cli/tests/pgas_resume.rs
+    rust/crates/cli/tests/calendar_fit_summary.rs
+    rust/crates/cli/tests/pfilter_trajectories.rs
+)
+
+# Engine-relevant tests: forward simulation, lineage runtime, interventions,
+# forcings, conservation invariants, golden agreement. Inference-side
+# observation tests cross-cut and live in INFERENCE_TESTS; that overlap
+# is small enough not to be worth bundling.
+ENGINE_TESTS=(
+    rust/crates/sim/tests/golden_simulate.rs
+    rust/crates/sim/tests/smoke_all_golden.rs
+    rust/crates/sim/tests/expr_eval.rs
+    rust/crates/sim/tests/resolved_expr.rs
+    rust/crates/sim/tests/gillespie_determinism.rs
+    rust/crates/sim/tests/gillespie_invariants.rs
+    rust/crates/sim/tests/chain_binomial_invariants.rs
+    rust/crates/sim/tests/bimolecular_conservation.rs
+    rust/crates/sim/tests/branching_destinations.rs
+    rust/crates/sim/tests/ode.rs
+    rust/crates/sim/tests/erlang_distribution.rs
+    rust/crates/sim/tests/statistical_distribution.rs
+    rust/crates/sim/tests/sparse_propensity.rs
+    rust/crates/sim/tests/scenario_application.rs
+    rust/crates/sim/tests/interventions.rs
+    rust/crates/sim/tests/intervention_dt_invariance.rs
+    rust/crates/sim/tests/periodic_forcing.rs
+    rust/crates/sim/tests/periodic_bspline_oracle.rs
+    rust/crates/sim/tests/fourier_oracle.rs
+    rust/crates/sim/tests/cubic_spline.rs
+    rust/crates/sim/tests/interpolation.rs
+    rust/crates/sim/tests/simplex.rs
+    rust/crates/sim/tests/spatial_density.rs
+    rust/crates/sim/tests/snapshot_projections.rs
+    rust/crates/sim/tests/rng_extreme_inputs.rs
+    rust/crates/sim/tests/lineage_runtime.rs
+    rust/crates/sim/tests/lineage_stratified.rs
+    rust/crates/sim/tests/lineage_coalescent.rs
+    rust/crates/sim/tests/lineage_batch.rs
+    rust/crates/sim/tests/lineage_streaming.rs
+    rust/crates/sim/tests/lineage_offspring.rs
+    rust/crates/sim/tests/lineage_oracle_tier5.rs
+    rust/crates/sim/tests/fixtures/
+    rust/crates/cli/tests/cas_integration.rs
+    rust/crates/cli/tests/backend_provenance.rs
+    rust/crates/cli/tests/parameter_bounds_validation.rs
+    rust/crates/cli/tests/dated_data_loader.rs
+    rust/crates/cli/tests/seed_timing_e2e.rs
+    rust/crates/cli/tests/lineage_e2e.rs
+    rust/crates/cli/tests/lineage_migration_e2e.rs
+    rust/crates/cli/tests/events_backend_parity.rs
+    rust/crates/cli/tests/intervention_event_defaults.rs
+    rust/crates/cli/tests/scenario_runtime_application.rs
+    rust/crates/cli/tests/compile_output_flag.rs
 )
 
 INFERENCE=(
@@ -71,10 +151,12 @@ INFERENCE=(
     rust/crates/cli/src/pfilter.rs
     rust/crates/cli/src/if2.rs
     rust/crates/cli/src/profile.rs
+    rust/crates/cli/src/profile_diagnostics.rs
     rust/crates/cli/src/sampling.rs
+    rust/crates/cli/src/survey.rs
     rust/crates/ir/src/
-    rust/crates/sim/tests/
     "${CLI_PLUMBING[@]}"
+    "${INFERENCE_TESTS[@]}"
     docs/camdl-inference-spec.md
     docs/camdl-run-spec.md
     docs/inference.md
@@ -84,12 +166,12 @@ INFERENCE=(
 
 ENGINE=(
     rust/crates/sim/src/
-    rust/crates/sim/tests/
     rust/crates/sim/Cargo.toml
     rust/crates/cli/src/eval.rs
     rust/crates/cli/src/data.rs
     rust/crates/ir/src/
     "${CLI_PLUMBING[@]}"
+    "${ENGINE_TESTS[@]}"
     ocaml/golden/
     docs/runtimes.md
     docs/compartmental-ir-spec.md
