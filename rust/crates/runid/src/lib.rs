@@ -22,6 +22,7 @@
 pub mod error;
 pub mod float;
 pub mod hash;
+pub mod ir_hash;
 pub mod kind;
 
 pub use error::ResolveError;
