@@ -12,6 +12,7 @@ members = [
   "crates/io",
   "crates/ir",
   "crates/runid",
+  "crates/runid-derive",
   "crates/sim",
 ]
 resolver = "2"

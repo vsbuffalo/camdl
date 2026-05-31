@@ -1734,10 +1734,20 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "ir",
+ "runid-derive",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "runid-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

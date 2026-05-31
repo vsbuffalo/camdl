@@ -405,3 +405,31 @@ impl ContentAddressed for ContentHash {
         h.write_raw(&self.0);
     }
 }
+
+// A `BTreeMap` is already iterated in sorted key order, so it hashes
+// canonically with no extra sort — count-prefixed, key then value. (The
+// `ir` tree's `HashMap`/`BTreeMap<String, …>` fields use the dedicated
+// `write_str_map`/`write_str_f64_map` helpers because `f64` values are not
+// `ContentAddressed`; this generic impl covers resolved digest types whose
+// values are.)
+impl<K: ContentAddressed + Ord, V: ContentAddressed> ContentAddressed
+    for std::collections::BTreeMap<K, V>
+{
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        h.write_len(self.len() as u64);
+        for (k, v) in self.iter() {
+            k.hash_into(h);
+            v.hash_into(h);
+        }
+    }
+}
+
+// A `BTreeSet` iterates in sorted order — count-prefixed, each element.
+impl<T: ContentAddressed + Ord> ContentAddressed for std::collections::BTreeSet<T> {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        h.write_len(self.len() as u64);
+        for item in self.iter() {
+            item.hash_into(h);
+        }
+    }
+}

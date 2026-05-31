@@ -19,9 +19,16 @@
 //! `#[derive(RunInput)]` macro (crate `runid-derive`) generates the same
 //! encoding for run-input types and is validated against the hand impls.
 
+// The `#[derive(RunInput)]` macro emits `runid::ContentAddressed` /
+// `runid::CanonicalHasher` paths so the same expansion compiles in consumer
+// crates *and* here, where the digest types are derived. This alias makes
+// `runid::…` resolve to the current crate.
+extern crate self as runid;
+
 pub mod error;
 pub mod float;
 pub mod hash;
+pub mod inputs;
 pub mod ir_hash;
 pub mod kind;
 
@@ -29,6 +36,9 @@ pub use error::ResolveError;
 pub use float::{FiniteF64, NonFiniteFloat};
 pub use hash::{CanonicalHasher, ContentAddressed, ContentHash, HexError, HASH_VERSION};
 pub use kind::{run_id, ArtifactKind};
+pub use runid_derive::RunInput;
 
+#[cfg(test)]
+mod macro_eq;
 #[cfg(test)]
 mod tests;
