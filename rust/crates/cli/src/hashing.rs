@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use crate::version;
 
 /// Structural hash of the IR: the fields that affect simulation semantics —
-/// including the `simulation` block (t_start/t_end/output_dt) and `time_unit`
-/// (gh#142). Still ignores pure display/provenance (name, description, labels).
+/// including the `simulation` block (t_start/t_end/output_dt), `time_unit`,
+/// `output` (row count / horizon), `bindings` (runtime-evaluated derived
+/// quantities), and `model_structure` (gh#142 + siblings). Still ignores pure
+/// display/provenance (name, description, labels).
 /// serde_json's Map is backed by BTreeMap (sorted keys), so serialization is deterministic.
 ///
 /// The on-disk IR is an *envelope* — `{ ir_version, validated_by, model: {…} }`
@@ -38,11 +40,25 @@ pub fn model_hash(ir_json: &str) -> String {
         // on the simulate path t_end comes solely from the model file, so a
         // change to it must change the key. Omitting them collided two models
         // that differed only in t_end (the second was served the first's
-        // trajectory). Adding inputs to the key is monotone-safe: it can only
-        // over-invalidate (a spurious recompute), never serve a wrong result.
-        // The broader totality audit (output config, model_structure, etc.)
-        // is the total-input-hash refactor (2026-05-31-total-input-hash-cas.md).
+        // trajectory).
         "simulation", "time_unit",
+        // gh#142 siblings — same collision class, all read at runtime:
+        //   `output`          governs the emitted row count and horizon
+        //                     (`output.times.regular.end`); two models differing
+        //                     only here are served each other's trajectory.
+        //                     Reproduced in tests/cas_output_in_key.rs.
+        //   `bindings`        derived quantities (e.g. N = S+I+R) evaluated by
+        //                     propensity.rs at every substep; changing a
+        //                     binding expr changes the dynamics.
+        //   `model_structure` consumed by sim/lineage (deme.rs) for spatial /
+        //                     lineage models.
+        // Adding inputs to the key is monotone-safe: it can only over-invalidate
+        // (a spurious recompute), never serve a wrong result. This is still a
+        // hand-written allowlist (the exact smell §3 of the total-input-hash
+        // proposal names); replacing it with a whole-`model` structural hash
+        // minus an explicit display set is the Phase C refactor
+        // (2026-05-31-total-input-hash-cas.md).
+        "output", "bindings", "model_structure",
     ];
     for key in &structural_keys {
         if let Some(val) = obj.get(*key) {

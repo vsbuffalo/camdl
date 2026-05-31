@@ -365,6 +365,16 @@ etc.) legitimately move — and they move because the input set legitimately gre
 Bounded, safe to land without a human watching the goldens, *because the failure
 direction is recompute-not-wrong.*
 
+**Landed (2026-05-31).** `simulation` + `time_unit` folded in (gh#142). The
+same pass also folded the three sibling top-level IR keys that were read at
+runtime but still absent from the allowlist — `output` (row count / horizon),
+`bindings` (derived quantities evaluated in `propensity.rs`), and
+`model_structure` (read by `sim/lineage/`) — each the *identical* collision
+class. `output` is reproduced red→green in `tests/cas_output_in_key.rs` (two
+IRs differing only in `output.end` were served each other's trajectory).
+Phase B is now complete, but it remains a hand-written allowlist; Phase C
+replaces it with a whole-`model` structural hash minus a display set.
+
 ### Phase C — the `RunInputs` enum + total structural hash (EXCLUSION-RISK, needs review)
 The full §4 type. Its risk is §4.3's exclusion set — every `#[hash_skip]` is an
 under-invalidation hazard (the wrong-answer direction). It also regenerates the
