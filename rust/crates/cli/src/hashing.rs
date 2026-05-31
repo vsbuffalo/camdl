@@ -3,8 +3,9 @@ use std::collections::HashMap;
 
 use crate::version;
 
-/// Structural hash of the IR: only fields that affect simulation semantics.
-/// Ignores t_end, output config, labels, and other non-structural fields.
+/// Structural hash of the IR: the fields that affect simulation semantics —
+/// including the `simulation` block (t_start/t_end/output_dt) and `time_unit`
+/// (gh#142). Still ignores pure display/provenance (name, description, labels).
 /// serde_json's Map is backed by BTreeMap (sorted keys), so serialization is deterministic.
 ///
 /// The on-disk IR is an *envelope* — `{ ir_version, validated_by, model: {…} }`
@@ -32,6 +33,16 @@ pub fn model_hash(ir_json: &str) -> String {
         "compartments", "transitions", "parameters", "tables",
         "time_functions", "interventions", "observations",
         "ode_equations", "initial_conditions",
+        // gh#142: the `simulation` block (t_start / t_end / output_dt /
+        // time_semantics / rng_seed) and `time_unit` ARE simulation inputs —
+        // on the simulate path t_end comes solely from the model file, so a
+        // change to it must change the key. Omitting them collided two models
+        // that differed only in t_end (the second was served the first's
+        // trajectory). Adding inputs to the key is monotone-safe: it can only
+        // over-invalidate (a spurious recompute), never serve a wrong result.
+        // The broader totality audit (output config, model_structure, etc.)
+        // is the total-input-hash refactor (2026-05-31-total-input-hash-cas.md).
+        "simulation", "time_unit",
     ];
     for key in &structural_keys {
         if let Some(val) = obj.get(*key) {
