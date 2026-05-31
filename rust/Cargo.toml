@@ -11,6 +11,7 @@ members = [
   "crates/external-harness",
   "crates/io",
   "crates/ir",
+  "crates/runid",
   "crates/sim",
 ]
 resolver = "2"
