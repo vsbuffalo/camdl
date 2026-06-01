@@ -1784,14 +1784,7 @@ mod tests {
     /// mixed sources, read the fit back, and assert each `.source` matches.
     #[test]
     fn fit_sidecar_resolved_priors_survive_read_fit_segment_round_trip() {
-        let tmp = std::env::temp_dir().join(format!(
-            "camdl_sidecar_priors_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let tmp = crate::test_support::unique_temp_dir("sidecar_priors");
         let seg = tmp.join("fits").join("demo-abc12345");
         let leaf = seg.join("01-posterior-1fb03eee").join("seed_1-06cbd6b3");
         std::fs::create_dir_all(&leaf).unwrap();

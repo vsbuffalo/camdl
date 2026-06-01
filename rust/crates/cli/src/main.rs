@@ -1,4 +1,6 @@
 mod args;
+#[cfg(test)]
+mod test_support;   // collision-free unique_temp_dir for unit tests (gh#153)
 mod util;
 mod params_resolver;  // unified parameter-value resolver (2026-05-25 CLI UX rev 2)
 mod cas_read;       // generic RunRecord reader (new-format sims); transitional alongside run_meta (gh#147)

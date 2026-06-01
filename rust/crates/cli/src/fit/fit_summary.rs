@@ -1887,11 +1887,7 @@ mod tests {
     /// block flags it.
     #[test]
     fn provenance_block_detects_mle_final_disagreement() {
-        let dir = std::env::temp_dir().join(format!(
-            "camdl_summary_prov_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
-        ));
+        let dir = crate::test_support::unique_temp_dir("summary_prov");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("final_params.toml"),
             "R0 = 56.82\nsigma = 0.0791\n").unwrap();
@@ -1913,11 +1909,7 @@ mod tests {
 
     #[test]
     fn provenance_block_passes_when_params_match() {
-        let dir = std::env::temp_dir().join(format!(
-            "camdl_summary_prov_ok_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
-        ));
+        let dir = crate::test_support::unique_temp_dir("summary_prov_ok");
         std::fs::create_dir_all(&dir).unwrap();
         // Values must match `synthetic_fit_state().start_values`
         // exactly — the second cross-check (fit_state ↔ final_params)
@@ -1945,11 +1937,7 @@ mod tests {
     fn make_fit_dir(stage: &str, state: &FitState, params: &[(&str, f64)])
         -> std::path::PathBuf
     {
-        let dir = std::env::temp_dir().join(format!(
-            "camdl_summary_format_{}_{}_{}",
-            stage, std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
-        ));
+        let dir = crate::test_support::unique_temp_dir(&format!("summary_format_{stage}"));
         std::fs::create_dir_all(&dir).unwrap();
         let parent_hash: String = "deadbeef".repeat(8);
         write_top_level_fit_run(&dir, &parent_hash);
@@ -2167,11 +2155,7 @@ mod tests {
 
     #[test]
     fn params_only_errors_when_no_completed_stage() {
-        let dir = std::env::temp_dir().join(format!(
-            "camdl_summary_empty_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
-        ));
+        let dir = crate::test_support::unique_temp_dir("summary_empty");
         std::fs::create_dir_all(&dir).unwrap();
         let stages = discover_stages(&dir);
         let err = dump_params_only(&dir.to_string_lossy(), None, &stages).unwrap_err();
