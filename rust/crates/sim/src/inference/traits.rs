@@ -196,6 +196,15 @@ pub struct SMCConfig {
     /// relative to the filter itself. See
     /// `docs/dev/proposals/2026-04-20-prequential-evaluation.md`.
     pub record_prequential: bool,
+
+    /// gh#147 (M3.2). Disable the machine-speed-dependent wall-clock
+    /// degeneracy watchdog for this filter call. Content-addressed (CAS)
+    /// fits set this `true` so their log-likelihood is a pure function of
+    /// inputs; the deterministic substep cap (`ITER_BUDGET`) remains the
+    /// compute-blowup safety. `false` keeps the env-resolved budget for
+    /// non-CAS callers. Config-threaded (not a process-global env toggle)
+    /// so a CAS and a non-CAS filter never race on a shared global.
+    pub pf_wallclock_disabled: bool,
 }
 
 /// Shared interface for algorithm config structs that drive a particle filter.

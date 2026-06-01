@@ -345,6 +345,8 @@ impl FitRunConfig {
             dt,
             t_start: compiled.model.simulation.t_start,
             skip_first_obs_from_loglik: ic_free,
+            // M3.2 commit 1 threads this; the CAS-fit writer flips it true.
+            pf_wallclock_disabled: false,
         };
         // IC-free precondition: at least one estimated param must be
         // marked ivp. Without per-particle spread at t=0, the first
@@ -415,6 +417,8 @@ impl FitRunConfig {
             skip_first_obs_from_loglik: self.ic_free,
             record_ancestry: false,
             record_prequential: false,
+            // M3.2 commit 1 threads this; the CAS-fit writer flips it true.
+            pf_wallclock_disabled: false,
         }
     }
 }

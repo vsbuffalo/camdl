@@ -1431,6 +1431,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     t_start: process.compiled.model.simulation.t_start,
                     simplex_groups: vec![],
                     skip_first_obs_from_loglik: false,
+                    pf_wallclock_disabled: false,
                 };
                 let result = run_if2(
                     &*process, &*obs_model_obj, &params, per_start_specs, &config, job_seed,
@@ -1464,6 +1465,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                             skip_first_obs_from_loglik: false,
                             record_ancestry: false,
                             record_prequential: false,
+                            pf_wallclock_disabled: false,
                         };
                         // Distinct seed from the IF2 inner run so the
                         // clean-eval PF doesn't reuse IF2's last
@@ -1576,6 +1578,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     skip_first_obs_from_loglik: false,
                     record_ancestry: false,
                     record_prequential: false,
+                    pf_wallclock_disabled: false,
                 };
 
                 let eval_loglik = |theta: &[f64], pf_seed: u64| -> f64 {

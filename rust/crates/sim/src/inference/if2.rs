@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use crate::rng::StatefulRng;
 use crate::error::SimError;
-use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, ITER_BUDGET};
+use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, pf_wallclock_budget, ITER_BUDGET};
 use super::traits::{ProcessModel, ObservationModel};
 use super::types::{ParticleState, log_sum_exp, normalize_log_weights, LOG_PROB_FLOOR, init_particle_rngs};
 use super::resampling::systematic_resample;
@@ -110,6 +110,11 @@ pub struct IF2Config {
     /// per-particle spread at t=0, typically from an `ivp` estimated
     /// parameter. See docs/dev/proposals/2026-04-18-ic-free-inference.md.
     pub skip_first_obs_from_loglik: bool,
+
+    /// gh#147 (M3.2). Disable the machine-speed-dependent wall-clock
+    /// watchdog (CAS fits set `true` for deterministic theta-hat; the
+    /// deterministic substep cap remains the compute-blowup safety).
+    pub pf_wallclock_disabled: bool,
 }
 
 impl super::traits::InferenceConfig for IF2Config {
@@ -273,6 +278,9 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     // ESS into one trace (across all iterations) so the K-window
     // detector can fire as soon as the cumulative pattern is bad.
     let t0_if2 = Instant::now();
+    // gh#147 (M3.2). Wall-clock budget resolved once from config; CAS fits
+    // disable it (`None`) for deterministic theta-hat.
+    let pf_wc = pf_wallclock_budget(config.pf_wallclock_disabled, n);
     let mut ess_history: Vec<f64> = Vec::with_capacity(config.n_iterations * n_obs);
 
     // Pre-allocate particle state, params, RNGs, and scratch buffers once.
@@ -516,7 +524,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             ess_history.push(ess_now);
             let elapsed = t0_if2.elapsed();
             if let Some(kind) = check_pf_degeneracy(
-                &ess_history, elapsed, obs_idx, 0, n,
+                &ess_history, elapsed, pf_wc, obs_idx, 0, n,
             ) {
                 // gh#133: WallClockExceeded → PFWallclockTimeout (resource
                 // limit), the rest → PFDegenerate (statistical pathology).

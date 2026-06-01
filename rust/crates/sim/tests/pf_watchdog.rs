@@ -180,6 +180,7 @@ fn bootstrap_filter_bails_on_ess_collapse() {
         n_particles: 200, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
+        pf_wallclock_disabled: false,
     };
 
     let t0 = Instant::now();
@@ -270,6 +271,7 @@ fn if2_bails_on_ess_collapse() {
         t_start: 0.0,
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
+        pf_wallclock_disabled: false,
     };
 
     let t0 = Instant::now();
@@ -433,6 +435,7 @@ fn if2_theta_hat_is_identical_across_thread_counts() {
         t_start: 0.0,
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
+        pf_wallclock_disabled: false,
     };
 
     // Run the identical fit under two different rayon pool sizes. `install`
@@ -582,6 +585,7 @@ fn bootstrap_filter_iteration_budget_aborts_pre_window() {
         n_particles, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
+        pf_wallclock_disabled: false,
     };
 
     let t0 = Instant::now();
@@ -638,6 +642,7 @@ fn if2_iteration_budget_aborts_pre_window() {
         t_start: 0.0,
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
+        pf_wallclock_disabled: false,
     };
 
     let t0 = Instant::now();

@@ -348,6 +348,8 @@ pub fn cmd_if2(a: &crate::args::If2Args) {
         t_start: compiled.model.simulation.t_start,
         // Legacy `camdl fit if2` subcommand doesn't surface ic_free.
         skip_first_obs_from_loglik: false,
+        // Standalone (non-CAS) path: env-resolved wall-clock budget.
+        pf_wallclock_disabled: false,
     };
 
     // Build process + observation model via traits
@@ -433,6 +435,7 @@ pub fn cmd_if2(a: &crate::args::If2Args) {
             skip_first_obs_from_loglik: false,
             record_ancestry: false,
             record_prequential: false,
+            pf_wallclock_disabled: false,
         };
 
         eprintln!("\nevaluating loglik (every {} iterations, all {} chains)...", eval_interval, n_chains);

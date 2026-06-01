@@ -129,6 +129,24 @@ fn pf_wallclock_budget_s(n_particles: usize) -> Option<u64> {
     resolve_wallclock_budget_s(std::env::var(WALLCLOCK_ENV).ok().as_deref(), n_particles)
 }
 
+/// gh#147 (M3.1/M3.2). Resolve the wall-clock budget for a filter call,
+/// honoring a **config-threaded** disable. CAS fits pass `disabled = true`
+/// so their log-likelihood is a pure function of inputs (the wall-clock
+/// watchdog is machine-speed-dependent); the deterministic substep cap
+/// ([`ITER_BUDGET`]) remains the compute-blowup safety. `disabled = false`
+/// keeps the existing env-resolved budget for non-CAS callers.
+///
+/// This is the seam that replaces the process-global env toggle: the
+/// disable now rides on the call's config, not a shared environment
+/// variable, so a CAS and a non-CAS filter never race on a global.
+pub fn pf_wallclock_budget(disabled: bool, n_particles: usize) -> Option<u64> {
+    if disabled {
+        None
+    } else {
+        pf_wallclock_budget_s(n_particles)
+    }
+}
+
 /// gh#110. Return the degeneracy mode if the filter has bailed at
 /// this observation window, otherwise `None`.
 ///
@@ -136,6 +154,11 @@ fn pf_wallclock_budget_s(n_particles: usize) -> Option<u64> {
 /// - `ess_history` — every ESS recorded so far, length = obs_windows
 ///   processed. Only the last `ESS_COLLAPSE_WINDOWS` are inspected.
 /// - `elapsed` — wall-clock since the filter call started.
+/// - `wallclock_budget_s` — the **resolved** wall-clock budget (seconds),
+///   or `None` to disable the wall-clock check. The caller resolves this
+///   via [`pf_wallclock_budget`] from its config, so a CAS fit
+///   (`disabled = true → None`) is deterministic and the env-read no
+///   longer lives inside this helper.
 /// - `_obs_window` — the just-processed window index. Reserved for
 ///   future diagnostics that want to localise the bail (e.g.
 ///   logging "ESS dropped at obs 47–50"). The current implementation
@@ -156,6 +179,7 @@ fn pf_wallclock_budget_s(n_particles: usize) -> Option<u64> {
 pub fn check_pf_degeneracy(
     ess_history: &[f64],
     elapsed: Duration,
+    wallclock_budget_s: Option<u64>,
     _obs_window: usize,
     dead_count: usize,
     n_particles: usize,
@@ -169,10 +193,10 @@ pub fn check_pf_degeneracy(
 
     // WallClockExceeded: independent of swarm state. A filter still
     // running past its budget is stuck in `step()` — *or* over-particled
-    // for the budget (gh#133). The budget scales with swarm size above the
-    // floor and is overridable (env / CLI), so a slow-but-healthy big
-    // filter is not false-flagged. `None` budget ⇒ the check is disabled.
-    if let Some(budget_s) = pf_wallclock_budget_s(n_particles) {
+    // for the budget (gh#133). The budget is resolved by the caller (env /
+    // CLI / config), so a slow-but-healthy big filter is not false-flagged
+    // and a CAS fit can disable it. `None` budget ⇒ the check is disabled.
+    if let Some(budget_s) = wallclock_budget_s {
         if elapsed.as_secs() >= budget_s {
             return Some(PFDegenerateKind::WallClockExceeded);
         }
@@ -285,13 +309,21 @@ pub fn pf_bail_error(kind: PFDegenerateKind, obs_window: usize, elapsed_s: f64) 
 mod tests {
     use super::*;
 
+    /// The env-resolved wall-clock budget for `n` particles (env unset in
+    /// tests → the scaled default), passed explicitly now that
+    /// `check_pf_degeneracy` takes the resolved budget rather than reading
+    /// the env itself. Reproduces the pre-threading behavior exactly.
+    fn wc(n: usize) -> Option<u64> {
+        resolve_wallclock_budget_s(None, n)
+    }
+
     /// Healthy run: ESS comfortably above the floor, fast wall-clock,
     /// no dead particles. Must NOT bail.
     #[test]
     fn healthy_run_returns_none() {
         let ess = vec![800.0, 750.0, 820.0, 790.0, 810.0];
         let elapsed = Duration::from_secs(5);
-        assert!(check_pf_degeneracy(&ess, elapsed, 4, 0, 1000).is_none());
+        assert!(check_pf_degeneracy(&ess, elapsed, wc(1000), 4, 0, 1000).is_none());
     }
 
     /// A single-window dip below the floor is normal during epidemic
@@ -299,14 +331,14 @@ mod tests {
     #[test]
     fn single_window_dip_does_not_trigger() {
         let ess = vec![800.0, 1.5, 750.0]; // mid-series dip
-        assert!(check_pf_degeneracy(&ess, Duration::from_secs(1), 2, 0, 1000).is_none());
+        assert!(check_pf_degeneracy(&ess, Duration::from_secs(1), wc(1000), 2, 0, 1000).is_none());
     }
 
     /// Two consecutive low windows still under K=3 threshold. Must NOT trigger.
     #[test]
     fn two_consecutive_low_windows_do_not_trigger() {
         let ess = vec![800.0, 1.5, 1.5];
-        assert!(check_pf_degeneracy(&ess, Duration::from_secs(1), 2, 0, 1000).is_none());
+        assert!(check_pf_degeneracy(&ess, Duration::from_secs(1), wc(1000), 2, 0, 1000).is_none());
     }
 
     /// K=3 consecutive windows at or below the floor → EssCollapsed
@@ -314,7 +346,7 @@ mod tests {
     #[test]
     fn k_consecutive_low_windows_trigger_ess_collapsed() {
         let ess = vec![800.0, 1.8, 1.2, 1.5];
-        let kind = check_pf_degeneracy(&ess, Duration::from_secs(1), 3, 0, 1000)
+        let kind = check_pf_degeneracy(&ess, Duration::from_secs(1), wc(1000), 3, 0, 1000)
             .expect("should bail with ESS collapse");
         match kind {
             PFDegenerateKind::EssCollapsed { last_ess } => {
@@ -330,7 +362,7 @@ mod tests {
     #[test]
     fn ess_equal_to_floor_counts_as_collapsed() {
         let ess = vec![ESS_FLOOR, ESS_FLOOR, ESS_FLOOR];
-        let kind = check_pf_degeneracy(&ess, Duration::from_secs(0), 2, 0, 1000)
+        let kind = check_pf_degeneracy(&ess, Duration::from_secs(0), wc(1000), 2, 0, 1000)
             .expect("should bail with ESS at the floor");
         assert!(matches!(kind, PFDegenerateKind::EssCollapsed { .. }));
     }
@@ -342,7 +374,7 @@ mod tests {
     fn wall_clock_timeout_triggers() {
         let ess = vec![800.0, 750.0]; // healthy
         let elapsed = Duration::from_secs(WALLCLOCK_FLOOR_S);
-        let kind = check_pf_degeneracy(&ess, elapsed, 1, 0, 100)
+        let kind = check_pf_degeneracy(&ess, elapsed, wc(100), 1, 0, 100)
             .expect("should bail on wall-clock");
         assert!(matches!(kind, PFDegenerateKind::WallClockExceeded));
     }
@@ -353,7 +385,7 @@ mod tests {
     fn wall_clock_just_under_does_not_trigger() {
         let ess = vec![800.0];
         let elapsed = Duration::from_secs(WALLCLOCK_FLOOR_S - 1);
-        assert!(check_pf_degeneracy(&ess, elapsed, 0, 0, 100).is_none());
+        assert!(check_pf_degeneracy(&ess, elapsed, wc(100), 0, 0, 100).is_none());
     }
 
     /// gh#133. A large-but-healthy swarm is slow, not stuck — the budget
@@ -364,7 +396,7 @@ mod tests {
     fn large_swarm_slow_but_healthy_does_not_false_trigger() {
         let ess = vec![800.0, 750.0, 820.0]; // healthy ESS
         assert!(
-            check_pf_degeneracy(&ess, Duration::from_secs(200), 50, 0, 1500).is_none(),
+            check_pf_degeneracy(&ess, Duration::from_secs(200), wc(1500), 50, 0, 1500).is_none(),
             "a slow-but-healthy 1500-particle filter must not be killed as degenerate"
         );
     }
@@ -374,7 +406,7 @@ mod tests {
     #[test]
     fn all_particles_dead_triggers() {
         let ess: Vec<f64> = vec![];
-        let kind = check_pf_degeneracy(&ess, Duration::from_secs(0), 0, 1000, 1000)
+        let kind = check_pf_degeneracy(&ess, Duration::from_secs(0), wc(1000), 0, 1000, 1000)
             .expect("should bail with AllParticlesDead");
         assert!(matches!(kind, PFDegenerateKind::AllParticlesDead));
     }
@@ -385,7 +417,7 @@ mod tests {
     #[test]
     fn all_particles_dead_wins_over_ess_collapse() {
         let ess = vec![0.0, 0.0, 0.0];
-        let kind = check_pf_degeneracy(&ess, Duration::from_secs(0), 2, 500, 500)
+        let kind = check_pf_degeneracy(&ess, Duration::from_secs(0), wc(500), 2, 500, 500)
             .expect("should bail");
         assert!(matches!(kind, PFDegenerateKind::AllParticlesDead),
             "AllParticlesDead must take priority over EssCollapsed");
@@ -399,7 +431,7 @@ mod tests {
         // No way an empty swarm should hit a watchdog — this guards
         // against an off-by-one that returns AllParticlesDead on
         // every call with n_particles=0.
-        assert!(check_pf_degeneracy(&[], Duration::from_secs(0), 0, 0, 0).is_none());
+        assert!(check_pf_degeneracy(&[], Duration::from_secs(0), wc(0), 0, 0, 0).is_none());
     }
 
     /// Exactly ESS_COLLAPSE_WINDOWS-1 windows of history with all at
@@ -409,7 +441,25 @@ mod tests {
         assert!(ESS_COLLAPSE_WINDOWS >= 2,
             "test assumes K-window threshold >= 2");
         let short: Vec<f64> = (0..ESS_COLLAPSE_WINDOWS - 1).map(|_| 0.5).collect();
-        assert!(check_pf_degeneracy(&short, Duration::from_secs(0), 0, 0, 1000).is_none());
+        assert!(check_pf_degeneracy(&short, Duration::from_secs(0), wc(1000), 0, 0, 1000).is_none());
+    }
+
+    /// gh#147 (M3.2). The config-threaded resolver: `disabled = true`
+    /// yields `None` (the wall-clock check is off — for deterministic CAS
+    /// fits), independent of swarm size; `disabled = false` falls through
+    /// to the env-resolved scaled budget.
+    #[test]
+    fn config_disable_turns_off_wallclock() {
+        assert_eq!(pf_wallclock_budget(true, 100), None);
+        assert_eq!(pf_wallclock_budget(true, 5000), None);
+        // Not disabled → the same budget the env path resolves (env unset
+        // in tests → the scaled default).
+        assert_eq!(pf_wallclock_budget(false, 100), Some(WALLCLOCK_FLOOR_S));
+        // And with the budget None, check_pf_degeneracy never fires the
+        // wall-clock arm even past any elapsed — the determinism guarantee.
+        assert!(check_pf_degeneracy(
+            &[800.0, 750.0], Duration::from_secs(10_000), None, 0, 0, 100,
+        ).is_none(), "disabled (None) budget must never trip the wall-clock");
     }
 
     /// gh#133. Budget resolution: scaled default, env disable, positive

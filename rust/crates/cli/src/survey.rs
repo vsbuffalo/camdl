@@ -1085,6 +1085,8 @@ fn eval_point_pfilter(
             skip_first_obs_from_loglik: false,
             record_ancestry: false,
             record_prequential: false,
+            // Non-CAS legacy path keeps the env-resolved wall-clock budget.
+            pf_wallclock_disabled: false,
         };
         match bootstrap_filter(process, obs_model, params, &cfg, seed) {
             Ok(PFilterResult { log_likelihood, ess_trace, .. }) => {

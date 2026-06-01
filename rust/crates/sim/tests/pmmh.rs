@@ -133,7 +133,7 @@ fn make_eval_loglik(
     move |params: &[f64], pf_seed: u64| -> f64 {
         let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
         let obs_model = pure_death_observations();
-        let config = SMCConfig { n_particles, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false };
+        let config = SMCConfig { n_particles, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false, pf_wallclock_disabled: false };
 
         let result = bootstrap_filter(
             &process, &obs_model, params, &config, pf_seed,

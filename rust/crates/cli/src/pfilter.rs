@@ -304,6 +304,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         skip_first_obs_from_loglik: false,
         record_ancestry: need_ancestry,
         record_prequential: save_prequential.is_some(),
+        // Non-CAS legacy path keeps the env-resolved wall-clock budget.
+        pf_wallclock_disabled: false,
     };
 
     // --save-filtering caveat log. Fires unconditionally (not quietable)

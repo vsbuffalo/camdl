@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use crate::rng::StatefulRng;
 use crate::error::SimError;
-use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, ITER_BUDGET};
+use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, pf_wallclock_budget, ITER_BUDGET};
 use super::traits::{ProcessModel, ObservationModel, SMCConfig};
 use super::types::{ParticleState, ParticleSwarm, log_sum_exp, normalize_log_weights, RESAMPLE_RNG_STREAM, init_particle_rngs};
 use super::resampling::systematic_resample;
@@ -153,6 +153,10 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // -∞ proposals, so no caller-side change is needed for the
     // common path. Init-eval callers detect the bail explicitly.
     let t0_call = Instant::now();
+    // gh#147 (M3.2). Resolve the wall-clock budget once from config: a CAS
+    // fit disables it (`None`) for deterministic loglik; the deterministic
+    // substep cap remains the compute-blowup guard.
+    let pf_wc = pf_wallclock_budget(config.pf_wallclock_disabled, n_particles);
 
     // Resampling RNG — reserved stream index, never collides with particle streams.
     let mut resample_rng = StatefulRng::new_stream(seed, RESAMPLE_RNG_STREAM);
@@ -350,7 +354,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         let dead_count = particle_dead.iter().filter(|&&d| d).count();
         let elapsed = t0_call.elapsed();
         if let Some(kind) = check_pf_degeneracy(
-            &ess_trace, elapsed, obs_idx, dead_count, n_particles,
+            &ess_trace, elapsed, pf_wc, obs_idx, dead_count, n_particles,
         ) {
             // gh#133: WallClockExceeded → PFWallclockTimeout (resource limit),
             // the rest → PFDegenerate (statistical). Single mapping helper.
