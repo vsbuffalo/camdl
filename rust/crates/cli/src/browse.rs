@@ -10,37 +10,56 @@ use std::time::SystemTime;
 
 use owo_colors::OwoColorize;
 
-use crate::run_meta::{Run, RunKind, SimulateMeta};
+use crate::cas_read;
+use crate::run_meta::{Run, RunKind};
 use crate::util::fmt_relative_time;
 
 // ── Entry types ──────────────────────────────────────────────────────────────
 
-/// A discovered cached simulate run. The surrounding `output/sims/` walk
-/// guarantees every entry's kind is `Simulate`, so we destructure at
-/// discovery and hold the `SimulateMeta` directly for field-access
-/// ergonomics (this struct predates the unified `Run`; rather than
-/// switch every `entry.meta.seed` call site to pattern-match, we keep
-/// the flat view here and leave the full `Run` record available for
-/// JSON output).
-#[derive(Debug, Clone)]
-struct RunEntry {
-    /// The full Run record as loaded from run.json.
-    run: Run,
-    /// Destructured Simulate payload (duplicates `run.kind` — stored
-    /// alongside for direct field access without repeated matches).
-    meta: SimulateMeta,
+/// A new-format (`runid::RunRecord`) simulate leaf, prepared for the `list`
+/// display. The kind-Sim filter happens in [`cas_read::walk_sim_leaves`].
+struct SimRow {
+    leaf: cas_read::Leaf,
     /// Path relative to the current working directory, copy-paste ready.
     rel_path: String,
-    /// When the run was written (from run.json `created_at`, parsed back
-    /// to SystemTime for comparison; falls back to filesystem mtime).
+    /// When the run was written (from `provenance.created_at`; falls back to
+    /// filesystem mtime).
     created: SystemTime,
-    /// Size of `traj.tsv` in bytes.
-    traj_bytes: u64,
 }
 
-/// Shared preamble: read `run.json` and derive the display time + the
-/// cwd-relative path. Returns `None` when the directory isn't a run.
-/// Callers match on `run.kind` to build kind-specific entry structs.
+/// Discover the new-format sim leaves under `root/sims/` for `list`.
+fn discover_sim_rows(root: &str) -> Vec<SimRow> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    cas_read::walk_sim_leaves(Path::new(root))
+        .into_iter()
+        .map(|leaf| {
+            let created = leaf
+                .record
+                .provenance
+                .created_at
+                .as_deref()
+                .and_then(parse_iso8601)
+                .unwrap_or_else(|| {
+                    std::fs::metadata(&leaf.dir)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH)
+                });
+            let rel_path = pathdiff_str(&leaf.dir, &cwd);
+            SimRow { leaf, rel_path, created }
+        })
+        .collect()
+}
+
+/// Shared preamble for the **legacy** `run_meta::Run` kinds (fit/profile/
+/// survey): read `run.json` and derive the display time + cwd-relative path.
+/// Returns `None` when the directory isn't a (legacy) run.
+///
+/// M3-DELETION-BOUND (gh#147): the transitional reader dispatches new-format
+/// `sims/` through [`cas_read`] and the legacy kinds through this path. When
+/// M3 migrates the fit/profile/survey *writers* to `RunRecord`, delete this
+/// helper and all `discover_fits`/`discover_profiles`/`discover_surveys` /
+/// `ResolvedRun` machinery in the same change — the generic walker subsumes
+/// them. The dual path is debt with a due date, not a keeper.
 fn load_run_common(dir: &Path, cwd: &Path) -> Option<(Run, SystemTime, String)> {
     let run = Run::read(dir).ok()?;
     let created = parse_iso8601(&run.created_at)
@@ -49,22 +68,6 @@ fn load_run_common(dir: &Path, cwd: &Path) -> Option<(Run, SystemTime, String)> 
             .unwrap_or(SystemTime::UNIX_EPOCH));
     let rel_path = pathdiff_str(dir, cwd);
     Some((run, created, rel_path))
-}
-
-/// Try to load a simulate run from a directory. Returns None if the
-/// directory has no run.json, the JSON is malformed, or the Run is not
-/// of kind Simulate (e.g. a fit/fit-stage run.json accidentally walked).
-fn load_sim_entry(dir: &Path, cwd: &Path) -> Option<RunEntry> {
-    let (run, created, rel_path) = load_run_common(dir, cwd)?;
-    let meta = match &run.kind {
-        RunKind::Simulate(m) => m.clone(),
-        _ => return None,
-    };
-    let traj_bytes = std::fs::metadata(dir.join("traj.tsv"))
-        .map(|m| m.len()).unwrap_or(0);
-    Some(RunEntry {
-        run, meta, rel_path, created, traj_bytes,
-    })
 }
 
 // ── cmd_list ─────────────────────────────────────────────────────────────────
@@ -105,7 +108,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     let runs = if !filter_kind.includes_sims() {
         Vec::new()
     } else {
-        discover_runs(&root).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+        discover_sim_rows(&root)
     };
     let fits = if !filter_kind.includes_fits() {
         Vec::new()
@@ -124,9 +127,9 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     };
 
     let now = SystemTime::now();
-    let mut filtered_runs: Vec<RunEntry> = runs.into_iter()
-        .filter(|r| a.model.as_deref().is_none_or(|m| r.meta.model.contains(m)))
-        .filter(|r| a.scenario.as_deref().is_none_or(|s| r.meta.scenario == s))
+    let mut filtered_runs: Vec<SimRow> = runs.into_iter()
+        .filter(|r| a.model.as_deref().is_none_or(|m| r.leaf.level_label("model").contains(m)))
+        .filter(|r| a.scenario.as_deref().is_none_or(|s| r.leaf.level_label("scenario") == s))
         .filter(|r| match filter_since {
             Some(dur) => now.duration_since(r.created).is_ok_and(|d| d <= dur),
             None => true,
@@ -172,7 +175,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     }
 
     if format_json {
-        print_json(&filtered_runs);
+        print_sim_json(&filtered_runs);
         print_fits_json(&filtered_fits);
         print_profiles_json(&filtered_profiles);
         print_surveys_json(&filtered_surveys);
@@ -197,7 +200,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         }
         if !filtered_runs.is_empty() || !any_other {
             if any_other { eprintln!("{}", "sims".bold()); }
-            print_table(&filtered_runs, now);
+            print_sim_table(&filtered_runs, now);
         }
     }
 }
@@ -322,11 +325,43 @@ fn list_profile_children(
 
 pub fn cmd_show(a: &crate::args::ShowArgs) {
     let root = a.root.to_string_lossy();
-    let resolved = resolve_any(&root, &a.target).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
-    show(&resolved);
+    match resolve_any(&root, &a.target) {
+        Ok(Resolved::Sim { leaf, rel_path, created }) => show_sim_record(&leaf, &rel_path, created),
+        Ok(Resolved::Legacy(r)) => show(&r),
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Render a new-format (`RunRecord`) sim: the factored levels, the run_id
+/// address, and provenance. Mirrors the legacy `show_simulate` layout.
+fn show_sim_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
+    let rec = &leaf.record;
+    println!("{}", "path".bright_black()); println!("  {}", rel_path.cyan());
+    println!("{}", "kind".bright_black()); println!("  sim");
+    if let Some(ref l) = rec.provenance.label {
+        println!("{}", "label".bright_black()); println!("  {}", l);
+    }
+    println!("{}", "model".bright_black()); println!("  {}", leaf.level_label("model"));
+    println!("{}", "scenario".bright_black()); println!("  {}", leaf.level_label("scenario"));
+    println!("{}", "seed".bright_black()); println!("  {}", leaf.seed());
+    println!("{}", "config".bright_black()); println!("  {}", leaf.level_label("config"));
+    println!("{}", "run_id".bright_black()); println!("  {}", rec.run_id.to_hex().dimmed());
+    println!("{}", "levels".bright_black());
+    for lvl in &rec.levels {
+        println!("  {:<9} {}-{}", lvl.name, lvl.label, lvl.hash.short8().dimmed());
+    }
+    println!("{}", "trajectory".bright_black());
+    println!("  {} bytes", leaf.traj_bytes());
+    println!("{}", "created".bright_black());
+    println!("  {}  ({})",
+        rec.provenance.created_at.as_deref().unwrap_or("?"),
+        fmt_relative_time(created, SystemTime::now()));
+    println!("{}", "engine".bright_black()); println!("  {}", rec.engine_version);
+    println!("{}", "argv".bright_black());
+    println!("  {}", rec.provenance.argv.join(" "));
 }
 
 /// Kind-agnostic show entry point. One match on `run.kind`; per-kind
@@ -591,7 +626,32 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
     });
 
     use std::io::Write as _;
+
+    // New-format sim: emit traj.tsv (or an obs stream) from the leaf dir.
+    let resolved = match resolved {
+        Resolved::Sim { leaf, rel_path, .. } => {
+            let bytes = if let Some(ref stream) = a.stream {
+                let path = find_obs_stream(&leaf.dir, stream).unwrap_or_else(|| {
+                    eprintln!("error: no observation stream '{}' in {}", stream, rel_path);
+                    std::process::exit(1);
+                });
+                std::fs::read(&path).unwrap_or_else(|e| {
+                    eprintln!("error reading {}: {}", path.display(), e); std::process::exit(1);
+                })
+            } else {
+                std::fs::read(leaf.dir.join("traj.tsv")).unwrap_or_else(|e| {
+                    eprintln!("error reading traj.tsv: {}", e); std::process::exit(1);
+                })
+            };
+            let _ = std::io::stdout().write_all(&bytes);
+            return;
+        }
+        Resolved::Legacy(r) => r,
+    };
+
     match &resolved.run.kind {
+        // Legacy sims no longer exist (sims are RunRecord), but the match
+        // stays exhaustive; a path-form cat of an old sim run.json reads here.
         RunKind::Simulate(_) => {
             let bytes = if let Some(ref stream) = a.stream {
                 let path = find_obs_stream(&resolved.abs_path, stream).unwrap_or_else(|| {
@@ -683,40 +743,10 @@ fn find_obs_stream(sim_dir: &Path, stream: &str) -> Option<PathBuf> {
 }
 
 // ── Internals: discovery + resolution ────────────────────────────────────────
-
-/// Walk `root/sims/` and collect all simulate runs (directories
-/// containing run.json). Fits live under `root/fits/` and are
-/// surfaced separately by [`discover_fits`].
-fn discover_runs(root: &str) -> Result<Vec<RunEntry>, String> {
-    let runs_dir = Path::new(root).join("sims");
-    if !runs_dir.exists() { return Ok(Vec::new()); }
-    let mut out = Vec::new();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    // Three-level walk: sim_hash / scenario-scen_hash / seed_N
-    let sim_dirs = std::fs::read_dir(&runs_dir)
-        .map_err(|e| format!("cannot read {}: {}", runs_dir.display(), e))?;
-    for sim in sim_dirs.flatten() {
-        let sim_path = sim.path();
-        if !sim_path.is_dir() { continue; }
-        if let Ok(scens) = std::fs::read_dir(&sim_path) {
-            for scen in scens.flatten() {
-                let scen_path = scen.path();
-                if !scen_path.is_dir() { continue; }
-                if let Ok(seeds) = std::fs::read_dir(&scen_path) {
-                    for seed in seeds.flatten() {
-                        let seed_path = seed.path();
-                        if !seed_path.is_dir() { continue; }
-                        if let Some(entry) = load_sim_entry(&seed_path, &cwd) {
-                            out.push(entry);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
-}
+//
+// New-format `sims/` are discovered generically via [`discover_sim_rows`]
+// (data-driven depth through [`cas_read`]). The legacy fit/profile/survey
+// discovery below is M3-DELETION-BOUND (gh#147) — see [`load_run_common`].
 
 /// A discovered cached fit.
 #[derive(Debug, Clone)]
@@ -943,31 +973,42 @@ struct ResolvedRun {
     created: SystemTime,
 }
 
-/// Resolve a user-supplied key to a single run, regardless of kind.
-/// Accepts:
-/// - Full relative or absolute path to a run.json-containing directory.
-/// - Short hash prefix (git-style) on `Run.hash`. Matches across every
-///   kind under `<root>/{sims,fits,profiles}/**` (sim, fit, fit-stage,
-///   profile leaf, replicate-set umbrella). Ambiguous prefix → error
-///   listing all candidates with their kinds.
-/// - For sims only: `{prefix}/{scenario}` or `{prefix}/{scenario}/{seed_N}`
-///   narrows further by the SimulateMeta fields. Other kinds ignore
-///   slash-delimited filters.
-fn resolve_any(root: &str, key: &str) -> Result<ResolvedRun, String> {
+/// A resolved run: a new-format sim (`RunRecord`) or a legacy kind (`Run`).
+/// The transitional reader resolves across both during M2→M3.
+#[derive(Debug)]
+enum Resolved {
+    Sim { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
+    Legacy(ResolvedRun),
+}
+
+/// Resolve a user-supplied key to a single run, spanning both the new-format
+/// `sims/` (matched on `run_id` hex prefix) and the legacy fit/profile/survey
+/// subtrees (matched on `Run.hash` prefix). Accepts either a path to a
+/// `run.json`-containing directory (new or legacy format), or a hash prefix
+/// where `{prefix}/{scenario}[/{seed_N}]` narrows sims further. An ambiguous
+/// prefix errors, listing all candidates with their kinds.
+fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    // Path form: load run.json directly.
+    // Path form: read run.json directly — try the new RunRecord first, then
+    // fall back to a legacy Run.
     let as_path = Path::new(key);
     if as_path.is_dir() && as_path.join("run.json").exists() {
+        if let Ok(bytes) = std::fs::read(as_path.join("run.json")) {
+            if let Ok(rec) = serde_json::from_slice::<runid::RunRecord>(&bytes) {
+                let leaf = cas_read::Leaf { dir: as_path.to_path_buf(), record: rec };
+                let created = leaf_created(&leaf);
+                return Ok(Resolved::Sim { leaf, rel_path: pathdiff_str(as_path, &cwd), created });
+            }
+        }
         let (run, created, rel_path) = load_run_common(as_path, &cwd)
             .ok_or_else(|| format!("could not read run.json at {}", as_path.display()))?;
-        return Ok(ResolvedRun {
-            run, rel_path, created,
-            abs_path: as_path.to_path_buf(),
-        });
+        return Ok(Resolved::Legacy(ResolvedRun {
+            run, rel_path, created, abs_path: as_path.to_path_buf(),
+        }));
     }
 
-    // Hash-prefix form: walk every run.json under <root>/{sims,fits,profiles}.
+    // Hash-prefix form.
     let parts: Vec<&str> = key.split('/').collect();
     let hash_prefix = parts[0];
     let scen_filter = parts.get(1).copied();
@@ -976,38 +1017,44 @@ fn resolve_any(root: &str, key: &str) -> Result<ResolvedRun, String> {
         .or_else(|| parts.get(2).copied())
         .and_then(|s| s.parse().ok());
 
-    let mut matches: Vec<ResolvedRun> = Vec::new();
-    for top in ["sims", "fits", "profiles", "surveys"] {
+    // New-format sims: match the run_id hex prefix, narrow by scenario/seed.
+    let mut sim_matches: Vec<(cas_read::Leaf, String, SystemTime)> = Vec::new();
+    for leaf in cas_read::resolve_sim_prefix(Path::new(root), hash_prefix) {
+        if scen_filter.is_some_and(|s| s != leaf.level_label("scenario")) { continue; }
+        if seed_filter.is_some_and(|s| s != leaf.seed()) { continue; }
+        let created = leaf_created(&leaf);
+        let rel = pathdiff_str(&leaf.dir, &cwd);
+        sim_matches.push((leaf, rel, created));
+    }
+
+    // Legacy kinds: match Run.hash prefix under fits/profiles/surveys.
+    let mut legacy_matches: Vec<ResolvedRun> = Vec::new();
+    for top in ["fits", "profiles", "surveys"] {
         let subroot = Path::new(root).join(top);
         if !subroot.exists() { continue; }
         for dir in walkdir_all(&subroot) {
             if !dir.join("run.json").exists() { continue; }
             let Some((run, created, rel_path)) = load_run_common(&dir, &cwd) else { continue; };
-            // Match against Run.hash universally. For Simulate runs
-            // also match against `sim_hash`, since the on-disk path
-            // is keyed by sim_hash (`<root>/sims/<sim_hash>/...`) and
-            // users naturally type the prefix they see.
-            let hash_match = run.hash.starts_with(hash_prefix)
-                || matches!(&run.kind, RunKind::Simulate(m) if m.sim_hash.starts_with(hash_prefix));
-            if !hash_match { continue; }
-            // Sim-only narrowing on /scenario[/seed_N].
-            if let RunKind::Simulate(ref m) = run.kind {
-                if scen_filter.is_some_and(|s| s != m.scenario) { continue; }
-                if seed_filter.is_some_and(|s| s != m.seed) { continue; }
-            }
-            matches.push(ResolvedRun {
-                run, rel_path, created,
-                abs_path: dir,
-            });
+            if !run.hash.starts_with(hash_prefix) { continue; }
+            legacy_matches.push(ResolvedRun { run, rel_path, created, abs_path: dir });
         }
     }
 
-    match matches.len() {
+    match sim_matches.len() + legacy_matches.len() {
         0 => Err(format!("no run matches '{}' in {}", key, root)),
-        1 => Ok(matches.into_iter().next().unwrap()),
+        1 => {
+            if let Some((leaf, rel_path, created)) = sim_matches.into_iter().next() {
+                Ok(Resolved::Sim { leaf, rel_path, created })
+            } else {
+                Ok(Resolved::Legacy(legacy_matches.into_iter().next().unwrap()))
+            }
+        }
         n => {
             let mut msg = format!("'{}' is ambiguous, matches {} entries:\n", key, n);
-            for r in &matches {
+            for (_, rel, _) in &sim_matches {
+                msg.push_str(&format!("  {:<14} {}\n", "sim", rel));
+            }
+            for r in &legacy_matches {
                 msg.push_str(&format!("  {:<14} {}\n", kind_label(&r.run.kind), r.rel_path));
             }
             msg.push_str("refine by appending /<scenario> and/or /<seed_N>, \
@@ -1015,6 +1062,20 @@ fn resolve_any(root: &str, key: &str) -> Result<ResolvedRun, String> {
             Err(msg)
         }
     }
+}
+
+/// Created-time for a new-format leaf (provenance timestamp, else dir mtime).
+fn leaf_created(leaf: &cas_read::Leaf) -> SystemTime {
+    leaf.record
+        .provenance
+        .created_at
+        .as_deref()
+        .and_then(parse_iso8601)
+        .unwrap_or_else(|| {
+            std::fs::metadata(&leaf.dir)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        })
 }
 
 /// Short tag for the disambiguation listing (`camdl show <ambiguous>`)
@@ -1098,10 +1159,10 @@ fn walkdir_all(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 // ── Output formatting ────────────────────────────────────────────────────────
 
-fn print_table(runs: &[RunEntry], now: SystemTime) {
+fn print_sim_table(rows: &[SimRow], now: SystemTime) {
     use comfy_table::{Table, Cell, ContentArrangement, presets::NOTHING};
 
-    if runs.is_empty() {
+    if rows.is_empty() {
         eprintln!("{}", "(no cached runs)".dimmed());
         return;
     }
@@ -1114,7 +1175,7 @@ fn print_table(runs: &[RunEntry], now: SystemTime) {
         .set_content_arrangement(ContentArrangement::Dynamic)
         .set_header(vec![
             Cell::new("CREATED").add_attribute(comfy_table::Attribute::Bold),
-            Cell::new("HASH").add_attribute(comfy_table::Attribute::Bold),
+            Cell::new("RUN_ID").add_attribute(comfy_table::Attribute::Bold),
             Cell::new("LABEL").add_attribute(comfy_table::Attribute::Bold),
             Cell::new("MODEL").add_attribute(comfy_table::Attribute::Bold),
             Cell::new("SCENARIO").add_attribute(comfy_table::Attribute::Bold),
@@ -1124,20 +1185,24 @@ fn print_table(runs: &[RunEntry], now: SystemTime) {
             Cell::new("PATH").add_attribute(comfy_table::Attribute::Bold),
         ]);
 
-    for r in runs {
-        let rel_time    = fmt_relative_time(r.created, now);
-        let model       = model_display_name(&r.meta.model);
-        let params      = format_params_summary(&r.meta, 40);
-        let size        = format_size(r.traj_bytes);
-        let hash_short  = short_hash_cell(&r.run.hash);
-        let label_cell  = label_cell(&r.run.label);
+    for r in rows {
+        let rel_time   = fmt_relative_time(r.created, now);
+        let model      = model_display_name(r.leaf.level_label("model"));
+        let size       = format_size(r.leaf.traj_bytes());
+        // The address is the run_id (the path is keyed by the factored level
+        // hashes; the run_id is what `show`/`cat` resolve).
+        let hash_short = short_hash_cell(&r.leaf.run_id_hex());
+        let label_cell = label_cell(&r.leaf.record.provenance.label);
+        // The params level label carries the sweep point (`beta=0.2`) or
+        // `base` for an unswept run.
+        let params     = r.leaf.level_label("params").to_string();
         table.add_row(vec![
             Cell::new(rel_time).fg(comfy_table::Color::Yellow),
             hash_short,
             label_cell,
             Cell::new(model),
-            Cell::new(&r.meta.scenario).fg(comfy_table::Color::Green),
-            Cell::new(r.meta.seed),
+            Cell::new(r.leaf.level_label("scenario")).fg(comfy_table::Color::Green),
+            Cell::new(r.leaf.seed()),
             Cell::new(params).add_attribute(comfy_table::Attribute::Dim),
             Cell::new(size),
             Cell::new(&r.rel_path).fg(comfy_table::Color::Cyan),
@@ -1160,9 +1225,9 @@ fn model_display_name(path: &str) -> String {
     base.to_string()
 }
 
-fn print_json(runs: &[RunEntry]) {
-    for r in runs {
-        let json = serde_json::to_string(&r.run).unwrap_or_default();
+fn print_sim_json(rows: &[SimRow]) {
+    for r in rows {
+        let json = serde_json::to_string(&r.leaf.record).unwrap_or_default();
         println!("{}", json);
     }
 }
@@ -1285,48 +1350,11 @@ fn label_cell(label: &Option<String>) -> comfy_table::Cell {
     }
 }
 
-/// Compact one-line summary of the run's sweep point (if any).
-/// Empty `sweep_point` → em-dash placeholder. Non-empty → sorted-by-key
-/// `name=value` pairs separated by spaces, truncated to `max_len` with
-/// an ellipsis.
-fn format_params_summary(meta: &SimulateMeta, max_len: usize) -> String {
-    if meta.sweep_point.is_empty() { return "—".to_string(); }
-    let mut pairs: Vec<(&String, &f64)> = meta.sweep_point.iter().collect();
-    pairs.sort_by_key(|(k, _)| k.as_str());
-    let full: String = pairs.iter()
-        .map(|(k, v)| format!("{}={}", k, format_num(**v)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    shorten(&full, max_len)
-}
-
-/// Format a number compactly: no trailing zeros, fixed-width for tidy tables.
-fn format_num(v: f64) -> String {
-    if v == v.round() && v.abs() < 1e6 {
-        format!("{}", v as i64)
-    } else if v.abs() >= 0.001 && v.abs() < 1e6 {
-        // Trim trailing zeros: "0.300" -> "0.3"
-        let s = format!("{:.4}", v);
-        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-        trimmed.to_string()
-    } else {
-        format!("{:.2e}", v)
-    }
-}
-
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 { format!("{}B", bytes) }
     else if bytes < 1024 * 1024 { format!("{}K", bytes / 1024) }
     else if bytes < 1024 * 1024 * 1024 { format!("{}M", bytes / 1024 / 1024) }
     else { format!("{}G", bytes / 1024 / 1024 / 1024) }
-}
-
-fn shorten(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { s.to_string() }
-    else {
-        let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{}…", truncated)
-    }
 }
 
 // ── Parsers (stdlib only) ────────────────────────────────────────────────────
@@ -1391,8 +1419,6 @@ fn pathdiff_str(path: &Path, base: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run_meta::RunStatus;
-    use std::collections::HashMap;
 
     #[test]
     fn parse_duration_ok() {
@@ -1429,16 +1455,6 @@ mod tests {
     }
 
     #[test]
-    fn shorten_keeps_short() {
-        assert_eq!(shorten("sir.camdl", 20), "sir.camdl");
-        let long = "a_very_long_model_name_that_should_be_truncated";
-        let s = shorten(long, 20);
-        // char count matches, not byte count (ellipsis is multibyte).
-        assert_eq!(s.chars().count(), 20);
-        assert!(s.ends_with('…'));
-    }
-
-    #[test]
     fn format_size_buckets() {
         assert_eq!(format_size(500), "500B");
         assert_eq!(format_size(2048), "2K");
@@ -1460,169 +1476,101 @@ mod tests {
         assert_eq!(model_display_name("sir.ir.json"), "sir");
     }
 
-    #[test]
-    fn format_num_compact() {
-        assert_eq!(format_num(0.0), "0");
-        assert_eq!(format_num(42.0), "42");
-        assert_eq!(format_num(0.3), "0.3");
-        assert_eq!(format_num(0.12345), "0.1235"); // rounds to 4 decimal
-        assert_eq!(format_num(1e-10), "1.00e-10"); // scientific for tiny
+    // ── Transitional reader: new-format (RunRecord) sim resolution ──────────
+
+    /// Write a new-format sim leaf (RunRecord run.json + traj.tsv) at its
+    /// factored `store_path`. `salt` varies the seed-level hash so two records
+    /// land at distinct paths; `run_id` is set directly to exercise prefix
+    /// resolution.
+    fn write_sim_record(
+        root: &Path,
+        run_id: runid::ContentHash,
+        seed: u64,
+        salt: u8,
+    ) -> PathBuf {
+        let h = |b: u8| runid::ContentHash::from_bytes([b; 32]);
+        let lvl = |name: &str, label: String, b: u8| runid::LevelId {
+            name: name.into(), label, hash: h(b), schema_version: 1,
+        };
+        let levels = vec![
+            lvl("model", "sir".into(), 1),
+            lvl("config", "chain_binomial-dt1".into(), 2),
+            lvl("params", "base".into(), 3),
+            lvl("scenario", "baseline".into(), 4),
+            lvl("seed", format!("seed_{seed}"), salt),
+        ];
+        let dir = runid::store_path(root, runid::ArtifactKind::Sim, &levels);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("traj.tsv"), "t\tS\n0\t100\n").unwrap();
+        let rec = runid::RunRecord {
+            format_version: runid::FORMAT_VERSION,
+            kind: runid::ArtifactKind::Sim,
+            run_id,
+            hash_version: runid::HASH_VERSION,
+            ir_version: "0.7".into(),
+            engine_version: "test".into(),
+            levels,
+            deps: vec![],
+            status: runid::RunStatus::Completed,
+            artifacts: Default::default(),
+            children: Default::default(),
+            inputs: serde_json::Value::Null,
+            provenance: runid::Provenance::default(),
+        };
+        std::fs::write(dir.join("run.json"), serde_json::to_string(&rec).unwrap()).unwrap();
+        dir
     }
 
-    fn sample_sim_meta() -> SimulateMeta {
-        SimulateMeta {
-            model: "m".into(), model_hash: "".into(), scenario: "".into(),
-            sim_hash: "".into(), scen_hash: "".into(), seed: 0,
-            backend: crate::args::types::Backend::Gillespie, dt: 1.0,
-            sweep_point: HashMap::new(),
-            from_fit_hash: None,
-            parameters_provenance: Default::default(),
-        }
-    }
-
     #[test]
-    fn format_params_summary_empty_and_populated() {
-        let base = sample_sim_meta();
-        assert_eq!(format_params_summary(&base, 30), "—");
-
-        let mut sp = HashMap::new();
-        sp.insert("beta".to_string(), 0.3);
-        sp.insert("gamma".to_string(), 0.1);
-        let meta = SimulateMeta { sweep_point: sp, ..base.clone() };
-        let s = format_params_summary(&meta, 30);
-        assert_eq!(s, "beta=0.3 gamma=0.1");
-
-        let mut sp = HashMap::new();
-        sp.insert("very_long_parameter_name".to_string(), 0.12345);
-        let meta = SimulateMeta { sweep_point: sp, ..base };
-        let s = format_params_summary(&meta, 15);
-        assert!(s.ends_with('…'), "should truncate with ellipsis: {}", s);
-        assert_eq!(s.chars().count(), 15);
-    }
-
-    #[test]
-    fn resolve_run_roundtrip() {
+    fn resolve_sim_by_run_id_prefix_and_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let run_dir = tmp.path().join("sims/abc12345/baseline-def45678/seed_42");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        std::fs::write(run_dir.join("traj.tsv"), "t\tS\n0\t100\n").unwrap();
-        let record = Run {
-            hash: "abc12345".repeat(8),
-            version: "0.1.0".into(),
-            created_at: "2026-04-16T00:00:00Z".into(),
-            argv: vec!["camdl".into(), "simulate".into(), "--cas".into()],
-            status: RunStatus::Running,
-            label: None,
-            kind: RunKind::Simulate(SimulateMeta {
-                model: "sir.camdl".into(),
-                model_hash: "m".into(),
-                scenario: "baseline".into(),
-                sim_hash: "abc12345aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-                scen_hash: "def45678".into(),
-                seed: 42,
-                backend: crate::args::types::Backend::Gillespie,
-                dt: 1.0,
-                sweep_point: HashMap::new(),
-                from_fit_hash: None,
-                parameters_provenance: Default::default(),
-            }),
-        };
-        record.write(&run_dir).unwrap();
-
+        let dir = write_sim_record(
+            tmp.path(),
+            runid::ContentHash::from_bytes([0xab; 32]),
+            42,
+            10,
+        );
         let root = tmp.path().to_str().unwrap();
-        let resolved = resolve_any(root, "abc12345").unwrap();
-        assert_seed_42(&resolved);
-        let resolved = resolve_any(root, "abc").unwrap();
-        assert_seed_42(&resolved);
-        let resolved = resolve_any(root, "abc/baseline").unwrap();
-        assert_seed_42(&resolved);
-        assert!(resolve_any(root, "zzz").is_err());
-    }
 
-    fn assert_seed_42(r: &ResolvedRun) {
-        match &r.run.kind {
-            RunKind::Simulate(m) => assert_eq!(m.seed, 42),
-            other => panic!("expected RunKind::Simulate, got {:?}", other),
+        // run_id hex prefix.
+        match resolve_any(root, "abab").unwrap() {
+            Resolved::Sim { leaf, .. } => assert_eq!(leaf.seed(), 42),
+            _ => panic!("expected new-format Sim"),
         }
+        // /scenario narrowing.
+        match resolve_any(root, "abab/baseline").unwrap() {
+            Resolved::Sim { leaf, .. } => assert_eq!(leaf.seed(), 42),
+            _ => panic!("expected Sim"),
+        }
+        // Path form.
+        match resolve_any(root, dir.to_str().unwrap()).unwrap() {
+            Resolved::Sim { .. } => {}
+            _ => panic!("expected Sim from path"),
+        }
+        // No match.
+        assert!(resolve_any(root, "ffff").is_err());
     }
 
     #[test]
-    fn resolve_any_ambiguous_prefix_lists_candidates() {
-        // Two sims that share the same 4-char `sim_hash` prefix and
-        // 64-char `Run.hash`. `resolve_any("abc1")` must reject with
-        // an error that lists both candidates with their kind labels.
-        // Guards the rendering path users see when a short prefix
-        // accidentally collides — "ambiguous" is the right error,
-        // "no run matches" would be silently wrong.
+    fn resolve_sim_ambiguous_prefix_lists_candidates() {
+        // Two sims whose run_ids share the prefix "ab" but diverge after.
         let tmp = tempfile::tempdir().unwrap();
-        let common_sim_hash = "abc12345aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-        // Run A: full hash starts with "abc1...1111"
-        let dir_a = tmp.path().join("sims/abc12345-A/baseline-def00001/seed_1");
-        std::fs::create_dir_all(&dir_a).unwrap();
-        let run_a = Run {
-            hash:    "abc11111".repeat(8),
-            version: "0.1".into(),
-            created_at: "2026-04-30T00:00:00Z".into(),
-            argv: vec![],
-            status: RunStatus::Completed { wall_time_seconds: 1.0 },
-            label: None,
-            kind: RunKind::Simulate(SimulateMeta {
-                model: "sir.camdl".into(),
-                model_hash: "m".repeat(64),
-                scenario: "baseline".into(),
-                sim_hash: common_sim_hash.into(),
-                scen_hash: "d".repeat(64),
-                seed: 1,
-                backend: crate::args::types::Backend::Gillespie,
-                dt: 1.0,
-                sweep_point: HashMap::new(),
-                from_fit_hash: None,
-                parameters_provenance: Default::default(),
-            }),
-        };
-        run_a.write(&dir_a).unwrap();
-
-        // Run B: full hash starts with "abc1...2222"
-        let dir_b = tmp.path().join("sims/abc12345-B/baseline-def00002/seed_2");
-        std::fs::create_dir_all(&dir_b).unwrap();
-        let run_b = Run {
-            hash:    "abc12222".repeat(8),
-            version: "0.1".into(),
-            created_at: "2026-04-30T00:00:00Z".into(),
-            argv: vec![],
-            status: RunStatus::Completed { wall_time_seconds: 1.0 },
-            label: None,
-            kind: RunKind::Simulate(SimulateMeta {
-                model: "sir.camdl".into(),
-                model_hash: "m".repeat(64),
-                scenario: "baseline".into(),
-                sim_hash: common_sim_hash.into(),
-                scen_hash: "d".repeat(64),
-                seed: 2,
-                backend: crate::args::types::Backend::Gillespie,
-                dt: 1.0,
-                sweep_point: HashMap::new(),
-                from_fit_hash: None,
-                parameters_provenance: Default::default(),
-            }),
-        };
-        run_b.write(&dir_b).unwrap();
-
+        write_sim_record(tmp.path(), runid::ContentHash::from_bytes([0xab; 32]), 1, 10);
+        let mut b = [0xab; 32];
+        b[1] = 0xcd; // hex "abcd…"
+        write_sim_record(tmp.path(), runid::ContentHash::from_bytes(b), 2, 20);
         let root = tmp.path().to_str().unwrap();
-        // Prefix "abc1" matches both (via Run.hash AND sim_hash).
-        let err = resolve_any(root, "abc1").expect_err(
-            "ambiguous prefix must reject");
+
+        // "ab" matches both → ambiguous, with the sim kind label listed.
+        let err = resolve_any(root, "ab").expect_err("ambiguous prefix must reject");
         assert!(err.contains("ambiguous"), "got: {}", err);
         assert!(err.contains("matches 2"), "got: {}", err);
-        assert!(err.contains("sim"),
-            "expected kind label in disambiguation: got {}", err);
+        assert!(err.contains("sim"), "expected kind label: got {}", err);
 
-        // Narrowing to a unique prefix resolves cleanly.
-        let resolved = resolve_any(root, "abc11111").unwrap();
-        match &resolved.run.kind {
-            RunKind::Simulate(m) => assert_eq!(m.seed, 1),
-            _ => panic!("expected sim"),
+        // "abab" uniquely resolves the first.
+        match resolve_any(root, "abab").unwrap() {
+            Resolved::Sim { leaf, .. } => assert_eq!(leaf.seed(), 1),
+            _ => panic!("expected Sim"),
         }
     }
 }

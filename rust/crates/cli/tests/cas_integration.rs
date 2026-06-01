@@ -33,6 +33,27 @@ fn skip_if_missing_binary() -> Option<PathBuf> {
     Some(bin)
 }
 
+// ── New-format (runid::RunRecord) helpers ──────────────────────────────────
+
+/// Read a sim leaf's `run.json` (a `RunRecord`) as JSON.
+fn read_meta(dir: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(dir.join("run.json")).unwrap()).unwrap()
+}
+
+/// A named factored level's label (`model`/`config`/`params`/`scenario`/`seed`).
+fn level_label<'a>(meta: &'a serde_json::Value, name: &str) -> &'a str {
+    meta["levels"].as_array().unwrap().iter()
+        .find(|l| l["name"] == name).unwrap_or_else(|| panic!("level {name} present"))
+        ["label"].as_str().unwrap()
+}
+
+/// A named factored level's content hash (64 hex).
+fn level_hash<'a>(meta: &'a serde_json::Value, name: &str) -> &'a str {
+    meta["levels"].as_array().unwrap().iter()
+        .find(|l| l["name"] == name).unwrap_or_else(|| panic!("level {name} present"))
+        ["hash"].as_str().unwrap()
+}
+
 #[test]
 fn cas_first_run_writes_cache_and_metadata() {
     let Some(bin) = skip_if_missing_binary() else { return; };
@@ -62,21 +83,17 @@ fn cas_first_run_writes_cache_and_metadata() {
     assert!(dir.join("traj.tsv").exists(), "traj.tsv should be written");
     assert!(dir.join("run.json").exists(), "run.json should be written");
 
-    // run.json should have full metadata including argv + version
-    let meta: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.join("run.json")).unwrap()
-    ).unwrap();
-    // Unified Run schema nests simulate-specific fields inside `kind`;
-    // shared Run fields stay at the top.
-    assert_eq!(meta["kind"]["seed"], 42);
-    assert_eq!(meta["kind"]["scenario"], "baseline");
-    assert_eq!(meta["kind"]["kind"], "simulate");
-    assert!(meta["kind"]["sim_hash"].as_str().unwrap().len() == 64);
-    assert!(meta["argv"].as_array().unwrap().len() >= 4);
-    assert!(meta["version"].as_str().unwrap().contains("+"),
-        "version should include git hash suffix");
-    assert!(meta["hash"].as_str().unwrap().len() == 64);
-    assert!(meta["created_at"].as_str().is_some());
+    // run.json is a RunRecord: factored levels + run_id + provenance.
+    let meta = read_meta(dir);
+    assert_eq!(meta["kind"], "sim", "new-format RunRecord: kind=sim");
+    assert_eq!(meta["run_id"].as_str().unwrap().len(), 64);
+    assert_eq!(meta["status"], "completed");
+    assert_eq!(level_label(&meta, "seed"), "seed_42");
+    assert_eq!(level_label(&meta, "scenario"), "baseline");
+    assert!(meta["provenance"]["argv"].as_array().unwrap().len() >= 4);
+    assert!(meta["engine_version"].as_str().unwrap().contains('+'),
+        "engine_version should include git hash suffix");
+    assert!(meta["provenance"]["created_at"].as_str().is_some());
 }
 
 #[test]
@@ -143,11 +160,12 @@ fn cas_different_seed_new_cache_entry() {
         .filter(|p| p.join("run.json").exists()).collect();
     assert_eq!(dirs.len(), 2, "should have two separate seed dirs");
 
+    // Seed segments are `seed_{base}-{seed_h8}` (no level is label-only).
     let seeds: Vec<String> = dirs.iter()
         .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert!(seeds.iter().any(|n| n == "seed_42"));
-    assert!(seeds.iter().any(|n| n == "seed_43"));
+    assert!(seeds.iter().any(|n| n.starts_with("seed_42-")), "got {seeds:?}");
+    assert!(seeds.iter().any(|n| n.starts_with("seed_43-")), "got {seeds:?}");
 }
 
 /// gh#135 regression. Two structurally different models under identical
@@ -217,21 +235,19 @@ fn cas_different_models_do_not_collide() {
         "two structurally different models must produce two CAS entries, \
          not collide to one (gh#135)");
 
-    // model_hash must be recorded, distinct, and never the empty-input hash.
-    const EMPTY_SHA256: &str =
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    // The model LEVEL hash (structural whole-IR digest) must be recorded,
+    // 64-hex, and distinct between the two structurally different models.
     let mut model_hashes: Vec<String> = dirs.iter().map(|d| {
-        let meta: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(d.join("run.json")).unwrap()).unwrap();
-        meta["kind"]["model_hash"].as_str().unwrap().to_string()
+        let meta = read_meta(d);
+        level_hash(&meta, "model").to_string()
     }).collect();
     model_hashes.sort();
     for mh in &model_hashes {
-        assert_ne!(mh, EMPTY_SHA256,
-            "model_hash must not be SHA256(\"\") — that is the gh#135 bug");
+        assert_eq!(mh.len(), 64, "model level hash is 64-hex");
     }
     assert_ne!(model_hashes[0], model_hashes[1],
-        "the two models must record distinct model_hash values (gh#135)");
+        "two structurally different models must record distinct model level \
+         hashes (gh#135/gh#147)");
 
     // And the trajectories themselves must differ — the symptom users saw.
     let trajs: Vec<Vec<u8>> = dirs.iter()
@@ -601,15 +617,14 @@ fn cas_stale_metadata_warns_and_reruns() {
     };
 
     let _ = run_once();
-    // Locate the run dir, corrupt the stored hash.
+    // Locate the run dir, then tamper with traj.tsv so the exact-set manifest
+    // (size) no longer matches — the tiered-integrity lookup returns Stale and
+    // the run is recomputed (never served corrupt bytes).
     let dir = walkdir(&output.join("sims")).into_iter()
         .find(|p| p.join("run.json").exists()).expect("one run");
-    let content = std::fs::read_to_string(dir.join("run.json")).unwrap();
-    let mut v: serde_json::Value = serde_json::from_str(&content).unwrap();
-    v["hash"] = serde_json::Value::String("0".repeat(64));
-    std::fs::write(dir.join("run.json"), serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    std::fs::write(dir.join("traj.tsv"), b"tampered-and-shorter").unwrap();
 
-    // Second run should detect the stale hash and warn.
+    // Second run should detect the stale cache and warn, then re-run.
     let out = run_once();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("stale cache"),
@@ -700,14 +715,12 @@ fn cat_emits_cached_trajectory() {
                "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
         .status().expect("spawn");
 
-    // Find the cached dir, derive short hash
+    // Find the cached dir, derive the run_id short prefix.
     let dir = walkdir(&output.join("sims")).into_iter()
         .find(|p| p.join("run.json").exists()).unwrap();
-    let meta: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.join("run.json")).unwrap()
-    ).unwrap();
-    let sim_hash_full = meta["kind"]["sim_hash"].as_str().unwrap();
-    let short = &sim_hash_full[..8];
+    let meta = read_meta(&dir);
+    let run_id = meta["run_id"].as_str().unwrap();
+    let short = &run_id[..8];
 
     // `camdl cat <short>` uniquely resolves and emits the TSV
     let out = Command::new(&bin)
@@ -771,15 +784,15 @@ beta = [0.2, 0.3, 0.4]
         .filter(|p| p.join("run.json").exists()).collect();
     assert_eq!(run_dirs.len(), 3, "expected 3 runs for 3-point sweep");
 
-    // Each run.json must have sweep_point with the beta value
+    // The sweep point is a resolved value in the PARAMS level (not the
+    // scenario delta, not the model hash). Its label encodes `beta=<v>`.
     let mut beta_values: Vec<f64> = Vec::new();
     for dir in &run_dirs {
-        let meta: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("run.json")).unwrap()
-        ).unwrap();
-        let sp = &meta["kind"]["sweep_point"];
-        assert!(!sp.is_null(), "run.json must have kind.sweep_point: {:?}", meta);
-        let beta = sp["beta"].as_f64().expect("sweep_point.beta must be a number");
+        let meta = read_meta(dir);
+        let label = level_label(&meta, "params"); // e.g. "beta=0.2"
+        let beta: f64 = label.strip_prefix("beta=")
+            .unwrap_or_else(|| panic!("params label should be beta=<v>, got {label}"))
+            .parse().expect("beta value parses");
         beta_values.push(beta);
     }
     beta_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -899,10 +912,8 @@ fn show_prints_metadata() {
 
     let dir = walkdir(&output.join("sims")).into_iter()
         .find(|p| p.join("run.json").exists()).unwrap();
-    let meta: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.join("run.json")).unwrap()
-    ).unwrap();
-    let short = &meta["kind"]["sim_hash"].as_str().unwrap()[..8];
+    let meta = read_meta(&dir);
+    let short = &meta["run_id"].as_str().unwrap()[..8];
 
     let out = Command::new(&bin)
         .args(["show", short, "--root", &output.to_string_lossy()])
@@ -912,7 +923,7 @@ fn show_prints_metadata() {
     // Check that show emits the key fields
     assert!(stdout.contains("baseline"), "should show scenario");
     assert!(stdout.contains("42"), "should show seed");
-    assert!(stdout.contains("chain_binomial"), "should show backend");
+    assert!(stdout.contains("chain_binomial"), "should show backend (config level)");
 }
 
 /// Test (4a from review): `camdl show <fit-stage-hash>` resolves and
@@ -1133,24 +1144,20 @@ fn label_works_on_sim_and_profile_runs() {
 
     let sim_dir = walkdir(&output.join("sims")).into_iter()
         .find(|p| p.join("run.json").exists()).expect("one sim dir");
-    let sim_meta: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(sim_dir.join("run.json")).unwrap()
-    ).unwrap();
-    let sim_hash: String = sim_meta["hash"].as_str().unwrap().chars().take(8).collect();
+    let sim_meta = read_meta(&sim_dir);
+    let sim_hash: String = sim_meta["run_id"].as_str().unwrap().chars().take(8).collect();
 
-    // Label the sim.
+    // Label the sim by run_id prefix.
     let status = Command::new(&bin)
         .args(["label", &sim_hash, "test sim label",
                "--root", &output.to_string_lossy()])
         .status().expect("spawn");
     assert!(status.success(), "label on sim must succeed");
 
-    // Re-read; assert label landed on the top-level Run.
-    let sim_meta2: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(sim_dir.join("run.json")).unwrap()
-    ).unwrap();
-    assert_eq!(sim_meta2["label"].as_str(), Some("test sim label"),
-        "sim label must persist on Run.label, not on FitMeta. got: {:?}",
+    // Re-read; the label persists in the RunRecord provenance.
+    let sim_meta2 = read_meta(&sim_dir);
+    assert_eq!(sim_meta2["provenance"]["label"].as_str(), Some("test sim label"),
+        "sim label must persist on RunRecord.provenance.label. got: {:?}",
         sim_meta2);
 
     // Now plant a profile umbrella + leaf and label the umbrella by hash.
@@ -1191,24 +1198,20 @@ fn label_works_on_sim_and_profile_runs() {
 
 /// Collect all directory paths under `root` (non-recursive children of
 /// each level; bounded depth is fine for our 3-level CAS layout).
+/// Every directory at any depth under `root`. Callers filter to leaves with
+/// `.filter(|p| p.join("run.json").exists())`. Depth-agnostic so it handles
+/// the factored 5-level CAS path (model/config/params/scenario/seed), not
+/// just the legacy 3-level layout.
 fn walkdir(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if !root.exists() { return out; }
-    let Ok(entries) = std::fs::read_dir(root) else { return out; };
-    for e in entries.flatten() {
-        let p = e.path();
-        if !p.is_dir() { continue; }
-        // Recurse up to ~3 levels: sim_hash / scen-hash / seed_n
-        if let Ok(entries2) = std::fs::read_dir(&p) {
-            for e2 in entries2.flatten() {
-                let p2 = e2.path();
-                if !p2.is_dir() { continue; }
-                if let Ok(entries3) = std::fs::read_dir(&p2) {
-                    for e3 in entries3.flatten() {
-                        let p3 = e3.path();
-                        if p3.is_dir() { out.push(p3); }
-                    }
-                }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue; };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.push(p.clone());
+                stack.push(p);
             }
         }
     }

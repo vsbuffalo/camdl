@@ -723,10 +723,11 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         resolved_scenarios: resolved_scenarios.clone(),
         model_path: ir_path_resolved.clone(),
         model_stem: model_stem.clone(),
-        model_hash: mhash.clone(),
-        base_params_canonical: canonical_params(&base_params),
+        base_model: batch_model.clone(),
+        base_params: base_params.clone(),
         backend,
         dt,
+        allow_degenerate_rates: a.allow_degenerate_rates,
         runs_dir: runs_dir.clone(),
         obs_enabled,
         force: a.force,
@@ -788,10 +789,15 @@ struct CasSink {
     resolved_scenarios: Vec<ResolvedEntry>,
     model_path: String,
     model_stem: Option<String>,
-    model_hash: String,
-    base_params_canonical: String,
+    /// The **base** model — its whole-IR digest is the (constant-across-cells)
+    /// model level. Never `cell.model` (which has scenario + sweep applied).
+    base_model: ir::Model,
+    /// Resolved base parameter values; per cell, the sweep point is layered on
+    /// top into the `params` level (a resolved value, not the scenario delta).
+    base_params: HashMap<String, f64>,
     backend: crate::args::types::Backend,
     dt: f64,
+    allow_degenerate_rates: bool,
     /// Absolute `<output>/sims` subtree.
     runs_dir: String,
     obs_enabled: bool,
@@ -803,53 +809,71 @@ struct CasSink {
 }
 
 impl CasSink {
-    /// The resolved scenario delta + slug + sweep-merged params for a cell.
-    /// `scen_params = resolved.params ∪ sweep_point` — i.e. the sweep
-    /// override WINS over the resolved scenario params, byte-identical to
-    /// the pre-unification `plan_runs` (`merged_params = sc.params.clone();
-    /// merged_params.extend(sweep)`). Getting the order backwards collapses
-    /// distinct sweep betas into one `scen_hash` (regression cas_integration
-    /// `batch_sweep_records_sweep_point_in_run_json_and_manifest`).
-    fn cell_cas_inputs(
+    /// The store root (`<output>`, the parent of `<output>/sims`).
+    fn root(&self) -> std::path::PathBuf {
+        std::path::Path::new(&self.runs_dir)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
+    /// Resolve a cell's trajectory identity + factored store path.
+    ///
+    /// The model level is the **base** model digest (constant across the
+    /// sweep — never `cell.model`, which has scenario + sweep applied). The
+    /// sweep point goes into the `params` level (base params ∪ sweep, a
+    /// resolved value — not the scenario delta, not the model hash). The
+    /// named scenario's enable/disable/params is the `scenario` level.
+    /// `process_seed` is engine-resolved (batch seeds are explicit).
+    fn cell_resolve(
         &self,
         spec: &crate::engine::CellSpec,
-    ) -> crate::cas::sim_inputs::SimulateInputs {
+    ) -> Result<(crate::resolve::ResolvedTrajectory, std::path::PathBuf, String), String> {
         let name = spec.scenario.name();
         let resolved = self.resolved_scenarios.iter()
             .find(|s| s.name == name || s.route.as_deref() == Some(name))
-            .expect("cell scenario must be one of the resolved batch scenarios");
-        let sweep: HashMap<String, f64> = spec.point_overrides.iter()
-            .map(|(k, v)| (k.clone(), *v)).collect();
-        let mut scen_params: HashMap<String, f64> = resolved.params.clone();
-        scen_params.extend(sweep.iter().map(|(k, v)| (k.clone(), *v)));
-        crate::cas::sim_inputs::SimulateInputs {
-            model_path: self.model_path.clone(),
-            model_stem: self.model_stem.clone(),
-            scenario: resolved.name.clone(),
-            model_hash: self.model_hash.clone(),
-            base_params_canonical: self.base_params_canonical.clone(),
+            .ok_or_else(|| format!("cell scenario '{}' not among resolved batch scenarios", name))?;
+
+        let mut params = self.base_params.clone();
+        for (k, v) in &spec.point_overrides {
+            params.insert(k.clone(), *v);
+        }
+
+        let scenario_label = if resolved.name.is_empty() { "baseline" } else { resolved.name.as_str() };
+        let param_label = if spec.point_overrides.is_empty() {
+            "base".to_string()
+        } else {
+            let mut sw: Vec<(&String, &f64)> = spec.point_overrides.iter().collect();
+            sw.sort_by(|a, b| a.0.cmp(b.0));
+            sw.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("_")
+        };
+
+        let ctx = crate::resolve::TrajectoryCtx {
+            model: &self.base_model,
+            model_stem: self.model_stem.as_deref().unwrap_or("model"),
+            ir_version: ir::IR_VERSION.trim(),
+            engine_version: version::VERSION_SHORT,
             backend: self.backend,
             dt: self.dt,
-            enable: resolved.enable.clone(),
-            disable: resolved.disable.clone(),
-            scen_params,
-            seed: spec.process_seed,
-            from_fit_hash: None,
-            sweep_point: sweep,
-        }
-    }
-
-    /// The CAS run directory + relative path for a cell.
-    fn cell_dirs(&self, spec: &crate::engine::CellSpec) -> (String, String) {
-        let inputs = self.cell_cas_inputs(spec);
-        let rel = crate::run_paths::sim_run_rel(
-            inputs.model_stem.as_deref(),
-            &inputs.sim_hash_str(),
-            &inputs.scenario,
-            &inputs.scen_hash_str(),
-            spec.process_seed,
-        );
-        (format!("{}/{}", self.runs_dir, rel), rel)
+            t_start: self.base_model.simulation.t_start,
+            t_end: self.base_model.simulation.t_end,
+            output: &self.base_model.output.times,
+            allow_degenerate_rates: self.allow_degenerate_rates,
+            base_params: &params,
+            table_digests: Vec::new(),
+            enable: &resolved.enable,
+            disable: &resolved.disable,
+            scen_params: &resolved.params,
+            param_label: &param_label,
+            scenario_label,
+            base_seed: spec.process_seed,
+            process_seed: spec.process_seed,
+        };
+        let rt = crate::resolve::resolve_trajectory(&ctx).map_err(|e| format!("resolve error: {e}"))?;
+        let root = self.root();
+        let dir = runid::store_path(&root, runid::ArtifactKind::Sim, &rt.levels);
+        let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
+        Ok((rt, dir, rel))
     }
 }
 
@@ -858,16 +882,24 @@ impl crate::engine::RunSink for CasSink {
         if self.force {
             return true;
         }
-        let (run_dir, _) = self.cell_dirs(spec);
-        // Cache hit ⇔ traj.tsv already present.
-        !std::path::Path::new(&format!("{}/traj.tsv", run_dir)).exists()
+        match self.cell_resolve(spec) {
+            Ok((rt, dir, _)) => {
+                let store = runid::FsCasStore::new(self.root());
+                !matches!(
+                    store.lookup(&dir, &runid::LeafIdentity::new(rt.run_id)),
+                    runid::Lookup::Hit(_)
+                )
+            }
+            // No cache key without a resolve → run; the error surfaces in merge_cell.
+            Err(_) => true,
+        }
     }
 
     fn on_skip(&mut self, spec: &crate::engine::CellSpec) {
-        let (_, rel) = self.cell_dirs(spec);
+        let rel = self.cell_resolve(spec).map(|(_, _, rel)| rel).unwrap_or_default();
         let name = spec.scenario.name().to_string();
         self.counter += 1;
-        eprintln!("[{}/{}] scenario={} seed={} (skipped — already exists)",
+        eprintln!("[{}/{}] scenario={} seed={} (skipped — cache hit)",
             self.counter, self.total, name, spec.process_seed);
         self.completed_runs.push(RunEntry {
             scenario: name,
@@ -879,55 +911,80 @@ impl crate::engine::RunSink for CasSink {
 
     fn merge_cell(&mut self, cell: &crate::engine::CellResult) -> Result<(), String> {
         let spec = &cell.spec;
-        let (run_dir, rel) = self.cell_dirs(spec);
         let name = spec.scenario.name().to_string();
-        let run_t0 = std::time::Instant::now();
 
-        if let Err(e) = std::fs::create_dir_all(&run_dir) {
-            self.counter += 1;
-            self.errors.push(format!("scenario={} seed={}: cannot create {}: {}",
-                name, spec.process_seed, run_dir, e));
-            return Ok(());
-        }
-        if let Err(e) = write_traj_tsv(&format!("{}/traj.tsv", run_dir), &cell.model, &cell.traj, true) {
-            self.counter += 1;
-            self.errors.push(format!("scenario={} seed={}: cannot write traj.tsv in {}: {}",
-                name, spec.process_seed, run_dir, e));
-            return Ok(());
-        }
-        // Observation ensemble (CLI review #4). One TSV per stream under
-        // seed_N/obs/{obs_hash}-{obs_seed}/. obs_seed = process_seed (the
-        // single-realization case); the obs RNG derivation is the canonical
-        // process_seed ^ SEED_MIX_OBS, shared with simulate --obs.
-        if self.obs_enabled {
-            if let Err(e) = write_obs_into_cas(
-                std::path::Path::new(&run_dir), &cell.model, &cell.traj, spec.process_seed,
-            ) {
+        let (rt, dir, rel) = match self.cell_resolve(spec) {
+            Ok(x) => x,
+            Err(e) => {
                 self.counter += 1;
-                self.errors.push(format!("scenario={} seed={}: cannot write obs ensemble in {}: {}",
-                    name, spec.process_seed, run_dir, e));
+                self.errors.push(format!("scenario={} seed={}: {}", name, spec.process_seed, e));
                 return Ok(());
             }
+        };
+
+        let traj_bytes = crate::util::traj_tsv_bytes(&cell.model, &cell.traj, true);
+
+        // Declare the obs ensemble as a child sub-artifact so the leaf's
+        // exact-set doesn't orphan the `obs/` subdir (written after the
+        // trajectory commits). M2-interim: the obs child is recorded + its
+        // streams written via the existing ensemble writer; a full
+        // obs-child RunRecord identity is a follow-up.
+        let mut children: std::collections::BTreeMap<String, Vec<runid::ContentHash>> =
+            std::collections::BTreeMap::new();
+        let has_obs = self.obs_enabled && !cell.model.observations.is_empty();
+        if has_obs {
+            let obs_seed = spec.process_seed ^ crate::util::SEED_MIX_OBS;
+            let obs_json = serde_json::to_string(&cell.model.observations).unwrap_or_default();
+            let obs_hash = crate::hashing::sha256_hex(obs_json.as_bytes());
+            let obs_id = runid::ContentHash::digest_bytes(
+                format!("{}:{}:{}", rt.run_id.to_hex(), obs_seed, obs_hash).as_bytes(),
+            );
+            children.insert("obs".to_string(), vec![obs_id]);
         }
 
-        let inputs = self.cell_cas_inputs(spec);
-        use crate::cas::typed::CasInputs;
-        let run_rec = crate::run_meta::Run {
-            hash: inputs.content_hash().full().to_string(),
-            version: version::VERSION_SHORT.to_string(),
-            created_at: cas::iso8601_utc(std::time::SystemTime::now()),
-            argv: std::env::args().collect(),
-            status: crate::run_meta::RunStatus::Completed {
-                wall_time_seconds: run_t0.elapsed().as_secs_f64(),
+        let record = runid::RunRecord {
+            format_version: runid::FORMAT_VERSION,
+            kind: runid::ArtifactKind::Sim,
+            run_id: rt.run_id,
+            hash_version: runid::HASH_VERSION,
+            ir_version: ir::IR_VERSION.trim().to_string(),
+            engine_version: version::VERSION_SHORT.to_string(),
+            levels: rt.levels,
+            deps: Vec::new(),
+            status: runid::RunStatus::Running,
+            artifacts: Default::default(),
+            children,
+            inputs: serde_json::Value::Null,
+            provenance: runid::Provenance {
+                argv: std::env::args().collect(),
+                created_at: Some(cas::iso8601_utc(std::time::SystemTime::now())),
+                source_paths: vec![self.model_path.clone()],
+                camdl_version: Some(version::VERSION_SHORT.to_string()),
+                ..Default::default()
             },
-            label: None,
-            kind: inputs.run_kind(),
         };
-        if let Err(e) = run_rec.write(std::path::Path::new(&run_dir)) {
-            self.counter += 1;
-            self.errors.push(format!("scenario={} seed={}: cannot write run.json in {}: {}",
-                name, spec.process_seed, run_dir, e));
-            return Ok(());
+
+        let mut artifacts = runid::Artifacts::new();
+        artifacts.insert("traj.tsv", traj_bytes);
+        let store = runid::FsCasStore::new(self.root());
+        let dest = match store.commit_atomic(&dir, record, artifacts) {
+            Ok(d) => d,
+            Err(e) => {
+                self.counter += 1;
+                self.errors.push(format!("scenario={} seed={}: commit failed: {}",
+                    name, spec.process_seed, e));
+                return Ok(());
+            }
+        };
+
+        // Obs ensemble: written into the committed leaf's `obs/` child. A
+        // failure here is non-fatal — children are independent, so a missing
+        // obs child never staleens the parent trajectory.
+        if has_obs {
+            if let Err(e) = write_obs_into_cas(&dest, &cell.model, &cell.traj, spec.process_seed) {
+                self.errors.push(format!("scenario={} seed={}: obs ensemble: {}",
+                    name, spec.process_seed, e));
+            }
         }
 
         self.counter += 1;

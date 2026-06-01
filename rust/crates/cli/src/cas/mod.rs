@@ -28,15 +28,7 @@
 //! key is `(trajectory, obs_hash, obs_seed)`.
 
 pub mod typed;
-pub mod sim_inputs;
 pub mod fit_inputs;
-
-use std::path::Path;
-
-/// Does this run have a cached trajectory?
-pub fn has_cached_traj(run_dir: &Path) -> bool {
-    run_dir.join("traj.tsv").exists()
-}
 
 // ─── Run buffer: accumulator for --cas trajectory bytes ────────────────────
 
@@ -110,16 +102,6 @@ fn civil_from_secs(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn has_cached_traj_detects_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("sims").join("abc/baseline-def/seed_1");
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(!has_cached_traj(&dir));
-        std::fs::write(dir.join("traj.tsv"), "t\tS\n0\t100\n").unwrap();
-        assert!(has_cached_traj(&dir));
-    }
 
     #[test]
     fn iso8601_epoch() {

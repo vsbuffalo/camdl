@@ -64,22 +64,19 @@ scenarios {
 
 /// Collect every directory three levels under `root` that contains a
 /// `run.json` (the CAS `sims/<sim>/<scen>/seed_N/` leaves).
+/// Every dir containing a `run.json`, at any depth — the factored CAS path
+/// is 5 levels deep (model/config/params/scenario/seed), not 3.
 fn run_leaves(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let Ok(l1) = std::fs::read_dir(root) else { return out; };
-    for a in l1.flatten() {
-        let pa = a.path();
-        if !pa.is_dir() { continue; }
-        let Ok(l2) = std::fs::read_dir(&pa) else { continue; };
-        for b in l2.flatten() {
-            let pb = b.path();
-            if !pb.is_dir() { continue; }
-            let Ok(l3) = std::fs::read_dir(&pb) else { continue; };
-            for c in l3.flatten() {
-                let pc = c.path();
-                if pc.is_dir() && pc.join("run.json").exists() {
-                    out.push(pc);
-                }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if dir.join("run.json").is_file() {
+            out.push(dir.clone());
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() { stack.push(p); }
             }
         }
     }

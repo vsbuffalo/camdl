@@ -1701,9 +1701,29 @@ pub fn run_simulation_event_log(
 
 /// Write a trajectory to a TSV file (same format as `camdl simulate` stdout).
 pub fn write_traj_tsv(path: &str, model: &ir::Model, traj: &Trajectory, emit_flows: bool) -> Result<(), String> {
-    use std::io::Write;
     use std::fs::File;
+    let mut f = File::create(path)
+        .map_err(|e| format!("cannot create {}: {}", path, e))?;
+    write_traj_to(&mut f, model, traj, emit_flows).map_err(|e| e.to_string())
+}
 
+/// Render a trajectory TSV into an in-memory buffer — the form the CAS
+/// commit hands to the store as the leaf's `traj.tsv` artifact. Byte-
+/// identical to [`write_traj_tsv`] (same `write_traj_to` core).
+pub fn traj_tsv_bytes(model: &ir::Model, traj: &Trajectory, emit_flows: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    // Writing to a `Vec` is infallible.
+    let _ = write_traj_to(&mut buf, model, traj, emit_flows);
+    buf
+}
+
+/// The shared trajectory-TSV renderer: header + one row per snapshot.
+fn write_traj_to(
+    w: &mut impl std::io::Write,
+    model: &ir::Model,
+    traj: &Trajectory,
+    emit_flows: bool,
+) -> std::io::Result<()> {
     let int_names: Vec<&str> = model.compartments.iter()
         .filter(|c| c.kind == ir::model::CompartmentKind::Integer)
         .map(|c| c.name.as_str()).collect();
@@ -1713,27 +1733,24 @@ pub fn write_traj_tsv(path: &str, model: &ir::Model, traj: &Trajectory, emit_flo
     let tr_names: Vec<&str> = model.transitions.iter()
         .map(|t| t.name.as_str()).collect();
 
-    let mut f = File::create(path)
-        .map_err(|e| format!("cannot create {}: {}", path, e))?;
-
     // Header
-    write!(f, "t").map_err(|e| e.to_string())?;
-    for n in &int_names  { write!(f, "\t{}", n).map_err(|e| e.to_string())?; }
-    for n in &real_names { write!(f, "\t{}", n).map_err(|e| e.to_string())?; }
+    write!(w, "t")?;
+    for n in &int_names  { write!(w, "\t{}", n)?; }
+    for n in &real_names { write!(w, "\t{}", n)?; }
     if emit_flows {
-        for n in &tr_names { write!(f, "\tflow_{}", n).map_err(|e| e.to_string())?; }
+        for n in &tr_names { write!(w, "\tflow_{}", n)?; }
     }
-    writeln!(f).map_err(|e| e.to_string())?;
+    writeln!(w)?;
 
     // Rows
     for snap in &traj.snapshots {
-        write!(f, "{}", snap.t).map_err(|e| e.to_string())?;
-        for &c in &snap.int_state.counts  { write!(f, "\t{}", c).map_err(|e| e.to_string())?; }
-        for &v in &snap.real_state.values { write!(f, "\t{:.4}", v).map_err(|e| e.to_string())?; }
+        write!(w, "{}", snap.t)?;
+        for &c in &snap.int_state.counts  { write!(w, "\t{}", c)?; }
+        for &v in &snap.real_state.values { write!(w, "\t{:.4}", v)?; }
         if emit_flows {
-            for &fl in &snap.flows.counts { write!(f, "\t{}", fl).map_err(|e| e.to_string())?; }
+            for &fl in &snap.flows.counts { write!(w, "\t{}", fl)?; }
         }
-        writeln!(f).map_err(|e| e.to_string())?;
+        writeln!(w)?;
     }
     Ok(())
 }

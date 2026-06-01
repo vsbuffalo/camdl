@@ -51,33 +51,13 @@ pub fn output_root(cli: Option<&str>, config: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_ROOT))
 }
 
-/// Directory for one simulate run. Matches the layout established
-/// for `--cas` and `batch run`:
+/// Relative path under `<root>/sims/` for a legacy simulate run path
+/// (`<stem>-<sim_hash[:8]>/<scenario-slug>-<scen_hash[:8]>/seed_<N>`).
 ///
-/// ```text
-/// <root>/sims/<sim_hash[:8]>/<scenario-slug>-<scen_hash[:8]>/seed_<N>/
-/// ```
-///
-/// Once commit 4 lands, this replaces the hard-coded
-/// `<root>/runs/...` construction in `cas::run_dir` and
-/// `batch.rs`'s sweep-point path assembly.
-pub fn sim_run_dir(
-    root: &Path,
-    model_stem: Option<&str>,
-    sim_hash: &str,
-    scenario: &str,
-    scen_hash: &str,
-    seed: u64,
-) -> PathBuf {
-    root.join("sims").join(sim_run_rel(model_stem, sim_hash, scenario, scen_hash, seed))
-}
-
-/// Relative path under `<root>/sims/` for a single simulate run.
-/// Shared between [`sim_run_dir`] (filesystem target) and callers that
-/// need a display string (e.g. `cached: sir_basic-abc/baseline-def/seed_1`
-/// stderr log, `RunEntry::run_path` in the batch manifest). Keeping the
-/// two return forms on the same helper prevents the display string from
-/// drifting out of sync with the write path.
+/// M3-DELETION-BOUND (gh#147): the new CAS path is the factored
+/// `runid::store_path` (5 levels, `{label}-{hash8}` each). This legacy
+/// helper survives only for `batch status`/`batch design` (not yet
+/// migrated); delete it when those paths move to `runid::store_path`.
 pub fn sim_run_rel(
     model_stem: Option<&str>,
     sim_hash: &str,
@@ -243,39 +223,6 @@ mod tests {
         assert_eq!(output_root(Some("/cli/dir"), None), PathBuf::from("/cli/dir"));
         assert_eq!(output_root(Some("/cli/dir"), Some("/config")),
             PathBuf::from("/cli/dir"));
-    }
-
-    #[test]
-    fn sim_run_dir_layout() {
-        let p = sim_run_dir(Path::new("/out"), None, "abcdef1234567890", "baseline",
-            "deadbeef1234", 42);
-        assert_eq!(p, Path::new("/out/sims/abcdef12/baseline-deadbeef/seed_42"));
-    }
-
-    #[test]
-    fn sim_run_dir_slugifies_scenario() {
-        let p = sim_run_dir(Path::new("/out"), None, "aaaaaaaa", "With SIA!",
-            "bbbbbbbb", 1);
-        assert!(p.to_str().unwrap().contains("/with_sia_-"),
-            "scenario must be slugified: {}", p.display());
-    }
-
-    #[test]
-    fn sim_run_dir_with_stem_prefix() {
-        let p = sim_run_dir(Path::new("/out"), Some("sir_basic"), "abcdef1234",
-            "baseline", "deadbeef", 1);
-        assert_eq!(p, Path::new("/out/sims/sir_basic-abcdef12/baseline-deadbeef/seed_1"));
-    }
-
-    #[test]
-    fn sim_run_rel_matches_sim_run_dir_tail() {
-        // The relative form must equal the last three path segments of
-        // the filesystem form — otherwise display strings drift from
-        // write paths.
-        let root = Path::new("/tmp/out");
-        let dir = sim_run_dir(root, Some("foo"), "abcdef1234", "s", "beefface", 9);
-        let rel = sim_run_rel(Some("foo"), "abcdef1234", "s", "beefface", 9);
-        assert_eq!(dir, root.join("sims").join(&rel));
     }
 
     #[test]

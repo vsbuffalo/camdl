@@ -145,10 +145,12 @@ fn simulate_unchanged_on_standalone_params_file() {
 }
 
 #[test]
-fn simulate_records_from_fit_hash_in_run_json() {
-    // When simulate runs with --params pointing at a fit MLE, and --cas
-    // is active, the resulting run.json should record `from_fit_hash`
-    // matching the fit's hash. Closes the sim → fit provenance edge.
+fn simulate_from_mle_params_writes_a_valid_sim_record() {
+    // simulate `--params <mle.toml> --cas` must run and write one valid sim
+    // RunRecord. (The sim → fit *lineage* edge — recording which fit produced
+    // the params as a `dep` ArtifactRef on the fit's run_id — lands in M3,
+    // when fits migrate to RunRecord. In M2 the consumed params are captured
+    // by value in the params-level digest, not by a from_fit pointer.)
     let Some(bin) = skip_if_missing() else { return; };
     let tmp = tempfile::tempdir().unwrap();
     let mle = tmp.path().join("mle.toml");
@@ -190,9 +192,14 @@ n_particles = 500
         .collect();
     assert_eq!(run_jsons.len(), 1, "expected one sim run, got {}",
         run_jsons.len());
-    let body = std::fs::read_to_string(&run_jsons[0]).unwrap();
-    assert!(body.contains(fit_hash),
-        "run.json must record from_fit_hash; got: {}", body);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&run_jsons[0]).unwrap()).unwrap();
+    assert_eq!(v["kind"], "sim", "a valid sim RunRecord");
+    assert_eq!(v["run_id"].as_str().unwrap().len(), 64);
+    // The mle's backend (chain_binomial) is auto-matched into the config level.
+    let cfg = v["levels"].as_array().unwrap().iter()
+        .find(|l| l["name"] == "config").unwrap()["label"].as_str().unwrap();
+    assert!(cfg.starts_with("chain_binomial-"), "config level: {cfg}");
 }
 
 // ── Behavior tests: read run.json and assert the *resolved* backend ──
@@ -210,18 +217,26 @@ n_particles = 500
 // bug hard-coding chain_binomial in the auto-match path is caught —
 // checking only one backend direction is insufficient.
 
-/// Helper: find the single run.json under `output/sims/**` and parse
-/// its `kind` table.
-fn read_sim_kind(output_root: &Path) -> serde_json::Value {
+/// Find the single sim run.json under `output/sims/**` and return the
+/// resolved `(backend, dt)` recorded in its `config` level label
+/// (`"chain_binomial-dt1"` → `("chain_binomial", "1")`). In the factored
+/// CAS, backend + dt live in the config level (hashed) — there is no
+/// `kind.backend`/`kind.dt` field anymore.
+fn read_sim_config(output_root: &Path) -> (String, String) {
     let run_jsons: Vec<_> = walkdir(&output_root.join("sims")).into_iter()
         .filter(|p| p.file_name().map(|s| s == "run.json").unwrap_or(false))
         .collect();
     assert_eq!(run_jsons.len(), 1,
         "expected exactly one run.json under {}, got {:?}",
         output_root.display(), run_jsons);
-    let body = std::fs::read_to_string(&run_jsons[0]).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    v["kind"].clone()
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&run_jsons[0]).unwrap()).unwrap();
+    let label = v["levels"].as_array().unwrap().iter()
+        .find(|l| l["name"] == "config").expect("config level")
+        ["label"].as_str().unwrap().to_string();
+    let (backend, dt) = label.rsplit_once("-dt")
+        .unwrap_or_else(|| panic!("config label should be <backend>-dt<dt>, got {label}"));
+    (backend.to_string(), dt.to_string())
 }
 
 /// Run `simulate --cas --params <mle> [extra args...]`, return the
@@ -254,10 +269,9 @@ fn run_json_records_chain_binomial_when_provenance_says_chain_binomial() {
     let mle = tmp.path().join("mle_cbin.toml");
     write_fake_mle(&mle, "chain_binomial", 1.0);
     let output = run_simulate_cas(&bin, tmp.path(), &mle, &[]);
-    let kind = read_sim_kind(&output);
-    assert_eq!(kind["backend"], "chain_binomial",
-        "run.json.backend must match provenance; got: {}", kind);
-    assert_eq!(kind["dt"], 1.0);
+    let (backend, dt) = read_sim_config(&output);
+    assert_eq!(backend, "chain_binomial", "config level must record auto-matched backend");
+    assert_eq!(dt, "1");
 }
 
 #[test]
@@ -270,9 +284,8 @@ fn run_json_records_gillespie_when_provenance_says_gillespie() {
     let mle = tmp.path().join("mle_gill.toml");
     write_fake_mle(&mle, "gillespie", 1.0);
     let output = run_simulate_cas(&bin, tmp.path(), &mle, &[]);
-    let kind = read_sim_kind(&output);
-    assert_eq!(kind["backend"], "gillespie",
-        "run.json.backend must match provenance; got: {}", kind);
+    let (backend, _dt) = read_sim_config(&output);
+    assert_eq!(backend, "gillespie", "config level must record gillespie (opposite direction)");
 }
 
 #[test]
@@ -286,10 +299,9 @@ fn run_json_records_auto_matched_dt_not_just_backend() {
     let mle = tmp.path().join("mle_dt05.toml");
     write_fake_mle(&mle, "chain_binomial", 0.5);
     let output = run_simulate_cas(&bin, tmp.path(), &mle, &[]);
-    let kind = read_sim_kind(&output);
-    assert_eq!(kind["dt"], 0.5,
-        "run.json.dt must auto-match provenance dt (0.5), not default \
-         to 1.0. Got kind: {}", kind);
+    let (_backend, dt) = read_sim_config(&output);
+    assert_eq!(dt, "0.5",
+        "config level must record auto-matched dt 0.5, not the 1.0 default");
 }
 
 #[test]
@@ -305,9 +317,8 @@ fn explicit_backend_overrides_provenance_in_run_json() {
     write_fake_mle(&mle, "chain_binomial", 1.0);
     let output = run_simulate_cas(&bin, tmp.path(), &mle,
         &["--backend", "gillespie"]);
-    let kind = read_sim_kind(&output);
-    assert_eq!(kind["backend"], "gillespie",
-        "explicit --backend must override provenance; got: {}", kind);
+    let (backend, _dt) = read_sim_config(&output);
+    assert_eq!(backend, "gillespie", "explicit --backend must override provenance");
 }
 
 #[test]
@@ -321,9 +332,8 @@ fn standalone_params_use_chain_binomial_default_in_run_json() {
     let standalone = tmp.path().join("p.toml");
     std::fs::write(&standalone, "mu = 0.05\n").unwrap();
     let output = run_simulate_cas(&bin, tmp.path(), &standalone, &[]);
-    let kind = read_sim_kind(&output);
-    assert_eq!(kind["backend"], "chain_binomial",
-        "standalone params must use chain_binomial default; got: {}", kind);
+    let (backend, _dt) = read_sim_config(&output);
+    assert_eq!(backend, "chain_binomial", "standalone params must use chain_binomial default");
 }
 
 #[test]
@@ -338,11 +348,10 @@ fn explicit_dt_overrides_provenance_in_run_json() {
     write_fake_mle(&mle, "chain_binomial", 0.5);
     let output = run_simulate_cas(&bin, tmp.path(), &mle,
         &["--dt", "0.25"]);
-    let kind = read_sim_kind(&output);
-    assert_eq!(kind["dt"], 0.25,
-        "explicit --dt must override provenance dt; got: {}", kind);
+    let (backend, dt) = read_sim_config(&output);
+    assert_eq!(dt, "0.25", "explicit --dt must override provenance dt");
     // And backend still auto-matches (we didn't pass --backend).
-    assert_eq!(kind["backend"], "chain_binomial");
+    assert_eq!(backend, "chain_binomial");
 }
 
 fn walkdir(root: &Path) -> Vec<PathBuf> {

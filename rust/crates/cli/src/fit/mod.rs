@@ -2142,6 +2142,30 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     };
 
     let run_json_path = run_dir.join("run.json");
+
+    // New-format (`runid::RunRecord`) sims: the label lives in `provenance`.
+    // (Sims are always written `Completed`, so there is no in-progress gate.)
+    if let Ok(txt) = std::fs::read_to_string(&run_json_path) {
+        if let Ok(mut rec) = serde_json::from_str::<runid::RunRecord>(&txt) {
+            let prior = rec.provenance.label.clone();
+            rec.provenance.label = Some(new_label.clone());
+            let tmp = run_dir.join("run.json.tmp");
+            let json = serde_json::to_string_pretty(&rec).unwrap_or_default();
+            if let Err(e) = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &run_json_path)) {
+                eprintln!("error: cannot write {}: {}", run_json_path.display(), e);
+                std::process::exit(1);
+            }
+            match prior {
+                Some(p) if p != new_label =>
+                    eprintln!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, run_dir.display()),
+                Some(_) => eprintln!("ok: label unchanged (\"{}\") on {}", new_label, run_dir.display()),
+                None => eprintln!("ok: label set to \"{}\" on {}", new_label, run_dir.display()),
+            }
+            return;
+        }
+    }
+
+    // Legacy `run_meta::Run` (fit / profile / survey / replicate-set).
     let mut run = match crate::run_meta::Run::read(&run_dir) {
         Ok(r) => r,
         Err(e) => {
@@ -2205,8 +2229,12 @@ fn find_runs_with_prefix(
         if run_json.is_file() {
             if let Ok(txt) = std::fs::read_to_string(&run_json) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                    // Legacy `Run.hash` or new-format `RunRecord.run_id`.
                     let hash = v.get("hash").and_then(|h| h.as_str()).unwrap_or("");
-                    if hash.starts_with(prefix) {
+                    let run_id = v.get("run_id").and_then(|h| h.as_str()).unwrap_or("");
+                    let matched = (!hash.is_empty() && hash.starts_with(prefix))
+                        || (!run_id.is_empty() && run_id.starts_with(prefix));
+                    if matched {
                         out.push(p.clone());
                     }
                 }

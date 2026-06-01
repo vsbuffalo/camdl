@@ -77,20 +77,19 @@ observations {
 }
 
 /// CAS sim leaves: `sims/<sim>/<scen>/seed_N/` dirs containing run.json.
+/// Every dir containing a `run.json`, at any depth — the factored CAS path
+/// is 5 levels deep, and the obs ensemble is a declared `obs/` child below it.
 fn run_leaves(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let Ok(l1) = std::fs::read_dir(root) else { return out; };
-    for a in l1.flatten() {
-        if !a.path().is_dir() { continue; }
-        let Ok(l2) = std::fs::read_dir(a.path()) else { continue; };
-        for b in l2.flatten() {
-            if !b.path().is_dir() { continue; }
-            let Ok(l3) = std::fs::read_dir(b.path()) else { continue; };
-            for c in l3.flatten() {
-                let pc = c.path();
-                if pc.is_dir() && pc.join("run.json").exists() {
-                    out.push(pc);
-                }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if dir.join("run.json").is_file() {
+            out.push(dir.clone());
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() { stack.push(p); }
             }
         }
     }

@@ -1,7 +1,9 @@
 mod args;
 mod util;
 mod params_resolver;  // unified parameter-value resolver (2026-05-25 CLI UX rev 2)
+mod cas_read;       // generic RunRecord reader (new-format sims); transitional alongside run_meta (gh#147)
 mod hashing;
+mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
 mod run_meta;       // unified Run/RunKind ADT — see docs/dev/proposals/2026-04-19-unified-output-tree.md
 mod run_paths;      // canonical output-path helpers
 mod cas;
@@ -661,7 +663,8 @@ fn run_simulate(a: &args::SimulateArgs) {
     };
     let mut cas_ctx: Option<CasCtx> = if cas_enabled {
         match prepare_cas_ctx(&base_sim_run, scenario_list[0].clone(), seeds[0],
-                              &cas_root, from_fit_hash.clone(), label_arg.clone()) {
+                              &cas_root, from_fit_hash.clone(), label_arg.clone(),
+                              a.allow_degenerate_rates) {
             Ok(ctx) => Some(ctx),
             Err(e) => {
                 eprintln!("error preparing CAS: {}", e);
@@ -674,16 +677,15 @@ fn run_simulate(a: &args::SimulateArgs) {
     let cas_sim_t0 = std::time::Instant::now();
 
     if let Some(ref ctx) = cas_ctx {
-        // Hash-aware cache check: we don't trust "traj.tsv exists" alone.
-        // If run.json is missing or its hash doesn't match the current
-        // sim config, fall through to re-run rather than serve a stale
-        // trajectory. Missing traj.tsv is always a miss regardless of
-        // the metadata.
-        use crate::run_meta::CacheStatus;
-        let traj_present = cas::has_cached_traj(&ctx.run_dir);
-        let meta_status = crate::run_meta::Run::check_cache(&ctx.run_dir, &ctx.run.hash);
-        match (traj_present, &meta_status) {
-            (true, CacheStatus::Hit) => {
+        // Identity-gated cache check via the store: a Hit is a Completed leaf
+        // whose run_id + level hashes match and whose exact-set manifest is
+        // intact. Stale/Miss fall through to re-run; a Collision (a different
+        // identity sharing the short-hash path) is left to the commit's
+        // disambiguation, never served.
+        let store = runid::FsCasStore::new(std::path::Path::new(&cas_root));
+        let id = runid::LeafIdentity::new(ctx.record.run_id);
+        match store.lookup(&ctx.run_dir, &id) {
+            runid::Lookup::Hit(_) => {
                 let cached = std::fs::read(ctx.run_dir.join("traj.tsv"))
                     .unwrap_or_else(|e| {
                         eprintln!("error reading cached traj.tsv: {}", e);
@@ -700,16 +702,12 @@ fn run_simulate(a: &args::SimulateArgs) {
                 eprintln!("{} {}", "cache hit:".bright_green().bold(), ctx.relative.cyan());
                 return;
             }
-            (true, CacheStatus::Stale { stored, current }) => {
-                eprintln!("{} stored hash {} ≠ current {} — re-running",
-                    "stale cache:".yellow().bold(),
-                    &stored[..8.min(stored.len())],
-                    &current[..8.min(current.len())]);
+            runid::Lookup::Stale(reason) => {
+                eprintln!("{} {:?} — re-running", "stale cache:".yellow().bold(), reason);
             }
-            // (true, Miss) — traj.tsv exists without run.json. Happens
-            // on interrupted runs or older binaries; treat as miss.
-            // (false, _) — nothing cached; miss.
-            _ => {}
+            // Collision: a different artifact occupies the short-hash path;
+            // the commit disambiguates. Miss: nothing cached.
+            runid::Lookup::Collision(_) | runid::Lookup::Miss => {}
         }
     }
 
@@ -913,13 +911,11 @@ fn run_simulate(a: &args::SimulateArgs) {
         }
     }
 
-    // ── CAS write (single-run --cas on cache miss) ─────────────────────────
+    // ── CAS commit (single-run --cas on cache miss) ────────────────────────
     if let (Some(ctx), Some(buf)) = (cas_ctx.as_mut(), cas_buffer.as_ref()) {
         let bytes = buf.bytes();
-        ctx.run.status = run_meta::RunStatus::Completed {
-            wall_time_seconds: cas_sim_t0.elapsed().as_secs_f64(),
-        };
-        // Mirror to user's destination
+        // Mirror to the user's destination (the canonical artifact bytes are
+        // what gets committed; this is the requested view).
         if !suppress_trajectory {
             match &output_path {
                 Some(path) => std::fs::write(path, &bytes).unwrap_or_else(|e| {
@@ -930,18 +926,27 @@ fn run_simulate(a: &args::SimulateArgs) {
                 }
             }
         }
-        // Write to CAS
-        std::fs::create_dir_all(&ctx.run_dir).unwrap_or_else(|e| {
-            eprintln!("cannot create CAS dir {}: {}", ctx.run_dir.display(), e);
-            std::process::exit(1);
-        });
-        std::fs::write(ctx.run_dir.join("traj.tsv"), &bytes).unwrap_or_else(|e| {
-            eprintln!("cannot write traj.tsv: {}", e); std::process::exit(1);
-        });
-        ctx.run.write(&ctx.run_dir).unwrap_or_else(|e| {
-            eprintln!("cannot write run.json: {}", e); std::process::exit(1);
-        });
-        eprintln!("{} {}", "cached:".bright_green().bold(), ctx.relative.cyan());
+        // Commit through the store: atomic stage-then-rename, the exact-set
+        // manifest, and Running → Completed. The store owns the file write —
+        // we hand it the captured bytes rather than touching disk ourselves.
+        let _ = cas_sim_t0; // wall time now lives in provenance timestamps
+        ctx.record.provenance.finished_at =
+            Some(cas::iso8601_utc(std::time::SystemTime::now()));
+        let mut artifacts = runid::Artifacts::new();
+        artifacts.insert("traj.tsv", bytes);
+        let store = runid::FsCasStore::new(std::path::Path::new(&cas_root));
+        let dest = store
+            .commit_atomic(&ctx.run_dir, ctx.record.clone(), artifacts)
+            .unwrap_or_else(|e| {
+                eprintln!("cannot commit CAS run: {}", e);
+                std::process::exit(1);
+            });
+        let rel = dest
+            .strip_prefix(std::path::Path::new(&cas_root))
+            .unwrap_or(&dest)
+            .to_string_lossy()
+            .into_owned();
+        eprintln!("{} {}", "cached:".bright_green().bold(), rel.cyan());
     }
 
     // ── Write combined observation output ───────────────────────────────────
@@ -1224,13 +1229,14 @@ impl StreamSink {
 /// directory + metadata template. Built before simulation so we can
 /// check for a cache hit and skip work if possible.
 struct CasCtx {
-    /// Relative path under `<root>/sims/`, e.g.
-    /// `abc12345/baseline-def45678/seed_42`. Logged to stderr.
+    /// Relative path under the CAS root (the factored
+    /// `sims/{model}-{h8}/…/seed_{n}-{h8}` tree). Logged to stderr.
     relative: String,
-    /// Absolute path to the run directory.
+    /// Absolute path to the run directory (`runid::store_path`).
     run_dir: std::path::PathBuf,
-    /// Metadata to write to `run.json` after a successful run.
-    run: run_meta::Run,
+    /// The leaf's run record — written through `CasStore` after a
+    /// successful run (status flips Running → Completed at commit).
+    record: runid::RunRecord,
 }
 
 /// Resolve the CAS run directory and build a `RunMeta` template for a
@@ -1242,8 +1248,9 @@ fn prepare_cas_ctx(
     scenario_name: Option<String>,
     seed: u64,
     cas_root: &str,
-    from_fit_hash: Option<String>,
+    _from_fit_hash: Option<String>,
     label: Option<String>,
+    allow_degenerate_rates: bool,
 ) -> Result<CasCtx, String> {
     // Load IR source + parse model
     let (ir_path_resolved, _tmp) = util::resolve_ir_path(&run.ir_path)?;
@@ -1296,40 +1303,90 @@ fn prepare_cas_ctx(
         (run.adhoc_enable.clone(), run.adhoc_disable.clone(), HashMap::new())
     };
 
-    let inputs = cas::sim_inputs::SimulateInputs {
-        model_path:           run.ir_path.clone(),
-        model_stem:           hashing::path_stem_slug(&run.ir_path),
-        scenario:             scenario_name.clone().unwrap_or_else(|| "baseline".to_string()),
-        model_hash:           hashing::model_hash(&src),
-        base_params_canonical: hashing::canonical_params(&base_params),
-        backend:              run.backend.clone(),
-        dt:                   run.dt,
-        enable, disable, scen_params,
-        seed,
-        from_fit_hash,
-        sweep_point:          HashMap::new(),  // single --cas: no sweep
+    // External `--table NAME=PATH` injections enter the params identity as
+    // content digests (name ++ content, sorted by name) — never as paths, and
+    // never dropped (a table-file edit must re-key, or it is a silent wrong
+    // answer). Inline tables are already baked into the IR (the model digest).
+    let table_digests = table_content_digests(&run.table_files)?;
+
+    let model_stem = hashing::path_stem_slug(&run.ir_path).unwrap_or_else(|| "model".to_string());
+    let ir_version = ir::IR_VERSION.trim();
+    let scenario_label = scenario_name.clone().unwrap_or_else(|| "baseline".to_string());
+
+    let rctx = crate::resolve::TrajectoryCtx {
+        model: &model,
+        model_stem: &model_stem,
+        ir_version,
+        engine_version: version::VERSION_SHORT,
+        backend: run.backend,
+        dt: run.dt,
+        // The resolved horizon/output live on the (post-resolution) model; a
+        // preset that overrides t_end is already reflected here.
+        t_start: model.simulation.t_start,
+        t_end: model.simulation.t_end,
+        output: &model.output.times,
+        allow_degenerate_rates,
+        base_params: &base_params,
+        table_digests,
+        enable: &enable,
+        disable: &disable,
+        scen_params: &scen_params,
+        param_label: "base",
+        scenario_label: &scenario_label,
+        // single `--cas`: total_runs == 1, so process_seed == base seed.
+        base_seed: seed,
+        process_seed: seed,
+    };
+    let resolved = crate::resolve::resolve_trajectory(&rctx)
+        .map_err(|e| format!("resolve error: {e}"))?;
+
+    let root = std::path::Path::new(cas_root);
+    let run_dir = runid::store_path(root, runid::ArtifactKind::Sim, &resolved.levels);
+    let relative = run_dir.strip_prefix(root).unwrap_or(&run_dir).to_string_lossy().into_owned();
+
+    let record = runid::RunRecord {
+        format_version: runid::FORMAT_VERSION,
+        kind: runid::ArtifactKind::Sim,
+        run_id: resolved.run_id,
+        hash_version: runid::HASH_VERSION,
+        ir_version: ir_version.to_string(),
+        engine_version: version::VERSION_SHORT.to_string(),
+        levels: resolved.levels,
+        deps: Vec::new(),
+        status: runid::RunStatus::Running,
+        artifacts: Default::default(),
+        children: Default::default(),
+        inputs: serde_json::Value::Null,
+        provenance: runid::Provenance {
+            argv: std::env::args().collect(),
+            label,
+            created_at: Some(cas::iso8601_utc(std::time::SystemTime::now())),
+            source_paths: vec![run.ir_path.clone()],
+            camdl_version: Some(version::VERSION_SHORT.to_string()),
+            ..Default::default()
+        },
     };
 
-    use cas::typed::CasInputs;
-    let run_dir = inputs.cas_path(std::path::Path::new(cas_root));
-    let relative = run_paths::sim_run_rel(
-        inputs.model_stem.as_deref(),
-        &inputs.sim_hash_str(),
-        &inputs.scenario,
-        &inputs.scen_hash_str(),
-        seed,
-    );
-    let run_record = run_meta::Run {
-        hash:              inputs.content_hash().full().to_string(),
-        version:           version::VERSION_SHORT.to_string(),
-        created_at:        cas::iso8601_utc(std::time::SystemTime::now()),
-        argv:              std::env::args().collect(),
-        status: run_meta::RunStatus::Running,
-        label,
-        kind:              inputs.run_kind(),
-    };
+    Ok(CasCtx { relative, run_dir, record })
+}
 
-    Ok(CasCtx { relative, run_dir, run: run_record })
+/// Content digests of `--table NAME=PATH` injections: SHA-256 of
+/// `name ++ \0 ++ file_bytes`, sorted by name for determinism. Folds in the
+/// name so re-binding the same bytes to a different table also re-keys.
+fn table_content_digests(
+    tables: &HashMap<String, String>,
+) -> Result<Vec<runid::inputs::DataDigest>, String> {
+    let mut names: Vec<(&String, &String)> = tables.iter().collect();
+    names.sort_by(|a, b| a.0.cmp(b.0));
+    let mut out = Vec::with_capacity(names.len());
+    for (name, path) in names {
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read table {path}: {e}"))?;
+        let mut framed = name.as_bytes().to_vec();
+        framed.push(0);
+        framed.extend_from_slice(&bytes);
+        out.push(runid::inputs::DataDigest(runid::ContentHash::digest_bytes(&framed)));
+    }
+    Ok(out)
 }
 
 /// Generate observation times from an IR schedule.
