@@ -25,6 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use runid_derive::RunInput;
+use serde::{Deserialize, Serialize};
 
 use crate::float::FiniteF64;
 use crate::hash::{CanonicalHasher, ContentAddressed, ContentHash};
@@ -162,7 +163,7 @@ impl ModelDigest {
 /// Folding the digest pins which upstream file was consumed, so a change to
 /// a sibling artifact under the same leaf does not invalidate the consumer,
 /// and a regenerated/reselected upstream invalidates correctly.
-#[derive(Debug, Clone, PartialEq, Eq, RunInput)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, RunInput)]
 pub struct ArtifactRef {
     pub run_id: ContentHash,
     /// Display-only (the producing kind); not folded into identity.

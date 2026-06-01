@@ -89,6 +89,16 @@ impl ContentHash {
         hex::encode(&self.0[..4])
     }
 
+    /// Digest of opaque artifact bytes — the *same* pinned hash function
+    /// (SHA-256) the structural hasher uses, applied to a file's raw
+    /// contents for the `run.json` manifest. This is the "never serve wrong
+    /// bytes" guarantee verified at consume time; it is distinct from the
+    /// structural input hash (which frames typed values), though both use
+    /// SHA-256 and migrate together via [`HASH_VERSION`].
+    pub fn digest_bytes(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
+    }
+
     /// Parse a full 64-char hex digest (the `run.json` form).
     pub fn from_hex(s: &str) -> Result<Self, HexError> {
         let bytes = hex::decode(s).map_err(|_| HexError::NotHex)?;
