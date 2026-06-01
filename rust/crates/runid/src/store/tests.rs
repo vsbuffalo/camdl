@@ -232,6 +232,53 @@ fn commit_clears_same_identity_stale_orphans() {
     cleanup(&root);
 }
 
+#[test]
+fn concurrent_same_identity_commits_are_race_safe() {
+    // The dedup'd-draw-row case: many threads commit the SAME identity (same
+    // content) to the same leaf concurrently. Each must succeed (no spurious
+    // error from a clobbered staging dir or a lost rename race), and the leaf
+    // must be a single intact Completed artifact.
+    let root = tmp_root("concurrent");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let ident = id(0xaa);
+    let content: Vec<u8> = b"deterministic-output-for-one-identity".to_vec();
+
+    // A barrier releases all threads into commit_atomic at the same instant,
+    // maximizing staging + rename contention — the old shared-staging
+    // (`.staging/{run_id}` + remove_dir_all) code clobbers under this.
+    const N: usize = 8;
+    let barrier = std::sync::Barrier::new(N);
+    let results: Vec<Result<PathBuf, CasError>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let store = &store;
+                let leaf = &leaf;
+                let barrier = &barrier;
+                let content = content.clone();
+                s.spawn(move || {
+                    barrier.wait();
+                    store.commit_atomic(leaf, record(ident), arts(&content))
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // Every commit succeeded and resolved to the one leaf (same identity → no
+    // disambiguation).
+    for r in &results {
+        let dest = r.as_ref().unwrap_or_else(|e| panic!("commit errored under concurrency: {e}"));
+        assert_eq!(dest, &leaf);
+    }
+    // The committed leaf is an intact Hit with the expected bytes.
+    match store.lookup(&leaf, &LeafIdentity::new(ident)) {
+        Lookup::Hit(_) => assert_eq!(fs::read(leaf.join("traj.tsv")).unwrap(), content),
+        other => panic!("expected Hit, got {other:?}"),
+    }
+    cleanup(&root);
+}
+
 // ── Mode B: streamed Running → Completed ─────────────────────────────────────
 
 #[test]

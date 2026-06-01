@@ -39,6 +39,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::hash::{ContentHash, HASH_VERSION};
@@ -59,17 +60,22 @@ impl LeafIdentity {
 }
 
 /// The outcome of a lookup at a path.
+///
+/// `RunRecord` is ~376 bytes; the record-carrying variants are boxed so the
+/// enum stays small (clippy `large_enum_variant`, a hard error under the
+/// repo's `-D warnings`). Callers match `Hit(record)`/`Collision(record)`
+/// where `record: Box<RunRecord>` derefs transparently.
 #[derive(Debug)]
 pub enum Lookup {
     /// Identity matches, `Completed`, exact-set integrity ok.
-    Hit(RunRecord),
+    Hit(Box<RunRecord>),
     /// Nothing usable at the path (no `run.json`).
     Miss,
     /// SAME identity present but unusable → safe-clear + recompute.
     Stale(StaleReason),
     /// A DIFFERENT full identity occupies this path (short-hash collision) →
     /// disambiguate, never touch the incumbent.
-    Collision(RunRecord),
+    Collision(Box<RunRecord>),
 }
 
 /// Why a same-identity leaf is unusable.
@@ -139,6 +145,11 @@ pub trait CasStore {
     ) -> Result<PathBuf, CasError>;
 }
 
+/// Process-local counter making each Mode-A staging dir unique per attempt,
+/// so concurrent same-identity commits never share (and clobber) a staging
+/// dir. Combined with the pid, the staging name is unique across processes.
+static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
+
 /// A filesystem-backed CAS rooted at a `results/` directory.
 pub struct FsCasStore {
     root: PathBuf,
@@ -197,8 +208,20 @@ impl FsCasStore {
         mut record: RunRecord,
         artifacts: Artifacts,
     ) -> Result<PathBuf, CasError> {
-        let staging = self.staging_root().join(record.run_id.to_hex());
-        // Sweep an orphaned staging dir from a prior crash.
+        // Staging is unique **per attempt** — `{run_id}.{pid}.{nonce}` — so
+        // two concurrent commits of the *same* identity (the dedup'd-draw-row
+        // case under batch's rayon) never share a staging dir and clobber each
+        // other's in-flight writes. The proposal's `.staging/{run_id}` named
+        // the intent ("unique staging dir, race-safe by rename"); the pid +
+        // process-local counter realize it. Orphaned `.staging/*` from a crash
+        // is harmless debris swept at store-open (M2's store lifecycle).
+        let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
+        let staging = self
+            .staging_root()
+            .join(format!("{}.{}.{}", record.run_id.to_hex(), std::process::id(), nonce));
+        // The unique path can only pre-exist as a stale orphan from a prior
+        // process that reused our pid+nonce — never a live concurrent attempt —
+        // so clearing it is safe.
         if staging.exists() {
             fs::remove_dir_all(&staging)?;
         }
@@ -229,22 +252,81 @@ impl FsCasStore {
         write_record_direct(&staging, &record)?;
         fsync_dir(&staging)?;
 
-        // Resolve the destination, handling collisions/staleness.
         let id = LeafIdentity::new(record.run_id);
-        match self.resolve_claim_dir(path, &id)? {
-            ClaimOutcome::AlreadyCompleted(dest) => {
-                // Lost a benign race: the identical leaf already landed.
-                fs::remove_dir_all(&staging).ok();
-                Ok(dest)
+        self.rename_staged_into_place(&staging, path, &id)
+    }
+
+    /// Resolve the destination and rename `staging` into it, tolerating the
+    /// concurrent-rename race: a competing winner can create `dest` between
+    /// our `resolve` and our `rename`, so a failed rename whose `dest` now
+    /// exists re-resolves (the next lookup sees the winner's `Completed` leaf
+    /// → benign Hit). This is the proposal's "if `final` exists when the
+    /// rename is attempted, run `lookup(final, expected)`" made race-safe.
+    fn rename_staged_into_place(
+        &self,
+        staging: &Path,
+        path: &Path,
+        id: &LeafIdentity,
+    ) -> Result<PathBuf, CasError> {
+        // The loop converges fast: a competing same-identity commit resolves
+        // to AlreadyCompleted, a different identity disambiguates to its own
+        // candidate. The cap is a defensive backstop, never reached in
+        // practice.
+        const MAX_ATTEMPTS: u32 = 64;
+        for _ in 0..MAX_ATTEMPTS {
+            match self.resolve_claim_dir(path, id)? {
+                ClaimOutcome::AlreadyCompleted(dest) => {
+                    // Lost a benign race: the identical leaf already landed.
+                    fs::remove_dir_all(staging).ok();
+                    return Ok(dest);
+                }
+                ClaimOutcome::Reclaim(dest) => {
+                    // A concurrent thread may reclaim the same stale leaf;
+                    // tolerate it already being gone.
+                    if let Err(e) = fs::remove_dir_all(&dest) {
+                        if e.kind() != ErrorKind::NotFound {
+                            return Err(e.into());
+                        }
+                    }
+                    if self.try_rename(staging, &dest)? {
+                        return Ok(dest);
+                    }
+                }
+                ClaimOutcome::Fresh(dest) => {
+                    if self.try_rename(staging, &dest)? {
+                        return Ok(dest);
+                    }
+                }
             }
-            ClaimOutcome::Reclaim(dest) => {
-                fs::remove_dir_all(&dest)?;
-                self.rename_into_place(&staging, &dest)?;
-                Ok(dest)
+        }
+        Err(CasError::Io(std::io::Error::other(
+            "commit did not converge: destination contended past retry cap",
+        )))
+    }
+
+    /// Attempt `rename(staging, dest)`. Returns `Ok(true)` on success (and
+    /// fsyncs the dest's parent), `Ok(false)` if a concurrent winner created
+    /// `dest` first (caller re-resolves), or an error for any other failure.
+    fn try_rename(&self, staging: &Path, dest: &Path) -> Result<bool, CasError> {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::rename(staging, dest) {
+            Ok(()) => {
+                if let Some(parent) = dest.parent() {
+                    fsync_dir(parent)?;
+                }
+                Ok(true)
             }
-            ClaimOutcome::Fresh(dest) => {
-                self.rename_into_place(&staging, &dest)?;
-                Ok(dest)
+            // A non-empty `dest` (a competing winner's leaf) makes `rename`
+            // fail; that is the benign race, re-resolved by the caller. Any
+            // other failure (dest still absent) is a real error.
+            Err(e) => {
+                if dest.exists() {
+                    Ok(false)
+                } else {
+                    Err(e.into())
+                }
             }
         }
     }
@@ -294,19 +376,6 @@ impl FsCasStore {
         write_record_atomic(&dir, &rec)?;
         fsync_dir(&dir)?;
         Ok(StreamClaim { dir })
-    }
-
-    /// `rename(staging, dest)` + fsync the destination's parent. `dest` must
-    /// be absent (the caller cleared/quarantined it or it never existed).
-    fn rename_into_place(&self, staging: &Path, dest: &Path) -> Result<(), CasError> {
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::rename(staging, dest)?;
-        if let Some(parent) = dest.parent() {
-            fsync_dir(parent)?;
-        }
-        Ok(())
     }
 
     /// Walk the disambiguation candidates for `path`, classifying each by a
@@ -453,7 +522,7 @@ enum ClaimOutcome {
 enum ReadResult {
     Absent,
     Unparseable,
-    Ok(RunRecord),
+    Ok(Box<RunRecord>),
 }
 
 enum ExactSet {
@@ -474,7 +543,7 @@ fn read_record(dir: &Path) -> ReadResult {
     match fs::read(dir.join("run.json")) {
         Err(_) => ReadResult::Absent,
         Ok(bytes) => match serde_json::from_slice::<RunRecord>(&bytes) {
-            Ok(r) => ReadResult::Ok(r),
+            Ok(r) => ReadResult::Ok(Box::new(r)),
             Err(_) => ReadResult::Unparseable,
         },
     }
