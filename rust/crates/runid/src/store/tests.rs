@@ -335,6 +335,110 @@ fn mode_b_reclaims_stale_running_when_unlocked() {
     cleanup(&root);
 }
 
+// ── Mode B: recursive (nested) exact-set manifest — fit stages nest chains ───
+
+/// Build a record carrying declared child namespaces (e.g. `trajectories`).
+fn record_with_children(run_id: ContentHash, children: &[(&str, ContentHash)]) -> RunRecord {
+    let mut r = record(run_id);
+    for (ns, cid) in children {
+        r.children.insert((*ns).to_string(), vec![*cid]);
+    }
+    r
+}
+
+#[test]
+fn mode_b_nested_own_files_are_manifested_and_hit() {
+    // A fit stage streams per-chain files under `chain_N/` plus stage-root
+    // outputs. The recursive manifest must capture every nested own-file
+    // (keyed by its `/`-joined relative path), and lookup must Hit.
+    let root = tmp_root("nested_hit");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("fit-aaaaaaaa").join("01-scout-bbbbbbbb").join("seed_1-cccccccc");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("chain_1/trace.tsv", b"sweep\tll\n1\t-2.0\n").unwrap();
+    claim.write("chain_2/trace.tsv", b"sweep\tll\n1\t-2.1\n").unwrap();
+    claim.write("fit_state.toml", b"best_loglik = -2.0\n").unwrap();
+    let dest = claim.finalize(record(id(0xaa))).unwrap();
+
+    match store.lookup(&dest, &LeafIdentity::new(id(0xaa))) {
+        Lookup::Hit(r) => {
+            assert!(r.artifacts.contains_key("chain_1/trace.tsv"), "nested chain file manifested");
+            assert!(r.artifacts.contains_key("chain_2/trace.tsv"));
+            assert!(r.artifacts.contains_key("fit_state.toml"));
+            assert!(!r.artifacts.contains_key("chain_1"), "the dir itself is not an own-file");
+        }
+        other => panic!("expected Hit, got {other:?}"),
+    }
+    cleanup(&root);
+}
+
+#[test]
+fn mode_b_nested_missing_file_is_corrupt() {
+    let root = tmp_root("nested_missing");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("01-s-bbbbbbbb").join("seed_1-cccccccc");
+    let dest = {
+        let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+        claim.write("chain_1/trace.tsv", b"data\n").unwrap();
+        claim.write("fit_state.toml", b"x = 1\n").unwrap();
+        claim.finalize(record(id(0xaa))).unwrap()
+    };
+    fs::remove_file(dest.join("chain_1/trace.tsv")).unwrap();
+    assert!(matches!(
+        store.lookup(&dest, &LeafIdentity::new(id(0xaa))),
+        Lookup::Stale(StaleReason::Corrupt)
+    ), "a missing nested own-file is Corrupt, not a Hit");
+    cleanup(&root);
+}
+
+#[test]
+fn mode_b_nested_orphan_file_is_orphan() {
+    let root = tmp_root("nested_orphan");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("01-s-bbbbbbbb").join("seed_1-cccccccc");
+    let dest = {
+        let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+        claim.write("chain_1/trace.tsv", b"data\n").unwrap();
+        claim.finalize(record(id(0xaa))).unwrap()
+    };
+    // An unlisted file dropped into a nested own-dir (crash debris) is an orphan.
+    fs::write(dest.join("chain_1/extra.tsv"), b"debris").unwrap();
+    assert!(matches!(
+        store.lookup(&dest, &LeafIdentity::new(id(0xaa))),
+        Lookup::Stale(StaleReason::OrphanFiles)
+    ), "an unlisted nested file is an orphan");
+    cleanup(&root);
+}
+
+#[test]
+fn mode_b_declared_child_is_a_boundary_not_recursed() {
+    // `trajectories/` is a declared child (its own artifact, keyed on
+    // n_trajectories). Its files must NOT enter the stage manifest and must
+    // NOT be orphaned — the recursive walk stops at the child boundary.
+    let root = tmp_root("child_boundary");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("01-s-bbbbbbbb").join("seed_1-cccccccc");
+    let rec = record_with_children(id(0xaa), &[("trajectories", id(0xcc))]);
+    let claim = store.claim_streaming(&leaf, rec.clone()).unwrap();
+    claim.write("fit_state.toml", b"x = 1\n").unwrap();
+    // Files inside the declared child — written as the child's content.
+    claim.write("trajectories/000001.tsv", b"t\tS\n0\t99\n").unwrap();
+    claim.write("trajectories/000002.tsv", b"t\tS\n0\t98\n").unwrap();
+    let dest = claim.finalize(rec).unwrap();
+
+    match store.lookup(&dest, &LeafIdentity::new(id(0xaa))) {
+        Lookup::Hit(r) => {
+            assert!(r.artifacts.contains_key("fit_state.toml"));
+            // The child's files are NOT folded into the stage manifest — so
+            // changing n_trajectories cannot re-key the θ̂ leaf.
+            assert!(!r.artifacts.keys().any(|k| k.starts_with("trajectories/")),
+                "declared-child files must not enter the stage manifest: {:?}", r.artifacts.keys().collect::<Vec<_>>());
+        }
+        other => panic!("expected Hit (child is a recognized boundary), got {other:?}"),
+    }
+    cleanup(&root);
+}
+
 #[test]
 fn mode_b_collision_disambiguates() {
     let root = tmp_root("modebcoll");

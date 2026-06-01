@@ -35,7 +35,7 @@
 //! leaf with **no** `.lock` is reclaimed by clearing its orphan contents
 //! under a fresh exclusive lock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -477,29 +477,11 @@ impl StreamClaim {
     /// streamed files, write `run.json.tmp → rename` over `run.json` (the
     /// single-file rename is the commit point), fsync the dir, drop the lock.
     pub fn finalize(self, mut record: RunRecord) -> Result<PathBuf, CasError> {
-        let mut manifest = BTreeMap::new();
-        for entry in fs::read_dir(&self.dir)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if is_reserved(&name) {
-                continue;
-            }
-            let meta = entry.metadata()?;
-            if meta.is_dir() {
-                // Declared children subdirs are not own-files.
-                continue;
-            }
-            let bytes = fs::read(entry.path())?;
-            manifest.insert(
-                name,
-                FileChecksum {
-                    bytes: meta.len(),
-                    mtime: fmt_mtime(meta.modified()?),
-                    digest: ContentHash::digest_bytes(&bytes),
-                },
-            );
-        }
-        record.artifacts = manifest;
+        // Walk the whole streamed subtree (chains nest under `chain_N/`),
+        // stopping at the declared children (`trajectories/`, `dt_check/`,
+        // `obs/`) — those are separate artifacts, manifested by their own
+        // commit, never folded into this leaf's exact set.
+        record.artifacts = build_manifest(&self.dir, &record.children)?;
         record.status = RunStatus::Completed;
         write_record_atomic(&self.dir, &record)?;
         fsync_dir(&self.dir)?;
@@ -553,10 +535,32 @@ fn same_identity_on_disk(cand: &Path, run_id: &ContentHash) -> bool {
     matches!(read_record(cand), ReadResult::Ok(r) if &r.run_id == run_id)
 }
 
+/// The `/`-joined path of `file` relative to the leaf `root` — the stable,
+/// OS-independent manifest key for a (possibly nested) own-file.
+fn rel_key(root: &Path, file: &Path) -> String {
+    file.strip_prefix(root)
+        .unwrap_or(file)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// The leaf's OWN files must exactly match the manifest — no missing and no
-/// orphan — except declared `children` subdirs and the reserved files.
+/// orphan — across its **whole subtree**, EXCEPT the reserved files and the
+/// declared `children` subdirs. A fit stage nests per-chain files
+/// (`chain_1/trace.tsv`) plus stage-root outputs (`fit_state.toml`,
+/// `draws.tsv`), so the walk recurses; but it **stops at a declared child**
+/// (`obs/`, `trajectories/`, `dt_check/`) — those are separate artifacts with
+/// their own `run.json`, validated on their own lookup, never recursed into
+/// nor folded into this leaf's manifest.
+///
+/// This is the **cheap gate**: presence + size + mtime only, no digest, so a
+/// fit with many/large chain files is not re-hashed on every `list`/`lookup`.
+/// The "never serve wrong bytes" digest check runs at consume time.
 fn check_exact_set(path: &Path, record: &RunRecord) -> ExactSet {
-    // 1. Every listed file present at recorded bytes + mtime.
+    // 1. Every listed file present at recorded bytes + mtime (keys may be
+    //    nested, e.g. `chain_1/trace.tsv`; `Path::join` resolves the `/`).
     for (name, ck) in &record.artifacts {
         let fp = path.join(name);
         let meta = match fs::metadata(&fp) {
@@ -571,26 +575,113 @@ fn check_exact_set(path: &Path, record: &RunRecord) -> ExactSet {
             _ => return ExactSet::Corrupt,
         }
     }
-    // 2. No unlisted files, no undeclared subdirs.
-    let entries = match fs::read_dir(path) {
-        Ok(e) => e,
-        Err(_) => return ExactSet::Corrupt,
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if is_reserved(&name) {
-            continue;
-        }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            if !record.children.contains_key(&name) {
-                return ExactSet::Orphan;
-            }
-        } else if !record.artifacts.contains_key(&name) {
-            return ExactSet::Orphan;
+    // 2. No unlisted files anywhere in the subtree, no undeclared subdirs.
+    let expected = expected_dirs(&record.artifacts);
+    match scan_orphans(path, path, record, &expected) {
+        Ok(()) => ExactSet::Ok,
+        Err(e) => e,
+    }
+}
+
+/// The set of directory rel-paths that *must* exist to hold the manifest's
+/// nested files — every proper ancestor of every manifest key. A `chain_1/`
+/// dir is legitimate because `chain_1/trace.tsv` is manifested; an empty or
+/// stray `junk/` is not implied by any manifest entry and is therefore an
+/// orphan (crash debris), preserving the strict "no undeclared subdir" gate
+/// while supporting nesting.
+fn expected_dirs(manifest: &BTreeMap<String, FileChecksum>) -> HashSet<String> {
+    let mut dirs = HashSet::new();
+    for key in manifest.keys() {
+        let parts: Vec<&str> = key.split('/').collect();
+        for i in 1..parts.len() {
+            dirs.insert(parts[..i].join("/"));
         }
     }
-    ExactSet::Ok
+    dirs
+}
+
+/// Recursive orphan scan rooted at the leaf `root`, currently visiting `dir`.
+/// A file not in the manifest is an `Orphan`. A *declared child* subdir is a
+/// boundary (recognized, not recursed). Any other subdir is an `Orphan`
+/// unless it is an ancestor of a manifested file (in `expected`), in which
+/// case it is part of the leaf and recursed into. Reserved files / `children`
+/// keys are meaningful at the leaf root (`dir == root`) only.
+fn scan_orphans(
+    root: &Path,
+    dir: &Path,
+    record: &RunRecord,
+    expected: &HashSet<String>,
+) -> Result<(), ExactSet> {
+    let entries = fs::read_dir(dir).map_err(|_| ExactSet::Corrupt)?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            if dir == root && record.children.contains_key(&name) {
+                continue; // declared child boundary — its own leaf
+            }
+            // An undeclared dir is only legitimate if a manifested file lives
+            // under it; an empty/stray dir is debris → orphan.
+            if !expected.contains(&rel_key(root, &entry.path())) {
+                return Err(ExactSet::Orphan);
+            }
+            scan_orphans(root, &entry.path(), record, expected)?;
+        } else {
+            if dir == root && is_reserved(&name) {
+                continue;
+            }
+            if !record.artifacts.contains_key(&rel_key(root, &entry.path())) {
+                return Err(ExactSet::Orphan);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build the exact-set manifest of the leaf's OWN files by walking its whole
+/// subtree (Mode B `finalize`): every file keyed by its `/`-joined relative
+/// path, EXCEPT reserved files and the contents of declared `children`
+/// subdirs (separate artifacts, manifested by their own commit).
+fn build_manifest(
+    root: &Path,
+    children: &BTreeMap<String, Vec<ContentHash>>,
+) -> Result<BTreeMap<String, FileChecksum>, CasError> {
+    let mut manifest = BTreeMap::new();
+    collect_own_files(root, root, children, &mut manifest)?;
+    Ok(manifest)
+}
+
+fn collect_own_files(
+    root: &Path,
+    dir: &Path,
+    children: &BTreeMap<String, Vec<ContentHash>>,
+    out: &mut BTreeMap<String, FileChecksum>,
+) -> Result<(), CasError> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            if dir == root && children.contains_key(&name) {
+                continue; // declared child boundary — its own leaf's bytes
+            }
+            collect_own_files(root, &entry.path(), children, out)?;
+        } else {
+            if dir == root && is_reserved(&name) {
+                continue;
+            }
+            let bytes = fs::read(entry.path())?;
+            out.insert(
+                rel_key(root, &entry.path()),
+                FileChecksum {
+                    bytes: meta.len(),
+                    mtime: fmt_mtime(meta.modified()?),
+                    digest: ContentHash::digest_bytes(&bytes),
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `{seg}` → `{seg}~{hash16}` → `{seg}~{full64}`. The full-64 form *is* the
