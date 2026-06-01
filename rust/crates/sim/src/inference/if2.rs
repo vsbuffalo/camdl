@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use crate::rng::StatefulRng;
 use crate::error::SimError;
-use super::degeneracy::check_pf_degeneracy;
+use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, ITER_BUDGET};
 use super::traits::{ProcessModel, ObservationModel};
 use super::types::{ParticleState, log_sum_exp, normalize_log_weights, LOG_PROB_FLOOR, init_particle_rngs};
 use super::resampling::systematic_resample;
@@ -368,11 +368,27 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         let mut n_skipped_obs: usize = 0;
         let mut t = config.t_start;
 
+        // gh#147 (M3.1). Cumulative particle-substep count for the
+        // deterministic compute-budget guard, scoped per IF2 iteration
+        // (each iteration is one PF evaluation; `ITER_BUDGET` bounds a
+        // single eval, independent of how many iterations the fit runs).
+        let mut iters: u64 = 0;
+
         for obs_idx in 0..n_obs {
             // Propagate — batched parallel dispatch per observation interval.
             let obs_time = obs_model.obs_time(obs_idx);
             let t_start = t;
             let dt = config.dt;
+
+            // gh#147 (M3.1). Deterministic compute-budget guard, PRE-window
+            // (same closed-form scalar cost + placement as bootstrap_filter):
+            // a pathological dt aborts before the substep loop runs.
+            let cost = window_substep_cost(n, t, obs_time, dt);
+            if let Some(kind) = check_iteration_budget(iters, cost, ITER_BUDGET) {
+                return Err(pf_bail_error(kind, obs_idx, t0_if2.elapsed().as_secs_f64()));
+            }
+            iters = iters.saturating_add(cost);
+
             let errors: Vec<Result<(), SimError>> = states.par_iter_mut()
                 .zip(particle_params.par_iter())
                 .zip(rngs.par_iter_mut())

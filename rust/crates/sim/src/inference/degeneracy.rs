@@ -71,6 +71,40 @@ const WALLCLOCK_PER_PARTICLE_S: f64 = 0.5;
 /// the workload-scaled default.
 pub const WALLCLOCK_ENV: &str = "CAMDL_PF_WALLCLOCK_TIMEOUT_S";
 
+/// gh#147 (M3.1). Fixed engine budget on the cumulative number of
+/// *particle-substeps* a single particle-filter evaluation may execute.
+/// This is the content-addressing-safe replacement for the wall-clock
+/// watchdog's compute-blowup role.
+///
+/// The wall-clock watchdog (`WallClockExceeded`) makes a fit's
+/// log-likelihood depend on machine speed and thread count — two runs
+/// with identical inputs can diverge — which is fatal to content
+/// addressing (a pure `f : Inputs → Artifacts` must be deterministic).
+/// The wall-clock check only ever caught *compute blow-up*: a particle
+/// filter never θ-wedges (it requires the chain-binomial backend, whose
+/// per-window substep count `ceil(Δt/dt)` is deterministic and whose
+/// per-substep work is θ-bounded), so "runs effectively forever" means
+/// "executes pathologically many substeps". The deterministic analog of
+/// "too many substeps" is a cap on the substep *count* itself —
+/// independent of how fast each one runs.
+///
+/// Sizing: the national worst case is ~2000 particles × a 2-year horizon
+/// at dt = 0.1 day ≈ 2000 × 7300 ≈ 1.5e7 substeps for one filter pass.
+/// A larger-than-national pass (5000 particles × 4 years × dt = 0.05 ≈
+/// 1.5e8) is still two orders of magnitude under this budget, while a
+/// genuine wedge (a sub-microsecond dt, or a non-positive dt) overshoots
+/// it by many orders of magnitude and is caught immediately. 1e10 is the
+/// headroom point: generous enough never to false-trip a legitimate fit,
+/// tight enough that a misconfiguration fails fast instead of hanging.
+///
+/// It is a *fixed* constant, never derived from core count, wall-clock,
+/// or any machine state — deriving it would re-introduce exactly the
+/// impurity the wall-clock watchdog has. The budget bounds a single PF
+/// evaluation (one `bootstrap_filter` call; one IF2 iteration's inner
+/// filter), so it is independent of how many IF2 iterations or chains a
+/// fit runs.
+pub const ITER_BUDGET: u64 = 10_000_000_000; // 1e10 particle-substeps
+
 /// Resolve the per-call wall-clock budget in seconds, or `None` to disable
 /// the check. `override_secs` is the raw override string (the env var
 /// today; the CLI flag / fit.toml field will pass through this same path)
@@ -161,17 +195,87 @@ pub fn check_pf_degeneracy(
     None
 }
 
-/// gh#133. Map a watchdog bail (the `kind` from [`check_pf_degeneracy`]) to
-/// the right `SimError`. `WallClockExceeded` is a *resource* limit and gets
-/// its own [`SimError::PFWallclockTimeout`], distinct from the statistical
-/// `PFDegenerate` pathologies (EssCollapsed/AllParticlesDead). Both are
-/// whole-call bails, so call-site behaviour is preserved — only the type and
-/// message differ. The single branch point keeps the two filter loops
-/// (`if2`, `bootstrap_filter`) agreeing.
+/// gh#147 (M3.1). The deterministic substep cost of propagating one
+/// observation window: `n_particles · ceil((obs_time − t)/dt)`.
+///
+/// This is a closed-form scalar over values already in scope at the top
+/// of the per-window loop — NOT a per-particle reduction — so it is
+/// identical regardless of thread count (`--parallel`-invariant by
+/// construction). The `ceil` matches the per-particle substep loop in
+/// `bootstrap_filter`/`run_if2` (`while t_local < obs_time − ε`, last
+/// step clamped), so accumulating this per window equals the true total
+/// substep count up to the ε boundary (a ≤1-step-per-window slack that is
+/// irrelevant against a 1e10 budget).
+///
+/// Degenerate `dt`: a non-positive or non-finite `dt` is itself a wedge
+/// (the substep loop would never advance), so it reports `u64::MAX` to
+/// trip the budget rather than silently returning 0. A window with
+/// `obs_time <= t` does no substeps and costs 0.
+pub fn window_substep_cost(n_particles: usize, t: f64, obs_time: f64, dt: f64) -> u64 {
+    if !dt.is_finite() || dt <= 0.0 {
+        return u64::MAX;
+    }
+    let span = obs_time - t;
+    // No work when the window has already passed (`span <= 0`). A NaN span
+    // (a broken obs schedule) also costs 0 — the substep loop's
+    // `t_local < obs_time` guard runs zero iterations on a NaN bound, so
+    // matching that here keeps the budget honest rather than misreporting a
+    // schedule bug as a compute blow-up.
+    if span <= 0.0 || span.is_nan() {
+        return 0;
+    }
+    let substeps = (span / dt).ceil();
+    if !substeps.is_finite() || substeps < 0.0 {
+        return u64::MAX;
+    }
+    // Saturating throughout: an astronomically small dt can overflow u64,
+    // which is itself a wedge → saturate to MAX and let the budget trip.
+    let substeps = if substeps >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        substeps as u64
+    };
+    (n_particles as u64).saturating_mul(substeps)
+}
+
+/// gh#147 (M3.1). Deterministic cumulative-substep budget check. Given the
+/// substeps already executed (`iters`) and the projected `cost` of the
+/// next window (from [`window_substep_cost`]), return
+/// `Some(IterationBudgetExceeded)` iff propagating that window would push
+/// the cumulative count *past* `budget` (strictly greater — exactly
+/// hitting the budget is allowed). `None` means "proceed". Pure: no clock,
+/// no env, no thread state — the same inputs always give the same answer.
+pub fn check_iteration_budget(iters: u64, cost: u64, budget: u64) -> Option<PFDegenerateKind> {
+    let attempted = iters.saturating_add(cost);
+    if attempted > budget {
+        Some(PFDegenerateKind::IterationBudgetExceeded {
+            attempted_substeps: attempted,
+            budget_substeps: budget,
+        })
+    } else {
+        None
+    }
+}
+
+/// gh#133/gh#147. Map a watchdog bail (the `kind` from
+/// [`check_pf_degeneracy`] or [`check_iteration_budget`]) to the right
+/// `SimError`. Both `WallClockExceeded` and `IterationBudgetExceeded` are
+/// *resource* limits and get their own error types
+/// ([`SimError::PFWallclockTimeout`] / [`SimError::PFIterationBudget`]),
+/// distinct from the statistical `PFDegenerate` pathologies
+/// (EssCollapsed/AllParticlesDead). All are whole-call bails, so call-site
+/// behaviour is preserved — only the type and message differ. The single
+/// branch point keeps the two filter loops (`if2`, `bootstrap_filter`)
+/// agreeing. `elapsed_s` is the wall-clock-relevant field; the
+/// deterministic iteration budget ignores it (its diagnostic data — the
+/// substep counts — rides on the `kind`).
 pub fn pf_bail_error(kind: PFDegenerateKind, obs_window: usize, elapsed_s: f64) -> SimError {
     match kind {
         PFDegenerateKind::WallClockExceeded => {
             SimError::PFWallclockTimeout { obs_window, elapsed_s }
+        }
+        PFDegenerateKind::IterationBudgetExceeded { attempted_substeps, budget_substeps } => {
+            SimError::PFIterationBudget { obs_window, attempted_substeps, budget_substeps }
         }
         other => SimError::PFDegenerate { kind: other, obs_window, elapsed_s },
     }
@@ -342,5 +446,83 @@ mod tests {
             pf_bail_error(PFDegenerateKind::EssCollapsed { last_ess: vec![1.0] }, 5, 1.0),
             SimError::PFDegenerate { .. }
         ));
+    }
+
+    /// gh#147 (M3.1). The iteration-budget bail maps to its own
+    /// resource-limit error (`PFIterationBudget`), carrying the substep
+    /// counts forward from the kind — distinct from both the statistical
+    /// `PFDegenerate` pathologies and the wall-clock timeout.
+    #[test]
+    fn iteration_budget_bail_is_its_own_resource_error() {
+        let kind = PFDegenerateKind::IterationBudgetExceeded {
+            attempted_substeps: 12_000_000_000,
+            budget_substeps: ITER_BUDGET,
+        };
+        match pf_bail_error(kind, 7, 0.0) {
+            SimError::PFIterationBudget { obs_window, attempted_substeps, budget_substeps } => {
+                assert_eq!(obs_window, 7);
+                assert_eq!(attempted_substeps, 12_000_000_000);
+                assert_eq!(budget_substeps, ITER_BUDGET);
+            }
+            other => panic!("expected PFIterationBudget, got {:?}", other),
+        }
+    }
+
+    /// gh#147 (M3.1). The per-window substep cost is exactly
+    /// `n_particles · ceil((obs_time − t)/dt)`, matching the substep loop's
+    /// iteration count (last step clamped → ceil, not floor).
+    #[test]
+    fn window_substep_cost_matches_ceil_of_span_over_dt() {
+        // Exact division: span/dt = 2 → 2 substeps.
+        assert_eq!(window_substep_cost(10, 0.0, 1.0, 0.5), 20);
+        // Non-exact: span/dt = 3.33 → ceil = 4 (the final clamped step counts).
+        assert_eq!(window_substep_cost(10, 0.0, 1.0, 0.3), 40);
+        // dt == span → exactly 1 substep.
+        assert_eq!(window_substep_cost(7, 0.0, 1.0, 1.0), 7);
+        // Mid-trajectory window: span = obs_time − t.
+        assert_eq!(window_substep_cost(3, 5.0, 6.0, 0.25), 12); // ceil(1/0.25)=4, ×3
+    }
+
+    /// gh#147 (M3.1). Degenerate inputs: a window that does no work costs
+    /// 0; a non-positive / non-finite dt is itself a wedge and reports
+    /// `u64::MAX` so the budget trips rather than silently passing.
+    #[test]
+    fn window_substep_cost_handles_degenerate_inputs() {
+        // obs_time == t (and obs_time < t): no substeps.
+        assert_eq!(window_substep_cost(100, 1.0, 1.0, 0.1), 0);
+        assert_eq!(window_substep_cost(100, 2.0, 1.0, 0.1), 0);
+        // Non-positive / non-finite dt → MAX (a wedge: the loop never advances).
+        assert_eq!(window_substep_cost(100, 0.0, 1.0, 0.0), u64::MAX);
+        assert_eq!(window_substep_cost(100, 0.0, 1.0, -0.1), u64::MAX);
+        assert_eq!(window_substep_cost(100, 0.0, 1.0, f64::NAN), u64::MAX);
+        // A sub-microsecond dt is a large but representable cost (no
+        // overflow): 2000 × ceil(1/1e-9) = 2e12, well over ITER_BUDGET but
+        // far under u64::MAX — it trips the budget without saturating.
+        assert_eq!(window_substep_cost(2000, 0.0, 1.0, 1e-9), 2_000_000_000_000);
+        // A dt so tiny the substep count × swarm overflows u64 → saturates
+        // to MAX rather than wrapping to a small value that slips the budget.
+        assert_eq!(window_substep_cost(2000, 0.0, 1.0, 1e-18), u64::MAX);
+    }
+
+    /// gh#147 (M3.1). The budget check fires strictly past the budget;
+    /// exactly hitting it is allowed. `None` means "proceed".
+    #[test]
+    fn check_iteration_budget_fires_strictly_past_budget() {
+        // Under budget → proceed.
+        assert!(check_iteration_budget(0, 100, 1000).is_none());
+        // Exactly at budget → proceed (boundary is inclusive).
+        assert!(check_iteration_budget(900, 100, 1000).is_none());
+        // One past budget → bail, carrying the projected total + budget.
+        match check_iteration_budget(901, 100, 1000) {
+            Some(PFDegenerateKind::IterationBudgetExceeded {
+                attempted_substeps, budget_substeps,
+            }) => {
+                assert_eq!(attempted_substeps, 1001);
+                assert_eq!(budget_substeps, 1000);
+            }
+            other => panic!("expected IterationBudgetExceeded, got {:?}", other),
+        }
+        // Saturating add: a MAX cost cannot wrap around the budget.
+        assert!(check_iteration_budget(1, u64::MAX, ITER_BUDGET).is_some());
     }
 }

@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use crate::rng::StatefulRng;
 use crate::error::SimError;
-use super::degeneracy::check_pf_degeneracy;
+use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, ITER_BUDGET};
 use super::traits::{ProcessModel, ObservationModel, SMCConfig};
 use super::types::{ParticleState, ParticleSwarm, log_sum_exp, normalize_log_weights, RESAMPLE_RNG_STREAM, init_particle_rngs};
 use super::resampling::systematic_resample;
@@ -139,6 +139,12 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
 
     let mut t = config.t_start;
 
+    // gh#147 (M3.1). Cumulative particle-substep count for the
+    // deterministic compute-budget guard. Bounds a single PF evaluation;
+    // see `ITER_BUDGET`. Checked BEFORE each window's propagation so a
+    // pathological dt aborts before the substep loop runs (and hangs).
+    let mut iters: u64 = 0;
+
     // gh#110. Wall-clock timer for the degeneracy watchdog. Started
     // here, checked after each observation window via
     // `check_pf_degeneracy`. The watchdog returns `Err(PFDegenerate)`
@@ -194,6 +200,20 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
 
     for obs_idx in 0..n_obs {
         let obs_time = obs_model.obs_time(obs_idx);
+
+        // gh#147 (M3.1). Deterministic compute-budget guard, PRE-window.
+        // The per-window substep cost `n_particles · ceil((obs_time−t)/dt)`
+        // is a closed-form scalar (parallel-invariant), so this fires
+        // identically regardless of thread count and BEFORE the substep
+        // loop below — a sub-nanosecond dt aborts here rather than wedging
+        // the propagation. Replaces the machine-speed-dependent wall-clock
+        // watchdog's compute-blowup role; the wall-clock check (below,
+        // post-window) remains for genuinely-slow-but-bounded filters.
+        let cost = window_substep_cost(n_particles, t, obs_time, dt);
+        if let Some(kind) = check_iteration_budget(iters, cost, ITER_BUDGET) {
+            return Err(pf_bail_error(kind, obs_idx, t0_call.elapsed().as_secs_f64()));
+        }
+        iters = iters.saturating_add(cost);
 
         // Propagate all particles from t to obs_time.
         let t_start_interval = t;

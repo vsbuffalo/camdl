@@ -109,6 +109,35 @@ pub enum SimError {
         elapsed_s: f64,
     },
 
+    /// gh#147 (M3.1). The particle filter's *deterministic* compute budget
+    /// was exceeded: propagating an observation window would push the
+    /// cumulative particle-substep count past the fixed engine budget
+    /// `ITER_BUDGET`. This is the content-addressing-safe replacement for
+    /// the wall-clock watchdog's compute-blowup role — the bound is a
+    /// closed-form scalar (`n_particles · ceil((obs_time − t)/dt)` summed
+    /// over windows), so it fires identically regardless of machine speed
+    /// or thread count and never makes a fit's log-likelihood depend on
+    /// wall-clock.
+    ///
+    /// Unlike `PFWallclockTimeout` (per-chain, machine-dependent) this is a
+    /// *configuration*-level limit: the per-window cost depends only on
+    /// `n_particles`, `dt`, and the observation schedule — none of which
+    /// vary across chains or iterations of a fit — so if it trips, it trips
+    /// identically for every chain. It therefore propagates as a fatal
+    /// error (no skip-and-continue): the remedy is a larger `dt`, a shorter
+    /// horizon, or fewer particles, not retrying another chain.
+    #[error("particle filter compute budget exceeded at obs_window {obs_window}: \
+             propagating this window needs {attempted_substeps} cumulative particle-substeps, \
+             over the engine budget of {budget_substeps} (gh#147 M3.1: a deterministic \
+             compute-blowup guard — your dt is too small, the horizon too long, or there are \
+             too many particles for the budget; reduce --dt resolution, shorten t_end, or lower \
+             --particles)")]
+    PFIterationBudget {
+        obs_window: usize,
+        attempted_substeps: u64,
+        budget_substeps: u64,
+    },
+
     /// gh#81 Phase 2. A model parameter reached the rate evaluator
     /// already non-finite (NaN / ±Inf). The rate expression itself is
     /// innocent — propagating NaN through `beta * S * I / N` produces
@@ -179,6 +208,15 @@ pub enum PFDegenerateKind {
     EssCollapsed { last_ess: Vec<f64> },
     /// Per-call wall-clock has exceeded the timeout.
     WallClockExceeded,
+    /// gh#147 (M3.1). The deterministic cumulative-substep budget would
+    /// be exceeded by propagating the next observation window. Carries
+    /// the projected cumulative substep count and the budget so the
+    /// diagnostic can report both. Maps to `SimError::PFIterationBudget`
+    /// (a resource limit), not a statistical pathology.
+    IterationBudgetExceeded {
+        attempted_substeps: u64,
+        budget_substeps: u64,
+    },
     /// Every particle hit a per-particle-recoverable error and is
     /// marked dead. Resampling on the next step would have zero
     /// weight everywhere; bail before the divide-by-zero.
