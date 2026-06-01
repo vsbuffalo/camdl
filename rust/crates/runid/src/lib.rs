@@ -31,6 +31,7 @@ pub mod hash;
 pub mod inputs;
 pub mod ir_hash;
 pub mod kind;
+pub mod layout;
 pub mod record;
 pub mod store;
 
@@ -38,6 +39,7 @@ pub use error::ResolveError;
 pub use float::{FiniteF64, NonFiniteFloat};
 pub use hash::{CanonicalHasher, ContentAddressed, ContentHash, HexError, HASH_VERSION};
 pub use kind::{run_id, ArtifactKind};
+pub use layout::{path_label, segment, store_path};
 pub use record::{FileChecksum, LevelId, Provenance, RunRecord, RunStatus, FORMAT_VERSION};
 pub use runid_derive::RunInput;
 pub use store::{Artifacts, CasError, CasStore, FsCasStore, LeafIdentity, Lookup, StaleReason};
