@@ -451,7 +451,6 @@ fn format_age(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run_meta::{FitStageMeta, Run, RunKind, RunStatus};
     use std::path::{Path, PathBuf};
 
     /// One-off tempdir helper that cleans up on Drop.
@@ -501,69 +500,32 @@ mod tests {
         assert!(s.contains("(no fits matched)"));
     }
 
-    fn write_fit(dir: &Path, hash: &str) {
-        use crate::run_meta::FitMeta;
-        use std::collections::HashMap;
-        let r = Run {
-            hash: hash.into(),
-            version: "0.1.0+test".into(),
-            created_at: "2026-04-27T00:00:00Z".into(),
-            argv: vec!["camdl".into()],
-            status: RunStatus::Completed { wall_time_seconds: 1.0 },
-            label: None,
-            kind: RunKind::Fit(FitMeta {
-                model: "sir.camdl".into(),
-                model_hash: "f00d".repeat(16),
-                fit_toml_path: "fit.toml".into(),
-                fit_toml_hash: "ca".repeat(32),
-                data_hashes: HashMap::new(),
-                estimated: vec!["R0".into()],
-                fixed: HashMap::new(),
-                stages_declared: vec!["mle".into()],
-                ic_free: false,
-                resolved_priors: Vec::new(),
-                parameters_provenance: Default::default(),
-                        }),
-        };
-        r.write(dir).unwrap();
+    /// gh#147 (M3.2): write a CAS fit segment at `seg` — one `FitStage` leaf
+    /// (`01-mle-<h8>/seed_1-<h8>/run.json`, a `runid::RunRecord`) plus the
+    /// fit-level sidecar — the shape `walk_fits_root` reads now. No
+    /// `mle_params.toml`/`fit_state.toml`, so the row's MethodResult won't load
+    /// (the property under test); the fit entry itself is still discovered.
+    fn write_cas_fit_seg(seg: &Path, fit_h8: &str) {
+        let leaf = seg.join("01-mle-1fb03eee").join("seed_1-06cbd6b3");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
+        let run_id = format!("{:0<64}", format!("{fit_h8}01"));
+        let rec = format!(
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"stage","label":"01-mle","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"mle","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+        );
+        std::fs::write(leaf.join("run.json"), rec).unwrap();
+        std::fs::write(
+            seg.join("fit.meta.json"),
+            r#"{"model_hash":"f00d","model_path":"sir.camdl","fit_toml_path":"fit.toml"}"#,
+        )
+        .unwrap();
     }
 
-    fn write_stage(stage_dir: &Path, parent_hash: &str) {
-        let r = Run {
-            hash: format!("{}-stage", parent_hash).chars().cycle().take(64).collect(),
-            version: "0.1.0+test".into(),
-            created_at: "2026-04-27T00:00:00Z".into(),
-            argv: vec![],
-            status: RunStatus::Completed { wall_time_seconds: 1.0 },
-            label: None,
-            kind: RunKind::FitStage(FitStageMeta {
-                fit_hash: parent_hash.into(),
-                stage: "mle".into(),
-                method: crate::run_meta::MethodKind::If2,
-                backend: crate::run_meta::Backend::ChainBinomial,
-                seed: 1,
-                n_chains: 2,
-                algorithm: serde_json::json!({"iterations": 5}),
-                best_loglik: Some(-100.0),
-                best_chain: Some(0),
-                starts_from: None,
-                derived_from: None,
-                parent_profile_hash: None,
-                profile_point_idx: None,
-                profile_start_idx: None,
-                parameters_provenance: Default::default(),
-                init_provenance: None,
-                        }),
-        };
-        r.write(stage_dir).unwrap();
-    }
-
-    /// The walker integration: write two fit_dirs that don't actually
-    /// have loadable MethodResults, ensure fit table emits a warning
-    /// per row but still produces an empty `rows: []` JSON output
-    /// rather than crashing. (Loadable MethodResult coverage lives in
-    /// the integration test in `tests/fit_experiment_management.rs`,
-    /// which has the FitState fixtures already.)
+    /// The walker integration: write two CAS fit segments whose leaves carry no
+    /// loadable MethodResults, and ensure `walk_fits_root` still discovers both
+    /// fit entries (the row's MethodResult load failing is handled downstream in
+    /// `cmd_fit_table`; loadable-result coverage lives in the integration test
+    /// in `tests/fit_experiment_management.rs`, which has the FitState fixtures).
     #[test]
     fn walker_returns_empty_rows_when_no_method_results_loadable() {
         let tmp = tempdir("empty_results");
@@ -571,14 +533,8 @@ mod tests {
         std::fs::create_dir_all(&fits_root).unwrap();
         for name in &["fit_a-aaaaaaaa", "fit_b-bbbbbbbb"] {
             let d = fits_root.join(name);
-            std::fs::create_dir_all(&d).unwrap();
-            let hash: String = name.split('-').next_back().unwrap().repeat(8);
-            write_fit(&d, &hash);
-            // Stage with run.json but no fit_state.toml — load will
-            // fail, error vector grows, rows stays empty.
-            let stage_dir = d.join("real").join("fit_1").join("mle");
-            std::fs::create_dir_all(&stage_dir).unwrap();
-            write_stage(&stage_dir, &hash);
+            let h8 = name.split('-').next_back().unwrap();
+            write_cas_fit_seg(&d, h8);
         }
         let entries = fit_tree::walk_fits_root(&fits_root).unwrap();
         assert_eq!(entries.len(), 2);

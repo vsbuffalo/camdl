@@ -235,12 +235,19 @@ fn find_fit_dir(out_root: &Path) -> PathBuf {
     entries.into_iter().next().unwrap()
 }
 
-/// Read the umbrella `run.json` payload for a fit dir.
-fn read_fit_run_json(fit_dir: &Path) -> serde_json::Value {
-    let body = std::fs::read_to_string(fit_dir.join("run.json"))
-        .unwrap_or_else(|e| panic!("read_to_string run.json: {}", e));
-    serde_json::from_str::<serde_json::Value>(&body)
-        .unwrap_or_else(|e| panic!("parse run.json: {}", e))
+/// Read the `resolved_priors` array from a fit's provenance sidecar
+/// (`fit.meta.json`). gh#147 (M3.2): a CAS fit has no fit-wide `run.json`; the
+/// gh#75 per-parameter prior-source provenance lives in the fit-level sidecar
+/// (`run_meta::FitSidecar`), at the top level (flattened FitMeta provenance).
+fn read_resolved_priors(fit_dir: &Path) -> Vec<serde_json::Value> {
+    let body = std::fs::read_to_string(fit_dir.join("fit.meta.json"))
+        .unwrap_or_else(|e| panic!("read_to_string fit.meta.json: {}", e));
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("parse fit.meta.json: {}", e));
+    v.get("resolved_priors")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_else(|| panic!("resolved_priors array missing in fit.meta.json: {}", v))
 }
 
 fn run_fit(bin: &Path, fit_toml: &Path) -> std::process::Output {
@@ -275,12 +282,7 @@ fn fit_run_with_model_ir_priors_only_succeeds() {
     let fit_dir = find_fit_dir(&out_root);
 
     // Provenance: every estimated param recorded as `model_ir`.
-    let run = read_fit_run_json(&fit_dir);
-    let kind = run.get("kind").expect("kind on run.json");
-    let resolved = kind.get("resolved_priors")
-        .expect("resolved_priors on FitMeta")
-        .as_array()
-        .expect("resolved_priors must be an array");
+    let resolved = read_resolved_priors(&fit_dir);
     let lookup = |param: &str| -> &str {
         resolved.iter().find(|e| {
             e.get("param").and_then(|p| p.as_str()) == Some(param)
@@ -312,10 +314,7 @@ fn fit_run_with_fit_toml_priors_only_succeeds() {
         String::from_utf8_lossy(&out.stderr));
 
     let fit_dir = find_fit_dir(&tmp.path().join("results"));
-    let run = read_fit_run_json(&fit_dir);
-    let kind = run.get("kind").expect("kind");
-    let resolved = kind.get("resolved_priors")
-        .expect("resolved_priors").as_array().expect("array");
+    let resolved = read_resolved_priors(&fit_dir);
     let lookup = |param: &str| -> &str {
         resolved.iter().find(|e| {
             e.get("param").and_then(|p| p.as_str()) == Some(param)
@@ -343,10 +342,7 @@ fn fit_run_with_mixed_priors_succeeds_and_sources_correctly() {
         String::from_utf8_lossy(&out.stderr));
 
     let fit_dir = find_fit_dir(&tmp.path().join("results"));
-    let run = read_fit_run_json(&fit_dir);
-    let kind = run.get("kind").expect("kind");
-    let resolved = kind.get("resolved_priors")
-        .expect("resolved_priors").as_array().expect("array");
+    let resolved = read_resolved_priors(&fit_dir);
     let lookup = |param: &str| -> &str {
         resolved.iter().find(|e| {
             e.get("param").and_then(|p| p.as_str()) == Some(param)
@@ -447,10 +443,7 @@ fn fit_run_with_explicit_flat_prior_succeeds_without_warning() {
     }
 
     let fit_dir = find_fit_dir(&tmp.path().join("results"));
-    let run = read_fit_run_json(&fit_dir);
-    let kind = run.get("kind").expect("kind");
-    let resolved = kind.get("resolved_priors")
-        .expect("resolved_priors").as_array().expect("array");
+    let resolved = read_resolved_priors(&fit_dir);
     let lookup = |param: &str| -> &str {
         resolved.iter().find(|e| {
             e.get("param").and_then(|p| p.as_str()) == Some(param)

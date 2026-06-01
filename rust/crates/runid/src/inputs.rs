@@ -285,6 +285,20 @@ pub struct FitStageInput {
     pub display: RunProvenance,
 }
 
+/// The `stage` *level* hash input: a stage's own config **plus its `deps`**.
+/// This is what the factored path's stage segment (`{NN}-{name}-{stage_h8}`)
+/// and the leaf `run_id` hash for the stage level — so `02-posterior`'s
+/// stage hash folds in `01-scout`'s identity (via `deps`), making the
+/// posterior re-key whenever the scout it consumes changes, while editing
+/// the posterior's own block leaves the scout leaf untouched (scout reuse).
+/// Kept distinct from [`StageConfig`] so the bare config (without lineage)
+/// stays addressable, and from [`FitStageInput`] which composes all levels.
+#[derive(Debug, Clone, PartialEq, Eq, RunInput)]
+pub struct StageLevel {
+    pub config: StageConfig,
+    pub deps: Deps,
+}
+
 /// `pfilter` leaf (M3): scores a model at fixed params (does not estimate) —
 /// its own kind, keeping "estimate params" and "score at fixed params"
 /// unconflated.

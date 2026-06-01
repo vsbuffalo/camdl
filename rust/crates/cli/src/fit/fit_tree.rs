@@ -117,35 +117,26 @@ pub fn walk_fits_root(root: &Path) -> io::Result<Vec<FitDirEntry>> {
         // listing, and "no fits yet" is a normal state.
         return Ok(out);
     }
+    // gh#147 (M3.2): a CAS fit is a segment dir `fits/{stem}-{h8}/` holding
+    // its stage-leaf subdirs (`{NN-stage}-{h8}/seed_N-{h8}/run.json`, kind
+    // FitStage) plus the fit-level sidecar. `read_fit_segment` derives ONE
+    // fit-level `RunKind::Fit` entry per segment from those leaves — the same
+    // adapter `table_row::build_row` (via `Run::read`) consumes, so the table
+    // row and its source entry agree. A dir with no FitStage leaves is not a
+    // fit segment and is skipped silently.
     let entries = std::fs::read_dir(root)?;
     for e in entries.flatten() {
         let p = e.path();
         if !p.is_dir() {
             continue;
         }
-        match Run::read(&p) {
-            Ok(run) => match &run.kind {
-                RunKind::Fit(meta) => {
-                    out.push(FitDirEntry {
-                        fit_dir: p.clone(),
-                        run: run.clone(),
-                        fit_meta: meta.clone(),
-                    });
-                }
-                _ => {
-                    // Not a top-level Fit — skip silently. e.g. an
-                    // accidentally-parked Profile run.
-                }
-            },
-            Err(err) => {
-                if p.join("run.json").exists() {
-                    eprintln!(
-                        "warning: walk_fits_root: skipping {} (cannot read run.json: {})",
-                        p.display(),
-                        err
-                    );
-                }
-                // No run.json → not a fit_dir. Silent.
+        if let Some(run) = crate::run_meta::read_fit_segment(&p) {
+            if let RunKind::Fit(meta) = &run.kind {
+                out.push(FitDirEntry {
+                    fit_dir: p.clone(),
+                    run: run.clone(),
+                    fit_meta: meta.clone(),
+                });
             }
         }
     }
@@ -163,6 +154,9 @@ pub fn walk_fits_root(root: &Path) -> io::Result<Vec<FitDirEntry>> {
 fn visit_dir(fit_dir: &Path, here: &Path, out: &mut Vec<StageNode>) {
     let run_json = here.join("run.json");
     if run_json.is_file() {
+        // `Run::read` transparently synthesizes a legacy `Run` from a CAS
+        // fit-stage `RunRecord` (gh#147 M3.2), so this one path discovers
+        // both content-addressed and any remaining legacy fit stages.
         match Run::read(here) {
             Ok(run) => {
                 if matches!(run.kind, RunKind::FitStage(_)) {
@@ -323,6 +317,26 @@ mod tests {
                 parameters_provenance: Default::default(),
                         }),
         }
+    }
+
+    /// gh#147 (M3.2): write a CAS fit segment at `seg` — one FitStage leaf
+    /// (`01-mle-<h8>/seed_1-<h8>/run.json`) plus the fit-level sidecar — the
+    /// shape `walk_fits_root` reads. `fit_h8` (8 hex) seeds the shared
+    /// `fit`-level hash so each segment gets a distinct `run.hash`.
+    fn write_cas_fit_seg(seg: &std::path::Path, fit_h8: &str) {
+        let leaf = seg.join("01-mle-1fb03eee").join("seed_1-06cbd6b3");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
+        let run_id = format!("{:0<64}", format!("{fit_h8}01"));
+        let rec = format!(
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"stage","label":"01-mle","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"mle","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+        );
+        std::fs::write(leaf.join("run.json"), rec).unwrap();
+        std::fs::write(
+            seg.join("fit.meta.json"),
+            r#"{"model_hash":"f00d","model_path":"sir.camdl","fit_toml_path":"fit.toml"}"#,
+        )
+        .unwrap();
     }
 
     fn stage_run(parent_hash: &str, stage: &str, method: crate::run_meta::MethodKind, seed: u64) -> Run {
@@ -542,11 +556,13 @@ mod tests {
         std::fs::create_dir_all(&fits_root).unwrap();
 
         let dirs = ["fit_a-11111111", "fit_b-22222222"];
-        for (i, name) in dirs.iter().enumerate() {
+        for name in dirs.iter() {
             let d = fits_root.join(name);
-            std::fs::create_dir_all(&d).unwrap();
-            let parent: String = format!("{}", i).chars().cycle().take(64).collect();
-            fit_run(&parent).write(&d).unwrap();
+            // gh#147 (M3.2): a CAS fit segment (one FitStage leaf + the
+            // fit-level sidecar) — the shape `walk_fits_root`/`read_fit_segment`
+            // reads now, not a fit-wide `RunKind::Fit` record.
+            let h8 = name.split('-').next_back().unwrap();
+            write_cas_fit_seg(&d, h8);
         }
         // A non-fit run.json (Simulate kind) under fits/ — should be
         // skipped.
@@ -581,8 +597,12 @@ mod tests {
             .map(|e| e.fit_dir.file_name().unwrap().to_str().unwrap())
             .collect();
         assert_eq!(names, ["fit_a-11111111", "fit_b-22222222"]);
-        // FitMeta is pre-parsed and accessible without a re-read.
-        assert_eq!(entries[0].fit_meta.estimated, vec!["beta"]);
+        // FitMeta is pre-parsed (derived from the stage leaves) and accessible
+        // without a re-read; `stages_declared` comes from the leaves' stage
+        // levels. gh#147 (M3.2): `estimated`/`fixed`/priors are config detail
+        // not carried on the leaves, so they default empty — config-diff reads
+        // the archived `fit.toml.original` for those.
+        assert_eq!(entries[0].fit_meta.stages_declared, vec!["mle"]);
         // The full Run is also exposed (callers want created_at /
         // wall_time without a third re-read).
         assert!(matches!(entries[0].run.kind, RunKind::Fit(_)));

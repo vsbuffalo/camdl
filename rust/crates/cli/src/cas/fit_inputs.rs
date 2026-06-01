@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cas::typed::{CasInputs, ContentHash};
-use crate::run_meta::{FitMeta, FitStageMeta, RunKind};
+use crate::run_meta::{FitMeta, RunKind};
 use crate::run_paths;
 
 /// Top-level fit run (the umbrella over a fit's stages).
@@ -48,35 +48,7 @@ impl CasInputs for FitInputs {
     }
 }
 
-/// One fit stage (cell × stage) — the leaf of a fit's CAS tree.
-///
-/// `stage_dir` is pre-computed by the runner because the cell layout
-/// (`real/fit_<seed>/...` vs. `synthetic/ds_NN/fit_<seed>/...`, plus
-/// optional sweep slug) is too compositional to derive from a bare
-/// `<root>` argument. The `cas_path` impl returns it unchanged.
-pub struct StageInputs {
-    /// Pre-computed `fit_stage_hash`. Includes seed, so each cell
-    /// produces a distinct StageInputs even across the same stage.
-    pub fit_stage_hash: String,
-    /// Absolute path of the stage's directory under the fit tree.
-    pub stage_dir: PathBuf,
-    /// `FitStageMeta` payload for the stage's `run.json`.
-    pub meta: FitStageMeta,
-}
-
-impl CasInputs for StageInputs {
-    fn content_hash(&self) -> ContentHash {
-        ContentHash::from_hex(self.fit_stage_hash.clone())
-    }
-    fn cas_path(&self, _root: &Path) -> PathBuf {
-        // Stage dirs depend on the fit's cell composition (real vs
-        // synthetic ds_NN, fit_seed, sweep slug). Runner pre-computes
-        // and we surface it here unchanged. Reader code can still
-        // recover the relative position via Run.kind backrefs
-        // (FitStageMeta.fit_hash etc.).
-        self.stage_dir.clone()
-    }
-    fn run_kind(&self) -> RunKind {
-        RunKind::FitStage(self.meta.clone())
-    }
-}
+// `StageInputs` (the legacy per-stage CAS-inputs type) was removed in M3.2:
+// fit stages are now content-addressed through `runid` (`fit/cas.rs`
+// `resolve_fit_stage` + Mode-B `claim_streaming`/`finalize`), so the legacy
+// `fit_stage_hash`-keyed `cas_path` writer no longer has a constructor.

@@ -16,6 +16,11 @@ use std::path::{Path, PathBuf};
 
 use runid::{ArtifactKind, RunRecord};
 
+// gh#147 (M3.2): the fit-level provenance sidecar (`fit.meta.json`) lives in
+// `run_meta::FitSidecar` (it carries `run_meta` provenance types —
+// `ResolvedPriorEntry`, `ParameterProvenance`), with `write_fit_sidecar` /
+// `read_fit_sidecar` beside `read_fit_segment` there.
+
 /// Recursively collect every `(dir, RunRecord)` under `subtree` whose dir holds
 /// a parseable `RunRecord` `run.json`. Hidden dirs (`.staging`, `.quarantine`)
 /// are skipped. Descends through leaves too, so declared child sub-artifacts
@@ -103,6 +108,24 @@ pub fn walk_sim_leaves(root: &Path) -> Vec<Leaf> {
 /// `browse::resolve_any` so a user can address any run during M2→M3).
 pub fn resolve_sim_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
     walk_sim_leaves(root)
+        .into_iter()
+        .filter(|s| s.run_id_hex().starts_with(prefix))
+        .collect()
+}
+
+/// All `fits/` leaves of kind `FitStage` (new-format fit-stage runs, M3.2).
+pub fn walk_fit_leaves(root: &Path) -> Vec<Leaf> {
+    walk_records(&root.join("fits"))
+        .into_iter()
+        .filter(|(_, r)| r.kind == ArtifactKind::FitStage)
+        .map(|(dir, record)| Leaf { dir, record })
+        .collect()
+}
+
+/// New-format fit stages whose `run_id` hex matches `prefix` (for `show`/`cat`
+/// prefix resolution alongside `resolve_sim_prefix`).
+pub fn resolve_fit_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
+    walk_fit_leaves(root)
         .into_iter()
         .filter(|s| s.run_id_hex().starts_with(prefix))
         .collect()

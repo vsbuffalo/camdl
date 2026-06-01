@@ -136,12 +136,24 @@ impl CalendarContext {
 /// set. Any failure (no run.json, non-fit run, model moved/unparseable)
 /// degrades to an empty context (numeric-only rendering) — never panics.
 fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
+    // Legacy fits carried the model path on the top-level `Fit` run.json. A
+    // content-addressed fit (gh#147 M3.2) has no fit-wide record — the fit
+    // level is a path segment — so recover the model path from any stage
+    // leaf's `run.json` `provenance.source_paths`.
     let model_path = match Run::read(fit_dir) {
         Ok(r) => match r.kind {
-            RunKind::Fit(m) => m.model,
-            _ => return CalendarContext::default(),
+            RunKind::Fit(m) => Some(m.model),
+            _ => None,
         },
-        Err(_) => return CalendarContext::default(),
+        Err(_) => None,
+    }
+    .or_else(|| {
+        crate::cas_read::walk_records(fit_dir)
+            .into_iter()
+            .find_map(|(_, rec)| rec.provenance.source_paths.first().cloned())
+    });
+    let Some(model_path) = model_path else {
+        return CalendarContext::default();
     };
     let model = match crate::util::load_model(&model_path) {
         Ok((m, _)) => m,

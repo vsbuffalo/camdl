@@ -699,8 +699,11 @@ pub enum CacheStatus {
     /// hash; caller can read results from `run_dir`.
     Hit,
     /// Directory exists but the stored hash differs from the expected
-    /// one. Typically triggers a re-run with a warning.
-    Stale { stored: String, current: String },
+    /// one. Typically triggers a re-run with a warning. (The stored/current
+    /// hash detail was dropped in M3.2: the only production reader — the
+    /// legacy fit cache check — moved to `runid` lookup; `survey` treats
+    /// Stale as a plain re-run signal.)
+    Stale,
     /// No `run.json` at the expected location; cache miss.
     Miss,
 }
@@ -738,9 +741,90 @@ impl Run {
     /// the schema — a sign the directory was written by an older
     /// camdl version or a different tool.
     pub fn read(dir: &std::path::Path) -> std::io::Result<Run> {
-        let contents = std::fs::read_to_string(dir.join("run.json"))?;
-        serde_json::from_str(&contents)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        let contents = match std::fs::read_to_string(dir.join("run.json")) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // gh#147 (M3.2): no `run.json` here. A CAS fit *segment*
+                // (`fits/{stem}-{h8}/`) has no fit-wide record — derive a
+                // fit-level `RunKind::Fit` Run from its stage leaves + the
+                // fit-level sidecar so `walk_fits_root` / `table_row` /
+                // `fit summary` see one fit entry. Falls back to the original
+                // NotFound when `dir` is not a fit segment.
+                return read_fit_segment(dir).ok_or(e);
+            }
+            Err(e) => return Err(e),
+        };
+        match serde_json::from_str::<Run>(&contents) {
+            Ok(run) => Ok(run),
+            Err(legacy_err) => {
+                // gh#147 (M3.2): a content-addressed fit-stage leaf writes a
+                // `runid::RunRecord`, not a legacy `Run`. Synthesize a legacy
+                // Run so the transitional fit readers (fit_tree, summary,
+                // table, MethodResult) keep working; otherwise surface the
+                // original legacy parse error.
+                if let Ok(rec) = serde_json::from_str::<runid::RunRecord>(&contents) {
+                    if let Some(run) = Run::from_fit_record(&rec) {
+                        return Ok(run);
+                    }
+                }
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, legacy_err))
+            }
+        }
+    }
+
+    /// gh#147 (M3.2). Synthesize a legacy `Run` (kind `FitStage`) from a CAS
+    /// fit-stage `RunRecord`. The recorded `inputs` (the FitStageMeta-
+    /// equivalent written at `finalize`) + `levels` map back to the legacy
+    /// shape the transitional fit readers consume; the typed θ̂ (params,
+    /// diagnostics) is still loaded per-stage from `fit_state.toml`. Returns
+    /// `None` for a non-FitStage record or malformed inputs.
+    pub fn from_fit_record(rec: &runid::RunRecord) -> Option<Run> {
+        if rec.kind != runid::ArtifactKind::FitStage {
+            return None;
+        }
+        let inputs = rec.inputs.as_object()?;
+        let method: MethodKind = inputs
+            .get("method")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())?;
+        let backend: Backend = inputs
+            .get("backend")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or(Backend::ChainBinomial);
+        let status = match rec.status {
+            runid::RunStatus::Completed => RunStatus::Completed {
+                wall_time_seconds: inputs
+                    .get("wall_time_seconds")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+            },
+            _ => RunStatus::Running,
+        };
+        Some(Run {
+            hash: rec.run_id.to_hex(),
+            version: rec.engine_version.clone(),
+            created_at: rec.provenance.created_at.clone().unwrap_or_default(),
+            argv: rec.provenance.argv.clone(),
+            status,
+            label: rec.provenance.label.clone(),
+            kind: RunKind::FitStage(FitStageMeta {
+                fit_hash: rec.levels.first().map(|l| l.hash.to_hex()).unwrap_or_default(),
+                stage: inputs.get("stage").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                method,
+                backend,
+                seed: inputs.get("seed").and_then(|v| v.as_u64()).unwrap_or(0),
+                n_chains: inputs.get("n_chains").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                algorithm: inputs.get("algorithm").cloned().unwrap_or(serde_json::Value::Null),
+                best_loglik: inputs.get("best_loglik").and_then(|v| v.as_f64()),
+                best_chain: inputs.get("best_chain").and_then(|v| v.as_u64()).map(|x| x as usize),
+                starts_from: None,
+                derived_from: None,
+                parent_profile_hash: None,
+                profile_point_idx: None,
+                profile_start_idx: None,
+                parameters_provenance: Default::default(),
+                init_provenance: None,
+            }),
+        })
     }
 
     /// Check whether `dir` has a `run.json` whose `hash` matches
@@ -751,13 +835,206 @@ impl Run {
         match Self::read(dir) {
             Ok(run) if run.hash == expected_hash =>
                 CacheStatus::Hit,
-            Ok(run) => CacheStatus::Stale {
-                stored: run.hash,
-                current: expected_hash.to_string(),
-            },
+            Ok(_) => CacheStatus::Stale,
             Err(_) => CacheStatus::Miss,
         }
     }
+}
+
+/// The bare stage name from a `NN-stage` provenance label (`"01-scout"` →
+/// `"scout"`); a label without an ordinal prefix is returned unchanged.
+/// Splits on the first `-` only, so stage names containing `-` survive.
+fn bare_stage_name(stage_label: &str) -> String {
+    stage_label
+        .split_once('-')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_else(|| stage_label.to_string())
+}
+
+/// The fit-level provenance sidecar (`fits/{stem}-{h8}/fit.meta.json`). A CAS
+/// fit's fit level is a path segment with no `RunRecord`; this sidecar is the
+/// single authoritative home for the fit-wide attributes that are NOT carried
+/// on the stage leaves — the user `--label` and the fit-wide provenance the
+/// legacy fit-wide record used to hold (`resolved_priors` = gh#75 per-parameter
+/// prior source, `estimated`/`fixed`/`data_hashes`, `model_hash`, paths).
+///
+/// It is **derived provenance, not a source of truth**: a faithful readable
+/// projection of inputs already hashed into the leaf identity (the `FitDigest`
+/// — different priors already produce a different fit identity). It is written
+/// post-identity and is never fed back into any hash. The producing `fit.toml`
+/// is archived beside it as `fit.toml.original` (the config-diff source for
+/// `fit table`). Interim home that M4's derived index subsumes.
+///
+/// Every field except `resolved_priors`-class provenance defaults, so partial
+/// sidecars (test fixtures) round-trip; `read_fit_segment` enforces that a
+/// Bayesian fit's `resolved_priors` is present (no silent default).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FitSidecar {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub model_path: String,
+    #[serde(default)]
+    pub model_hash: String,
+    #[serde(default)]
+    pub fit_toml_path: String,
+    #[serde(default)]
+    pub fit_toml_hash: String,
+    #[serde(default)]
+    pub data_hashes: HashMap<String, String>,
+    #[serde(default)]
+    pub estimated: Vec<String>,
+    #[serde(default)]
+    pub fixed: HashMap<String, f64>,
+    #[serde(default)]
+    pub resolved_priors: Vec<ResolvedPriorEntry>,
+    #[serde(default)]
+    pub parameters_provenance: HashMap<String, ParameterProvenance>,
+}
+
+/// Write the fit-level sidecar and archive the producing `fit.toml`
+/// (`fit.toml.original`, the config-diff source `fit table` loads). The archive
+/// is best-effort: a CLI-only fit (no `.toml`) has none and config-diff degrades
+/// to identity. Idempotent; the caller writes it once per fit segment.
+pub fn write_fit_sidecar(
+    fit_segment: &std::path::Path,
+    fit_toml_path: &std::path::Path,
+    sidecar: &FitSidecar,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(fit_segment)?;
+    if fit_toml_path.is_file() {
+        std::fs::copy(fit_toml_path, fit_segment.join("fit.toml.original"))?;
+    }
+    let bytes = serde_json::to_vec_pretty(sidecar)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(fit_segment.join("fit.meta.json"), bytes)
+}
+
+/// Read the fit-level sidecar; `None` when absent (an incomplete/legacy
+/// segment — `read_fit_segment` treats that as a malformed fit and skips it
+/// loudly rather than fabricating empty provenance).
+pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Option<FitSidecar> {
+    let bytes = std::fs::read(fit_segment.join("fit.meta.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Derive a fit-level `RunKind::Fit` `Run` from a CAS fit segment
+/// (`fits/{stem}-{h8}/`): one entry computed from its `FitStage` leaves plus the
+/// fit-level [`FitSidecar`]. `run.hash` is the `fit`-level (FitDigest) hash
+/// shared by every leaf (the sidecar is never identity-bearing); `created_at`
+/// is the latest leaf; `stages_declared` is the bare stage names in execution
+/// order (the `NN-` ordinal prefix sorts topologically); `label` and the
+/// fit-wide provenance (`resolved_priors`, `estimated`, `fixed`, `data_hashes`,
+/// `model_hash`) come from the sidecar — NOT defaulted.
+///
+/// Provenance integrity (gh#147): a segment with stage leaves but no sidecar is
+/// malformed — skipped with a loud error rather than surfaced with empty
+/// provenance. For a Bayesian fit (a `pgas`/`pmmh` leaf), an empty
+/// `resolved_priors` is itself a bug signal (gh#75) and is flagged.
+///
+/// Transitional, like [`Run::from_fit_record`]: it keeps the legacy `Run` /
+/// `RunKind::Fit` readers (`walk_fits_root`, `table_row::build_row`,
+/// `fit summary`) working during M2→M3. M3.3 deletes the legacy fit readers and
+/// this adapter with them; a one-boundary translation, not a permanent home.
+pub fn read_fit_segment(seg: &std::path::Path) -> Option<Run> {
+    let mut leaves: Vec<runid::RunRecord> = crate::cas_read::walk_records(seg)
+        .into_iter()
+        .map(|(_, r)| r)
+        .filter(|r| r.kind == runid::ArtifactKind::FitStage)
+        .collect();
+    if leaves.is_empty() {
+        return None;
+    }
+    let stage_label = |r: &runid::RunRecord| -> String {
+        r.levels
+            .iter()
+            .find(|l| l.name == "stage")
+            .map(|l| l.label.clone())
+            .unwrap_or_default()
+    };
+    // Execution order: the `NN-stage` ordinal prefix sorts topologically.
+    leaves.sort_by(|a, b| stage_label(a).cmp(&stage_label(b)));
+
+    let fit_hash = leaves
+        .iter()
+        .find_map(|r| {
+            r.levels
+                .iter()
+                .find(|l| l.name == "fit")
+                .map(|l| l.hash.to_hex())
+        })
+        .unwrap_or_default();
+    let created_at = leaves
+        .iter()
+        .filter_map(|r| r.provenance.created_at.clone())
+        .max()
+        .unwrap_or_default();
+    let version = leaves
+        .first()
+        .map(|r| r.engine_version.clone())
+        .unwrap_or_default();
+    let argv = leaves
+        .first()
+        .map(|r| r.provenance.argv.clone())
+        .unwrap_or_default();
+    // Bare stage names in execution order, dedup preserving order.
+    let mut stages_declared: Vec<String> = Vec::new();
+    for r in &leaves {
+        let bare = bare_stage_name(&stage_label(r));
+        if !stages_declared.contains(&bare) {
+            stages_declared.push(bare);
+        }
+    }
+
+    // Provenance: from the sidecar, never defaulted. A fit with leaves but no
+    // sidecar is malformed — skip it loudly (the writer always writes one).
+    let side = match read_fit_sidecar(seg) {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "warning: fit {} has stage leaves but no fit.meta.json provenance \
+                 sidecar — skipping (provenance missing)",
+                seg.display()
+            );
+            return None;
+        }
+    };
+    // A Bayesian fit (`pgas`/`pmmh` leaf consumes priors) with empty
+    // resolved_priors is a dropped-provenance bug (gh#75), not a valid state.
+    let is_bayesian = leaves.iter().any(|r| {
+        matches!(
+            r.inputs.get("method").and_then(|m| m.as_str()),
+            Some("pgas") | Some("pmmh")
+        )
+    });
+    if is_bayesian && side.resolved_priors.is_empty() {
+        eprintln!(
+            "error: Bayesian fit {} has empty resolved_priors in its sidecar — \
+             prior-source provenance was dropped (gh#75)",
+            seg.display()
+        );
+    }
+    Some(Run {
+        hash: fit_hash,
+        version,
+        created_at,
+        argv,
+        status: RunStatus::Completed { wall_time_seconds: 0.0 },
+        label: side.label,
+        kind: RunKind::Fit(FitMeta {
+            model: side.model_path,
+            model_hash: side.model_hash,
+            fit_toml_path: side.fit_toml_path,
+            fit_toml_hash: side.fit_toml_hash,
+            data_hashes: side.data_hashes,
+            estimated: side.estimated,
+            fixed: side.fixed,
+            stages_declared,
+            ic_free: false,
+            resolved_priors: side.resolved_priors,
+            parameters_provenance: side.parameters_provenance,
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -935,13 +1212,10 @@ mod tests {
         ));
 
         // Stale when hash differs.
-        match Run::check_cache(&tmp, "different_hash") {
-            CacheStatus::Stale { stored, current } => {
-                assert_eq!(stored, stored_hash);
-                assert_eq!(current, "different_hash");
-            }
-            other => panic!("expected Stale, got {:?}", other),
-        }
+        assert!(
+            matches!(Run::check_cache(&tmp, "different_hash"), CacheStatus::Stale),
+            "expected Stale on a hash mismatch",
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -1500,5 +1774,62 @@ mod tests {
         let parsed: InitProvenance = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.chains[0]["beta"].source, "prior_draw");
         assert_eq!(parsed.chains[3]["beta"].source, "params_point");
+    }
+
+    /// gh#147 (M3.2) regression guard for the dropped-provenance bug: the gh#75
+    /// per-parameter prior sources must survive the fit-level sidecar
+    /// write → `read_fit_segment` read round trip. Before the sidecar carried
+    /// `resolved_priors`, the reader defaulted it empty and this class of bug
+    /// shipped silently. Write a Bayesian (`pgas`) stage leaf + a sidecar with
+    /// mixed sources, read the fit back, and assert each `.source` matches.
+    #[test]
+    fn fit_sidecar_resolved_priors_survive_read_fit_segment_round_trip() {
+        let tmp = std::env::temp_dir().join(format!(
+            "camdl_sidecar_priors_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let seg = tmp.join("fits").join("demo-abc12345");
+        let leaf = seg.join("01-posterior-1fb03eee").join("seed_1-06cbd6b3");
+        std::fs::create_dir_all(&leaf).unwrap();
+        // A Bayesian (pgas) stage leaf — `read_fit_segment` requires its
+        // sidecar to carry resolved_priors.
+        std::fs::write(
+            leaf.join("run.json"),
+            r#"{"format_version":1,"kind":"fit_stage","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"stage","label":"01-posterior","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"stage":"posterior","method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
+        )
+        .unwrap();
+
+        let sidecar = FitSidecar {
+            estimated: vec!["beta".into(), "gamma".into()],
+            resolved_priors: vec![
+                ResolvedPriorEntry { param: "beta".into(), source: "model_ir".into() },
+                ResolvedPriorEntry { param: "gamma".into(), source: "fit_toml".into() },
+            ],
+            ..Default::default()
+        };
+        // No fit.toml on disk → archive step is skipped; the sidecar still writes.
+        write_fit_sidecar(&seg, std::path::Path::new("nonexistent.toml"), &sidecar).unwrap();
+
+        let run = read_fit_segment(&seg).expect("read_fit_segment must derive a fit entry");
+        let meta = match run.kind {
+            RunKind::Fit(m) => m,
+            other => panic!("expected RunKind::Fit, got {:?}", other),
+        };
+        let source = |p: &str| -> Option<&str> {
+            meta.resolved_priors
+                .iter()
+                .find(|e| e.param == p)
+                .map(|e| e.source.as_str())
+        };
+        assert_eq!(source("beta"), Some("model_ir"),
+            "beta prior source must survive the sidecar round trip");
+        assert_eq!(source("gamma"), Some("fit_toml"),
+            "gamma prior source must survive the sidecar round trip");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

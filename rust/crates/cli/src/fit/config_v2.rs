@@ -1082,6 +1082,36 @@ impl Stage {
         }
     }
 
+    /// gh#147 (M3.2). The stage's *extension dimension* (the field
+    /// `identity_payload` omits so `--resume` can extend a chain): PGAS
+    /// `sweeps`, IF2/PMMH `iterations`. A resumed run is a distinct artifact
+    /// keyed on this value, so the CAS stage level folds it in. Single-pass
+    /// stages (PFilter) and the NLopt MLE stages (whose `max_evals` is a
+    /// budget already in `identity_payload`, not an extension) report 0.
+    pub fn cas_target_length(&self) -> u64 {
+        match self {
+            Stage::IF2 { iterations, .. } => *iterations as u64,
+            Stage::PGAS { sweeps, .. } => *sweeps as u64,
+            Stage::PMMH { iterations, .. } => *iterations as u64,
+            Stage::PFilter { .. } | Stage::NlSbplx(_) | Stage::NlBobyqa(_) => 0,
+        }
+    }
+
+    /// gh#147 (M3.2). The number of posterior trajectory samples saved to
+    /// disk (PGAS only; default 200). An output-shaping knob that
+    /// `identity_payload` deliberately omits. Commit 1 folds it into the
+    /// stage identity (so changing it yields a distinct leaf — no silent
+    /// reuse of the wrong trajectory count); M3.3 relocates `trajectories/`
+    /// to a root-level child keyed on this value and removes it from the
+    /// stage identity (changing it then becomes a cheap re-save, not a
+    /// re-fit).
+    pub fn cas_n_trajectories(&self) -> u64 {
+        match self {
+            Stage::PGAS { n_trajectories, .. } => *n_trajectories as u64,
+            _ => 0,
+        }
+    }
+
     /// Hashable subset of the stage that defines its statistical
     /// identity. For PGAS / PMMH this *omits* the extension dimension
     /// (`sweeps` / `iterations` respectively), so `--resume` can extend

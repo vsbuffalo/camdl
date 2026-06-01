@@ -327,6 +327,7 @@ pub fn cmd_show(a: &crate::args::ShowArgs) {
     let root = a.root.to_string_lossy();
     match resolve_any(&root, &a.target) {
         Ok(Resolved::Sim { leaf, rel_path, created }) => show_sim_record(&leaf, &rel_path, created),
+        Ok(Resolved::Fit { leaf, rel_path, created }) => show_fit_record(&leaf, &rel_path, created),
         Ok(Resolved::Legacy(r)) => show(&r),
         Err(e) => {
             eprintln!("error: {}", e);
@@ -362,6 +363,42 @@ fn show_sim_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     println!("{}", "engine".bright_black()); println!("  {}", rec.engine_version);
     println!("{}", "argv".bright_black());
     println!("  {}", rec.provenance.argv.join(" "));
+}
+
+/// Render a new-format (`RunRecord`) fit-stage leaf: the factored levels, the
+/// run_id address, the `deps` (lineage), and the recorded FitStageMeta
+/// `inputs` (display-only). Mirrors `show_sim_record` for the CAS fit path.
+fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
+    let rec = &leaf.record;
+    println!("{}", "path".bright_black()); println!("  {}", rel_path.cyan());
+    println!("{}", "kind".bright_black()); println!("  fit_stage");
+    println!("{}", "fit".bright_black()); println!("  {}", leaf.level_label("fit"));
+    println!("{}", "stage".bright_black()); println!("  {}", leaf.level_label("stage"));
+    println!("{}", "seed".bright_black()); println!("  {}", leaf.level_label("seed"));
+    println!("{}", "run_id".bright_black()); println!("  {}", rec.run_id.to_hex().dimmed());
+    println!("{}", "levels".bright_black());
+    for lvl in &rec.levels {
+        println!("  {:<9} {}-{}", lvl.name, lvl.label, lvl.hash.short8().dimmed());
+    }
+    if !rec.deps.is_empty() {
+        println!("{}", "deps".bright_black());
+        for d in &rec.deps {
+            println!("  {} {} ({})", d.run_id.short8().dimmed(), d.artifact, d.digest.short8().dimmed());
+        }
+    }
+    // FitStageMeta-equivalent recorded in `inputs` (display-only, never hashed).
+    if let Some(obj) = rec.inputs.as_object() {
+        for key in ["method", "backend", "n_chains", "best_chain", "best_loglik"] {
+            if let Some(v) = obj.get(key) {
+                println!("{}", key.bright_black()); println!("  {}", v);
+            }
+        }
+    }
+    println!("{}", "created".bright_black());
+    println!("  {}  ({})",
+        rec.provenance.created_at.as_deref().unwrap_or("?"),
+        fmt_relative_time(created, SystemTime::now()));
+    println!("{}", "engine".bright_black()); println!("  {}", rec.engine_version);
 }
 
 /// Kind-agnostic show entry point. One match on `run.kind`; per-kind
@@ -643,6 +680,19 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                     eprintln!("error reading traj.tsv: {}", e); std::process::exit(1);
                 })
             };
+            let _ = std::io::stdout().write_all(&bytes);
+            return;
+        }
+        // New-format fit stage: default to the θ̂ summary; `--stream NAME`
+        // cats a named file from the leaf (e.g. `draws.tsv`,
+        // `chain_1/trace.tsv`).
+        Resolved::Fit { leaf, rel_path, .. } => {
+            let name = a.stream.as_deref().unwrap_or("fit_state.toml");
+            let path = leaf.dir.join(name);
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| {
+                eprintln!("error reading {} in {}: {}", name, rel_path, e);
+                std::process::exit(1);
+            });
             let _ = std::io::stdout().write_all(&bytes);
             return;
         }
@@ -978,6 +1028,8 @@ struct ResolvedRun {
 #[derive(Debug)]
 enum Resolved {
     Sim { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
+    /// New-format (`RunRecord`) fit-stage leaf under `fits/` (M3.2).
+    Fit { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
     Legacy(ResolvedRun),
 }
 
@@ -996,9 +1048,14 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     if as_path.is_dir() && as_path.join("run.json").exists() {
         if let Ok(bytes) = std::fs::read(as_path.join("run.json")) {
             if let Ok(rec) = serde_json::from_slice::<runid::RunRecord>(&bytes) {
+                let kind = rec.kind;
                 let leaf = cas_read::Leaf { dir: as_path.to_path_buf(), record: rec };
                 let created = leaf_created(&leaf);
-                return Ok(Resolved::Sim { leaf, rel_path: pathdiff_str(as_path, &cwd), created });
+                let rel_path = pathdiff_str(as_path, &cwd);
+                return Ok(match kind {
+                    runid::ArtifactKind::FitStage => Resolved::Fit { leaf, rel_path, created },
+                    _ => Resolved::Sim { leaf, rel_path, created },
+                });
             }
         }
         let (run, created, rel_path) = load_run_common(as_path, &cwd)
@@ -1027,9 +1084,18 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
         sim_matches.push((leaf, rel, created));
     }
 
-    // Legacy kinds: match Run.hash prefix under fits/profiles/surveys.
+    // New-format fit stages (M3.2): match the run_id hex prefix under fits/.
+    let mut fit_matches: Vec<(cas_read::Leaf, String, SystemTime)> = Vec::new();
+    for leaf in cas_read::resolve_fit_prefix(Path::new(root), hash_prefix) {
+        let created = leaf_created(&leaf);
+        let rel = pathdiff_str(&leaf.dir, &cwd);
+        fit_matches.push((leaf, rel, created));
+    }
+
+    // Legacy kinds: match Run.hash prefix under profiles/surveys. Fits are
+    // content-addressed now (matched above); profile/survey migrate in M3.3.
     let mut legacy_matches: Vec<ResolvedRun> = Vec::new();
-    for top in ["fits", "profiles", "surveys"] {
+    for top in ["profiles", "surveys"] {
         let subroot = Path::new(root).join(top);
         if !subroot.exists() { continue; }
         for dir in walkdir_all(&subroot) {
@@ -1040,11 +1106,13 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
         }
     }
 
-    match sim_matches.len() + legacy_matches.len() {
+    match sim_matches.len() + fit_matches.len() + legacy_matches.len() {
         0 => Err(format!("no run matches '{}' in {}", key, root)),
         1 => {
             if let Some((leaf, rel_path, created)) = sim_matches.into_iter().next() {
                 Ok(Resolved::Sim { leaf, rel_path, created })
+            } else if let Some((leaf, rel_path, created)) = fit_matches.into_iter().next() {
+                Ok(Resolved::Fit { leaf, rel_path, created })
             } else {
                 Ok(Resolved::Legacy(legacy_matches.into_iter().next().unwrap()))
             }
@@ -1053,6 +1121,9 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
             let mut msg = format!("'{}' is ambiguous, matches {} entries:\n", key, n);
             for (_, rel, _) in &sim_matches {
                 msg.push_str(&format!("  {:<14} {}\n", "sim", rel));
+            }
+            for (_, rel, _) in &fit_matches {
+                msg.push_str(&format!("  {:<14} {}\n", "fit_stage", rel));
             }
             for r in &legacy_matches {
                 msg.push_str(&format!("  {:<14} {}\n", kind_label(&r.run.kind), r.rel_path));

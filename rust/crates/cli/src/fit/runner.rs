@@ -345,8 +345,11 @@ impl FitRunConfig {
             dt,
             t_start: compiled.model.simulation.t_start,
             skip_first_obs_from_loglik: ic_free,
-            // M3.2 commit 1 threads this; the CAS-fit writer flips it true.
-            pf_wallclock_disabled: false,
+            // gh#147 (M3.2): fits are content-addressed, so the wall-clock
+            // watchdog is OFF for determinism (theta-hat must be a pure
+            // function of inputs); M3.1's deterministic substep cap is the
+            // compute-blowup safety.
+            pf_wallclock_disabled: true,
         };
         // IC-free precondition: at least one estimated param must be
         // marked ivp. Without per-particle spread at t=0, the first
@@ -417,8 +420,9 @@ impl FitRunConfig {
             skip_first_obs_from_loglik: self.ic_free,
             record_ancestry: false,
             record_prequential: false,
-            // M3.2 commit 1 threads this; the CAS-fit writer flips it true.
-            pf_wallclock_disabled: false,
+            // gh#147 (M3.2): CAS fits run watchdog-None (deterministic θ̂);
+            // the substep cap is the safety. See the IF2Config above.
+            pf_wallclock_disabled: true,
         }
     }
 }

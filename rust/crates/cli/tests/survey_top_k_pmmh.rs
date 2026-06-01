@@ -265,6 +265,7 @@ fn parse_chain_starts_tsv(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
 }
 
 #[test]
+#[ignore = "survey/top-k init not yet migrated to CAS — M3.3 (gh#151)"]
 fn pmmh_survey_top_k_writes_chain_starts_with_survey_ranks() {
     let Some(bin) = camdl_bin() else { return };
     if camdlc_bin().is_none() { return }

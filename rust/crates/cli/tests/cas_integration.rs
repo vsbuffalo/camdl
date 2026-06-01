@@ -518,18 +518,8 @@ fn list_kind_filter_isolates_sections() {
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
-    // Synthesise a fit.
-    let fit_dir = output.join("fits").join("demo-abc12345");
-    std::fs::create_dir_all(&fit_dir).unwrap();
-    let run_json = r#"{
-        "hash": "abc12345deadbeef0000000000000000000000000000000000000000abc12345",
-        "version":"0.1.0+test","created_at":"2026-04-19T12:00:00Z",
-        "argv":["camdl","fit","run","demo.toml"],"status":{"completed":{"wall_time_seconds":1.0}},
-        "kind": {"kind":"fit","model":"demo.camdl","model_hash":"m",
-        "fit_toml_path":"demo.toml","fit_toml_hash":"h",
-        "data_hashes":{},"estimated":["beta"],"fixed":{},"stages_declared":["mle"]}
-    }"#;
-    std::fs::write(fit_dir.join("run.json"), run_json).unwrap();
+    // Synthesise a CAS fit (single `mle` stage leaf + sidecar).
+    write_cas_fit(&output, "demo", "abc12345", &["mle"], "m");
 
     let fit_only = Command::new(&bin)
         .args(["list", "--kind", "fit", &output.to_string_lossy()])
@@ -556,29 +546,10 @@ fn list_shows_fit_entries() {
     let Some(bin) = skip_if_missing_binary() else { return; };
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
-    let fit_dir = output.join("fits").join("demo-abc12345");
-    std::fs::create_dir_all(&fit_dir).unwrap();
-
-    // Minimal valid Run + RunKind::Fit JSON matching run_meta.rs schema.
-    let run_json = r#"{
-        "hash": "abc12345deadbeef0000000000000000000000000000000000000000abc12345",
-        "version": "0.1.0+test",
-        "created_at": "2026-04-19T12:00:00Z",
-        "argv": ["camdl","fit","run","demo.toml"],
-        "status": {"completed": {"wall_time_seconds": 3.2}},
-        "kind": {
-            "kind": "fit",
-            "model": "demo.camdl",
-            "model_hash": "m000",
-            "fit_toml_path": "demo.toml",
-            "fit_toml_hash": "h000",
-            "data_hashes": {"cases": "d000"},
-            "estimated": ["beta","gamma"],
-            "fixed": {"N0": 1000.0},
-            "stages_declared": ["scout","refine"]
-        }
-    }"#;
-    std::fs::write(fit_dir.join("run.json"), run_json).unwrap();
+    // gh#147 (M3.2): a CAS fit segment with two stage leaves + the fit-level
+    // sidecar. `read_fit_segment` derives one fit entry whose `stages_declared`
+    // comes from the leaves (`scout`, `refine`).
+    write_cas_fit(&output, "demo", "abc12345", &["scout", "refine"], "m000");
 
     let out = Command::new(&bin)
         .args(["list", &output.to_string_lossy()])
@@ -637,27 +608,19 @@ fn show_resolves_fit_by_hash_prefix() {
     let Some(bin) = skip_if_missing_binary() else { return; };
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
-    let fit_dir = output.join("fits").join("demo-deadbeef");
-    std::fs::create_dir_all(&fit_dir).unwrap();
-    // hash starts with deadbeef so the short-hash lookup should match.
-    let run_json = r#"{
-        "hash":"deadbeefc0ffee00000000000000000000000000000000000000000000000000",
-        "version":"0.1.0+test","created_at":"2026-04-19T12:00:00Z",
-        "argv":["camdl","fit","run","demo.toml"],"status":{"completed":{"wall_time_seconds":1.0}},
-        "kind":{"kind":"fit","model":"demo.camdl","model_hash":"m",
-        "fit_toml_path":"demo.toml","fit_toml_hash":"h",
-        "data_hashes":{},"estimated":["beta"],"fixed":{},"stages_declared":["mle"]}
-    }"#;
-    std::fs::write(fit_dir.join("run.json"), run_json).unwrap();
+    // gh#147 (M3.2): a CAS fit is addressed by its stage-leaf `run_id` prefix;
+    // there is no legacy fit-wide record. `run_id` starts `deadbeef` so the
+    // short prefix matches.
+    let run_id = "deadbeefc0ffee00000000000000000000000000000000000000000000000000";
+    write_cas_fit_stage(&output, run_id, "demo");
     let out = Command::new(&bin)
         .args(["show", "deadbee", "--root", &output.to_string_lossy()])
         .output().expect("spawn");
-    assert!(out.status.success(), "show by short-hash should resolve: stderr={}",
+    assert!(out.status.success(), "show by run_id prefix should resolve: stderr={}",
         String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("kind"));
-    assert!(stdout.contains("fit"));
-    assert!(stdout.contains("demo.camdl"));
+    assert!(stdout.contains("fit_stage"), "should render a fit-stage: {stdout}");
+    assert!(stdout.contains("scout"), "stage label missing: {stdout}");
 }
 
 #[test]
@@ -929,51 +892,108 @@ fn show_prints_metadata() {
 /// Test (4a from review): `camdl show <fit-stage-hash>` resolves and
 /// renders the FitStage payload. Pre-show-coverage-collapse, this
 /// returned "unrecognised kind".
+/// A content-addressed fit-stage leaf (`runid::RunRecord`, M3.2) at
+/// `fits/{fit}/{NN-stage}/{seed}/run.json`, addressable by `run_id` prefix.
+fn write_cas_fit_stage(output: &Path, run_id: &str, fit_label: &str) -> PathBuf {
+    let leaf = output.join("fits")
+        .join(format!("{fit_label}-5ca1ab1e"))
+        .join("01-scout-1fb03eee")
+        .join("seed_42-06cbd6b3");
+    std::fs::create_dir_all(&leaf).unwrap();
+    let rec = format!(r#"{{
+        "format_version": 1,
+        "kind": "fit_stage",
+        "run_id": "{run_id}",
+        "hash_version": 1,
+        "ir_version": "0.7",
+        "engine_version": "0.1.0+test",
+        "levels": [
+            {{"name":"fit","label":"{fit_label}","hash":"5ca1ab1e00000000000000000000000000000000000000000000000000000000","schema_version":1}},
+            {{"name":"stage","label":"01-scout","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
+            {{"name":"seed","label":"seed_42","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
+        ],
+        "status": "completed",
+        "artifacts": {{}},
+        "inputs": {{"stage":"scout","method":"if2","backend":"chain_binomial","seed":42,"n_chains":4,"best_loglik":-123.45,"best_chain":1}},
+        "provenance": {{"created_at":"2026-04-30T12:00:00Z","argv":["camdl","fit","run"]}}
+    }}"#);
+    std::fs::write(leaf.join("run.json"), rec).unwrap();
+    leaf
+}
+
+/// Write a content-addressed fit segment `fits/<label>-<fit_h8>/` with one
+/// `FitStage` leaf per stage (`<NN>-<stage>-<h8>/seed_1-<h8>/run.json`) plus the
+/// fit-level sidecar (`fit.meta.json` — the label + model-hash home). This is
+/// the shape `read_fit_segment` derives a single fit-level entry from, so
+/// `list` / `fit table` see one fit with `stages_declared` taken from the
+/// leaves. Returns the segment dir.
+fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], model_hash: &str) -> PathBuf {
+    let seg = output.join("fits").join(format!("{label}-{fit_h8}"));
+    std::fs::create_dir_all(&seg).unwrap();
+    let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
+    for (i, stage) in stages.iter().enumerate() {
+        let nn = i + 1;
+        let leaf = seg
+            .join(format!("{nn:02}-{stage}-1fb03eee"))
+            .join("seed_1-06cbd6b3");
+        std::fs::create_dir_all(&leaf).unwrap();
+        // Any distinct 64-hex run_id per leaf; `read_fit_segment` reads the
+        // `fit`-level hash (shared) for the fit-level entry's `run.hash`.
+        let run_id = format!("{:0<64}", format!("abc{nn}"));
+        let rec = format!(r#"{{
+            "format_version": 1,
+            "kind": "fit_stage",
+            "run_id": "{run_id}",
+            "hash_version": 1,
+            "ir_version": "0.7",
+            "engine_version": "0.1.0+test",
+            "levels": [
+                {{"name":"fit","label":"{label}","hash":"{fit_hash}","schema_version":1}},
+                {{"name":"stage","label":"{nn:02}-{stage}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
+                {{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
+            ],
+            "status": "completed",
+            "artifacts": {{}},
+            "inputs": {{"stage":"{stage}","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},
+            "provenance": {{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}
+        }}"#);
+        std::fs::write(leaf.join("run.json"), rec).unwrap();
+    }
+    std::fs::write(
+        seg.join("fit.meta.json"),
+        format!(r#"{{"model_hash":"{model_hash}","model_path":"demo.camdl","fit_toml_path":"demo.toml"}}"#),
+    )
+    .unwrap();
+    seg
+}
+
+/// gh#147 (M3.2): `camdl show <fit-stage path | run_id prefix>` renders the
+/// CAS fit-stage `RunRecord` — factored levels + the recorded FitStageMeta.
 #[test]
 fn show_renders_fit_stage_metadata() {
     let Some(bin) = skip_if_missing_binary() else { return };
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
-    let stage = output.join("fits/parent-abc12345/real/fit_42/scout");
-    std::fs::create_dir_all(&stage).unwrap();
-    let stage_run = r#"{
-        "hash": "stage1234deadbeef0000000000000000000000000000000000000000stage1234",
-        "version": "0.1.0+test",
-        "created_at": "2026-04-30T12:00:00Z",
-        "argv": ["camdl","fit","run","fit.toml","--stage","scout"],
-        "status": {"completed": {"wall_time_seconds": 12.5}},
-        "kind": {
-            "kind": "fit-stage",
-            "fit_hash": "abc12345deadbeef0000000000000000000000000000000000000000abc12345",
-            "stage": "scout",
-            "method": "if2",
-            "backend": "chain_binomial",
-            "seed": 42,
-            "n_chains": 4,
-            "best_loglik": -123.45,
-            "best_chain": 1
-        }
-    }"#;
-    std::fs::write(stage.join("run.json"), stage_run).unwrap();
+    let run_id = "5ca1ab1e00000000000000000000000000000000000000000000000000000000";
+    let leaf = write_cas_fit_stage(&output, run_id, "parent");
 
     // Resolve by full path.
     let out = Command::new(&bin)
-        .args(["show", &stage.to_string_lossy()])
+        .args(["show", &leaf.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "show fit-stage failed: stderr={}",
         String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("fit-stage"), "kind label missing: {}", s);
+    assert!(s.contains("fit_stage"), "kind label missing: {}", s);
     assert!(s.contains("scout"),     "stage name missing: {}", s);
     assert!(s.contains("if2"),       "method missing: {}", s);
     assert!(s.contains("-123.45"),   "best_loglik missing: {}", s);
-    assert!(s.contains("12.5"),      "wall time missing: {}", s);
 
-    // Resolve by hash prefix.
+    // Resolve by run_id prefix.
     let out = Command::new(&bin)
-        .args(["show", "stage1234", "--root", &output.to_string_lossy()])
+        .args(["show", "5ca1ab1e", "--root", &output.to_string_lossy()])
         .output().expect("spawn");
-    assert!(out.status.success(), "show by stage-hash prefix failed: stderr={}",
+    assert!(out.status.success(), "show by run_id prefix failed: stderr={}",
         String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("scout"));

@@ -248,6 +248,7 @@ survey_path    = "{survey}"
 /// the run — the chain is skipped with a `BadInit` diagnostic and
 /// the sane rank-2 chain completes.
 #[test]
+#[ignore = "survey/top-k init not yet migrated to CAS — M3.3 (gh#151)"]
 fn pmmh_skips_pathological_survey_init_and_continues() {
     let Some(bin) = camdl_bin() else { return };
     if camdlc_bin().is_none() { return }

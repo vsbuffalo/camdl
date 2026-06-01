@@ -5,6 +5,7 @@
 //! inline; the runner walks them in order. See
 //! `docs/dev/proposals/2026-04-15-fit-run-spec-v0.4.md`.
 
+pub mod cas;  // gh#147 M3.2: fit-stage CAS identity (resolve_fit_stage)
 pub mod config_v2;
 pub mod state;
 pub mod provenance;
@@ -438,24 +439,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         },
         None => None,
     };
-    let mut run_fit = build_fit_run(&config, &fit_path, validated_label, Some(&model));
+    // gh#147 (M3.2): the fit identity is now a CAS *path segment*
+    // (`fits/{fit}-{h8}/`), not a separate fit-wide `run.json`, so the
+    // legacy fit-wide record + `fit.toml.original` archive are no longer
+    // written — they created a stray `fit_dir` under `fits/` alongside the
+    // CAS stage tree. `build_fit_run` is kept only for `parent_fit_hash`
+    // (consumed by the match-arm provenance below). The fit-level outputs
+    // (grid summary, sweep_failures) still use `fit_dir` for swept/synthetic
+    // multi-cell fits — their CAS-segment relocation is M3.3.
+    let run_fit = build_fit_run(&config, &fit_path, validated_label, Some(&model));
     let parent_fit_hash = run_fit.hash.clone();
-    if let Err(e) = run_fit.write(&fit_dir) {
-        eprintln!("warning: cannot write {}/run.json: {}", fit_dir.display(), e);
-    }
-
-    // Archive the fit.toml verbatim under <fit_dir>/fit.toml.original.
-    // Step 6 of the experiment-management proposal: `fit table`'s
-    // config_diff reader consumes this archive (not FitMeta.fit_toml_path,
-    // which can move/change after the run). Write-once-on-first-run;
-    // on cached re-entry into the same content-hashed fit_dir, verify
-    // the current fit.toml is byte-identical to the archive (it must
-    // be, by content-hash construction — a divergence here is a hash
-    // collision or a bug, surfaced loudly).
-    if let Err(e) = archive_fit_toml(&fit_path, &fit_dir) {
-        eprintln!("warning: cannot archive fit.toml.original at {}: {}",
-            fit_dir.display(), e);
-    }
 
     eprintln!("fit: {} ({} stage{})",
         fit_path,
@@ -604,6 +597,23 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // summary of passed/failed cells.
     let mut sweep_failures: Vec<(usize, usize, String, String)> = Vec::new();
 
+    // ── gh#147 (M3.2): content-addressed store root + fit-level label ──
+    // Fits write to `<output_root>/fits/{fit}-{h8}/{NN-stage}-{h8}/seed_N-{h8}/`
+    // (symmetric to sims under `<output_root>/sims/`), NOT the legacy
+    // per-fit `fit_dir`. The fit level is a path segment, so there is no
+    // separate fit-wide record.
+    let cas_root = crate::run_paths::output_root(None, config.output_dir.as_deref());
+    let fit_stem = crate::hashing::path_stem_slug(&fit_path)
+        .unwrap_or_else(|| "fit".to_string());
+    let ir_version_str = ir::IR_VERSION.trim().to_string();
+    // gh#147 (M3.2): fit segments whose fit-level sidecar (label + model hash
+    // + the `fit.toml.original` config-diff archive) has been written this
+    // run. The fit level is a path segment with no CAS record, so this sidecar
+    // is the fit-wide home `walk_fits_root` / `table_row` read; write it once
+    // per segment (each sweep point keys its own FitDigest → its own segment).
+    let mut written_fit_segments: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+
     // ── Execute grid: cell × sweep_point × stage ──
     for (cell_i, cell) in cells.iter().enumerate() {
         let mut cell_config = config.clone();
@@ -666,11 +676,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             fit_dir.join(&per_fit_prefix)
         };
 
+    // gh#147 (M3.2): memoize each completed stage's CAS identity so a
+    // downstream `StartsFrom` resolves to the upstream leaf and folds an
+    // `ArtifactRef` dep into its stage hash (the deps-DAG). Scoped per
+    // (cell, sweep_point) — the pipeline that ran together.
+    let mut stage_identities: std::collections::HashMap<String, (runid::ContentHash, std::path::PathBuf)> =
+        std::collections::HashMap::new();
+    let _ = &sweep_fit_dir; // legacy layout retired; CAS root is output_root
     for (stage_name, stage) in &stages_to_run {
-        let stage_dir = sweep_fit_dir.join(stage_name);
         eprintln!("\n── stage: {} (method={}) ──", stage_name, stage.method_name());
 
-        // Config hash staleness check
+        // Resolve data the runners load from (also feeds the data digests).
         let fixed_resolved = sweep_config.fixed.resolve().unwrap_or_default();
         let data_spec = sweep_config.data_spec().unwrap_or_else(|e| {
             eprintln!("error: {}", e);
@@ -693,51 +709,115 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             });
-        let config_hash = provenance::fit_stage_hash(
-            &model_json, &effective_obs, &sweep_config.estimate,
-            &fixed_resolved, &sweep_config.simplex_groups,
-            stage_name, stage, seed,
-        ).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
+        // ── gh#147 (M3.2): resolve StartsFrom → upstream CAS leaf + dep ──
+        // CLI --starts-from wins (single-stage only); else the stage's
+        // init_mle. `effective_starts` is the dir the runner loads the prior
+        // θ̂ from (now an upstream CAS leaf); `deps` folds the upstream's
+        // identity + consumed `fit_state.toml` digest into this stage's hash.
+        let cli_starts = starts_from_override.as_ref()
+            .filter(|_| stages_to_run.len() == 1)
+            .cloned();
+        let (effective_starts, deps): (Option<String>, Vec<runid::inputs::ArtifactRef>) =
+            if let Some(dir) = cli_starts {
+                let dep = cas::cas_dep_from_dir(std::path::Path::new(&dir));
+                (Some(dir), dep.into_iter().collect())
+            } else {
+                match stage.starts_from() {
+                    StartsFrom::Random => (None, Vec::new()),
+                    StartsFrom::Stage(ref dep_name) => match stage_identities.get(dep_name) {
+                        Some((up_run_id, up_dir)) => {
+                            let dep = cas::cas_dep_ref(*up_run_id, up_dir);
+                            (Some(up_dir.to_string_lossy().to_string()), dep.into_iter().collect())
+                        }
+                        None => {
+                            eprintln!("error: stage '{}' starts_from '{}', which has not run \
+                                       in this pipeline", stage_name, dep_name);
+                            std::process::exit(1);
+                        }
+                    },
+                    StartsFrom::Directory(ref path) => {
+                        let dep = cas::cas_dep_from_dir(path);
+                        (Some(path.to_string_lossy().to_string()), dep.into_iter().collect())
+                    }
+                }
+            };
+
+        // ── CAS identity + claim ──
+        let ordinal = config.stages.get_index_of(*stage_name).map(|i| i + 1).unwrap_or(0);
+        let ctx = cas::FitStageCtx {
+            model: &model,
+            fit_stem: &fit_stem,
+            ir_version: &ir_version_str,
+            engine_version: crate::version::VERSION_SHORT,
+            config: &sweep_config,
+            data_paths: &effective_obs,
+            stage_name: *stage_name,
+            stage,
+            ordinal,
+            seed,
+            deps: deps.clone(),
+        };
+        let resolved = cas::resolve_fit_stage(&ctx).unwrap_or_else(|e| {
+            eprintln!("error: fit-stage identity: {}", e);
             std::process::exit(1);
         });
-        if !force && !a.resume {
-            match crate::run_meta::Run::check_cache(&stage_dir, &config_hash) {
-                crate::run_meta::CacheStatus::Hit => {
-                    eprintln!("  \x1b[33mskipped — results already exist for these inputs.\x1b[0m");
-                    eprintln!("  config_hash: {}", &config_hash[..16]);
-                    eprintln!("  Use --force to re-run, or --resume to continue.");
-                    continue;
+        let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitStage, &resolved.levels);
+        // gh#147 (M3.2): write the fit-level sidecar once per fit segment
+        // (`cas_path`'s grandparent: `.../fits/{stem}-{h8}/`). Done before the
+        // cache-hit short-circuit below so the label/archive stay current even
+        // on an all-cache-hit rerun.
+        if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
+            if written_fit_segments.insert(seg.to_path_buf()) {
+                // gh#147 (M3.2): the fit-level provenance sidecar — a faithful
+                // readable projection of the fit-wide `FitMeta` `build_fit_run`
+                // already computed (resolved_priors with gh#75 sources,
+                // estimated/fixed/data_hashes/model_hash). Derived provenance,
+                // never identity-bearing (the priors are already hashed into the
+                // FitDigest); written once per segment, even on a cached rerun.
+                let sidecar = if let crate::run_meta::RunKind::Fit(m) = &run_fit.kind {
+                    crate::run_meta::FitSidecar {
+                        label: run_fit.label.clone(),
+                        model_path: m.model.clone(),
+                        model_hash: m.model_hash.clone(),
+                        fit_toml_path: m.fit_toml_path.clone(),
+                        fit_toml_hash: m.fit_toml_hash.clone(),
+                        data_hashes: m.data_hashes.clone(),
+                        estimated: m.estimated.clone(),
+                        fixed: m.fixed.clone(),
+                        resolved_priors: m.resolved_priors.clone(),
+                        parameters_provenance: m.parameters_provenance.clone(),
+                    }
+                } else {
+                    crate::run_meta::FitSidecar::default()
+                };
+                if let Err(e) = crate::run_meta::write_fit_sidecar(
+                    seg,
+                    std::path::Path::new(&fit_path),
+                    &sidecar,
+                ) {
+                    eprintln!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e);
                 }
-                crate::run_meta::CacheStatus::Stale { stored, current } => {
-                    eprintln!("  \x1b[33mstale results detected — config has changed. Re-running.\x1b[0m");
-                    eprintln!("  stored:  {}", &stored[..16.min(stored.len())]);
-                    eprintln!("  current: {}", &current[..16.min(current.len())]);
-                }
-                crate::run_meta::CacheStatus::Miss => {}
             }
         }
-
-        // Resolve starts_from: CLI override > stage config
-        let effective_starts = if let Some(ref cli_sf) = starts_from_override {
-            // CLI --starts-from applies to the target stage only
-            if stages_to_run.len() == 1 {
-                Some(cli_sf.clone())
-            } else {
-                None // only applies when running a single stage
+        let store = runid::FsCasStore::new(&cas_root);
+        if !force && !a.resume {
+            if let runid::Lookup::Hit(_) =
+                store.lookup(&cas_path, &runid::LeafIdentity::new(resolved.run_id))
+            {
+                eprintln!("  \x1b[33mcache hit — reusing {}\x1b[0m",
+                    cas_path.strip_prefix(&cas_root).unwrap_or(&cas_path).display());
+                stage_identities.insert(stage_name.to_string(), (resolved.run_id, cas_path));
+                continue;
             }
-        } else {
-            match stage.starts_from() {
-                StartsFrom::Random => None,
-                StartsFrom::Stage(ref dep_name) => {
-                    // Resolve to the directory of a prior stage in this fit
-                    Some(sweep_fit_dir.join(dep_name).to_string_lossy().to_string())
-                }
-                StartsFrom::Directory(ref path) => {
-                    Some(path.to_string_lossy().to_string())
-                }
-            }
-        };
+        }
+        let running = cas::build_fit_stage_record(
+            &resolved, &deps, &ir_version_str, runid::RunStatus::Running,
+            serde_json::Value::Null, &sweep_config.model.camdl);
+        let claim = store.claim_streaming(&cas_path, running).unwrap_or_else(|e| {
+            eprintln!("error: claim fit stage {}: {}", cas_path.display(), e);
+            std::process::exit(1);
+        });
+        let stage_dir = claim.dir().to_path_buf();
 
         let stage_t0 = std::time::Instant::now();
         let mut stage_best_loglik: Option<f64> = None;
@@ -1431,35 +1511,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         }
 
-        // ── Shared run.json write (all stage types) ─────────────────────────
+        // ── gh#147 (M3.2): finalize the CAS fit-stage leaf ──
+        // The runners streamed every output (chains, fit_state.toml,
+        // draws.tsv, trajectories/, …) into `stage_dir = claim.dir()`;
+        // `finalize` builds the recursive exact-set manifest over them and
+        // commits Running→Completed. The FitStageMeta-equivalent rides in
+        // `run.json` `inputs` (recorded, never hashed) for show/status.
         let stage_elapsed = stage_t0.elapsed();
-        // Resolve the upstream stage's name + hash from its run.json
-        // (if it exists). `effective_starts` is a directory path — for
-        // in-fit references it points to a sibling stage that's already
-        // written its run.json by the time we run; for external
-        // `--starts-from` it points to an arbitrary directory whose
-        // run.json may or may not exist.
-        let starts_from_ref = effective_starts.as_ref().map(|dir_path| {
-            let p = std::path::Path::new(dir_path);
-            let stage_name = p.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-            // Try to read the upstream run.json. On failure, record
-            // `None` + warn — absent is the honest signal for "we
-            // can't prove what this refers to", as distinct from empty
-            // string which used to masquerade as a real hash.
-            let stage_hash = match crate::run_meta::Run::read(p) {
-                Ok(r) => Some(r.hash),
-                Err(e) => {
-                    eprintln!("warning: starts_from = {} has no readable \
-                              run.json ({}); provenance chain will record \
-                              stage_hash: null", dir_path, e);
-                    None
-                }
-            };
-            crate::run_meta::StartsFromRef { stage: stage_name, stage_hash }
-        });
         let algo_tag = stage.method_name();
         let backend_tag = stage.backend().as_str();
         let algo_json = match stage {
@@ -1474,46 +1532,32 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             Stage::NlSbplx(c) | Stage::NlBobyqa(c) =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": c.chains, "tolerance": c.tolerance, "max_evals": c.max_evals }),
         };
-        let n_chains = stage.chains();
-        let stage_inputs = crate::cas::fit_inputs::StageInputs {
-            fit_stage_hash: config_hash.clone(),
-            stage_dir: stage_dir.clone(),
-            meta: crate::run_meta::FitStageMeta {
-                fit_hash: parent_fit_hash.clone(),
-                stage: stage_name.to_string(),
-                method: stage.method_kind(),
-                backend: stage.backend(),
-                seed,
-                n_chains,
-                algorithm: algo_json,
-                best_loglik: stage_best_loglik,
-                best_chain: stage_best_chain,
-                starts_from: starts_from_ref,
-                derived_from: sweep_config.provenance.as_ref()
-                    .and_then(|p| p.derived_from.clone()),
-                parent_profile_hash: None,
-                profile_point_idx: None,
-                profile_start_idx: None,
-                // gh#83/gh#85 step 9: stage-level provenance is
-                // populated by the inference algorithm runner (which
-                // has the per-stage `ResolvedParameters` /
-                // `ChainStarts` in scope); the CAS-hash skeleton
-                // constructed here leaves them empty.
-                parameters_provenance: Default::default(),
-                init_provenance: None,
-            },
+        let inputs_json = serde_json::json!({
+            "stage": stage_name,
+            "method": algo_tag,
+            "backend": backend_tag,
+            "seed": seed,
+            "n_chains": stage.chains(),
+            "best_loglik": stage_best_loglik,
+            "best_chain": stage_best_chain,
+            "algorithm": algo_json,
+            "starts_from": effective_starts,
+            "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
+            "wall_time_seconds": stage_elapsed.as_secs_f64(),
+        });
+        let completed = cas::build_fit_stage_record(
+            &resolved, &deps, &ir_version_str, runid::RunStatus::Completed,
+            inputs_json, &sweep_config.model.camdl);
+        let dest = match claim.finalize(completed) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("error: could not finalize fit stage {}: {}", cas_path.display(), e);
+                std::process::exit(1);
+            }
         };
-        use crate::cas::typed::CasInputs;
-        let mut stage_run = stage_inputs.to_run(
-            crate::version::VERSION_SHORT.to_string(),
-            std::env::args().collect(),
-        );
-        stage_run.status = crate::run_meta::RunStatus::Completed {
-            wall_time_seconds: stage_elapsed.as_secs_f64(),
-        };
-        if let Err(e) = stage_run.write(&stage_dir) {
-            eprintln!("warning: could not write {}/run.json: {}", stage_dir.display(), e);
-        }
+        eprintln!("  {} complete in {:.1}s → {}", stage_name, stage_elapsed.as_secs_f64(),
+            dest.strip_prefix(&cas_root).unwrap_or(&dest).display());
+        stage_identities.insert(stage_name.to_string(), (resolved.run_id, dest));
 
     } // end stages
     } // end sweep_points
@@ -1566,7 +1610,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
     let source = if config.synthetic.is_some() { "synthetic" } else { "real" };
     let mut rows: Vec<grid_summary::SummaryRow> = Vec::new();
-    for (cell_i, cell) in cells.iter().enumerate() {
+    for cell in cells.iter() {
         let (dataset, cell_dir) = match cell.dataset_idx {
             Some(idx) => {
                 let ds = format!("ds_{:02}", idx);
@@ -1578,16 +1622,20 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 ("real".to_string(), dir)
             }
         };
-        match grid_summary::read_cell_row(&cell_dir, &terminal_stage, &dataset, cell.fit_seed) {
-            Some(r) => rows.push(r),
-            None    => eprintln!(
-                "warning: cell {}/{} ({} × fit_seed={}) produced no mle_params.toml at {}",
-                cell_i + 1, cells.len(), dataset, cell.fit_seed,
-                cell_dir.join(&terminal_stage).display()),
+        if let Some(r) = grid_summary::read_cell_row(&cell_dir, &terminal_stage, &dataset, cell.fit_seed) {
+            rows.push(r);
         }
     }
 
-    if !rows.is_empty() {
+    if rows.is_empty() {
+        // gh#147 (M3.2): the grid summary still aggregates the *legacy*
+        // multi-cell cell dirs (`real/fit_<seed>/`,
+        // `synthetic/ds_NN/fit_<seed>/`). CAS fits write their leaves under the
+        // content-addressed tree, so there are no legacy cells to aggregate yet
+        // — this is the visible seam, not a failure. The grid summary's CAS
+        // migration lands in M3.3 (gh#150).
+        eprintln!("note: grid summary not yet available for CAS fits — lands in M3.3 (gh#150)");
+    } else {
         match grid_summary::write_summary(&fit_dir, source, &rows) {
             Ok(p)  => eprintln!("summary: {}", p.display()),
             Err(e) => eprintln!("warning: could not write summary.tsv: {}", e),
@@ -1603,19 +1651,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
     }
 
-    // ── Final rewrite: top-level run.json with accumulated wall time ──
-    //
-    // The top-level Run::Fit was written at fit-start with wall_time=0
-    // so the fit is listable even if interrupted. Now that every stage
-    // has completed (or aggregate post-processing has finished), patch
-    // the wall-clock so `camdl list` / `camdl show` report honest
-    // totals.
-    run_fit.status = crate::run_meta::RunStatus::Completed {
-        wall_time_seconds: fit_start.elapsed().as_secs_f64(),
-    };
-    if let Err(e) = run_fit.write(&fit_dir) {
-        eprintln!("warning: cannot rewrite {}/run.json: {}", fit_dir.display(), e);
-    }
+    // gh#147 (M3.2): no fit-wide `run.json` rewrite — the fit identity is a
+    // CAS path segment, and each stage leaf records its own wall time in
+    // `run.json` `inputs` at `finalize`. `fit_start` paces the run; per-stage
+    // timing is the honest unit now.
+    let _ = fit_start;
 }
 
 /// Read an IR JSON string from a model path, compiling .camdl → IR on
@@ -1631,47 +1671,10 @@ fn read_ir_json_or_empty(model_path: &str) -> String {
     }
 }
 
-/// Archive the fit.toml verbatim under `<fit_dir>/fit.toml.original`.
-/// Step 6 of the experiment-management proposal.
-///
-/// The fit_dir is content-hashed on (model_hash, fit.toml bytes,
-/// data hashes), so any two runs landing in the same fit_dir
-/// necessarily had byte-identical fit.toml content at hash time. The
-/// archive captures that fit.toml so `fit table`'s config_diff
-/// reader can compare fits without depending on `FitMeta.fit_toml_path`
-/// — the user's original file path, which can move or change after
-/// the run.
-///
-/// Policy:
-/// - **Write once.** If `<fit_dir>/fit.toml.original` does not exist,
-///   copy the current fit.toml there.
-/// - **Verify on cached hit.** If it already exists, read both the
-///   archive and the current fit.toml; warn loudly if they differ.
-///   (They must not — a divergence indicates a hash collision or a
-///   bug in fit_content_hash. The warning is the alarm; the archive
-///   is preserved as the canonical version.)
-///
-/// Returns Err on filesystem errors; the caller's responsibility to
-/// surface the failure mode (the runner logs it as a warning rather
-/// than aborting, since fit-state writes happen later anyway).
-fn archive_fit_toml(fit_path: &str, fit_dir: &std::path::Path)
-    -> std::io::Result<()>
-{
-    let archive_path = fit_dir.join("fit.toml.original");
-    let current = std::fs::read(fit_path)?;
-    if archive_path.exists() {
-        let archived = std::fs::read(&archive_path)?;
-        if archived != current {
-            eprintln!(
-                "warning: fit.toml.original at {} differs from current {}; \
-                 this should be impossible (content-hash mismatch). \
-                 Archive preserved.",
-                archive_path.display(), fit_path);
-        }
-        return Ok(());
-    }
-    std::fs::write(&archive_path, &current)
-}
+// gh#147 (M3.2): `archive_fit_toml` (the legacy `fit.toml.original` writer
+// under `fit_dir`) was removed — fits are content-addressed now and the
+// fit-level config archive for `fit table` config_diff is reworked in M3.3
+// alongside the fit-level outputs' CAS relocation.
 
 /// Build the top-level `Run::Fit` record for a fit.toml. Fields that
 /// require I/O (model IR, data files, fit.toml bytes) are read here
@@ -2115,32 +2118,68 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         std::process::exit(1);
     }
 
-    // Walk every `run.json` under <root>/{sims,fits,profiles}/**.
-    // Match by Run.hash prefix; collect ambiguous results for diagnostics.
+    // Match by hash prefix. Sims/profiles carry a per-leaf `run.json` matched
+    // on its hash. A CAS fit (gh#147 M3.2) has no fit-wide `run.json` — its
+    // fit-level hash is derived from its stage leaves and its label lives in
+    // the fit-level sidecar (`fit.meta.json`), so fits resolve by
+    // fit-level-hash prefix → segment and relabel the sidecar.
     let mut matches: Vec<std::path::PathBuf> = Vec::new();
-    for top in ["sims", "fits", "profiles"] {
+    for top in ["sims", "profiles"] {
         let subroot = root.join(top);
         if !subroot.exists() { continue; }
         find_runs_with_prefix(&subroot, &args.hash, &mut matches);
     }
-
-    let run_dir = match matches.len() {
-        0 => {
-            eprintln!("error: no run found with hash prefix `{}` under {}",
-                args.hash, root.display());
-            std::process::exit(1);
-        }
-        1 => matches.into_iter().next().unwrap(),
-        n => {
-            eprintln!("error: hash prefix `{}` matches {} runs — \
-                       use a longer prefix", args.hash, n);
-            for p in &matches[..n.min(8)] {
-                eprintln!("  {}", p.display());
+    let mut fit_segments: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(root.join("fits")) {
+        for e in rd.flatten() {
+            let seg = e.path();
+            if !seg.is_dir() { continue; }
+            if let Some(run) = crate::run_meta::read_fit_segment(&seg) {
+                if run.hash.starts_with(&args.hash) {
+                    fit_segments.push(seg);
+                }
             }
+        }
+    }
+
+    let total = matches.len() + fit_segments.len();
+    if total == 0 {
+        eprintln!("error: no run found with hash prefix `{}` under {}",
+            args.hash, root.display());
+        std::process::exit(1);
+    }
+    if total > 1 {
+        eprintln!("error: hash prefix `{}` matches {} runs — \
+                   use a longer prefix", args.hash, total);
+        for p in matches.iter().chain(fit_segments.iter()).take(8) {
+            eprintln!("  {}", p.display());
+        }
+        std::process::exit(1);
+    }
+
+    // gh#147 (M3.2): the single match is a CAS fit segment — rewrite the
+    // fit-level sidecar's label (its authoritative home), leaving the archived
+    // `fit.toml.original` untouched.
+    if let Some(seg) = fit_segments.into_iter().next() {
+        let mut side = crate::run_meta::read_fit_sidecar(&seg).unwrap_or_default();
+        let prior = side.label.clone();
+        side.label = Some(new_label.clone());
+        if let Err(e) = crate::run_meta::write_fit_sidecar(
+            &seg, std::path::Path::new(&side.fit_toml_path), &side,
+        ) {
+            eprintln!("error: cannot write fit-level sidecar {}: {}", seg.display(), e);
             std::process::exit(1);
         }
-    };
+        match prior {
+            Some(p) if p != new_label =>
+                eprintln!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, seg.display()),
+            Some(_) => eprintln!("ok: label unchanged (\"{}\") on {}", new_label, seg.display()),
+            None => eprintln!("ok: label set to \"{}\" on {}", new_label, seg.display()),
+        }
+        return;
+    }
 
+    let run_dir = matches.into_iter().next().unwrap();
     let run_json_path = run_dir.join("run.json");
 
     // New-format (`runid::RunRecord`) sims: the label lives in `provenance`.
@@ -2272,93 +2311,6 @@ fn resolve_starts_from_arg(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn unique_tmp(tag: &str) -> std::path::PathBuf {
-        let ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(
-            format!("camdl_archive_{}_{}_{}", tag, std::process::id(), ns));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-
-    /// First-run path: archive does not exist, so `archive_fit_toml`
-    /// writes a verbatim copy of the source fit.toml.
-    #[test]
-    fn archive_fit_toml_writes_on_first_run() {
-        let tmp = unique_tmp("first_run");
-        let fit_path = tmp.join("fit.toml");
-        let body = "# fit.toml\n[fit]\nmodel = \"sir.camdl\"\n";
-        std::fs::write(&fit_path, body).unwrap();
-        let fit_dir = tmp.join("fit_dir");
-        std::fs::create_dir_all(&fit_dir).unwrap();
-
-        archive_fit_toml(&fit_path.to_string_lossy(), &fit_dir).unwrap();
-
-        let archived = std::fs::read_to_string(fit_dir.join("fit.toml.original")).unwrap();
-        assert_eq!(archived, body, "archive must be byte-identical to source");
-
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// Cached-hit path: archive already exists with matching content
-    /// (the canonical case under content-hash routing). `archive_fit_toml`
-    /// verifies bytes and is a no-op — does not re-write, does not
-    /// emit any warning.
-    #[test]
-    fn archive_fit_toml_no_op_on_matching_archive() {
-        let tmp = unique_tmp("matching");
-        let body = "# matching\n";
-        let fit_path = tmp.join("fit.toml");
-        std::fs::write(&fit_path, body).unwrap();
-        let fit_dir = tmp.join("fit_dir");
-        std::fs::create_dir_all(&fit_dir).unwrap();
-        let archive = fit_dir.join("fit.toml.original");
-        std::fs::write(&archive, body).unwrap();
-        // Capture mtime of existing archive so we can verify no rewrite.
-        let mtime_before = std::fs::metadata(&archive).unwrap().modified().unwrap();
-
-        archive_fit_toml(&fit_path.to_string_lossy(), &fit_dir).unwrap();
-
-        // File should not have been rewritten — same content, same mtime.
-        let mtime_after = std::fs::metadata(&archive).unwrap().modified().unwrap();
-        assert_eq!(mtime_before, mtime_after,
-            "archive must not be rewritten when content matches");
-        let archived = std::fs::read_to_string(&archive).unwrap();
-        assert_eq!(archived, body);
-
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// Cached-hit path with mismatched archive: indicates a hash
-    /// collision or a runner bug. `archive_fit_toml` returns Ok (the
-    /// runner does not abort), preserves the existing archive (does
-    /// not overwrite), and emits a loud stderr warning. The test
-    /// verifies the preserve-existing semantic; the stderr warning is
-    /// observed in the `cargo test --nocapture` mode and is not
-    /// asserted-on here.
-    #[test]
-    fn archive_fit_toml_preserves_archive_on_mismatch() {
-        let tmp = unique_tmp("mismatch");
-        let archived_body = "# archived (canonical)\n";
-        let current_body  = "# divergent (this should not happen)\n";
-        let fit_path = tmp.join("fit.toml");
-        std::fs::write(&fit_path, current_body).unwrap();
-        let fit_dir = tmp.join("fit_dir");
-        std::fs::create_dir_all(&fit_dir).unwrap();
-        let archive = fit_dir.join("fit.toml.original");
-        std::fs::write(&archive, archived_body).unwrap();
-
-        archive_fit_toml(&fit_path.to_string_lossy(), &fit_dir).unwrap();
-
-        // Existing archive preserved, NOT overwritten with current.
-        let archived = std::fs::read_to_string(&archive).unwrap();
-        assert_eq!(archived, archived_body,
-            "on mismatch, the archive must be preserved (not overwritten \
-             with the divergent current fit.toml)");
-
-        std::fs::remove_dir_all(&tmp).ok();
-    }
 
     // ── validate_label ────────────────────────────────────────────
 
