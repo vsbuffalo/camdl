@@ -139,7 +139,8 @@ pub struct SimConfig {
 pub struct ModelDigest {
     /// `content_hash` of the whole canonical IR.
     pub ir: ContentHash,
-    pub ir_version: u32,
+    /// The IR schema version (e.g. `"0.7"`), matching `ir/VERSION`.
+    pub ir_version: String,
     pub engine: EngineVersion,
 }
 
@@ -150,7 +151,7 @@ impl ModelDigest {
     /// pure-presentation fields — `output.format`, `simulation.time_semantics`
     /// — so `--format`/`--dates` stay inert. M1 hashes the model faithfully;
     /// the caller normalizes first.)
-    pub fn from_model(model: &ir::Model, ir_version: u32, engine: EngineVersion) -> Self {
+    pub fn from_model(model: &ir::Model, ir_version: String, engine: EngineVersion) -> Self {
         Self { ir: model.content_hash(), ir_version, engine }
     }
 }

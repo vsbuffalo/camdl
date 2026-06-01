@@ -37,7 +37,7 @@ fn record(run_id: ContentHash) -> RunRecord {
         kind: ArtifactKind::Sim,
         run_id,
         hash_version: HASH_VERSION,
-        ir_version: 7,
+        ir_version: "0.7".into(),
         engine_version: "0.3.0".into(),
         levels: vec![],
         deps: vec![],

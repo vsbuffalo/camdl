@@ -87,7 +87,7 @@ fn artifact_ref_kind_is_provenance_digest_is_semantic() {
 fn trajectory_input_display_is_provenance() {
     let model = ModelDigest {
         ir: ContentHash::from_bytes([5; 32]),
-        ir_version: 7,
+        ir_version: "0.7".into(),
         engine: EngineVersion("0.3.0".into()),
     };
     let config = SimConfig {

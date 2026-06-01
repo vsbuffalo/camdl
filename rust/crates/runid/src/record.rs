@@ -85,7 +85,8 @@ pub struct RunRecord {
     pub kind: ArtifactKind,
     pub run_id: ContentHash,
     pub hash_version: u16,
-    pub ir_version: u32,
+    /// The IR schema version (e.g. `"0.7"`) — a string, matching `ir/VERSION`.
+    pub ir_version: String,
     pub engine_version: String,
     /// The factored identity, in path order.
     pub levels: Vec<LevelId>,
