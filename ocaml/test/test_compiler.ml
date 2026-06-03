@@ -5305,8 +5305,84 @@ let test_phase2_origin_in_unanchored_errors () =
       simulate { from = 0  to = 24 }
     |}
 
+(* ── Regression: bare incidence() over a stratified transition ───────────
+   See models/camdl_issues/ISSUE_1_incidence_stratified.md. An un-indexed
+   `incidence(infection)` over a stratified transition expands to a bare
+   `CumulativeFlow "infection"`, which the runtime resolves as the sum over
+   the `infection_*` family (language spec §25.4). validate must therefore
+   accept the bare stem, or `check`/`compile` diverge from `simulate` (E507). *)
+
+let incidence_stratified_src projected = Printf.sprintf {|
+  time_unit = 'days
+  dimensions { age = [child, adult] }
+  compartments { S, I, R }
+  stratify(by = age)
+  let N[a in age] = S[a] + I[a] + R[a]
+  parameters {
+    beta  : rate in [0.001, 5.0]
+    gamma : rate in [0.05, 0.5]
+  }
+  transitions {
+    infection[a in age] : S[a] --> I[a]
+      @ beta * S[a] * sum(b in age, if N[b] > 0 then I[b] / N[b] else 0.0)
+    recovery[a in age] : I[a] --> R[a] @ gamma * I[a]
+  }
+  observations {
+    cases : {
+      projected  = %s
+      every      = 7 'days
+      likelihood = poisson(rate = projected)
+    }
+  }
+  init { S[a in age] = 1000.0  I[a in age] = 10.0  R[a in age] = 0.0 }
+  simulate { from = 0  to = 150 }
+|} projected
+
+let test_incidence_bare_stratified_accepted () =
+  (* Un-indexed incidence over a stratified family must compile (was E507). *)
+  ignore (compile_expect_ok (incidence_stratified_src "incidence(infection)"))
+
+let test_incidence_indexed_stratum_accepted () =
+  (* Indexed control: a single stratum has always worked; keep it green. *)
+  ignore (compile_expect_ok (incidence_stratified_src "incidence(infection[child])"))
+
+let test_incidence_unknown_transition_rejected () =
+  (* A truly-unknown transition must still be rejected with E507, so a real
+     typo is not silently swept up by the family-prefix rule.
+
+     NOTE: validate-stage (E5xx) errors are raised by `Compiler.compile` as a
+     `Diagnostics.Compile_error` exception (via report_and_exit in the outer
+     `compile`), rather than being caught and returned as `Error` the way
+     parse/expansion-phase errors are in `compile_detail_result`. So we cannot
+     reuse `expect_error_code` here; we assert on either channel.
+     CAMDL-FRICTION: validate-pass (E5xx) errors escape Compiler.compile as an
+     uncaught Compile_error exception, while parse/expansion errors are
+     returned as `Error msg` — inconsistent error surface for callers/tests. *)
+  Diagnostics.json_errors_mode := true;
+  let payload =
+    match Compiler.compile ~name:"test_e507"
+            (incidence_stratified_src "incidence(nonexistent)") with
+    | Ok _ -> Diagnostics.json_errors_mode := false;
+      Alcotest.fail "expected E507 but compile succeeded"
+    | Error e -> Diagnostics.json_errors_mode := false; e
+    | exception Diagnostics.Compile_error e ->
+      Diagnostics.json_errors_mode := false; e
+  in
+  if not (contains_substring ~needle:"E507" payload) then
+    Alcotest.failf "expected error code E507, got: %s" payload;
+  if not (contains_substring ~needle:"nonexistent" payload) then
+    Alcotest.failf "expected error to mention 'nonexistent', got: %s" payload
+
 let () =
   Alcotest.run "compiler" [
+    "incidence_stratified", [
+      Alcotest.test_case "bare incidence(infection) over stratified family is accepted"
+        `Quick test_incidence_bare_stratified_accepted;
+      Alcotest.test_case "indexed incidence(infection[child]) still accepted"
+        `Quick test_incidence_indexed_stratum_accepted;
+      Alcotest.test_case "E507 incidence(nonexistent) unknown transition rejected"
+        `Quick test_incidence_unknown_transition_rejected;
+    ];
     "golden", [
       Alcotest.test_case "sir_basic"      `Quick (test_golden "sir_basic");
       Alcotest.test_case "sir_demography" `Quick (test_golden "sir_demography");

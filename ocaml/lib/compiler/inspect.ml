@@ -1095,6 +1095,14 @@ let run_check path =
     Fmt.epr "Error: %s@\n" e;
     exit 1
   | Ok d ->
+    (* Run structural validation so `camdlc check` matches the `compile`
+       pipeline. Previously `check` skipped `run_validate`, so a dangling
+       observation projection (e.g. un-indexed incidence over a stratified
+       transition) passed `check` with "no errors" but failed `simulate`
+       with E507. Validate before dimcheck, mirroring `Compiler.compile`
+       (dimcheck ICEs on unknown refs, so validate's clean diagnostics
+       must run first). Symmetric to the GH #9 dimcheck fix below. *)
+    ignore (Compiler.run_validate d);
     (* Run Dimcheck so `camdlc check` matches the `compile` pipeline
        (GH #9: previously check silently skipped dimcheck and reported
        "no errors" on models that simulate would reject with E301). *)

@@ -109,7 +109,20 @@ let validate (m : model) : (unit, error list) result =
   List.iter (fun (obs: observation_model) ->
     (match obs.projection with
      | CumulativeFlow tn ->
-       if not (SS.mem tn tr_set) then errors := UnknownTransition tn :: !errors
+       (* A bare transition name over a stratified family (e.g. `infection`
+          when only `infection_child`, `infection_adult` exist) is the
+          documented "sum over all strata" form (language spec §25.4). The
+          runtime resolves it by matching `tn` exactly OR any `tn_*` family
+          member (see multi_stream_obs.rs::from_ir and
+          main.rs::project_all_obs_times), so validation must accept the
+          same set or `check`/`compile` diverge from `simulate`. *)
+       let family_stem =
+         SS.exists (fun n ->
+           String.length n > String.length tn
+           && String.sub n 0 (String.length tn + 1) = tn ^ "_") tr_set
+       in
+       if not (SS.mem tn tr_set || family_stem) then
+         errors := UnknownTransition tn :: !errors
      | _ -> ());
     (* Walk observation-likelihood expressions. The likelihood AST
        may reference parameters, populations, tables, and the special

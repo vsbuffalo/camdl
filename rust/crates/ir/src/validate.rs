@@ -148,7 +148,17 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
     for obs in &model.observations {
         // projection
         if let crate::observation::Projection::CumulativeFlow(ref tn) = obs.projection {
-            if !tr_names.contains(tn.as_str()) {
+            // A bare transition name over a stratified family (e.g. `infection`
+            // when only `infection_child`, `infection_adult` exist) is the
+            // documented "sum over all strata" form (language spec §25.4). The
+            // runtime resolves it by matching `tn` exactly OR any `tn_*` family
+            // member (see multi_stream_obs.rs::from_ir and
+            // main.rs::project_all_obs_times), so validation must accept the
+            // same set or it diverges from simulation.
+            let prefix = format!("{}_", tn);
+            let ok = tr_names.contains(tn.as_str())
+                || tr_names.iter().any(|n| n.starts_with(&prefix));
+            if !ok {
                 errors.push(ValidationError::UnknownTransitionInObservation {
                     obs: obs.name.clone(),
                     transition: tn.clone(),
@@ -341,5 +351,80 @@ mod tests {
         p.name = "beta_extra".into();
         m.parameters.push(p);
         validate(&m).expect("only hierarchical set must validate");
+    }
+
+    // ── Regression: bare CumulativeFlow stem over a stratified family ────────
+    // See models/camdl_issues/ISSUE_1_incidence_stratified.md. A bare
+    // `incidence(infection)` over a stratified transition expands to a bare
+    // `CumulativeFlow("infection")` whose name does not exist post-expansion
+    // (only `infection_child`, `infection_adult`, … do). The runtime resolves
+    // it as the family sum, so validation must accept the stem too — otherwise
+    // `check`/`compile` diverge from `simulate` (the original E507).
+
+    use crate::observation::{
+        Likelihood, ObservationModel, ObservationSchedule, PoissonLikelihood, Projection,
+    };
+
+    /// A trivial Poisson obs over `CumulativeFlow(stem)`, for validate tests.
+    fn obs_cumflow(name: &str, stem: &str) -> ObservationModel {
+        ObservationModel {
+            name:       name.into(),
+            schedule:   ObservationSchedule::AtTimes(vec![1.0]),
+            projection: Projection::CumulativeFlow(stem.into()),
+            likelihood: Likelihood::Poisson(PoissonLikelihood {
+                rate: Expr::const_(1.0),
+            }),
+        }
+    }
+
+    /// Rename sir_basic's `infection` transition to a stratified family so the
+    /// post-expansion transition set is `{infection_child, infection_adult,
+    /// recovery}` and there is no bare `infection`.
+    fn stratify_infection(m: &mut Model) {
+        let proto = m
+            .transitions
+            .iter()
+            .find(|t| t.name == "infection")
+            .expect("sir_basic has an `infection` transition")
+            .clone();
+        m.transitions.retain(|t| t.name != "infection");
+        for stratum in ["child", "adult"] {
+            let mut t = proto.clone();
+            t.name = format!("infection_{stratum}");
+            m.transitions.push(t);
+        }
+    }
+
+    #[test]
+    fn bare_stratified_incidence_stem_is_accepted() {
+        let mut m = load_sir();
+        stratify_infection(&mut m);
+        m.observations.push(obs_cumflow("weekly_cases", "infection"));
+        validate(&m).expect(
+            "bare CumulativeFlow stem over a stratified family must validate \
+             (matches runtime family-sum semantics)",
+        );
+    }
+
+    #[test]
+    fn unknown_transition_in_observation_is_rejected() {
+        let mut m = load_sir();
+        stratify_infection(&mut m);
+        m.observations.push(obs_cumflow("bad", "nonexistent"));
+        let errs = validate(&m).expect_err("a truly-unknown transition must be rejected");
+        assert!(
+            errs.iter().any(|e| matches!(e,
+                ValidationError::UnknownTransitionInObservation { transition, .. }
+                    if transition == "nonexistent")),
+            "expected UnknownTransitionInObservation for 'nonexistent', got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn exact_transition_match_still_accepted() {
+        // The exact-name path (non-stratified) must keep working.
+        let mut m = load_sir();
+        m.observations.push(obs_cumflow("rec", "recovery"));
+        validate(&m).expect("exact transition-name match must validate");
     }
 }
