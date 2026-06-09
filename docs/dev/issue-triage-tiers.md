@@ -2,7 +2,9 @@
 
 Working vocabulary used when triaging the GitHub backlog for batch reduction.
 Not formal process — a shared shorthand so "S-class" / "tricky-leave" mean the
-same thing across passes.
+same thing across passes. The vocabulary is carried on GitHub by the label
+taxonomy in [`issue-labels.md`](issue-labels.md): the effort tiers below are
+`effort/*`, the triage buckets are `status/*`.
 
 ## Effort tiers (rough wall-clock for one engineer/agent)
 
