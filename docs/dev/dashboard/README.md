@@ -6,6 +6,11 @@ heat map, the blocker critical path, the upstream-audit cohort, the needs-RFC
 list, and the s-class/effort batch queue. Every issue links to GitHub; the table
 cells and stat tiles link to filtered issue searches.
 
+Issues authored by anyone other than the maintainer (`MAINTAINER` in `build.py`,
+default `vsbuffalo`) carry an `@handle` **external** badge and roll up into an
+"external reporters" cohort — a dashboard-only marker derived from issue
+authorship, not a GitHub label.
+
 The dashboard is **generated**, not committed — `index.html` is gitignored. The
 data is the _live_ GitHub label state, pulled via `gh`, so the dashboard is only
 as current as its last build.
