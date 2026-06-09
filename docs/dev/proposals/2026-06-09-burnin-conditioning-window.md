@@ -7,7 +7,10 @@
   domains, and the forecast horizon compose across the fit and
   simulate-into-the-future operations. Retained for its problem statement (§1,
   gh#134) and inference math (§2, §6); **do not implement the §4 surface
-  as-is**. Superseded by the forthcoming interval-model proposal.
+  as-is**. Superseded by
+  [`2026-06-09-time-interval-model.md`](2026-06-09-time-interval-model.md),
+  which folds this conditioning inference math (§2, §6) into the conditioning
+  window of the interval model and replaces the lone `condition_from` surface.
 - **Supersedes:** `2026-05-30-conditioning-boundary-tcond.md` (the
   inference-math half; now marked superseded). This document is self-contained
   and owns the inference math, the surface, and the UX.
