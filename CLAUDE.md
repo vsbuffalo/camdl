@@ -478,6 +478,39 @@ something, it must either mean exactly that or produce a clear error. Examples:
 to "works but wrong." If the compiler accepts it, the behavior must be fully
 specified and intentional.
 
+### Every backend × inference method is a supported cell — no silent gaps
+
+The product of forward backends (chain_binomial, gillespie, ode) and inference
+methods (particle filter, IF2, PGAS, PMMH) is a dense matrix. Every cell must
+either work and be tested, or fail loudly through the capability system — there
+is no third option. A combination that is silently untested, silently skipped,
+or excluded from a cross-cutting test behind a "covered elsewhere" hand-wave is
+a latent silent-wrong-answer bug. (This is how gh#187 hid: the PGAS path
+silently dropped scheduled interventions, behind a cross-backend lifecycle test
+that excluded PGAS and a comment claiming another test covered it — it did not.)
+
+- **Consolidate to the shared substrate before the matrix can drift.** Push the
+  bug-prone, genuinely-shared mechanism into one path every cell routes through
+  (e.g. every backend and the PGAS producer step with
+  `chain_binomial::step_one`, which owns intervention/event/balance application
+  via the `effects` seam) so a feature cannot be live in one cell and silently
+  absent in another. Unify the shared substrate, keep the distinct algorithms
+  distinct — the "natural seam" rule. Reimplementing shared behaviour per-cell
+  is how cells diverge.
+- **A genuine capability gap is expressed in code, not omitted.** If a
+  combination truly cannot be supported, route it through the `Capabilities`
+  bitflags (`rust/crates/sim/src/lib.rs`:
+  `CompiledModel::required_capabilities()` vs each backend's
+  `Simulate::capabilities()`), which hard-errors at dispatch with a message
+  naming the limitation — and the error tells the user. Never drop the
+  combination from a test or skip it silently. The capability system exists (see
+  "Backend capabilities" above); if you think it does not, look harder or flag
+  it to the maintainer rather than inventing a silent exclusion.
+- **Tests follow the matrix.** A property that must hold across cells is tested
+  for each cell it applies to. A "covered by test X" claim must name X, and X
+  must actually exercise that property for that cell — verify it, don't assert
+  it.
+
 ### Error messages are a feature, not polish
 
 Error quality is a first-class design goal. A bad error message is a bug — it
