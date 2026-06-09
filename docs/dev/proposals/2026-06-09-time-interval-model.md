@@ -13,6 +13,10 @@
   code comment at `hashing.rs` labels the same fix gh#147 — a citation drift to
   reconcile). The two silent-wrong findings F1/F4 (§5) have since been
   **reproduced** (no longer leads) and are filable incidents.
+- **New here? Read the overview first:**
+  [`2026-06-09-time-and-observation-overview.md`](2026-06-09-time-and-observation-overview.md)
+  — the system-level map of how time and observations work across all three
+  proposals, with diagrams and the type designs.
 - **Sibling proposals — this is the top of a three-layer stack; read §1.5:**
   `2026-06-06-observation-system.md` (the data layer — `bind`/`BoundObs`, holes,
   missing data) and `2026-06-06-scheduling-effect-topology.md` (the temporal
@@ -77,8 +81,10 @@ layer. A reader must hold the other two, because this proposal deliberately does
 
 The seams: the **incidence-vs-prevalence** distinction is the spine's
 `TemporalKind` (this proposal uses it, does not redefine it); the **per-stream
-flow reset** is the spine's `ResetWindow` (the conditioning reset in §7.2 _is_ a
-`ResetWindow` keyed at `cond_from`, not a new mechanism); **per-stream
+flow reset** is the spine's `ResetWindow`, _placed_ at `cond_from` (a non-obs
+boundary) rather than at an obs — a placement-generalization of today's
+obs-keyed reset, not a re-key of an existing effect (the spine's reset is itself
+unbuilt, so this is genuine per-cell work, enumerated in §7.2); **per-stream
 observation windows** are the data layer's `BoundObs` cells + the spine's
 `ResetWindow` (this proposal references them, §7.1 pt 2, and does not re-own
 them). **Dependency order:** the spine's `ResetWindow`/`TemporalKind` are **0%
@@ -137,6 +143,17 @@ checked constructor argument (§7.1 pt 5). The per-stream windows Wₖ and the
 incidence flow reset are **not** fields here — they belong to the data layer and
 the spine (§1.5); `RunWindows` carries only the single global axis those derive
 against.
+
+**Caveat, stated as bluntly as the data layer states its own:**
+"unconstructible" holds only once **every backend read of `simulation.t_end` /
+`output.times.end` is routed through `RunWindows` and the direct IR-field reads
+are deleted** (today the forward backends read `model.simulation.t_end` straight
+into their configs — `util.rs:2029`, the three backend configs). Until then
+`RunWindows` is a validation pass wearing a type's clothing. This is the exact
+obligation the observation system states for `BoundObs` ("a private constructor
+guards a door next to an open window" — `MultiStreamObsModel::new` must consume
+the validated type and the raw path be privatized); the interval layer owes the
+same.
 
 ## 3. Master diagram (the clean target)
 
@@ -345,7 +362,16 @@ not a field that means five things.
    (matching `observation-system.md`'s ODE step): route conditioning through the
    shared path so each cell honors it where it can; gate only a cell that
    genuinely cannot, with the bar "show it cannot be unified before you gate
-   it." The reset mechanism is §7.2.
+   it." The reset mechanism is §7.2. **`ic_free` is orthogonal and stays.**
+   Verified: `ic_free` (`skip_first_obs_from_loglik`, honored only by IF2 and
+   the bootstrap PF) means precisely "drop the _first_ likelihood term while
+   still reweighting/resampling at it" — it does **not** warm up dynamics or
+   reset a flow accumulator. So `C` does not replace `ic_free`; they **compose**
+   (a fit can both warm up over `[t_start, cond_from)` and drop the first scored
+   term). The migration must define the `C` that reproduces today's
+   `ic_free=true` bit-for-bit on the IF2/PF cells, or declare the break and
+   re-baseline — `cond_from = t_start` reproduces today's _no-conditioning_
+   default, not the `ic_free=true` case.
 4. **Forecast horizon F is a per-run/operation parameter — _up to the covariate
    horizon_.** A `--until`/`--horizon` knob projects from the fitted posterior
    to F, reusing the fit, so you forecast further _without recompiling and
@@ -366,13 +392,19 @@ not a field that means five things.
 5. **Forcing/covariate domains Eⱼ get explicit bounds and an out-of-bounds
    policy**, checked against the integration span — uniform with the table
    mechanism that already does this. Per forcing kind: **`error` for data-driven
-   series** (`interpolated`) and **for `CubicSpline`** (cubic extrapolation past
-   the knots produces wildly wrong or negative rates — _more_ dangerous than
-   flat-lining, so it must error, not clamp); **`constant`-outside** permitted
-   explicitly for genuine step functions (`piecewise`/`Constant`), where a flat
-   tail is intended; **`Periodic`/`Fourier`/`PeriodicSpline` are exempt** (they
-   wrap by construction, there is no domain to exceed). F2 becomes loud (or an
-   explicit opt-in for the step kinds).
+   series** (`interpolated`) and **for `CubicSpline`** — note both currently
+   _clamp flat_ at the last knot (`compiled_model.rs:100`, "Clamps to boundary
+   values"), the **same** silent-extrapolation hazard as `interpolated`; they
+   error for that reason, not because a polynomial blows up past the knots (it
+   does not — an earlier draft of this point mis-stated the mechanism).
+   **`constant`-outside** is permitted explicitly only for genuine step
+   functions (`piecewise`/`Constant`), where a held level past the domain is the
+   intended semantics; **`Periodic`/`Fourier`/`PeriodicSpline` are exempt**
+   (they wrap by construction, there is no domain to exceed). Note also that
+   scheduled campaigns (SIAs) are **`interventions`**, not forcings — they fire
+   `transfer()` `at [dates]` and simply do not fire past them, so this
+   forcing-OOB policy never touches them. F2 becomes loud (or an explicit opt-in
+   for the step kinds).
 6. **One reconciliation pass over the time axis.** Every window is validated
    against D in a single place, every mismatch is a loud diagnostic, and the
    behavior is identical across backends. F3, F4, F5 become uniform and
@@ -412,12 +444,13 @@ symmetric partner, and the whole window routed through the capability gate.
 
 ## 8. Operations — which intervals each reads
 
-| Operation                  | Integration span D                                   | Conditions over | Forecast | Forcing constraint |
-| -------------------------- | ---------------------------------------------------- | --------------- | -------- | ------------------ |
-| **simulate** (forward)     | `[t_start, out_end or --until]`                      | —               | optional | Eⱼ ⊇ D             |
-| **simulate --draws** (PPC) | same as the fit's D, optionally + F                  | —               | optional | Eⱼ ⊇ D             |
-| **fit**                    | `[t_start, max_k Wₖ.end]` (burn-in start → last obs) | C ∩ Wₖ          | no       | Eⱼ ⊇ D             |
-| **forecast**               | `[last data, F]`, continuing the posterior state     | none            | yes      | Eⱼ ⊇ [.., F]       |
+| Operation                   | Integration span D                                              | Conditions over | Forecast | Forcing constraint |
+| --------------------------- | --------------------------------------------------------------- | --------------- | -------- | ------------------ |
+| **simulate** (forward)      | `[t_start, out_end or --until]`                                 | —               | optional | Eⱼ ⊇ D             |
+| **simulate --draws** (PPC)  | same as the fit's D, optionally + F                             | —               | optional | Eⱼ ⊇ D             |
+| **fit**                     | `[t_start, max_k Wₖ.end]` (burn-in start → last obs)            | C ∩ Wₖ          | no       | Eⱼ ⊇ D             |
+| **forecast** (PGAS)         | `[last data, F]` — continue from the stored latent end-state    | none            | yes      | Eⱼ ⊇ [.., F]       |
+| **forecast** (MLE: IF2/ODE) | `[t_start, F]` — no stored end-state, so re-filter then project | none            | yes      | Eⱼ ⊇ [.., F]       |
 
 Placement of the intervals — the resolution of the model-vs-fit question:
 

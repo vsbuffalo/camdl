@@ -11,6 +11,12 @@ issue: gh#171, gh#172, gh#98, gh#134
 
 # Observation system
 
+> **New here?** Read
+> [`2026-06-09-time-and-observation-overview.md`](2026-06-09-time-and-observation-overview.md)
+> first — the system-level map of how time and observations work across all
+> three proposals (data layer, temporal spine, interval model), with diagrams
+> and the type designs. This document is the data-layer detail.
+
 ## Scope: the data layer, on top of the timeline spine
 
 The observation surface splits into two layers that were previously entangled,
@@ -126,17 +132,23 @@ mod obsdata {
 
     // ── the report: errors are VALUES, not control flow ──
     pub enum Severity { Error, Warn, Info }
-    pub struct Finding { kind: BindIssue, stream: String, detail: String, count: usize, severity: Severity }
+    pub struct Finding { kind: BindIssue, loc: FindingLoc, detail: BindIssueDetail, count: usize }
+    struct FindingLoc { stream: String, stratum: Option<String>, row: Option<usize>, time: Option<f64> }
+    // severity is DERIVED, never stored: fixed by `kind` where the kind fixes it
+    // (ReservedNameCollision ⇒ Error), policy-dependent only for Hole/LeftoverColumn.
+    impl Finding { fn severity(&self, policy: &BindPolicy) -> Severity { /* (kind, policy) */ } }
     pub enum BindIssue {
         LeftoverColumn, LeftoverStratum, DuplicateColumn, ReservedNameCollision,
         OffGridInterval, OffGridInstant, Collision, Duplicate, CoarserThanModel,
         Hole, RejectedValue, CountExceedsDenom, UnparseableDate, InconsistentTimeColumn,
     }
     pub struct BindReport { findings: Vec<Finding> }
-    impl BindReport { fn verdict(&self) -> Severity { /* max over findings */ } }  // DERIVED, never stored
+    impl BindReport { fn verdict(&self, p: &BindPolicy) -> Severity { /* max over findings */ } }  // DERIVED
 
+    // A FATAL bind has no BoundObs — an invalid one must not exist downstream.
+    // Warn/Info findings ride alongside good data; Error findings yield Err.
     pub fn bind(model: &Model, rows: Vec<LongRow>, dt: f64, cal: &CalendarCtx, policy: &BindPolicy)
-        -> (BoundObs, BindReport);   // never panics, never exits — errors are VALUES (gh#181)
+        -> Result<(BoundObs, BindReport /* warn+info only */), BindReport>;   // errors are VALUES (gh#181)
 }
 ```
 
@@ -320,14 +332,14 @@ own treatment.
 `ResetWindow` effects the topology work introduces. The mapping is mechanical,
 and it is the single place the data layer and the temporal layer connect:
 
-| `BoundObs`               | becomes, in the runtime                                                                                                    |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| `times` (the union axis) | `Schedule::with_obs(times)` — the obs boundaries every driver steps to (Snap or Exact)                                     |
-| each `StreamCells`       | one `Observe` effect (`Stage::Observe`, read-only `&State`)                                                                |
-| `StreamCells.kind`       | the `Observe`'s `TemporalKind` → its `StreamProjection` (Interval→`FlowSum`; Instant→`IntCompSum`/`Expr`)                  |
-| each `Interval` stream   | one `ResetWindow{ flow_indices }` (`Stage::Reset`) keyed to _that_ stream's flows                                          |
-| `cells[k] = Some(v)`     | a scored observation for that stream at `obs_idx = k`                                                                      |
-| `cells[k] = None` (hole) | that stream contributes **no term** to the joint log-likelihood at `obs_idx = k` — skipped, not scored as an observed zero |
+| `BoundObs`               | becomes, in the runtime                                                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `times` (the union axis) | `Schedule::with_obs(times)` — the obs boundaries every driver steps to (Snap or Exact)                                                      |
+| each `StreamCells`       | one `Observe` effect (`Stage::Observe`, read-only `&State`)                                                                                 |
+| `StreamCells.kind`       | the `Observe`'s `TemporalKind` → its `StreamProjection` (Interval→`FlowSum`; Instant→`IntCompSum`/`Expr`)                                   |
+| each `Interval` stream   | one accumulator reset keyed per-`(observer, flow)`, firing on _that stream's cadence_ (not value presence) — `Stage::Reset`                 |
+| `cells[k] = Some(v)`     | a scored observation for that stream at `obs_idx = k`                                                                                       |
+| `cells[k] = None` (hole) | **no likelihood term** at `obs_idx = k` (not an observed zero) — but if `k` is a scheduled cadence point, the reset still fires (fixed-bin) |
 
 That last row is the entire correctness point, and it has three subtleties worth
 pinning so "free marginalization" is actually free.
@@ -340,16 +352,39 @@ over a union axis can — _provided_ an absent row binds to `None` and never to
 `Scalar(0.0)`, which the `RawValue::Missing` vs `Num(0.0)` split enforces at
 parse.
 
-**A hole suppresses the term _and_ the reset.** For an `Interval` (incidence)
-stream the per-stream `ResetWindow` must fire at that stream's _present_ cells
-only: a hole suppresses both the likelihood term and the accumulator reset, so
-the flow keeps accumulating across the hole and the integrated incidence covers
-the true open interval to the next _present_ observation. The reset is keyed to
-the cell's presence, not to the union time. This is what makes a sparse interval
-stream correct — a weekly-cases observation no longer truncates a monthly-deaths
-window (the global-reset corruption the topology `M3` fix removes). Skipping the
-term but still resetting at the union time would truncate the window and
-under-count: the same M3 bug, per-stream.
+**A missing value suppresses the score, not the reset — incidence is fixed-bin
+(the pomp precedent).** An incidence (`Interval`) accumulator resets on the
+stream's **observation cadence** (its scheduled reporting boundaries), _not_ on
+value presence: a scheduled week whose value is missing still resets the
+accumulator at the week boundary — it just contributes no likelihood term. So a
+missing week-2 report leaves week-3's count as week-3-only, never weeks 2+3
+merged. This is exactly pomp's accumulator-variable semantics: accumvars "set to
+zero prior to any `rprocess` computation over [each] interval between successive
+observations," and a missing/NA observation returns `dmeasure = 1` (no term)
+while its time stays in the grid so the reset still fires (pomp `accumvars`;
+King, Nguyen & Ionides 2016; the He, Ionides & King 2010 measles accumvars). The
+_cumulative-since-last-report_ reading (accumulate across a missing bin) is the
+unusual case — an opt-in a stream declares, not the default. Two consequences:
+(i) the reset key is the stream's **cadence / opportunity schedule**, so the
+data model must distinguish "scheduled time, value missing" (reset, no score)
+from "no scheduled opportunity here" (the leading burn-in gap — no reset until
+`cond_from`); and (ii) the conditioning reset at `cond_from` is the _same_
+mechanism — a reset at a scheduled-but-unscored boundary, which is precisely
+pomp's idiom of a "fictitious NA observation at an intermediate time."
+
+**Accumulators are keyed per-(observer, flow), not per-flow.** Two streams can
+read the _same_ model transition flow at different cadences (weekly cases and
+monthly cases both off the S→I flow). A flow-keyed reset would let the weekly
+reset zero the monthly accumulator — corrupting it (the canary comment at
+`particle_filter.rs:401-413` predicts exactly this, which is why heterogeneous
+schedules are rejected today). So each observer carries its own accumulator over
+its source flows (an `AccumulatorId` per `(stream, flow-set)`), reset on _that_
+stream's cadence. Scope note that bounds the blast radius: `cum_flows` feed
+**only** the observation projection — the process / path-prior transition
+density reads the per-substep flow records, not the cumulative accumulator
+(`pgas.rs:732`) — so observer-keyed accumulators are needed for correct
+_observation_ scoring and its gradient, and do **not** corrupt the transition
+sufficient statistics (a narrowing of the external review's claim).
 
 **The union axis is "times where ≥1 cell is present" — an all-hole time is not a
 stop.** Stopping the integrator is _not_ free even when the term is. Every obs
