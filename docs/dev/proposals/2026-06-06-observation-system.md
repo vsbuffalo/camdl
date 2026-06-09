@@ -62,18 +62,32 @@ needs.
 
 A data point that fails to reach scoring — silently — is a wrong likelihood,
 hence a wrong posterior. The bind exists to make every malformed input a _named,
-located_ outcome. Three residual gaps motivate it:
+located_ outcome. Four residual gaps motivate it:
 
-- **NaN/inf are unguarded on the obs value path.** `pfilter.rs:669,699` parse
-  values with bare `parse::<f64>()`, which accepts `"NaN"`/`"inf"`; nothing
-  checks `is_finite` before the value reaches the log-pmf.
-- **Loading is scattered and duplicated.** The
-  `--data → per-stream series → MultiStreamObsModel` pipeline is re-implemented
-  in `pfilter.rs`, `profile.rs`, `fit/runner.rs`, and `survey.rs` — each
-  resolves `--data`, builds its own per-stream series, replicates the
-  shared-grid check (≥5 sites), and canonicalizes
-  `observations = per_stream_obs[0]`. That duplication is where silent drops and
-  the homogeneity asserts live.
+- **Value columns are bound _positionally_, not by name — today.** This is the
+  most dangerous gap, and it means the "bind by name" guarantee below is a thing
+  we must _build_, not a thing the loader already does. In the single-stream
+  case (the common one) `pfilter.rs` tries the named column, then falls back
+  twice to position: an inner 2-column fallback (`cols.len() == 2 ⇒ Some(1)`,
+  `pfilter.rs:671-675`) and an outer `.or_else(|_| load_data_tsv(...))`
+  (`pfilter.rs:147-149`) that blindly takes `fields[1]`. So a typo'd,
+  wrong-cased, or trailing-spaced value header (`Prevalence`, `prevalence`,
+  `wrongname`) — or even a 3-column file with _no_ matching header at all —
+  silently binds the second column and produces a quietly-wrong-but-finite
+  likelihood. The bind must **delete both positional fallbacks**; until it does,
+  the by-name guarantee is aspirational.
+- **NaN/inf are unguarded on the obs value path.** `pfilter.rs:692,722` parse
+  values with bare `parse::<f64>()`, which accepts `"NaN"`/`"inf"`/`"infinity"`;
+  nothing checks `is_finite` before the value reaches the log-pmf.
+- **Leftover columns and duplicate headers are silently dropped — today.** The
+  loader finds the _one_ named column and never scans for unmatched headers, so
+  a typo'd second stream (`prevalance` beside `prevalence`) or a duplicate
+  header (two `prevalence` columns) simply vanishes with no finding. The
+  `--data → per-stream series → MultiStreamObsModel` pipeline is also
+  re-implemented across `pfilter.rs`, `profile.rs`, `fit/runner.rs`, and
+  `survey.rs` (≥5 sites), each replicating the shared-grid check and
+  canonicalizing `observations = per_stream_obs[0]`. That scatter is where the
+  silent drops and the homogeneity asserts live.
 - **Holes cannot be expressed.** Every stream shares one dense `obs_times`, so
   sparse/multi-cadence surveillance (`gh#171`) is rejected, not represented.
 
@@ -91,7 +105,8 @@ seam a single, typed input.
 ```rust
 mod obsdata {
     // ── input: one untyped row per PRESENT observation ──
-    struct LongRow { stream: String, stratum: Option<String>, when: RawTime, value: RawValue }
+    struct LongRow { stream: String, stratum: Option<String>, when: RawTime,
+                     value: RawValue, denom: Option<RawValue> }  // denom: only k-of-n (Counted) streams
     enum RawTime  { Offset(f64), Date(String) }      // resolved via ir::caltime + model origin
     enum RawValue { Num(f64), Missing, Unparseable(String) }
 
@@ -113,9 +128,9 @@ mod obsdata {
     pub enum Severity { Error, Warn, Info }
     pub struct Finding { kind: BindIssue, stream: String, detail: String, count: usize, severity: Severity }
     pub enum BindIssue {
-        LeftoverColumn, LeftoverStratum, OffGridInterval, OffGridInstant,
-        Collision, Duplicate, CoarserThanModel, Hole, RejectedValue,
-        UnparseableDate, InconsistentTimeColumn,
+        LeftoverColumn, LeftoverStratum, DuplicateColumn, ReservedNameCollision,
+        OffGridInterval, OffGridInstant, Collision, Duplicate, CoarserThanModel,
+        Hole, RejectedValue, CountExceedsDenom, UnparseableDate, InconsistentTimeColumn,
     }
     pub struct BindReport { findings: Vec<Finding>, verdict: Severity }
 
@@ -124,10 +139,41 @@ mod obsdata {
 }
 ```
 
-`TemporalKind` is **not** declared here — it is imported from the topology work,
-where it is a runtime type carried on the `Observe` effect. The loader _chooses_
-the variant from the stream's projection; the runtime _enforces_ its semantics.
-One type, two responsibilities, no duplicate definition.
+`TemporalKind` is **not** declared here — it is a runtime type carried on the
+`Observe` effect. The loader _chooses_ the variant from the stream's projection;
+the runtime _enforces_ its semantics. One type, two responsibilities, no
+duplicate definition. **Sequencing consequence (do not gloss over it):**
+`TemporalKind` does not exist in the tree yet (it is the topology work's, also
+unbuilt), and `StreamCells` cannot be _typed_ without it — so building
+`BoundObs` (migration step 2) is coupled to the topology from step 2, not merely
+the scoring change in step 3. Either the topology defines `TemporalKind` first,
+or the data layer defines it and the topology imports it (inverting the stated
+dependency). That ordering must be decided before either side starts; §Migration
+pins it.
+
+**The private constructor only helps if scoring consumes `BoundObs`.** Today the
+likelihood does not read `BoundObs` — it reads `MultiStreamObsModel`, built by a
+**public** `MultiStreamObsModel::new(Vec<StreamSpec>)` whose `StreamSpec` has a
+`pub observations: Vec<f64>` and does no finiteness check. So a private
+`BoundObs` ctor guards a door next to an open window: any of the five load sites
+(or a sixth added later) can build a `StreamSpec { observations: vec![NaN] }`
+and call `new` without ever touching `bind`. The invariant is real only if
+**`new` is changed to take a `BoundObs`** and the raw `StreamSpec`/`new` path is
+privatized — that is part of this work, not an assumption.
+
+**`Counted` binds _two_ named columns, because a denominator is a second
+relation over the same key.** A `k`-of-`n` survey datum is genuinely a join —
+numerator and denominator are two series sharing `(stream, time)` — which is why
+`LongRow` carries an optional `denom`: a `Counted` stream binds both its value
+column and a declared denominator column (both by name; a long-format file
+carries `denom` per row, a wide file pairs `slide_pos`/`slide_examined`). `bind`
+assembles `ObsCell::Counted { value, denom }` from the pair and enforces two
+rules at load: **`value ≤ denom`** (a transposed `positive,examined` file
+otherwise scores finite-but-wrong, surfacing only as a degenerate `-inf` filter
+— so `value > denom` is a located `CountExceedsDenom` error), and **a per-cell
+`denom` and a model `n: Expr` are mutually exclusive** (both present ⇒ error, so
+the denominator has exactly one source). The fixed-`n: Expr` path stays the
+default when no `denom` column is bound.
 
 ## The bind as a cardinality map
 
@@ -143,9 +189,20 @@ with a defined resolution and a severity that splits by _direction_:
 | 0:1                    | cell with no data — a hole                   | `None` cell; `Hole` → **Info** (sparse) / **Warn** (stream declared dense)                     |
 | 1:0                    | data with no cell — a leftover               | `LeftoverColumn`/`LeftoverStratum` → **Error**; benign metadata column → **Info**              |
 
-Data-has-extra (`LeftoverColumn`) defaults to Info (real files carry
-`population`, `notes`); model-cell-unfilled-when-dense and stratum-mismatch
-default to Error.
+**Leftover columns default to `Error`, not `Info` — a typo'd stream name is the
+common case and must be loud.** Only an exact match against a small metadata
+allowlist (`population`, `notes`, `source`) downgrades to `Info`; a header
+within edit-distance 1 of a real stream/stratum name (`prevalance` for
+`prevalence`, `case` for `cases`) is a _louder_ `Error` with a "did you mean
+`prevalence`?" hint — because silently dropping a near-miss is exactly the
+unscored-stream bug the bind exists to kill. Two more departures the map must
+name, since neither fits the 1:0/0:1 rows: a **duplicate column header** (two
+`prevalence` columns, where a naive `position()` silently takes the first) is a
+`DuplicateColumn` → **Error**; and a **stream or stratum named `time`** that
+collides with the reserved time header is a `ReservedNameCollision` → **Error**
+(the time column is `fields[0]` unconditionally, so the collision must be
+rejected at declare/bind, never silently resolved one way).
+Model-cell-unfilled-when-dense and stratum-mismatch remain `Error`.
 
 ## Binding and typing columns
 
@@ -166,9 +223,14 @@ schema, and the file is bound _into_ it.
   `t` must not have its case counts mistaken for timestamps because they happen
   to be small integers.
 - A header that matches a model **stream** name _is_ that stream; a header that
-  matches a **stratum** dimension _is_ that stratum. (The existing column-named
-  multi-stream loader already works this way — every column must be named,
-  nothing is positional.)
+  matches a **stratum** dimension _is_ that stratum. The multi-stream
+  column-named loader already does this — but the _single-stream_ path does
+  **not**: it falls back to positional binding (the G1 gap above), so
+  establishing this guarantee means **deleting those two fallbacks**, not
+  inheriting an existing behaviour. Matching is also exact today (no trim, no
+  case-fold), so `prevalence` and `Prevalence` miss and then bind positionally —
+  the bind must either normalize the header or treat the near-miss as the
+  `Error`-with-hint above, never fall through to position.
 - A header that matches **nothing** is a located `LeftoverColumn` finding —
   surfaced with the column name and a hint listing the model's known stream and
   stratum names. It is `Info` if it looks like benign metadata (`population`,
@@ -179,8 +241,10 @@ The failure mode this rules out is the dangerous one: a content heuristic that
 silently routes the wrong column into the likelihood. With binding-by-name, "the
 loader couldn't tell what this column was" has a definite outcome — it says so,
 names the column, and lists what it expected — rather than guessing and
-producing a quietly-wrong posterior. There is no code path in which a
-mis-identified column reaches scoring.
+producing a quietly-wrong posterior. Once the two positional fallbacks are
+removed, there is no code path in which a mis-identified column reaches scoring;
+until then, the single-stream path is the standing violation this proposal
+closes.
 
 ### Time-cell typing is reused, not reinvented — and has one known gap
 
@@ -215,7 +279,7 @@ so we name it rather than assume it away.
 ### Value-cell typing is the hardening this proposal actually adds
 
 `caltime_load` is time-only; the observation _value_ cells are, today, parsed
-with a bare `parse::<f64>()` (`pfilter.rs:669,699`) that silently accepts
+with a bare `parse::<f64>()` (`pfilter.rs:692,722`) that silently accepts
 `"NaN"` and `"inf"` and has no located error for a non-numeric value. This is
 the real robustness hole, and it is on the value path, not the date path. The
 `RawValue { Num | Missing | Unparseable }` type plus a finiteness guard closes
@@ -242,13 +306,40 @@ and it is the single place the data layer and the temporal layer connect:
 | `cells[k] = Some(v)`     | a scored observation for that stream at `obs_idx = k`                                                                      |
 | `cells[k] = None` (hole) | that stream contributes **no term** to the joint log-likelihood at `obs_idx = k` — skipped, not scored as an observed zero |
 
-That last row is the entire correctness point: a hole is the _absence of a term
-in the sum_, not an observed value of zero. The homogeneous path cannot express
-it because every stream shares one dense `obs_times`; `Option` cells over a
-union axis can. And the per-stream `ResetWindow` is what makes a _sparse_
-interval stream correct: its flow accumulator is zeroed only at _its own_ obs
-times, so a weekly-cases observation no longer truncates a monthly-deaths window
-(the global-reset corruption the topology work's `M3` fix removes).
+That last row is the entire correctness point, and it has three subtleties worth
+pinning so "free marginalization" is actually free.
+
+**A hole omits the term, it does not score a zero.** For a state-space filter,
+omitting the factor _is_ marginalizing the unobserved value (∫ p(yₖ|xₖ) dyₖ =
+1), valid under MAR — see _Missing data_ above. The homogeneous path cannot
+express this because every stream shares one dense `obs_times`; `Option` cells
+over a union axis can — _provided_ an absent row binds to `None` and never to
+`Scalar(0.0)`, which the `RawValue::Missing` vs `Num(0.0)` split enforces at
+parse.
+
+**A hole suppresses the term _and_ the reset.** For an `Interval` (incidence)
+stream the per-stream `ResetWindow` must fire at that stream's _present_ cells
+only: a hole suppresses both the likelihood term and the accumulator reset, so
+the flow keeps accumulating across the hole and the integrated incidence covers
+the true open interval to the next _present_ observation. The reset is keyed to
+the cell's presence, not to the union time. This is what makes a sparse interval
+stream correct — a weekly-cases observation no longer truncates a monthly-deaths
+window (the global-reset corruption the topology `M3` fix removes). Skipping the
+term but still resetting at the union time would truncate the window and
+under-count: the same M3 bug, per-stream.
+
+**The union axis is "times where ≥1 cell is present" — an all-hole time is not a
+stop.** Stopping the integrator is _not_ free even when the term is. Every obs
+boundary the filter stops at consumes an RNG draw in the (unconditional)
+resample — shifting the paired-seed CRN order — runs the reset stage, and under
+`Exact` inserts an integrator boundary that changes the rate-freezing
+granularity for the chain-binomial / tau-leap kernels. So an all-hole union time
+would perturb the trajectory law while scoring nothing; `times` must exclude it
+_by construction_. The deeper version — that adding a stream's off-grid times
+inserts stops the other streams did not have, so a multi-stream fit's per-stream
+trajectory is not invariant to which other streams are present — is the temporal
+layer's Layer-4 caveat to resolve; the data layer's narrower, hard obligation is
+to never emit an all-hole stop and to define `times` as the present-cell union.
 
 The flow, end to end:
 
@@ -314,9 +405,25 @@ automatic. What you must _not_ do is score the hole as an observed zero: a
 `None` cell and an observed `0` are different data and must produce different
 likelihoods (this is the load-bearing `hole ≠ zero` test). The latent state
 still evolves through the hole, driven by the dynamics and by whatever _other_
-streams _did_ observe at that time. This is valid under missing-at-random (MAR):
-the mere fact that a measurement is absent carries no information about its
-value beyond what the model already implies.
+streams _did_ observe at that time.
+
+This is valid under **missing-at-random (MAR)** — and MAR is an _assumption the
+user is accepting_, not a fact about the world, which the proposal must say out
+loud rather than bury. It holds when absence is uninformative about the value
+(the serosurvey simply wasn't run that week). It _fails_ in exactly the case the
+target user hits most: reporting that breaks down _because_ counts are high (a
+surveillance system overwhelmed at the epidemic peak), so holes cluster at the
+peaks and dropping their factors biases the fit toward _under_-estimating the
+peak — silently. Critically, this informative-absence case arrives as a **hole**
+(an absent row), not as a censoring mark, so there is nothing to
+`RejectedValue`; the blanket MAR treatment would absorb it without a word. Per
+the repo's no-silent-wrong-answers standard the bind must therefore **surface
+the MAR assumption rather than assert it**: when a stream's holes are
+distributed non-uniformly in a way a cheap runs-test flags (or simply whenever a
+stream has holes at all), emit a `Warn`/`Info` finding — "stream `cases` has N
+holes; the fit assumes they are missing-at-random." It does not (cannot) _solve_
+non-MAR missingness — modelling the missingness mechanism is out of scope
+(case 3) — but it must not let the user mistake an assumption for a guarantee.
 
 So to your question — "do we sample over it?" — for the common case, no, and we
 do not need to: the filter marginalizes it by construction, and the
@@ -338,16 +445,21 @@ can be added as a flag on the simulate/PPC path without touching `bind`.
 
 ### 3. Informative or censored missingness — explicitly out of scope, and why
 
-The hard case is when absence is _not_ random, or when a value is only partially
-known: a count censored at a detection limit (`"<5"`, exact value unknown), an
-interval-valued report ("between 100 and 200"), below-threshold suppression for
-privacy, or — the genuinely informative case — reporting that _fails because
-counts are high_ (the surveillance system is overwhelmed at a peak), so a hole
-is itself evidence _for_ a large latent value. None of these is MAR, and none is
-handled by dropping the factor. A censored observation contributes ∫_region p(y
-| xₖ) dy — a real likelihood term integrated over the censoring region, not one
-— and an informative-missingness model needs an explicit mechanism p(observed |
-xₖ) multiplied in.
+The hard cases come in two flavours, and it is worth keeping them distinct
+because they arrive through different doors:
+
+- **A value that is only partially known** — censored at a detection limit
+  (`"<5"`), interval-valued ("between 100 and 200"), or below-threshold
+  suppressed for privacy. This arrives as a **non-numeric cell** (a mark), and
+  the correct likelihood is ∫_region p(yₖ | xₖ) dy — a real term integrated over
+  the censoring region, not one.
+- **Informative _absence_** — reporting that _fails because counts are high_, so
+  a hole is itself evidence _for_ a large latent value. This arrives as a
+  **hole**, not a mark, and needs an explicit missingness mechanism p(observed |
+  xₖ) multiplied in. Case 1 above _surfaces_ this (the MAR-assumption finding)
+  but does not _model_ it.
+
+Neither is MAR, and neither is solved by dropping the factor.
 
 This proposal **does not** handle these, and that is a deliberate scope line,
 not an oversight. Censoring/truncation is a _new likelihood kind_ (the obs model
@@ -473,9 +585,16 @@ enum Objective {
 `BoundObs` gives these methods their input for free: the observed summary is
 computed once from `BoundObs`; the simulated summary is computed from each
 `Trajectory` projected through the _same_ `StreamProjection`, so the two sides
-are apples-to-apples by construction, and holes are handled by the summary
-itself ("mean over present cells"). The honest constraint: a summary objective
-is **incompatible with PGAS/NUTS** (no per-time conditional density, no latent
+are apples-to-apples — _provided_ the **present-cell mask is applied to both
+sides**. For location summaries (mean, peak height) holes are handled by the
+summary itself ("mean over present cells"); but for summaries whose sampling
+distribution depends on _which_ cells are present (a variance or autocorrelation
+probe has a different synthetic-likelihood covariance per present-cell mask),
+the simulated series must be summarized over the **same** present-cell mask as
+the observed, or the two are no longer comparable. The mask is per-present-cell,
+not per-stream, so it is an extra obligation on the `SeriesScorer`, not free
+from the `StreamProjection` alone. The honest constraint: a summary objective is
+**incompatible with PGAS/NUTS** (no per-time conditional density, no latent
 path, no gradient) — it composes with the gradient-free outer loops (MH-over-θ,
 derivative-free optimization). This proposal does not implement summary scoring;
 it only keeps the inference entry points reaching their objective behind that
@@ -484,21 +603,53 @@ objective_, not a new data path.
 
 ## Migration — layered on the topology stages
 
-The data layer is independent of the timeline; only step 3 waits on the topology
-work's per-stream `ResetWindow`.
+The data layer is _mostly_ independent of the timeline, but two couplings are
+real and must be sequenced (an earlier "only step 3 waits" framing understated
+them): **(i)** `StreamCells.kind: TemporalKind` cannot be typed until
+`TemporalKind` exists, and it is the topology's, **not yet in the tree** — so
+step 2 needs a decision: the topology defines `TemporalKind` first, or the data
+layer defines it and the topology imports it (inverting the stated direction).
+**(ii)** the per-stream `ResetWindow` step 3 wires is also **0% built today**
+(the topology proposal is a design map; its superseding v2 is unwritten), so
+step 3 is gated on unwritten code, not a shipped artifact. Steps 1 and 4–6 are
+genuinely parallelizable; 2 and 3 are gated as noted.
 
-1. **(light, parallel with topology)** `LongRow` parse (long + wide sugar) over
-   `caltime`; the NaN/finiteness guard at `pfilter.rs:669/699`. No behaviour
-   change.
-2. **(light)** `bind` + `BindReport` + `BoundObs`, reproducing today's
-   homogeneous/dense semantics so goldens do not move; the report is additive.
-   Route the five scattered load sites through it (the unification).
-3. **(HEAVY — the correctness tier; gated on the topology `ResetWindow`)** relax
-   the ≥5 shared-grid assertions to the union axis + `Option`-cell scoring at
-   the single seam `log_likelihood_from_flows_and_counts`
-   (`multi_stream_obs.rs`), **wired to** the per-stream `ResetWindow` for
-   `Interval` streams. FD/likelihood parity must hold on the dense case; the
-   sparse-interval reset gets its own window-correctness test.
+1. **(light, parallel)** `LongRow` parse (long + wide sugar) over `caltime`; the
+   NaN/finiteness guard at `pfilter.rs:692/722`; and **delete the two positional
+   value-column fallbacks** (`pfilter.rs:147-149` outer
+   `.or_else(load_data_tsv)`, `:671-675` inner 2-column fallback) so a
+   typo'd/wrong-cased header is a located finding, not a silent positional bind
+   (G1). The fallback deletion changes behaviour for _malformed_ inputs (they
+   now error) — flag it in the changelog; well-formed inputs are unchanged.
+2. **(light, but coupled to `TemporalKind` — see (i))** `bind` + `BindReport` +
+   `BoundObs`, reproducing today's homogeneous/dense semantics so goldens do not
+   move; the report is additive. Route the five scattered load sites through it,
+   and **change `MultiStreamObsModel::new` to consume a `BoundObs`**
+   (privatizing the raw `Vec<StreamSpec>` path) so the private-ctor invariant
+   actually holds.
+3. **(HEAVY — the correctness tier; gated on the unbuilt topology
+   `ResetWindow`)** relax the ≥5 shared-grid assertions to the **present-cell
+   union axis** (`times` = times with ≥1 present cell; all-hole times excluded
+   by construction) + `Option`-cell scoring at the single seam
+   `log_likelihood_from_flows_and_counts` (`multi_stream_obs.rs`), **wired to**
+   the per-stream `ResetWindow` (fires at present `Interval` cells only). The
+   relaxation also un-pins the gh#188 strictly-increasing guard, which today
+   runs on stream 0 only _because_ all streams are forced equal — so **each
+   per-stream cell vector now needs its own monotonicity validation**, plus the
+   union axis needs the topology's sub-`dt` collision guard. FD/likelihood
+   parity must hold on the dense case; the sparse-interval reset gets its own
+   window-correctness test. 3b. **(correctness gate — cross-cutting with the
+   interval model's F1)** the ODE-inference scorer `compute_ode_loglik`
+   (`runner.rs:519`) does **not** consume `BoundObs` or the union axis — it does
+   its own exact-equality obs-to-snapshot matching, its own global flow reset,
+   and ignores `ic_free`. When step 3 relaxes to a union axis with holes, that
+   path hard-errors on a hole's `obs_idx` or on a present cell with no snapshot.
+   So ODE-inference — and any cell that does not consume `BoundObs` — must be
+   routed through a **capability gate** that hard-errors on
+   sparse/per-stream/hole obs (and on conditioning) with a message naming the
+   limitation, never silently score a different object. This is the matrix rule
+   (CLAUDE.md): a cell is supported-and-tested or fails loudly. Owning the gate
+   here closes the silent-third-option the interval model flags as F1.
 4. **(small)** `ObsCell::Counted { value, denom }` through `bind` into the
    Binomial/BetaBinomial scoring path. Scipy-anchored value test; the
    fixed-`n: Expr` path unchanged when no `denom` supplied.
@@ -533,11 +684,30 @@ correctness tests:
 - **censoring mark is surfaced, not coerced**: a `"<5"` value cell becomes a
   located `RejectedValue` finding (not parsed as `5`, not dropped) — the
   loud-interim behaviour until the separate censoring-likelihood proposal lands.
-- **`Counted` denom**: scipy-anchored per-cell Binomial/BetaBinomial value test.
+- **`Counted` denom**: scipy-anchored per-cell Binomial/BetaBinomial value test;
+  plus **`value > denom` → located `CountExceedsDenom`** (a transposed
+  `positive,examined` file fails loud, not as a degenerate `-inf` filter), and
+  **per-cell `denom` + model `n: Expr` together → error** (one source only).
+- **by-name binding, no positional fallback**: a single-stream file with a
+  typo'd/wrong-cased/trailing-spaced value header, and a 3-column file with no
+  matching header, are **located findings, not silent positional binds** — the
+  regression test for the G1 fallback deletion.
+- **leftover/duplicate/reserved-name** → located: a typo'd second-stream column
+  is `LeftoverColumn` **Error** (near-miss gets the "did you mean" hint), a
+  duplicate header is `DuplicateColumn`, a stream named `time` is
+  `ReservedNameCollision` — none silently dropped.
 - **`Instant` off-grid** (annual prevalence under a daily grid) → snap + warn,
   **not** reject; **`Interval` off-grid** (window can't tile) → error. (The
   snap/exact decision itself is the topology work's `StepPolicy`; this tests the
   _policy choice per kind_.)
+- **all-hole union time is not a stop**: two streams with non-aligning cadences
+  produce no union-axis time at which both are holes — and a cases-only fit and
+  a cases+serosurvey fit produce the **same cases trajectory** on a fixed grid
+  (guards the H1 dt-stop perturbation).
+- **MAR surfaced, not asserted**: a stream with holes produces a `Warn`/`Info`
+  finding naming the MAR assumption — it is not silent.
+- **ODE-inference rejects sparse/per-stream/holes** at dispatch with a named
+  capability error (the 3b gate), rather than scoring a different object.
 - **gh#98** calendar equivalence over a date battery.
 
 ## Open questions
