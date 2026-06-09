@@ -282,6 +282,13 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let t_start = compiled.model.simulation.t_start;
     for (stream_obs, ir_obs) in per_stream_obs.iter().zip(bound_ir.iter()) {
         let times: Vec<f64> = stream_obs.iter().map(|o| o.time).collect();
+        // F4: an observation strictly before the model origin can never be
+        // propagated to — its window yields zero substeps yet it is still
+        // scored (a silent wrong answer). Reject loudly before the filter runs.
+        if let Err(e) = crate::util::check_obs_before_origin(&ir_obs.name, t_start, &times) {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
         let first_value = stream_obs.first().map(|o| o.value).unwrap_or(0.0);
         let incidence_override = ir::observation::Projection::CumulativeFlow(String::new());
         let effective_projection = if flow_name.is_some() {

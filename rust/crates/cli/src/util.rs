@@ -940,6 +940,45 @@ pub fn check_incidence_origin_window(
     ))
 }
 
+/// Reject any observation strictly before the model origin `t_start` (F4).
+///
+/// An observation dated before the model begins cannot be scored: the
+/// integrator never advances a particle to a time it has already passed, so
+/// the inference window for that obs yields zero substeps (the particle does
+/// not propagate) yet the obs is still handed to the likelihood — a silent
+/// wrong answer. (Mechanically: `Schedule::substeps` returns `None`
+/// immediately when `t >= obs_time`, and the only sim-side guard,
+/// `interval_steps`' `debug_assert!(t1 >= t0)`, is stripped in release.)
+///
+/// This is the load-bearing boundary check the time-helper docs defer to:
+/// caught once at config load, with a located message, before any stage runs.
+/// Returns `Ok(())` when every observation is at or after the origin (obs
+/// exactly AT the origin is allowed here; the degenerate first-incidence
+/// window is a separate concern handled by `check_incidence_origin_window`).
+///
+/// "Strictly before" is judged with the same 1e-9 tolerance the loaders use
+/// for obs-time comparisons, so a time a float-ULP below the origin is treated
+/// as on-origin, not as an error.
+pub fn check_obs_before_origin(
+    stream_name: &str,
+    t_start: f64,
+    obs_times: &[f64],
+) -> Result<(), String> {
+    if let Some(&t) = obs_times.iter().find(|&&t| t < t_start - 1e-9) {
+        return Err(format!(
+            "observation stream '{stream_name}': observation at t = {t} precedes \
+             the model origin t_start = {t_start}. The simulation begins at \
+             t_start, so an earlier observation can never be propagated to — its \
+             likelihood term would be scored against a particle that never \
+             advanced (a silent wrong answer). Fix the alignment: remove the \
+             pre-origin observation(s), or move the model origin earlier (set \
+             `simulate.from` ≤ {t}) so every observation falls within the run \
+             window."
+        ));
+    }
+    Ok(())
+}
+
 /// gh#134 (request 3) — `W329`: warn when the FIRST inter-observation
 /// interval is far larger than the typical observation cadence.
 ///
@@ -1222,6 +1261,54 @@ mod incidence_origin_tests {
     #[test]
     fn empty_obs_times_is_ok() {
         assert!(check_incidence_origin_window("cases", &inc(), 0.0, &[], 11.0).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod obs_before_origin_tests {
+    use super::check_obs_before_origin;
+
+    #[test]
+    fn obs_strictly_before_origin_errors_and_locates_it() {
+        // Model origin t_start = 21, obs at 0/7/14 all precede it (F4).
+        let e = check_obs_before_origin("cases", 21.0, &[0.0, 7.0, 14.0])
+            .unwrap_err();
+        assert!(e.contains("cases"), "error must name the stream: {e}");
+        // Locates the offending time and the origin.
+        assert!(e.contains('0') && e.contains("21"),
+            "error must name the offending obs time and the origin t_start: {e}");
+        // Gives an actionable fix.
+        assert!(e.contains("remove") || e.contains("simulate.from") || e.contains("origin"),
+            "error must suggest a fix: {e}");
+    }
+
+    #[test]
+    fn obs_at_origin_is_allowed() {
+        // An observation exactly at the origin is fine — the window
+        // semantics (degenerate first incidence) are handled separately by
+        // check_incidence_origin_window, not here.
+        assert!(check_obs_before_origin("cases", 21.0, &[21.0, 28.0]).is_ok());
+    }
+
+    #[test]
+    fn obs_after_origin_is_allowed() {
+        assert!(check_obs_before_origin("cases", 21.0, &[28.0, 35.0]).is_ok());
+        assert!(check_obs_before_origin("cases", 0.0, &[0.0, 7.0, 14.0]).is_ok());
+    }
+
+    #[test]
+    fn empty_obs_times_is_ok() {
+        assert!(check_obs_before_origin("cases", 21.0, &[]).is_ok());
+    }
+
+    #[test]
+    fn only_the_first_offender_need_be_within_tolerance() {
+        // A time a hair below the origin (within float tolerance) is NOT an
+        // error — it's treated as on-origin. Strictly-before means by more
+        // than the obs-time comparison tolerance used elsewhere.
+        assert!(check_obs_before_origin("cases", 21.0, &[21.0 - 1e-12, 28.0]).is_ok());
+        // ...but a clearly-earlier time is rejected.
+        assert!(check_obs_before_origin("cases", 21.0, &[20.0, 28.0]).is_err());
     }
 }
 

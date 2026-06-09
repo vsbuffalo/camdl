@@ -300,11 +300,20 @@ impl FitRunConfig {
                 &obs_model.projection, &compiled, stream_name,
             )?;
 
+            // F4: reject an observation strictly before the model origin.
+            // The integrator never propagates a particle to a time it has
+            // already passed, so the window yields zero substeps yet the obs
+            // is still scored — a silent wrong answer. Hard error at load.
             // gh#174: reject a positive incidence observation at the model
             // origin (zero-width first window → -Inf masquerading as filter
             // degeneracy). Hard error before any stage runs.
             {
                 let obs_times: Vec<f64> = obs.iter().map(|o| o.time).collect();
+                crate::util::check_obs_before_origin(
+                    stream_name,
+                    compiled.model.simulation.t_start,
+                    &obs_times,
+                )?;
                 let first_value = obs.first().map(|o| o.value).unwrap_or(0.0);
                 crate::util::check_incidence_origin_window(
                     stream_name,
