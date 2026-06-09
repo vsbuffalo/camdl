@@ -216,23 +216,37 @@ def render(repo: str, issues: list[dict], flow: dict, snaps: list[dict],
     cell = {(k, a): sum(1 for i in by_kind[k] if a in i["areas"])
             for k in KIND_ORDER for a in AREA_ORDER}
     mx = max(cell.values()) if cell else 0
+    kinds_present = [k for k in KIND_ORDER
+                     if by_kind[k] or any(cell[(k, a)] for a in AREA_ORDER)]
 
-    head = "".join(
-        f'<th><a href="{search_url(repo, a)}">{esc(a.split("/")[1])}</a></th>'
+    def short(label):
+        return esc(label.split("/")[1])
+
+    def colhead(repo_label):
+        return (f'<th><a href="{search_url(repo, repo_label)}">'
+                f'{short(repo_label)}</a></th>')
+
+    def xcell(k, a):
+        c = cell[(k, a)]
+        link = f'<a href="{search_url(repo, k, a)}">{c}</a>' if c else c
+        return f'<td style="{heat(c, mx)}">{link}</td>'
+
+    def rowhead(label, count):
+        return (f'<th class="rk"><a href="{search_url(repo, label)}">'
+                f'{short(label)}</a> <span class="ct">{count}</span></th>')
+
+    # Wide (desktop): kinds as rows, areas as columns.
+    head = "".join(colhead(a) for a in AREA_ORDER)
+    rows = "".join(
+        f'<tr>{rowhead(k, len(by_kind[k]))}'
+        + "".join(xcell(k, a) for a in AREA_ORDER) + "</tr>"
+        for k in kinds_present)
+    # Narrow (mobile): transposed — areas as rows, kinds as columns.
+    nhead = "".join(colhead(k) for k in kinds_present)
+    nrows = "".join(
+        f'<tr>{rowhead(a, len(by_area[a]))}'
+        + "".join(xcell(k, a) for k in kinds_present) + "</tr>"
         for a in AREA_ORDER)
-    rows = ""
-    for k in KIND_ORDER:
-        if not by_kind[k] and sum(cell[(k, a)] for a in AREA_ORDER) == 0:
-            continue
-        tds = ""
-        for a in AREA_ORDER:
-            c = cell[(k, a)]
-            link = f'<a href="{search_url(repo, k, a)}">{c}</a>' if c else c
-            tds += f'<td style="{heat(c, mx)}">{link}</td>'
-        kname = k.split("/")[1]
-        rows += (f'<tr><th class="rk"><a href="{search_url(repo, k)}">'
-                 f'{esc(kname)}</a> <span class="ct">{len(by_kind[k])}</span>'
-                 f'</th>{tds}</tr>')
 
     def stat(label, n, href=None):
         inner = (f'<a href="{href}">{n}</a>' if href else n)
@@ -352,7 +366,15 @@ def render(repo: str, issues: list[dict], flow: dict, snaps: list[dict],
   .flow {{ font-size: 13px; color: #57606a; margin: 8px 0 2px; }}
   .flow b {{ font-variant-numeric: tabular-nums; color: #1b1f24; }}
   .cols {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
-  @media (max-width: 720px) {{ .cols {{ grid-template-columns: 1fr; }} }}
+  .xtab.narrow {{ display: none; }}
+  @media (max-width: 720px) {{
+    .cols {{ grid-template-columns: 1fr; }}
+    .xtab.wide {{ display: none; }}
+    .xtab.narrow {{ display: table; }}
+    .xtab.narrow th, .xtab.narrow td {{ padding: 4px 4px; font-size: 12px; }}
+    .xtab.narrow th.rk {{ white-space: nowrap; }}
+    .xtab.narrow .ct {{ display: none; }}
+  }}
   .play td, .play th {{ text-align: left; }}
   code {{ background: #eef1f4; border-radius: 4px; padding: 1px 5px; font-size: 12px; }}
   footer {{ margin-top: 40px; color: #8b949e; font-size: 12px; }}
@@ -374,7 +396,8 @@ def render(repo: str, issues: list[dict], flow: dict, snaps: list[dict],
 {details("silent-wrong on the inference/sim path", blockers, open_=True)}
 
 <h2>kind &times; area</h2>
-<table><tr><th></th>{head}</tr>{rows}</table>
+<table class="xtab wide"><tr><th></th>{head}</tr>{rows}</table>
+<table class="xtab narrow"><tr><th></th>{nhead}</tr>{nrows}</table>
 
 <h2>Batch queue &mdash; s-class / small</h2>
 {details("effort/S or status/s-class", sclass, open_=True)}
