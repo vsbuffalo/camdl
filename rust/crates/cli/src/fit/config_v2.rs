@@ -1963,6 +1963,24 @@ impl FitConfigV2 {
             }
         }
 
+        // ic_free / conditioning support gate (F1). `ic_free = true` is
+        // honored only by the cells that actually drop y₁ from the
+        // accumulated loglik (if2, pfilter, plain pmmh). PGAS, the ODE-MLE
+        // optimizers, and correlated PMMH score every obs unconditionally —
+        // running ic_free on them would silently compute the UNCONDITIONAL
+        // likelihood while the banner claims conditioning. Reject loudly.
+        if self.ic_free.unwrap_or(false) {
+            for (stage_name, stage) in &self.stages {
+                let correlated =
+                    matches!(stage, Stage::PMMH { rho: Some(_), .. });
+                if let Err(msg) =
+                    super::methods::validate_ic_free(stage.method_name(), correlated)
+                {
+                    return Err(format!("stage '{}': {}", stage_name, msg));
+                }
+            }
+        }
+
         // IF2 stages require at least one iteration — zero iterations would
         // leave `iterations` empty and cause `last().unwrap()` to panic in
         // `run_if2`. Catch it here so the user gets a config error, not a crash.
@@ -4436,6 +4454,127 @@ cases = "data/cases.tsv"
         let err = config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()])
             .unwrap_err();
         assert!(err.contains("duplicate"), "must reject duplicate fit seeds: {}", err);
+    }
+
+    // ── ic_free / conditioning support gate (F1) ───────────────────────────
+    //
+    // `ic_free = true` is honored only by IF2, the bootstrap PF, and plain
+    // (uncorrelated) PMMH. PGAS, the ODE-MLE optimizers, and correlated PMMH
+    // score every obs unconditionally — running ic_free on them silently
+    // computes the unconditional likelihood. validate() must hard-error those
+    // cells; the honoring cells must still pass.
+
+    /// Model params for the ic_free fixtures (sir with beta/gamma/N0/I0).
+    fn ic_free_model_params() -> Vec<String> {
+        vec!["beta".into(), "gamma".into(), "N0".into(), "I0".into()]
+    }
+
+    #[test]
+    fn ic_free_with_if2_stage_still_validates() {
+        // Regression: IF2 honors conditioning — ic_free=true must NOT be
+        // rejected by the gate (it would break ic_free_true_with_ivp_succeeds).
+        let src = format!(
+            "ic_free = true\n{}\n[data.observations]\ncases = \"data/cases.tsv\"\n",
+            minimal_fit_stages()
+        );
+        let config = parse(&src).unwrap();
+        config
+            .validate(&ic_free_model_params())
+            .expect("ic_free=true on an IF2 stage must validate (IF2 honors conditioning)");
+    }
+
+    #[test]
+    fn ic_free_with_pgas_stage_is_rejected() {
+        let src = r#"ic_free = true
+[model]
+camdl = "models/sir.camdl"
+
+[data.observations]
+cases = "data/cases.tsv"
+
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+
+[fixed]
+N0 = 1000
+I0 = 5
+gamma = 0.1
+
+[stages.bayes]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 2
+particles = 500
+sweeps = 100
+"#;
+        let config = parse(src).unwrap();
+        let err = config
+            .validate(&ic_free_model_params())
+            .expect_err("ic_free=true on a PGAS stage must be rejected (PGAS ignores conditioning)");
+        assert!(err.contains("ic_free"), "error must name ic_free: {err}");
+        assert!(err.contains("pgas"), "error must name the offending stage's algorithm: {err}");
+    }
+
+    #[test]
+    fn ic_free_with_ode_mle_stage_is_rejected() {
+        let src = r#"ic_free = true
+[model]
+camdl = "models/sir.camdl"
+
+[data.observations]
+cases = "data/cases.tsv"
+
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+
+[fixed]
+N0 = 1000
+I0 = 5
+gamma = 0.1
+
+[stages.mle]
+algorithm = "nl-sbplx"
+backend = "ode"
+chains = 1
+"#;
+        let config = parse(src).unwrap();
+        let err = config
+            .validate(&ic_free_model_params())
+            .expect_err("ic_free=true on an ODE-MLE stage must be rejected (compute_ode_loglik ignores conditioning)");
+        assert!(err.contains("ic_free"), "error must name ic_free: {err}");
+        assert!(err.contains("nl-sbplx"), "error must name the offending algorithm: {err}");
+    }
+
+    #[test]
+    fn ic_free_with_correlated_pmmh_stage_is_rejected() {
+        let src = r#"ic_free = true
+[model]
+camdl = "models/sir.camdl"
+
+[data.observations]
+cases = "data/cases.tsv"
+
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+
+[fixed]
+N0 = 1000
+I0 = 5
+gamma = 0.1
+
+[stages.bayes]
+algorithm = "pmmh"
+backend = "chain_binomial"
+chains = 1
+particles = 500
+iterations = 100
+rho = 0.99
+"#;
+        let config = parse(src).unwrap();
+        let err = config
+            .validate(&ic_free_model_params())
+            .expect_err("ic_free=true on a correlated PMMH stage must be rejected");
+        assert!(err.contains("ic_free"), "error must name ic_free: {err}");
     }
 
     // ── per_fit_prefix layout ──────────────────────────────────────────────

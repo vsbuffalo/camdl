@@ -423,6 +423,79 @@ pub fn resolve_obs_alignment(
     }
 }
 
+/// The `(algorithm × ic_free)` support gate at the fit-dispatch seam (F1).
+///
+/// `ic_free = true` requests IC-free / conditional-likelihood inference:
+/// weight-and-resample at the first observation (pinning the initial state)
+/// but drop y₁ from the accumulated log-likelihood. This is honored only by
+/// the cells that actually skip the first increment:
+///
+///   * `if2`     — `if2.rs` guards `total_loglik` at `obs_idx == 0`.
+///   * `pfilter` — `particle_filter.rs` guards the increment at `obs_idx == 0`.
+///   * `pmmh` **without** `rho` (plain / uncorrelated) — wraps the bootstrap
+///     PF, so it inherits the guard.
+///
+/// The remaining cells score every observation unconditionally, so
+/// `ic_free = true` would *silently* compute the UNCONDITIONAL likelihood
+/// while the startup banner claims "conditioning on y₁":
+///
+///   * `pgas`                  — no conditioning field anywhere in `pgas.rs`.
+///   * `nl-sbplx` / `nl-bobyqa` — score via `runner::compute_ode_loglik`,
+///     which sums over every obs time with no skip.
+///   * `pmmh` **with** `rho` (correlated PMMH) — routes to
+///     `correlated_pf::bootstrap_filter_correlated`, which adds every
+///     increment unconditionally.
+///
+/// For those, this hard-errors at config-load time, naming the limitation
+/// and the supported cells — converting a silent wrong answer into a loud
+/// failure. `correlated` is `true` for a PMMH stage with `rho` set.
+pub fn validate_ic_free(algorithm: &str, correlated: bool) -> Result<(), String> {
+    match algorithm {
+        // Honoring cells: the first increment is dropped from the loglik.
+        "if2" | "pfilter" => Ok(()),
+        // Plain PMMH wraps the bootstrap PF (honors it); correlated PMMH
+        // routes to the correlated PF, which does not.
+        "pmmh" if !correlated => Ok(()),
+        "pmmh" => Err(
+            "ic_free = true is not supported with correlated PMMH (a `pmmh` \
+             stage with `rho` set). The correlated particle filter \
+             (correlated_pf) accumulates every observation's log-likelihood \
+             increment unconditionally, so it would silently compute the \
+             UNCONDITIONAL likelihood while reporting that it conditioned on \
+             y₁.\n\n  \
+             ic_free is honored by: if2, pfilter, and plain pmmh (no rho).\n  \
+             Either unset `rho` on this stage (plain PMMH honors ic_free), or \
+             remove `ic_free = true`."
+                .into(),
+        ),
+        "pgas" => Err(
+            "ic_free = true is not supported with the `pgas` algorithm. PGAS \
+             accumulates every observation's log-likelihood increment \
+             unconditionally (no conditioning field exists in its CSMC / \
+             ancestor-sampling path), so it would silently compute the \
+             UNCONDITIONAL likelihood while reporting that it conditioned on \
+             y₁.\n\n  \
+             ic_free is honored by: if2, pfilter, and plain pmmh (no rho).\n  \
+             Use one of those for IC-free inference, or remove \
+             `ic_free = true` from the fit."
+                .into(),
+        ),
+        "nl-sbplx" | "nl-bobyqa" => Err(format!(
+            "ic_free = true is not supported with the `{algorithm}` algorithm \
+             (ODE-MLE). The deterministic likelihood (compute_ode_loglik) sums \
+             over every observation time with no first-observation skip, so it \
+             would silently compute the UNCONDITIONAL likelihood while \
+             reporting that it conditioned on y₁.\n\n  \
+             ic_free is honored by: if2, pfilter, and plain pmmh (no rho).\n  \
+             Use one of those for IC-free inference, or remove \
+             `ic_free = true` from the fit."
+        )),
+        other => Err(format!(
+            "validate_ic_free: unknown algorithm '{other}'"
+        )),
+    }
+}
+
 pub fn check_model_capabilities(
     backend: &str,
     compiled: &sim::CompiledModel,
@@ -633,6 +706,64 @@ mod tests {
         let err = resolve_obs_alignment("pgas", false, Some(Exact), true).unwrap_err();
         assert!(err.contains("not yet implemented"), "should name exact-PGAS as unimplemented: {err}");
         assert!(err.contains("if2") || err.contains("snap"), "should suggest a fix: {err}");
+    }
+
+    // ── ic_free / conditioning support gate (F1) ───────────────────────────
+    //
+    // `ic_free = true` (IC-free / conditional likelihood) is honored only by
+    // the cells that actually drop y₁ from the accumulated loglik: IF2, the
+    // bootstrap particle filter (`pfilter`), and plain PMMH (uncorrelated —
+    // it wraps the bootstrap PF). PGAS, the ODE-MLE optimizers
+    // (`nl-sbplx` / `nl-bobyqa`, via `compute_ode_loglik`), and correlated
+    // PMMH (rho set, via `bootstrap_filter_correlated`) score every
+    // observation unconditionally — running them with `ic_free = true`
+    // silently computes the UNCONDITIONAL likelihood while the banner claims
+    // conditioning. The gate hard-errors those cells.
+
+    #[test]
+    fn ic_free_honored_cells_succeed() {
+        // IF2 and the bootstrap PF honor conditioning — must pass.
+        assert!(validate_ic_free("if2", false).is_ok());
+        assert!(validate_ic_free("pfilter", false).is_ok());
+        // Plain PMMH (no rho / uncorrelated) wraps the bootstrap PF — honors it.
+        assert!(validate_ic_free("pmmh", false).is_ok());
+    }
+
+    #[test]
+    fn ic_free_pgas_is_hard_error_naming_the_limitation() {
+        let err = validate_ic_free("pgas", false).unwrap_err();
+        assert!(err.contains("ic_free"), "must name ic_free: {err}");
+        assert!(err.contains("pgas"), "must name the offending algorithm: {err}");
+        // Points the user at a supported alternative.
+        assert!(
+            err.contains("if2") || err.contains("pfilter"),
+            "must name a supported cell: {err}"
+        );
+    }
+
+    #[test]
+    fn ic_free_ode_mle_is_hard_error() {
+        // Both NLopt deterministic optimizers score every obs via
+        // compute_ode_loglik — conditioning is silently ignored.
+        for algo in ["nl-sbplx", "nl-bobyqa"] {
+            let err = validate_ic_free(algo, false).unwrap_err();
+            assert!(err.contains("ic_free"), "{algo}: must name ic_free: {err}");
+            assert!(err.contains(algo), "{algo}: must name the algorithm: {err}");
+        }
+    }
+
+    #[test]
+    fn ic_free_correlated_pmmh_is_hard_error_but_plain_pmmh_is_ok() {
+        // Correlated PMMH (rho set) routes to bootstrap_filter_correlated,
+        // which adds every increment unconditionally → reject.
+        let err = validate_ic_free("pmmh", true).unwrap_err();
+        assert!(err.contains("ic_free"), "must name ic_free: {err}");
+        assert!(
+            err.contains("correlated") || err.contains("rho"),
+            "must name the correlated/rho condition: {err}"
+        );
+        // ...but plain PMMH (uncorrelated) honors conditioning.
+        assert!(validate_ic_free("pmmh", false).is_ok());
     }
 
     #[test]
