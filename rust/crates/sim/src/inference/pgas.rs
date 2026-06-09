@@ -1516,10 +1516,13 @@ pub fn run_pgas(
     let t_start = model.model.simulation.t_start;
 
     // exact-PGAS does not yet support always-active events: their firing keys on
-    // round(t/dt) (intervention.rs::inject_event_deltas), which a shortened exact
-    // substep shifts off the intended step. Refuse loudly rather than silently
-    // misfire. (Scheduled non-active interventions are already not applied in the
-    // PGAS producer path under either policy.)
+    // round(t/dt) (the fire_steps lookup in effects::due_effects), which a
+    // shortened exact substep shifts off the intended step. Refuse loudly rather
+    // than silently misfire. (Scheduled non-active interventions ARE applied in
+    // the PGAS producer path under both policies — step_one routes them through
+    // due_effects -> apply_post_advance; pinned by the
+    // gh187_pgas_scheduled_intervention regression test. gh#187's "skipped" claim
+    // described pre-refactor code where inject_event_deltas handled only events.)
     if config.step_policy == StepPolicy::Exact
         && model.model.interventions.iter().any(|iv| iv.kind.is_event())
     {
