@@ -8,13 +8,20 @@
   warm-up, the per-filter reset sites — is **preserved** here as the
   conditioning window's mechanism (§7.2); only its _surface_ (a lone
   `condition_from` fit.toml scalar) is replaced by the interval model.
-- **Issues:** gh#134 (incidence over-accumulation), gh#142 (CAS horizon keying —
-  closed), gh#143 (output vs dynamics end — open), plus two silent-wrong leads
-  this audit surfaced (§5, F1/F4) that need a maintainer reproduction before
-  filing.
-- **Required reading before implementing:** `ir/schema.json`
-  (`simulation_config`, `output_config`, `output_schedule`); the inference
-  modules
+- **Issues:** gh#134 (incidence over-accumulation), gh#143 (output vs dynamics
+  end — open), and the CAS horizon-keying fix (the proposal cites gh#142; the
+  code comment at `hashing.rs` labels the same fix gh#147 — a citation drift to
+  reconcile). The two silent-wrong findings F1/F4 (§5) have since been
+  **reproduced** (no longer leads) and are filable incidents.
+- **Sibling proposals — this is the top of a three-layer stack; read §1.5:**
+  `2026-06-06-observation-system.md` (the data layer — `bind`/`BoundObs`, holes,
+  missing data) and `2026-06-06-scheduling-effect-topology.md` (the temporal
+  spine — `Observe`, `TemporalKind`, the per-stream `ResetWindow`,
+  `StepPolicy`). This proposal sits above both and must not re-own what they own
+  (§1.5).
+- **Required reading before implementing:** the two sibling proposals above;
+  `ir/schema.json` (`simulation_config`, `output_config`, `output_schedule`);
+  the inference modules
   `rust/crates/sim/src/inference/{particle_filter,if2,pgas,correlated_pf}.rs`
   and the fit dispatch `rust/crates/cli/src/fit/{methods,runner}.rs`; the
   forward backends + `rust/crates/sim/src/schedule.rs`;
@@ -56,6 +63,31 @@ them, and routes every "interval doesn't line up" case through a loud error or a
 capability gate — so the silent configurations in §4 become uniform and
 diagnosable across every backend and inference algorithm.
 
+## 1.5 Where this sits: the three-layer stack
+
+This proposal is the **top** of a three-layer stack, and it owns only the top
+layer. A reader must hold the other two, because this proposal deliberately does
+**not** re-specify what they own:
+
+| Layer                | Proposal                                   | Owns                                                                                                                                  |
+| -------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **Data**             | `2026-06-06-observation-system.md`         | rows → typed per-stream cells, holes (missing values), `bind`/`BoundObs`                                                              |
+| **Temporal spine**   | `2026-06-06-scheduling-effect-topology.md` | `Schedule`, `TemporalKind{Interval,Instant}`, per-stream `ResetWindow`, `StepPolicy`, the sub-`dt` collision guard                    |
+| **Intervals (this)** | this proposal                              | the run's time-axis _windows_ and their reconciliation; the conditioning window C; the forecast horizon F; covariate-domain bounds Eⱼ |
+
+The seams: the **incidence-vs-prevalence** distinction is the spine's
+`TemporalKind` (this proposal uses it, does not redefine it); the **per-stream
+flow reset** is the spine's `ResetWindow` (the conditioning reset in §7.2 _is_ a
+`ResetWindow` keyed at `cond_from`, not a new mechanism); **per-stream
+observation windows** are the data layer's `BoundObs` cells + the spine's
+`ResetWindow` (this proposal references them, §7.1 pt 2, and does not re-own
+them). **Dependency order:** the spine's `ResetWindow`/`TemporalKind` are **0%
+built today** (the topology doc is a design map), so this proposal's
+conditioning and per-stream work (P2, P4) is gated on the spine shipping them —
+the same gate the data layer's heavy tier waits on. What this proposal adds and
+nobody else owns: the **forecast horizon F**, the **covariate-domain bound Eⱼ**,
+and the **reconciliation of the three "end" fields** into one authority (§7).
+
 ## 2. The cast of intervals
 
 The design is types-first: a run is described by a small set of named intervals,
@@ -75,6 +107,36 @@ The reframe that dissolves the earlier "where does `condition_from` live"
 debate: `condition_from` is simply **C.start**, one boundary of one named
 interval. Each interval has a natural home, and the operations compose them
 rather than one field meaning five things at once.
+
+**Make the illegal states unrepresentable — one `RunWindows` authority type.**
+The findings in §5 (F3, F4, F5) are all the same shape: independent `f64` fields
+that can silently disagree (`simulation.t_end` vs `output.times.end` vs
+`obs_times.last()`), or an unchecked ordering (an obs before `t_start`). The fix
+is not "add a validation pass" — it is a type whose _construction_ forbids the
+bad state. A single `RunWindows` value owns the axis:
+
+```rust
+struct RunWindows {
+    dynamics:    Interval,          // D = [t_start, t_end]; t_end > t_start enforced
+    conditioning: Option<Interval>, // C = [cond_from, cond_to] ⊆ D; None ⇒ no warm-up
+    output:      OutputSchedule,    // O, validated ⊆ D
+    forecast:    Option<f64>,       // F: horizon ≥ D.end, an operation parameter
+    // per-stream observation windows Wₖ are NOT here — they live in the data
+    // layer's BoundObs; this type only carries the global axis they derive against.
+}
+impl RunWindows { fn new(...) -> Result<Self, Error> { /* enforces every ordering */ } }
+```
+
+Built once per operation, it makes F3/F5 (disagreeing ends) and F4 (obs before
+`t_start`) **unconstructible**, not merely caught — the orderings
+`t_start ≤ cond_from < cond_to ≤ D.end ≤ F` and "every window ⊆ D" are checked
+in one constructor, and nothing downstream can hold a contradictory pair of
+ends. The covariate-domain bound Eⱼ is the one cross-cutting constraint a pure
+ordering type cannot encode (it depends on the forcing data), so it stays a
+checked constructor argument (§7.1 pt 5). The per-stream windows Wₖ and the
+incidence flow reset are **not** fields here — they belong to the data layer and
+the spine (§1.5); `RunWindows` carries only the single global axis those derive
+against.
 
 ## 3. Master diagram (the clean target)
 
@@ -140,18 +202,25 @@ the implementation at the cited site), or `[lead]` (strong code evidence but
 needs an independent maintainer reproduction before being filed as an incident).
 Ranked by blast radius.
 
-**F1 — Conditioning is silently ignored on the PGAS and ODE inference cells.**
-`[lead]` `skip_first_obs_from_loglik` (the `ic_free` mechanism) is honored only
-by IF2 (`if2.rs:501`) and the bootstrap PF (`particle_filter.rs:355`; PMMH
-inherits it via its PF closure). `compute_ode_loglik` (`runner.rs:519`) does not
-read it and scores every observation including `y₁`; `pgas.rs` has no first-obs
-/ conditioning handling at all. So `ic_free = true` on an `nl-sbplx`/`nl-bobyqa`
-or PGAS stage silently computes the _unconditional_ likelihood — and the startup
-banner and the `ic_free && !ivp` precondition (`runner.rs:427`, `mod.rs:466`)
-fire regardless of stage type, _falsely signaling_ that conditioning is active.
-No capability flag catches it. (Config 1/2 × the wrong cell.) **Silent-wrong,
-live today.** Repro pending: a one-stage `ic_free` fit on each of ODE and PGAS,
-asserting the returned loglik equals the _conditional_ value, not the full sum.
+**F1 — Conditioning is silently ignored on the PGAS, ODE, _and_ correlated-PMMH
+inference cells.** `[repro]` `skip_first_obs_from_loglik` (the `ic_free`
+mechanism) is honored only by IF2 (`if2.rs:501`) and the bootstrap PF
+(`particle_filter.rs:355`; plain PMMH inherits it via its PF closure). Three
+cells ignore it: `compute_ode_loglik` (`runner.rs:519`) scores every observation
+including `y₁`; `pgas.rs` has no first-obs/conditioning handling at all; and
+**correlated-PMMH** (`correlated_pf.rs:480`) adds every increment
+unconditionally — a fourth cell the earlier draft missed. **Reproduced:** a
+one-stage `nl-sbplx`/ODE fit returns byte-identical `best_loglik` (−58.714… to
+15 digits) whether `ic_free` is true or false, _while printing_ "ic-free
+inference: conditioning on y₁"; the PGAS config struct (`pgas.rs:477`) has no
+conditioning field at all. So `ic_free = true` silently computes the
+_unconditional_ likelihood while the banner and the `ic_free && !ivp`
+precondition (`runner.rs:427`, `mod.rs:466`) falsely signal conditioning is
+active. No gate catches it. (Config 1/2 × the wrong cell.) **Silent-wrong, live,
+filable.** The fix is **not** "presume these cells can't condition and gate them
+off" — it is to route conditioning through the dispatch path so each cell either
+honors it or hard-errors (see §7.1 pt 3; this matches the observation system's
+"unify first, gate only the floor" for the same ODE cell).
 
 **F2 — Forcings silently flat-extrapolate past their data.** `[repro]` A
 data-driven `interpolated`/`Constant` forcing clamps to its first/last knot
@@ -182,15 +251,20 @@ the ODE-loglik path uses `model_sim.t_end` and _hard-errors_ if it precedes the
 last obs (`runner.rs:612`). The same model + data file gets opposite treatment
 by backend. (Config 3.)
 
-**F4 — Data before `t_start` is silently mis-scored in release.** `[lead]` The
-loader skips observations with `t < t_start` (`caltime_load.rs:250`); the only
-downstream lower-bound guard is a `debug_assert!` in `interval_steps`
-(`time.rs:108`), compiled out of `--release`. Rust's saturating float→int cast
-turns the resulting negative step count to `0`, the substep iterator yields no
-steps (`schedule.rs:426`), and the particle is then scored against that datum
-_without having propagated to it_. No panic, no error. **Silent-wrong.** Repro
-pending: a fit with one obs at `t < t_start`, asserting it is either rejected or
-correctly handled rather than scored against the unpropagated state.
+**F4 — Data before `t_start` is silently mis-scored in release.** `[repro]`
+**Reproduced** (model `from = 21`, obs at `t = 0, 7, 14`): `camdl pfilter` loads
+all 12 observations and returns a stored loglik with **exit 0** (−inf when the
+early obs are zero, `EssCollapsed` when large) — no diagnostic ever names "obs
+precedes `t_start`." The mechanism, corrected from the earlier draft: the early
+observations are **not** dropped at load (the `caltime_load.rs:250` `continue`
+is inside the distinct-substep collision check only, not the loader) — they are
+**loaded and then scored without the particle ever propagating to them**, which
+is strictly worse than "skipped." The substep iterator yields zero steps for an
+obs at `t < t_start` (`schedule.rs:426`); the only lower-bound guard is a
+`debug_assert!` in `interval_steps` (`time.rs:108`), compiled out of
+`--release`, and the saturating float→int cast turns the negative step count to
+`0`. The particle is then scored unpropagated (`particle_filter.rs:288`). No
+panic, no error. **Silent-wrong, live, filable.**
 
 **F5 — Frozen tail / output truncation.** `[repro]` `output.times.end` and
 `simulation.t_end` are independent fields with no reconciliation. With
@@ -210,7 +284,11 @@ validated _twice_ with two different tolerances (exact `!=` at
 to one shared `obs_times` vector; heterogeneous schedules hard-error ("not
 supported yet"). The flow-reset carries a canary comment
 (`particle_filter.rs:401-413`) marking exactly where true per-stream windows
-would require a per-flow, per-stream-indexed reset. (Config 5.)
+would require a per-flow, per-stream-indexed reset. (Config 5.) This is the
+_same_ finding the data layer (`observation-system.md`) and the spine
+(`scheduling-effect-topology.md`, its `M3`) record; the **fix is owned there**
+(the spine's per-stream `ResetWindow` + the data layer's `BoundObs` cells), not
+here. This proposal only consumes it — see §1.5 and §7.1 pt 2.
 
 **Healthy, for contrast.** The (algorithm × backend) _pairing_ gate is loud and
 well-formed: the registry (`methods.rs:67`), `validate_combo`, and per-pair
@@ -241,37 +319,60 @@ not a field that means five things.
 
 ### 7.1 Six design points
 
-1. **One integration span D per operation**, computed as the union of the
-   windows that operation needs, explicit and validated (`t_end > t_start`,
-   `dt > 0`, `dt ≤ (t_end − t_start)` — none of which is checked today). This
-   kills the three-independent-ends problem: there is one span, and output /
-   conditioning / data windows are sub-intervals validated against it.
-2. **Observation windows Wₖ become first-class and per-stream.** `first_obs`,
-   `last_obs`, and C are _derived_ quantities computed once, not recomputed ad
-   hoc at the ~6 sites that do so today. The flow-reset becomes
-   per-stream-indexed (the canary already marks the site). This is the
-   unified-observation-data lift (gh#134/#139); the interval model is its
-   time-axis half.
-3. **Conditioning window C = `[cond_from, cond_to]` is explicit and routed
-   through the capability/dispatch gate.** A cell that cannot condition (today:
-   ODE and PGAS for `ic_free`) **hard-errors** at dispatch with a message naming
-   the limitation, instead of silently ignoring it. This is the "every backend ×
-   inference cell supported or fail loudly" rule (CLAUDE.md) applied to the
-   window axis; F1 becomes loud. The reset mechanism is the one from the
-   superseded burn-in proposal (§7.2).
-4. **Forecast horizon F is a per-run/operation parameter, not model identity.**
-   A `--until`/`--horizon` knob (or a `forecast` operation) projects from the
-   fitted posterior to F, reusing the fit — so you forecast further _without
-   recompiling and re-fitting_. Today the horizon is baked into `simulate.to`,
-   so extending it re-keys the model hash (`hashing.rs:60-78`) and invalidates
-   the fit cache; that conflation is the most likely source of the user-reported
-   forecasting friction (confirm against the colleague's report — §10).
+1. **One integration span D per operation — the `RunWindows` authority type
+   (§2).** D is computed as the union of the windows that operation needs, and
+   the orderings (`t_end > t_start`, every window ⊆ D,
+   `t_start ≤ cond_from <
+   cond_to`) are enforced in the type's constructor —
+   so the three-independent-ends problem and the obs-before-`t_start` case are
+   _unconstructible_, not merely validated after the fact. None of these
+   orderings is checked today.
+2. **Observation windows Wₖ are first-class and per-stream — owned by the data
+   layer and the spine, not here.** `first_obs`, `last_obs`, and C are _derived_
+   from the bound data, computed once rather than recomputed ad hoc at the ~6
+   sites that do so today. The per-stream flow reset is the spine's
+   `ResetWindow`; the per-stream cells are the data layer's `BoundObs` (§1.5).
+   This proposal **consumes** them and must not re-specify them; the work itself
+   is the data-layer + spine lift (gh#134/#139).
+3. **Conditioning window C = `[cond_from, cond_to]` is explicit and gated at the
+   right seam.** A cell that does not honor conditioning hard-errors with a
+   message naming the limitation instead of silently ignoring it (F1). Mechanism
+   detail to pin: conditioning is **per-stage inference config**, so the gate is
+   the `(algorithm)` dispatch registry (`methods.rs::validate_combo` /
+   `resolve_obs_alignment`), **not** the IR-scanning `required_capabilities()` /
+   `Simulate::capabilities()` flags (those scan the _model_, which knows nothing
+   about `ic_free`). And the resolution is **unify first, gate only the floor**
+   (matching `observation-system.md`'s ODE step): route conditioning through the
+   shared path so each cell honors it where it can; gate only a cell that
+   genuinely cannot, with the bar "show it cannot be unified before you gate
+   it." The reset mechanism is §7.2.
+4. **Forecast horizon F is a per-run/operation parameter — _up to the covariate
+   horizon_.** A `--until`/`--horizon` knob projects from the fitted posterior
+   to F, reusing the fit, so you forecast further _without recompiling and
+   re-fitting_ — the CAS premise holds (extending `simulate.to` today re-keys
+   the model hash, `hashing.rs`, and invalidates the fit cache). **But the
+   headline is bounded:** a covariate-driven model reads forcing tables that
+   only have data to some `last_knot`, and design point 5 makes reading past
+   that a hard error — so the maximum reachable F is capped by where the
+   covariate data ends, a _model-input_ property, not a free dial. Forecasting
+   beyond it requires extending the covariate data (a model-input change), not
+   just a larger F. Since the motivating models _are_ covariate-driven (the Kano
+   SIA/births burn-in), state this limit, do not paper over it. Also unresolved
+   and method-dependent: forecast's integration span D. With a stored filtered
+   end-state (PGAS) D = `[last_data, F]`; with an MLE fit (IF2/ODE, no stored
+   end-state) the forecast must re-filter from `t_start`, so D = `[t_start, F]`.
+   The forcing-domain and conditioning checks key on D, so this must be pinned
+   per fit method (§10).
 5. **Forcing/covariate domains Eⱼ get explicit bounds and an out-of-bounds
    policy**, checked against the integration span — uniform with the table
-   mechanism that already does this. Default `error` for data-driven series
-   (`interpolated`); `constant`-outside permitted explicitly for genuine step
-   functions (`piecewise`/`Constant`), where a flat tail is intended rather than
-   a ran-out-of-data accident. F2 becomes loud (or an explicit opt-in).
+   mechanism that already does this. Per forcing kind: **`error` for data-driven
+   series** (`interpolated`) and **for `CubicSpline`** (cubic extrapolation past
+   the knots produces wildly wrong or negative rates — _more_ dangerous than
+   flat-lining, so it must error, not clamp); **`constant`-outside** permitted
+   explicitly for genuine step functions (`piecewise`/`Constant`), where a flat
+   tail is intended; **`Periodic`/`Fourier`/`PeriodicSpline` are exempt** (they
+   wrap by construction, there is no domain to exceed). F2 becomes loud (or an
+   explicit opt-in for the step kinds).
 6. **One reconciliation pass over the time axis.** Every window is validated
    against D in a single place, every mismatch is a loud diagnostic, and the
    behavior is identical across backends. F3, F4, F5 become uniform and
@@ -286,14 +387,23 @@ warm-up informative), and **the incidence flow accumulator is reset at
 `cond_from`** so the first scored window is one cadence `(cond_from, first_obs]`
 rather than the whole leading gap. This is purely an incidence
 (flow-accumulator) concern; prevalence (state-snapshot) observations are already
-scored correctly regardless of where dynamics start. The reset lands in each
-filter's idiom — the PF/IF2 propagate-to-`cond_from` prelude, and the PGAS
-`cum_flows` reset at the boundary substep in `complete_data_loglik`, `csmc_as`,
-**and** `complete_data_loglik_grad` (missing the gradient mirror is a silent
-NUTS bug). The default is no warm-up (`cond_from = t_start`), bit-identical to
-today. See the superseded `2026-06-09-burnin-conditioning-window.md` §2/§6 for
-the full inference math and per-filter reset sites, which this proposal carries
-forward intact.
+scored correctly regardless of where dynamics start.
+
+**The reset is the spine's `ResetWindow`, keyed at `cond_from` instead of at an
+obs — not a new per-filter mechanism.** Framing it as N hand-rolled per-filter
+edits would re-introduce the very drift the topology's `Stage::Reset` exists to
+remove. Each cell still expresses it in its idiom (PF/IF2: a
+propagate-to-`cond_from` prelude; the chain-binomial-stepping cells: a
+`cum_flows` reset at the `cond_from` substep), and it must land in **every cell
+that accumulates incidence flow** — `complete_data_loglik`, `csmc_as`,
+`complete_data_loglik_grad` (the gradient mirror; missing it is a silent NUTS
+bug), **and `correlated_pf`** (`correlated_pf.rs:521`, the cell the earlier
+draft omitted — matching F1's omission). Clarity caveat: the "one long
+propagation, no resample" mental model is **PF-specific** — `csmc_as` resamples
+and ancestor-tracks every substep, so the per-particle `cum_flows[j]` reset
+applies across the resampled set, not to a single path. The default is no
+warm-up (`cond_from = t_start`), bit-identical to today. See the superseded
+`2026-06-09-burnin-conditioning-window.md` §2/§6 for the full inference math.
 
 The change versus that proposal is the _surface_: instead of a lone
 `condition_from` scalar in fit.toml, the conditioning window is one of the run's
@@ -331,11 +441,16 @@ where the data and the question live.
 ## 9. Capability/dispatch integration and phasing
 
 Every (backend × inference algorithm × window-feature) combination must be
-supported-and-tested or hard-error through the capability system — no silent
-third option (CLAUDE.md). Concretely, the conditioning window and the
-forcing-domain check join the existing dispatch gates (`required_capabilities()`
-/ `Simulate::capabilities()` / `resolve_obs_alignment`), so an unsupporting cell
-fails loudly with a message naming the limitation.
+supported-and-tested or hard-error — no silent third option (CLAUDE.md). The two
+new checks attach at **different** seams, and conflating them is a mistake to
+avoid: **conditioning** is per-stage inference config, so it gates at the
+`(algorithm)` dispatch registry (`methods.rs::validate_combo` /
+`resolve_obs_alignment`), _not_ the IR-scanning capability flags; the
+**forcing-domain** check (Eⱼ) is on model data, so it _can_ ride the
+`required_capabilities()` / `Simulate::capabilities()` path that already scans
+the IR. Either way an unsupporting cell fails loudly with a message naming the
+limitation, and the conditioning fix is unify-first, gate-only-the-floor (§7.1
+pt 3).
 
 Suggested phasing (each phase ends green, none batches semantic changes):
 
@@ -358,8 +473,13 @@ Suggested phasing (each phase ends green, none batches semantic changes):
 - **P3 — Forecast as an operation.** The `--until`/`forecast` horizon parameter,
   posterior reuse, and CAS keying that does not invalidate the fit. Needs the
   colleague's friction report to pin the surface (§10).
-- **P4 — Per-stream windows.** First-class Wₖ and the per-stream-indexed flow
-  reset (F6) — folds into the unified-observation-data surface (gh#134/#139).
+- **P4 — Per-stream windows (NOT this proposal's to schedule freely).**
+  First-class Wₖ and the per-stream-indexed flow reset (F6) are the data
+  layer's + spine's work; **this phase is blocked on the spine shipping the
+  per-stream `ResetWindow` and `TemporalKind`, which are 0% built today** — the
+  same gate `observation-system.md`'s heavy migration tier waits on. It is
+  listed here only for completeness; the owning staging is in those two
+  proposals, and this proposal must not present it as free-standing.
 
 IR changes are confined to the time-axis structs (`simulation_config`,
 `output_config`, forcing domains) and follow the atomic OCaml+Rust+golden update

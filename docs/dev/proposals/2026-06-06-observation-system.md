@@ -132,7 +132,8 @@ mod obsdata {
         OffGridInterval, OffGridInstant, Collision, Duplicate, CoarserThanModel,
         Hole, RejectedValue, CountExceedsDenom, UnparseableDate, InconsistentTimeColumn,
     }
-    pub struct BindReport { findings: Vec<Finding>, verdict: Severity }
+    pub struct BindReport { findings: Vec<Finding> }
+    impl BindReport { fn verdict(&self) -> Severity { /* max over findings */ } }  // DERIVED, never stored
 
     pub fn bind(model: &Model, rows: Vec<LongRow>, dt: f64, cal: &CalendarCtx, policy: &BindPolicy)
         -> (BoundObs, BindReport);   // never panics, never exits — errors are VALUES (gh#181)
@@ -174,6 +175,28 @@ otherwise scores finite-but-wrong, surfacing only as a degenerate `-inf` filter
 `denom` and a model `n: Expr` are mutually exclusive** (both present ⇒ error, so
 the denominator has exactly one source). The fixed-`n: Expr` path stays the
 default when no `denom` column is bound.
+
+**Type discipline: make the illegal states unconstructible, not merely
+checked.** Three places where a stored field could contradict reality, closed by
+construction rather than by a validation pass:
+
+- **`BindReport` stores no `verdict`** — it is a `verdict()` method returning
+  the max severity over the findings, so a report can never claim `Info` while
+  carrying an `Error` finding.
+- **`Finding.severity` is derived from `(kind, policy)` where the kind fixes
+  it**, free only where it is genuinely context-dependent. A
+  `ReservedNameCollision` is always `Error`; storing severity as a free field
+  would let one be built as `Info`. The fixed kinds get their severity from the
+  kind, not the field.
+- **`ObsCell::Counted` is built through a checked constructor**
+  (`counted(k, n) ->
+  Result`, rejecting `k > n`), so the `CountExceedsDenom`
+  invariant holds at the type boundary, not only at load.
+- The **rectangular shape** (`every StreamCells.cells.len() == times.len()`) and
+  the **no-all-hole-time** rule (every `times[k]` has ≥1 present cell) are
+  enforced in the private `bind`/`BoundObs` constructor — the one place that
+  can. (A `times × streams` matrix type would make the ragged shape structurally
+  impossible; that is a heavier change, noted as an option, not required.)
 
 ## The bind as a cardinality map
 
