@@ -26,11 +26,16 @@ import json
 import subprocess
 import sys
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "index.html"
+SNAP = HERE / "snapshots.ndjson"  # forward-accruing metric log (gitignored)
+
+# Trend windows in days. 7d = week-over-week is the "are we winning" signal;
+# 1d catches the bursty triage days; 3d smooths. Swap 7 -> 5 for a work-week.
+WINDOWS = [1, 3, 7]
 
 # Canonical display order (axes from ../issue-labels.md).
 KIND_ORDER = [
@@ -82,6 +87,69 @@ def fetch_issues() -> list[dict]:
     return sorted(out, key=lambda x: x["n"])
 
 
+def parse_ts(s: str | None):
+    return datetime.fromisoformat(s.replace("Z", "+00:00")) if s else None
+
+
+def fetch_flow(now: datetime) -> dict[int, dict]:
+    """Exact open-count momentum from issue timestamps (backfilled, real).
+
+    Two bounded calls (created / closed within the widest window + a day of
+    slack), then bucketed locally with full-precision timestamps. net = opened
+    - closed = the change in the open count over the window.
+    """
+    since = (now - timedelta(days=max(WINDOWS) + 1)).strftime("%Y-%m-%d")
+    opened = json.loads(sh(["gh", "issue", "list", "--state", "all",
+                            "--search", f"created:>={since}", "--limit", "800",
+                            "--json", "createdAt"]))
+    closed = json.loads(sh(["gh", "issue", "list", "--state", "all",
+                            "--search", f"closed:>={since}", "--limit", "800",
+                            "--json", "closedAt"]))
+    oc = [parse_ts(i["createdAt"]) for i in opened]
+    cc = [parse_ts(i["closedAt"]) for i in closed if i.get("closedAt")]
+    flow = {}
+    for w in WINDOWS:
+        cut = now - timedelta(days=w)
+        op = sum(1 for t in oc if t and t >= cut)
+        cl = sum(1 for t in cc if t and t >= cut)
+        flow[w] = {"opened": op, "closed": cl, "net": op - cl}
+    return flow
+
+
+def load_snaps() -> list[dict]:
+    if not SNAP.exists():
+        return []
+    rows = [json.loads(ln) for ln in SNAP.read_text().splitlines() if ln.strip()]
+    return sorted(rows, key=lambda r: r["ts"])
+
+
+def record_snap(row: dict) -> None:
+    """Append today's snapshot, one row per UTC date (last write wins)."""
+    rows = [r for r in load_snaps() if r.get("date") != row["date"]]
+    rows.append(row)
+    rows.sort(key=lambda r: r["ts"])
+    SNAP.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def snap_trend(snaps: list[dict], key: str, w: int, now: datetime, current: int):
+    """current - (most recent snapshot at or before now-w days). None if no
+    snapshot is old enough yet (history hasn't accrued)."""
+    target = now - timedelta(days=w)
+    base = [s for s in snaps if parse_ts(s["ts"]) <= target and key in s]
+    return None if not base else current - base[-1][key]
+
+
+def delta_cell(delta, lower_better: bool = True) -> str:
+    if delta is None:
+        return ('<td class="nd" title="accrues from the first --snapshot">'
+                '&middot;</td>')
+    if delta == 0:
+        return '<td class="flat">&ndash;</td>'
+    good = (delta < 0) if lower_better else (delta > 0)
+    arrow = "&#9660;" if delta < 0 else "&#9650;"  # ▼ / ▲
+    return f'<td class="{"good" if good else "bad"}">{arrow}{abs(delta)}</td>'
+
+
 def esc(s: str) -> str:
     return html.escape(s, quote=True)
 
@@ -129,7 +197,8 @@ def details(summary: str, items: list[dict], open_: bool = False) -> str:
     return f"<details{op}><summary>{summary} <b>({len(items)})</b></summary>{body}</details>"
 
 
-def render(repo: str, issues: list[dict]) -> str:
+def render(repo: str, issues: list[dict], flow: dict, snaps: list[dict],
+           now: datetime):
     total = len(issues)
     by_kind = {k: [i for i in issues if i["kind"] == k] for k in KIND_ORDER}
     by_area = {a: [i for i in issues if a in i["areas"]] for a in AREA_ORDER}
@@ -198,11 +267,43 @@ def render(repo: str, issues: list[dict]) -> str:
                        'are set by reading each issue + a code peek, not from '
                        'titles. See the playbook below.</p>')
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # Snapshot row (the series we trend on) + momentum panel.
+    row = {
+        "date": now.strftime("%Y-%m-%d"),
+        "ts": now.isoformat(timespec="seconds"),
+        "total": total, "blocker": len(blockers),
+        "audit": len(audit), "external": len(external),
+        **{k: len(by_kind[k]) for k in KIND_ORDER},
+        **{a: len(by_area[a]) for a in AREA_ORDER},
+    }
+    win_h = "".join(f"<th>&Delta; {w}d</th>" for w in WINDOWS)
+    # Open issues: exact + backfilled (delta over window == net flow).
+    open_cells = "".join(delta_cell(flow[w]["net"]) for w in WINDOWS)
+
+    def metric_row(label, key, current):
+        cells = "".join(delta_cell(snap_trend(snaps, key, w, now, current))
+                        for w in WINDOWS)
+        return f'<tr><th class="rk">{label}</th><td>{current}</td>{cells}</tr>'
+
+    trend_rows = (
+        f'<tr><th class="rk">open issues</th><td>{total}</td>{open_cells}</tr>'
+        + metric_row("blockers", "blocker", len(blockers))
+        + metric_row("bugs", "kind/bug", len(by_kind["kind/bug"]))
+        + metric_row("external", "external", len(external)))
+    flow_line = " &middot; ".join(
+        f'{w}d <b>+{flow[w]["opened"]}</b> / <b>&minus;{flow[w]["closed"]}</b>'
+        for w in WINDOWS)
+    has_hist = any(parse_ts(s["ts"]) <= now - timedelta(days=min(WINDOWS))
+                   for s in snaps)
+    trend_note = ("Open trend is exact (issue timestamps); label trends "
+                  + ("" if has_hist else "begin accruing now &mdash; ")
+                  + "from the <code>--snapshot</code> log. &#9660; down is good.")
+
+    gen = now.strftime("%Y-%m-%d %H:%M UTC")
     labels_doc = blob(repo, "docs/dev/issue-labels.md")
     tiers_doc = blob(repo, "docs/dev/issue-triage-tiers.md")
 
-    return f"""<!doctype html>
+    page = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>camdl · issue triage</title>
@@ -242,6 +343,14 @@ def render(repo: str, issues: list[dict]) -> str:
   .badge.ext {{ background: #fff3c4; color: #7a5d00; font-weight: 600; }}
   .empty, .warn {{ color: #8b949e; font-size: 13px; }}
   .warn {{ color: #b60205; }}
+  .trend td {{ font-variant-numeric: tabular-nums; font-weight: 600; }}
+  .trend th.rk {{ font-weight: 550; }}
+  .good {{ color: #1a7f37; background: #e6f4ea; }}
+  .bad  {{ color: #b60205; background: #ffe9e7; }}
+  .flat {{ color: #8b949e; font-weight: 400; }}
+  .nd   {{ color: #c4cdd6; font-weight: 400; }}
+  .flow {{ font-size: 13px; color: #57606a; margin: 8px 0 2px; }}
+  .flow b {{ font-variant-numeric: tabular-nums; color: #1b1f24; }}
   .cols {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
   @media (max-width: 720px) {{ .cols {{ grid-template-columns: 1fr; }} }}
   .play td, .play th {{ text-align: left; }}
@@ -250,11 +359,16 @@ def render(repo: str, issues: list[dict]) -> str:
 </style></head><body><div class="wrap">
 
 <h1>camdl &middot; issue triage</h1>
-<div class="meta">{esc(repo)} &middot; generated {now} &middot; axes per
+<div class="meta">{esc(repo)} &middot; generated {gen} &middot; axes per
   <a href="{labels_doc}">issue-labels.md</a></div>
 
 <div class="stats">{stats}</div>
 {unclass_note}
+
+<h2>Momentum</h2>
+<table class="trend"><tr><th></th><th>now</th>{win_h}</tr>{trend_rows}</table>
+<p class="flow">opened / closed: {flow_line}</p>
+<p class="empty">{trend_note}</p>
 
 <h2>Critical path &mdash; blockers</h2>
 {details("silent-wrong on the inference/sim path", blockers, open_=True)}
@@ -295,12 +409,19 @@ def render(repo: str, issues: list[dict]) -> str:
 
 </div></body></html>
 """
+    return page, row
 
 
-def build() -> Path:
+def build(snapshot: bool = False) -> Path:
     repo = repo_slug()
     issues = fetch_issues()
-    OUT.write_text(render(repo, issues), encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    flow = fetch_flow(now)
+    snaps = load_snaps()
+    page, row = render(repo, issues, flow, snaps, now)
+    OUT.write_text(page, encoding="utf-8")
+    if snapshot:
+        record_snap(row)
     return OUT
 
 
@@ -332,9 +453,12 @@ def main() -> None:
     ap.add_argument("--serve", action="store_true",
                     help="serve and regenerate on each page load")
     ap.add_argument("--port", type=int, default=8799)
+    ap.add_argument("--snapshot", action="store_true",
+                    help="record today's counts into the trend log "
+                         "(run daily, e.g. from cron, to accrue label history)")
     args = ap.parse_args()
-    path = build()
-    print(f"wrote {path}")
+    path = build(snapshot=args.snapshot)
+    print(f"wrote {path}" + (" (+snapshot)" if args.snapshot else ""))
     if args.serve:
         serve(args.port)
 

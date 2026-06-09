@@ -30,6 +30,27 @@ Stdlib only — no `uv`/pip deps. Needs `gh` on PATH and authenticated
 (`gh auth status`). To open a static build without the server, just open
 `index.html` in a browser.
 
+## Momentum / trends
+
+The top panel shows direction over `WINDOWS` (default **1d / 3d / 7d** — edit
+the constant in `build.py`; `7` → `5` for a work-week). Down is green, up is
+red. Two data sources, because GitHub's API gives current state, not history:
+
+- **Open-issue trend is exact and backfilled** from issue `createdAt`/`closedAt`
+  timestamps — `Δ = opened − closed` over the window. Works immediately, no log.
+- **Label trends (blockers, bugs, …) accrue forward** from a snapshot log,
+  because the taxonomy labels carry no usable past (they were created the day
+  the scheme landed). Until a snapshot is old enough, those cells read `·`.
+
+```bash
+python3 docs/dev/dashboard/build.py --snapshot   # record today's counts
+```
+
+Run `--snapshot` once a day (cron / a GitHub Action) to build the series. The
+log is `snapshots.ndjson` (one row per UTC date, last write wins) and is
+gitignored — commit it, or have an Action commit it, for durable shared history.
+A plain `--serve` never writes the log.
+
 ## What it shows
 
 Read-only over the labels — it does not change any issue. To act on it, apply

@@ -1,2 +1,5 @@
 # Generated dashboard — derived from live `gh` data, never committed.
 index.html
+# Local trend log — accrues per machine; commit it (or a GH Action) if you
+# want durable, shared history.
+snapshots.ndjson
