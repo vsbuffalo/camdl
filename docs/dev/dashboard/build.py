@@ -42,6 +42,10 @@ AREA_ORDER = [
     "area/obs-model", "area/ir-schema", "area/testing",
 ]
 
+# The main dev. Issues authored by anyone else get an "@handle" external
+# badge — a dashboard-only marker (no GitHub label involved).
+MAINTAINER = "vsbuffalo"
+
 
 def sh(args: list[str]) -> str:
     r = subprocess.run(args, capture_output=True, text=True)
@@ -57,14 +61,17 @@ def repo_slug() -> str:
 
 def fetch_issues() -> list[dict]:
     raw = sh(["gh", "issue", "list", "--state", "open", "--limit", "500",
-              "--json", "number,title,labels,url"])
+              "--json", "number,title,labels,url,author"])
     out = []
     for it in json.loads(raw):
         names = [lbl["name"] for lbl in it["labels"]]
+        author = (it.get("author") or {}).get("login") or "ghost"
         out.append({
             "n": it["number"],
             "t": it["title"],
             "url": it["url"],
+            "author": author,
+            "external": author != MAINTAINER,
             "kind": next((n for n in names if n.startswith("kind/")), None),
             "areas": [n for n in names if n.startswith("area/")],
             "effort": next((n for n in names if n.startswith("effort/")), None),
@@ -99,6 +106,8 @@ def heat(count: int, mx: int) -> str:
 
 def issue_li(it: dict) -> str:
     badges = ""
+    if it["external"]:
+        badges += f' <span class="badge ext">@{esc(it["author"])}</span>'
     if it["blocker"]:
         badges += ' <span class="badge blk">blocker</span>'
     if it["effort"]:
@@ -127,6 +136,9 @@ def render(repo: str, issues: list[dict]) -> str:
     blockers = [i for i in issues if i["blocker"]]
     design = by_kind["kind/design"]
     audit = [i for i in issues if i["audit"]]
+    external = [i for i in issues if i["external"]]
+    ext_search = (f"https://github.com/{repo}/issues?q="
+                  + urllib.parse.quote(f"is:open -author:{MAINTAINER}"))
     sclass = [i for i in issues
               if i["status"] == "status/s-class" or i["effort"] == "effort/S"]
     unclassified = [i for i in issues if i["kind"] is None or not i["areas"]]
@@ -163,7 +175,7 @@ def render(repo: str, issues: list[dict]) -> str:
         stat("bugs", len(by_kind["kind/bug"]), search_url(repo, "kind/bug")),
         stat("features", len(by_kind["kind/feature"]), search_url(repo, "kind/feature")),
         stat("needs RFC", len(design), search_url(repo, "kind/design")),
-        stat("audit cohort", len(audit), search_url(repo, "upstream-audit")),
+        stat("external", len(external), ext_search),
     ])
 
     kind_blocks = "".join(
@@ -227,6 +239,7 @@ def render(repo: str, issues: list[dict]) -> str:
             padding: 1px 6px; margin-left: 2px; white-space: nowrap; }}
   .badge.blk {{ background: #ffd7d5; color: #b60205; font-weight: 600; }}
   .badge.aud {{ background: #efe5ff; color: #5319e7; }}
+  .badge.ext {{ background: #fff3c4; color: #7a5d00; font-weight: 600; }}
   .empty, .warn {{ color: #8b949e; font-size: 13px; }}
   .warn {{ color: #b60205; }}
   .cols {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
@@ -254,6 +267,7 @@ def render(repo: str, issues: list[dict]) -> str:
 {sclass_hint}
 
 <h2>Cohorts</h2>
+{details(f"external reporters (not @{esc(MAINTAINER)})", external, open_=True)}
 <div class="cols">
   <div>{details("upstream-audit", audit)}{details("needs an RFC (kind/design)", design)}</div>
   <div>{details("docs", by_kind["kind/docs"])}{details("refactor / tech-debt", by_kind["kind/refactor"])}</div>
