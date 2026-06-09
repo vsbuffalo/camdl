@@ -638,18 +638,23 @@ genuinely parallelizable; 2 and 3 are gated as noted.
    per-stream cell vector now needs its own monotonicity validation**, plus the
    union axis needs the topology's sub-`dt` collision guard. FD/likelihood
    parity must hold on the dense case; the sparse-interval reset gets its own
-   window-correctness test. 3b. **(correctness gate — cross-cutting with the
-   interval model's F1)** the ODE-inference scorer `compute_ode_loglik`
-   (`runner.rs:519`) does **not** consume `BoundObs` or the union axis — it does
-   its own exact-equality obs-to-snapshot matching, its own global flow reset,
-   and ignores `ic_free`. When step 3 relaxes to a union axis with holes, that
-   path hard-errors on a hole's `obs_idx` or on a present cell with no snapshot.
-   So ODE-inference — and any cell that does not consume `BoundObs` — must be
-   routed through a **capability gate** that hard-errors on
-   sparse/per-stream/hole obs (and on conditioning) with a message naming the
-   limitation, never silently score a different object. This is the matrix rule
-   (CLAUDE.md): a cell is supported-and-tested or fails loudly. Owning the gate
-   here closes the silent-third-option the interval model flags as F1.
+   window-correctness test.
+
+   And **de-smell the ODE-inference path while here — unify first, gate only the
+   floor.** The ODE-inference scorer `compute_ode_loglik` (`runner.rs:519`) is a
+   pre-existing one-off: it does **not** consume `BoundObs` or the shared
+   schedule — it hand-rolls its own exact-equality obs matching, its own global
+   reset, and ignores `ic_free`. There is no good reason its _data binding_
+   differs from every other cell's, so the goal is to **route it through the
+   same `bind`/`BoundObs`** (and, where feasible, the same scoring seam) —
+   consolidate to the shared substrate, not keep a permanent special case. The
+   capability gate is the **floor, not the goal**: only a feature that genuinely
+   cannot map onto a deterministic ODE-skeleton trajectory (e.g. per-stream
+   incidence-window accumulation, _if_ it proves infeasible on a smooth path)
+   may be gated, and then it must **hard-error** naming the limitation, never
+   silently score a different object. The bar is "show it cannot be unified
+   before you gate it" (CLAUDE.md's capability rule). Either way this closes the
+   silent-third-option the interval model flags as F1.
 4. **(small)** `ObsCell::Counted { value, denom }` through `bind` into the
    Binomial/BetaBinomial scoring path. Scipy-anchored value test; the
    fixed-`n: Expr` path unchanged when no `denom` supplied.
