@@ -384,11 +384,15 @@ not a field that means five things.
    beyond it requires extending the covariate data (a model-input change), not
    just a larger F. Since the motivating models _are_ covariate-driven (the Kano
    SIA/births burn-in), state this limit, do not paper over it. Also unresolved
-   and method-dependent: forecast's integration span D. With a stored filtered
-   end-state (PGAS) D = `[last_data, F]`; with an MLE fit (IF2/ODE, no stored
-   end-state) the forecast must re-filter from `t_start`, so D = `[t_start, F]`.
-   The forcing-domain and conditioning checks key on D, so this must be pinned
-   per fit method (§10).
+   and method-dependent: forecast's integration span D. The origin is keyed on
+   _what the fit persisted_, not the method name: with a stored filtered
+   end-state (PGAS) D = `[last_data, F]`, and a bootstrap-PF fit that saved its
+   paths likewise continues from the filtered cloud; with an MLE fit (IF2/ODE,
+   no stored end-state) — **or a bootstrap-PF fit that did not persist paths**
+   (paths are optional output) — the forecast falls through to re-filtering from
+   `t_start`, so D = `[t_start, F]`. The absent-paths case degrades to the
+   re-filter path, it does not error. The forcing-domain and conditioning checks
+   key on D, so this must be pinned per fit method (§10).
 5. **Forcing/covariate domains Eⱼ get explicit bounds and an out-of-bounds
    policy**, checked against the integration span — uniform with the table
    mechanism that already does this. Per forcing kind: **`error` for data-driven
