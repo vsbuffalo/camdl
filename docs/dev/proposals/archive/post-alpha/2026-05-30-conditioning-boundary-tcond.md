@@ -1,12 +1,11 @@
 # The conditioning boundary `t_cond`: decoupling burn-in from the start of filtering
 
-Status: **SUPERSEDED** by
-[`2026-06-09-burnin-conditioning-window.md`](2026-06-09-burnin-conditioning-window.md),
-which folds in this inference math, resolves the §3 crux (the unweighted
-stochastic ensemble is the answer), and carries the surface + UX. Read that
-instead; this is retained only because inbound references (the W329 message,
-`warning-catalog.md`, the parent obs-data proposal) still point here until the
-implementation repoints them.
+Status: **SUPERSEDED (archived 2026-06-09)** by the time-interval model —
+`2026-06-09-time-interval-model.md` (which carries this inference math forward
+as the conditioning window's mechanism). Start from
+`2026-06-09-time-and-observation-overview.md`. Retained for history only — do
+not implement from this. (Inbound references — the W329 message,
+`warning-catalog.md` — still point here until the implementation repoints them.)
 
 Date: 2026-05-30
 

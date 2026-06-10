@@ -1,15 +1,17 @@
 ---
 date: 2026-06-05
-status: proposal
+status: superseded
+superseded_by: 2026-06-06-observation-system.md
 related: gh#171, gh#172, gh#98
-area: observation data loading / inference
-note: re-audit gh#134 / the 2026-05-30-unified-observation-data umbrella against
-  HEAD before relying on it — FromData and data_stream were deleted (e845282,
-  77bfe4e); fitting already bypasses the schedule enum, reading obs times
-  straight into Vec<Observation>, so the union axis is a pure loader concern.
 ---
 
 # Observation-data binding
+
+> **SUPERSEDED (archived 2026-06-09)** by `2026-06-06-observation-system.md`,
+> which carries this draft's bind/`BoundObs`/typed-holes design forward (and
+> folds in three adversarial reviews). Start from
+> `2026-06-09-time-and-observation-overview.md`. Retained for history only — do
+> not implement from this.
 
 ## Framing: bind, not join
 
@@ -206,18 +208,18 @@ this proposal unifies what _builds_ it.
   (`particle_filter.rs:401-402` resets every particle's accumulators at every
   obs time), which is the umbrella's §5.2.1 trap for sparse incidence.
 - **`trait ProcessModel` / `DensityProcess`** (`traits.rs`) — the simulator
-  side; unchanged here, named only to locate the observation seam relative to
-  it (`ProcessModel::State: Resettable` is the bound that ties the two).
+  side; unchanged here, named only to locate the observation seam relative to it
+  (`ProcessModel::State: Resettable` is the bound that ties the two).
 
 So `BoundObs` slots in at exactly one place, and the mapping into
 `MultiStreamObsModel` is mechanical:
 
-| `BoundObs`                | becomes, in `MultiStreamObsModel`                                                            |
-| ------------------------- | -------------------------------------------------------------------------------------------- |
-| `times` (the union axis)  | `obs_times`; drives `n_observations()`                                                        |
-| `StreamCells.kind`        | the `StreamProjection` variant (Interval→`FlowSum`; Instant→`IntCompSum`/`Expr`)             |
-| `cells[k] = Some(v)`      | a scored observation for that stream at `obs_idx = k`                                         |
-| `cells[k] = None` (hole)  | that stream contributes **0** to the joint log-likelihood at `obs_idx = k` — skipped, not scored as an observed zero |
+| `BoundObs`               | becomes, in `MultiStreamObsModel`                                                                                    |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `times` (the union axis) | `obs_times`; drives `n_observations()`                                                                               |
+| `StreamCells.kind`       | the `StreamProjection` variant (Interval→`FlowSum`; Instant→`IntCompSum`/`Expr`)                                     |
+| `cells[k] = Some(v)`     | a scored observation for that stream at `obs_idx = k`                                                                |
+| `cells[k] = None` (hole) | that stream contributes **0** to the joint log-likelihood at `obs_idx = k` — skipped, not scored as an observed zero |
 
 That last row is the entire correctness point: a hole is the _absence of a term
 in the sum_, not an observed value of zero. The homogeneous path can't express
@@ -227,26 +229,26 @@ union axis can.
 ### The flow
 
 ```
-  --data PATH  /  --data NAME=PATH                  (raw file: long, or wide-sugar)
-        |   parse + ir::caltime  (date -> model-time)
-        v
-  Vec<LongRow>                                      (untyped: stream, stratum, when, value)
-        |   obsdata::bind(model, rows, dt, cal, policy)
-        v
-  (BoundObs, BindReport) ----------------> report.verdict
-        |  value: model-shaped, typed,             |  Error      -> refuse: SimError::Validation
-        |  Option cells (holes typed)              |               with rendered findings,
-        |                                          |               unless --allow-drop[=kind]
-        |                                          |  Warn/Info  -> proceed, surface findings
-        v
-  MultiStreamObsModel : ObservationModel<ParticleState>
-        |   log_likelihood(state, obs_idx, params)   (the one seam; traits.rs:94)
-        v
-  { particle_filter, if2, pmmh, pgas }              (each generic over ObservationModel)
-        |   reads state via StreamProjection
-        v
-  ParticleState { counts (Instant) | flow_accumulators (Interval) }
-        ^   Resettable::reset_accumulators          (per-stream, for Interval streams)
+--data PATH  /  --data NAME=PATH                  (raw file: long, or wide-sugar)
+      |   parse + ir::caltime  (date -> model-time)
+      v
+Vec<LongRow>                                      (untyped: stream, stratum, when, value)
+      |   obsdata::bind(model, rows, dt, cal, policy)
+      v
+(BoundObs, BindReport) ----------------> report.verdict
+      |  value: model-shaped, typed,             |  Error      -> refuse: SimError::Validation
+      |  Option cells (holes typed)              |               with rendered findings,
+      |                                          |               unless --allow-drop[=kind]
+      |                                          |  Warn/Info  -> proceed, surface findings
+      v
+MultiStreamObsModel : ObservationModel<ParticleState>
+      |   log_likelihood(state, obs_idx, params)   (the one seam; traits.rs:94)
+      v
+{ particle_filter, if2, pmmh, pgas }              (each generic over ObservationModel)
+      |   reads state via StreamProjection
+      v
+ParticleState { counts (Instant) | flow_accumulators (Interval) }
+      ^   Resettable::reset_accumulators          (per-stream, for Interval streams)
 ```
 
 Errors flow _alongside_ the data, never as control flow. `bind` always returns
@@ -282,9 +284,9 @@ schema (the "bind, not join" principle applied to columns):
 
 - the **time** column is identified by a fixed header (`time`) or `--time-col`,
   not by "which column looks date-shaped";
-- a header matching a model **stream** name _is_ that stream; a header matching a
-  **stratum** dimension _is_ that stratum (the multi-stream "column-named loader"
-  already works this way — every column must be named);
+- a header matching a model **stream** name _is_ that stream; a header matching
+  a **stratum** dimension _is_ that stratum (the multi-stream "column-named
+  loader" already works this way — every column must be named);
 - a header matching **nothing** is a `LeftoverColumn` finding — located,
   surfaced, Info if it looks like benign metadata (`population`, `notes`), never
   silently dropped and never content-sniffed into a role.
@@ -301,8 +303,8 @@ The whole-column time typer already exists and is the thing `bind` calls — it 
 not new surface. `caltime_load::convert_time_column` /`detect_kind`
 (`caltime_load.rs:100-221`):
 
-- scans the **whole column**: all cells numeric → numeric (day-offsets);
-  all cells ISO-date → dated (converted via the model's `origin` + `time_unit`);
+- scans the **whole column**: all cells numeric → numeric (day-offsets); all
+  cells ISO-date → dated (converted via the model's `origin` + `time_unit`);
 - a **mixed** column → hard error naming _both_ offending rows
   (`caltime_load.rs:131-140`; tested: `mixed_column_errors_naming_both_rows`);
 - a **`--time-format numeric|date`** override is honoured _before_ detection
@@ -316,19 +318,20 @@ reports a mixed column naming both rows; if it parses as neither a number nor an
 ISO date, the `detect_kind` else-branch (`:112-125`) reports
 `line N: time cell '…' is neither a number nor an ISO date (reason)`. Under the
 bind, these become `Finding`s (`UnparseableDate` / `InconsistentTimeColumn`,
-Error severity) rather than bare `Result::Err`, so they flow through `BindReport`
-with everything else — but the detection and the located message already exist.
+Error severity) rather than bare `Result::Err`, so they flow through
+`BindReport` with everything else — but the detection and the located message
+already exist.
 
-The honest gap is the **invalid-but-date-shaped** cell (`2024-13-45`, `2024-O3-01`
-with a letter O): it hits the right else-branch but there is **no test pinning
-it** today (the suite covers numeric+date mix, not the neither-branch). That is a
-test obligation below, not a missing mechanism.
+The honest gap is the **invalid-but-date-shaped** cell (`2024-13-45`,
+`2024-O3-01` with a letter O): it hits the right else-branch but there is **no
+test pinning it** today (the suite covers numeric+date mix, not the
+neither-branch). That is a test obligation below, not a missing mechanism.
 
 ### Value **cell** typing is the part that needs hardening
 
 `caltime_load` is time-only. The observation **value** cells are parsed with a
-bare `parse::<f64>()` (`pfilter.rs:669,699`) that accepts `"NaN"`/`"inf"` and has
-no located error for a non-numeric value. `bind` adds the typed `RawValue`
+bare `parse::<f64>()` (`pfilter.rs:669,699`) that accepts `"NaN"`/`"inf"` and
+has no located error for a non-numeric value. `bind` adds the typed `RawValue`
 (`Num | Missing | Unparseable`) and a finiteness guard, so a bad value cell is a
 located `RejectedValue` finding and a `NaN`/`inf` can never reach the log-pmf.
 This — not the date path — is where robustness is actually added.
@@ -350,8 +353,8 @@ Does this unlock fitting to malaria-style data — prevalence surveys at sparse,
 irregular times? Mostly **yes**, and the part it doesn't reach is named.
 
 - **The hard part — yes.** Malaria prevalence is an `Instant` stream
-  (`CurrentPop`/`DerivedExpr`, e.g. `I/(S+I+R)`): read at the survey instant,
-  no accumulation window, no per-stream reset (it bypasses `flow_accumulators`
+  (`CurrentPop`/`DerivedExpr`, e.g. `I/(S+I+R)`): read at the survey instant, no
+  accumulation window, no per-stream reset (it bypasses `flow_accumulators`
   entirely and reads `counts`). Sparse + irregular survey times are exactly the
   union-axis + `Option`-cell case: each survey is a present cell on the union
   `times`; every non-survey time is a typed hole that contributes no term.
@@ -370,8 +373,8 @@ irregular times? Mostly **yes**, and the part it doesn't reach is named.
   model and the data file. The fix is the `ObsCell::Counted { value, denom }`
   payload: the denominator rides _with_ the datum in `BoundObs`, and the
   likelihood reads it per cell. This ships in this proposal (it is a small,
-  self-contained addition to the cell type and the Binomial/BetaBinomial
-  scoring path), so binomial positivity is a first-class target, not a deferral.
+  self-contained addition to the cell type and the Binomial/BetaBinomial scoring
+  path), so binomial positivity is a first-class target, not a deferral.
 - **The model-side gaps (same as #171).** If prevalence is observed only in a
   subset of patches/age-strata (cross-sectional surveys rarely cover every
   cell), that restriction is the gh#171 subset binder — model-side, separate
@@ -420,11 +423,11 @@ camdl scores every fit through one seam — `ObservationModel::log_likelihood`,
 evaluated _per observation time_ and combined sequentially by the particle
 filter. That per-cell, Markovian shape is what makes the bootstrap filter and
 PGAS work. But a whole class of methods deliberately abandons the per-time
-likelihood: **probe-matching / synthetic likelihood** (Wood 2010; King, Nguyen
-& Ionides 2016, the pomp `probe`/`probe_match` and synthetic-likelihood
-surface) and **approximate Bayesian computation (ABC)**. These score a model by
-how well _summaries_ of simulated data match summaries of the observed data —
-peak height, time-to-peak, final size, growth rate, autocorrelations, spectral
+likelihood: **probe-matching / synthetic likelihood** (Wood 2010; King, Nguyen &
+Ionides 2016, the pomp `probe`/`probe_match` and synthetic-likelihood surface)
+and **approximate Bayesian computation (ABC)**. These score a model by how well
+_summaries_ of simulated data match summaries of the observed data — peak
+height, time-to-peak, final size, growth rate, autocorrelations, spectral
 features — rather than by a point-by-point density. They are the right tool when
 the per-observation likelihood is intractable, ill-defined, or pathological
 (near-deterministic dynamics, hard-to-specify reporting processes), and they are
@@ -454,33 +457,34 @@ enum Objective {
 }
 ```
 
-**What `BoundObs` gives these methods for free.** The observed summary `s(y_obs)`
-is computed _once_ from `BoundObs`; the simulated summary is computed from each
-simulated `Trajectory` **projected through the same `StreamProjection`**. Because
-both sides flow through the identical projection (the `Interval`/`Instant` split,
-the stratum layout, the union axis), the observed and simulated summaries are
-guaranteed apples-to-apples — a summary function is just a reduction over the
-model-shaped cells, defined once and applied to both sides. Holes (`None` cells)
-are handled by the summary itself (e.g. "mean over present cells"), exactly as
-they should be, with no special path. Synthetic likelihood then fits a Gaussian
-to the M simulated summary vectors and scores `s(y_obs)` under it (Wood 2010);
-ABC thresholds a distance. Neither needs a gradient, and neither touches the
-loader.
+**What `BoundObs` gives these methods for free.** The observed summary
+`s(y_obs)` is computed _once_ from `BoundObs`; the simulated summary is computed
+from each simulated `Trajectory` **projected through the same
+`StreamProjection`**. Because both sides flow through the identical projection
+(the `Interval`/`Instant` split, the stratum layout, the union axis), the
+observed and simulated summaries are guaranteed apples-to-apples — a summary
+function is just a reduction over the model-shaped cells, defined once and
+applied to both sides. Holes (`None` cells) are handled by the summary itself
+(e.g. "mean over present cells"), exactly as they should be, with no special
+path. Synthetic likelihood then fits a Gaussian to the M simulated summary
+vectors and scores `s(y_obs)` under it (Wood 2010); ABC thresholds a distance.
+Neither needs a gradient, and neither touches the loader.
 
 **How it plugs into a fit — concretely.** A fit today is an _outer parameter
 search_ wrapped around an _inner objective_ that turns a θ into a scalar
-(pseudo-)log-density. The inner objective is built once — `FitConfig::build_obs_model`
-(`fit/runner.rs:404`) constructs the `MultiStreamObsModel` — and handed to the
-algorithm, which scores it **sequentially inside a particle filter**: `if2` and
-`particle_filter` take it as `&dyn ObservationModel<ParticleState>`, `pgas`/`pmmh`
-take the concrete `&MultiStreamObsModel` (PGAS additionally needs the per-state
-gradient and a latent-state representation). A `SeriesScorer` replaces the
-_inner objective only_: instead of "run a PF to get a marginal likelihood," it is
-"simulate M trajectories at θ, project each through the same `StreamProjection`,
-reduce to summaries, score against the observed summaries." That scalar then
-feeds the **same** kind of outer search. So the integration is a new `algorithm`
-value in `fit.toml` (e.g. `algorithm = "probe_match"` / `"synthetic"` / `"abc"`)
-whose objective is a `SeriesScorer` and whose outer loop is a derivative-free
+(pseudo-)log-density. The inner objective is built once —
+`FitConfig::build_obs_model` (`fit/runner.rs:404`) constructs the
+`MultiStreamObsModel` — and handed to the algorithm, which scores it
+**sequentially inside a particle filter**: `if2` and `particle_filter` take it
+as `&dyn ObservationModel<ParticleState>`, `pgas`/`pmmh` take the concrete
+`&MultiStreamObsModel` (PGAS additionally needs the per-state gradient and a
+latent-state representation). A `SeriesScorer` replaces the _inner objective
+only_: instead of "run a PF to get a marginal likelihood," it is "simulate M
+trajectories at θ, project each through the same `StreamProjection`, reduce to
+summaries, score against the observed summaries." That scalar then feeds the
+**same** kind of outer search. So the integration is a new `algorithm` value in
+`fit.toml` (e.g. `algorithm = "probe_match"` / `"synthetic"` / `"abc"`) whose
+objective is a `SeriesScorer` and whose outer loop is a derivative-free
 optimizer (Nelder-Mead, as pomp's `probe_match` uses) or a Metropolis sampler
 over θ — reusing the existing `EstimatedParam`/`Transform` bounds-and-scale
 machinery unchanged.
@@ -543,8 +547,9 @@ this proposal owes. No silent coercion, no silent drop, anywhere.
   warn, **not** reject.
 - `[gap]` `Interval` off-grid (window can't tile) → Error.
 - `[gap]` **sparse `Interval` per-stream reset** — the §5.2.1 trap: a sparse
-  incidence stream's flow accumulated over `[t₁, t₃]` is not truncated by another
-  stream's observation at `t₂`. The single most important correctness test here.
+  incidence stream's flow accumulated over `[t₁, t₃]` is not truncated by
+  another stream's observation at `t₂`. The single most important correctness
+  test here.
 
 **`Counted` payload**
 

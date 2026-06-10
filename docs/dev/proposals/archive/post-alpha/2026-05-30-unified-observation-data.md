@@ -1,6 +1,10 @@
 # Unified observation data: joining, heterogeneous streams, missing data, and the burn-in boundary
 
-Status: Draft (for review)
+Status: **SUPERSEDED (archived 2026-06-09).** This umbrella draft is replaced by
+`2026-06-06-observation-system.md` (the data layer), with the
+burn-in/conditioning half folded into `2026-06-09-time-interval-model.md`. Start
+from `2026-06-09-time-and-observation-overview.md`. Retained for history only —
+do not implement from this.
 
 Date: 2026-05-30
 

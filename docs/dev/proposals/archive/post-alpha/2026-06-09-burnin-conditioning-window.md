@@ -1,16 +1,16 @@
 # The conditioning boundary: a covariate-informed burn-in
 
-- **Status:** ON HOLD (2026-06-09) — paused as a standalone design pending a
-  wider time-interval model. The placement of `condition_from` (model vs fit)
-  turned out to depend on a larger question being mapped first: how the
+- **Status:** SUPERSEDED (archived 2026-06-09) — replaced as a standalone design
+  by a wider time-interval model. The placement of `condition_from` (model vs
+  fit) turned out to depend on a larger question being mapped first: how the
   simulation interval, per-stream observation intervals, covariate-table
   domains, and the forecast horizon compose across the fit and
   simulate-into-the-future operations. Retained for its problem statement (§1,
   gh#134) and inference math (§2, §6); **do not implement the §4 surface
-  as-is**. Superseded by
-  [`2026-06-09-time-interval-model.md`](2026-06-09-time-interval-model.md),
-  which folds this conditioning inference math (§2, §6) into the conditioning
-  window of the interval model and replaces the lone `condition_from` surface.
+  as-is**. Superseded by `2026-06-09-time-interval-model.md`, which folds this
+  conditioning inference math (§2, §6) into the conditioning window of the
+  interval model and replaces the lone `condition_from` surface. Start from
+  `2026-06-09-time-and-observation-overview.md`.
 - **Supersedes:** `2026-05-30-conditioning-boundary-tcond.md` (the
   inference-math half; now marked superseded). This document is self-contained
   and owns the inference math, the surface, and the UX.
