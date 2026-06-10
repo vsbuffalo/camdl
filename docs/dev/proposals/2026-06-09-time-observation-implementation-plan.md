@@ -182,14 +182,37 @@ representation change belongs with the correctness tier, not the no-op seam).
 ## Phase 4 — data correctness tier + conditioning window
 
 From `observation-system.md` step 3 + `time-interval-model.md` §7.2. **Not
-blocked on the spine.** The per-observer reset this tier needs is a localized
-generalization of `Resettable::reset_accumulators` (today it zeroes _all_ flow
-accumulators) to take which flow-indices to reset — **6 call sites**
-(`particle_filter.rs:415`, `if2.rs:319,559`, `correlated_pf.rs:521`, and the two
-PGAS `cum_flows` zeroings at `pgas.rs:843,1250`), all in the inference
-projection path, none in the transition density. An in-tree canary comment
-(`particle_filter.rs:405-413`) already anticipates exactly this generalization.
-P4 builds it; it does not wait on a separate spine deliverable.
+blocked on the spine.**
+
+**DONE — hole-scoring slice (`188a9b0`):** `ObsCell{Scalar}` + per-observation
+`Vec<Option<ObsCell>>` (None = hole); the scoring seam skips a `None` (omits the
+factor — marginalization), the loader reads `NA` as a hole keeping its time in
+the grid, and the existing per-obs-index reset still fires at holes (a missing
+week closes its bin). Hole ≠ observed-zero, in the type. A review-found leak
+(the dense placeholder reaching `--save-prequential`/`--trace`) is hard-errored
+(`check_holes_output_compat`). **Verified camdl-vs-pomp on a sparse/holes
+He-2010 series: -4726.55 vs oracle -4723.42 (3.13 nats, inside the 35-nat
+band)** — the oracle is in `tests/external/sparse_oracle_wip/` (untracked, NA→1
+dmeasure + weekly accumvar reset, independently reproduced). Dense parity intact
+(goldens DRIFT 0). For a **single** stream the per-obs-index reset is already
+correct (its cadence is the grid) — so this slice greens the He-2010 gate
+WITHOUT the per-observer reset below.
+
+**NEXT in P4 (remaining):**
+
+- **Wire the formal sparse gate.** Assemble `tests/external/sparse_oracle_wip/`
+  into a real `tests/external/cases/he2010_pfilter_loglik_sparse/` (camdl-side
+  holed `.tsv` with `NA` + the oracle's `expected.toml`/`reference.R`), wired
+  into `run_all_cases` so the −4723.42 invariant runs in CI. (Converts the
+  upstream review's pomp-numerical gate from a one-off into a permanent check.)
+- **Per-observer / per-cadence reset** (needed only for MULTI-stream different
+  cadences — polio ES+AFP — NOT the He-2010 gate): the localized generalization
+  of the reset (`state.reset_flows()` at `particle_filter.rs:415`,
+  `if2.rs:319,559`, `correlated_pf.rs:521`; PGAS `cum_flows` at
+  `pgas.rs:843,1250`) to "reset only the flows whose bin closes at this
+  obs_idx", obs-model-driven via `reset_due_flows(state, obs_idx)`. Dense ⇒
+  resets all ⇒ parity. Its own multi-cadence test. The reviewer owns this seam
+  (inference math).
 
 - relax the shared-grid assertions to the **present-cell union axis** (all-hole
   times excluded by construction);
