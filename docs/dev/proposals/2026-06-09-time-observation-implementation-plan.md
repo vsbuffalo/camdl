@@ -50,8 +50,11 @@ Before building, an agent must check what each already does and fold/align:
 | `c11f0a7` method caveat banner from the registry                                                  | F1's false "conditioning on y₁" banner                               | the P0 agent verifies whether this already fixed the banner before fixing F1.                                                                                  |
 | `7d92a4d` gh#191 real-compartment support across the inference stack                              | the REAL_COMPARTMENTS capability gap                                 | confirm it closed; touched the inference stack — re-verify F1/F4 against it.                                                                                   |
 
-Also Phase 0: **file the two confirmed silent-wrong findings as incidents** once
-the P0 agent reproduces them (F1, F4) — reproduction-backed, per CLAUDE.md.
+Phase 0 does **not** require standalone incident docs for F1/F4: they are
+well-scoped fixes whose reproduction + red→green proof live in their fix-commit
+messages (`b0b044e`, `4106d6d`). An incident doc is for a serious bug warranting
+an engineering response beyond the fix — not every silent-wrong finding clears
+that bar.
 
 ## Phase 1 — P0 silent-wrong bug fixes (unblocked, in progress)
 
@@ -68,7 +71,7 @@ commit. **In progress** (agent running):
   per-kind policy (error for `interpolated`/`CubicSpline`, `constant`-outside
   for step kinds) and must reconcile with forcing v3; it lands in P5.
 
-**Gate:** `make test` green; red+green pasted; incidents filed.
+**Gate:** `make test` green; red+green pasted in each fix commit.
 
 ## Phase 2 — the spine (the foundation; the long pole)
 
