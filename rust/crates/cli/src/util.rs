@@ -998,8 +998,12 @@ pub fn check_obs_before_origin(
 ///      prequential / log-likelihood terms are dominated by that one window.
 ///
 /// Nothing in the existing pipeline points at the cause — the fit just starts
-/// badly. This is a pure soft warning: it never rejects a model (a previously
-/// valid fit stays valid), it only names the numbers and the fix.
+/// badly. This detector only reports the anomaly (the gap, the modal cadence,
+/// the ratio); the *severity* decision lives in [`first_window_guard`], which —
+/// per the §6.8 escalation of the burn-in/conditioning proposal — turns it into
+/// a hard error for incidence streams (where the wide window is the gh#134
+/// wrong-number) and keeps it a soft warning for prevalence (where it is only
+/// free-running drift the first datum corrects).
 ///
 /// **Modal vs median spacing.** We use the *mode* of the consecutive-diffs
 /// (the most common gap), not the median, deliberately. The median is itself
@@ -1023,13 +1027,12 @@ pub fn check_obs_before_origin(
 ///
 /// Returns `None` when there is nothing to say (fewer than 3 observations — too
 /// few for a meaningful mode; a non-positive or degenerate modal gap; or a
-/// first window within `K *` the cadence). Returns `Some(message)` carrying the
-/// `[warn W329]` line otherwise. The caller emits it (mirrors how
-/// `check_incidence_origin_window` returns a `String` for the caller to route).
+/// first window within `K *` the cadence). Returns `Some(FirstWindowAnomaly)`
+/// otherwise; the caller routes it through [`first_window_guard`].
 pub fn check_first_interval_window(
     t_start: f64,
     obs_times: &[f64],
-) -> Option<String> {
+) -> Option<FirstWindowAnomaly> {
     // Need at least 3 observations → at least 2 inter-obs gaps → a meaningful
     // notion of a "most common" gap. With 2 obs there is a single gap and no
     // cadence to compare the first window against.
@@ -1075,19 +1078,83 @@ pub fn check_first_interval_window(
     }
 
     let ratio = first_window / modal_gap;
-    Some(format!(
-        "[warn W329] first observation interval is {first_window:.4} but the \
-         typical (modal) observation cadence is {modal_gap:.4} — the first \
-         window is {ratio:.1}x the usual spacing. This usually means \
-         `simulate.from` sits far behind the first data point: the model \
-         free-runs unconditioned across that whole span (no observation pulls \
-         the filter toward the data), and for incidence observations the first \
-         window accumulates a giant flow, so the fit starts badly. Fix: move \
-         `simulate.from` (the model origin) closer to the first observation so \
-         the first window matches the cadence — or, if the long pre-data \
-         burn-in is intentional, the principled fix is an explicit conditioning \
-         boundary (see docs/dev/proposals/2026-05-30-conditioning-boundary-tcond.md)."
-    ))
+    Some(FirstWindowAnomaly { first_window, modal_gap, ratio })
+}
+
+/// The numbers behind a flagged oversized first window (W329): the leading gap
+/// `first_obs − t_start`, the modal observation cadence, and their ratio.
+/// Severity (soft warn vs hard error) is decided by [`first_window_guard`].
+#[derive(Debug, Clone, Copy)]
+pub struct FirstWindowAnomaly {
+    pub first_window: f64,
+    pub modal_gap:    f64,
+    pub ratio:        f64,
+}
+
+impl FirstWindowAnomaly {
+    /// Soft-warning text (prevalence streams). The wide gap means the model
+    /// free-runs unconditioned, but a prevalence datum reads the instantaneous
+    /// state, so the first datum still corrects it — not a wrong number.
+    pub fn warn_message(&self) -> String {
+        let FirstWindowAnomaly { first_window, modal_gap, ratio } = *self;
+        format!(
+            "[warn W329] the first observation is {first_window:.4} after the \
+             model start but the typical (modal) observation cadence is \
+             {modal_gap:.4} — the first window is {ratio:.1}x the usual spacing. \
+             This usually means `simulate.from` sits far behind the first data \
+             point, so the model free-runs unconditioned across that whole span \
+             (no observation pulls the filter toward the data). Fix: move \
+             `simulate.from` closer to the first observation, or — if the long \
+             pre-data burn-in is intentional — set `condition_from` to begin \
+             scoring one cadence before the data (`camdl docs fit-toml`)."
+        )
+    }
+
+    /// Hard-error text (incidence streams, §6.8). The first incidence bin would
+    /// accumulate the whole leading gap and score it against one datum — the
+    /// gh#134 wrong-number. Names both fixes and the explicit opt-out.
+    pub fn error_message(&self) -> String {
+        let FirstWindowAnomaly { first_window, modal_gap, ratio } = *self;
+        format!(
+            "[W329] the first observation is {first_window:.4} after the model \
+             start (`simulate.from`) — {ratio:.1}x the typical {modal_gap:.4} \
+             observation cadence. This is an incidence (cumulative-flow) \
+             observation, so the first window would accumulate the entire \
+             {first_window:.4}-long flow and score it against a single datum, a \
+             wrong likelihood (gh#134). Fix one of:\n  \
+             • set `condition_from` to one cadence before the first datum (e.g. \
+             `condition_from = first_obs - 1 week`) to run a covariate-informed \
+             warm-up and score the first datum against one cadence; or\n  \
+             • move `simulate.from` closer to the first observation.\n\
+             To deliberately score the whole leading window, set `condition_from` \
+             to the model start explicitly. See `camdl docs fit-toml`."
+        )
+    }
+}
+
+/// Route a flagged first-window anomaly to the right severity (§6.8). Setting
+/// `condition_from` suppresses the guard entirely — the modeler has engaged with
+/// the boundary, and `resolve_condition_from` validates the value. With no
+/// `condition_from`: an `Interval` (incidence) stream over the threshold is a
+/// hard error (`Err`); an `Instant` (prevalence) stream is a soft warn
+/// (`Ok(Some(msg))`, for the caller to emit). `Ok(None)` means nothing to say.
+pub fn first_window_guard(
+    has_condition_from: bool,
+    t_start: f64,
+    obs_times: &[f64],
+    kind: ir::observation::TemporalKind,
+) -> Result<Option<String>, String> {
+    use ir::observation::TemporalKind;
+    if has_condition_from {
+        return Ok(None);
+    }
+    match check_first_interval_window(t_start, obs_times) {
+        None => Ok(None),
+        Some(anomaly) => match kind {
+            TemporalKind::Interval => Err(anomaly.error_message()),
+            TemporalKind::Instant => Ok(Some(anomaly.warn_message())),
+        },
+    }
 }
 
 /// Most-common value in `xs` under a relative tolerance (~1%). Used for the
@@ -1122,20 +1189,38 @@ mod first_interval_tests {
     use super::check_first_interval_window;
 
     #[test]
-    fn far_first_window_warns_and_names_numbers() {
+    fn far_first_window_detects_and_names_numbers() {
         // 1000-day first window against a weekly cadence: the gh#134 footgun.
         let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
-        let msg = check_first_interval_window(0.0, &obs)
-            .expect("an oversized first window must warn");
+        let a = check_first_interval_window(0.0, &obs)
+            .expect("an oversized first window must be flagged");
+        assert!((a.first_window - 1000.0).abs() < 1e-9, "first window: {a:?}");
+        assert!((a.modal_gap - 7.0).abs() < 1e-9, "modal gap: {a:?}");
+        assert!((a.ratio - 1000.0 / 7.0).abs() < 1e-6, "ratio: {a:?}");
+    }
+
+    #[test]
+    fn warn_message_explains_and_points_to_condition_from() {
+        let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
+        let msg = check_first_interval_window(0.0, &obs).unwrap().warn_message();
         assert!(msg.contains("[warn W329]"), "must carry the W329 code: {msg}");
-        // Names the first interval, the modal cadence, and the ratio.
-        assert!(msg.contains("1000"), "must name the first interval: {msg}");
+        assert!(msg.contains("1000"), "must name the first window: {msg}");
         assert!(msg.contains("7.0000"), "must name the modal cadence: {msg}");
-        assert!(msg.contains("142") || msg.contains("143"), "must name the ratio: {msg}");
-        // Says WHY (free-run + incidence window) and HOW to fix.
         assert!(msg.contains("free-run"), "must explain the free-run footgun: {msg}");
-        assert!(msg.contains("simulate.from"), "must give the fix hint: {msg}");
-        assert!(msg.contains("tcond.md"), "must cite the conditioning-boundary proposal: {msg}");
+        assert!(msg.contains("simulate.from"), "must give the move-origin hint: {msg}");
+        assert!(msg.contains("condition_from"), "must point at condition_from: {msg}");
+        assert!(!msg.contains("tcond.md"), "must NOT dangle the retired proposal: {msg}");
+    }
+
+    #[test]
+    fn error_message_names_incidence_and_the_fixes() {
+        let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
+        let msg = check_first_interval_window(0.0, &obs).unwrap().error_message();
+        assert!(msg.contains("incidence"), "must name the incidence cause: {msg}");
+        assert!(msg.contains("gh#134"), "must cite the bug: {msg}");
+        assert!(msg.contains("condition_from"), "must name the boundary fix: {msg}");
+        assert!(msg.contains("simulate.from"), "must name the move-origin fix: {msg}");
+        assert!(!msg.contains("tcond.md"), "must NOT dangle the retired proposal: {msg}");
     }
 
     #[test]
@@ -1177,9 +1262,9 @@ mod first_interval_tests {
         // and a years-behind origin must still warn against it. Origin at day 0,
         // first obs ~3 years later.
         let obs = [1095.0, 1125.0, 1156.0, 1184.0, 1215.0, 1245.0];
-        let msg = check_first_interval_window(0.0, &obs)
-            .expect("3-year first window vs monthly cadence must warn");
-        assert!(msg.contains("[warn W329]"), "{msg}");
+        let a = check_first_interval_window(0.0, &obs)
+            .expect("3-year first window vs monthly cadence must be flagged");
+        assert!(a.warn_message().contains("[warn W329]"), "{}", a.warn_message());
     }
 
     #[test]
@@ -1191,8 +1276,8 @@ mod first_interval_tests {
         // 990 / 7 ≈ 141x → warns. (Demonstrates we key off the recurring
         // cadence, not a window-inclusive central tendency.)
         let obs = [990.0, 997.0, 1004.0];
-        let msg = check_first_interval_window(0.0, &obs).expect("must warn");
-        assert!(msg.contains("7.0000"), "modal gap should be the recurring 7: {msg}");
+        let a = check_first_interval_window(0.0, &obs).expect("must flag");
+        assert!((a.modal_gap - 7.0).abs() < 1e-9, "modal gap should be the recurring 7: {a:?}");
     }
 
     #[test]
@@ -1206,6 +1291,51 @@ mod first_interval_tests {
         );
         // Same data, origin back at 0 → 1000/7 ≈ 143x → warns.
         assert!(check_first_interval_window(0.0, &obs).is_some());
+    }
+
+    // ── first_window_guard: the §6.8 severity policy ────────────────────────
+
+    #[test]
+    fn guard_rejects_incidence_wide_gap_without_condition_from() {
+        use ir::observation::TemporalKind;
+        let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
+        let err = super::first_window_guard(false, 0.0, &obs, TemporalKind::Interval)
+            .expect_err("incidence + wide gap + no condition_from must hard-error");
+        assert!(err.contains("condition_from"), "must name the fix: {err}");
+        assert!(err.contains("incidence"), "must name the cause: {err}");
+    }
+
+    #[test]
+    fn guard_warns_but_does_not_reject_prevalence_wide_gap() {
+        use ir::observation::TemporalKind;
+        let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
+        let warn = super::first_window_guard(false, 0.0, &obs, TemporalKind::Instant)
+            .expect("prevalence must not hard-error")
+            .expect("prevalence wide gap must still warn");
+        assert!(warn.contains("[warn W329]"), "{warn}");
+    }
+
+    #[test]
+    fn guard_suppressed_when_condition_from_set() {
+        use ir::observation::TemporalKind;
+        let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
+        // Even for incidence: setting condition_from suppresses the guard
+        // (the modeler engaged with the boundary; resolve_condition_from validates).
+        assert!(
+            super::first_window_guard(true, 0.0, &obs, TemporalKind::Interval)
+                .expect("condition_from set ⇒ no error")
+                .is_none(),
+            "condition_from set ⇒ guard suppressed (no warn, no error)"
+        );
+    }
+
+    #[test]
+    fn guard_silent_when_no_anomaly() {
+        use ir::observation::TemporalKind;
+        // First window = one cadence (7) → no anomaly → Ok(None) for both kinds.
+        let obs = [7.0, 14.0, 21.0, 28.0];
+        assert!(super::first_window_guard(false, 0.0, &obs, TemporalKind::Interval).unwrap().is_none());
+        assert!(super::first_window_guard(false, 0.0, &obs, TemporalKind::Instant).unwrap().is_none());
     }
 }
 

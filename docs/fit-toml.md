@@ -87,6 +87,32 @@ not a setting.
 > at load rather than being silently dropped, so a sweep that varies a typo'd
 > knob can't quietly produce identical fits.
 
+## Conditioning boundary (`condition_from`)
+
+A top-level key. By default the filter conditions from the model origin
+(`simulate.from`): the first observation is scored against the flow accumulated
+since `t_start`. When `simulate.from` sits well before the first datum — e.g.
+you start dynamics in 2011 so births and SIA/MCV covariates shape the
+susceptible pool, but case data begins in 2014 — that first incidence window
+spans the whole gap, and the opening likelihood term is meaningless (gh#134).
+
+`condition_from` moves the conditioning boundary to one cadence before the first
+datum. The leading span becomes a covariate-informed **warm-up** — simulated
+with the full stochastic dynamics (births, campaigns, seasonality, process
+noise) but **not scored** — and the first observation is scored against one
+normal cadence:
+
+```toml
+condition_from = "first_obs - 1 week" # idiomatic: one cadence before the data
+# condition_from = "date(\"2014-08-18\")"  # or an absolute calendar date
+```
+
+It must resolve to a time strictly between `simulate.from` and the first
+observation (and onto the `dt` grid). For an **incidence** stream, omitting it
+when the leading gap is large is a hard error (W329) naming this fix; for
+**prevalence** it is only a soft warning. `condition_from` and `ic_free` cannot
+be combined.
+
 ## Priors
 
 Externally-tagged inline tables (the wire format matches the IR emission):

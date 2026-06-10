@@ -372,19 +372,35 @@ impl FitRunConfig {
         // Canonical observations (from first stream)
         let mut observations = streams[0].data.clone();
 
-        // gh#134 (request 3, W329): warn once on the canonical stream when the
-        // first inter-observation interval is far larger than the modal cadence
-        // — `simulate.from` sitting well behind the first data point, so the
-        // model free-runs unconditioned over a giant first window. Pure soft
-        // warning (never rejects); the harder principled fix is a conditioning
-        // boundary (see the cited proposal in the message).
+        // gh#134 W329: the leading gap (first_obs − t_start) vs the modal
+        // cadence. For an INCIDENCE (Interval) canonical stream a wide gap is the
+        // gh#134 wrong-number — the first bin accumulates the whole gap and
+        // scores it against one datum — so with no `condition_from` set we
+        // HARD-ERROR, naming the boundary fix. For a PREVALENCE (Instant) stream
+        // it is only free-running drift the first datum corrects → soft warn.
+        // Setting `condition_from` suppresses the guard: the modeler has engaged
+        // with the boundary, and `resolve_condition_from` (below) validates it.
         {
+            use ir::observation::TemporalKind;
+            // All streams share identical obs times (validated above), so the
+            // leading gap is the same for every stream. The wrong-number is an
+            // incidence problem, so escalate to a hard error if ANY stream is
+            // incidence; warn only when every stream is prevalence.
+            let effective_kind = if streams.iter().any(|s| {
+                s.projection.temporal_kind() == TemporalKind::Interval
+            }) {
+                TemporalKind::Interval
+            } else {
+                TemporalKind::Instant
+            };
             let obs_times: Vec<f64> = observations.iter().map(|o| o.time).collect();
-            if let Some(msg) = crate::util::check_first_interval_window(
+            if let Some(warn) = crate::util::first_window_guard(
+                fit.condition_from.is_some(),
                 compiled.model.simulation.t_start,
                 &obs_times,
-            ) {
-                eprintln!("{msg}");
+                effective_kind,
+            )? {
+                eprintln!("{warn}");
             }
         }
 
@@ -4415,12 +4431,27 @@ dt = 1.0
             ic_free: bool,
             ivp: bool,
         ) -> FitConfigV2 {
+            // Default: weekly obs from t=7 — first window is one cadence, so the
+            // W329 first-window guard never fires.
+            fixture_with_obs(dir, condition_from, ic_free, ivp,
+                "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n")
+        }
+
+        /// Like [`fixture`] but with caller-supplied observation TSV — lets a
+        /// test set a wide leading gap (first_obs ≫ t_start) to exercise the
+        /// W329 first-window guard (§6.8).
+        fn fixture_with_obs(
+            dir: &std::path::Path,
+            condition_from: Option<&str>,
+            ic_free: bool,
+            ivp: bool,
+            obs_tsv: &str,
+        ) -> FitConfigV2 {
             let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
             let ir_path = format!(
                 "{}/../../../ocaml/golden/seir_observations.ir.json", manifest);
             let data_path = dir.join("obs.tsv");
-            std::fs::write(&data_path,
-                "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
+            std::fs::write(&data_path, obs_tsv).unwrap();
             let cond_line = condition_from
                 .map(|c| format!("condition_from = {c}\n"))
                 .unwrap_or_default();
@@ -4593,6 +4624,41 @@ dt = 1.0
             };
             assert!(err.contains("nothing to condition on"),
                 "condition_from + ic_free must trip the missing-y₁ guard: {err}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// W329 escalation (§6.8): a wide leading gap before the first datum on
+        /// an INCIDENCE stream (`weekly_cases` = `cumulative_flow infection`)
+        /// with no `condition_from` is the gh#134 wrong-number — the first bin
+        /// would accumulate the whole gap. The fit must be REJECTED, naming the
+        /// fix.
+        #[test]
+        fn wide_incidence_gap_without_condition_from_is_rejected() {
+            let dir = test_dir("widegap_reject");
+            // first obs at t=70 vs t_start=0 → 70-day first window = 10× the
+            // 7-day weekly cadence (> K=5). All obs ≤ t_end (365).
+            let wide = "time\tweekly_cases\n70\t1\n77\t2\n84\t3\n91\t4\n98\t5\n";
+            let fit = fixture_with_obs(&dir, None, false, false, wide);
+            let err = match FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false) {
+                Ok(_) => panic!("wide incidence gap + no condition_from must error"),
+                Err(e) => e,
+            };
+            assert!(err.contains("condition_from"),
+                "the error must name condition_from as the fix: {err}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// The same wide gap with `condition_from` set suppresses the guard — the
+        /// modeler engaged with the boundary, and the leading hole makes the
+        /// first scored bin one cadence. The fit builds.
+        #[test]
+        fn wide_incidence_gap_with_condition_from_builds() {
+            let dir = test_dir("widegap_ok");
+            let wide = "time\tweekly_cases\n70\t1\n77\t2\n84\t3\n91\t4\n98\t5\n";
+            // 63 = 70 − 7 (one cadence before first_obs), interior to (0, 70).
+            let fit = fixture_with_obs(&dir, Some("63.0"), false, false, wide);
+            FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
+                .expect("wide gap + condition_from must build");
             std::fs::remove_dir_all(&dir).ok();
         }
     }

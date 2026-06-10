@@ -99,6 +99,10 @@ fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, output_dir: &Path) -> Path
     let body = format!(
         r#"
 output_dir = "{out}"
+# Early origin (~20 d before the daily data) to estimate the seed time; condition
+# one cadence before the first datum so the first incidence bin is one day, not
+# the whole pre-data gap (gh#134 / W329).
+condition_from = "first_obs - 1 day"
 
 [model]
 camdl = "{ir}"

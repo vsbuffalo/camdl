@@ -50,6 +50,11 @@ fn write_data(dir: &Path) -> PathBuf {
 fn write_fit_toml(dir: &Path, out: &Path, data: &Path, posterior_iters: u32) -> PathBuf {
     let body = format!(
         r#"output_dir = "{out}"
+# seed_timing_dated starts ~20 days before the first datum (daily incidence) to
+# estimate the seed time, so the first incidence bin would otherwise span the
+# whole 20-day gap (gh#134 / W329). Condition one cadence before the data: the
+# pre-data span is a warm-up, the first datum is scored against one day.
+condition_from = "first_obs - 1 day"
 
 [model]
 camdl = "{ir}"
