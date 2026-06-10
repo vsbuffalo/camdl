@@ -22,6 +22,7 @@ use sim::{
         pmmh::Prior,
         BoundObs,
         MultiStreamObsModel,
+        dense_cells,
         multi_stream_obs::StreamSpec,
     },
 };
@@ -130,7 +131,7 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
                     }),
                 }),
             },
-            observations: obs.iter().map(|o| o.value).collect(),
+            observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
         }]).unwrap().0,
         compiled.clone(),

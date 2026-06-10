@@ -66,6 +66,35 @@ use super::obs_model::{
     sample_obs_resolved, eval_obs_mean_resolved,
 };
 
+/// One observation cell on a stream's grid.
+///
+/// A stream's per-observation data is `Vec<Option<ObsCell>>`: `None` is a
+/// HOLE (a grid time that is present — so incidence accumulators still reset
+/// on schedule — but carries no observed value, so it contributes NO term to
+/// the joint log-likelihood, i.e. the unobserved value is marginalized,
+/// log-contribution 0). `Some(ObsCell::Scalar(v))` is an observed scalar
+/// value `v`, scored exactly as a dense observation.
+///
+/// A hole is NOT an observed zero: `None` ≠ `Some(Scalar(0.0))`. The former
+/// omits the likelihood factor; the latter scores the density at `y = 0`.
+///
+/// Only `Scalar` exists today. A `Counted { value, denom }` variant (for
+/// binomial-with-known-denominator survey data) is a later phase.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ObsCell {
+    /// A single observed scalar value.
+    Scalar(f64),
+}
+
+/// Dense-convenience: wrap a dense `Vec<f64>` of observed values into the
+/// `Vec<Option<ObsCell>>` cell representation, with every entry observed
+/// (`Some(ObsCell::Scalar(_))`) and no holes. This is the no-hole path every
+/// existing call site uses; only the CLI data loader (which can read an `NA`
+/// token) ever produces `None` entries.
+pub fn dense_cells(values: Vec<f64>) -> Vec<Option<ObsCell>> {
+    values.into_iter().map(|v| Some(ObsCell::Scalar(v))).collect()
+}
+
 /// How a stream projects simulator state into the scalar `projected` value
 /// passed to the likelihood.
 #[derive(Clone)]
@@ -315,8 +344,10 @@ impl BindReport {
 struct BoundStream {
     ir_model: ir::observation::ObservationModel,
     projection: StreamProjection,
+    /// Per-observation cells, indexed by observation-time index. `None` is a
+    /// hole (no likelihood term; the grid time still resets incidence).
     /// INVARIANT (enforced by `bind`): `values.len() == BoundObs.times.len()`.
-    values: Vec<f64>,
+    values: Vec<Option<ObsCell>>,
 }
 
 /// A validated, model-shaped observation set. The ONLY way to obtain one is
@@ -449,8 +480,10 @@ struct Stream {
     /// Resolved likelihood expression tree (pre-resolved at construction,
     /// but evaluates with params at call time — no baked-in values).
     resolved: ResolvedLikelihood,
-    /// Observed values indexed by observation time index.
-    observations: Vec<f64>,
+    /// Per-observation cells indexed by observation time index. `None` is a
+    /// hole: it contributes no likelihood term (the incidence reset still
+    /// fires at its grid index — see `particle_filter.rs`).
+    observations: Vec<Option<ObsCell>>,
 }
 
 /// Multi-stream observation model.
@@ -468,10 +501,15 @@ pub struct MultiStreamObsModel {
 }
 
 /// Specification for building one observation stream.
+///
+/// `observations` is the per-grid-time cell vector: `None` = hole (no term,
+/// reset still fires), `Some(ObsCell::Scalar(v))` = observed value `v`. Dense
+/// call sites build it with [`dense_cells`] (all observed, no holes); only the
+/// CLI loader emits `None` from an `NA` token.
 pub struct StreamSpec {
     pub projection: StreamProjection,
     pub ir_model: ir::observation::ObservationModel,
-    pub observations: Vec<f64>,
+    pub observations: Vec<Option<ObsCell>>,
     pub obs_times: Vec<f64>,
 }
 
@@ -561,8 +599,18 @@ impl MultiStreamObsModel {
     ) -> f64 {
         let t = self.obs_times[obs_idx];
         (0..self.streams.len()).map(|si| {
-            let projected = self.project_stream_with_params(si, cum_flows, counts, params, t);
             let s = &self.streams[si];
+            // Hole: this stream has no observed value at `obs_idx`. Omit the
+            // likelihood factor entirely (log-contribution 0) — the missing
+            // value is marginalized, NOT scored as zero. The projection +
+            // accumulator reset are NOT gated on value presence: the filter
+            // loop resets per-obs-index regardless, so a hole still closes
+            // the fixed incidence bin on schedule (pomp `accumvars`).
+            let observed = match s.observations[obs_idx] {
+                Some(ObsCell::Scalar(v)) => v,
+                None => return 0.0,
+            };
+            let projected = self.project_stream_with_params(si, cum_flows, counts, params, t);
             // GitHub #6 fix: the likelihood's p/mean/sd expressions can
             // reference compartment state (e.g. `p = projected / N`
             // with `N = S + I + R`). Evaluate against actual counts,
@@ -572,7 +620,7 @@ impl MultiStreamObsModel {
             // surveys wildly inconsistent with true prevalence.
             with_scratch_int_from_counts(counts, |int_s| {
                 eval_likelihood_resolved(
-                    &s.resolved, t, projected, s.observations[obs_idx],
+                    &s.resolved, t, projected, observed,
                     params, &self.compiled, int_s, &self.real_s,
                 )
             })
@@ -610,11 +658,17 @@ impl MultiStreamObsModel {
         let mut grad = vec![0.0; d];
         let t = self.obs_times[obs_idx];
         for si in 0..self.streams.len() {
-            let projected = self.project_stream_with_params(si, cum_flows, counts, params, t);
             let s = &self.streams[si];
+            // Hole: no term, so no gradient contribution (∂/∂θ of an omitted
+            // factor is 0). Mirrors the scoring seam exactly.
+            let observed = match s.observations[obs_idx] {
+                Some(ObsCell::Scalar(v)) => v,
+                None => continue,
+            };
+            let projected = self.project_stream_with_params(si, cum_flows, counts, params, t);
             with_scratch_int_from_counts(counts, |int_s| {
                 eval_likelihood_resolved_grad(
-                    &s.resolved, t, projected, s.observations[obs_idx],
+                    &s.resolved, t, projected, observed,
                     params, &self.compiled, int_s, &self.real_s,
                     estimated_to_model, &mut grad,
                 );
@@ -715,7 +769,7 @@ mod bind_tests {
     //! located message; the happy path returns `Ok((bound, report))` with a
     //! non-fatal verdict. gh#188 (strictly increasing) and the empty/
     //! heterogeneous checks all live here now.
-    use super::{BoundObs, Severity, StreamProjection, StreamSpec};
+    use super::{BoundObs, dense_cells, Severity, StreamProjection, StreamSpec};
     use ir::observation::{
         Likelihood, ObservationModel as IrObservationModel, ObservationSchedule,
         PoissonLikelihood, Projection,
@@ -740,7 +794,7 @@ mod bind_tests {
         StreamSpec {
             projection: StreamProjection::FlowSum(vec![0]),
             ir_model: ir_obs(name),
-            observations,
+            observations: dense_cells(observations),
             obs_times,
         }
     }
@@ -843,8 +897,8 @@ mod bind_tests {
         for s in &bound.streams {
             assert_eq!(s.values.len(), bound.times().len());
         }
-        assert_eq!(bound.streams[0].values, vec![10.0, 11.0, 12.0]);
-        assert_eq!(bound.streams[1].values, vec![20.0, 21.0, 22.0]);
+        assert_eq!(bound.streams[0].values, dense_cells(vec![10.0, 11.0, 12.0]));
+        assert_eq!(bound.streams[1].values, dense_cells(vec![20.0, 21.0, 22.0]));
     }
 }
 
@@ -878,6 +932,218 @@ mod temporal_kind_tests {
         assert!(flow.resets_after_observation());
         assert!(!comp.resets_after_observation());
         assert!(!expr.resets_after_observation());
+    }
+}
+
+#[cfg(test)]
+mod hole_scoring_tests {
+    //! Sparse/holes correctness at the SCORING seam
+    //! (`log_likelihood_from_flows_and_counts`). A hole (`None`) omits the
+    //! stream's likelihood factor entirely (log-contribution 0); an observed
+    //! zero (`Some(ObsCell::Scalar(0.0))`) scores the density at `y = 0`.
+    //! These are different — the core sparse-obs correctness property. The
+    //! reset-survives-a-hole property is a filter-loop property and lives in
+    //! `tests/sparse_holes_reset.rs`.
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use super::{dense_cells, BoundObs, MultiStreamObsModel, ObsCell, StreamProjection, StreamSpec};
+    use crate::compiled_model::CompiledModel;
+    use crate::inference::ParticleState;
+    use crate::inference::traits::ObservationModel;
+    use ir::{
+        expr::{BinOp, BinOpExpr, BinOpWrap, Expr, ParamExpr, ProjectedExpr},
+        model::{
+            Compartment, CompartmentKind, InitialConditions, OutputConfig,
+            OutputSchedule, SimulationConfig,
+        },
+        observation::{
+            Likelihood, ObservationModel as IrObs, ObservationSchedule,
+            PoissonLikelihood, Projection,
+        },
+        parameter::{ParamValue, Parameter},
+        transition::{DrawMethod, StoichiometryEntry, Transition},
+        Model,
+    };
+
+    /// SIR with an incidence stream `cases = incidence(recovery)` and a
+    /// Poisson likelihood `rate = rho * projected`. The projected value is
+    /// the cumulative `recovery` flow over the interval; the likelihood is a
+    /// pure function of (projected, observed), so scoring at a fixed
+    /// (flows, counts) lets us isolate the hole-vs-observed-zero behaviour.
+    fn model() -> Arc<CompiledModel> {
+        let m = Model {
+            name: "hole_scoring".into(),
+            version: "0.3".into(),
+            time_unit: "days".into(),
+            description: None,
+            origin: None, origin_rata_die: None,
+            compartments: vec![
+                Compartment { name: "S".into(), kind: CompartmentKind::Integer },
+                Compartment { name: "I".into(), kind: CompartmentKind::Integer },
+                Compartment { name: "R".into(), kind: CompartmentKind::Integer },
+            ],
+            transitions: vec![
+                Transition {
+                    name: "recovery".into(),
+                    stoichiometry: vec![
+                        StoichiometryEntry("I".into(), -1),
+                        StoichiometryEntry("R".into(), 1),
+                    ],
+                    rate: Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+                        op: BinOp::Mul,
+                        left: Box::new(Expr::Param(ParamExpr { param: "gamma".into() })),
+                        right: Box::new(Expr::Pop(ir::expr::PopExpr { pop: "I".into() })),
+                    }}),
+                    metadata: None,
+                    draw_method: DrawMethod::Poisson, rate_grad: Default::default(), lineage: None,
+                },
+            ],
+            ode_equations: vec![],
+            time_functions: vec![],
+            tables: vec![],
+            interventions: vec![],
+            observations: vec![
+                IrObs {
+                    name: "cases".into(),
+                    schedule: ObservationSchedule::AtTimes(vec![]),
+                    projection: Projection::CumulativeFlow("recovery".into()),
+                    likelihood: Likelihood::Poisson(PoissonLikelihood {
+                        // rate = rho * projected
+                        rate: Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+                            op: BinOp::Mul,
+                            left: Box::new(Expr::Param(ParamExpr { param: "rho".into() })),
+                            right: Box::new(Expr::Projected(ProjectedExpr { projected: () })),
+                        }}),
+                    }),
+                },
+            ],
+            bindings: vec![],
+            parameters: vec![
+                Parameter { name: "gamma".into(), value: ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None },
+                Parameter { name: "rho".into(), value: ParamValue::Fixed { value: 0.5 }, param_kind: None, param_dim: None },
+            ],
+            initial_conditions: InitialConditions::Explicit({
+                let mut h = HashMap::new();
+                h.insert("S".into(), 950.0); h.insert("I".into(), 40.0); h.insert("R".into(), 10.0); h
+            }),
+            output: OutputConfig {
+                times: OutputSchedule::AtTimes(vec![0.0, 30.0]),
+                format: "tsv".into(), trajectory: true, observations: false,
+            },
+            simulation: SimulationConfig {
+                t_start: 0.0, t_end: 30.0, time_semantics: "continuous".into(),
+                dt: Some(1.0), rng_seed: Some(42),
+            },
+            presets: vec![],
+            model_structure: None, balance: None, identity_tracked_compartments: vec![],
+        };
+        Arc::new(CompiledModel::new(m).unwrap())
+    }
+
+    /// Build a single-stream incidence obs model from explicit cells.
+    fn obs_model(cells: Vec<Option<ObsCell>>, obs_times: Vec<f64>) -> MultiStreamObsModel {
+        let compiled = model();
+        let rec = compiled.model.transitions.iter()
+            .position(|t| t.name == "recovery").unwrap();
+        let spec = StreamSpec {
+            projection: StreamProjection::FlowSum(vec![rec]),
+            ir_model: compiled.model.observations[0].clone(),
+            observations: cells,
+            obs_times,
+        };
+        MultiStreamObsModel::new(
+            BoundObs::bind(vec![spec]).expect("bind").0, compiled).unwrap()
+    }
+
+    /// (a) A `None` cell contributes EXACTLY 0 to the joint log-likelihood —
+    /// identical to having no observation at that index — and is DIFFERENT
+    /// from `Some(Scalar(0.0))`, which scores the Poisson density at y = 0.
+    /// This is the core correctness test: hole ≠ observed-zero.
+    #[test]
+    fn hole_contributes_zero_and_differs_from_observed_zero() {
+        let times = vec![7.0, 14.0, 21.0];
+        // A non-trivial flow so `projected = rho * 100 = 50` and the Poisson
+        // log-pmf at y = 0 is clearly nonzero (≈ -50). counts unused by this
+        // likelihood but must be a valid slice.
+        let flows = vec![100u64];
+        let counts = vec![900i64, 40, 60];
+        let params = model().default_params.clone();
+
+        // Hole at obs_idx 1.
+        let holed = obs_model(
+            vec![Some(ObsCell::Scalar(30.0)), None, Some(ObsCell::Scalar(20.0))],
+            times.clone());
+        // Observed zero at obs_idx 1 (same elsewhere).
+        let zeroed = obs_model(
+            vec![Some(ObsCell::Scalar(30.0)), Some(ObsCell::Scalar(0.0)), Some(ObsCell::Scalar(20.0))],
+            times.clone());
+
+        let ll_hole = holed.log_likelihood_from_flows_and_counts(&flows, &counts, 1, &params);
+        let ll_zero = zeroed.log_likelihood_from_flows_and_counts(&flows, &counts, 1, &params);
+
+        // The hole contributes EXACTLY 0.0 (omitted factor).
+        assert_eq!(ll_hole, 0.0,
+            "a hole must contribute exactly 0 to the joint log-likelihood, got {ll_hole}");
+        // The observed-zero scores the Poisson density at y=0 with mean 50:
+        // log P(0; 50) = -50. Far from zero — proves hole ≠ observed-zero.
+        assert!(ll_zero.is_finite() && ll_zero < -10.0,
+            "observed-zero must score the density (≈ -50 here), got {ll_zero}");
+        assert_ne!(ll_hole, ll_zero,
+            "hole (omit term) must DIFFER from observed-zero (score y=0): \
+             hole={ll_hole} zero={ll_zero}");
+    }
+
+    /// (a, cont.) A hole at one index leaves every OTHER index scored exactly
+    /// as in the all-dense series — the hole is local, not a global skip.
+    #[test]
+    fn non_hole_indices_are_unaffected_by_a_hole_elsewhere() {
+        let times = vec![7.0, 14.0, 21.0];
+        let flows = vec![100u64];
+        let counts = vec![900i64, 40, 60];
+        let params = model().default_params.clone();
+
+        let holed = obs_model(
+            vec![Some(ObsCell::Scalar(30.0)), None, Some(ObsCell::Scalar(20.0))],
+            times.clone());
+        let dense = obs_model(
+            dense_cells(vec![30.0, 99.0, 20.0]), // index-1 value irrelevant to 0 and 2
+            times.clone());
+
+        for idx in [0usize, 2] {
+            let h = holed.log_likelihood_from_flows_and_counts(&flows, &counts, idx, &params);
+            let d = dense.log_likelihood_from_flows_and_counts(&flows, &counts, idx, &params);
+            assert_eq!(h, d,
+                "obs_idx {idx} must score identically whether or not index 1 is a hole: \
+                 holed={h} dense={d}");
+        }
+    }
+
+    /// (c) The dense (all-`Some`) path is byte-identical to passing the same
+    /// values through `dense_cells` — i.e. wrapping a `Vec<f64>` introduces no
+    /// behavioural change for the no-hole case. (`dense_cells` is exactly what
+    /// every existing call site now uses; this pins that the wrap is a no-op
+    /// for scoring.)
+    #[test]
+    fn dense_cells_scoring_is_unchanged() {
+        let times = vec![7.0, 14.0, 21.0];
+        let flows = vec![100u64];
+        let counts = vec![900i64, 40, 60];
+        let params = model().default_params.clone();
+        let values = vec![30.0, 45.0, 20.0];
+
+        let m = obs_model(dense_cells(values.clone()), times.clone());
+
+        // Also build via the trait path (ParticleState) to confirm both seams
+        // agree on dense cells.
+        let state = ParticleState { counts: counts.clone(), flow_accumulators: flows.clone() };
+        for idx in 0..3 {
+            let flat = m.log_likelihood_from_flows_and_counts(&flows, &counts, idx, &params);
+            let via_state = m.log_likelihood(&state, idx, &params);
+            assert!(flat.is_finite(), "dense scoring must be finite at idx {idx}, got {flat}");
+            assert_eq!(flat, via_state,
+                "flat and trait paths must agree on dense cells at idx {idx}: \
+                 flat={flat} state={via_state}");
+        }
     }
 }
 

@@ -484,7 +484,8 @@ impl FitRunConfig {
             .map(|s| sim::inference::multi_stream_obs::StreamSpec {
                 projection: s.projection.clone(),
                 ir_model: s.obs_model_ir.clone(),
-                observations: s.data.iter().map(|o| o.value).collect(),
+                observations: sim::inference::dense_cells(
+                    s.data.iter().map(|o| o.value).collect()),
                 obs_times: self.observations.iter().map(|o| o.time).collect(),
             }).collect();
         let (bound, _report) = sim::inference::BoundObs::bind(specs).unwrap_or_else(|report| {

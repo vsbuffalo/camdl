@@ -28,6 +28,7 @@ use sim::{
     compiled_model::CompiledModel,
     inference::{
         BoundObs,
+        dense_cells,
         multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec},
         traits::ObservationModel,
         ParticleState,
@@ -98,7 +99,7 @@ fn build_obs_model(compiled: &Arc<CompiledModel>, projection: StreamProjection, 
         BoundObs::bind(vec![StreamSpec {
             projection,
             ir_model: obs_ir,
-            observations: vec![observed],
+            observations: dense_cells(vec![observed]),
             obs_times: vec![5.0],
         }]).unwrap().0,
         compiled.clone(),
@@ -144,7 +145,7 @@ fn current_pop_sum_from_ir_resolves_stratified_compartments() {
         BoundObs::bind(vec![StreamSpec {
             projection,
             ir_model: compiled.model.observations[0].clone(),
-            observations: vec![20.0],
+            observations: dense_cells(vec![20.0]),
             obs_times: vec![5.0],
         }]).unwrap().0,
         compiled.clone(),
@@ -389,7 +390,7 @@ fn snapshot_reads_post_intervention_state() {
         BoundObs::bind(vec![StreamSpec {
             projection,
             ir_model: compiled.model.observations[0].clone(),
-            observations: vec![500.0],
+            observations: dense_cells(vec![500.0]),
             obs_times: vec![5.0],
         }]).unwrap().0,
         compiled.clone(),

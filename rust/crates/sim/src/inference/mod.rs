@@ -43,6 +43,7 @@ pub use particle_filter::bootstrap_filter;
 pub use traits::{ProcessModel, DensityProcess, ObservationModel, Resettable, SMCConfig, InferenceConfig};
 pub use chain_binomial_process::ChainBinomialProcess;
 pub use multi_stream_obs::{
-    BindReport, BoundObs, Finding, MultiStreamObsModel, NullObsModel, Severity,
+    dense_cells, BindReport, BoundObs, Finding, MultiStreamObsModel, NullObsModel, ObsCell,
+    Severity,
 };
 pub use prior::Prior;

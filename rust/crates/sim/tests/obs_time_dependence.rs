@@ -26,7 +26,7 @@ use ir::{
 use sim::{
     compiled_model::CompiledModel,
     inference::{
-        BoundObs, ParticleState, ObservationModel, MultiStreamObsModel,
+        BoundObs, ParticleState, ObservationModel, MultiStreamObsModel, dense_cells,
         multi_stream_obs::{StreamSpec, StreamProjection},
         obs_loglik::poisson_logpmf,
     },
@@ -103,7 +103,7 @@ fn time_varying_obs(compiled: &Arc<CompiledModel>, obs_times: Vec<f64>, observat
                     ir::observation::PoissonLikelihood { rate },
                 ),
             },
-            observations,
+            observations: dense_cells(observations),
             obs_times,
         }]).unwrap().0,
         compiled.clone(),

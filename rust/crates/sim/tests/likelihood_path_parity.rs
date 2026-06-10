@@ -33,6 +33,7 @@ use sim::{
     inference::{
         BoundObs,
         ParticleState,
+        dense_cells,
         traits::ObservationModel,
         multi_stream_obs::{MultiStreamObsModel, StreamSpec, StreamProjection},
     },
@@ -124,7 +125,7 @@ fn pf_and_pgas_likelihood_paths_agree() {
     let spec = StreamSpec {
         ir_model: compiled.model.observations[0].clone(),
         projection: StreamProjection::IntCompSum(vec![i_idx]), // prevalence of I
-        observations: vec![12.0, 30.0],
+        observations: dense_cells(vec![12.0, 30.0]),
         obs_times: vec![1.0, 5.0],
     };
     let obs_model = MultiStreamObsModel::new(

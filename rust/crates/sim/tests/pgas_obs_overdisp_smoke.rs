@@ -20,6 +20,7 @@ use std::sync::Arc;
 use sim::compiled_model::CompiledModel;
 use sim::inference::if2::{EstimatedParam, Transform};
 use sim::inference::BoundObs;
+use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{MultiStreamObsModel, StreamSpec, StreamProjection};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{run_pgas, simulate_reference, PGASConfig};
@@ -112,7 +113,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
                         dispersion: ir::expr::Expr::Const(ir::expr::ConstExpr { value: 10.0 }),
                     }),
             },
-            observations: obs.iter().map(|o| o.value).collect(),
+            observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
         }]).unwrap().0,
         compiled.clone(),
@@ -233,7 +234,7 @@ fn smoke_pgas_nuts_estimates_rho() {
                     .collect(),
             ),
             ir_model: compiled.model.observations[0].clone(),
-            observations: obs.iter().map(|o| o.value).collect(),
+            observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
         }]).unwrap().0,
         compiled.clone(),

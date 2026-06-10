@@ -142,19 +142,58 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // or wrong-cased header is a located error, not a silent bind to the
     // positionally-first value column (G1). A single-stream `time\tcases`
     // file still loads because `cases` matches the header by name.
+    //
+    // Sparse/holes: the value column may contain the missing-value token
+    // `NA`, which loads as a HOLE — its time stays in the observation grid
+    // (so the incidence accumulator still resets there) but it carries no
+    // value (no likelihood term). `per_stream_cells` is the authoritative
+    // per-grid-time cell vector threaded into the obs model; `per_stream_obs`
+    // is a dense placeholder view (holes → 0.0) consumed only by the
+    // diagnostic/time paths (schedule validation, origin checks, trace
+    // timestamps) where a hole's value is not load-bearing.
     let n_streams = bound_streams.len();
     let mut per_stream_obs: Vec<Vec<Observation>> = Vec::with_capacity(n_streams);
+    let mut per_stream_cells: Vec<Vec<Option<sim::inference::ObsCell>>> =
+        Vec::with_capacity(n_streams);
     for (sname, spath) in &bound_streams {
         let path_str = spath.to_string_lossy().into_owned();
-        let result = load_data_tsv_column(&path_str, sname, &time_opts);
-        match result {
-            Ok(obs) => per_stream_obs.push(obs),
+        match load_data_tsv_column_cells(&path_str, sname, &time_opts) {
+            Ok((times, cells)) => {
+                // Dense placeholder view (holes → 0.0) for diagnostics/time.
+                let obs: Vec<Observation> = times.iter().zip(cells.iter())
+                    .map(|(&time, cell)| Observation {
+                        time,
+                        value: match cell {
+                            Some(sim::inference::ObsCell::Scalar(v)) => *v,
+                            None => 0.0,
+                        },
+                    }).collect();
+                per_stream_obs.push(obs);
+                per_stream_cells.push(cells);
+            }
             Err(e) => {
                 eprintln!("error: cannot load data column '{}' from {}: {}",
                     sname, path_str, e);
                 std::process::exit(1);
             }
         }
+    }
+
+    // Holes (missing observations via `NA`) are correct for the filter
+    // log-likelihood — a hole contributes no term but still resets the bin
+    // (the authoritative `per_stream_cells` carry `None`). But the prequential
+    // and `--trace` outputs read the dense placeholder view, where a hole shows
+    // as 0: prequential would score elpd/CRPS/PIT against a fictitious observed
+    // 0, and the trace's `observed` column would report 0 at a missing week.
+    // Rather than emit a silently-wrong diagnostic, reject the combination until
+    // those paths thread holes through (follow-up). The plain filter loglik is
+    // unaffected.
+    let has_holes = per_stream_cells.iter().any(|cells| cells.iter().any(|c| c.is_none()));
+    if let Err(e) = check_holes_output_compat(
+        has_holes, save_prequential.is_some(), trace_path.is_some(),
+    ) {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
     }
 
     // Validate every stream shares the same obs_times schedule.
@@ -306,11 +345,16 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let process = ChainBinomialProcess::new(compiled.clone(), dt);
 
     let obs_times: Vec<f64> = observations.iter().map(|o| o.time).collect();
+    // Authoritative per-stream cells (holes = `None`) thread into the obs
+    // model; `per_stream_obs` is only the dense placeholder view for
+    // diagnostics. A hole contributes no likelihood term but still resets the
+    // incidence accumulator at its grid index (the filter loop reset is
+    // per-obs-index, not gated on value presence).
     let stream_specs: Vec<StreamSpec> = bound_ir.iter().zip(projections.into_iter())
-        .zip(per_stream_obs.iter()).map(|((o, projection), stream_obs)| StreamSpec {
+        .zip(per_stream_cells.into_iter()).map(|((o, projection), cells)| StreamSpec {
             projection,
             ir_model: o.clone(),
-            observations: stream_obs.iter().map(|x| x.value).collect(),
+            observations: cells,
             obs_times: obs_times.clone(),
         }).collect();
     let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
@@ -629,6 +673,37 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
 
 use crate::caltime_load::{check_substeps_and_grid, convert_time_column, TimeFormat, TimeOpts};
 
+/// Reject output modes that would silently mis-handle a hole (a missing `NA`
+/// observation). A hole is correct for the filter log-likelihood — it
+/// contributes no term but still resets the incidence bin — but `--save-prequential`
+/// and `--trace` read the dense placeholder view where a hole shows as `0`, so
+/// they would score / report a fictitious observed zero at a missing week.
+/// Hard-error rather than emit a silently-wrong diagnostic; full hole support
+/// for these paths is a follow-up. (The plain filter loglik is unaffected.)
+fn check_holes_output_compat(
+    has_holes: bool,
+    save_prequential: bool,
+    trace: bool,
+) -> Result<(), String> {
+    if !has_holes {
+        return Ok(());
+    }
+    if save_prequential {
+        return Err("--save-prequential is not yet supported with missing observations \
+            (NA holes): the prequential scores (elpd / CRPS / PIT) would treat a hole \
+            as an observed 0. The filter log-likelihood handles holes correctly; rerun \
+            without --save-prequential."
+            .to_string());
+    }
+    if trace {
+        return Err("--trace is not yet supported with missing observations (NA holes): \
+            the trace's `observed` column would report 0 at a missing week. The filter \
+            log-likelihood handles holes correctly; rerun without --trace."
+            .to_string());
+    }
+    Ok(())
+}
+
 /// gh#90: fit-toml fallback for `camdl pfilter --fit fit.toml` (no CLI
 /// `--data` flags). Reads `[data]` from the toml and returns a list of
 /// (stream_name, path) bindings — same shape `resolve_data_specs`
@@ -655,15 +730,21 @@ pub fn load_data_observations_from_fit_toml(
     Ok(entries)
 }
 
-/// Load observations from a specific column in a TSV file.
-/// The column name must match a header field. First column is always time.
-pub fn load_data_tsv_column(
+/// Parse the raw rows of one named TSV column into per-row cells. A cell is
+/// `None` for a HOLE (the missing-value token `NA`) and `Some(v)` for an
+/// observed finite value. The TIME of a hole row is retained (the row is
+/// kept) so the observation grid is unchanged — only the value is absent.
+///
+/// `NaN`/`inf` are rejected as garbage (a hole is `NA`, not a non-finite
+/// number). Strict by-name column binding, no positional fallback (G1).
+///
+/// Shared core of [`load_data_tsv_column`] (which rejects holes for the dense
+/// callers) and [`load_data_tsv_column_cells`] (the sparse/holes pfilter path).
+fn parse_column_cells<'a>(
+    content: &'a str,
     path: &str,
     column: &str,
-    opts: &TimeOpts,
-) -> Result<Vec<Observation>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("{}: {}", path, e))?;
+) -> Result<(Vec<&'a str>, Vec<Option<f64>>, Vec<usize>), String> {
     let mut lines = content.lines();
     let header = lines.next().ok_or("empty data file")?;
     let cols: Vec<&str> = header.split('\t').collect();
@@ -690,11 +771,11 @@ pub fn load_data_tsv_column(
             )
         })?;
 
-    // Two-pass: collect raw time cells + values, then convert the whole
+    // Two-pass: collect raw time cells + cells, then convert the whole
     // time column at once (whole-column detection — proposal §6.3).
     let mut time_cells: Vec<&str> = Vec::new();
     let mut rows: Vec<usize> = Vec::new();
-    let mut values: Vec<f64> = Vec::new();
+    let mut cells: Vec<Option<f64>> = Vec::new();
     for (line_num, line) in lines.enumerate() {
         if line.trim().is_empty() { continue; }
         let fields: Vec<&str> = line.split('\t').collect();
@@ -702,21 +783,90 @@ pub fn load_data_tsv_column(
             return Err(format!("line {}: expected {}+ columns, got {}",
                 line_num + 2, col_idx + 1, fields.len()));
         }
-        let value: f64 = fields[col_idx].trim().parse()
-            .map_err(|_| format!("line {}: cannot parse value '{}' in column '{}'",
-                line_num + 2, fields[col_idx], column))?;
-        if !value.is_finite() {
-            return Err(format!(
-                "line {} (t='{}'): non-finite observation value '{}' in column '{}' \
-                 — NaN and infinities are not valid observations. Fix or remove the row.",
-                line_num + 2, fields[0].trim(), fields[col_idx].trim(), column));
-        }
+        let raw = fields[col_idx].trim();
+        // TODO: make the missing-value token (`NA`) a user option (CLI flag /
+        // config) — hard-coded for now.
+        let cell = if raw == "NA" {
+            None // hole: time retained, value absent → no likelihood term
+        } else {
+            let value: f64 = raw.parse()
+                .map_err(|_| format!("line {}: cannot parse value '{}' in column '{}'",
+                    line_num + 2, fields[col_idx], column))?;
+            if !value.is_finite() {
+                return Err(format!(
+                    "line {} (t='{}'): non-finite observation value '{}' in column '{}' \
+                     — NaN and infinities are not valid observations (a missing value \
+                     is the token `NA`). Fix or remove the row.",
+                    line_num + 2, fields[0].trim(), fields[col_idx].trim(), column));
+            }
+            Some(value)
+        };
         time_cells.push(fields[0]);
         rows.push(line_num + 2);
-        values.push(value);
+        cells.push(cell);
     }
 
+    Ok((time_cells, cells, rows))
+}
+
+/// Load observations from a specific column in a TSV file.
+/// The column name must match a header field. First column is always time.
+///
+/// DENSE path: a hole (`NA`) is an error here — callers on this path
+/// (survey, profile, fit) do not yet support holes. The sparse/holes pfilter
+/// path uses [`load_data_tsv_column_cells`].
+pub fn load_data_tsv_column(
+    path: &str,
+    column: &str,
+    opts: &TimeOpts,
+) -> Result<Vec<Observation>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("{}: {}", path, e))?;
+    let (time_cells, cells, rows) = parse_column_cells(&content, path, column)?;
+    // Reject holes on the dense path with a located message.
+    let mut values: Vec<f64> = Vec::with_capacity(cells.len());
+    for (i, c) in cells.iter().enumerate() {
+        match c {
+            Some(v) => values.push(*v),
+            None => return Err(format!(
+                "line {} (t='{}'): missing value `NA` in column '{}' is not supported \
+                 on this path. Holes (NA) are only handled by `camdl pfilter`.",
+                rows[i], time_cells[i].trim(), column)),
+        }
+    }
     finalize_observations(time_cells, values, rows, opts)
+}
+
+/// Sparse/holes-aware load of one named TSV column for `camdl pfilter`.
+/// Returns the converted observation `times` and the per-row cell vector,
+/// where `None` is a hole (the `NA` token): its time stays in the grid (so
+/// the incidence accumulator still resets there) but it carries no value (no
+/// likelihood term). Same time-conversion + grid/ordering checks as
+/// [`load_data_tsv_column`]; only the value column may contain `NA`.
+pub fn load_data_tsv_column_cells(
+    path: &str,
+    column: &str,
+    opts: &TimeOpts,
+) -> Result<(Vec<f64>, Vec<Option<sim::inference::ObsCell>>), String> {
+    use sim::inference::ObsCell;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("{}: {}", path, e))?;
+    let (time_cells, cells, rows) = parse_column_cells(&content, path, column)?;
+
+    // Convert the time column + run the distinct-substep/off-grid/ordering
+    // checks via the same back-half used by the dense path — but on the time
+    // axis only, since holes have no value. We materialize a value vector
+    // where holes use a placeholder (0.0) purely to reuse `finalize_observations`
+    // for time conversion + grid checks; the placeholder is then discarded and
+    // the authoritative cells are returned.
+    let placeholder_values: Vec<f64> = cells.iter().map(|c| c.unwrap_or(0.0)).collect();
+    let observations = finalize_observations(time_cells, placeholder_values, rows, opts)?;
+
+    let times: Vec<f64> = observations.iter().map(|o| o.time).collect();
+    let obs_cells: Vec<Option<ObsCell>> = cells.iter()
+        .map(|c| c.map(ObsCell::Scalar))
+        .collect();
+    Ok((times, obs_cells))
 }
 
 /// Shared back-half: convert the raw time column, run the distinct-substep +
@@ -928,6 +1078,23 @@ fn write_filtering_tsv(
 mod tests {
     use super::*;
 
+    // ── holes × output-mode compatibility guard ─────────────────────────
+    #[test]
+    fn holes_reject_prequential_and_trace_but_allow_plain_filter() {
+        // No holes: every output mode is fine.
+        assert!(check_holes_output_compat(false, true, true).is_ok());
+        // Holes + plain filter (no prequential/trace): fine — the loglik handles holes.
+        assert!(check_holes_output_compat(true, false, false).is_ok());
+        // Holes + prequential: rejected (would score a hole as observed 0).
+        let e = check_holes_output_compat(true, true, false).unwrap_err();
+        assert!(e.contains("--save-prequential") && e.contains("hole"),
+            "prequential rejection must name the flag + the cause: {e}");
+        // Holes + trace: rejected (observed column would report 0 at a hole).
+        let e = check_holes_output_compat(true, false, true).unwrap_err();
+        assert!(e.contains("--trace") && e.contains("hole"),
+            "trace rejection must name the flag + the cause: {e}");
+    }
+
     fn write_temp_tsv(name: &str, content: &str) -> String {
         let path = std::env::temp_dir().join(format!("camdl_test_{}.tsv", name));
         std::fs::write(&path, content).unwrap();
@@ -1105,5 +1272,59 @@ mod tests {
         assert_eq!(from_dates, from_nums);
         std::fs::remove_file(&dated).ok();
         std::fs::remove_file(&numeric).ok();
+    }
+
+    // ── Sparse/holes: `NA` loads as a hole on the cells path ────────────
+    //
+    // The missing-value token `NA` becomes a hole (`None`) whose TIME stays
+    // in the grid (the row is kept). NaN/inf are still rejected as garbage.
+    // The dense `load_data_tsv_column` rejects `NA` (holes are pfilter-only).
+
+    #[test]
+    fn cells_loader_treats_na_as_a_hole_with_time_retained() {
+        use sim::inference::ObsCell;
+        // Three weekly rows; the middle one is NA (a hole).
+        let path = write_temp_tsv("na_hole", "time\tcases\n7\t10\n14\tNA\n21\t30\n");
+        let (times, cells) = load_data_tsv_column_cells(&path, "cases", &numeric_opts())
+            .expect("NA must load as a hole, not error");
+
+        // All three grid times are retained — the hole's time stays.
+        assert_eq!(times, vec![7.0, 14.0, 21.0],
+            "the hole row's TIME must stay in the grid; got {:?}", times);
+        // The middle cell is a hole; the others are observed scalars.
+        assert_eq!(cells[0], Some(ObsCell::Scalar(10.0)));
+        assert_eq!(cells[1], None, "the NA cell must be a hole (None)");
+        assert_eq!(cells[2], Some(ObsCell::Scalar(30.0)));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn cells_loader_still_rejects_nan_and_inf() {
+        // A hole is `NA`, not a non-finite number — those remain garbage.
+        for (name, body) in [
+            ("cells_nan", "time\tcases\n7\t10\n14\tNaN\n21\t30\n"),
+            ("cells_inf", "time\tcases\n7\t10\n14\tinf\n21\t30\n"),
+        ] {
+            let path = write_temp_tsv(name, body);
+            let result = load_data_tsv_column_cells(&path, "cases", &numeric_opts());
+            assert!(result.is_err(),
+                "non-finite values must still be rejected on the cells path ({name})");
+            let err = result.err().unwrap();
+            assert!(err.contains("cases"), "error must name the column: {}", err);
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[test]
+    fn dense_loader_rejects_na_token() {
+        // The dense path (survey/profile/fit) does not support holes yet — an
+        // `NA` there is a located error, not a silent placeholder.
+        let path = write_temp_tsv("dense_na", "time\tcases\n7\t10\n14\tNA\n21\t30\n");
+        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        assert!(result.is_err(), "dense loader must reject NA");
+        let err = result.err().unwrap();
+        assert!(err.contains("NA") && err.contains("cases"),
+            "error must name the NA token and the column: {}", err);
+        std::fs::remove_file(&path).ok();
     }
 }

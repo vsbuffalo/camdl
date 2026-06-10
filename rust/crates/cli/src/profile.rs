@@ -787,7 +787,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             stream_specs.push(StreamSpec {
                 projection,
                 ir_model: (*obs).clone(),
-                observations: stream_obs.iter().map(|o| o.value).collect(),
+                observations: sim::inference::dense_cells(
+                    stream_obs.iter().map(|o| o.value).collect()),
                 obs_times: obs_times_vec.clone(),
             });
         }

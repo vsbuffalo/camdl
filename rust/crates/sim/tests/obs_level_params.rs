@@ -23,6 +23,7 @@ use sim::{
     compiled_model::CompiledModel,
     inference::{
         BoundObs,
+        dense_cells,
         multi_stream_obs::{MultiStreamObsModel, StreamSpec},
         traits::ObservationModel,
         ParticleState,
@@ -124,7 +125,7 @@ fn test_obs_param_changes_loglik() {
         BoundObs::bind(vec![StreamSpec {
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
-            observations: obs_values,
+            observations: dense_cells(obs_values),
             obs_times,
         }]).unwrap().0,
         compiled.clone(),
@@ -177,7 +178,7 @@ fn test_obs_param_from_flows() {
         BoundObs::bind(vec![StreamSpec {
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
-            observations: vec![8.0],
+            observations: dense_cells(vec![8.0]),
             obs_times: vec![10.0],
         }]).unwrap().0,
         compiled.clone(),
@@ -211,7 +212,7 @@ fn test_obs_model_consistency() {
         BoundObs::bind(vec![StreamSpec {
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
-            observations: vec![8.0, 7.0],
+            observations: dense_cells(vec![8.0, 7.0]),
             obs_times: vec![10.0, 20.0],
         }]).unwrap().0,
         compiled.clone(),

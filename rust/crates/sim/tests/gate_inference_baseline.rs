@@ -44,6 +44,7 @@ use sim::{
     compiled_model::CompiledModel,
     inference::{
         BoundObs,
+        dense_cells,
         multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec},
         particle_filter::bootstrap_filter,
         traits::SMCConfig,
@@ -155,7 +156,7 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
         ir_model: compiled.model.observations[0].clone(),
         projection: StreamProjection::FlowSum(vec![inf]),
         // seed-1 synthetic weekly reported cases (see the sir case README).
-        observations: vec![16.0, 166.0, 626.0, 1303.0, 1260.0, 1023.0, 327.0, 91.0, 58.0, 6.0, 2.0],
+        observations: dense_cells(vec![16.0, 166.0, 626.0, 1303.0, 1260.0, 1023.0, 327.0, 91.0, 58.0, 6.0, 2.0]),
         obs_times,
     };
     let obs_model = MultiStreamObsModel::new(
