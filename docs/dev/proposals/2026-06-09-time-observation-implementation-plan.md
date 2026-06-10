@@ -149,16 +149,22 @@ does (P4 for the reset, the existing suite for the landed spine).
 
 ## Phase 3 — data layer, early (partly parallel with P2)
 
-From `observation-system.md` migration steps 1–2. No behavior change:
+From `observation-system.md` migration steps 1–2. No behavior change (for
+well-formed inputs).
 
-- delete the positional value-column fallbacks (`pfilter.rs:147-149`,
-  `:671-675`); bind by name only;
-- the NaN/finiteness guard (`pfilter.rs:692,722`);
-- `bind` / `BoundObs` reproducing today's dense semantics, routing the ~5
-  scattered load sites through it; **`MultiStreamObsModel::new` consumes a
-  `BoundObs`** and the raw `StreamSpec` path is privatized (so the
+- **DONE — item 1 (`1a20bcf`):** deleted the positional value-column fallbacks
+  (the outer `.or_else(load_data_tsv)` and the inner 2-column fallback) in
+  `pfilter.rs`, and the same fallback in `profile.rs`/`survey.rs`; bind strictly
+  by name with a located error; added the NaN/finiteness guard. (Exposed and
+  fixed a latent instance of the same G1 bug in the `he2010_pfilter_loglik`
+  fixture — model stream `weekly_cases` vs data column `cases`.) Malformed
+  inputs now error; well-formed unchanged; goldens did not move.
+- **NEXT — item 2:** `bind` / `BoundObs` reproducing today's dense semantics,
+  routing the ~5 scattered load sites through it; **`MultiStreamObsModel::new`
+  consumes a `BoundObs`** and the raw `StreamSpec` path is privatized (so the
   validated-ctor invariant is real); `bind` returns `Result` (no `BoundObs` on a
-  fatal error); derived severity + structured findings.
+  fatal error); derived severity + structured findings. `TemporalKind` (P1.5)
+  now exists for the typed cells.
 
 **Decision needed in P3:** dense vs **sparse** `BoundObs` storage. Sparse
 (per-stream present cells; union axis as a derived view) is required for
