@@ -480,18 +480,22 @@ impl FitRunConfig {
         sim::inference::ChainBinomialProcess::new(self.compiled.clone(), dt)
     }
     pub fn build_obs_model(&self) -> sim::inference::MultiStreamObsModel {
-        sim::inference::MultiStreamObsModel::new(
-            self.streams.iter().map(|s| sim::inference::multi_stream_obs::StreamSpec {
+        let specs: Vec<sim::inference::multi_stream_obs::StreamSpec> = self.streams.iter()
+            .map(|s| sim::inference::multi_stream_obs::StreamSpec {
                 projection: s.projection.clone(),
                 ir_model: s.obs_model_ir.clone(),
                 observations: s.data.iter().map(|o| o.value).collect(),
                 obs_times: self.observations.iter().map(|o| o.time).collect(),
-            }).collect(),
-            self.compiled.clone(),
-        ).unwrap_or_else(|e| {
-            eprintln!("error: observation model construction failed: {:?}", e);
+            }).collect();
+        let (bound, _report) = sim::inference::BoundObs::bind(specs).unwrap_or_else(|report| {
+            eprintln!("error: observation data invalid:\n{}", report.render());
             std::process::exit(1);
-        })
+        });
+        sim::inference::MultiStreamObsModel::new(bound, self.compiled.clone())
+            .unwrap_or_else(|e| {
+                eprintln!("error: observation model construction failed: {:?}", e);
+                std::process::exit(1);
+            })
     }
     pub fn smc_config(&self) -> sim::inference::traits::SMCConfig {
         sim::inference::traits::SMCConfig {

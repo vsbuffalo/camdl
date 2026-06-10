@@ -35,7 +35,7 @@ use sim::{
     compiled_model::CompiledModel,
     inference::{
         particle_filter::{bootstrap_filter, Observation, PFilterResult},
-        ChainBinomialProcess, MultiStreamObsModel,
+        BoundObs, ChainBinomialProcess, MultiStreamObsModel,
         multi_stream_obs::StreamSpec,
         traits::{ObservationModel, SMCConfig},
         types::{log_sum_exp, EstimatedParam, ParticleState},
@@ -404,7 +404,11 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
                 obs_times: obs_times.clone(),
             });
         }
-        Arc::new(MultiStreamObsModel::new(stream_specs, resolved.compiled.clone())
+        let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
+            eprintln!("error: observation data invalid:\n{}", report.render());
+            std::process::exit(1);
+        });
+        Arc::new(MultiStreamObsModel::new(bound, resolved.compiled.clone())
             .unwrap_or_else(|e| {
                 eprintln!("error: observation model construction failed: {:?}", e);
                 std::process::exit(1);

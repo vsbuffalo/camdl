@@ -31,6 +31,7 @@ use ir::{
 use sim::{
     compiled_model::CompiledModel,
     inference::{
+        BoundObs,
         ParticleState,
         traits::ObservationModel,
         multi_stream_obs::{MultiStreamObsModel, StreamSpec, StreamProjection},
@@ -126,7 +127,8 @@ fn pf_and_pgas_likelihood_paths_agree() {
         observations: vec![12.0, 30.0],
         obs_times: vec![1.0, 5.0],
     };
-    let obs_model = MultiStreamObsModel::new(vec![spec], compiled.clone()).unwrap();
+    let obs_model = MultiStreamObsModel::new(
+        BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap();
 
     // Non-zero in BOTH fields so the identity exercises the full
     // ParticleState, not a degenerate all-zero case.

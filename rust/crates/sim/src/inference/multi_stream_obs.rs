@@ -238,6 +238,207 @@ fn resolve_int_comp(compiled: &CompiledModel, name: &str) -> Option<usize> {
     compiled.global_to_int[global]
 }
 
+/// Severity of a [`Finding`] emitted by [`BoundObs::bind`]. `Error` is fatal
+/// (no `BoundObs` escapes); `Warn`/`Info` are advisory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warn,
+    Info,
+}
+
+/// A single diagnostic produced while validating observation streams. The
+/// `message` is the located, actionable text (names the stream, the offending
+/// times, and the fix) — same quality bar as the `SimError::Validation`
+/// messages these were factored out of.
+#[derive(Debug, Clone)]
+pub struct Finding {
+    pub severity: Severity,
+    pub message: String,
+}
+
+/// Outcome of validating a set of observation streams. Carries the findings;
+/// the verdict is *derived* from them, not stored, so it cannot drift from the
+/// findings it summarizes.
+#[derive(Debug, Clone)]
+pub struct BindReport {
+    findings: Vec<Finding>,
+}
+
+impl BindReport {
+    fn new(findings: Vec<Finding>) -> Self {
+        BindReport { findings }
+    }
+
+    pub fn findings(&self) -> &[Finding] {
+        &self.findings
+    }
+
+    /// Derived from the maximum finding severity: `Error` if any finding is an
+    /// `Error`, else `Warn` if any is a `Warn`, else `Info`. Not a stored
+    /// field — recomputed from `findings` on each call.
+    pub fn verdict(&self) -> Severity {
+        if self.findings.iter().any(|f| f.severity == Severity::Error) {
+            Severity::Error
+        } else if self.findings.iter().any(|f| f.severity == Severity::Warn) {
+            Severity::Warn
+        } else {
+            Severity::Info
+        }
+    }
+
+    /// True iff any finding is an `Error`. Equivalent to
+    /// `self.verdict() == Severity::Error`, but reads at the call site.
+    pub fn is_fatal(&self) -> bool {
+        self.findings.iter().any(|f| f.severity == Severity::Error)
+    }
+
+    /// Render the findings as a single, newline-joined diagnostic string for
+    /// surfacing through a CLI error path. One line per finding, prefixed by
+    /// its severity.
+    pub fn render(&self) -> String {
+        self.findings
+            .iter()
+            .map(|f| match f.severity {
+                Severity::Error => format!("error: {}", f.message),
+                Severity::Warn => format!("warning: {}", f.message),
+                Severity::Info => format!("info: {}", f.message),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// One validated stream inside a [`BoundObs`]. Private — the only way to
+/// obtain a `BoundStream` is through [`BoundObs::bind`], whose constructor
+/// guarantees `values.len() == BoundObs.times.len()`.
+struct BoundStream {
+    ir_model: ir::observation::ObservationModel,
+    projection: StreamProjection,
+    /// INVARIANT (enforced by `bind`): `values.len() == BoundObs.times.len()`.
+    values: Vec<f64>,
+}
+
+/// A validated, model-shaped observation set. The ONLY way to obtain one is
+/// [`BoundObs::bind`], whose constructor enforces every construction-time
+/// invariant — so [`MultiStreamObsModel::new`] consumes it without re-checking.
+///
+/// Today's semantics are dense and homogeneous: all streams share ONE
+/// observation axis (`times`), and each stream carries one value per time.
+/// The sparse / per-stream-axis generalization is a later phase; this type is
+/// deliberately dense.
+pub struct BoundObs {
+    /// The single shared observation axis (homogeneous across streams today).
+    times: Vec<f64>,
+    streams: Vec<BoundStream>,
+}
+
+impl BoundObs {
+    /// Validate + construct from per-stream raw [`StreamSpec`]s. Enforces the
+    /// construction-time invariants that previously lived in
+    /// `MultiStreamObsModel::new`:
+    ///
+    /// - at least one stream,
+    /// - each stream has at least one observation time,
+    /// - stream 0's times are strictly increasing (gh#188),
+    /// - every other stream's `obs_times` equals stream 0's (homogeneous
+    ///   schedule),
+    ///
+    /// On any `Error` finding the result is `Err(report)` and NO `BoundObs`
+    /// escapes. Otherwise it collapses the (identical) per-stream schedules to
+    /// one shared `times` and returns `Ok((bound, report))`; the equal-length
+    /// invariant `values.len() == times.len()` then holds by construction.
+    ///
+    /// Reproduces today's dense/homogeneous semantics exactly.
+    pub fn bind(streams: Vec<StreamSpec>) -> Result<(BoundObs, BindReport), BindReport> {
+        let mut findings: Vec<Finding> = Vec::new();
+
+        // (1) Empty stream list.
+        if streams.is_empty() {
+            findings.push(Finding {
+                severity: Severity::Error,
+                message: "at least one observation stream required".to_string(),
+            });
+            return Err(BindReport::new(findings));
+        }
+
+        // The shared axis is stream 0's schedule; every other stream is pinned
+        // to it below.
+        let times = streams[0].obs_times.clone();
+
+        // (2) Empty observation series — a header row but no data rows. Left
+        // unchecked this panics downstream (`obs_times[0]` on a zero-length
+        // vec). Reject with an actionable message.
+        if times.is_empty() {
+            findings.push(Finding {
+                severity: Severity::Error,
+                message: format!(
+                    "observation stream '{}' has no observations — the data file \
+                     has a header row but no data rows. A particle filter needs at \
+                     least one observation; check that the --data file is non-empty \
+                     and that its time/value columns parse.",
+                    streams[0].ir_model.name
+                ),
+            });
+            // No shared axis exists, so further checks are not meaningful.
+            return Err(BindReport::new(findings));
+        }
+
+        // (3) gh#188: stream 0's observation times must be strictly increasing.
+        // The cross-stream pin below carries this to every stream.
+        if let Some(w) = times.windows(2).find(|w| w[1] <= w[0]) {
+            findings.push(Finding {
+                severity: Severity::Error,
+                message: format!(
+                    "observation stream '{}' has non-increasing observation \
+                     times ({} then {}); observation times must be strictly increasing — \
+                     remove duplicate rows or sort the --data file by time.",
+                    streams[0].ir_model.name, w[0], w[1]
+                ),
+            });
+        }
+
+        // (4) Heterogeneous schedules: every other stream must share stream 0's
+        // times. Collapsing to one shared axis is only valid once this holds.
+        for (si, spec) in streams.iter().enumerate().skip(1) {
+            if spec.obs_times != times {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "observation stream {} has obs_times that differ from stream 0; \
+                         heterogeneous schedules are not supported yet",
+                        si
+                    ),
+                });
+            }
+        }
+
+        let report = BindReport::new(findings);
+        if report.is_fatal() {
+            return Err(report);
+        }
+
+        // All schedules validated and identical to `times`; collapse to one
+        // shared axis with per-stream values. `values.len() == times.len()`
+        // holds because `spec.obs_times == times` for every stream.
+        let bound_streams = streams
+            .into_iter()
+            .map(|spec| BoundStream {
+                ir_model: spec.ir_model,
+                projection: spec.projection,
+                values: spec.observations,
+            })
+            .collect();
+
+        Ok((BoundObs { times, streams: bound_streams }, report))
+    }
+
+    /// The single shared observation axis.
+    pub fn times(&self) -> &[f64] {
+        &self.times
+    }
+}
+
 /// One observation stream.
 struct Stream {
     /// IR-level observation block name. Used by `stream_names()` for
@@ -274,27 +475,6 @@ pub struct StreamSpec {
     pub obs_times: Vec<f64>,
 }
 
-/// Reject non-strictly-increasing observation times (gh#188). A duplicate time
-/// silently drops a likelihood contribution downstream — `build_obs_at_substep`
-/// maps both observations to one substep key (last-wins), and the exact PGAS
-/// grid drops the observation and its entire suffix — and an out-of-order time
-/// would walk an observation window backwards. Reject both at the shared
-/// construction seam with an actionable message rather than score wrong silently.
-fn validate_obs_times_increasing(
-    stream_name: &str,
-    obs_times: &[f64],
-) -> Result<(), crate::error::SimError> {
-    if let Some(w) = obs_times.windows(2).find(|w| w[1] <= w[0]) {
-        return Err(crate::error::SimError::Validation(format!(
-            "observation stream '{stream_name}' has non-increasing observation \
-             times ({} then {}); observation times must be strictly increasing — \
-             remove duplicate rows or sort the --data file by time.",
-            w[0], w[1]
-        )));
-    }
-    Ok(())
-}
-
 impl MultiStreamObsModel {
     /// Create an empty observation model (no streams, no data).
     /// Used when only the transition density is needed (e.g., gradient tests
@@ -311,54 +491,24 @@ impl MultiStreamObsModel {
         }
     }
 
-    /// IM3 in 2026-04-19 inference review: previously this was infallible
-    /// and panicked inside `resolve_likelihood_from_model` when any
-    /// stream's likelihood expression referenced an unknown parameter /
-    /// compartment / table. Now returns `Result<Self, SimError>` so the
-    /// CLI can surface a diagnostic. Im3 (multi-stream obs_times
-    /// mismatch) is now also checked here: all streams must share the
-    /// same obs_times as stream 0; heterogeneous schedules are rejected
-    /// at construction rather than silently ignored.
+    /// Consume a validated [`BoundObs`] and resolve each stream's likelihood
+    /// against `compiled`.
+    ///
+    /// The construction-time invariants — non-empty stream list, non-empty and
+    /// strictly-increasing observation times, homogeneous schedules — have
+    /// MOVED to [`BoundObs::bind`], which is the only way to obtain a
+    /// `BoundObs`. This constructor therefore re-checks none of them; it only
+    /// resolves likelihood expressions (which still needs `compiled` and can
+    /// still fail with `SimError` when a stream references an unknown
+    /// parameter / compartment / table — IM3 in 2026-04-19 inference review).
     pub fn new(
-        stream_specs: Vec<StreamSpec>,
+        bound: BoundObs,
         compiled: Arc<CompiledModel>,
     ) -> Result<Self, crate::error::SimError> {
-        if stream_specs.is_empty() {
-            return Err(crate::error::SimError::Validation(
-                "at least one observation stream required".to_string()
-            ));
-        }
-        let obs_times = stream_specs[0].obs_times.clone();
-        // An empty observation series is meaningless for a filter and,
-        // left unchecked, panics downstream: `mean()`/`sample()` index
-        // `obs_times[obs_idx]` and the bootstrap filter would hit
-        // `obs_times[0]` on a zero-length vec (index-out-of-bounds). Reject
-        // it here with an actionable message — the earliest shared seam, so
-        // pfilter / fit / if2 all get the clean error instead of the panic.
-        if obs_times.is_empty() {
-            return Err(crate::error::SimError::Validation(format!(
-                "observation stream '{}' has no observations — the data file \
-                 has a header row but no data rows. A particle filter needs at \
-                 least one observation; check that the --data file is non-empty \
-                 and that its time/value columns parse.",
-                stream_specs[0].ir_model.name
-            )));
-        }
-        // gh#188: observation times must be strictly increasing. The cross-stream
-        // check below pins every stream to these times, so validating stream 0
-        // here covers all of them.
-        validate_obs_times_increasing(&stream_specs[0].ir_model.name, &obs_times)?;
-        for (si, spec) in stream_specs.iter().enumerate().skip(1) {
-            if spec.obs_times != obs_times {
-                return Err(crate::error::SimError::Validation(format!(
-                    "observation stream {} has obs_times that differ from stream 0; \
-                     heterogeneous schedules are not supported yet", si
-                )));
-            }
-        }
+        let BoundObs { times: obs_times, streams: bound_streams } = bound;
 
-        let mut streams = Vec::with_capacity(stream_specs.len());
-        for spec in stream_specs {
+        let mut streams = Vec::with_capacity(bound_streams.len());
+        for spec in bound_streams {
             let resolved = resolve_likelihood_from_model(
                 &spec.ir_model.likelihood, &compiled,
             )?;
@@ -366,7 +516,7 @@ impl MultiStreamObsModel {
                 name: spec.ir_model.name.clone(),
                 projection: spec.projection,
                 resolved,
-                observations: spec.observations,
+                observations: spec.values,
             });
         }
 
@@ -558,30 +708,143 @@ impl ObservationModel<ParticleState> for NullObsModel {
 }
 
 #[cfg(test)]
-mod obs_time_validation_tests {
-    //! gh#188: observation times must be strictly increasing at construction.
-    use super::validate_obs_times_increasing;
+mod bind_tests {
+    //! Construction-time invariants for observation streams, factored out of
+    //! `MultiStreamObsModel::new` into `BoundObs::bind`. Each fatal check
+    //! returns `Err(report)` with `report.is_fatal()` and an actionable,
+    //! located message; the happy path returns `Ok((bound, report))` with a
+    //! non-fatal verdict. gh#188 (strictly increasing) and the empty/
+    //! heterogeneous checks all live here now.
+    use super::{BoundObs, Severity, StreamProjection, StreamSpec};
+    use ir::observation::{
+        Likelihood, ObservationModel as IrObservationModel, ObservationSchedule,
+        PoissonLikelihood, Projection,
+    };
+    use ir::expr::{Expr, ProjectedExpr};
+
+    /// Minimal IR observation block. `bind`'s validation runs before any
+    /// likelihood resolution, so the likelihood here only has to be
+    /// constructible — it is never resolved in these checks.
+    fn ir_obs(name: &str) -> IrObservationModel {
+        IrObservationModel {
+            name: name.into(),
+            schedule: ObservationSchedule::AtTimes(vec![]),
+            projection: Projection::CumulativeFlow("inc".into()),
+            likelihood: Likelihood::Poisson(PoissonLikelihood {
+                rate: Expr::Projected(ProjectedExpr { projected: () }),
+            }),
+        }
+    }
+
+    fn spec(name: &str, obs_times: Vec<f64>, observations: Vec<f64>) -> StreamSpec {
+        StreamSpec {
+            projection: StreamProjection::FlowSum(vec![0]),
+            ir_model: ir_obs(name),
+            observations,
+            obs_times,
+        }
+    }
+
+    /// Extract the fatal `BindReport` from a `bind` call expected to fail —
+    /// without requiring `BoundObs: Debug` (the `Ok` half is private-fielded).
+    fn expect_fatal(
+        r: Result<(super::BoundObs, super::BindReport), super::BindReport>,
+        ctx: &str,
+    ) -> super::BindReport {
+        match r {
+            Ok(_) => panic!("{ctx}"),
+            Err(report) => report,
+        }
+    }
 
     #[test]
-    fn duplicate_times_are_rejected() {
-        // The bug: [3.0, 3.0] previously passed and silently dropped one
+    fn empty_stream_list_is_fatal() {
+        let report = expect_fatal(
+            BoundObs::bind(vec![]),
+            "an empty stream list must be rejected",
+        );
+        assert!(report.is_fatal());
+        assert_eq!(report.verdict(), Severity::Error);
+        assert!(report.findings().iter().any(|f|
+            f.message.contains("at least one observation stream")));
+    }
+
+    #[test]
+    fn empty_obs_times_is_fatal() {
+        // A header row but no data rows. Left unchecked this panics downstream
+        // on `obs_times[0]`.
+        let report = expect_fatal(
+            BoundObs::bind(vec![spec("cases", vec![], vec![])]),
+            "a stream with no observations must be rejected",
+        );
+        assert!(report.is_fatal());
+        assert!(report.findings().iter().any(|f|
+            f.message.contains("no observations") && f.message.contains("cases")),
+            "message must name the stream and the cause: {:?}", report.findings());
+    }
+
+    #[test]
+    fn non_increasing_obs_times_is_fatal() {
+        // gh#188: [3.0, 3.0] previously passed and silently dropped one
         // likelihood (build_obs_at_substep last-wins; exact grid drops the suffix).
-        let err = validate_obs_times_increasing("cases", &[1.0, 3.0, 3.0, 6.0]);
-        assert!(err.is_err(), "duplicate observation times must be rejected");
-        assert!(format!("{:?}", err.unwrap_err()).contains("strictly increasing"));
+        let dup = expect_fatal(
+            BoundObs::bind(vec![spec(
+                "cases", vec![1.0, 3.0, 3.0, 6.0], vec![0.0, 0.0, 0.0, 0.0],
+            )]),
+            "duplicate observation times must be rejected",
+        );
+        assert!(dup.is_fatal());
+        assert!(dup.findings().iter().any(|f|
+            f.message.contains("strictly increasing") && f.message.contains("cases")),
+            "message must name the stream and the rule: {:?}", dup.findings());
+
+        let oo = expect_fatal(
+            BoundObs::bind(vec![spec(
+                "cases", vec![1.0, 6.0, 3.0], vec![0.0, 0.0, 0.0],
+            )]),
+            "out-of-order observation times must be rejected",
+        );
+        assert!(oo.is_fatal());
     }
 
     #[test]
-    fn out_of_order_times_are_rejected() {
-        assert!(validate_obs_times_increasing("cases", &[1.0, 6.0, 3.0]).is_err(),
-            "non-monotone observation times must be rejected");
+    fn heterogeneous_schedules_are_fatal() {
+        let report = expect_fatal(
+            BoundObs::bind(vec![
+                spec("a", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
+                spec("b", vec![1.0, 2.0, 4.0], vec![20.0, 21.0, 22.0]),
+            ]),
+            "a stream whose schedule differs from stream 0 must be rejected",
+        );
+        assert!(report.is_fatal());
+        assert!(report.findings().iter().any(|f|
+            f.message.contains("heterogeneous schedules") && f.message.contains("stream 1")),
+            "message must name the offending stream index: {:?}", report.findings());
     }
 
     #[test]
-    fn strictly_increasing_times_pass() {
-        assert!(validate_obs_times_increasing("cases", &[1.0, 3.0, 6.0, 9.3]).is_ok());
-        assert!(validate_obs_times_increasing("cases", &[5.0]).is_ok(), "single obs is fine");
-        assert!(validate_obs_times_increasing("cases", &[]).is_ok(), "empty handled upstream");
+    fn happy_path_multi_stream_binds_and_collapses_axis() {
+        // Two streams sharing one strictly-increasing schedule: Ok, non-fatal,
+        // one shared axis, per-stream values preserved with the equal-length
+        // invariant holding by construction.
+        let (bound, report) = BoundObs::bind(vec![
+            spec("a", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
+            spec("b", vec![1.0, 2.0, 3.0], vec![20.0, 21.0, 22.0]),
+        ]).expect("a homogeneous, strictly-increasing multi-stream input must bind");
+
+        // Negative control: the verdict is NOT fatal on valid input.
+        assert!(!report.is_fatal(), "valid input must not produce a fatal report");
+        assert_ne!(report.verdict(), Severity::Error);
+        assert!(report.findings().is_empty(), "valid dense input has no findings");
+
+        // One shared axis (= stream 0's), collapsed from the identical schedules.
+        assert_eq!(bound.times(), &[1.0, 2.0, 3.0]);
+        // Equal-length invariant holds by construction for every stream.
+        for s in &bound.streams {
+            assert_eq!(s.values.len(), bound.times().len());
+        }
+        assert_eq!(bound.streams[0].values, vec![10.0, 11.0, 12.0]);
+        assert_eq!(bound.streams[1].values, vec![20.0, 21.0, 22.0]);
     }
 }
 

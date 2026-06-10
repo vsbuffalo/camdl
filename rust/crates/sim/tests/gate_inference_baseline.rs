@@ -43,6 +43,7 @@ use ir::{
 use sim::{
     compiled_model::CompiledModel,
     inference::{
+        BoundObs,
         multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec},
         particle_filter::bootstrap_filter,
         traits::SMCConfig,
@@ -157,7 +158,8 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
         observations: vec![16.0, 166.0, 626.0, 1303.0, 1260.0, 1023.0, 327.0, 91.0, 58.0, 6.0, 2.0],
         obs_times,
     };
-    let obs_model = MultiStreamObsModel::new(vec![spec], compiled.clone()).unwrap();
+    let obs_model = MultiStreamObsModel::new(
+        BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap();
     let params = compiled.default_params.clone();
     (obs_model, compiled, params)
 }

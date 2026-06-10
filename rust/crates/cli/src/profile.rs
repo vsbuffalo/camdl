@@ -34,7 +34,7 @@ use sim::{
     inference::{
         if2::{run_if2, IF2Config, Observation},
         pmmh::{run_pmmh, PMMHConfig, Prior},
-        ChainBinomialProcess, MultiStreamObsModel,
+        BoundObs, ChainBinomialProcess, MultiStreamObsModel,
         multi_stream_obs::StreamSpec,
     },
 };
@@ -791,7 +791,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 obs_times: obs_times_vec.clone(),
             });
         }
-        Arc::new(MultiStreamObsModel::new(stream_specs, compiled.clone())
+        let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
+            eprintln!("error: observation data invalid:\n{}", report.render());
+            std::process::exit(1);
+        });
+        Arc::new(MultiStreamObsModel::new(bound, compiled.clone())
             .unwrap_or_else(|e| {
                 eprintln!("error: observation model construction failed: {:?}", e);
                 std::process::exit(1);

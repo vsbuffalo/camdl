@@ -15,6 +15,7 @@ use sim::{
         particle_filter::Observation,
         traits::SMCConfig,
         ChainBinomialProcess,
+        BoundObs,
         MultiStreamObsModel,
         multi_stream_obs::StreamSpec,
     },
@@ -312,7 +313,11 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             observations: stream_obs.iter().map(|x| x.value).collect(),
             obs_times: obs_times.clone(),
         }).collect();
-    let obs_model = MultiStreamObsModel::new(stream_specs, compiled.clone())
+    let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
+        eprintln!("error: observation data invalid:\n{}", report.render());
+        std::process::exit(1);
+    });
+    let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
         .unwrap_or_else(|e| {
             eprintln!("error: observation model construction failed: {:?}", e);
             std::process::exit(1);

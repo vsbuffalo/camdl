@@ -27,6 +27,7 @@ use ir::{
 use sim::{
     compiled_model::CompiledModel,
     inference::{
+        BoundObs,
         multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec},
         traits::ObservationModel,
         ParticleState,
@@ -94,12 +95,12 @@ fn build_obs_model(compiled: &Arc<CompiledModel>, projection: StreamProjection, 
 {
     let obs_ir = compiled.model.observations[0].clone();
     MultiStreamObsModel::new(
-        vec![StreamSpec {
+        BoundObs::bind(vec![StreamSpec {
             projection,
             ir_model: obs_ir,
             observations: vec![observed],
             obs_times: vec![5.0],
-        }],
+        }]).unwrap().0,
         compiled.clone(),
     ).unwrap()
 }
@@ -140,12 +141,12 @@ fn current_pop_sum_from_ir_resolves_stratified_compartments() {
     state.counts[4] = 5;
 
     let obs_model = MultiStreamObsModel::new(
-        vec![StreamSpec {
+        BoundObs::bind(vec![StreamSpec {
             projection,
             ir_model: compiled.model.observations[0].clone(),
             observations: vec![20.0],
             obs_times: vec![5.0],
-        }],
+        }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
     // Poisson(observed=20, rate=projected+0.1) peaks at projected≈20.
@@ -385,12 +386,12 @@ fn snapshot_reads_post_intervention_state() {
         &compiled.model.observations[0].projection, &compiled, "obs",
     ).unwrap();
     let obs_model = MultiStreamObsModel::new(
-        vec![StreamSpec {
+        BoundObs::bind(vec![StreamSpec {
             projection,
             ir_model: compiled.model.observations[0].clone(),
             observations: vec![500.0],
             obs_times: vec![5.0],
-        }],
+        }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
 

@@ -20,6 +20,7 @@ use sim::{
         if2::{EstimatedParam, Transform},
         pgas::{PGASConfig, run_pgas},
         pmmh::Prior,
+        BoundObs,
         MultiStreamObsModel,
         multi_stream_obs::StreamSpec,
     },
@@ -112,7 +113,7 @@ fn mu_param() -> EstimatedParam {
 fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
     let obs = observations();
     MultiStreamObsModel::new(
-        vec![StreamSpec {
+        BoundObs::bind(vec![StreamSpec {
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: ir::observation::ObservationModel {
                 name: "cases".into(),
@@ -131,7 +132,7 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
             },
             observations: obs.iter().map(|o| o.value).collect(),
             obs_times: obs.iter().map(|o| o.time).collect(),
-        }],
+        }]).unwrap().0,
         compiled.clone(),
     ).unwrap()
 }

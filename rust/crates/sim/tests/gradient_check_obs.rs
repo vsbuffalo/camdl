@@ -21,7 +21,7 @@ use std::sync::Arc;
 use sim::compiled_model::CompiledModel;
 use sim::inference::pgas::{IVPMapping, simulate_reference, complete_data_loglik, build_obs_at_substep};
 use sim::inference::pgas_grad::complete_data_loglik_grad;
-use sim::inference::MultiStreamObsModel;
+use sim::inference::{BoundObs, MultiStreamObsModel};
 use sim::inference::multi_stream_obs::{StreamProjection, StreamSpec, eval_stream_projection};
 use sim::inference::particle_filter::Observation;
 use sim::rng::StatefulRng;
@@ -49,7 +49,7 @@ fn build_obs_model(
             obs_times: obs_times.to_vec(),
         }
     }).collect();
-    MultiStreamObsModel::new(specs, compiled).unwrap()
+    MultiStreamObsModel::new(BoundObs::bind(specs).unwrap().0, compiled).unwrap()
 }
 
 fn set_param_defaults(model: &mut ir::Model, defaults: &[(&str, f64)]) {
