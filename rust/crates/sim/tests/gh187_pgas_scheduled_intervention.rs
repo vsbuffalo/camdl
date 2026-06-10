@@ -59,14 +59,17 @@ fn load() -> CompiledModel {
 fn gh187_pgas_applies_scheduled_intervention() {
     let compiled = load();
 
-    // Fixture preconditions: exactly one scheduled (non-active) intervention and
-    // one always_active event, both at t=5.
+    // Fixture preconditions: exactly one scheduled (Scenario) intervention and
+    // one Event (always-active) intervention, both at t=5.
+    // (gh#107 replaced the former `always_active: bool` with
+    // `kind: InterventionKind{Event, Scenario}`; `kind.is_event()` reads where
+    // `always_active` did.)
     let scheduled: Vec<_> = compiled.model.interventions.iter()
-        .filter(|iv| !iv.always_active).collect();
+        .filter(|iv| !iv.kind.is_event()).collect();
     let active: Vec<_> = compiled.model.interventions.iter()
-        .filter(|iv| iv.always_active).collect();
+        .filter(|iv| iv.kind.is_event()).collect();
     assert_eq!(scheduled.len(), 1, "fixture should have one scheduled intervention");
-    assert_eq!(active.len(), 1, "fixture should have one always_active event");
+    assert_eq!(active.len(), 1, "fixture should have one Event (always-active) intervention");
     eprintln!("[gh#187] scheduled intervention: {} (always_active=false)", scheduled[0].name);
     eprintln!("[gh#187] always_active event:     {} (always_active=true)", active[0].name);
 
