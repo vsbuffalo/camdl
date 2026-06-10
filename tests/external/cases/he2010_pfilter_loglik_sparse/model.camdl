@@ -1,0 +1,148 @@
+# Measles SEIR — exact He et al. (2010) replication in camdl
+# J. R. Soc. Interface 7: 271–283
+# Parameters from MLE fit to London weekly notifications, 1950–1964
+# Values in params/he2010_london.toml
+#
+# This model matches pomp's implementation exactly:
+# - Time-varying pop(t) and birthrate(t) from interpolated covariates
+# - Deterministic births with cohort pulse via conditional expression
+# - 365-day periodic forcing matching pomp's exact school calendar
+# - Overdispersed infection rate (Gamma noise on per-capita FOI)
+# - Observation = incidence(recovery) matching pomp's C accumulator
+# - No B_hold compartment, no interventions, no workarounds
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+parameters {
+  R0        : positive    in [1.0, 100.0]
+  sigma     : rate        in [0.01, 0.5]    # 1/latent period (day^-1)
+  gamma     : rate        in [0.01, 0.5]    # 1/infectious period (day^-1)
+  mu        : rate        in [1e-6, 0.01]   # death rate (day^-1)
+  alpha     : positive [1] in [0.5, 1.0]    # mixing exponent (dimensionless)
+  iota      : count       in [0.01, 100.0]  # importation floor: enters FOI as (I + iota)^alpha — dimensionless count, NOT a rate. He et al. MLE: 2.9
+  sigma_se  : positive [1] in [0.001, 5.0]  # extra-demographic noise σ² (dimensionless)
+  amplitude : probability in [0.0001, 0.9999] # term-time forcing amplitude
+  cohort    : probability in [0.0001, 0.9999] # fraction of births entering at school start
+  rho       : probability in [0.0001, 0.9999] # reporting probability
+  psi       : positive [1] in [0.001, 1.0]  # measurement overdispersion (He et al. eq. 6)
+  s0        : probability in [0.001, 0.5]   # initial susceptible fraction (He et al. MLE ≈ 0.0297). Wider than He et al.'s search range to give IF2's logit transform ≥ 3 log-units of margin on both sides of truth; earlier [0.005, 0.25] pinned chains at the lower logit bound (see he2010-synthetic.qmd diagnostic)
+  e0        : probability in [1e-6, 0.01]   # initial exposed fraction
+  i0        : probability in [1e-6, 0.01]   # initial infected fraction
+  N0        : count       in [1000, 10000000]
+}
+
+# ── Time-varying covariates ──────────────────────────────────────────────────
+# Monthly data pre-interpolated by R's smooth.spline().
+# Birthrate lagged 4 years (school entry delay).
+# Source: bench/he2010/01_pomp_reference.R → data/he2010_london_covariates.tsv
+forcing {
+  pop : interpolated 'count {
+    data      = "data/he2010_london_covariates.tsv"
+    time_col  = t
+    value_col = pop
+    method    = "linear"
+  }
+
+  birthrate : interpolated 'per_year {
+    data      = "data/he2010_london_covariates.tsv"
+    time_col  = t
+    value_col = birthrate
+    method    = "linear"
+  }
+
+  # UK school calendar matching pomp exactly:
+  # Term days 7–100, 115–199, 252–300, 308–356
+  # 277 school days / 365 = 0.7589 fraction
+  school : periodic 'ratio {
+    period = 365.25 'days
+    step   = 1 'days
+    on     = [7:100, 115:199, 252:300, 308:356]
+  }
+}
+
+# ── Rate expressions ─────────────────────────────────────────────────────────
+
+# Beta: Euler-multinomial correction matching pomp
+# (gamma + mu) is T⁻¹; multiply by 1 'days to get dimensionless for exp()
+let beta_base = R0 * (1.0 - exp(-(gamma + mu) * 1 'days))
+
+# Seasonal forcing: mean(seas) = 1 over the year
+# With 277/365 school fraction, the normalization is exact
+let seas = 1.0 - amplitude + amplitude * (1.0 + 0.2411 / 0.7589) * school(t)
+
+# Births: deterministic, matching pomp's nearbyint(pop*br*dt).
+# `birthrate` is declared `'per_year`; the compiler rescales it to the
+# model's time unit at load, so `birthrate(t)` already returns a per-day
+# rate and must NOT be divided by 365.25 again here.
+let daily_births = birthrate(t) * pop(t)
+
+transitions {
+  # Infection with environmental noise.
+  # (I + iota)^alpha is He et al.'s inhomogeneous mixing term — alpha < 1
+  # makes the FOI sublinear in I. This is dimensionally irregular (P^0.976
+  # has no coherent dimension), so we assert the result is a population count.
+  infection : S --> E  @ overdispersed(beta_base * seas * S * unchecked_dim((I + iota) ^ alpha, dim = population, reason = "He et al. alpha-mixing: phenomenological P^alpha term") / pop(t), sigma_se)
+
+  latency   : E --> I  @ sigma * E
+  recovery  : I --> R  @ gamma * I
+
+  # Continuous births only (no cohort pulse — that's in events {})
+  birth : --> S  @ deterministic((1.0 - cohort) * daily_births)
+
+  # Deaths
+  death_S : S -->  @ mu * S
+  death_E : E -->  @ mu * E
+  death_I : I -->  @ mu * I
+  death_R : R -->  @ mu * R
+}
+
+init {
+  S = s0 * N0
+  E = e0 * N0
+  I = i0 * N0
+  R = N0 - s0 * N0 - e0 * N0 - i0 * N0
+}
+
+# Cohort: children enter school once per year on day 251.
+# Uses events {} block — the engine handles once-per-period scheduling
+# correctly (no mod() arithmetic, no double-firing from fractional drift).
+events {
+# at_day 258 = day 251 of calendar year + 7 day offset (t=0 is Dec 24).
+# The pulse size is cohort × annual total births. `birthrate(t) * pop(t)`
+# is already a per-day rate (see daily_births above), so multiply by a
+# year to recover the annual count. `1 'years` keeps the dim check tight
+# (rate × time = count) where a bare `* 365.25` would not.
+  cohort_entry : add(S, cohort * birthrate(t) * pop(t) * 1 'years)
+    every 365.25 'days at_day 258
+}
+
+# Match pomp's R = nearbyint(pop) - S - E - I constraint.
+# Without this, the cohort pulse creates 20K phantom susceptibles/year
+# (births into S with no corresponding reduction of R). The balance
+# keeps S+E+I+R = pop(t) by absorbing the pulse into R.
+balance {
+  R = pop(t) - S - E - I
+}
+
+# He et al. observe C = cumulative I→R recoveries per week.
+# The E→I→R pipeline (~24 day residence) low-pass filters the Gamma noise.
+# Observation model: discretized Normal (He et al. 2010, eq. 6)
+#   mean = rho * C
+#   var  = rho * C * (1 - rho + psi^2 * rho * C)
+observations {
+  weekly_cases : {
+    projected  = incidence(recovery)
+    every      = 7 'days
+    likelihood = normal(
+      mean = rho * projected,
+      sd   = sqrt(rho * projected * (1.0 - rho + psi * psi * rho * projected))
+    )
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 21 'years
+}

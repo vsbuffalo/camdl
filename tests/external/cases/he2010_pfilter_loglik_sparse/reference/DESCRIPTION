@@ -1,0 +1,6 @@
+Title: camdl-bench
+Description: pomp vs camdl numerical validation
+Depends:
+    pomp,
+    dplyr,
+    tidyr

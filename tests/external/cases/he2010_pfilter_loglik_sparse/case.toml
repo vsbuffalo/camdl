@@ -1,0 +1,75 @@
+name = "he2010_pfilter_loglik_sparse"
+description = """
+Particle-filter log-likelihood of He et al. (2010) London measles at
+the published MLE, on a SPARSE (holed) observation series. Sibling to
+he2010_pfilter_loglik (the dense case): byte-for-byte the same model,
+parameters, particle count, seeds, and time grid — the ONLY difference
+is that 222 of the 1096 weekly values are missing (NA), leaving 874
+observed (79.7%). The holes are an every-5th-week stride plus a 4-week
+mid-series run (548-551), exercising both isolated holes and a
+consecutive run.
+
+This case validates the SPARSE/holes likelihood path specifically. A
+hole (NA) must contribute NO term to the total log-likelihood, while the
+weekly incidence bin must STILL reset on the full weekly grid — the bin
+width is set by the schedule, not by whether the value was observed. It
+discriminates the sparse-specific bug classes the dense case cannot
+reach: a skipped weekly accumulator reset across a hole (which would
+double/merge a bin and shift the loglik by many nats per affected
+boundary), or scoring a hole as an observed 0.
+
+Note on obs-model asymmetry: pomp uses a discretised Normal
+(pnorm(y+0.5) - pnorm(y-0.5)) while camdl uses continuous Normal
+density. This yields a small but systematic log-lik offset; the
+tolerance on the mean absorbs it. The value we're protecting is
+agreement *modulo that offset*, which is still tight enough to catch
+pf resampling / likelihood-evaluation bugs — those move the mean by
+tens to hundreds of nats, well above the obs-model discretisation
+offset (~log(cases_per_obs), ~10 nats total across 874 observations
+for this data).
+"""
+category = "pfilter"
+
+[camdl]
+model = "model.camdl"
+params = "params.toml"
+mode = "batch-replicated"
+batch_seed_col = "seed"
+# One invocation, N replicates. @batch_out becomes the TSV path the
+# harness reads as a long-format (seed, loglik) table.
+command = [
+  "camdl",
+  "pfilter",
+  "@model",
+  "--params",
+  "@params",
+  "--data",
+  "data/he2010_london_cases_holed.tsv",
+  "--particles",
+  "2000",
+  "--replicates",
+  "@n_seeds",
+  "--seed",
+  "@seed_base",
+  "--output",
+  "@batch_out",
+]
+n_seeds = 10
+seed_base = 42
+
+[reference]
+kind = "r-pomp"
+run = "reference/run.sh"
+ensemble_tsv = "reference/out/pomp_pfilter_loglik.tsv"
+seed_col = "sim"
+
+# Both sides write a long-format (seed, loglik) TSV. Column rename
+# not needed — camdl's `seed` and pomp's `loglik` line up.
+#
+# Aggregate `mean` on a one-row-per-seed loglik column gives back
+# the scalar loglik per seed, which is exactly what we want.
+[summary]
+kind = "ensemble-stats"
+stats = [
+  { name = "loglik", aggregate = "mean", over = "loglik", scope = "per-seed" },
+]

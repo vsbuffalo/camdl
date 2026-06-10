@@ -1,0 +1,32 @@
+# He, Ionides & King (2010) MLE for London measles
+# J. R. Soc. Interface 7: 271–283
+# Source: pomp short-course materials (kingaa.github.io/short-course)
+
+# Transmission
+R0 = 56.8 # basic reproduction number (inflated by alpha < 1)
+alpha = 0.976 # mixing exponent: FOI ∝ (I + iota)^alpha
+amplitude = 0.554 # school-term forcing amplitude
+iota = 2.9 # importation floor (dimensionless count of equivalent-infecteds; enters FOI as (I + iota)^alpha — see He et al. 2010). NOT a rate; do not divide by 365.25.
+# He et al. sigmaSE = 0.0878 (std dev, yearly units).
+# Convert: σ²_daily = sigmaSE² × 365.25 = 0.0878² × 365.25 = 2.816
+sigma_se = 2.816
+
+# Natural history
+sigma = 0.0791 # latent rate (1/sigma ≈ 12.6 days; = 28.9/yr)
+gamma = 0.0832 # recovery rate (1/gamma ≈ 12.0 days; = 30.4/yr)
+
+# Demography (now time-varying via interpolated covariates)
+mu = 0.0000548 # death rate (= 0.02/yr); births from covariate
+cohort = 0.557 # fraction of births entering S at school start (day 251)
+
+# Observation model
+rho = 0.488 # reporting probability
+psi = 0.116 # He et al. measurement overdispersion (for discretized Normal pfilter)
+
+# Initial conditions (London, 1944-01-07)
+# He et al. fractions: s0=0.0297, e0=5.17e-5, i0=5.14e-5
+# Model uses fraction parameters; init block scales by N0.
+N0 = 2462500 # pop at t=0 (1944-01-07)
+s0 = 0.0297 # initial susceptible fraction
+e0 = 0.0000517 # initial exposed fraction
+i0 = 0.0000514 # initial infected fraction

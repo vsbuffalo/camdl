@@ -1,0 +1,52 @@
+# Tolerance + MC power for the he2010_pfilter_loglik_sparse case.
+# Empirical reference numbers from pomp 6.4, 2000-particle × 20-replicate
+# pfilter at the published London MLE, on the HOLED series (222 of 1096
+# weeks blanked to NA; 874 observed):
+#   mean loglik ≈ -4723.42   per-replicate SD ≈ 14.06
+# (Dense sibling, same model/params: mean ≈ -5827.4, SD ≈ 12.7.)
+
+[checks.loglik]
+compare = "mean"
+tol_abs = 35.0
+rationale = """
+pomp pfilter at the published London MLE on the HOLED series (222 of
+1096 weekly values set to NA per a deterministic pattern; weekly grid
+unchanged), 2000 particles × 20 replicates: mean ≈ -4723.42,
+per-replicate SD ≈ 14.06. MC SE of the mean at n=10 camdl replicates is
+SD/sqrt(n) ≈ 4.4 nats; at pomp's n=20 reference the reference-side SE is
+≈ 3.1 nats. Combined SE of the difference of means ≈ sqrt(4.4² + 3.1²)
+≈ 5.4 nats.
+
+tol_abs = 35 nats ≈ 6.5× combined SE. This matches the dense case's
+tolerance: the per-observation log-density scale is the same (dense
+per-obs ll ≈ -5.317, holed per-obs ll ≈ -5.404), so the same 35-nat bar
+discriminates the same bug class. It is above the continuous-vs-discrete
+normal obs-model offset (≤ ~10 nats over 874 observations, since the
+obs-scale SDs are large enough that log-density ≈ log-mass-per-unit-
+interval) and below the class of bug this case is meant to flag for the
+SPARSE path specifically:
+  - a hole week's incidence accumulator NOT being reset on the weekly
+    grid (a doubled/merged bin would shift the loglik by many nats per
+    affected boundary);
+  - a hole's measurement density contributing a nonzero term instead of
+    exactly zero (NA mishandled);
+  - the latent dynamics over a hole interval diverging from the dense
+    run (the process must be identical; only the obs term goes away).
+A 100-nat bias fires at ≥18σ.
+
+Use tol_abs (not tol_rel): log-lik differences are additive-natural;
+"camdl is 30 nats off pomp" is interpretable, "0.6% off" is not (the
+log-lik zero point is arbitrary).
+
+The particle count must be pinned at 2000 on both sides (pfilter
+log-lik has a well-known negative bias scaling ~1/N_particles). If
+either side changes N_particles without the other following, the
+comparison is apples-to-oranges. The staleness machinery catches this —
+case.toml is part of the case_sha, so changing --particles flips the
+fixture stale and forces a matched regen.
+
+PARTIAL-SUM sanity: the holed total (-4723.42) is less negative than
+the dense total (-5827.4) — fewer obs terms — and tracks the observed
+fraction: ratio of totals 0.811 vs observed fraction 0.797. Direction
+and magnitude are as expected for a fixed-bin partial sum.
+"""
