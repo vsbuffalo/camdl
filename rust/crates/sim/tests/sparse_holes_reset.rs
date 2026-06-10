@@ -173,6 +173,78 @@ fn hole_does_not_suppress_incidence_reset() {
         "hole index must contribute 0 to the loglik, got {}", res.ll_increments[1]);
 }
 
+/// gh#134 burn-in / conditioning window: a LEADING reset-only hole at
+/// `cond_from` must discard the warm-up incidence accumulated over
+/// `[t_start, cond_from)`, so the FIRST SCORED bin tallies only
+/// `(cond_from, first_obs]` — not the whole `[t_start, first_obs]` gap.
+///
+/// This is exactly the property the runner's `condition_from` insertion relies
+/// on: a conditioning boundary IS a hole (reset, no score), so it rides the
+/// SAME unconditional per-obs-index reset this file already pins for interior
+/// holes — no new reset mechanism. Here we probe it at the filter-loop level
+/// (the shared scoring/reset seam all cells route through).
+///
+/// Deterministic inflow `K` per unit, t_start = 0, weekly grid. Without
+/// conditioning the first observed bin at t=14 would tally `[0,14] = 14·K`. A
+/// leading hole at t=7 (the conditioning boundary) resets at t=7, so the bin at
+/// t=14 tallies only `(7,14] = 7·K`. The mutation: if the leading hole's reset
+/// were skipped, the t=14 prediction would be 14·K (the inflated warm-up bin).
+#[test]
+fn conditioning_boundary_resets_leading_incidence() {
+    let k = 10.0;
+    let compiled = model(k);
+    let params = compiled.default_params.clone();
+    let dt = 1.0;
+    let weekly = 7.0 * k; // 70 over one 7-unit week
+    let two_weeks = 14.0 * k; // 140 — the inflated [0,14] bin if no reset at t=7
+
+    // Conditioning boundary at t=7: a LEADING hole, then real obs at 14, 21, 28.
+    // This is what `FitRunConfig::build` prepends when `condition_from = 7`.
+    let times = vec![7.0, 14.0, 21.0, 28.0];
+    let cells = vec![
+        None, // leading reset-only hole at cond_from = 7 (warm-up boundary)
+        Some(ObsCell::Scalar(weekly)),
+        Some(ObsCell::Scalar(weekly)),
+        Some(ObsCell::Scalar(weekly)),
+    ];
+
+    let process = ChainBinomialProcess::new(compiled.clone(), dt);
+    let cfg = SMCConfig {
+        n_particles: 4, dt, t_start: 0.0,
+        skip_first_obs_from_loglik: false,
+        record_ancestry: false, record_prequential: false,
+        pf_wallclock_disabled: true,
+    };
+
+    let m = obs_model(compiled.clone(), cells, times.clone());
+    let res = bootstrap_filter(&process, &m, &params, &cfg, 7)
+        .expect("conditioned pfilter must run");
+    let preds = res.predictions.expect("incidence obs → predictions recorded");
+
+    // obs index 0 is the leading hole at t=7: warm-up [0,7] accumulated here.
+    // obs index 1 is the FIRST SCORED bin at t=14. If the reset fired at the
+    // leading hole, this bin tallies ONLY (7,14] = 70. If the reset were
+    // skipped, it would carry the whole [0,14] = 140.
+    let first_scored = preds[1].obs_mean;
+    assert!((first_scored - weekly).abs() < 1e-6,
+        "first SCORED bin after the conditioning boundary must tally ONLY \
+         (cond_from, first_obs] = {weekly}; the warm-up incidence over \
+         [t_start, cond_from) must be reset away. Got {first_scored} \
+         (no-reset bug would give the inflated {two_weeks}).");
+
+    // The leading hole itself contributes NO likelihood term.
+    assert!((res.ll_increments[0] - 0.0).abs() < 1e-9,
+        "the leading conditioning hole must contribute 0 to the loglik, got {}",
+        res.ll_increments[0]);
+
+    // Later bins are unaffected — each remains one week.
+    for i in [2usize, 3] {
+        assert!((preds[i].obs_mean - weekly).abs() < 1e-6,
+            "bin {i} after conditioning must still tally one week ({weekly}), got {}",
+            preds[i].obs_mean);
+    }
+}
+
 /// Negative control / cross-check: with the SAME deterministic flow but a
 /// DENSE series, the week-after prediction is identical (the reset fires every
 /// week regardless), so the holed-vs-dense difference is ONLY the omitted term

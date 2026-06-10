@@ -160,6 +160,21 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // evaluation. Was a CLI flag, which silently bypassed the run_id.
     sim::eval_stats::set_allow_degenerate_rates(config.config.allow_degenerate_rates);
 
+    // gh#134: `--condition-from` mirrors the top-level fit.toml `condition_from`
+    // and OVERRIDES it. Written into the in-memory config BEFORE the
+    // fit-identity hash is computed (`cas::fit_level_hash` serializes this
+    // config via `fit_config_blob_hash`), so a CLI-set conditioning window
+    // re-keys the fit exactly as a toml-set one does — no silent identity
+    // bypass. A bare number is absolute model time; anything else is a
+    // date / relative-offset spec resolved at build time.
+    if let Some(raw) = &a.condition_from {
+        let raw = raw.trim();
+        config.condition_from = Some(match raw.parse::<f64>() {
+            Ok(v) => config_v2::ConditionFrom::Absolute(v),
+            Err(_) => config_v2::ConditionFrom::Spec(raw.to_string()),
+        });
+    }
+
     // Compile `model.camdl` → IR EXACTLY ONCE for the whole fit. Every
     // per-(cell × sweep point × stage) `FitRunConfig::build` then loads this
     // pre-compiled IR instead of re-invoking camdlc per unit (a multi-stage

@@ -115,6 +115,35 @@ pub struct FitConfigV2 {
     #[serde(default)]
     pub ic_free: Option<bool>,
 
+    /// Burn-in / conditioning window (gh#134). The model is simulated
+    /// faithfully over the leading span `[t_start, cond_from)` — full process
+    /// noise, interventions, forcings — but **nothing there is scored**, and
+    /// the incidence accumulator is reset at `cond_from`, so the first scored
+    /// incidence bin is `(cond_from, first_obs]` rather than the whole
+    /// `[t_start, first_obs]` gap. Mechanically this inserts `cond_from` as a
+    /// leading reset-only HOLE on the observation grid (reset, no likelihood
+    /// term — the same machinery sparse-obs `NA` cells use), so PF / IF2 /
+    /// PGAS / PMMH all get it through the shared `BoundObs`/obs grid.
+    ///
+    /// Accepted forms (see [`ConditionFrom`]):
+    /// - absolute model-time number (`condition_from = 14.0`),
+    /// - absolute `date("…")` / bare ISO date (`condition_from = "date(\"2020-02-01\")"`),
+    ///   resolved via the model origin + `time_unit`,
+    /// - relative `"first_obs - <N> <unit>"` (`condition_from = "first_obs - 1 week"`),
+    ///   resolved as `first_obs_time − N·unit` in model time.
+    ///
+    /// Validation (in `FitRunConfig::build`): `cond_from ∈ [t_start, first_obs)`.
+    /// `cond_from == t_start` (or unset) is a no-op (bit-identical to today —
+    /// no hole inserted). Orthogonal to `ic_free`; setting BOTH errors loudly
+    /// (the inserted leading hole trips the existing "nothing to condition on"
+    /// guard).
+    ///
+    /// `skip_serializing_if None` keeps it OUT of the fit identity hash when
+    /// unset, so existing fits' `run_id`s are unchanged. A *set* value re-keys
+    /// the fit (a different conditioning window is a different fit / estimand).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_from: Option<ConditionFrom>,
+
     /// Optional lineage metadata (not used by the runner).
     #[serde(default)]
     pub provenance: Option<FitProvenance>,
@@ -129,6 +158,60 @@ pub struct FitConfigV2 {
     /// identity-bearing source path (the fit content hash hashes its bytes).
     #[serde(skip)]
     pub compiled_ir: Option<String>,
+}
+
+/// The user-facing `condition_from` value before resolution to model time.
+///
+/// Two surface forms, dispatched on the TOML value type (a number vs a
+/// string), mirroring [`SeedsSpec`]:
+///
+/// - [`ConditionFrom::Absolute`] — a bare model-time number
+///   (`condition_from = 14.0`). Used verbatim.
+/// - [`ConditionFrom::Spec`] — a string. Either an absolute calendar date
+///   (`date("YYYY-MM-DD")` or a bare `"YYYY-MM-DD"`, resolved via the model
+///   origin + `time_unit`) or a relative offset off the first observation
+///   (`"first_obs - <N> <unit>"`, resolved as `first_obs_time − N·unit`).
+///
+/// Resolution to a concrete `cond_from` (model time) happens in
+/// [`crate::fit::runner::resolve_condition_from`], which needs the
+/// `first_obs_time`, `t_start`, `origin`, and `time_unit` from the loaded
+/// model + data. Serialization emits the matching TOML primitive (number for
+/// `Absolute`, string for `Spec`) so the round-trip through the fit-identity
+/// hash is stable.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConditionFrom {
+    /// A model-time number, used verbatim as `cond_from`.
+    Absolute(f64),
+    /// A string form: `date("…")` / bare ISO date (absolute), or
+    /// `"first_obs - <N> <unit>"` (relative). Parsed at resolution time.
+    Spec(String),
+}
+
+impl<'de> Deserialize<'de> for ConditionFrom {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let v = toml::Value::deserialize(de)?;
+        match v {
+            toml::Value::Integer(n) => Ok(ConditionFrom::Absolute(n as f64)),
+            toml::Value::Float(f) => Ok(ConditionFrom::Absolute(f)),
+            toml::Value::String(s) => Ok(ConditionFrom::Spec(s)),
+            other => Err(D::Error::custom(format!(
+                "condition_from must be a model-time number, a date string \
+                 like date(\"2020-02-01\") or \"2020-02-01\", or a relative \
+                 offset like \"first_obs - 1 week\"; got {:?}",
+                other
+            ))),
+        }
+    }
+}
+
+impl Serialize for ConditionFrom {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ConditionFrom::Absolute(v) => s.serialize_f64(*v),
+            ConditionFrom::Spec(spec) => s.serialize_str(spec),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

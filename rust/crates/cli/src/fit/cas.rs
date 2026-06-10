@@ -624,6 +624,75 @@ mod tests {
             "explicit allow_degenerate_rates=false must match the default (no re-key)");
     }
 
+    /// gh#134: `condition_from` is part of the fit IDENTITY — a different
+    /// conditioning window is a different fit / estimand. So a SET value must
+    /// fold into the fit-level blob hash and re-key the fit; an UNSET value
+    /// (the common case) must leave the hash bit-identical so existing fits'
+    /// `run_id`s are unchanged. `skip_serializing_if = Option::is_none` is what
+    /// makes the unset case inert. Both surface forms (absolute number, string)
+    /// re-key, and distinct values produce distinct hashes.
+    /// A `minimal_config` variant with a TOP-LEVEL `condition_from` line. The
+    /// `minimal_config(extra)` helper splices `extra` inside `[fixed]`, which is
+    /// wrong for a top-level key (it would be absorbed by `FixedParams`'
+    /// flattened param map), so we build the doc directly here.
+    fn config_with_top_level(cond_line: &str) -> FitConfigV2 {
+        toml::from_str(&format!(
+            "{cond_line}\
+             [model]\ncamdl = \"models/sir.camdl\"\n\
+             [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
+             [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n\
+             [fixed]\nN0 = 1000000\n\
+             [stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             chains = 4\nparticles = 1000\niterations = 50\ncooling = 0.70\n"
+        ))
+        .expect("fit config must parse")
+    }
+
+    #[test]
+    fn condition_from_changes_the_fit_identity_when_set() {
+        let unset = fit_config_blob_hash(&config_with_top_level("")).unwrap();
+
+        // A SET value (number form) re-keys the fit.
+        let set_num = fit_config_blob_hash(
+            &config_with_top_level("condition_from = 14.0\n")).unwrap();
+        assert_ne!(unset, set_num,
+            "a SET condition_from must fold into the fit identity (gh#134)");
+
+        // The string form also re-keys.
+        let set_str = fit_config_blob_hash(
+            &config_with_top_level("condition_from = \"first_obs - 1 week\"\n")).unwrap();
+        assert_ne!(unset, set_str,
+            "a string-form condition_from must fold into the fit identity");
+
+        // Two DIFFERENT conditioning windows are two different fits.
+        let set_num2 = fit_config_blob_hash(
+            &config_with_top_level("condition_from = 21.0\n")).unwrap();
+        assert_ne!(set_num, set_num2,
+            "distinct condition_from values must produce distinct fit hashes");
+
+        // No spurious sensitivity: identical value → identical hash.
+        assert_eq!(set_num, fit_config_blob_hash(
+            &config_with_top_level("condition_from = 14.0\n")).unwrap());
+    }
+
+    /// gh#134 (the bit-identical guarantee): an UNSET `condition_from` must NOT
+    /// re-key. Because the field carries `skip_serializing_if = Option::is_none`,
+    /// the absent key serializes to nothing, so the blob is byte-identical to a
+    /// config that never had the field — existing fits keep their `run_id`.
+    #[test]
+    fn unset_condition_from_does_not_change_the_fit_identity() {
+        // The pre-condition_from `minimal_config` (which never mentions the key)
+        // must hash identically to a config that explicitly omits it.
+        let legacy = fit_config_blob_hash(&minimal_config("")).unwrap();
+        let explicit_absent = fit_config_blob_hash(&config_with_top_level("")).unwrap();
+        assert_eq!(legacy, explicit_absent,
+            "an unset condition_from must be bit-identical — existing fits must \
+             keep their run_id (gh#134)");
+        // And the parsed config genuinely has it as None.
+        assert!(config_with_top_level("").condition_from.is_none());
+        assert!(minimal_config("").condition_from.is_none());
+    }
+
     /// gh#189: the integrator `[config] dt` changes the substep grid (and, via
     /// `Expr::Dt` and the obs-alignment substep window, the computed output), so
     /// two fits differing only in `dt` must get distinct fit-level hashes — else

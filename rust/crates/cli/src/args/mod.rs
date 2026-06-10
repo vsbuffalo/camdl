@@ -822,6 +822,20 @@ pub struct FitRunArgs {
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
 
+    /// Burn-in / conditioning window (gh#134). Mirrors the top-level
+    /// `condition_from` key in fit.toml; the CLI value overrides it. The
+    /// model warms up over `[t_start, condition_from)` (full process noise,
+    /// interventions, forcings) but scores nothing there, then the incidence
+    /// accumulator is reset at the boundary so the first scored bin is
+    /// `(condition_from, first_obs]`. Accepts a model-time number
+    /// (`--condition-from 14`), a calendar date
+    /// (`--condition-from 'date("2020-02-01")'` or `--condition-from 2020-02-01`),
+    /// or a relative offset (`--condition-from "first_obs - 1 week"`). A set
+    /// value re-keys the fit (it is part of the fit identity); unset leaves
+    /// the fit bit-identical.
+    #[arg(long, value_name = "WHEN")]
+    pub condition_from: Option<String>,
+
     // ── Richardson dt-convergence check (gh#52) ─────────────────────
 
     /// Skip the post-fit Richardson dt-convergence check at θ̂.

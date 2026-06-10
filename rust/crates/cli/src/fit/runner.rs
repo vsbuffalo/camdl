@@ -370,7 +370,7 @@ impl FitRunConfig {
         }
 
         // Canonical observations (from first stream)
-        let observations = streams[0].data.clone();
+        let mut observations = streams[0].data.clone();
 
         // gh#134 (request 3, W329): warn once on the canonical stream when the
         // first inter-observation interval is far larger than the modal cadence
@@ -385,6 +385,51 @@ impl FitRunConfig {
                 &obs_times,
             ) {
                 eprintln!("{msg}");
+            }
+        }
+
+        // gh#134: burn-in / conditioning window. Resolve `condition_from` to a
+        // concrete `cond_from` in model time, then — if it lies strictly inside
+        // (t_start, first_obs) — insert `cond_from` as a LEADING reset-only HOLE
+        // on the shared observation grid. The grid time resets the incidence
+        // accumulator (per-obs-index, the same path sparse-obs `NA` cells use)
+        // but a `None` cell scores no likelihood term, so:
+        //   - the substep walk warms up [t_start, cond_from) faithfully,
+        //   - the per-obs-index reset fires at cond_from (discarding warm-up
+        //     incidence),
+        //   - scoring proceeds from the first real obs over (cond_from, first_obs].
+        // No new reset mechanism: the leading hole rides the existing
+        // hole/reset seam, so PF / IF2 / PGAS / PMMH all get it via `BoundObs`.
+        // `cond_from == t_start` (or unset) inserts NOTHING — bit-identical to
+        // today. The hole is prepended to BOTH `observations` (the canonical
+        // times every algorithm reads) and each stream's `data` + `cells`.
+        if let Some(spec) = &fit.condition_from {
+            let t_start = compiled.model.simulation.t_start;
+            let first_obs_time = observations.iter()
+                .map(|o| o.time)
+                .fold(f64::INFINITY, f64::min);
+            if let Some(cond_from) = resolve_condition_from(
+                spec,
+                first_obs_time,
+                t_start,
+                model.origin.as_deref(),
+                &model.time_unit,
+                dt,
+            )? {
+                eprintln!(
+                    "  \x1b[36mconditioning window:\x1b[0m warm-up [{t_start}, \
+                     {cond_from}) simulated but not scored; first scored \
+                     incidence bin is ({cond_from}, {first_obs_time}]"
+                );
+                // Prepend the leading reset-only hole to the canonical times.
+                observations.insert(0, Observation { time: cond_from, value: 0.0 });
+                // And to every stream: a hole cell (`None`) at cond_from, with a
+                // dense-placeholder Observation row whose value is unread (the
+                // cells, not `data`, are authoritative for scoring).
+                for s in &mut streams {
+                    s.data.insert(0, Observation { time: cond_from, value: 0.0 });
+                    s.cells.insert(0, None);
+                }
             }
         }
 
@@ -1237,6 +1282,174 @@ fn load_observations(
     Ok((observations, cells))
 }
 
+
+/// Resolve a [`ConditionFrom`] surface value to a concrete `cond_from` in
+/// model time, then validate it against the conditioning window
+/// `[t_start, first_obs)`.
+///
+/// Returns:
+/// - `Ok(None)`  — no conditioning (the value resolved to `t_start`, the
+///   no-op case). The caller inserts NO leading hole and the fit is
+///   bit-identical to an unset `condition_from`.
+/// - `Ok(Some(c))` — insert a leading reset-only hole at model time `c`,
+///   with `t_start < c < first_obs`.
+/// - `Err(_)`    — a located error: `c < t_start`, `c >= first_obs`, an
+///   unparseable form, a date with no model origin, or an off-grid `c`.
+///
+/// Accepted forms (see [`ConditionFrom`]):
+/// - `Absolute(n)` — used verbatim.
+/// - `Spec("date(\"YYYY-MM-DD\")")` / `Spec("YYYY-MM-DD")` — absolute calendar
+///   date, resolved via `origin` + `time_unit` (`date_to_internal`).
+/// - `Spec("first_obs - <N> <unit>")` — `first_obs_time − N·unit`.
+///
+/// `dt`-grid alignment is checked here so a mis-specified boundary fails at
+/// build time rather than tripping the chain-binomial step-boundary invariant
+/// downstream.
+pub fn resolve_condition_from(
+    spec: &crate::fit::config_v2::ConditionFrom,
+    first_obs_time: f64,
+    t_start: f64,
+    origin: Option<&str>,
+    time_unit: &str,
+    dt: f64,
+) -> Result<Option<f64>, String> {
+    use crate::fit::config_v2::ConditionFrom;
+
+    let cond_from = match spec {
+        ConditionFrom::Absolute(v) => *v,
+        ConditionFrom::Spec(raw) => parse_condition_spec(raw, first_obs_time, origin, time_unit)?,
+    };
+
+    // No-op case: cond_from == t_start ⇒ no conditioning, no hole. Treat a
+    // float-noise-equal value as exactly t_start so the bit-identical
+    // guarantee survives a date that rounds onto the origin.
+    if (cond_from - t_start).abs() < 1e-9 {
+        return Ok(None);
+    }
+
+    if cond_from < t_start {
+        return Err(format!(
+            "condition_from resolves to t = {cond_from}, which is before the \
+             model start t_start = {t_start}. The conditioning window must lie \
+             within [t_start, first_obs); pick a boundary at or after t_start."
+        ));
+    }
+    if cond_from >= first_obs_time - 1e-9 {
+        return Err(format!(
+            "condition_from resolves to t = {cond_from}, which is at or after \
+             the first observation (t = {first_obs_time}) — nothing to \
+             condition on. The conditioning window must lie strictly before \
+             the first observation: t_start ≤ condition_from < first_obs."
+        ));
+    }
+
+    // Must land on the dt grid (the chain-binomial state only exists at step
+    // boundaries; the inserted hole becomes an obs-grid time scored/reset
+    // there). Same alignment rule the real observations are held to.
+    let remainder = (cond_from - t_start).rem_euclid(dt);
+    let aligned = remainder.abs() < 1e-9 || (dt - remainder).abs() < 1e-9;
+    if !aligned {
+        return Err(format!(
+            "condition_from resolves to t = {cond_from}, which is not on the \
+             dt = {dt} grid relative to t_start = {t_start}. The conditioning \
+             boundary must align to a step boundary; adjust condition_from or dt."
+        ));
+    }
+
+    Ok(Some(cond_from))
+}
+
+/// Parse a string-form [`ConditionFrom::Spec`] to model time.
+fn parse_condition_spec(
+    raw: &str,
+    first_obs_time: f64,
+    origin: Option<&str>,
+    time_unit: &str,
+) -> Result<f64, String> {
+    let s = raw.trim();
+
+    // Relative form: "first_obs - <N> <unit>".
+    if let Some(rest) = s.strip_prefix("first_obs") {
+        let rest = rest.trim();
+        let after = rest.strip_prefix('-').ok_or_else(|| format!(
+            "condition_from = \"{raw}\": the relative form must subtract from \
+             first_obs, e.g. \"first_obs - 1 week\" (only `-` is supported)."
+        ))?;
+        let mut it = after.split_whitespace();
+        let n_tok = it.next().ok_or_else(|| format!(
+            "condition_from = \"{raw}\": expected \"first_obs - <N> <unit>\", \
+             e.g. \"first_obs - 1 week\"."
+        ))?;
+        let unit_tok = it.next().ok_or_else(|| format!(
+            "condition_from = \"{raw}\": missing unit; expected \
+             \"first_obs - <N> <unit>\", e.g. \"first_obs - 7 days\"."
+        ))?;
+        if it.next().is_some() {
+            return Err(format!(
+                "condition_from = \"{raw}\": trailing tokens after the unit; \
+                 expected exactly \"first_obs - <N> <unit>\"."
+            ));
+        }
+        let n: f64 = n_tok.parse().map_err(|_| format!(
+            "condition_from = \"{raw}\": '{n_tok}' is not a number."
+        ))?;
+        if n < 0.0 {
+            return Err(format!(
+                "condition_from = \"{raw}\": N must be non-negative (the form \
+                 already subtracts); got {n}."
+            ));
+        }
+        // Convert N <unit> into model-time units: N · days_per_unit(unit) /
+        // days_per_unit(model_time_unit). When the spec unit equals the model
+        // time unit this is just N.
+        let unit = canonical_duration_unit(unit_tok);
+        let span_days = n * ir::caltime::days_per_unit(&unit)
+            .map_err(|_| format!(
+                "condition_from = \"{raw}\": unknown unit '{unit_tok}'. \
+                 Use days / weeks / months / years."
+            ))?;
+        let model_unit_days = ir::caltime::days_per_unit(time_unit)
+            .map_err(|e| format!("condition_from: model time_unit: {e}"))?;
+        let offset = span_days / model_unit_days;
+        return Ok(first_obs_time - offset);
+    }
+
+    // Absolute date form: date("YYYY-MM-DD") or a bare YYYY-MM-DD.
+    let date_str = if let Some(inner) = s.strip_prefix("date(") {
+        inner.strip_suffix(')')
+            .map(|x| x.trim().trim_matches('"').to_string())
+            .ok_or_else(|| format!(
+                "condition_from = \"{raw}\": malformed date(...) — expected \
+                 date(\"YYYY-MM-DD\")."
+            ))?
+    } else {
+        s.to_string()
+    };
+
+    let origin = origin.ok_or_else(|| format!(
+        "condition_from = \"{raw}\" is a calendar date, but the model declares \
+         no `origin = date(\"…\")`. Either add an origin to the model or use a \
+         numeric model-time value for condition_from."
+    ))?;
+    ir::caltime::date_to_internal(origin, &date_str, time_unit).map_err(|e| format!(
+        "condition_from = \"{raw}\": cannot resolve date '{date_str}' against \
+         origin '{origin}' (time_unit = {time_unit}): {e:?}"
+    ))
+}
+
+/// Normalize a user-written duration unit token to the canonical
+/// [`ir::caltime::days_per_unit`] spelling, accepting common singular/plural
+/// abbreviations so `"1 week"` and `"7 days"` both work.
+fn canonical_duration_unit(tok: &str) -> String {
+    match tok.trim().to_lowercase().as_str() {
+        "day" | "days" | "d" => "days",
+        "week" | "weeks" | "w" => "weeks",
+        "month" | "months" | "mo" => "months",
+        "year" | "years" | "yr" | "y" => "years",
+        other => other,
+    }
+    .to_string()
+}
 
 /// Run one IF2 chain (called from thread::scope).
 fn run_one_chain(
@@ -4077,5 +4290,310 @@ dt = 1.0
             "the merge datum (140) must score MUCH worse than one week (70) — a \
              large gap is only possible if projected ≈ 70. Got gap = {}",
             ll_one_week - ll_two_weeks);
+    }
+
+    // ── gh#134: burn-in / conditioning window (`condition_from`) ─────────
+    //
+    // Two layers of tests:
+    //   (1) `resolve_condition_from` — pure resolution + validation of the
+    //       surface forms (absolute number, date, relative offset) and the
+    //       window-bounds errors. No model load.
+    //   (2) `FitRunConfig::build` end-to-end — the leading reset-only hole is
+    //       prepended to the shared obs grid + every stream's cells (unset is
+    //       bit-identical), and `condition_from` + `ic_free` errors loudly.
+
+    mod condition_from_resolve {
+        use crate::fit::config_v2::ConditionFrom;
+        use crate::fit::runner::resolve_condition_from;
+
+        // first_obs = 7, t_start = 0, unit = days, dt = 1.
+
+        #[test]
+        fn absolute_number_interior_resolves_verbatim() {
+            // c = 3 ∈ (0, 7) → Some(3.0).
+            let c = resolve_condition_from(
+                &ConditionFrom::Absolute(3.0), 7.0, 0.0, None, "days", 1.0).unwrap();
+            assert_eq!(c, Some(3.0));
+        }
+
+        #[test]
+        fn relative_first_obs_minus_one_week() {
+            // first_obs - 1 week = 7 - 7 = 0 = t_start → NO conditioning (None).
+            let c = resolve_condition_from(
+                &ConditionFrom::Spec("first_obs - 1 week".into()),
+                7.0, 0.0, None, "days", 1.0).unwrap();
+            assert_eq!(c, None, "first_obs - 1 week == t_start ⇒ no-op (None)");
+
+            // first_obs - 4 days = 7 - 4 = 3 ∈ (0,7) → Some(3.0).
+            let c = resolve_condition_from(
+                &ConditionFrom::Spec("first_obs - 4 days".into()),
+                7.0, 0.0, None, "days", 1.0).unwrap();
+            assert_eq!(c, Some(3.0));
+        }
+
+        #[test]
+        fn relative_unit_conversion_into_model_units() {
+            // Model time_unit = weeks; first_obs = 5 (weeks); "first_obs - 7 days"
+            // = 5 weeks − (7 days / 7 days-per-week) = 5 − 1 = 4 weeks.
+            let c = resolve_condition_from(
+                &ConditionFrom::Spec("first_obs - 7 days".into()),
+                5.0, 0.0, None, "weeks", 1.0).unwrap();
+            assert_eq!(c, Some(4.0));
+        }
+
+        #[test]
+        fn absolute_date_resolves_via_origin() {
+            // origin 2020-01-01, unit days. date("2020-01-04") → t = 3.
+            let c = resolve_condition_from(
+                &ConditionFrom::Spec("date(\"2020-01-04\")".into()),
+                7.0, 0.0, Some("2020-01-01"), "days", 1.0).unwrap();
+            assert_eq!(c, Some(3.0));
+
+            // Bare ISO date is also accepted.
+            let c2 = resolve_condition_from(
+                &ConditionFrom::Spec("2020-01-04".into()),
+                7.0, 0.0, Some("2020-01-01"), "days", 1.0).unwrap();
+            assert_eq!(c2, Some(3.0));
+        }
+
+        #[test]
+        fn date_without_origin_errors() {
+            let err = resolve_condition_from(
+                &ConditionFrom::Spec("2020-01-04".into()),
+                7.0, 0.0, None, "days", 1.0).unwrap_err();
+            assert!(err.contains("origin"), "must name the missing origin: {err}");
+        }
+
+        #[test]
+        fn equal_to_t_start_is_noop() {
+            let c = resolve_condition_from(
+                &ConditionFrom::Absolute(0.0), 7.0, 0.0, None, "days", 1.0).unwrap();
+            assert_eq!(c, None, "cond_from == t_start ⇒ no conditioning (None)");
+        }
+
+        #[test]
+        fn before_t_start_errors() {
+            let err = resolve_condition_from(
+                &ConditionFrom::Absolute(-2.0), 7.0, 0.0, None, "days", 1.0).unwrap_err();
+            assert!(err.contains("before the model start") || err.contains("t_start"),
+                "must flag cond_from < t_start: {err}");
+        }
+
+        #[test]
+        fn at_or_after_first_obs_errors() {
+            // Exactly at first_obs.
+            let err = resolve_condition_from(
+                &ConditionFrom::Absolute(7.0), 7.0, 0.0, None, "days", 1.0).unwrap_err();
+            assert!(err.contains("nothing to condition on") || err.contains("first observation"),
+                "cond_from == first_obs must error: {err}");
+            // After first_obs.
+            let err2 = resolve_condition_from(
+                &ConditionFrom::Absolute(9.0), 7.0, 0.0, None, "days", 1.0).unwrap_err();
+            assert!(err2.contains("nothing to condition on") || err2.contains("first observation"),
+                "cond_from > first_obs must error: {err2}");
+        }
+
+        #[test]
+        fn off_grid_errors() {
+            // 3.5 is not a multiple of dt = 1 relative to t_start = 0.
+            let err = resolve_condition_from(
+                &ConditionFrom::Absolute(3.5), 7.0, 0.0, None, "days", 1.0).unwrap_err();
+            assert!(err.contains("grid"), "off-grid cond_from must error: {err}");
+        }
+    }
+
+    mod condition_from_build {
+        use crate::fit::config_v2::FitConfigV2;
+        use crate::fit::runner::FitRunConfig;
+
+        /// Minimal v2 fit.toml against the seir_observations golden IR, with an
+        /// optional top-level `condition_from` line and toggleable `ic_free`.
+        /// seir: time_unit=days, t_start=0, weekly_cases at t=7,14,…; dt=1.
+        fn fixture(
+            dir: &std::path::Path,
+            condition_from: Option<&str>,
+            ic_free: bool,
+            ivp: bool,
+        ) -> FitConfigV2 {
+            let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+            let ir_path = format!(
+                "{}/../../../ocaml/golden/seir_observations.ir.json", manifest);
+            let data_path = dir.join("obs.tsv");
+            std::fs::write(&data_path,
+                "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
+            let cond_line = condition_from
+                .map(|c| format!("condition_from = {c}\n"))
+                .unwrap_or_default();
+            let ivp_line = if ivp { "ivp    = true\n" } else { "" };
+            let fit_toml_path = dir.join("fit.toml");
+            let toml_src = format!(r#"
+output_dir = "{}"
+ic_free = {ic_free}
+{cond_line}
+[model]
+camdl = "{ir_path}"
+
+[data.observations]
+weekly_cases = "{}"
+
+[estimate.I0]
+bounds = [1, 1000]
+start  = 5
+{ivp_line}
+[fixed]
+sigma    = 0.25
+gamma    = 0.3
+rho      = 0.5
+k        = 10.0
+p_detect = 0.5
+N0       = 1000
+beta     = 0.1
+
+[stages.scout]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 1
+particles  = 100
+iterations = 1
+cooling    = 0.5
+
+[config]
+backend = "chain_binomial"
+dt = 1.0
+"#, dir.display(), data_path.display());
+            std::fs::write(&fit_toml_path, toml_src).unwrap();
+            FitConfigV2::load(&fit_toml_path.to_string_lossy()).expect("fit.toml parse")
+        }
+
+        fn test_dir(tag: &str) -> std::path::PathBuf {
+            let d = std::env::temp_dir().join(format!(
+                "camdl_condfrom_{}_{}_{}", tag, std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        /// (a) A `condition_from` interior to (t_start, first_obs) prepends a
+        /// LEADING reset-only hole to the shared obs grid: observations[0] is
+        /// cond_from with a `None` cell in every stream, and the first REAL obs
+        /// (t=7) shifts to index 1 — so the first scored bin is (cond_from, 7].
+        #[test]
+        fn interior_condition_from_inserts_leading_hole() {
+            let dir = test_dir("insert");
+            let fit = fixture(&dir, Some("3.0"), false, false);
+            let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
+                .expect("interior condition_from must build");
+
+            // Canonical times: leading hole at 3.0, then the original grid.
+            assert_eq!(config.observations[0].time, 3.0,
+                "leading hole must be prepended at cond_from = 3.0");
+            assert_eq!(config.observations[1].time, 7.0,
+                "the first REAL observation must shift to index 1");
+            assert_eq!(config.observations.len(), 6, "5 real obs + 1 leading hole");
+
+            // Every stream: a None cell at index 0; the original first value at 1.
+            for s in &config.streams {
+                assert!(s.cells[0].is_none(),
+                    "stream '{}' cell 0 must be a hole (None) at cond_from", s.name);
+                assert!(s.cells[1].is_some(),
+                    "stream '{}' cell 1 must be the first real observation", s.name);
+                assert_eq!(s.data[0].time, 3.0, "stream data time 0 = cond_from");
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// (b) `condition_from` UNSET: no grid change — observations start at the
+        /// real first obs (t=7), no leading hole, no `None` at index 0. This is
+        /// the bit-identical default.
+        #[test]
+        fn unset_condition_from_is_unchanged() {
+            let dir = test_dir("unset");
+            let fit = fixture(&dir, None, false, false);
+            assert!(fit.condition_from.is_none(), "fixture without the key parses to None");
+            let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
+                .expect("unset condition_from must build");
+            assert_eq!(config.observations[0].time, 7.0,
+                "unset condition_from must NOT insert a leading hole");
+            assert_eq!(config.observations.len(), 5, "5 real obs, no hole");
+            for s in &config.streams {
+                assert!(s.cells[0].is_some(),
+                    "unset: stream '{}' cell 0 must be the real first obs, not a hole", s.name);
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// (b, cont.) The no-op boundary `condition_from == t_start` resolves to
+        /// None and inserts nothing — bit-identical to unset.
+        #[test]
+        fn condition_from_at_t_start_inserts_nothing() {
+            let dir = test_dir("at_tstart");
+            let fit = fixture(&dir, Some("0.0"), false, false);
+            let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
+                .expect("condition_from == t_start must build (no-op)");
+            assert_eq!(config.observations[0].time, 7.0,
+                "condition_from == t_start must insert no hole");
+            assert_eq!(config.observations.len(), 5);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// (c) Relative form `"first_obs - 4 days"` resolves to cond_from = 3.0
+        /// and inserts the same leading hole as the absolute form.
+        #[test]
+        fn relative_form_builds_and_inserts() {
+            let dir = test_dir("relative");
+            let fit = fixture(&dir, Some("\"first_obs - 4 days\""), false, false);
+            let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
+                .expect("relative condition_from must build");
+            assert_eq!(config.observations[0].time, 3.0,
+                "first_obs(7) - 4 days = 3.0 leading hole");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// (d) Validation: cond_from before t_start errors at build.
+        #[test]
+        fn before_t_start_errors_at_build() {
+            let dir = test_dir("before");
+            let fit = fixture(&dir, Some("-2.0"), false, false);
+            let err = match FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false) {
+                Ok(_) => panic!("condition_from < t_start must error"),
+                Err(e) => e,
+            };
+            assert!(err.contains("before the model start") || err.contains("t_start"),
+                "must flag cond_from < t_start: {err}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// (d) Validation: cond_from at/after the first obs errors at build.
+        #[test]
+        fn at_or_after_first_obs_errors_at_build() {
+            let dir = test_dir("after");
+            let fit = fixture(&dir, Some("7.0"), false, false); // == first obs
+            let err = match FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false) {
+                Ok(_) => panic!("condition_from >= first_obs must error"),
+                Err(e) => e,
+            };
+            assert!(err.contains("nothing to condition on") || err.contains("first observation"),
+                "must flag cond_from >= first_obs: {err}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// (e) `condition_from` + `ic_free` together error loudly. The leading
+        /// hole at obs-index 0 means y₁ is a hole in every stream, tripping the
+        /// existing "nothing to condition on" ic_free guard — the desired
+        /// orthogonal-mechanisms behaviour (no silent-wrong, no ic_free no-op).
+        #[test]
+        fn condition_from_with_ic_free_errors_loudly() {
+            let dir = test_dir("with_icfree");
+            // ic_free + ivp (so the ivp precondition passes and only the
+            // missing-y₁ guard can fire) + an interior condition_from.
+            let fit = fixture(&dir, Some("3.0"), true, true);
+            let err = match FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false) {
+                Ok(_) => panic!("condition_from + ic_free must error"),
+                Err(e) => e,
+            };
+            assert!(err.contains("nothing to condition on"),
+                "condition_from + ic_free must trip the missing-y₁ guard: {err}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 }
