@@ -82,10 +82,24 @@ pub enum StreamProjection {
 }
 
 impl StreamProjection {
+    /// Classify as incidence ([`TemporalKind::Interval`]) or prevalence
+    /// ([`TemporalKind::Instant`]). Agrees by construction with the IR
+    /// [`ir::observation::Projection::temporal_kind`] this was built from:
+    /// `FlowSum` ⇐ `CumulativeFlow*` (incidence); `IntCompSum`/`Expr` ⇐
+    /// `CurrentPop*`/`DerivedExpr` (prevalence).
+    pub fn temporal_kind(&self) -> ir::observation::TemporalKind {
+        use ir::observation::TemporalKind;
+        match self {
+            StreamProjection::FlowSum(_) => TemporalKind::Interval,
+            StreamProjection::IntCompSum(_) | StreamProjection::Expr(_) => TemporalKind::Instant,
+        }
+    }
+
     /// True for projections that accumulate between observations and must be
-    /// reset after the likelihood is scored. Only `FlowSum` does.
+    /// reset after the likelihood is scored — exactly the `Interval`
+    /// (incidence) kind. Only `FlowSum` does.
     pub fn resets_after_observation(&self) -> bool {
-        matches!(self, StreamProjection::FlowSum(_))
+        self.temporal_kind() == ir::observation::TemporalKind::Interval
     }
 
     /// Build a projection from the IR projection + compiled model. Handles:
@@ -568,6 +582,39 @@ mod obs_time_validation_tests {
         assert!(validate_obs_times_increasing("cases", &[1.0, 3.0, 6.0, 9.3]).is_ok());
         assert!(validate_obs_times_increasing("cases", &[5.0]).is_ok(), "single obs is fine");
         assert!(validate_obs_times_increasing("cases", &[]).is_ok(), "empty handled upstream");
+    }
+}
+
+#[cfg(test)]
+mod temporal_kind_tests {
+    //! P1.5: `StreamProjection::temporal_kind()` classifies incidence vs
+    //! prevalence, and `resets_after_observation()` is exactly the `Interval`
+    //! (incidence) kind — the reset decision has one source of truth.
+    use super::StreamProjection;
+    use crate::resolved_expr::ResolvedExpr;
+    use ir::observation::TemporalKind;
+
+    #[test]
+    fn temporal_kind_and_reset_agree_for_every_variant() {
+        let flow = StreamProjection::FlowSum(vec![0]); // incidence
+        let comp = StreamProjection::IntCompSum(vec![0]); // prevalence
+        let expr = StreamProjection::Expr(ResolvedExpr::Const(0.0)); // prevalence-family
+
+        assert_eq!(flow.temporal_kind(), TemporalKind::Interval);
+        assert_eq!(comp.temporal_kind(), TemporalKind::Instant);
+        assert_eq!(expr.temporal_kind(), TemporalKind::Instant);
+
+        // the reset predicate is exactly "is this Interval" — no second source
+        for p in [&flow, &comp, &expr] {
+            assert_eq!(
+                p.resets_after_observation(),
+                p.temporal_kind() == TemporalKind::Interval
+            );
+        }
+        // and concretely: only incidence resets
+        assert!(flow.resets_after_observation());
+        assert!(!comp.resets_after_observation());
+        assert!(!expr.resets_after_observation());
     }
 }
 
