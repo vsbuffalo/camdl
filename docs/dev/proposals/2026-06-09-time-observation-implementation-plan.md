@@ -159,20 +159,25 @@ well-formed inputs).
   fixed a latent instance of the same G1 bug in the `he2010_pfilter_loglik`
   fixture — model stream `weekly_cases` vs data column `cases`.) Malformed
   inputs now error; well-formed unchanged; goldens did not move.
-- **NEXT — item 2:** `bind` / `BoundObs` reproducing today's dense semantics,
-  routing the ~5 scattered load sites through it; **`MultiStreamObsModel::new`
-  consumes a `BoundObs`** and the raw `StreamSpec` path is privatized (so the
-  validated-ctor invariant is real); `bind` returns `Result` (no `BoundObs` on a
-  fatal error); derived severity + structured findings. `TemporalKind` (P1.5)
-  now exists for the typed cells.
+- **DONE — item 2 (`6d2eed8`):** `BoundObs` validated-ctor seam.
+  `MultiStreamObsModel::new` now consumes a `BoundObs`; the four construction
+  checks (empty streams, empty/non-increasing times, heterogeneous schedules)
+  moved into `BoundObs::bind`, which returns
+  `Result<(BoundObs, BindReport),
+  BindReport>` (verdict DERIVED, not stored).
+  `StreamSpec` stays public as bind's input; all ~17 caller sites (4 prod + 13
+  tests) migrated. Dense (`values: Vec<f64>`), reproducing today exactly —
+  goldens did not move.
 
-**Decision needed in P3:** dense vs **sparse** `BoundObs` storage. Sparse
-(per-stream present cells; union axis as a derived view) is required for
-national/polio scale — confirmed. Logical model stays union-axis-with-holes;
-physical storage is sparse.
+P3 (the no-behavior-change loader + bind seam) is **complete**. What is
+deliberately NOT here, deferred to P4 (the correctness tier): typed
+`Option<ObsCell>` cells (holes), `Counted{value,denom}`, the per-stream
+`ResetWindow`, the present-cell **union axis**, and the dense-vs-**sparse**
+storage decision (sparse per-stream cells are required for national/polio scale
+— confirmed — but the logical model stays union-axis-with-holes; the physical
+representation change belongs with the correctness tier, not the no-op seam).
 
-**Gate:** goldens don't move (dense parity); `TemporalKind` exists (landed in
-P1.5 — the typed `BoundObs` needs it).
+**Gate met:** goldens did not move (dense parity); `TemporalKind` exists (P1.5).
 
 ## Phase 4 — data correctness tier + conditioning window
 
