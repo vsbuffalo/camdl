@@ -341,8 +341,7 @@ al. 2009) is to condition the likelihood on the first observation and let the
 particle filter's initial reweight pin `I₀` implicitly:
 
 ```toml
-[fit]
-ic_free = true
+ic_free = true # top-level key — fit.toml is parsed strictly (deny_unknown_fields); there is no [fit] table
 ```
 
 When set:
@@ -373,6 +372,57 @@ Explicitly not the same: the Cori-Fraser-Cauchemez / EpiEstim renewal-equation
 approach avoids `I₀` by replacing the compartmental structure during growth with
 a branching process parameterised by `R_t`. That is a different process model,
 not a different likelihood factorisation, and is out of scope for this feature.
+
+### 3.9 The conditioning boundary (covariate-informed burn-in)
+
+`simulate.from` (the model origin `t_start`) and the first observation need not
+coincide: a model may start dynamics well before the data — e.g. to let births
+and SIA/MCV covariates shape the susceptible pool over a span where no case data
+exists yet. The particle filter conditions observation _k_ over the half-open
+window `(t_{k-1}, t_k]`, so the first window is `(t_start, first_obs]`. For an
+**incidence** observation (a flow accumulated between observations), that first
+window then spans the whole pre-data gap, and the first datum is scored against
+the flow integrated over the entire gap — a wrong likelihood (gh#134).
+
+`condition_from` decouples where dynamics begin from where the likelihood
+begins. It places a **conditioning boundary** one cadence before the first
+datum: the leading span `[t_start, condition_from)` becomes a **warm-up** —
+simulated with the full stochastic dynamics (births, campaigns, seasonality,
+process noise) but not scored — and the first observation is scored against one
+normal cadence `(condition_from, first_obs]`.
+
+```toml
+condition_from = "first_obs - 1 week" # one cadence before the data
+# condition_from = "date(\"2014-08-18\")"  # or an absolute calendar date
+# condition_from = 19.0                    # or a bare model-time number
+```
+
+Mechanically the boundary is a leading **reset-only hole** on the shared
+observation grid: its grid time resets the incidence accumulator (so the first
+scored bin is one cadence) while contributing no likelihood term (the warm-up
+flow is discarded, not scored). It rides the same hole/reset seam as sparse
+(`NA`) observations, so every algorithm — bootstrap PF, IF2, correlated-PF,
+PGAS, PMMH — receives it through the bound observation set.
+
+- **Domain.** `condition_from` must resolve strictly between `simulate.from` and
+  the first observation, and onto the `dt` grid. A value at/after the first
+  observation, at/before the origin, or off-grid is a hard error naming the
+  valid range.
+- **Default.** Omitted (or resolving to `t_start`) inserts no hole — byte-for-
+  byte identical to no conditioning.
+- **Guard (W329).** When `simulate.from` sits a wide gap before the data on an
+  incidence stream and `condition_from` is unset, the fit is rejected with a
+  hard error naming this fix; for a prevalence observation (read at the instant,
+  no accumulation) it is only a soft warning.
+- **Composition with `ic_free`.** The two cannot be combined: the leading hole
+  is obs-index 0, and `ic_free` conditions on the first observation there — a
+  hole is not an observation, so the fit is rejected ("nothing to condition
+  on"). They address overlapping uncertainty anyway: a covariate-informed
+  burn-in _derives_ the boundary state, reducing the need for the `ic_free`
+  initial-state estimate.
+
+See `docs/dev/proposals/2026-06-09-burnin-conditioning-window.md` for the
+design, the gh#134 reproduction, and the per-algorithm mechanics.
 
 ---
 

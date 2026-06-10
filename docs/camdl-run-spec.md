@@ -1136,6 +1136,19 @@ pub struct FitConfig {
 
     pub output_dir: Option<PathBuf>,
 
+    /// Conditioning boundary for a covariate-informed burn-in (top-level key).
+    /// Places a leading reset-only hole one cadence before the first datum, so
+    /// the pre-data span is a warm-up (simulated, not scored) and the first
+    /// observation is scored against one cadence. Forms: `"first_obs - 1 week"`,
+    /// `"date(\"…\")"`, or a bare model-time number. See
+    /// `camdl-inference-spec.md` §3.9 and `fit-toml.md`.
+    pub condition_from: Option<ConditionFrom>,
+
+    // NOTE: this struct is illustrative and elides several real top-level keys
+    // of the runtime `FitConfigV2` (e.g. `ic_free`, `config`, `scenario`); see
+    // `fit-toml.md` for the full surface. A complete §6.2 resync is tracked
+    // separately.
+
     /// The free parameters: what the inference algorithm estimates.
     pub estimate: IndexMap<String, EstimateSpec>,
 
@@ -2307,10 +2320,10 @@ what "state at `t`" means per backend:
   events. The snapshot reads the state that has been in effect since the last
   event preceding `t`. If an event or scheduled intervention fires exactly at
   `t`, the snapshot reads the **post-event** state.
-- **Chain-binomial (discrete-time, step `dt`):** the snapshot reads
-  the state at the step boundary that lands on, or first passes, `t`. For
-  `dt = 1` with daily observations this is exact; for `dt < 1` the snapshot is
-  the state at the first step boundary `≥ t`.
+- **Chain-binomial (discrete-time, step `dt`):** the snapshot reads the state at
+  the step boundary that lands on, or first passes, `t`. For `dt = 1` with daily
+  observations this is exact; for `dt < 1` the snapshot is the state at the
+  first step boundary `≥ t`.
 - **ODE (continuous integrator):** dense-output evaluation of the integrator
   state at exactly `t`.
 
