@@ -488,15 +488,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
     let mut per_stream_obs: Vec<Vec<Observation>> = Vec::with_capacity(bound_streams.len());
     let mut canonical_times: Option<Vec<f64>> = None;
-    let n_streams = bound_streams.len();
     for (sname, spath) in &bound_streams {
         let path_str = spath.to_string_lossy().into_owned();
-        let result = if n_streams == 1 {
-            crate::pfilter::load_data_tsv_column(&path_str, sname, &time_opts)
-                .or_else(|_| crate::pfilter::load_data_tsv_pub(&path_str, &time_opts))
-        } else {
-            crate::pfilter::load_data_tsv_column(&path_str, sname, &time_opts)
-        };
+        // Strict by-name binding — no positional fallback (G1). The data
+        // column header must match the model's `observe` name exactly; a
+        // typo'd/wrong-cased header is a located error, not a silent bind
+        // to the positionally-first value column.
+        let result = crate::pfilter::load_data_tsv_column(&path_str, sname, &time_opts);
         let stream_obs: Vec<Observation> = match result {
             Ok(v) => v.into_iter().map(|o| Observation { time: o.time, value: o.value }).collect(),
             Err(e) => {

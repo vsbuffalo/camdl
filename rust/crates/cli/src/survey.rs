@@ -913,19 +913,16 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
     }
 }
 
-/// Load (time, value) pairs from a TSV column. Mirrors profile's
-/// load helper: by-name lookup with fallback to column 1 for 2-column
-/// TSVs.
+/// Load (time, value) pairs from a TSV column by NAME — the data column
+/// header must match the model's `observe` name exactly. There is no
+/// positional fallback (G1): a typo'd/wrong-cased header is a located
+/// error, not a silent bind to the positionally-first value column.
 fn load_observations_from_tsv(
     path: &str,
     column: &str,
     opts: &crate::caltime_load::TimeOpts,
 ) -> Result<Vec<Observation>, String> {
-    let by_name = crate::pfilter::load_data_tsv_column(path, column, opts);
-    let raw = match by_name {
-        Ok(v) => v,
-        Err(_) => crate::pfilter::load_data_tsv_pub(path, opts)?,
-    };
+    let raw = crate::pfilter::load_data_tsv_column(path, column, opts)?;
     Ok(raw.into_iter().map(|o| Observation { time: o.time, value: o.value }).collect())
 }
 

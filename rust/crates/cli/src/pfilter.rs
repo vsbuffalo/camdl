@@ -135,21 +135,17 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         format: a.inference.time_format,
     };
 
-    // Build per-stream Observation vectors. For each bound stream
-    // try the column-named loader first (multi-stream wide TSV),
-    // fall back to the 2-col TSV loader when there's a single
-    // stream (preserves the legacy single-stream `time,value`
-    // schema). For multi-stream, every column must be named.
+    // Build per-stream Observation vectors. Every stream binds its value
+    // column by NAME — the data column header must match the model's
+    // `observe` name exactly. There is no positional fallback: a typo'd
+    // or wrong-cased header is a located error, not a silent bind to the
+    // positionally-first value column (G1). A single-stream `time\tcases`
+    // file still loads because `cases` matches the header by name.
     let n_streams = bound_streams.len();
     let mut per_stream_obs: Vec<Vec<Observation>> = Vec::with_capacity(n_streams);
     for (sname, spath) in &bound_streams {
         let path_str = spath.to_string_lossy().into_owned();
-        let result = if n_streams == 1 {
-            load_data_tsv_column(&path_str, sname, &time_opts)
-                .or_else(|_| load_data_tsv(&path_str, &time_opts))
-        } else {
-            load_data_tsv_column(&path_str, sname, &time_opts)
-        };
+        let result = load_data_tsv_column(&path_str, sname, &time_opts);
         match result {
             Ok(obs) => per_stream_obs.push(obs),
             Err(e) => {
@@ -654,13 +650,6 @@ pub fn load_data_observations_from_fit_toml(
     Ok(entries)
 }
 
-/// Load observation data from a TSV file (first value column), routing the
-/// time column through the calendar-time boundary translator (numeric or
-/// dated, per `opts`). The `_pub` suffix is historical (cross-module reuse).
-pub fn load_data_tsv_pub(path: &str, opts: &TimeOpts) -> Result<Vec<Observation>, String> {
-    load_data_tsv(path, opts)
-}
-
 /// Load observations from a specific column in a TSV file.
 /// The column name must match a header field. First column is always time.
 pub fn load_data_tsv_column(
@@ -674,15 +663,27 @@ pub fn load_data_tsv_column(
     let header = lines.next().ok_or("empty data file")?;
     let cols: Vec<&str> = header.split('\t').collect();
 
-    // Find the column index for the requested stream name
+    // Find the column index for the requested stream name. Binding is
+    // strict by name — there is NO positional fallback. A typo'd,
+    // wrong-cased, or renamed header is a located error, not a silent
+    // bind to whatever column happens to be positionally first (G1: a
+    // wrong-answer-with-exit-0). The data column header must match the
+    // model's `observe` name exactly.
     let col_idx = cols.iter().position(|&c| c == column)
-        .or({
-            // Fallback: if only 2 columns (time + value), use column 1
-            if cols.len() == 2 { Some(1) } else { None }
-        })
-        .ok_or_else(|| format!(
-            "column '{}' not found in data file '{}'. Available columns: {:?}",
-            column, path, &cols[1..]))?;
+        .ok_or_else(|| {
+            let available = if cols.len() > 1 {
+                cols[1..].join(", ")
+            } else {
+                "(no value columns — only a time column)".to_string()
+            };
+            format!(
+                "observation stream '{column}' not found in data file '{path}'. \
+                 Value column headers present: [{available}]. \
+                 Fix: rename the data column to '{column}' (it must match the \
+                 model's `observe` name exactly, case-sensitive), or rename the \
+                 model's observation block to match the data header."
+            )
+        })?;
 
     // Two-pass: collect raw time cells + values, then convert the whole
     // time column at once (whole-column detection — proposal §6.3).
@@ -699,35 +700,12 @@ pub fn load_data_tsv_column(
         let value: f64 = fields[col_idx].trim().parse()
             .map_err(|_| format!("line {}: cannot parse value '{}' in column '{}'",
                 line_num + 2, fields[col_idx], column))?;
-        time_cells.push(fields[0]);
-        rows.push(line_num + 2);
-        values.push(value);
-    }
-
-    finalize_observations(time_cells, values, rows, opts)
-}
-
-fn load_data_tsv(path: &str, opts: &TimeOpts) -> Result<Vec<Observation>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("{}: {}", path, e))?;
-    let mut lines = content.lines();
-    let header = lines.next().ok_or("empty data file")?;
-    let cols: Vec<&str> = header.split('\t').collect();
-    if cols.len() < 2 {
-        return Err(format!("data file needs at least 2 columns (time, value), got {}", cols.len()));
-    }
-
-    let mut time_cells: Vec<&str> = Vec::new();
-    let mut rows: Vec<usize> = Vec::new();
-    let mut values: Vec<f64> = Vec::new();
-    for (line_num, line) in lines.enumerate() {
-        if line.trim().is_empty() { continue; }
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 2 {
-            return Err(format!("line {}: expected 2+ columns, got {}", line_num + 2, fields.len()));
+        if !value.is_finite() {
+            return Err(format!(
+                "line {} (t='{}'): non-finite observation value '{}' in column '{}' \
+                 — NaN and infinities are not valid observations. Fix or remove the row.",
+                line_num + 2, fields[0].trim(), fields[col_idx].trim(), column));
         }
-        let value: f64 = fields[1].trim().parse()
-            .map_err(|_| format!("line {}: cannot parse value '{}'", line_num + 2, fields[1]))?;
         time_cells.push(fields[0]);
         rows.push(line_num + 2);
         values.push(value);
@@ -964,7 +942,7 @@ mod tests {
     #[test]
     fn load_data_rejects_out_of_order() {
         let path = write_temp_tsv("out_of_order", "time\tcases\n7\t10\n14\t20\n10\t15\n21\t30\n");
-        let result = load_data_tsv(&path, &numeric_opts());
+        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
         assert!(result.is_err(), "should reject out-of-order times");
         let err = result.err().unwrap();
         assert!(err.contains("not in chronological order"), "error message: {}", err);
@@ -976,7 +954,7 @@ mod tests {
     fn load_data_accepts_equal_times() {
         // Equal times are valid (multi-stream observations at same time point)
         let path = write_temp_tsv("equal_times", "time\tcases\n7\t10\n7\t5\n14\t20\n");
-        let result = load_data_tsv(&path, &numeric_opts());
+        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
         assert!(result.is_ok(), "equal times should be accepted: {:?}", result.err());
         let obs = result.unwrap();
         assert_eq!(obs.len(), 3);
@@ -986,9 +964,123 @@ mod tests {
     #[test]
     fn load_data_accepts_sorted() {
         let path = write_temp_tsv("sorted", "time\tcases\n7\t10\n14\t20\n21\t30\n");
-        let result = load_data_tsv(&path, &numeric_opts());
+        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 3);
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ── G1: by-name binding is strict — no positional fallback ──────────
+    //
+    // A stream requested by name against a file whose column does not match
+    // (typo / wrong case / renamed header) must ERROR with a located
+    // message, never silently bind a value column by position. Pre-fix, the
+    // inner 2-column fallback (`if cols.len() == 2 { Some(1) }`) made a
+    // mis-cased single-value file load against column 1 — a wrong answer
+    // with exit 0.
+
+    #[test]
+    fn load_data_tsv_column_rejects_miscased_name_in_2col_file() {
+        // Header column is `Cases` (capital C); model asks for `cases`.
+        // Pre-fix: 2-column fallback binds column 1 and loads. Post-fix:
+        // located error naming the requested column + available headers.
+        let path = write_temp_tsv("miscased_2col", "time\tCases\n7\t10\n14\t20\n");
+        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        assert!(result.is_err(),
+            "a mis-cased column name must NOT silently bind by position; got Ok({:?})",
+            result.as_ref().ok());
+        let err = result.err().unwrap();
+        assert!(err.contains("cases"),
+            "error must name the requested stream/column 'cases': {}", err);
+        assert!(err.contains("Cases"),
+            "error must list the headers actually present (incl. 'Cases'): {}", err);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_data_tsv_column_rejects_renamed_name_in_wide_file() {
+        // Multi-column file, requested name absent. (This path already
+        // errored pre-fix, but pin the located-message quality.)
+        let path = write_temp_tsv("renamed_wide",
+            "time\tcase_count\tdeaths\n7\t10\t1\n14\t20\t2\n");
+        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        assert!(result.is_err(), "absent column name must error");
+        let err = result.err().unwrap();
+        assert!(err.contains("cases"), "error must name requested column: {}", err);
+        assert!(err.contains("case_count") && err.contains("deaths"),
+            "error must list available headers: {}", err);
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ── G1/NaN: non-finite observation values are rejected at load ──────
+    //
+    // `"NaN".parse::<f64>()` returns `Ok(NaN)` and `"inf"`/`"Infinity"`
+    // return `Ok(±inf)`. Pre-fix these flowed straight into the likelihood.
+    // Post-fix: located error (file path implied by caller, column, row).
+
+    #[test]
+    fn load_data_tsv_column_rejects_nan_value() {
+        let path = write_temp_tsv("nan_value", "time\tcases\n7\t10\n14\tNaN\n21\t30\n");
+        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        assert!(result.is_err(),
+            "a NaN observation value must be rejected at load; got Ok({:?})",
+            result.as_ref().ok());
+        let err = result.err().unwrap();
+        assert!(err.contains("cases"), "error must name the column: {}", err);
+        assert!(err.contains('3') || err.contains("14"),
+            "error must locate the offending row/time (line 3, t=14): {}", err);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_data_tsv_column_rejects_inf_value() {
+        let path = write_temp_tsv("inf_value", "time\tcases\n7\t10\n14\tinf\n21\t30\n");
+        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        assert!(result.is_err(),
+            "an infinite observation value must be rejected at load; got Ok({:?})",
+            result.as_ref().ok());
+        let err = result.err().unwrap();
+        assert!(err.contains("cases"), "error must name the column: {}", err);
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ── Negative control: well-formed input is unchanged ────────────────
+    //
+    // Guards against a vacuous test: a matching column name loads the
+    // SAME values as the 2-column loader on the equivalent file, and the
+    // by-name path binds the requested column (not column 1) in a wide
+    // file. This is the happy path that must remain byte-identical.
+
+    #[test]
+    fn load_data_tsv_column_happy_path_loads_named_column() {
+        // Wide file: `cases` is column 2 (not column 1). By-name binding
+        // must pick column 2's values, not deaths in column 1.
+        let path = write_temp_tsv("happy_wide",
+            "time\tdeaths\tcases\n7\t1\t10\n14\t2\t20\n21\t3\t30\n");
+        let obs = load_data_tsv_column(&path, "cases", &numeric_opts())
+            .expect("well-formed named column must load");
+        assert_eq!(obs.len(), 3);
+        assert_eq!(obs[0].value, 10.0);
+        assert_eq!(obs[1].value, 20.0);
+        assert_eq!(obs[2].value, 30.0);
+        assert_eq!(obs[0].time, 7.0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_data_tsv_column_happy_path_2col_named_file() {
+        // The happy single-stream case: a `time\tcases` file binds the
+        // `cases` column *because it is named* `cases` (which happens to
+        // be column 1), not by position. Values must round-trip exactly —
+        // this is the legacy single-stream schema, unchanged by the
+        // fallback deletion.
+        let path = write_temp_tsv("happy_2col", "time\tcases\n7\t10\n14\t20\n21\t30\n");
+        let obs = load_data_tsv_column(&path, "cases", &numeric_opts())
+            .expect("named single-stream load");
+        assert_eq!(obs.len(), 3);
+        assert_eq!(obs[0], Observation { time: 7.0, value: 10.0 });
+        assert_eq!(obs[1], Observation { time: 14.0, value: 20.0 });
+        assert_eq!(obs[2], Observation { time: 21.0, value: 30.0 });
         std::fs::remove_file(&path).ok();
     }
 
@@ -1003,8 +1095,8 @@ mod tests {
         let numeric = write_temp_tsv("dated_num", "time\tcases\n0\t10\n7\t20\n14\t30\n");
         let mut o = numeric_opts();
         o.origin = Some("2020-03-01");
-        let from_dates = load_data_tsv(&dated, &o).unwrap();
-        let from_nums = load_data_tsv(&numeric, &numeric_opts()).unwrap();
+        let from_dates = load_data_tsv_column(&dated, "cases", &o).unwrap();
+        let from_nums = load_data_tsv_column(&numeric, "cases", &numeric_opts()).unwrap();
         assert_eq!(from_dates, from_nums);
         std::fs::remove_file(&dated).ok();
         std::fs::remove_file(&numeric).ok();
