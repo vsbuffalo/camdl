@@ -99,22 +99,31 @@ commit. **Landed** (`b0b044e` F1, `4106d6d` F4; full `make test` green):
 
 **Gate:** `make test` green; red+green pasted in each fix commit.
 
-## Phase 1.5 — `TemporalKind` (tiny standalone unblock; land before P3)
+## Phase 1.5 — `TemporalKind` (COMPLETE — `f2581dc`)
 
-The _only_ hard compile-time dependency the data layer has on the spine. It does
-not exist in code (it is a `matches!` predicate today). Land it as one small PR:
+The name for the incidence-vs-prevalence distinction the data layer and the
+reset / missing-data logic branch on. **Landed as a _derived_ classification,
+not a stored field**, in the `ir` crate:
 
-- `pub enum TemporalKind { Interval, Instant }` — `Interval` ⇒ incidence
-  (`FlowSum` projection, needs reset); `Instant` ⇒ prevalence
-  (`IntCompSum`/`Expr`, no reset).
-- **Ownership decision (recorded here):** the data layer needs it first and the
-  spine code never references it today, so **the `sim` crate owns it** (it is a
-  runtime type carried on the observation projection); a later spine reshape
-  imports it if needed. This inverts the topology map's "the spine defines it"
-  assumption — a deliberate, recorded choice, not drift.
+- `ir::observation::TemporalKind { Interval, Instant }` +
+  `Projection::temporal_kind()` — `CumulativeFlow*` ⇒ `Interval` (incidence,
+  resets on cadence); `CurrentPop*` / `DerivedExpr` ⇒ `Instant` (prevalence, no
+  reset).
+- `StreamProjection::temporal_kind()` delegates to the same classification, and
+  `resets_after_observation()` now reads `== Interval` — behaviour identical
+  (`FlowSum` is still the only resetting kind).
+- **Design (refines the earlier "sim owns it"):** it is _derived_ from the
+  projection, never a stored `StreamCells.kind` — a stored kind could only ever
+  _disagree_ with the projection (an `Interval` stream on an `IntCompSum`
+  projection is an illegal state you would then have to validate). And it lives
+  in `ir` because it classifies `ir::observation::Projection`, which the data
+  layer has at bind time _before_ runtime resolution. Pure-Rust method, no
+  serde, no schema / golden change. `TemporalKind` is an obs/ir concept the
+  spine _consumes_, not one the spine _defines_.
 
-**Gate:** the enum compiles; both the typed-`BoundObs` track (P3) and any spine
-reshape can import it. No behaviour change.
+**Gate met:** all 5 IR projection variants + all 3 runtime variants pinned, the
+`resets == (kind == Interval)` invariant pinned, full `make test` green (DRIFT
+0). P3's typed `BoundObs` imports it.
 
 ## Phase 2 — the spine: already landed; remaining reshapes out of scope
 
