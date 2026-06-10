@@ -198,13 +198,21 @@ dmeasure + weekly accumvar reset, independently reproduced). Dense parity intact
 correct (its cadence is the grid) — so this slice greens the He-2010 gate
 WITHOUT the per-observer reset below.
 
+**DONE since:**
+
+- **Formal sparse gate wired (`b06e71d`).**
+  `tests/external/cases/he2010_pfilter_loglik_sparse/` runs in every `make test`
+  (5-case `run_all`; camdl −4726.55 vs pomp fixture −4716.65, inside the 35-nat
+  band). The −4723-class invariant is now permanent.
+- **Holes through `camdl fit` (`4f1a509`).** IF2/PGAS/PMMH/ODE-MLE now accept
+  `NA` (the loader was the only blocker; the algorithms were already
+  hole-correct). Proven: fit PFilter-stage loglik == standalone `pfilter` on the
+  same holed data, exactly. Added the `ic_free` + missing-first-obs guard
+  (hard-error: no y₁ to condition on). `profile`/`survey` stay dense-only
+  (separate paths; reject `NA` loudly) — follow-up if needed.
+
 **NEXT in P4 (remaining):**
 
-- **Wire the formal sparse gate.** Assemble `tests/external/sparse_oracle_wip/`
-  into a real `tests/external/cases/he2010_pfilter_loglik_sparse/` (camdl-side
-  holed `.tsv` with `NA` + the oracle's `expected.toml`/`reference.R`), wired
-  into `run_all_cases` so the −4723.42 invariant runs in CI. (Converts the
-  upstream review's pomp-numerical gate from a one-off into a permanent check.)
 - **Per-observer / per-cadence reset** (needed only for MULTI-stream different
   cadences — polio ES+AFP — NOT the He-2010 gate): the localized generalization
   of the reset (`state.reset_flows()` at `particle_filter.rs:415`,
