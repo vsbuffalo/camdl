@@ -28,7 +28,18 @@ pub struct ObsStream {
     /// built from the IR observation block.
     pub projection: sim::inference::multi_stream_obs::StreamProjection,
     pub obs_model_ir: ir::observation::ObservationModel,
+    /// Dense placeholder view (a hole shows as value 0) used only by the
+    /// startup diagnostics and the canonical-times path. NOT load-bearing for
+    /// scoring — the authoritative per-grid-time cells (with holes) are in
+    /// `cells`. Times are always correct here regardless of holes.
     pub data: Vec<Observation>,
+    /// Authoritative per-grid-time observation cells, parallel to `data` and to
+    /// `obs_times`. `None` = a hole (the `NA` token): its time stays in the
+    /// grid (so the incidence accumulator still resets at its index) but it
+    /// carries no value (no likelihood term). `Some(ObsCell::Scalar(v))` =
+    /// observed value `v`. Threaded into the obs model so the already
+    /// hole-correct scoring seam (`MultiStreamObsModel`) handles missing values.
+    pub cells: Vec<Option<sim::inference::ObsCell>>,
 }
 
 pub struct FitRunConfig {
@@ -287,7 +298,7 @@ impl FitRunConfig {
             format: crate::caltime_load::TimeFormat::Auto,
         };
         for (stream_name, data_path) in &data_entries {
-            let obs = load_observations(data_path, stream_name, dt, &time_opts)?;
+            let (obs, cells) = load_observations(data_path, stream_name, dt, &time_opts)?;
             let obs_model = model.observations.iter()
                 .find(|o| o.name == **stream_name)
                 .cloned()
@@ -314,7 +325,17 @@ impl FitRunConfig {
                     compiled.model.simulation.t_start,
                     &obs_times,
                 )?;
-                let first_value = obs.first().map(|o| o.value).unwrap_or(0.0);
+                // The degenerate-origin-window check fires only when the FIRST
+                // observation sits exactly on the origin AND carries a positive
+                // incidence value. If the first cell is a HOLE there is no value
+                // scored at the origin (the term is omitted), so the -Inf risk
+                // does not arise — pass a non-positive sentinel so the check is a
+                // no-op. We must NOT substitute a later present value (it belongs
+                // to a later time, not the origin) nor a fictitious 0 that scores.
+                let first_value = match cells.first() {
+                    Some(Some(sim::inference::ObsCell::Scalar(v))) => *v,
+                    _ => 0.0, // first cell is a hole (or no obs) → check is a no-op
+                };
                 crate::util::check_incidence_origin_window(
                     stream_name,
                     &obs_model.projection,
@@ -344,6 +365,7 @@ impl FitRunConfig {
                 projection,
                 obs_model_ir: obs_model,
                 data: obs,
+                cells,
             });
         }
 
@@ -432,7 +454,25 @@ impl FitRunConfig {
             // compute-blowup safety.
             pf_wallclock_disabled: true,
         };
-        // IC-free precondition: at least one estimated param must be
+        // IC-free precondition (data): y₁ must actually be observed. ic_free
+        // conditions the initial state on the first observation (it still
+        // reweights/resamples at obs_idx 0, dropping only that term from the
+        // accumulated loglik). If y₁ is missing — a hole (`NA`) in every stream
+        // at the first observation index — there is nothing to condition on, so
+        // ic_free would silently degenerate to *no* initial-state conditioning
+        // (a weaker estimand than requested). Checked before the ivp
+        // precondition: a missing y₁ makes ic_free impossible regardless of ivp.
+        if ic_free
+            && !streams.is_empty()
+            && streams.iter().all(|s| s.cells.first().is_some_and(|c| c.is_none()))
+        {
+            return Err(
+                "ic_free = true conditions the initial state on the first \
+                 observation y₁, but y₁ is missing (`NA` / a hole) in every data \
+                 stream — there is nothing to condition on. Provide the first \
+                 observation, or disable ic_free.".into());
+        }
+        // IC-free precondition (config): at least one estimated param must be
         // marked ivp. Without per-particle spread at t=0, the first
         // reweight can't discriminate and ic-free degenerates to
         // silently dropping y₁. Error at config build so the mistake
@@ -484,8 +524,10 @@ impl FitRunConfig {
             .map(|s| sim::inference::multi_stream_obs::StreamSpec {
                 projection: s.projection.clone(),
                 ir_model: s.obs_model_ir.clone(),
-                observations: sim::inference::dense_cells(
-                    s.data.iter().map(|o| o.value).collect()),
+                // Authoritative per-grid-time cells (holes = `None`). A hole
+                // contributes no likelihood term but its obs time stays in the
+                // grid, so the per-obs-index incidence reset still fires at it.
+                observations: s.cells.clone(),
                 obs_times: self.observations.iter().map(|o| o.time).collect(),
             }).collect();
         let (bound, _report) = sim::inference::BoundObs::bind(specs).unwrap_or_else(|report| {
@@ -1152,27 +1194,47 @@ pub fn auto_rw_sd_from_value(_current_value: f64, lower: f64, upper: f64, transf
 }
 
 /// Load observations from TSV, validating time alignment with dt.
+///
+/// Sparse/holes: the value column may contain the missing-value token `NA`,
+/// loaded as a HOLE — its time stays in the grid (so the incidence accumulator
+/// still resets at its index) but it carries no value. Returns both the
+/// authoritative per-grid-time cells (`None` = hole) and a dense placeholder
+/// view of `Observation`s (a hole shows as value 0) for the diagnostics and
+/// time-axis callers, where a hole's value is not load-bearing. The cells are
+/// threaded into the obs model so the already hole-correct scoring seam handles
+/// missing values; the placeholder view is never scored.
 fn load_observations(
     path: &str,
     column: &str,
     dt: f64,
     opts: &crate::caltime_load::TimeOpts,
-) -> Result<Vec<Observation>, String> {
-    let observations = crate::pfilter::load_data_tsv_column(path, column, opts)?;
-    // Validate time alignment
-    for obs in &observations {
-        let remainder = obs.time % dt;
+) -> Result<(Vec<Observation>, Vec<Option<sim::inference::ObsCell>>), String> {
+    let (times, cells) = crate::pfilter::load_data_tsv_column_cells(path, column, opts)?;
+    // Validate time alignment (holes keep their time, so this is unaffected by
+    // missing values).
+    for &time in &times {
+        let remainder = time % dt;
         let aligned = remainder.abs() < 1e-9 || (dt - remainder.abs()).abs() < 1e-9;
         if !aligned {
             return Err(format!(
                 "observation at t={} is not a multiple of dt={}.\n\
                  The chain-binomial state only exists at step boundaries.\n\
                  Adjust observation times or dt to align.",
-                obs.time, dt
+                time, dt
             ));
         }
     }
-    Ok(observations.into_iter().map(|o| Observation { time: o.time, value: o.value }).collect())
+    // Dense placeholder view (holes → 0.0) for diagnostics/time.
+    let observations: Vec<Observation> = times.iter().zip(cells.iter())
+        .map(|(&time, cell)| Observation {
+            time,
+            value: match cell {
+                Some(sim::inference::ObsCell::Scalar(v)) => *v,
+                None => 0.0,
+            },
+        })
+        .collect();
+    Ok((observations, cells))
 }
 
 
@@ -3150,6 +3212,27 @@ dt = 1.0
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// ic_free=true WITH ivp but the FIRST observation is a hole (`NA`) →
+    /// build errors: there is no y₁ to condition on, so ic_free would silently
+    /// degenerate to no initial-state conditioning. The ivp precondition is
+    /// satisfied here, so only the missing-y₁ guard can fire — isolating it.
+    #[test]
+    fn ic_free_with_missing_first_obs_is_rejected() {
+        let dir = ic_free_test_dir("first_na");
+        let fit = ic_free_fixture(&dir, true, true); // ic_free + ivp (passes ivp gate)
+        // Overwrite the data so the FIRST observation (t=7) is a hole. build()
+        // loads the data fresh, so it sees this holed series.
+        std::fs::write(dir.join("obs.tsv"),
+            "time\tweekly_cases\n7\tNA\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
+        let err = match FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false) {
+            Ok(_) => panic!("ic_free=true + a missing first observation must error"),
+            Err(e) => e,
+        };
+        assert!(err.contains("nothing to condition on"),
+            "error must name the missing-y₁ cause, not the ivp precondition: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// ic_free absent (default false) → build succeeds regardless of
     /// ivp presence, and the SMCConfig view reports ic_free=false.
     /// Regression guard: the new flag must default to OFF so no
@@ -3828,5 +3911,171 @@ dt = 1.0
         assert!(d.rhat.is_nan() && d.ess_total.is_nan() && d.ess_per_chain.is_empty(),
             "single chain → all NaN/empty; got ({}, {}, {:?})",
             d.rhat, d.ess_total, d.ess_per_chain);
+    }
+
+    // ── ODE incidence across a HOLE: the bin reset must still fire ──────────
+    //
+    // `compute_ode_loglik` walks ODE snapshots, accumulates `cum_flows`, and
+    // resets at each obs time. A HOLE keeps its time in the grid, so the reset
+    // SHOULD fire across it (fixed-bin / pomp `accumvars` semantics): a missing
+    // week still closes its weekly incidence bin — it must NOT merge two weeks
+    // of incidence into the next observed bin. This mirrors the stochastic
+    // `sparse_holes_reset.rs` test for the ODE-MLE loglik path.
+    //
+    // Probe: a DETERMINISTIC inflow `--> R @ K`, observed as `incidence` with a
+    // Normal likelihood `mean = projected`, on a weekly grid 7/14/21/28 with a
+    // HOLE at t=14. With K=10/day the per-week tally is 70. We probe the t=21
+    // bin (the week AFTER the hole) by sweeping its datum and locating the
+    // likelihood peak (the data value the model's projection most prefers):
+    //   * reset fired at the hole  → projected@21 = 70  (one week)  → peak at 70
+    //   * reset SKIPPED (merge)     → projected@21 = 140 (two weeks) → peak at 140
+    // The Normal observation likelihood is the He-et-al-2010 *discretized* PMF
+    // (a ±0.5 continuity correction, NOT the continuous PDF), so we assert the
+    // peak LOCATION (70, not 140) rather than a closed-form gap. ll(70) beating
+    // both ll(71) and ll(140) pins projected@21 = one week ⇒ the reset fired.
+    #[test]
+    fn ode_incidence_reset_fires_across_hole() {
+        use std::collections::HashMap;
+        use ir::{
+            expr::{ConstExpr, Expr, ProjectedExpr},
+            model::{
+                Compartment, CompartmentKind, InitialConditions, OutputConfig,
+                OutputSchedule, RegularOutputSchedule, SimulationConfig,
+            },
+            observation::{
+                Likelihood, ObservationModel as IrObs, ObservationSchedule,
+                NormalLikelihood, Projection,
+            },
+            parameter::{ParamValue, Parameter},
+            transition::{DrawMethod, StoichiometryEntry, Transition},
+            Model,
+        };
+        use sim::inference::{
+            BoundObs, MultiStreamObsModel, ObsCell,
+            multi_stream_obs::{StreamProjection, StreamSpec},
+        };
+
+        let k = 10.0; // deterministic inflow per day → 70/week at the weekly grid
+        let weekly = 7.0 * k; // 70
+        let sd = 5.0; // tight: a 70-unit residual (the merge error) is 14 sd → huge
+
+        // Daily output schedule so a snapshot lands on every obs time
+        // (compute_ode_loglik requires a snapshot at each obs time).
+        let m = Model {
+            name: "ode_hole_reset".into(),
+            version: "0.3".into(),
+            time_unit: "days".into(),
+            description: None,
+            origin: None, origin_rata_die: None,
+            compartments: vec![
+                Compartment { name: "R".into(), kind: CompartmentKind::Integer },
+            ],
+            transitions: vec![
+                Transition {
+                    name: "inflow".into(),
+                    stoichiometry: vec![StoichiometryEntry("R".into(), 1)],
+                    rate: Expr::Const(ConstExpr { value: k }),
+                    metadata: None,
+                    draw_method: DrawMethod::Deterministic,
+                    rate_grad: Default::default(),
+                    lineage: None,
+                },
+            ],
+            ode_equations: vec![],
+            time_functions: vec![],
+            tables: vec![],
+            interventions: vec![],
+            observations: vec![
+                IrObs {
+                    name: "cases".into(),
+                    schedule: ObservationSchedule::AtTimes(vec![]),
+                    projection: Projection::CumulativeFlow("inflow".into()),
+                    likelihood: Likelihood::Normal(NormalLikelihood {
+                        mean: Expr::Projected(ProjectedExpr { projected: () }),
+                        sd: Expr::Const(ConstExpr { value: sd }),
+                    }),
+                },
+            ],
+            bindings: vec![],
+            parameters: vec![
+                Parameter { name: "dummy".into(), value: ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None },
+            ],
+            initial_conditions: InitialConditions::Explicit({
+                let mut h = HashMap::new();
+                h.insert("R".into(), 0.0); h
+            }),
+            output: OutputConfig {
+                // Daily snapshots 0..=28 so 7/14/21/28 each get one.
+                times: OutputSchedule::Regular(RegularOutputSchedule {
+                    start: 0.0, step: 1.0, end: 28.0,
+                }),
+                format: "tsv".into(), trajectory: true, observations: false,
+            },
+            simulation: SimulationConfig {
+                t_start: 0.0, t_end: 28.0, time_semantics: "continuous".into(),
+                dt: Some(1.0), rng_seed: Some(1),
+            },
+            presets: vec![],
+            model_structure: None, balance: None, identity_tracked_compartments: vec![],
+        };
+        let compiled = Arc::new(CompiledModel::new(m).unwrap());
+        let params = compiled.default_params.clone();
+        let dt = 1.0;
+
+        let times = vec![7.0, 14.0, 21.0, 28.0];
+        let inflow_idx = compiled.model.transitions.iter()
+            .position(|t| t.name == "inflow").unwrap();
+
+        // Build an obs model with a hole at t=14 and the t=21 datum set to
+        // `data21`. Returns the ODE loglik.
+        let score = |data21: f64| -> f64 {
+            let cells = vec![
+                Some(ObsCell::Scalar(weekly)), // t=7
+                None,                          // t=14 HOLE
+                Some(ObsCell::Scalar(data21)), // t=21 (the probe)
+                Some(ObsCell::Scalar(weekly)), // t=28
+            ];
+            let spec = StreamSpec {
+                projection: StreamProjection::FlowSum(vec![inflow_idx]),
+                ir_model: compiled.model.observations[0].clone(),
+                observations: cells,
+                obs_times: times.clone(),
+            };
+            let obs_model = MultiStreamObsModel::new(
+                BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap();
+            super::compute_ode_loglik(&compiled, &obs_model, &times, dt, &params).unwrap()
+        };
+
+        let ll_one_week  = score(weekly);        // data@21 = 70  (reset fired)
+        let ll_near_one  = score(weekly + 1.0);  // data@21 = 71  (just off peak)
+        let ll_two_weeks = score(2.0 * weekly);  // data@21 = 140 (merge)
+
+        assert!(ll_one_week.is_finite() && ll_two_weeks.is_finite()
+                && ll_near_one.is_finite(),
+            "ODE loglik across a hole must be finite: one_week={ll_one_week}, \
+             near={ll_near_one}, two_weeks={ll_two_weeks}");
+
+        // Peak LOCATION: the t=21 datum the projection most prefers is the
+        // projected value itself. If the reset fired at the hole, projected = 70
+        // (one week) — so ll(70) is the maximum and beats BOTH a neighbour (71)
+        // and the merge value (140). If the reset had been (wrongly) skipped,
+        // projected = 140 and ll(140) would be the maximum instead.
+        assert!(ll_one_week > ll_near_one,
+            "ll(70) must beat ll(71): the t=21 likelihood peak sits at the \
+             projected value; projected = one week = {weekly}. Got ll(70)={ll_one_week} \
+             vs ll(71)={ll_near_one}.");
+        assert!(ll_one_week > ll_two_weeks,
+            "post-hole bin must tally ONE week of incidence ({weekly}), not two \
+             ({}). ll(70) must beat ll(140) — got ll(70)={ll_one_week} vs \
+             ll(140)={ll_two_weeks}. ll(140) ≥ ll(70) would mean the hole \
+             suppressed the incidence-bin reset (merged two weeks into one bin).",
+            2.0 * weekly);
+        // The merge value is far in the tail of the one-week-centred density:
+        // the gap must be large (not a numerical wobble). With sd = {sd} the
+        // residual at 140 is 70 = 14·sd — many nats below the peak.
+        assert!(ll_one_week - ll_two_weeks > 10.0,
+            "the merge datum (140) must score MUCH worse than one week (70) — a \
+             large gap is only possible if projected ≈ 70. Got gap = {}",
+            ll_one_week - ll_two_weeks);
     }
 }
