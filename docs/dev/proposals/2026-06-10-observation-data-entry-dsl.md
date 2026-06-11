@@ -22,11 +22,14 @@ substrate that tables, forcings, and observations each duplicate today.
 **Governing principle — no implicit mapping, no positional mapping; everything
 explicit.** A `.camdl` file declares every column, every dimension, and every
 role explicitly; the binding matches **by name**; nothing is positional and
-nothing is inferred. This is a deliberate correction: positional/implicit column
-mapping crept in (tables map columns positionally; the observation loader took
-"column 0 is time" and fell back to a positional value column — the G1 bug) and
-it is exactly the silent-wrong-answer class this software cannot afford. The
-principle applies to **both observations and tables** (§6).
+nothing is inferred. This is a deliberate correction: the observation loader
+took "column 0 is time" and fell back to a positional value column — the G1 bug
+— and it is exactly the silent-wrong-answer class this software cannot afford.
+The principle drives the **observation and forcing** surfaces here (§6);
+**tables are a deliberate exception in v1** — their dimension columns already
+bind by level name and their value shape is type-signature-validated (no
+G1-class hole), so full table-binding-by-name is named as a separate follow-up,
+not improvised here (§6.2).
 
 It is the **data layer**. The **inference-time** handling of streams on
 different cadences (the union time axis + per-observer flow reset) is the
@@ -86,7 +89,7 @@ The likelihood is written with `~` — the operator the language already uses fo
 
 ```camdl
 observations {
-  weekly_cases : {
+  weekly_cases from flu {
     columns   { time : time, cases : count }
     projected = incidence(infection)
     every     = 7 'days
@@ -94,6 +97,11 @@ observations {
   }
 }
 ```
+
+`weekly_cases from flu` names the stream (`weekly_cases`) and the **data
+source** it reads from (`flu`); `from <label>` is the binding seam covered in
+§2.4. The header is `name from <label> { }` — **no colon** (the block brace
+follows the header directly, as `interventions`/`events` blocks do).
 
 `cases ~ neg_binomial(...)` reads as the statistical model and parallels the
 parameters block (`beta ~ log_normal(...)`). Rules that keep it unambiguous:
@@ -127,14 +135,14 @@ positional binding**: `columns { }` is always present and lists time, the index
 name**:
 
 ```camdl
-es[p in patch] : {
+es[p in patch] from es_data {
   columns {
     time     : time         # the time axis (exactly one)
     patch    : dim          # a model dimension; values validated against patch levels
     positive : count        # observed value (the ~ LHS)
     tested   : count        # auxiliary value (the denominator, referenced on the RHS)
   }
-  projected = prevalence(I_shed[p]) / (baseline + rain(t))
+  projected = prevalence(I_shed[patch = p]) / (baseline + rain(t))
   every     = 14 'days
   positive ~ binomial(n = tested, p = detect(projected))
 }
@@ -148,8 +156,11 @@ require the file header, which the reader provides — §6):
 - exactly one `: time` column; file headers must match the declared names
   exactly (force-matching; no positional fallback, no rename-on-bind in v1);
 - **every file column is accounted for** — a header present in the file but
-  absent from `columns { }` is an error (not silently dropped — that is how a
-  forgotten stratum column becomes a silent partial-coverage miss);
+  absent from the `columns { }` of _any stream reading that source_ is an error
+  (not silently dropped — that is how a forgotten stratum column becomes a
+  silent partial-coverage miss). The accounting is **per source**: when two
+  streams share `from flu`, the union of their declared columns must cover the
+  file header (§2.4);
 - the `~` LHS is a declared value column; every declared value column is the LHS
   or RHS-referenced (no dead columns; no undeclared LHS).
 
@@ -157,14 +168,13 @@ Value types (`count`, `real`, `probability`, …) are the existing parameter
 types; the type lets the dimchecker verify the likelihood argument the column
 feeds (§3.1).
 
-**Binding key vs column mapping.** The stream _name_ is the data **key** —
-`--data es=es_data.tsv` (`args/mod.rs:1245`) and `[data.observations] es = "…"`
-(`config_v2.rs:292`) bind the block to a file, matched to
-`model.observations[].name` (unchanged, already wired). `columns { }` governs
-only the _within-file_ mapping. For an indexed stream the key is the **base
-name** (`cases[p in patch]` → key `cases`, like a transition
-`infection[p in patch]` has base `infection`); a long-form file binds
-`--data cases=cases_long.tsv`.
+**Binding key vs column mapping.** The **source label** (`from <label>`) is the
+data **key**: `--data flu=flu.tsv` (`args/mod.rs:1245`) and
+`[data.observations] flu = "…"` (`config_v2.rs:292`) bind the _source_ to a file
+(§2.4). `columns { }` governs only the _within-file_ mapping. The source label,
+not the stream name, is what a file binds to — so several streams can read one
+file, and the **column-completeness check (§2.2) is per-source, not
+per-stream**.
 
 ### 2.3 `projected =` and the incidence/prevalence axis
 
@@ -178,6 +188,49 @@ name** (`cases[p in patch]` → key `cases`, like a transition
 
 Orthogonal to per-observation aux (§3): serosurvey = prevalence + denominator;
 positivity = incidence + denominator; census = prevalence + pure.
+
+### 2.4 `from <label>` — the data-source seam
+
+A stream's header is `name from <label> { … }`. The `<label>` names a **data
+source** — the thing a file binds to. This separates two concerns the old
+"stream name _is_ the data key" surface conflated:
+
+- the **stream** is a model-side declaration (a projection, a likelihood, a
+  cadence) — there can be many;
+- the **source** is a file (`--data flu=flu.tsv`,
+  `[data.observations] flu = "…"`) — one file, possibly feeding several streams.
+
+`from` is **optional**; omitting it defaults the source label to the stream
+name, so the common 1:1 case is unchanged in spirit:
+
+```camdl
+observations {
+  cases { … }            # source label defaults to `cases`; --data cases=cases.tsv
+}
+```
+
+The motivating N:1 case — a single wide file carrying two outcome columns scored
+by two different measurement models — is now expressible without breaking the
+per-source column-completeness rule (§2.2):
+
+```camdl
+observations {
+  cases  from flu { columns { time : time, cases  : count } … cases  ~ … }
+  deaths from flu { columns { time : time, deaths : count } … deaths ~ … }
+  # source `flu` (--data flu=flu.tsv) carries time, cases, deaths;
+  # the union of the two streams' columns covers the header → OK.
+}
+```
+
+Without `from`, each of `cases`/`deaths` would demand its own file and each
+file's _other_ outcome column would trip the completeness check. `from <label>`
+is also the **forward-compatible hook** for the deferred "declare the file
+schema once and refer to it" feature (§8): a named source is the natural place a
+reused `columns { }` schema would later attach. The 1:1 default keeps that
+complexity out of the common case.
+
+The header form is `IDENT index_bindings_opt (FROM IDENT)? LBRACE … RBRACE` —
+**no colon**. (Was `name : { }`; the colon is dropped — see migration §9.)
 
 ## 3. Per-observation auxiliary data — declared, typed value columns
 
@@ -234,6 +287,12 @@ likelihood family:
   normalizer (`mean = report_frac * projected`), per-round assay Se/Sp. Same
   mechanism.
 
+The existing `diagnostic_test(...)` family is **not a separate denominator
+case**: `parser.mly:488-525` desugars it at parse time into a binomial whose `p`
+is reparameterized by sensitivity/specificity (`p → se·p + (1−sp)·(1−p)`). Its
+`n` is the same binomial `n`, so the `value ≤ n`/`n > 0` row check and the
+declared-column denominator apply to it for free — no extra surface.
+
 ### 3.3 Deferred, not foreclosed
 
 - **Multinomial / compositional outcomes** (serotype/variant splits; two
@@ -252,14 +311,14 @@ rest of the language uses** (transitions `infection[p in patch]`, compartments,
 `let`s):
 
 ```camdl
-cases[p in patch, a in age] : {
+cases[p in patch, a in age] from flu {
   columns {
     time  : time
     patch : dim
     age   : dim
     cases : count
   }
-  projected = incidence(infection[p, a])
+  projected = incidence(infection[patch = p, age = a])
   every     = 7 'days
   cases ~ neg_binomial(mean = rho * projected, r = k)
 }
@@ -273,6 +332,17 @@ keyword (which would have been a second, colliding strata mechanism) and over
 indexing on the `~` line (which would leave `projected`'s use of `p`/`a`
 unbound). A non-stratified stream omits the brackets; its name is a clean data
 key.
+
+**Index the projection by name.** The projection writes
+`infection[patch = p, age = a]` — each model dimension named, the loop variable
+on the right. This matches the governing principle (no positional mapping) and
+is unambiguous when a transition is multiply stratified. The bare positional
+form `infection[p, a]` is **also accepted** — it is not a silent-rebind risk,
+because each subscript is dimension-membership-validated at expand time (`p`
+must range over `patch`, `a` over `age`; an out-of-dimension subscript is a
+located error, spec §12.1) — but the named form is preferred for readability and
+is what the examples use. This is a style/consistency point, not a correctness
+gate.
 
 **Two declarations, distinct jobs, cross-checked (not redundant):**
 `columns
@@ -354,7 +424,7 @@ inside `sum`" binding — a sub-feature with its own correctness surface. v1
 supports the national (all-to-one) case via explicit `sum(...)`; sub-national
 rollup is named in §9.
 
-## 6. The binding seam — and the no-positional fix for tables
+## 6. The binding seam — one validated reader for obs + forcings
 
 ### 6.1 `BoundObs`, typed columns, extensible cells
 
@@ -365,7 +435,7 @@ multinomial); the denominator/offset/covariate columns are typed fields the
 compiler knows; the strata index (§4) and aggregation (§5) resolve in `bind`,
 where the model's dimension levels and the file header are both in hand.
 
-### 6.2 Unify the reader; make tables by-name too; keep the concepts distinct
+### 6.2 Unify the reader for obs + forcings; keep the concepts distinct
 
 The shared, bug-prone substrate is **read a delimited file → map columns to
 typed roles → validate → index**. Extract one core:
@@ -376,20 +446,38 @@ read_long(file, role_policy, time_opts) -> Result<Vec<TypedRow>, BindError>
 //   one Rust-side date parser, finiteness guard.
 ```
 
-Per the governing principle, **`role_policy` is `ByName` for observations,
-forcings, AND tables** — the positional table mapping (`spec §6`) is the
-implicit/positional binding to eliminate, so tables move to declared, by-name
-column binding through this same reader. (This is the cross-cutting fix the "no
-positional mapping" principle requires; flag it explicitly as a tables change,
-with golden updates.) Unifying the reader removes G1 and the three Rust loaders'
-duplication.
+**`role_policy` is `ByName` for observations and forcings** — the two surfaces
+with the G1 silent-wrong class (a positional value-column fallback on a header
+typo). Unifying their reader removes G1 and the loaders' duplication.
+
+**Tables are deliberately _not_ folded into this in v1.** A table's binding is
+not the G1 class, for two reasons verified against the code, not the spec:
+
+- a table's **dimension columns are already matched by name** to the dimension's
+  levels — the spec §6.2 line that says "positional mapping" (spec:890) is
+  **stale doc-vs-code**; `dimcheck`/expand validate dimension membership by
+  level name (spec §12.1:763). Correcting that stale sentence is doc hygiene
+  done with this work, not a code change;
+- a table's **value shape is validated against its declared type signature** (an
+  N×M contact matrix must present N×M values); a shape mismatch is a located
+  error, not a silent misread. So there is no positional-fallback hole to close.
+
+Full **table-binding-by-name** is a real but **separate** follow-up (§8) with
+its own correctness surface that this proposal must not improvise:
+inline-literal tables (no file, no headers to match), a contact matrix indexed
+by the **same dimension twice** (`contact[age, age]` — two columns would need
+disambiguated names, not just the dimension name), and wide-form matrix files
+(one column per level). Bundling those into "by-name everywhere" is how a
+one-line principle turns into an unscoped refactor. v1 leaves tables on their
+shape-validated binding and names the by-name table work as deferred.
 
 **Scope correction:** this does **not** kill the gh#98 battery. That test is a
 _cross-language_ OCaml↔Rust contract (OCaml parses date literals in source at
 compile; Rust parses data files at load); a Rust-side reader cannot remove the
 OCaml parser, so the OCaml↔Rust caltime golden stays. `read_long` unifies the
-Rust-side parsing only. (And the by-name-time flip — §1.3 — must land _with_ the
-reader extraction, or the shared core re-introduces a positional default.)
+Rust-side parsing only. (And the by-name-time flip — §1 problem 3 — must land
+_with_ the reader extraction, or the shared core re-introduces a positional
+default.)
 
 Do **not** unify the concepts above the reader: `tables` (compile-time,
 dimension-indexed, RHS coefficient), `forcings` (compile-time, time-indexed,
@@ -404,6 +492,37 @@ from the obs loader.
 `bind` takes a per-stream missing-token set (default `{NA}`, extensible:
 `missing = {NA, -, .}`) mapping listed tokens to holes; unlisted non-numeric
 tokens are hard errors; censored tokens (`<5`) stay a loud reject pending §3.3.
+
+### 6.4 Which checks live in OCaml (compile) vs Rust (bind) — and what the IR must carry
+
+The two-stage architecture (OCaml expand → IR → Rust simulate/fit) splits this
+proposal's validation, and the split decides what the IR contract must carry:
+
+- **OCaml, at compile (file not yet seen):** the `~` parse and
+  prior-vs-likelihood disambiguation (§2.1); `columns { }` _internal_ coherence
+  (exactly one `: time`, `~` LHS is a declared column, no dead columns); the
+  `[p in dim]` ↔ `: dim` cross-check (§4.1); the dimcheck of likelihood
+  arguments **including the new `constrain_known` on Binomial/BetaBinomial `n`
+  and the Poisson rate/offset** (§3.1). For that constraint to bite, the
+  declared column must be registered in the dimcheck environment as a `Known`
+  count — declaring `tested : count` is what registers it; a column declared
+  `real` would not constrain `n`. The aggregation gate (§5.2) is **also
+  compile-side** (it is decidable from the model stratification + the stream's
+  index, both known pre-file).
+- **Rust, at `bind` (file in hand):** the file-header force-match (§2.2); the
+  per-source column-completeness check (§2.4); **by-name level matching** (§4.2)
+  — matching a `: dim` column's _values_ against the model dimension's _level
+  names_; the per-row `value ≤ n`/`n > 0` data check (§3.2); missing-token →
+  hole (§6.3); partial-coverage holes (§4.2).
+
+**IR contract consequence:** because level matching is Rust-side, **the IR must
+carry each stream's dimension level names** (the ordered level set of every
+`: dim` column), not just the dimension's arity. Today the expanded IR flattens
+strata into per-cell names; the binder needs the _level labels_ to match file
+values by name. This is the one schema-touching item in this proposal (a
+`levels: [String]` per indexed stream dimension) — flagged for the atomic
+OCaml+Rust+golden update, and called out so it is not discovered
+mid-implementation.
 
 ## 7. Two evaluation paths must agree; and the spine connection
 
@@ -432,45 +551,75 @@ this a drop-in.
 
 ## 8. Scope and deferrals
 
-- **In:** the `~` surface; `columns { }` full explicit schema; per-obs aux as
-  declared typed columns; header-form `[p in dim]` indexing with by-name level
-  matching and partial-coverage holes; explicit national aggregation; the
-  `read_long` reader unification incl. **by-name tables**; extensible `ObsCell`;
+- **In:** the `~` surface; `columns { }` full explicit schema (always required);
+  `from <label>` data-source binding; per-obs aux as declared typed columns;
+  header-form `[p in dim]` indexing with by-name level matching and
+  partial-coverage holes; explicit national aggregation; the `read_long` reader
+  unification **for observations + forcings**; extensible `ObsCell`;
   missing-token policy; the dimcheck-`n` fix.
 - **Companion (proposal B):** multi-cadence union axis + per-observer reset.
-- **Deferred, named:** external-name → internal-name remapping (`<=` / `=>`, a
-  cross-cutting feature with tables/forcings); multinomial / shared-denominator
-  outcomes; censoring; sub-national 1:many aggregation; **time-free
-  summary-statistic observations** (final size, peak timing — a different
-  observation _kind_, no time index); wide-form stratified files (one column per
-  level — common Excel export; long-form only in v1); a stateful environmental
-  reservoir under chain-binomial inference (QSS-derived-expression is the
-  fittable interim; gh#191 is the real blocker).
+- **Deferred, named:**
+  - **Declare a file schema once, reuse it** across streams/sources (the
+    `from <label>` seam is the forward-compatible hook — §2.4); v1 repeats
+    `columns { }` per stream.
+  - **`columns { }` auto-derive / inference** from the file header — v1 is
+    verbose by design (the explicit schema is documentation for humans and
+    agents).
+  - **Right-truncation / nowcasting** (reporting triangles — the highest-value
+    deferral for real surveillance; an observation seen "so far" is a censored
+    count) and other **censoring** (detection limits).
+  - **Time-varying Se/Sp supplied as a column** (per-round assay
+    sensitivity/specificity beyond the per-obs covariate of §3.2).
+  - **Cumulative-reporting observations** (data is a running total, not a
+    per-interval increment — a different accumulation contract).
+  - **Full table-binding-by-name** (inline-literal, same-dimension-twice,
+    wide-form matrix files — §6.2).
+  - external-name → internal-name remapping (`<=` / `=>`, cross-cutting with
+    tables/forcings); multinomial / shared-denominator outcomes; sub-national
+    1:many aggregation; **time-free summary-statistic observations** (final
+    size, peak timing — a different observation _kind_, no time index);
+    wide-form stratified files (one column per level — common Excel export;
+    long-form only in v1); a stateful environmental reservoir under
+    chain-binomial inference (QSS-derived-expression is the fittable interim;
+    gh#191 is the real blocker).
 
 ## 9. Migration (breaking; alpha, signposted)
 
 Each breaking change rejects the old form with a diagnostic naming the
 replacement (and a `docs/language-changes.md` entry):
 
-- `likelihood = D(...)` → `<value_col> ~ D(...)`.
+- `likelihood = D(...)` → `<value_col> ~ D(...)`. The `projected` quantity is
+  now referenced from the `~` RHS (`mean = rho * projected`) rather than read
+  out of a `likelihood =` expression — the `Projected` expr node's valid scope
+  moves to the `~` RHS (spec §14.2), `projected =` stays its own field (§2.1).
+- **stream header colon dropped:** `name : { … }` → `name { … }` (and the new
+  optional `name from <label> { … }`). Diagnostic names the rewrite.
 - positional/implicit column binding → required `columns { }` with by-name
   headers; positional "column 0 is time" → `time : time`.
 - un-indexed cross-strata auto-sum on a stratified model → the §5.2 hard error.
-- **tables: positional → by-name** declared columns (golden updates; flag
-  loudly).
+- **doc-only:** correct the stale spec §6.2 "positional mapping" sentence
+  (spec:890) — table dimension columns already bind by level name (§6.2). No
+  code or golden change; tables' binding is unchanged in v1.
 
 ## 10. Implementation phases + tests
 
-1. **`~` surface** — parser production reusing `TILDE` (without the `| dim`
-   suffix; keyword-only RHS); no IR change; `likelihood =` migration diagnostic.
-2. **`read_long` reader unification + by-name everywhere** — one core, `ByName`
-   policy for obs/forcings/tables; the by-name-time flip lands here. Tests: G1
-   unconstructible; positional-time gone; a header absent from `columns { }`
-   errors; tables bind by name (golden updates).
-3. **`columns { }` + declared aux + extensible `ObsCell` + the dimcheck-`n`
-   fix** — tests: dimcheck rejects a dimensionally-wrong `n`; name-collision
-   hard error; positivity fit recovers params; person-time offset; `value ≤ n`
-   row check in `bind` with a located row.
+1. **`~` surface + header reshape** — parser production reusing `TILDE` (without
+   the `| dim` suffix; keyword-only RHS); the stream header drops the colon and
+   gains optional `from <label>`
+   (`IDENT index_bindings_opt (FROM IDENT)? LBRACE`); no IR change yet;
+   `likelihood =` and `name : {` migration diagnostics.
+2. **`read_long` reader unification (obs + forcings) + per-source binding** —
+   one core, `ByName` policy for obs/forcings (tables untouched, §6.2); the
+   by-name-time flip lands here; `from <label>` source resolution + per-source
+   column-completeness. Tests: G1 unconstructible; positional-time gone; a
+   header absent from the source's union of `columns { }` errors; two streams
+   sharing one source bind cleanly.
+3. **`columns { }` + declared aux + extensible `ObsCell` + the dimcheck-`n` fix
+   - the `levels` IR field** — tests: dimcheck rejects a dimensionally-wrong
+     `n`; name-collision hard error; positivity fit recovers params; person-time
+     offset; `value ≤ n` row check in `bind` with a located row. (The
+     `levels: [String]` IR field — §6.4 — rides the atomic OCaml+Rust+golden
+     update here.)
 4. **Header-form indexing** — by-name level matching, per-cell scoring,
    partial-coverage holes, bins-differ errors, brackets↔columns cross-check.
 5. **National aggregation** — the §5.2 hard error; explicit `sum(...)` forms.
