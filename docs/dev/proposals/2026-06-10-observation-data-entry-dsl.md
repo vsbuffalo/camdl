@@ -9,536 +9,486 @@ area: observation data entry / DSL surface / binding
 issue: gh#171 (sparse/irregular obs), gh#98 (date-parse equivalence), gh#172
 ---
 
-# Observation data entry: the `~` surface, typed columns, strata indexing, aggregation
+# Observation data entry: the `~` surface, typed columns, explicit indexing, aggregation
 
-## 0. What this is, and what it is not
+## 0. What this is, and the governing principle
 
 This proposal fixes the **DSL surface and the binding layer** for observation
-data: how a stream declares its data columns and their types, how the
+data: how a stream declares its file columns and their types, how the
 measurement model is written, how data is indexed by **time and strata**, and
-how data **coarser than the model** is aggregated. It also unifies the
-file-reading substrate that tables, forcings, and observations each duplicate
-today.
+how data **coarser than the model** is aggregated. It unifies the file-reading
+substrate that tables, forcings, and observations each duplicate today.
+
+**Governing principle — no implicit mapping, no positional mapping; everything
+explicit.** A `.camdl` file declares every column, every dimension, and every
+role explicitly; the binding matches **by name**; nothing is positional and
+nothing is inferred. This is a deliberate correction: positional/implicit column
+mapping crept in (tables map columns positionally; the observation loader took
+"column 0 is time" and fell back to a positional value column — the G1 bug) and
+it is exactly the silent-wrong-answer class this software cannot afford. The
+principle applies to **both observations and tables** (§6).
 
 It is the **data layer**. The **inference-time** handling of streams on
 different cadences (the union time axis + per-observer flow reset) is the
 sibling proposal `2026-06-10-multi-stream-multi-cadence-union-axis.md` (proposal
-B); this proposal is compatible with it and names where they meet, but does not
-implement it. Survey **denominators** are not a special construct here — they
-fall out of the typed-column design (§3).
+B); this proposal feeds it (§7) but does not implement it. Survey
+**denominators** are not a special construct — they fall out of the typed-column
+design (§3).
 
-**Required reading:** `docs/camdl-language-spec.md` §6 (tables), §7 (forcings),
-§12 (observations), §2666 (the likelihood namespace); the current binding types
-in `rust/crates/sim/src/inference/multi_stream_obs.rs`
-(`BoundObs`/`bind`/`StreamProjection`/`ObsCell`, the scoring seam at :593, the
-sample/mean emission paths at :708/:730); the prior `~` grammar in
-`ocaml/lib/compiler/parser.mly` (the `TILDE` productions, ll. 161–185). This
-touches inference math and a load-bearing DSL surface — treat as high-risk.
+**Required reading:** `docs/camdl-language-spec.md` §6 (tables), §7 (forcings,
+the `time_col`/`value_col` convention), §12 (observations, the `[p in dim]`
+indexed form), the likelihood namespace (§14.2); `parser.mly` (the `TILDE` prior
+productions ll. 161–185, the `index_bindings_opt` form l. 447/463); the binding
+types in `rust/crates/sim/src/inference/multi_stream_obs.rs`; `dimcheck.ml` (the
+Binomial/Poisson arms ~l. 843). High-risk: touches inference math and a
+load-bearing DSL surface.
 
 ## 1. The problem
 
 Observation data enters camdl through a surface that is **inconsistent with the
-rest of the language, under-typed at the binding boundary, and silently
-aggregating** in ways that bake in modeling assumptions. Concretely:
+rest of the language, under-typed, implicitly/positionally bound, and silently
+aggregating**:
 
-1. **The likelihood is the lone holdout from `~`.** Priors are written
+1. **The likelihood is the lone holdout from `~`.** Priors are
    `beta : rate in [0.01, 2.0] ~ log_normal(...)` — `~` already means "is
    distributed as." Observations write `likelihood = neg_binomial(...)`. Two
    notations for one idea.
-2. **Per-observation auxiliary data has no home.** Real surveillance is
-   dominated by the **k-of-n family** — test positivity, seroprevalence, variant
-   frequency, environmental-surveillance site-positivity, age/space positivity —
-   all Binomial/BetaBinomial with an **external denominator `n` that varies per
-   observation and is data, not a parameter.** Today
-   `Observation { time, value }` carries one value; the binomial's `n` is an
-   `Expr` (a constant/param), so a _varying, data-driven_ `n` cannot be
-   expressed. The same gap blocks Poisson **person-time offsets** and externally
-   supplied per-observation reporting fractions.
-3. **The binding boundary is under-typed and was silently wrong.** Tables map
-   columns _positionally_; observations map _by name_; the loaders drifted (G1:
-   a single-stream loader fell back to a positional column, binding the wrong
-   data on a header typo — now fixed). NaN/Inf passed through to the log-PMF
-   (now guarded). Three loaders (`pfilter.rs`, `profile.rs`, `fit/runner.rs`)
-   plus a table reader plus a forcing reader each re-implement
-   read-file-and-map-columns; date parsing is duplicated across OCaml-compile
-   and Rust-load and pinned equal only by a battery test (gh#98).
+2. **Per-observation auxiliary data has no home.** The **k-of-n family** — test
+   positivity, seroprevalence, variant frequency, environmental-surveillance
+   positivity, age/space positivity — is Binomial/BetaBinomial with an
+   **external denominator `n` that varies per observation and is data, not a
+   parameter**. Today `Observation { time, value }` carries one value; the
+   binomial's `n` is an `Expr` (constant/param), so a varying, data-driven `n`
+   cannot be expressed. Same gap for Poisson person-time **offsets** and
+   per-observation reporting fractions.
+3. **The binding is implicitly/positionally bound and was silently wrong.** The
+   value column fell back to a positional index on a header typo (G1, now
+   fixed); the **time column is still positional** ("column 0 is time",
+   `pfilter.rs:813`); tables map columns **positionally** (`spec §6`). Three
+   observation loaders, a table reader, and a forcing reader each re-implement
+   read-file-and-map-columns; date parsing is duplicated Rust-side across them
+   (gh#98 is the cross-language pin, a separate matter — §6).
 4. **Cross-strata aggregation is automatic and silent.** An un-indexed
    `incidence(infection)` on a stratified model compiles to `CumulativeFlowSum`
-   and **sums across all strata** (`multi_stream_obs.rs:157`). A national datum
-   then scores against the summed _true_ incidence with a single reporting
-   fraction applied outside the sum — silently assuming **uniform reporting and
-   full coverage** across strata, which is usually false.
+   and **sums across all strata** (`multi_stream_obs.rs:157`).
 5. **`simulate` and `fit` are asymmetric.** `simulate` already emits
    multi-cadence, multi-stream, stratified data (one TSV per stream); the
-   inference loaders reject heterogeneous schedules. The format exists; the
-   binding does not. (The inference-time half is proposal B.)
-
-The unifying theme — flagged in `ARCHITECTURE.md` as "the consolidation that
-pays down the whole observation-data tier" — is that the **binding** is the
-bug-prone shared substrate, and the **surface** has drifted from the language's
-own conventions.
+   inference loaders reject heterogeneous schedules (the inference-time half is
+   proposal B).
 
 ## 2. The observation block surface
 
 ### 2.1 `~` for the measurement model
 
-The likelihood is written with `~`, the operator the language already uses for
-"is distributed as" (priors). Two reserved names anchor it: **`projected`** (the
-model's predicted quantity) and **`observed`** (the data):
+The likelihood is written with `~` — the operator the language already uses for
+"is distributed as." The **left side is a value column** declared in
+`columns { }` (§2.2); the right side is the distribution:
 
 ```camdl
 observations {
   weekly_cases : {
+    columns   { time : time, cases : count }
     projected = incidence(infection)
     every     = 7 'days
-    observed ~ neg_binomial(mean = rho * projected, r = k)
-  }
-  detection : {
-    projected = prevalence(I)
-    every     = 14 'days
-    observed ~ bernoulli(p = p_detect)
+    cases ~ neg_binomial(mean = rho * projected, r = k)
   }
 }
 ```
 
-`observed ~ neg_binomial(...)` reads as the statistical model, parallels the
-parameters block (`beta ~ log_normal(...)`), and collapses two notations into
-one. **The projection stays a separate field** (`projected = incidence(...)`):
+`cases ~ neg_binomial(...)` reads as the statistical model and parallels the
+parameters block (`beta ~ log_normal(...)`). Rules that keep it unambiguous:
+
+- **The `~` RHS is keyword-only** (`binomial(n = …, p = …)`), exactly as
+  `likelihood =` is today — no positional distribution args (else
+  `binomial(tested,
+  …)` is ambiguous about which declared count column is
+  `n`).
+- **The likelihood `~` production does NOT carry the prior's `| dim` pooling
+  suffix.** The prior grammar (`parser.mly:194`) allows `~ dist(...) | age`
+  (hierarchical pooling over a dimension); that is meaningless on a likelihood,
+  so the observation `~` is a _distinct_ production sharing the `TILDE` token,
+  and `cases ~ dist(...) | age` is a hard error pointing at `[a in age]`
+  indexing.
+- Prior-vs-likelihood is disambiguated by the enclosing block (`parameters` vs
+  `observations`); the trade vs the unmistakable-but-uglier `likelihood =`
+  keyword is deliberate — one operator, two block-scoped uses.
+
+**The projection stays a separate field** (`projected = incidence(...)`):
 inlining it into the `~` would bury the incidence-vs-prevalence classification
 (which drives the flow-reset semantics) inside a distribution expression. So `~`
-replaces `likelihood =` and nothing else; `projected`/`every`/`by`/`columns`
-remain their own lines.
+replaces `likelihood =` and nothing else.
 
-For a single-value stream, `observed` is the stream's one data column. When a
-stream has multiple data columns (§3), the `~` LHS is the **outcome** column by
-name (`positive ~ binomial(...)`), and the others are referenced on the RHS.
+### 2.2 `columns { }` — the full file schema, explicit, by name
 
-### 2.2 `columns { }` — the file's typed schema
-
-A stream declares the **value columns** its data file carries, with types, in
-one block:
+A stream declares **every column its data file carries**, with a role, in one
+block. Per the governing principle there is **no implicit default and no
+positional binding**: `columns { }` is always present and lists time, the index
+(`: dim`) columns, and the value columns, matched to the file headers **by
+name**:
 
 ```camdl
-es : {
-  every   = 14 'days
-  columns { positive : count, tested : count }
+es[p in patch] : {
+  columns {
+    time     : time         # the time axis (exactly one)
+    patch    : dim          # a model dimension; values validated against patch levels
+    positive : count        # observed value (the ~ LHS)
+    tested   : count        # auxiliary value (the denominator, referenced on the RHS)
+  }
+  projected = prevalence(I_shed[p]) / (baseline + rain(t))
+  every     = 14 'days
   positive ~ binomial(n = tested, p = detect(projected))
 }
 ```
 
-The block is the file's _schema_; roles are assigned by the `~` statement (LHS =
-outcome, RHS references = auxiliary). This co-locates types (you read the file's
-shape in one place), mirrors how a table declares its columns, and keeps the `~`
-line a clean statistical statement. A `aux`/`observe` role keyword was
-considered and rejected: once `~` assigns roles, a role keyword double-marks.
+`columns { }` is the file's _schema_, visible to humans and agents; roles come
+from the declaration (`time` / `dim` / a value type) and from the `~` statement
+(LHS = scored outcome, RHS references = auxiliary). Validation cross-checks (all
+require the file header, which the reader provides — §6):
 
-**Validation cross-check** (a feature of separating schema from role): every
-column in `columns { }` must be the `~` LHS or referenced on the RHS (no dead
-columns); the `~` LHS must be a declared column (catches typos both ways).
+- exactly one `: time` column; file headers must match the declared names
+  exactly (force-matching; no positional fallback, no rename-on-bind in v1);
+- **every file column is accounted for** — a header present in the file but
+  absent from `columns { }` is an error (not silently dropped — that is how a
+  forgotten stratum column becomes a silent partial-coverage miss);
+- the `~` LHS is a declared value column; every declared value column is the LHS
+  or RHS-referenced (no dead columns; no undeclared LHS).
 
-`count`, `real`, `probability` etc. are the existing parameter types; a column's
-type is what lets the OCaml dimchecker verify the likelihood argument it feeds
-(`n = tested` requires `tested : count`).
+Value types (`count`, `real`, `probability`, …) are the existing parameter
+types; the type lets the dimchecker verify the likelihood argument the column
+feeds (§3.1).
 
-**Binding key vs column mapping (what changes, what does not).** The stream
-_name_ is the data **key** — `--data es=es_data.tsv` (`args/mod.rs:1245`,
-`NAME=PATH`) and `[data.observations] es = "es_data.tsv"` (`config_v2.rs:292`,
-an `IndexMap<name, path>`) bind the observation block `es` to a file, matched to
-`model.observations[].name` (`runner.rs:303`). That is unchanged and already
-wired. What `columns { }` changes is the _within-file_ mapping: today the loader
-reads the single column **named after the stream**
-(`load_observations(path, column = stream_name)`, `runner.rs:301`), so a stream
-`weekly_cases` must have a `weekly_cases` column — the single-column assumption
-that blocks a positivity file (`positive` + `tested`, with no `es` column).
-`columns { }` declares the file's columns explicitly, **decoupling them from the
-stream name**: `--data es=es_data.tsv` then reads a `positive`/`tested` file.
-The key (which file) stays the stream name; the columns (which fields inside it)
-become declared.
-
-> **Open decision D1b — single-column default.** For a stream with one value
-> column and no `columns { }`, keep today's "the column is named after the
-> stream" default (back-compat, terse), or require a one-line
-> `columns { weekly_cases : count }`? My recommendation: **default the single
-> undeclared column to the stream name** (the common case stays a one-liner) and
-> require `columns { }` the moment there is more than one column — so the
-> multi-column case is always explicit and the single-column case is never more
-> verbose than today.
-
-> **Open decision D1 — block name.** `columns { }` vs `data { }`. `data { }` is
-> intuitive but collides with fit.toml's `[data.observations]` (file paths). My
-> recommendation: **`columns { }`** (literal, no collision).
+**Binding key vs column mapping.** The stream _name_ is the data **key** —
+`--data es=es_data.tsv` (`args/mod.rs:1245`) and `[data.observations] es = "…"`
+(`config_v2.rs:292`) bind the block to a file, matched to
+`model.observations[].name` (unchanged, already wired). `columns { }` governs
+only the _within-file_ mapping. For an indexed stream the key is the **base
+name** (`cases[p in patch]` → key `cases`, like a transition
+`infection[p in patch]` has base `infection`); a long-form file binds
+`--data cases=cases_long.tsv`.
 
 ### 2.3 `projected =` and the incidence/prevalence axis
 
-`projected` is the model quantity scored against `observed`:
+`projected` is the model quantity scored against the outcome column:
 
 - `incidence(flow)` — a flow accumulated between observations
-  (`CumulativeFlow`); the accumulator resets after each observation (the
-  `Interval`/`TemporalKind` axis). Reset semantics across cadences are proposal
-  B.
-- `prevalence(comp)` / a state expression — read at the observation instant
-  (`Instant`); no accumulation, no reset.
+  (`CumulativeFlow`), the accumulator resetting after each observation
+  (`Interval`/`TemporalKind`);
+- `prevalence(comp)` / a state expression — read at the instant (`Instant`); no
+  accumulation, no reset.
 
-This axis is **orthogonal** to per-observation aux (§3): a serosurvey is
-prevalence + a denominator; positivity is incidence + a denominator; a hospital
-census is prevalence + pure. Both axes compose.
+Orthogonal to per-observation aux (§3): serosurvey = prevalence + denominator;
+positivity = incidence + denominator; census = prevalence + pure.
 
-## 3. Per-observation auxiliary data — declared, typed, stream-scoped
+## 3. Per-observation auxiliary data — declared, typed value columns
 
-The denominator `n` in `binomial(n = tested, p)` references the per-observation
-column `tested`. The design choice that makes this **sound** is that such
-columns are **declared and typed** (in `columns { }`), not free-floating names.
+The denominator `n` in `binomial(n = tested, p)` references the declared column
+`tested`. The design is sound precisely because the columns are **declared and
+typed** in `columns { }`, not free-floating names.
 
-### 3.1 Why declared, not a free expression
+### 3.1 Why declared, not a free expression — and the dimcheck work this requires
 
-It is tempting to say "`n` is just an expression that references a data column."
-That is **unsound**, because every name in a rate/likelihood expression today is
-resolved, dimension-checked, and differentiated **at compile time in OCaml**,
-long before any data file is read. A free, load-time column reference breaks all
-three:
+Every name in a likelihood expression is resolved, dimension-checked, and
+differentiated **at compile time in OCaml**, before any file is read. A free,
+load-time column reference breaks all three; a declared column fixes them:
 
-- **Name resolution.** A data column `tested` and a parameter `N` would compete
-  for the same namespace with no defined precedence — a silent re-binding. The
-  malaria positivity example uses `N_tested` as a _parameter_ today; migrating
-  it to a column while the param is still declared is exactly the collision.
-  Stream-scoped _declared_ columns resolve unambiguously and a name collision
-  with a global is a **hard error** naming both.
-- **Dimensional checking.** The dimchecker never sees the file; an undeclared
-  column has no dimension, so `binomial(n = tested)` cannot be checked. A
-  declared `tested : count` can.
-- **Autodiff.** The gradient graph is built at compile time; a data column is
-  `∂/∂θ = 0`, but only if the compiler _knows_ it is data and not a parameter. A
-  declared column announces this; a free name does not.
-- **Per-row presence.** If `n = tested` and `tested` is missing on a row whose
-  outcome is present, a free reference yields `binomial(n = NaN)` — the exact
-  NaN-into-resampling failure the value-cell guard prevents, reintroduced at the
-  auxiliary column. Declaring the columns lets `bind` enforce "outcome and its
-  referenced covariates are present together, or it is a hole" — unconstructible
-  otherwise.
+- **Name resolution.** A declared, stream-scoped column resolves unambiguously;
+  a collision with a parameter/compartment/forcing/level name is a **hard error
+  naming both** (vs a silent re-binding).
+- **Dimensional checking — including a real fix.** **Today the binomial `n` is
+  NOT dimension-checked**: `dimcheck.ml` (~l. 843) does `ignore (infer … b.n)`
+  and only constrains `p`; BetaBinomial `n` and the Poisson rate are likewise
+  inferred-and-discarded. So "declaring `tested : count`" alone does not verify
+  the denominator today. **This proposal adds the missing `constrain_known` on
+  the Binomial/BetaBinomial `n` (to `count`) and the Poisson rate/offset** as
+  in-scope work, so a declared `tested : count` feeding `n` is actually checked.
+  (Until that lands, the column type drives Rust-side cell typing +
+  autodiff-constant marking only — stated honestly, not over-claimed.)
+- **Autodiff.** A declared data column is `∂/∂θ = 0`; the gradient path already
+  treats binomial `n` as constant (`obs_model.rs:206`), so a declared column
+  slots in with no new gradient machinery.
+- **Per-row presence.** Declaring value+aux columns together lets `bind` enforce
+  "outcome and its referenced covariates present together, or it is a hole" — so
+  `binomial(n = NaN)` (a missing denominator poisoning resampling) is
+  unconstructible.
 
-So per-observation aux is a **typed, stream-scoped declaration**
-(`columns { }`), and the likelihood references it by name. This is the
-established pomp `covar`/`covartable` idiom made type-safe. It is neither a
-magic `Counted` keyword (too narrow — see §3.2) nor a free expression (unsound).
+This is the pomp `covar`/`covartable` idiom made type-safe — not a magic
+`Counted` keyword (too narrow), not a free expression (unsound).
 
-### 3.2 Aux roles — one mechanism, distinct likelihood semantics
+### 3.2 Aux roles — one mechanism, distinct likelihood semantics; where the guard lives
 
-Per-observation aux is not one shape. The declared-column mechanism carries all
-of them; the _semantics_ live in the likelihood family:
+The declared-column mechanism carries every role; the semantics live in the
+likelihood family:
 
-- **Denominator that caps the outcome** — Binomial/BetaBinomial `n`. The cap
-  `observed ≤ n` and `n > 0` are enforced **in the binomial family's eval** (not
-  a cell type), so the guard holds whether `n` is a column, a param, or a
-  constant. (This is where the stashed `Counted{value, denom}` prototype's
-  discipline lives — generalized.)
-- **Offset that scales a rate** — a Poisson person-time/exposure column
-  (`rate = lambda * projected, offset = person_time`); `k` is _unbounded_ (not a
-  cap). A single `Counted` pair cannot represent this; a declared column does.
+- **Denominator that caps the outcome** — Binomial/BetaBinomial `n`. The
+  **per-row data check `value ≤ n` and `n > 0` is enforced in `bind`, with a
+  located row number** (a malformed survey row is a _data_ error caught at load,
+  not a fit-time `-Inf`); the _projected-vs-n_ relationship stays a guard in the
+  family eval. A binding cap that yields `-Inf` does not poison resampling
+  (`normalize_log_weights` handles a non-finite weight), but the gradient is 0
+  there while the value is `-Inf`, so the gradient-consistency test must include
+  a near-`k = n` boundary point.
+- **Offset that scales a rate** — a Poisson person-time column
+  (`rate = lambda * projected, offset = person_time`); `k` is unbounded. A
+  declared column expresses it; a `Counted` pair cannot.
 - **Per-observation covariate** — an externally supplied reporting fraction or
-  normalizer the mean references (`mean = report_frac * projected`), or
-  per-round assay sensitivity/specificity. Same mechanism.
+  normalizer (`mean = report_frac * projected`), per-round assay Se/Sp. Same
+  mechanism.
 
-`n`-from-data and `n`-as-expression both work, because both are expressions; one
-happens to reference a declared column. A fixed survey size is `n = N0` (param);
-a real survey is `n = tested` (column).
+### 3.3 Deferred, not foreclosed
 
-### 3.3 Deferred, but not foreclosed
+- **Multinomial / compositional outcomes** (serotype/variant splits; two
+  outcomes sharing one denominator). `ObsCell` is designed **extensible**
+  (`Scalar | Counted | Vector`) so the type does not wall this off; the
+  multinomial likelihood itself is deferred.
+- **Censoring** (detection limits, reporting triangles) — changes the
+  likelihood's functional form; deferred, named loudly.
 
-- **Multinomial / compositional outcomes** (serotype/variant splits,
-  age-distribution-of-cases). `ObsCell` must be designed **extensible**
-  (`Scalar | Counted | Vector`) so the _type_ does not wall this off, even
-  though the multinomial likelihood is deferred.
-- **Censoring** (detection limits, reporting triangles/nowcasting). This changes
-  the likelihood's _functional form_ (an integral over a region), not just an
-  argument — a different kind of feature. Deferred and named loudly.
+## 4. Indexing — strata × time, explicit, by name
 
-## 4. Indexing — strata × time
+### 4.1 Header-form `[p in dim]` — the language-wide idiom
 
-### 4.1 `every` (time) + `by` (strata), by-name, per-cell
-
-A stratified observation declares its time cadence with `every` and its strata
-with `by` (the keyword `stratify(by = ...)` already uses):
+A stratified observation uses the **same `name[p in dim]` indexing idiom the
+rest of the language uses** (transitions `infection[p in patch]`, compartments,
+`let`s):
 
 ```camdl
-sero : {
-  every = 365 'days
-  by    = age                       # long-form file carries an `age` column
-  columns { seropos : count, sampled : count }
-  seropos ~ binomial(n = sampled, p = R[age] / N[age])
+cases[p in patch, a in age] : {
+  columns {
+    time  : time
+    patch : dim
+    age   : dim
+    cases : count
+  }
+  projected = incidence(infection[p, a])
+  every     = 7 'days
+  cases ~ neg_binomial(mean = rho * projected, r = k)
 }
 ```
 
-Long-form file:
+The brackets bind the loop variables `p`, `a` for the **whole block** (both
+`projected` and the `~` are evaluated once per `(patch, age)` cell with `p`, `a`
+bound) — consistent with how `infection[p in patch] : S[p] --> E[p]` binds `p`
+for the transition body. The bracket form was preferred over a parallel `by =`
+keyword (which would have been a second, colliding strata mechanism) and over
+indexing on the `~` line (which would leave `projected`'s use of `p`/`a`
+unbound). A non-stratified stream omits the brackets; its name is a clean data
+key.
 
-```
-time        age     seropos  sampled
-2024-01-01  child   30       100
-2024-01-01  adult   12       200
-```
+**Two declarations, distinct jobs, cross-checked (not redundant):**
+`columns
+{ patch : dim }` declares the _file column_ and validates it;
+`[p in patch]` binds the _loop variable_ for expressions. The compiler
+cross-checks them both ways: every `[_ in X]` needs an `X : dim` column (no data
+to stratify by, else error); a `: dim` column with no bracket index is flagged
+(the data is finer than the model iterates — you meant to aggregate, §5, or
+forgot a bracket). `time` is never a bracket index (it is the axis, declared
+`time : time`).
 
-`by = age` binds `age` as the stream's stratum index (like a transition's
-`[p in patch]`); each row binds `age` and is scored independently
-(`30 ~ binomial(100, R[child]/N[child])`). Multi-strata is `by = age × region`.
-A non-stratified stream omits `by` (index is time only).
+### 4.2 By-name level matching, and what "bins differ" does
 
-**Three by-name mappings**, all by name, not position:
+A `: dim` column's **values are matched to the model dimension's levels by
+name** (a camdl dimension _is_ a categorical factor; its levels are the bins).
+By-name is a correctness requirement — a positional match would silently score
+one stratum's data against another compartment. From it:
 
-1. time index — a column named `time` (override §4.2);
-2. strata index — the `by` column's values matched to the model's dimension
-   **levels**;
-3. value columns — `columns { }` matched to file headers.
+- **same bins** (file `age ∈ {0-4, 5-14, 15+}` = model levels) → fine;
+- **different cutpoints** (file `{0-5, 6-17, 18+}`) → **hard error: "unknown
+  level `0-5` in column `age`; model `age` levels are [0-4, 5-14, 15+]"** —
+  never a silent remap (mapping `0-5` onto `0-4` would misassign data). Re-bin
+  upstream;
+- **data coarser than model, nested** (file `{child, adult}`, model
+  `[0-4, 5-14, 15+]`) → the same unknown-level error, fixed by an explicit
+  aggregation (§5) — "coarser age data" is §5's 1:many aggregation on the age
+  dimension;
+- **finer / non-nested** → re-bin upstream (data prep); not silently inferred.
 
-**The time column is by-name too — fixing a residual positional binding.** Today
-the value column is by-name (the G1 fix), but the _time_ column is still
-**positional**: the loader takes column 0 (`pfilter.rs:813`, "first column is
-always time"), ignoring its name. That is the same fragility class as the G1
-value bug — reorder the columns so time is not first and the wrong column is
-silently read as time. This proposal makes the time index **by-name** like the
-other two: a column named `time` by convention, the `time = <col>` override
-(§4.2) when it is named otherwise, and **no positional fallback** (a file with
-no `time` column and no override is a located error, not a silent column-0
-bind). So all three indices — time, strata, value — resolve by name with
-overrides, and the last positional binding is gone.
+Unknown level = located error; a model level absent from the file = that
+`(time, level)` cell is **unobserved** (a hole — no term, no false zero), which
+is the normal partial-coverage serosurvey shape.
 
-By-name strata matching is a **correctness requirement**: a positional match
-would silently score one stratum's data against another compartment — the worst
-silent-wrong-answer. From it, two loud behaviors fall out:
-
-- **unknown level** (file `age = infant`, model `[child, adult]`) → hard error
-  naming the valid levels;
-- **missing level** (model has `elderly`, the survey did not cover it) → that
-  `(time, stratum)` cell is **unobserved** (a hole — no term, no false zero).
-  This is the normal partial-coverage serosurvey shape, handled by construction.
-
-### 4.2 Convention with explicit override
-
-The default is convention: a file column named after the dimension carries that
-stratum; `time`/value columns are named to match. An explicit override covers
-files that do not follow it:
-
-```camdl
-sero : {
-  time  = report_date              # the time index is the `report_date` column
-  by    = age from age_band        # the `age` dimension is carried by `age_band`
-  columns { seropos = n_pos : count, sampled = n_tested : count }
-  seropos ~ binomial(n = sampled, p = R[age] / N[age])
-}
-```
-
-Every mapping has a by-name default and a `role = file_column` override:
-`by = age` ≡ `by = age from age`; the time index is a column named `time`,
-overridden by `time = <col>` (this replaces today's positional "first column is
-always time" — §4.1); value columns default to their `columns { }` names,
-overridden by `stream_name = file_column`.
-
-> **Open decision D2 — convention vs always-explicit.** My recommendation:
-> **convention-with-override** (terse common case; by-name matching keeps the
-> correctness-critical strata→levels mapping safe regardless; the override
-> handles messy ministry files). The conservative alternative is to require the
-> `from`/`= col` clauses always (no convention) — defensible for data you do not
-> control, but boilerplate that gets copy-pasted wrong.
+**No `_col` override and no implicit defaults in v1.** A file whose headers do
+not match the declared names is renamed upstream (a transparent, auditable data
+step). An external-name → internal-name remapping is a deferred cross-cutting
+feature (§9), not a per-column escape hatch here.
 
 ## 5. Aggregation — data coarser than the model
 
-### 5.1 The risk
+### 5.1 What the auto-sum actually is
 
-Auto-summing across strata (§1.4) is risky because it **decouples the
-aggregation from the reporting model**, which cannot be decoupled. If reporting
-varies by stratum (`rho[patch]`), the honest national observation is
+Auto-summing across strata decouples the aggregation from the reporting model.
+Crucially, for **uniform** reporting the auto-sum `rho * incidence(infection)`
+and the explicit `rho * sum(p in patch,
+incidence(infection[p]))` compute the
+_identical_ value — so the gate below is a **forcing-function to make the
+reporting-level decision explicit, not a fix for a wrong number in the uniform
+case**. The genuinely-wrong case is _non-uniform_ reporting written as uniform:
+the honest quantity is `sum(p in patch, rho[p] * incidence(infection[p]))`, and
+applying a single `rho` outside the sum is silently wrong.
 
-```camdl
-observed ~ neg_binomial(mean = sum(p in patch, rho[p] * incidence(infection[p])), r = k)
-```
+### 5.2 Require explicit aggregation when the data is coarser than the model
 
-— sum the _reported_ incidence — whereas the easy auto-summing form
-
-```camdl
-observed ~ neg_binomial(mean = rho * incidence(infection), r = k)   # silently sums TRUE incidence
-```
-
-applies one reporting fraction to summed _true_ incidence: a different, wrong
-quantity whenever reporting is non-uniform. Auto-sum silently assumes **uniform
-reporting** and **full coverage**, and **silently re-sums** if a stratum is
-added later.
-
-### 5.2 Require explicit aggregation
-
-"Data coarser than the model strata" is a **1:many aggregation**. National is
-the extreme (all strata → one); sub-national (district model, state data) needs
-an **aggregation map** (`district × state`) — which is a _table_ (the
-reader/mapping machinery again). The rule:
-
-- data at model resolution (`by = patch`, file has a `patch` column) → per-cell,
-  no aggregation;
-- data coarser than the model → the aggregation must be **explicit**.
-
-A bare un-indexed projection that would silently sum across strata, on a
-stratified model, is a **hard error** naming the choice:
+The gate is decidable at `bind` (a `CumulativeFlowSum` over >1 flow on a stream
+whose data is coarser than the family). A bare un-indexed projection that would
+silently sum across strata, on a stratified model, is a **hard error** naming
+the choice:
 
 ```
 error: stream `national_cases` is national, but the model is stratified by `patch`.
        An incidence projection over a stratified family would silently sum all
        patches and apply reporting uniformly. State the aggregation explicitly:
-         • uniform reporting:   observed ~ ...( rho * sum(p in patch, incidence(infection[p])) )
-         • per-patch reporting: observed ~ ...( sum(p in patch, rho[p] * incidence(infection[p])) )
-       For coarser-than-national data, supply an aggregation map (a `district × region` table).
+         • uniform reporting:   cases ~ ...( rho * sum(p in patch, incidence(infection[p])) )
+         • per-patch reporting: cases ~ ...( sum(p in patch, rho[p] * incidence(infection[p])) )
 ```
 
 This forces the modeler to confront _where reporting applies_ and which strata
-are actually covered — the load-bearing modeling decision the auto-sum hides.
+are covered. It has a known false-positive class — a model stratified for
+transmission with genuinely national data and genuinely uniform reporting is
+_correct_ and is asked to write the longer `rho * sum(...)` (the same value) —
+which is why this is a "make the decision explicit" gate, accepted as
+loud-by-design (D3).
 
-> **Open decision D3 — require-explicit vs auto-sum-with-flag.** My
-> recommendation: **require explicit** (hard error). The failure is a quietly
-> miscalibrated likelihood (per-stratum reporting collapsed to uniform), not a
-> typo — the "informs public-health decisions" stakes argue for loud. This is a
-> **breaking change** to the current auto-sum (needs a migration diagnostic).
-> The alternative (auto-sum + a warning naming the assumptions) preserves
-> convenience but warnings get skimmed on exactly a silent-wrong-answer class.
+**Sub-national 1:many aggregation is deferred.** District model + state data
+needs an aggregation map (`district × state`, itself a table) plus a partition
+check (each district in exactly one state) and a precise "`by`-bound index
+inside `sum`" binding — a sub-feature with its own correctness surface. v1
+supports the national (all-to-one) case via explicit `sum(...)`; sub-national
+rollup is named in §9.
 
-## 6. The binding seam
+## 6. The binding seam — and the no-positional fix for tables
 
 ### 6.1 `BoundObs`, typed columns, extensible cells
 
 `bind(streams) -> Result<(BoundObs, BindReport), BindReport>` stays the single
-validated constructor (every path routes through it). Changes:
+validated constructor every path routes through. `ObsCell` becomes
+**extensible** (`Scalar | Counted { value, denom } | …`, Vector reserved for
+multinomial); the denominator/offset/covariate columns are typed fields the
+compiler knows; the strata index (§4) and aggregation (§5) resolve in `bind`,
+where the model's dimension levels and the file header are both in hand.
 
-- `ObsCell` becomes **extensible**:
-  `Scalar(f64) | Counted { value, denom } |
-  …` (Vector reserved for
-  multinomial). The denominator/offset/covariate columns are typed fields the
-  compiler knows (so `∂/∂θ = 0` and dimcheck hold — §3.1).
-- a stream carries its declared **columns** (name → type) and the resolved
-  outcome/aux roles from the `~` statement;
-- the strata index (§4) and aggregation (§5) are resolved in `bind`, where the
-  model's dimension levels and the file's columns are both in hand.
+### 6.2 Unify the reader; make tables by-name too; keep the concepts distinct
 
-**Two resolution stages, kept distinct.** The **stream → file** key
-(`--data
-es=…`, `[data.observations] es = …`) is resolved at the fit-config
-layer (`runner.rs`), matched to `model.observations[].name`; this is unchanged
-(§2.2). The **file → columns** mapping (which column is time, which are the
-value/aux/ strata-index columns) is resolved inside `bind`/`read_long`, **by
-name**, with the `time = <col>` / `by = … from <col>` / `stream = <col>`
-overrides (§4). The two stages are independent: the key says _which file_,
-`read_long` + the `columns { }`/index declarations say _which fields in it_ — so
-the same by-name-with-override discipline governs every column, and no column is
-bound by position.
-
-### 6.2 Unify the reader, not the concepts
-
-The genuinely-shared, bug-prone substrate is **read a delimited file → map
-columns to typed roles → validate → index**. Tables (positional), observations
-(by name), and forcings (`time_col`/`value_col`) each re-implement it; G1 was
-the observation loader drifting toward the table policy, and the gh#98
-date-parse battery test exists only because OCaml-compile and Rust-load parse
-dates separately. Extract one core:
+The shared, bug-prone substrate is **read a delimited file → map columns to
+typed roles → validate → index**. Extract one core:
 
 ```rust
 read_long(file, role_policy, time_opts) -> Result<Vec<TypedRow>, BindError>
 //   separator-from-extension, comment/blank skipping, header detection,
-//   ONE date-column parser (kills the gh#98 battery), finiteness guard.
-//   role_policy ∈ { Positional (tables), ByName (observations, forcings) }
+//   one Rust-side date parser, finiteness guard.
 ```
 
-Do **not** unify the concepts above this line. `tables` (compile-time,
+Per the governing principle, **`role_policy` is `ByName` for observations,
+forcings, AND tables** — the positional table mapping (`spec §6`) is the
+implicit/positional binding to eliminate, so tables move to declared, by-name
+column binding through this same reader. (This is the cross-cutting fix the "no
+positional mapping" principle requires; flag it explicitly as a tables change,
+with golden updates.) Unifying the reader removes G1 and the three Rust loaders'
+duplication.
+
+**Scope correction:** this does **not** kill the gh#98 battery. That test is a
+_cross-language_ OCaml↔Rust contract (OCaml parses date literals in source at
+compile; Rust parses data files at load); a Rust-side reader cannot remove the
+OCaml parser, so the OCaml↔Rust caltime golden stays. `read_long` unifies the
+Rust-side parsing only. (And the by-name-time flip — §1.3 — must land _with_ the
+reader extraction, or the shared core re-introduces a positional default.)
+
+Do **not** unify the concepts above the reader: `tables` (compile-time,
 dimension-indexed, RHS coefficient), `forcings` (compile-time, time-indexed,
-**interpolated** RHS), and `observations` (load-time, grid-indexed, scored LHS,
-**never interpolated**) stay three distinct role-typed declarations. The
-load-bearing reason: **forcings interpolate; observations must not** — a unified
-"indexed data source" with an interpolation knob puts _imputing a missing
-observation_ (instead of marginalizing it) one autocomplete from the obs loader,
-which is a correctness regression, not a convenience. Unifying the _reader_
-removes G1 and the gh#98 battery; unifying the _concepts_ would smuggle
-interpolation into the likelihood.
+**interpolated** RHS), `observations` (load-time, grid-indexed, scored LHS,
+**never interpolated**) stay distinct. Forcings interpolate; observations must
+not — a unified "indexed data source" with an interpolation knob would put
+_imputing a missing observation_ (instead of marginalizing it) one autocomplete
+from the obs loader.
 
 ### 6.3 Missing-token policy
 
-Real exports use `NA`, `-`, `.`, blank, and `<5` interchangeably. Today only
-`NA` maps to a hole and everything else errors, so a routine file fails to load
-with an invisible fix. `bind` takes a per-stream/per-file **missing-token set**
-(default `{NA}`, extensible: `missing = {NA, -, .}`) mapping listed tokens to
-holes; unlisted non-numeric tokens remain hard errors. Censored tokens (`<5`)
-stay a loud reject pending the censoring feature (§3.3).
+`bind` takes a per-stream missing-token set (default `{NA}`, extensible:
+`missing = {NA, -, .}`) mapping listed tokens to holes; unlisted non-numeric
+tokens are hard errors; censored tokens (`<5`) stay a loud reject pending §3.3.
 
-## 7. Two evaluation paths must agree
+## 7. Two evaluation paths must agree; and the spine connection
 
-Scoring (`log_likelihood_from_flows_and_counts`, the gh#139 seam) and emission
-(`sample`/`mean`, `multi_stream_obs.rs:708/730`, used for synthetic data and
-posterior-predictive) evaluate the likelihood's argument expressions through
-_different_ functions. A state- or forcing-dependent likelihood argument (a
-detection probability depending on a compartment and `rain(t)`) must evaluate
-**identically** in both — the gh#6 class (a likelihood arg scored against a
-zero-scratch buffer, off by ~100×, bit twice). Per-observation covariates (§3)
-and forcings-in-likelihoods widen exactly this gap, and only the scoring path is
-gated. **A cross-path agreement test** (sample vs score on a state+forcing+aux
-likelihood) is required, not optional, and `dt` semantics at the obs boundary
-(`dt = 0.0` there, `multi_stream_obs.rs:256`) must be specified for any
-`dt`-referencing forcing used in a likelihood.
+**Sample/score/mean/gradient.** Scoring
+(`log_likelihood_from_flows_and_counts`), emission (`sample`/`mean`,
+`multi_stream_obs.rs:708/730`), and the gradient evaluate the likelihood's
+argument expressions through _four_ hand-mirrored functions. A state- or
+forcing-dependent argument (a detection probability over a compartment and
+`rain(t)`) must evaluate identically in all four — the gh#6 class. The
+cross-path agreement test must be a **matrix over (likelihood family) × (aux
+role) × (path)**, not a single point, and the `dt = 0.0`-at-obs-boundary literal
+(present in all four contexts) must be one shared `EvalCtx` constructor so a
+`dt`-referencing forcing in a likelihood cannot silently read `0` in one path.
+
+**The spine connection (clean).** The scheduling substrate (`schedule.rs`)
+builds a `Schedule` from `dt`, a `StepPolicy`, and a **sorted list of
+observation boundaries** (`Schedule::with_obs`, `:187`); `build_substep_grid`
+turns that into the substep grid + substep→obs map. The binding here produces
+exactly that input shape (a stream's observation times), so it rides the
+existing `with_obs` seam with no change to the spine — and proposal B's **union
+axis is just the sorted _merge_ of all streams' times**, the same shape, fed to
+the same `Schedule`. The per-stream membership + per-observer reset is a layer
+on top of the substep walk, not a change to it. The recent scheduling-spine work
+deliberately decoupled the observation layer from the spine, which is what makes
+this a drop-in.
 
 ## 8. Scope and deferrals
 
-- **In:** the `~` surface; `columns { }` typed schema; per-obs aux as declared
-  columns (denominator/offset/covariate); strata×time indexing with by-name
-  mapping and partial-coverage holes; explicit cross-strata aggregation; the
-  `read_long` reader unification; extensible `ObsCell`; missing-token policy.
-- **Companion (proposal B):** multi-cadence union axis + per-observer flow
-  reset. This proposal's per-stream schedules feed B's union axis; B's reset
-  keys on the declared schedule, not value presence.
-- **Deferred, named:** multinomial outcomes (cell type stays extensible);
-  censoring (LOD/reporting triangles); a stateful environmental reservoir under
-  chain-binomial inference (the QSS-derived-expression path is the fittable
-  interim — the gh#191 capability gap is the real blocker).
+- **In:** the `~` surface; `columns { }` full explicit schema; per-obs aux as
+  declared typed columns; header-form `[p in dim]` indexing with by-name level
+  matching and partial-coverage holes; explicit national aggregation; the
+  `read_long` reader unification incl. **by-name tables**; extensible `ObsCell`;
+  missing-token policy; the dimcheck-`n` fix.
+- **Companion (proposal B):** multi-cadence union axis + per-observer reset.
+- **Deferred, named:** external-name → internal-name remapping (`<=` / `=>`, a
+  cross-cutting feature with tables/forcings); multinomial / shared-denominator
+  outcomes; censoring; sub-national 1:many aggregation; **time-free
+  summary-statistic observations** (final size, peak timing — a different
+  observation _kind_, no time index); wide-form stratified files (one column per
+  level — common Excel export; long-form only in v1); a stateful environmental
+  reservoir under chain-binomial inference (QSS-derived-expression is the
+  fittable interim; gh#191 is the real blocker).
 
-## 9. Migration (breaking changes — alpha, but signposted)
+## 9. Migration (breaking; alpha, signposted)
 
-Per `docs/language-changes.md` policy, each breaking change rejects the old form
-with a diagnostic naming the replacement:
+Each breaking change rejects the old form with a diagnostic naming the
+replacement (and a `docs/language-changes.md` entry):
 
-- `likelihood = D(...)` → `observed ~ D(...)` (or `<col> ~ D(...)`).
+- `likelihood = D(...)` → `<value_col> ~ D(...)`.
+- positional/implicit column binding → required `columns { }` with by-name
+  headers; positional "column 0 is time" → `time : time`.
 - un-indexed cross-strata auto-sum on a stratified model → the §5.2 hard error.
-- (no change for non-stratified single-value streams beyond `likelihood =` →
-  `~`.)
+- **tables: positional → by-name** declared columns (golden updates; flag
+  loudly).
 
 ## 10. Implementation phases + tests
 
-1. **`~` surface + `projected`/`observed`** — parser production reusing `TILDE`;
-   no IR change (sugar over `Likelihood`); migration diagnostic for
-   `likelihood
-   =`. Test: golden models reparse; `likelihood =` rejected with
-   the hint.
-2. **`read_long` reader unification** — one core, `role_policy` param; route the
-   three obs loaders + table + forcing readers through it; one date parser.
-   Test: G1 unconstructible (positional fallback gone); gh#98 battery retired in
-   favor of the single parser; missing-token set honored.
-3. **`columns { }` + declared per-obs aux + extensible `ObsCell`** — typed
-   columns; `n`/offset/covariate from columns; `k≤n`/`n>0` in the binomial
-   family. Tests: dimcheck rejects an undeclared column; name-collision hard
-   error; `binomial(n = tested)` recovers a positivity fit; person-time offset.
-4. **Strata×time indexing** — `by`, by-name level matching, per-cell scoring,
-   partial-coverage holes, the override forms. Tests: unknown level errors;
-   missing level → unobserved cell; per-cell scoring matches a hand computation;
-   `from`/`= col` override.
-5. **Aggregation** — the coarser-than-model hard error; `sum(p in patch, ...)`
-   explicit forms; the aggregation-map (table) path. Tests: bare auto-sum on a
-   stratified model errors with the §5.2 message; explicit per-stratum-reporting
-   national fit recovers params; a `district × region` rollup.
-6. **Cross-path agreement** — sample vs score on a state+forcing+aux likelihood
-   (§7); `dt`-at-boundary specified.
+1. **`~` surface** — parser production reusing `TILDE` (without the `| dim`
+   suffix; keyword-only RHS); no IR change; `likelihood =` migration diagnostic.
+2. **`read_long` reader unification + by-name everywhere** — one core, `ByName`
+   policy for obs/forcings/tables; the by-name-time flip lands here. Tests: G1
+   unconstructible; positional-time gone; a header absent from `columns { }`
+   errors; tables bind by name (golden updates).
+3. **`columns { }` + declared aux + extensible `ObsCell` + the dimcheck-`n`
+   fix** — tests: dimcheck rejects a dimensionally-wrong `n`; name-collision
+   hard error; positivity fit recovers params; person-time offset; `value ≤ n`
+   row check in `bind` with a located row.
+4. **Header-form indexing** — by-name level matching, per-cell scoring,
+   partial-coverage holes, bins-differ errors, brackets↔columns cross-check.
+5. **National aggregation** — the §5.2 hard error; explicit `sum(...)` forms.
+6. **Cross-path agreement matrix** (§7) + the shared `dt`-boundary `EvalCtx`.
+
+Tests follow the matrix (family × aux-role × path) — no single-point coverage.
 
 ## 11. References
 
-- The k-of-n family and the aux-role taxonomy (denominator/offset/covariate;
-  censoring as a form change) — surveillance practice: pomp measles/`bsflu`
-  (King, Nguyen & Ionides 2016, JSS); `spatPomp`; EpiNow2/epinowcast; FluView /
-  FluNet; GISAID variant frequencies; WHO polio AFP+ES; Rogan–Gladen (1978) and
-  Hui–Walter (1980) for assay correction.
-- Auto-sum today: `multi_stream_obs.rs:157` (`CumulativeFlowSum`).
-- The four identical-times rejections (proposal B): `fit/runner.rs:355`,
-  `pfilter.rs:208`, `profile.rs:516`, `multi_stream_obs.rs:439`.
-- The two-eval-path / gh#6 hazard: `obs_model.rs` scoring vs
-  `multi_stream_obs.rs:708/730` emission; `dt = 0.0` at :256.
-- Prior `~` grammar: `parser.mly` ll. 161–185 (`TILDE`).
-- Reader/date duplication: gh#98 (the date-equivalence battery test).
-- Superseded: `2026-06-06-observation-system.md` (carried forward: the
-  `bind`-not-join seam, `Option`-hole missing-data semantics, the NaN guard, the
-  positional-fallback removal — all retained and extended here).
+- Aux-role taxonomy + the k-of-n family — pomp (King, Nguyen & Ionides 2016
+  JSS), spatPomp, EpiNow2/epinowcast, FluNet, GISAID, WHO polio AFP+ES,
+  Rogan–Gladen (1978), Hui–Walter (1980).
+- Auto-sum today: `multi_stream_obs.rs:157`. Dimcheck-`n` discard:
+  `dimcheck.ml ~843`. Positional time: `pfilter.rs:813`. Positional tables:
+  `spec §6`. Prior `~` grammar + `| dim`: `parser.mly:161-194`. Indexed-obs
+  form: `parser.mly:463`. Forcing `_col` convention: `spec:1093`. Two-eval-path
+  / gh#6: `obs_model.rs`, `multi_stream_obs.rs:708/730`. Spine seam:
+  `schedule.rs:187`, `pgas.rs build_substep_grid`. gh#98 cross-language pin.
+- Superseded: `2026-06-06-observation-system.md` (carried forward:
+  bind-not-join, `Option` holes, the NaN guard, the positional-fallback removal
+  — extended here).

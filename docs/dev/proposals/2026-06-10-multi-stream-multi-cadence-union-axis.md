@@ -4,8 +4,8 @@
   side only: let `camdl fit` / `pfilter` / `profile` consume observation streams
   on **different schedules** (e.g. polio AFP monthly + ES biweekly). The
   `simulate` side already produces multi-cadence data (one TSV per stream).
-- **Issue:** the remaining gap from the sparse-observation lift. gh — (file an
-  issue on landing).
+- **Issue:** the remaining gap from the sparse-observation lift (gh#171); file a
+  dedicated multi-cadence issue on landing.
 - **Supersedes / relates to:** completes the observation-system work
   (`2026-06-06-observation-system.md`, the sparse/hole machinery this reuses).
   The **denominator surface** (`Counted{value,denom}` for survey positivity) is
@@ -27,10 +27,20 @@ already allow it:
 
 ```camdl
 observations {
-  afp : { projected = incidence(paralysis)  every = 30 'days  likelihood = neg_binomial(mean = rho * projected, r = k) }
-  es  : { projected = prevalence(I_shed)     every = 14 'days  likelihood = poisson(rate = lambda * projected) }
+  afp[p in patch] : {
+    columns   { time : time, patch : dim, cases : count }
+    projected = incidence(paralysis[p])  every = 30 'days
+    cases ~ neg_binomial(mean = rho * projected, r = k)
+  }
+  es[p in patch] : {
+    columns   { time : time, patch : dim, conc : real }
+    projected = prevalence(I_shed[p])    every = 14 'days
+    conc ~ normal(mean = lambda * projected, sd = sigma)
+  }
 }
 ```
+
+(Surface per the sibling proposal A: `columns { }`, `[p in dim]` indexing, `~`.)
 
 `camdl simulate` **handles this**: it writes **one TSV per stream** (`--obs-dir`
 / `--obs-only-dir`), each on its own time axis, and it hard-errors if you ask
@@ -138,23 +148,20 @@ pub struct BoundObs { times: Vec<f64> /* union */, streams: Vec<BoundStream> }
 the per-stream `obs_times` it already carries simply stop having to be
 identical.
 
-**The reset keys on a _declared_ schedule, not value presence.** For a stream
-with a declared cadence (`every = 7 'days`), "scheduled at `t`" is defined by
-the cadence, independent of whether a value is present — so a missing value
-there is a _hole_ (resets) and a union-time the cadence does not include is _not
-scheduled_ (no reset). The only ambiguous case is a stream whose schedule is
-**data-defined** (irregular, "whenever it reports"): a union-time injected by a
-_sibling_ stream falls in a gap that is genuinely neither, and hole-vs-not-
-scheduled give different incidence bins with nothing in the data to
-disambiguate. The rule that removes the ambiguity: an **incidence (`Interval`)**
-stream's reset keys on its **declared opportunity schedule** — its `every`, or,
-for a genuinely irregular stream, an explicitly declared schedule (proposal A
-§4) distinct from its present values — **never** the present-cell union.
-(Prevalence streams have no reset, so this does not arise for them.) This also
-dissolves the "exclude all-hole union times" tension: a reset is keyed on the
-stream's own schedule and fires whether or not the union axis happens to carry
-that instant, so excluding a union-time with no present cells can never drop a
-scheduled reset.
+**Each stream resets on its own observation grid — not on the union.** A
+stream's incidence bins are bounded by **its own observation times**: its
+cadence grid for a regular stream (`every = 7 'days`, including
+scheduled-but-missing `NA` holes), or simply its present rows for an irregular
+stream. The reset fires when the stream is scheduled at a union-time (a member
+of its own grid) and **does not fire at a sibling's union-time that the stream's
+grid does not contain**. So the classic case — stream A on rows {1, 3, 8},
+sibling B at 5, union {1, 3, 5, 8} — is unambiguous: 5 ∉ A's grid, so A does not
+reset at 5; A's bin closes at 8 over (3, 8]. No "declared schedule separate from
+the values" is needed — for an irregular stream the grid _is_ its rows, and a
+sibling's time simply is not in it. (Prevalence streams have no accumulator, so
+no reset, so this never arises for them.) Membership is exactly the per-stream
+`at_union` map: scheduled (member) vs not-scheduled (non-member), with holes
+being members whose value is `None`.
 
 ### 3.2 `bind()` merges instead of rejecting (the shared substrate)
 
@@ -173,46 +180,61 @@ to "every stream's `cells.len() == obs_times.len()`, and
 `at_union.len() ==
 times.len()`."
 
-### 3.3 Per-observer reset (the crux) — baseline subtraction
+### 3.3 Per-observer reset (the crux) — per-stream accumulators reset on each stream's own grid
 
-Per the Im5 canary, the reset becomes "per-flow, indexed by which stream last
-observed." The recommended representation is **baseline subtraction**, which is
-correct even when two incidence streams share a flow index:
+Per the Im5 canary, the reset becomes "flow since **this stream's** last
+observation" — literally a per-incidence-stream accumulator that resets on the
+stream's own grid (§3.1):
 
-- the substep loop keeps **one monotonic** `cum_flows: Vec<u64>` (accumulates
-  all transitions; **never blanket-reset**);
-- each `Interval` (incidence) stream `s` carries a scalar **baseline** `b_s` =
-  `Σ_{i∈s.flows} cum_flows[i]` as of `s`'s last scored observation;
-- `s`'s projected incidence over its current bin =
-  `(Σ_{i∈s.flows} cum_flows[i]) − b_s`;
-- "reset `s`" = `b_s ← Σ_{i∈s.flows} cum_flows[i]` (re-baseline) — fired
-  **only** when `s` is scheduled at this union-time.
+- each `Interval` (incidence) stream `s` carries **its own** flow accumulator
+  over the flows it projects (summed by its `FlowSum` indices), advanced every
+  substep with the dynamics;
+- at a union-time where `s` is scheduled (a member of its grid — value or hole),
+  `s` is scored against its accumulator, then **`s`'s accumulator resets to 0**;
+- at a union-time where `s` is not scheduled (a sibling's time), `s` does
+  nothing — its accumulator keeps running toward `s`'s next scheduled time.
 
-Two incidence streams sharing flow `i` are independent: each subtracts its own
-baseline; re-baselining one never touches the other. This dissolves the (b)/(c)
-fragility the canary flagged. Storage is one `u64` per incidence stream per
-particle (negligible vs the state vector). `Instant` (prevalence) streams carry
-no baseline and never reset (they read state at their scheduled instant).
+This is the bounded, lock-step-safe representation, and it **engineers the
+over/underflow risk out** rather than bounding it. Each accumulator holds only
+one inter-observation interval's flow (the same bound as today's single
+accumulator — population × substeps-per-bin), so there is **no never-reset
+counter to overflow**; it is part of the particle state and is copied with the
+rest of the particle at resampling (`pgas.rs:1117`, `particle_filter.rs:381`),
+so there is **no separate baseline that can fall out of sync under ancestor
+swaps**. Two incidence streams sharing a flow are independent because each has
+its own accumulator over that flow. The cost is storage
+`O(incidence-streams × their-flows × particles)` — a real scaling axis that §7
+gates as bounded at the 774-LGA national model.
+
+(A rejected alternative — "one monotonic, never-reset counter plus per-stream
+baselines you subtract" — computes the identical bins, but a never-reset `u64`
+can overflow on a long national run, and the baseline must be carried in
+lockstep with the particle through ancestor resampling or it underflows. The
+per-stream accumulator above avoids both by construction, which is why it is
+preferred over the subtraction trick.)
 
 The blanket `reset_flows()` at the six sites is replaced by
-`reset_due_baselines(obs_model, state, union_idx)` — re-baseline exactly the
-incidence streams scheduled at `union_idx`. `TemporalKind` is the gate (only
-`Interval` streams have baselines). For the homogeneous case (all streams
-scheduled at every union-index) this reproduces today's semantics exactly — the
+`reset_due_flows(obs_model, state, union_idx)` — reset exactly the incidence
+streams scheduled at `union_idx`. `TemporalKind` is the gate (only `Interval`
+streams accumulate and reset). For the homogeneous case (all streams scheduled
+at every union-index) this reproduces today's blanket reset exactly — the
 **bit-identical-homogeneous test** (§7) is the guard.
 
-> **Gradient note.** `projected` stays a scalar fed to the likelihood args; the
-> baseline only changes how that scalar is computed (upstream of
-> `d logL / d projected`). So `complete_data_loglik_grad` is structurally
-> unaffected — same per-stream re-baseline at the same scheduled substeps.
+> **Gradient note.** Each stream's accumulator is a scalar readout fed to the
+> likelihood args (upstream of `d logL / d projected`), and the reset fires at
+> the same scheduled substeps in value and gradient paths. So
+> `complete_data_loglik_grad` is structurally unaffected — but the §7 test must
+> include a near-`k = n` boundary point, where a binding `value ≤ n` cap makes
+> the value `-Inf` while the gradient is 0 (an inconsistency NUTS must not be
+> misled by).
 
 ### 3.4 Scoring + substep mapping generalize
 
 - `log_likelihood_from_flows_and_counts(cum_flows, counts, union_idx, params)`:
   iterate streams, skip any not scheduled at `union_idx`
   (`at_union[union_idx]
-  == None`), else project (incidence via baseline
-  subtraction; prevalence direct) and score the cell (hole → omit).
+  == None`), else project (incidence from the stream's
+  own accumulator; prevalence direct) and score the cell (hole → omit).
 - `build_obs_at_substep` / `SubstepGrid` map `substep → union_idx` over the
   union axis; the per-stream `at_union` then selects who is due. The snap/exact
   alignment and collision diagnostics are unchanged (they already operate on a
@@ -236,7 +258,7 @@ scheduled at every union-index) this reproduces today's semantics exactly — th
 - The **hole machinery is reused** ("scheduled-but-missing"); only
   "not-scheduled" is new.
 - The **four rejections collapse to one lift** in `bind()`.
-- The **reset change is localized**: one new `reset_due_baselines` replacing the
+- The **reset change is localized**: one new `reset_due_flows` replacing the
   blanket reset at six sites, gated by `TemporalKind`.
 
 ## 6. The fixture: spatial polio AFP + ES
@@ -266,15 +288,15 @@ cadence) from known params; the fit recovers them. Fixture lives in
    `sparse_holes_reset.rs`) — 2 streams, AFP `every=30`, ES `every=14`, fixed
    seed, drainless dynamics so counts are RNG-independent. Assert: AFP's scored
    bin equals the flow over its **30-day** span (not the 14-day union step), and
-   an **ES-only union-time does not re-baseline AFP** (mutation check: forcing a
-   blanket reset makes AFP's bin too small → test fails). This is the canary
-   condition, made executable.
+   an **ES-only union-time does not reset AFP's accumulator** (mutation check:
+   forcing a blanket reset makes AFP's bin too small → test fails). This is the
+   canary condition, made executable.
 2. **`bind_merges_heterogeneous_schedules`** — `bind()` on two different-cadence
    `StreamSpec`s returns `Ok` with `times` = the union and correct per-stream
    `at_union`; the old "identical times" rejection is gone. A 3rd stream that is
    prevalence at a 3rd cadence also binds.
 3. **`homogeneous_is_bit_identical`** — all streams on one cadence: union axis
-   == shared axis, baseline reset == blanket reset, loglik byte-identical to
+   == shared axis, per-stream reset == blanket reset, loglik byte-identical to
    today. Guards the regression.
 4. **End-to-end fit** — the polio AFP+ES fixture: `camdl fit run` (IF2 scout,
    optionally PGAS) on `[synthetic]` data recovers `beta`, coupling `kappa`, and
@@ -284,10 +306,10 @@ cadence) from known params; the fit recovers them. Fixture lives in
 5. **Single-patch reduction cross-check** — one patch, AFP+ES, against a hand /
    pomp-style computation of each stream's bin, to anchor the mechanism where an
    oracle is tractable (no oracle exists for spatial multi-cadence).
-6. **PGAS gradient consistency** — the §3.3 baseline re-baseline reaches
+6. **PGAS gradient consistency** — the §3.3 per-stream reset reaches
    `complete_data_loglik_grad`; finite-difference value-vs-grad on a
-   multi-cadence fixture (also pays down the deferred §6.6 test from the burn-in
-   work).
+   multi-cadence fixture, **including a near-`k = n` boundary point** (§3.3
+   gradient note); also pays down the deferred §6.6 test from the burn-in work.
 
 ## 8. Implementation phases
 
@@ -295,9 +317,9 @@ cadence) from known params; the fit recovers them. Fixture lives in
    `times`, remove the homogeneous rejection; the three CLI loaders
    (`runner.rs`, `pfilter.rs`, `profile.rs`) drop their identical-times checks
    (now `bind()` owns it). Tests 2, 3.
-2. **Per-observer reset** (§3.3) — per-stream baselines + `reset_due_baselines`
-   at the six sites; scoring/substep generalization (§3.4). Tests 1, 3, 6.
-   Highest-risk; PGAS value + gradient.
+2. **Per-observer reset** (§3.3) — per-stream flow accumulators +
+   `reset_due_flows` at the six sites; scoring/substep generalization (§3.4).
+   Tests 1, 3, 6. Highest-risk; PGAS value + gradient.
 3. **Fixture + end-to-end** (§6) — the polio model, `[synthetic]` fit.toml,
    tests 4, 5.
 4. **Docs** — `camdl-inference-spec.md` §3 (the union axis + per-observer
