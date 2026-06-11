@@ -1,6 +1,7 @@
 ---
 date: 2026-06-06
-status: proposal
+status: superseded by 2026-06-10-observation-data-entry-dsl.md
+superseded_by: 2026-06-10-observation-data-entry-dsl.md
 supersedes: 2026-06-05-observation-data-binding.md
 related:
   - 2026-06-06-scheduling-effect-topology.md
