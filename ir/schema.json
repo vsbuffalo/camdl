@@ -646,13 +646,48 @@
 
     "observation_model": {
       "type": "object",
-      "required": ["name", "schedule", "projection", "likelihood"],
+      "required": ["name", "source", "columns", "scored", "projection", "likelihood"],
       "properties": {
         "name": { "type": "string" },
-        "schedule": { "$ref": "#/definitions/observation_schedule" },
+        "source": { "type": "string" },
+        "columns": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/obs_column" }
+        },
+        "scored": { "type": "string" },
+        "emit_schedule": { "$ref": "#/definitions/observation_schedule" },
         "projection": { "$ref": "#/definitions/projection" },
         "likelihood": { "$ref": "#/definitions/likelihood" }
-      }
+      },
+      "additionalProperties": false
+    },
+
+    "obs_column": {
+      "type": "object",
+      "required": ["name", "role"],
+      "properties": {
+        "name": { "type": "string" },
+        "role": {
+          "oneOf": [
+            { "type": "string", "enum": ["time"] },
+            {
+              "type": "object",
+              "required": ["dim"],
+              "properties": { "dim": { "type": "string" } },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["value"],
+              "properties": {
+                "value": { "type": "string", "enum": ["rate", "probability", "count", "positive", "real", "instant", "duration"] }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
 
     "prior_dist": {

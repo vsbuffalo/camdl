@@ -27,13 +27,14 @@ transitions {
 }
 
 observations {
-  detection : {
-    projected  = prevalence(I)
-    every      = 14 'days
+  detection {
+    columns       { time : time, detection : count }
+    projected     = prevalence(I)
+    emit_schedule = every 14 'days
     # BUG: bernoulli's `p` is a probability ∈ [0, 1]; a count there
     # is wrong by dimension. Intent was almost certainly
     # `p = projected / N` (a prevalence fraction).
-    likelihood = bernoulli(p = projected)
+    detection ~ bernoulli(p = projected)
   }
 }
 

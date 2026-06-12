@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.11",
+  "ir_version": "0.12",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "birth_death",
@@ -71,7 +71,13 @@
     "observations": [
       {
         "name": "count",
-        "schedule": {
+        "source": "count",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "count", "role": { "value": "count" } }
+        ],
+        "scored": "count",
+        "emit_schedule": {
           "regular": {
             "start": 1.0,
             "step": 1.0,

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::expr::Expr;
+use crate::parameter::ParamKind;
 
 // ── Projection ────────────────────────────────────────────────────────────────
 
@@ -119,14 +120,52 @@ pub enum ObservationSchedule {
     Regular(RegularSchedule),
 }
 
+// ── Declared file columns ──────────────────────────────────────────────────────
+
+/// The role of a declared file column (the `columns { name : role }` block;
+/// 2026-06-10 observation data-entry §2.2).
+///
+/// Serialises to match the OCaml IR: `Time` → the bare string `"time"`;
+/// `Dim(d)` → `{"dim": d}`; `Value(k)` → `{"value": "<param_kind>"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnRole {
+    /// The time axis (exactly one per stream) — the FIT time source.
+    Time,
+    /// A model dimension; values bind to that dimension's levels.
+    Dim(String),
+    /// An observed value of the given DSL type (count/real/probability/…) —
+    /// either the `~` LHS (scored) or RHS-referenced auxiliary data.
+    Value(ParamKind),
+}
+
+/// One declared file column: header name + role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObsColumn {
+    pub name: String,
+    pub role: ColumnRole,
+}
+
 // ── Observation model ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObservationModel {
-    pub name:        String,
-    pub schedule:    ObservationSchedule,
-    pub projection:  Projection,
-    pub likelihood:  Likelihood,
+    pub name:          String,
+    /// The `from <label>` data-source key — the thing `--data label=file`
+    /// binds a file to (defaults to `name`).
+    pub source:        String,
+    /// The explicit file schema. The loader binds the data file's columns by
+    /// these declared names; the `Time` column is the fit time source.
+    pub columns:       Vec<ObsColumn>,
+    /// The `~` LHS — the declared value column the likelihood scores.
+    pub scored:        String,
+    /// SIMULATE-only emission cadence (`emit_schedule`). The fit path reads
+    /// the data file's time column and never consults this; `None` for a
+    /// fit-only model that omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit_schedule: Option<ObservationSchedule>,
+    pub projection:    Projection,
+    pub likelihood:    Likelihood,
 }
 
 #[cfg(test)]

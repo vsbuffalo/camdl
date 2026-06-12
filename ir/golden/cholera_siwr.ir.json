@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.11",
+  "ir_version": "0.12",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "cholera_siwr",
@@ -203,7 +203,13 @@
     "observations": [
       {
         "name": "reported_cases",
-        "schedule": {
+        "source": "reported_cases",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "reported_cases", "role": { "value": "count" } }
+        ],
+        "scored": "reported_cases",
+        "emit_schedule": {
           "regular": {
             "start": 7.0,
             "step": 7.0,

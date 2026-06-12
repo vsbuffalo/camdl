@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.11",
+  "ir_version": "0.12",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "pure_death",
@@ -46,7 +46,13 @@
     "observations": [
       {
         "name": "population",
-        "schedule": {
+        "source": "population",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "population", "role": { "value": "count" } }
+        ],
+        "scored": "population",
+        "emit_schedule": {
           "regular": {
             "start": 1.0,
             "step": 1.0,

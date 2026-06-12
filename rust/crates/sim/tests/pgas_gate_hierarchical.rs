@@ -57,7 +57,13 @@ fn build_poisson_obs_block() -> ir::observation::ObservationModel {
     use ir::observation::*;
     ObservationModel {
         name: "weekly_cases".into(),
-        schedule: ObservationSchedule::AtTimes(vec![]),
+        source: "weekly_cases".into(),
+        columns: vec![
+            ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+            ir::observation::ObsColumn { name: "weekly_cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+        ],
+        scored: "weekly_cases".into(),
+        emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         projection: Projection::CumulativeFlow("infection".into()),
         likelihood: Likelihood::Poisson(PoissonLikelihood {
             rate: Expr::Projected(ProjectedExpr { projected: () }),

@@ -116,7 +116,13 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
         interventions: vec![],
         observations: vec![IrObs {
             name: "weekly_cases".into(),
-            schedule: ObservationSchedule::AtTimes(vec![]),
+            source: "weekly_cases".into(),
+            columns: vec![
+                ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                ir::observation::ObsColumn { name: "weekly_cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "weekly_cases".into(),
+            emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
             projection: Projection::CumulativeFlow("infection".into()),
             likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {
                 mean: mul(p("rho"), Expr::Projected(ProjectedExpr { projected: () })),

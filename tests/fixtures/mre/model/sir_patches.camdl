@@ -32,15 +32,17 @@ transitions {
 }
 
 observations {
-  cases_north : {
-    projected  = incidence(infection_north)
-    every      = 7 'days
-    likelihood = neg_binomial(mean = rho * projected, r = k)
+  cases_north {
+    columns       { time : time, cases_north : count }
+    projected     = incidence(infection_north)
+    emit_schedule = every 7 'days
+    cases_north   ~ neg_binomial(mean = rho * projected, r = k)
   }
-  cases_south : {
-    projected  = incidence(infection_south)
-    every      = 7 'days
-    likelihood = neg_binomial(mean = rho * projected, r = k)
+  cases_south {
+    columns       { time : time, cases_south : count }
+    projected     = incidence(infection_south)
+    emit_schedule = every 7 'days
+    cases_south   ~ neg_binomial(mean = rho * projected, r = k)
   }
 }
 

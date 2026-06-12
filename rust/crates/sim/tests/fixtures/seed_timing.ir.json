@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.11",
-  "validated_by": "ocaml-compiler-v0.11",
+  "ir_version": "0.12",
+  "validated_by": "ocaml-compiler-v0.12",
   "model": {
     "name": "seed_timing",
     "version": "0.3",
@@ -512,7 +512,13 @@
     "observations": [
       {
         "name": "cases",
-        "schedule": {
+        "source": "cases",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases", "role": { "value": "count" } }
+        ],
+        "scored": "cases",
+        "emit_schedule": {
           "regular": { "start": 0.0, "step": 1.0, "end": 120.0 }
         },
         "projection": { "cumulative_flow": "infection" },

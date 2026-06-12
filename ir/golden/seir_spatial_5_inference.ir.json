@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.11",
-  "validated_by": "ocaml-compiler-v0.11",
+  "ir_version": "0.12",
+  "validated_by": "ocaml-compiler-v0.12",
   "model": {
     "name": "seir_spatial_5_inference",
     "version": "0.3",
@@ -3967,7 +3967,13 @@
     "observations": [
       {
         "name": "cases_p1",
-        "schedule": {
+        "source": "cases_p1",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p1", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p1",
+        "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
         "projection": { "cumulative_flow": "recovery_p1" },
@@ -3986,7 +3992,13 @@
       },
       {
         "name": "cases_p2",
-        "schedule": {
+        "source": "cases_p2",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p2", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p2",
+        "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
         "projection": { "cumulative_flow": "recovery_p2" },
@@ -4005,7 +4017,13 @@
       },
       {
         "name": "cases_p3",
-        "schedule": {
+        "source": "cases_p3",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p3", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p3",
+        "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
         "projection": { "cumulative_flow": "recovery_p3" },
@@ -4024,7 +4042,13 @@
       },
       {
         "name": "cases_p4",
-        "schedule": {
+        "source": "cases_p4",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p4", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p4",
+        "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
         "projection": { "cumulative_flow": "recovery_p4" },
@@ -4043,7 +4067,13 @@
       },
       {
         "name": "cases_p5",
-        "schedule": {
+        "source": "cases_p5",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p5", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p5",
+        "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
         "projection": { "cumulative_flow": "recovery_p5" },

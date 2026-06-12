@@ -780,9 +780,16 @@ mod bind_tests {
     /// likelihood resolution, so the likelihood here only has to be
     /// constructible — it is never resolved in these checks.
     fn ir_obs(name: &str) -> IrObservationModel {
+        use ir::observation::{ColumnRole, ObsColumn};
         IrObservationModel {
             name: name.into(),
-            schedule: ObservationSchedule::AtTimes(vec![]),
+            source: name.into(),
+            columns: vec![
+                ObsColumn { name: "time".into(), role: ColumnRole::Time },
+                ObsColumn { name: name.into(), role: ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: name.into(),
+            emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
             projection: Projection::CumulativeFlow("inc".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: Expr::Projected(ProjectedExpr { projected: () }),
@@ -1005,7 +1012,13 @@ mod hole_scoring_tests {
             observations: vec![
                 IrObs {
                     name: "cases".into(),
-                    schedule: ObservationSchedule::AtTimes(vec![]),
+                    source: "cases".into(),
+                    columns: vec![
+                        ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                        ir::observation::ObsColumn { name: "cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+                    ],
+                    scored: "cases".into(),
+                    emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                     projection: Projection::CumulativeFlow("recovery".into()),
                     likelihood: Likelihood::Poisson(PoissonLikelihood {
                         // rate = rho * projected

@@ -362,7 +362,13 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
             projection: StreamProjection::FlowSum(vec![0]),  // infection
             ir_model: ir::observation::ObservationModel {
                 name: "cases".into(),
-                schedule: ir::observation::ObservationSchedule::AtTimes(vec![]),
+                source: "cases".into(),
+                columns: vec![
+                    ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                    ir::observation::ObsColumn { name: "cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+                ],
+                scored: "cases".into(),
+                emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
                 projection: ir::observation::Projection::CumulativeFlow("infection".into()),
                 likelihood: ir::observation::Likelihood::NegBinomial(
                     ir::observation::NegBinomialLikelihood {

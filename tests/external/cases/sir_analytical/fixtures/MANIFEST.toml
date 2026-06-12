@@ -1,8 +1,8 @@
 reference_sha = "afbc4cb5b47951c2eb619e33bc9c66dca9f7a2d89f67edbc68c842413ab4f620"
-case_sha = "1312106a06a4d8f5aacf57bc6590d796b1fda93102d8a4e84fd2d55dbe244f7d"
+case_sha = "790a74240260100fe31ef380a4ff1a78f333c6b02c3781f0fbf052e1c9aa8334"
 harness_version = "0.1.0"
 fixture_sha = "0cad9eaedf23ac97aae4be71fd6357afb778d64ed6a673eb490d46fb4dae8ce9"
-generated_at = "2026-06-08T16:48:35.210866+00:00"
+generated_at = "2026-06-12T16:11:51.358726+00:00"
 generated_on = "macos-aarch64"
 generated_command = "external-harness bootstrap"
 generated_in_docker = false

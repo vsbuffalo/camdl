@@ -37,27 +37,30 @@ transitions {
 
 observations {
   # Large weekly case counts — normal approximation; SD scales with the mean.
-  cases : {
-    projected  = incidence(infection)
-    every      = 7 'days
-    likelihood = normal(mean = rho * projected, sd = sigma_rel * projected)
+  cases {
+    columns       { time : time, cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ normal(mean = rho * projected, sd = sigma_rel * projected)
   }
 
   # Rare, well-ascertained deaths — Poisson.
-  deaths : {
-    projected  = incidence(disease_death)
-    every      = 7 'days
-    likelihood = poisson(rate = projected)
+  deaths {
+    columns       { time : time, deaths : count }
+    projected     = incidence(disease_death)
+    emit_schedule = every 7 'days
+    deaths        ~ poisson(rate = projected)
   }
 
   # Periodic serosurvey: positives out of n_sero, over-dispersed positivity.
   # True seroprevalence R/N sets the mean; kappa controls overdispersion.
-  seroprev : {
-    projected  = R / N
-    every      = 90 'days
-    likelihood = beta_binomial(n = n_sero,
-                               alpha = projected * kappa,
-                               beta  = (1 - projected) * kappa)
+  seroprev {
+    columns       { time : time, seroprev : count }
+    projected     = R / N
+    emit_schedule = every 90 'days
+    seroprev      ~ beta_binomial(n = n_sero,
+                                  alpha = projected * kappa,
+                                  beta  = (1 - projected) * kappa)
   }
 }
 

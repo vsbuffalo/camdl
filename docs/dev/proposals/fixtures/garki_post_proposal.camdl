@@ -73,10 +73,11 @@ transitions {
 
 # Wave 1 #4: diagnostic_test likelihood for slide-positivity surveys.
 observations {
-  slide_positivity[a in age] : {
-    projected  = prevalence(Y1[a] + Y2[a])
-    every      = 1 'weeks
-    likelihood = diagnostic_test(
+  slide_positivity[a in age] {
+    columns       { time : time, age : dim, slide_positivity : count }
+    projected     = prevalence(Y1[a] + Y2[a])
+    emit_schedule = every 1 'weeks
+    slide_positivity ~ diagnostic_test(
       base = binomial(n = N_tested, p = projected / N_h),
       sens = rho_sens,
       spec = rho_spec

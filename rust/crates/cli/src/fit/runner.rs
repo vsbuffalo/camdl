@@ -270,25 +270,60 @@ impl FitRunConfig {
         // stream name to that file. From here on the loop is the same.
         let dt = fit.config.dt;
         let data_spec = fit.data_spec()?;
-        let model_obs_names: Vec<String> = model.observations.iter()
-            .map(|o| o.name.clone()).collect();
-        let effective = data_spec.effective_observations(&model_obs_names)?;
+        // `--data`/`[data.observations]` keys by the `from <label>` SOURCE
+        // (defaults to the stream name; §2.4). Resolve against the distinct
+        // source labels so several streams can share one wide file.
+        let mut source_labels: Vec<String> = model.observations.iter()
+            .map(|o| o.source.clone()).collect();
+        source_labels.sort();
+        source_labels.dedup();
+        let effective = data_spec.effective_observations(&source_labels)?;
         if effective.is_empty() {
             return Err(
                 "fit.toml [data] resolves to zero observation streams. Either \
                  set `[data] file = \"<path>\"` (one wide TSV) or fill \
-                 [data.observations] (per-stream paths).".into());
+                 [data.observations] (per-source paths).".into());
         }
 
         let mut streams = Vec::new();
         let mut canonical_times: Option<Vec<f64>> = None;
 
-        // Sort by name for deterministic ordering. (IndexMap preserves
-        // insertion order — we pin a sort here so two fits with the
-        // same observations but different toml ordering still hash
-        // identically downstream.)
-        let mut data_entries: Vec<_> = effective.iter().collect();
-        data_entries.sort_by_key(|(k, _)| k.as_str());
+        // Iterate the model's observation blocks whose `source` is BOUND to a
+        // data file (sorted by name for deterministic ordering — two fits with
+        // the same observations but different toml ordering hash identically
+        // downstream). A stream whose source is not in `[data.observations]` is
+        // not fit against — only the bound streams are loaded (the caller may
+        // deliberately fit a subset). Each stream resolves its file via its
+        // declared `source`; columns bind by name.
+        let mut obs_blocks: Vec<&ir::observation::ObservationModel> =
+            model.observations.iter()
+                .filter(|o| effective.contains_key(&o.source))
+                .collect();
+        obs_blocks.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Every bound source must name a real observation stream — a key in
+        // `[data.observations]` (or a `--data NAME=` source) that matches no
+        // stream's `source` is a typo, not a silent no-op.
+        for src in effective.keys() {
+            if !model.observations.iter().any(|o| &o.source == src) {
+                return Err(format!(
+                    "data source '{}' is bound to a file but matches no observation \
+                     stream's source. Available sources: {}",
+                    src,
+                    {
+                        let mut s: Vec<&str> = model.observations.iter()
+                            .map(|o| o.source.as_str()).collect();
+                        s.sort_unstable(); s.dedup();
+                        s.join(", ")
+                    }));
+            }
+        }
+        if obs_blocks.is_empty() {
+            return Err(
+                "no observation stream is bound to a data file — check that \
+                 [data.observations] / --data names match the model's stream \
+                 sources.".into());
+        }
 
         let time_opts = crate::caltime_load::TimeOpts {
             origin: model.origin.as_deref(),
@@ -297,19 +332,16 @@ impl FitRunConfig {
             t_start: compiled.model.simulation.t_start,
             format: crate::caltime_load::TimeFormat::Auto,
         };
-        for (stream_name, data_path) in &data_entries {
-            let (obs, cells) = load_observations(data_path, stream_name, dt, &time_opts)?;
-            let obs_model = model.observations.iter()
-                .find(|o| o.name == **stream_name)
-                .cloned()
-                .ok_or_else(|| format!(
-                    "no observation block named '{}'. Available: {}",
-                    stream_name,
-                    model.observations.iter().map(|o| o.name.as_str()).collect::<Vec<_>>().join(", ")
-                ))?;
+        for obs_model in &obs_blocks {
+            let stream_name = obs_model.name.clone();
+            let data_path = effective.get(&obs_model.source)
+                .expect("filtered to bound sources above");
+            let (obs, cells) = load_observations(data_path, obs_model, dt, &time_opts)?;
+            let obs_model: ir::observation::ObservationModel = (*obs_model).clone();
             let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
-                &obs_model.projection, &compiled, stream_name,
+                &obs_model.projection, &compiled, &stream_name,
             )?;
+            let stream_name = stream_name.as_str();
 
             // F4: reject an observation strictly before the model origin.
             // The integrator never propagates a particle to a time it has
@@ -1266,11 +1298,17 @@ pub fn auto_rw_sd_from_value(_current_value: f64, lower: f64, upper: f64, transf
 /// missing values; the placeholder view is never scored.
 fn load_observations(
     path: &str,
-    column: &str,
+    obs_model: &ir::observation::ObservationModel,
     dt: f64,
     opts: &crate::caltime_load::TimeOpts,
 ) -> Result<(Vec<Observation>, Vec<Option<sim::inference::ObsCell>>), String> {
-    let (times, cells) = crate::pfilter::load_data_tsv_column_cells(path, column, opts)?;
+    // Bind the file columns BY NAME: the declared `Time`-role column is the
+    // time axis (the by-name-time flip — no positional "column 0 is time"),
+    // and `scored` is the value column.
+    let time_col = crate::pfilter::obs_time_column(obs_model)?;
+    let value_col = &obs_model.scored;
+    let (times, cells) =
+        crate::pfilter::load_data_tsv_column_cells(path, time_col, value_col, opts)?;
     // Validate time alignment (holes keep their time, so this is unaffected by
     // missing values).
     for &time in &times {
@@ -4217,7 +4255,13 @@ dt = 1.0
             observations: vec![
                 IrObs {
                     name: "cases".into(),
-                    schedule: ObservationSchedule::AtTimes(vec![]),
+                    source: "cases".into(),
+                    columns: vec![
+                        ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                        ir::observation::ObsColumn { name: "cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+                    ],
+                    scored: "cases".into(),
+                    emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                     projection: Projection::CumulativeFlow("inflow".into()),
                     likelihood: Likelihood::Normal(NormalLikelihood {
                         mean: Expr::Projected(ProjectedExpr { projected: () }),

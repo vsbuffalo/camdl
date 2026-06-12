@@ -68,7 +68,13 @@ fn build_betabinomial_obs_block(alpha_param: &str) -> ir::observation::Observati
 
     ObservationModel {
         name: "weekly_cases".into(),
-        schedule: ObservationSchedule::AtTimes(vec![]),
+        source: "weekly_cases".into(),
+        columns: vec![
+            ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+            ir::observation::ObsColumn { name: "weekly_cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+        ],
+        scored: "weekly_cases".into(),
+        emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         projection: Projection::CumulativeFlow("infection".into()),
         likelihood: Likelihood::BetaBinomial(BetaBinomialLikelihood { n, alpha, beta }),
     }
@@ -99,7 +105,13 @@ fn build_parametric_derived_proj_block(scale_param: &str) -> ir::observation::Ob
 
     ObservationModel {
         name: "weekly_cases".into(),
-        schedule: ObservationSchedule::AtTimes(vec![]),
+        source: "weekly_cases".into(),
+        columns: vec![
+            ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+            ir::observation::ObsColumn { name: "weekly_cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+        ],
+        scored: "weekly_cases".into(),
+        emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         projection: Projection::DerivedExpr(projection_expr),
         likelihood: Likelihood::Poisson(PoissonLikelihood { rate }),
     }

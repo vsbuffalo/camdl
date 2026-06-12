@@ -62,15 +62,17 @@ init {
 simulate { from = 0 'days  to = 56 'days }
 
 observations {
-  weekly_cases : {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
     projected  = incidence(infection)
-    every      = 7 'days
-    likelihood = poisson(rate = rho * projected)
+    emit_schedule = every 7 'days
+    weekly_cases ~ poisson(rate = rho * projected)
   }
-  biweekly_recoveries : {
+  biweekly_recoveries {
+    columns       { time : time, biweekly_recoveries : count }
     projected  = incidence(recovery)
-    every      = 14 'days
-    likelihood = poisson(rate = rho * projected)
+    emit_schedule = every 14 'days
+    biweekly_recoveries ~ poisson(rate = rho * projected)
   }
 }
 "#;

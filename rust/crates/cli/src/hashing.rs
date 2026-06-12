@@ -379,7 +379,7 @@ mod tests {
     fn ir_with(times: &str, t_end: f64, origin: &str, origin_rd: &str, time_unit: &str,
                format: &str, time_semantics: &str) -> String {
         format!(
-            r#"{{"ir_version":"0.11","validated_by":"camdlc","model":{{
+            r#"{{"ir_version":"0.12","validated_by":"camdlc","model":{{
                 "compartments":["S","I","R"],
                 "transitions":[{{"name":"inf","rate":"beta*S*I"}}],
                 "parameters":[{{"name":"beta","value":0.3}}],

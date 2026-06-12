@@ -33,7 +33,8 @@ use ir::model::{
     ModelStructure, OutputConfig, OutputSchedule, Preset, RegularOutputSchedule, SimulationConfig,
 };
 use ir::observation::{
-    Likelihood, ObservationModel, ObservationSchedule, Projection, RegularSchedule,
+    ColumnRole, Likelihood, ObsColumn, ObservationModel, ObservationSchedule, Projection,
+    RegularSchedule,
 };
 use ir::ode_equation::OdeEquation;
 use ir::parameter::{
@@ -507,11 +508,40 @@ impl ContentAddressed for ObservationSchedule {
     }
 }
 
+impl ContentAddressed for ColumnRole {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::observation::ColumnRole");
+        // Permanent variant indices (run-id stability) — new roles append.
+        match self {
+            ColumnRole::Time => h.write_u32(0),
+            ColumnRole::Dim(d) => {
+                h.write_u32(1);
+                h.write_str(d);
+            }
+            ColumnRole::Value(k) => {
+                h.write_u32(2);
+                k.hash_into(h);
+            }
+        }
+    }
+}
+
+impl ContentAddressed for ObsColumn {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::observation::ObsColumn");
+        h.write_str(&self.name);
+        self.role.hash_into(h);
+    }
+}
+
 impl ContentAddressed for ObservationModel {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::observation::ObservationModel");
         h.write_str(&self.name);
-        self.schedule.hash_into(h);
+        h.write_str(&self.source);
+        self.columns.hash_into(h);
+        h.write_str(&self.scored);
+        self.emit_schedule.hash_into(h);
         self.projection.hash_into(h);
         self.likelihood.hash_into(h);
     }

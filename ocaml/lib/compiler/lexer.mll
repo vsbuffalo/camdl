@@ -114,6 +114,8 @@
       "at_day",        AT_DAY;
       "likelihood",    LIKELIHOOD;
       "origin",        ORIGIN;
+      "columns",       COLUMNS;
+      "emit_schedule", EMIT_SCHEDULE;
     ];
     t
 

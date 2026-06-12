@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.11",
+  "ir_version": "0.12",
   "validated_by": "hand-curated-fixture",
   "model": {
     "name": "seir_spatial_5",
@@ -8031,7 +8031,13 @@
     "observations": [
       {
         "name": "cases_p1",
-        "schedule": {
+        "source": "cases_p1",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p1", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p1",
+        "emit_schedule": {
           "regular": {
             "start": 0.0,
             "step": 7.0,
@@ -8062,7 +8068,13 @@
       },
       {
         "name": "cases_p2",
-        "schedule": {
+        "source": "cases_p2",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p2", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p2",
+        "emit_schedule": {
           "regular": {
             "start": 0.0,
             "step": 7.0,
@@ -8093,7 +8105,13 @@
       },
       {
         "name": "cases_p3",
-        "schedule": {
+        "source": "cases_p3",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p3", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p3",
+        "emit_schedule": {
           "regular": {
             "start": 0.0,
             "step": 7.0,
@@ -8124,7 +8142,13 @@
       },
       {
         "name": "cases_p4",
-        "schedule": {
+        "source": "cases_p4",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p4", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p4",
+        "emit_schedule": {
           "regular": {
             "start": 0.0,
             "step": 7.0,
@@ -8155,7 +8179,13 @@
       },
       {
         "name": "cases_p5",
-        "schedule": {
+        "source": "cases_p5",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "cases_p5", "role": { "value": "count" } }
+        ],
+        "scored": "cases_p5",
+        "emit_schedule": {
           "regular": {
             "start": 0.0,
             "step": 7.0,

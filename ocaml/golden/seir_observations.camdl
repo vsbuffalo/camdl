@@ -26,16 +26,18 @@ transitions {
 }
 
 observations {
-  weekly_cases : {
-    projected  = incidence(infection)
-    every      = 7 'days
-    likelihood = neg_binomial(mean = rho * projected, r = k)
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
   }
 
-  detection : {
-    projected  = prevalence(I)
-    every      = 14 'days
-    likelihood = bernoulli(p = p_detect)
+  detection {
+    columns       { time : time, detection : count }
+    projected     = prevalence(I)
+    emit_schedule = every 14 'days
+    detection     ~ bernoulli(p = p_detect)
   }
 }
 

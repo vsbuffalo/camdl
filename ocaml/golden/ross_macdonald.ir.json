@@ -1,4 +1,4 @@
-{"ir_version":"0.11","validated_by":"ocaml-compiler-v0.11","model":{"name":"ross_macdonald","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.12","validated_by":"ocaml-compiler-v0.12","model":{"name":"ross_macdonald","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_h","kind":"integer"},
 {"name":"I_h","kind":"integer"},
 {"name":"S_v","kind":"integer"},
@@ -14,7 +14,7 @@
 {"name":"death_Iv","stoichiometry":[["I_v",-1]],"rate":{"bin_op":{"op":"mul","left":{"param":"mu_v"},"right":{"pop":"I_v"}}},"metadata":{"origin_kind":"outflow","source_compartment":"I_v","dest_compartment":null},"rate_grad":{"mu_v":{"pop":"I_v"}}},
 {"name":"birth_v","stoichiometry":[["S_v",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"mu_v"},"right":{"param":"M0"}}},"metadata":{"origin_kind":"inflow","source_compartment":null,"dest_compartment":"S_v"},"rate_grad":{"mu_v":{"param":"M0"},"M0":{"param":"mu_v"}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[
-{"name":"slide_positivity","schedule":{"regular":{"start":0.0,"step":7.0,"end":365.0}},"projection":{"current_pop":"I_h"},"likelihood":{"binomial":{"n":{"param":"N_tested"},"p":{"bin_op":{"op":"add","left":{"bin_op":{"op":"mul","left":{"param":"rho_sens"},"right":{"bin_op":{"op":"div","left":{"projected":null},"right":{"binding_ref":"H"}}}}},"right":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"sub","left":{"const":1.0},"right":{"param":"rho_spec"}}},"right":{"bin_op":{"op":"sub","left":{"const":1.0},"right":{"bin_op":{"op":"div","left":{"projected":null},"right":{"binding_ref":"H"}}}}}}}}}}}}
+{"name":"slide_positivity","source":"slide_positivity","columns":[{"name":"time","role":"time"},{"name":"slide_positivity","role":{"value":"count"}}],"scored":"slide_positivity","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":365.0}},"projection":{"current_pop":"I_h"},"likelihood":{"binomial":{"n":{"param":"N_tested"},"p":{"bin_op":{"op":"add","left":{"bin_op":{"op":"mul","left":{"param":"rho_sens"},"right":{"bin_op":{"op":"div","left":{"projected":null},"right":{"binding_ref":"H"}}}}},"right":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"sub","left":{"const":1.0},"right":{"param":"rho_spec"}}},"right":{"bin_op":{"op":"sub","left":{"const":1.0},"right":{"bin_op":{"op":"div","left":{"projected":null},"right":{"binding_ref":"H"}}}}}}}}}}}}
 ],"parameters":[
 {"name":"a","value":{"mode":"estimated","bounds":[0.1,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"b_h","value":{"mode":"estimated","bounds":[0.05,0.8],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null},

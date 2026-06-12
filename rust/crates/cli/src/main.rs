@@ -794,12 +794,15 @@ fn run_simulate(a: &args::SimulateArgs) {
         // Validate schedule compatibility for --obs (single file)
         if obs_path.is_some() && model_check.observations.len() > 1 {
             let schedules: Vec<_> = model_check.observations.iter()
-                .map(|o| obs_schedule_times(&o.schedule))
+                .map(|o| obs_emit_schedule_times(o).unwrap_or_else(|e| {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }))
                 .collect();
             let all_same = schedules.windows(2).all(|w| w[0] == w[1]);
             if !all_same {
                 let descs: Vec<String> = model_check.observations.iter()
-                    .map(|o| format!("{}: {:?}", o.name, o.schedule))
+                    .map(|o| format!("{}: {:?}", o.name, o.emit_schedule))
                     .collect();
                 eprintln!("error: observation streams have different schedules ({}).\n\
                            A single wide TSV cannot hold multi-cadence streams.\n\
@@ -1645,7 +1648,7 @@ impl engine::RunSink for StreamSink {
                 for obs_model in &model.observations {
                     self.obs_stream_names.push(obs_model.name.clone());
                     self.obs_data.push(Vec::new());
-                    let times = obs_schedule_times(&obs_model.schedule);
+                    let times = obs_emit_schedule_times(obs_model)?;
                     self.obs_times_cache.push(times);
                 }
             }
@@ -1796,6 +1799,24 @@ pub(crate) fn obs_schedule_times(
             times
         }
         ir::observation::ObservationSchedule::AtTimes(times) => times.clone(),
+    }
+}
+
+/// Emission times for `simulate --obs` on one stream. `emit_schedule` is the
+/// SIMULATE-only cadence (proposal §2.5); a model that only ever fits omits it
+/// and so cannot generate synthetic data — a hard error naming the fix, not a
+/// silent empty series.
+pub(crate) fn obs_emit_schedule_times(
+    obs: &ir::observation::ObservationModel,
+) -> Result<Vec<f64>, String> {
+    match &obs.emit_schedule {
+        Some(s) => Ok(obs_schedule_times(s)),
+        None => Err(format!(
+            "observation stream '{}' has no `emit_schedule` — it is fit-only \
+             and cannot generate synthetic data. Add `emit_schedule = every N 'unit` \
+             (or `at [...] 'unit`) to the block to `simulate --obs`.",
+            obs.name
+        )),
     }
 }
 
@@ -2821,7 +2842,7 @@ mod tests {
     /// in IR envelope so it parses through the new ir::from_str path.
     fn ir_with_prior(name: &str, bounds: &str, prior_json: &str, extras: &str) -> String {
         format!(r#"{{
-          "ir_version": "0.11",
+          "ir_version": "0.12",
           "validated_by": "test-fixture",
           "model": {{
             "name": "t", "version": "0.3", "time_unit": "days",
@@ -2900,7 +2921,7 @@ mod tests {
         // should succeed (sampled beta + fixed N0).
         // gh#audit-C8: wrap in IR envelope.
         let json = r#"{
-          "ir_version": "0.11",
+          "ir_version": "0.12",
           "validated_by": "test-fixture",
           "model": {
             "name": "t", "version": "0.3", "time_unit": "days",
@@ -3205,7 +3226,7 @@ I0    = { bounds = [1, 1000] }
     fn prior_draws_errors_only_when_neither_fit_toml_nor_ir_has_a_prior() {
         // Hand-rolled IR: `beta` has a log_normal prior, `gamma` has none.
         let ir_json = r#"{
-          "ir_version": "0.11",
+          "ir_version": "0.12",
           "validated_by": "test-fixture",
           "model": {
             "name": "t", "version": "0.3", "time_unit": "days",
@@ -3261,7 +3282,7 @@ gamma = { bounds = [0.05, 1.0] }
     fn prior_draws_fit_toml_prior_wins_over_ir_prior() {
         // beta declared with normal(0, 1) — very narrow around 0.
         let ir_json = r#"{
-          "ir_version": "0.11",
+          "ir_version": "0.12",
           "validated_by": "test-fixture",
           "model": {
             "name": "t", "version": "0.3", "time_unit": "days",

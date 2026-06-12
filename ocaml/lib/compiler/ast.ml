@@ -178,18 +178,54 @@ type likelihood_kind =
   | LikBetaBinomial of (string * expr) list
   | LikBernoulli    of (string * expr) list
 
+(* A measurement-model statement: `<scored_col> ~ Dist(kw = ..., ...)`.
+   The left side is a declared value column (the scored outcome); the right
+   side is the distribution family + its keyword args. Distinct from the
+   prior `~` (no `| dim` pooling suffix — meaningless on a likelihood). *)
+type obs_measurement = {
+  om_scored : string;          (* the `~` LHS: a declared value column *)
+  om_lik    : likelihood_kind; (* the `~` RHS distribution *)
+}
+
+(* The role of a declared file column (the `columns { name : role }` block,
+   2026-06-10 observation data-entry §2.2):
+   - [ColTime]  — the time axis (exactly one per stream); the FIT time source.
+   - [ColDim d] — a model dimension `d`; values bind to that dimension's levels.
+   - [ColValue k] — an observed value of type `k` (count/real/probability/…);
+     either the `~` LHS (scored) or RHS-referenced auxiliary data. *)
+type obs_col_role =
+  | ColTime
+  | ColDim   of string
+  | ColValue of param_type
+
+(* A declared file column: header name + role. *)
+type obs_column = {
+  oc_name : string;
+  oc_role : obs_col_role;
+}
+
 type obs_decl = {
   oname       : string;
   oindices    : index_binding list;
-  (* m12 in 2026-04-19 review: each of schedule/projection/likelihood
-     is mandatory; an empty `cases: {}` block previously defaulted to
-     Poisson(rate=1) every 1 time unit on an incidence projection,
-     silently producing a meaningless but compile-green likelihood.
-     Represented as option here so the expander can emit a specific
-     diagnostic naming the missing field. *)
+  (* `from <label>` — the data SOURCE the stream reads from (§2.4). The
+     source label is the data key (`--data label=file`); None defaults the
+     key to the stream name. *)
+  osource     : string option;
+  (* `columns { name : role }` — the full, explicit file schema (§2.2);
+     always required. None lets the expander emit the missing-field
+     diagnostic. *)
+  ocolumns    : obs_column list option;
+  (* m12 in 2026-04-19 review: each of measurement/projection is mandatory;
+     an empty `cases {}` block previously defaulted to Poisson(rate=1) on an
+     incidence projection, silently producing a meaningless but compile-green
+     likelihood. Represented as option here so the expander can emit a
+     specific diagnostic naming the missing field. *)
+  omeasurement : obs_measurement option;
+  oprojection  : obs_projection option;
+  (* `emit_schedule` (§2.5): the SIMULATE-only emission cadence — when
+     `simulate --obs` writes synthetic rows. Optional and never consulted by
+     the fit path (the data file's `time` column drives there). *)
   oschedule   : schedule_core option;
-  oprojection : obs_projection option;
-  olikelihood : likelihood_kind option;
   oloc        : loc;
 }
 

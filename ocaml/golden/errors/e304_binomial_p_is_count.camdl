@@ -29,13 +29,14 @@ transitions {
 }
 
 observations {
-  prevalence_signal : {
-    projected  = prevalence(I)
-    every      = 7 'days
+  prevalence_signal {
+    columns       { time : time, prevalence_signal : count }
+    projected     = prevalence(I)
+    emit_schedule = every 7 'days
     # BUG (silently accepted today): p must be a probability,
     # but `projected` is a count. The intent was almost certainly
     # `p = projected / N`.
-    likelihood = binomial(n = 1000, p = projected)
+    prevalence_signal ~ binomial(n = 1000, p = projected)
   }
 }
 

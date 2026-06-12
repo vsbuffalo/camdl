@@ -2130,23 +2130,28 @@ transitions {
 
 ```camdl preamble=obs-sir
 observations {
-  weekly_cases : {
-    projected  = incidence(infection)
-    every      = 7 'days
-    likelihood = neg_binomial(mean = rho * projected, r = k)
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
   }
 
-  detection : {
-    projected  = prevalence(I)
-    every      = 14 'days
-    likelihood = bernoulli(p = p_detect)
+  detection {
+    columns       { time : time, detection : count }
+    projected     = prevalence(I)
+    emit_schedule = every 14 'days
+    detection     ~ bernoulli(p = p_detect)
   }
 }
 ```
 
-Syntax notes: the observation name is followed by `: {` (colon required).
-`likelihood` uses `= KIND(...)` (equals sign, function-call form with named
-arguments separated by commas).
+Syntax notes: the observation header is `name { … }` (no colon), optionally
+`name from <source> { … }`. `columns { }` declares the file schema by name
+(exactly one `: time` column). The measurement model uses `<value_col> ~
+KIND(...)` (the `~` operator, function-call form with named arguments).
+`emit_schedule` is the simulate-only emission cadence; a fit-only model omits
+it (the data file's `time` column drives the fit).
 
 ### 12.1 Projections
 
@@ -2184,20 +2189,22 @@ transitions {
 ```camdl preamble=obs-derived
 observations {
   # Pooled-group count (Garki patent prevalence across x3, y3).
-  patent_count : {
-    projected = x3 + y3
-    likelihood = poisson(rate = projected)
-    every = 1 'months
+  patent_count {
+    columns       { time : time, patent_count : count }
+    projected     = x3 + y3
+    patent_count  ~ poisson(rate = projected)
+    emit_schedule = every 1 'months
   }
 
   # Prevalence-as-proportion — the canonical surveillance form.
-  slide_positivity : {
-    projected = (I_m + I_s) / (S + I_m + I_s + R)
-    likelihood = diagnostic_test(
+  slide_positivity {
+    columns          { time : time, slide_positivity : count }
+    projected        = (I_m + I_s) / (S + I_m + I_s + R)
+    slide_positivity ~ diagnostic_test(
       base = binomial(n = N_tested, p = projected),
       sens = rho_sens, spec = rho_spec
     )
-    every = 1 'weeks
+    emit_schedule    = every 1 'weeks
   }
 }
 ```
@@ -2250,10 +2257,11 @@ biology:
 
 ```camdl preamble=obs-sir
 observations {
-  slide_positivity : {
-    projected  = prevalence(I)
-    every      = 1 'weeks
-    likelihood = diagnostic_test(
+  slide_positivity {
+    columns          { time : time, slide_positivity : count }
+    projected        = prevalence(I)
+    emit_schedule    = every 1 'weeks
+    slide_positivity ~ diagnostic_test(
       base = binomial(n = N_tested, p = projected / N),
       sens = rho_sens,
       spec = rho_spec
@@ -2324,10 +2332,11 @@ transitions {
 
 ```camdl preamble=obs-patch
 observations {
-  cases_by_patch[p in patch] : {
-    projected  = incidence(infection[patch = p])
-    every      = 7 'days
-    likelihood = neg_binomial(mean = rho * projected, r = k)
+  cases_by_patch[p in patch] {
+    columns        { time : time, patch : dim, cases_by_patch : count }
+    projected      = incidence(infection[patch = p])
+    emit_schedule  = every 7 'days
+    cases_by_patch ~ neg_binomial(mean = rho * projected, r = k)
   }
 }
 ```
@@ -4061,10 +4070,11 @@ interventions {
 ## ── Observations ───────────────────────────────────────
 
 observations {
-  weekly_cases : {
-    projected  = incidence(infection)
-    every      = 7 'days
-    likelihood = neg_binomial(mean = rho * projected, r = k)
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
   }
 }
 

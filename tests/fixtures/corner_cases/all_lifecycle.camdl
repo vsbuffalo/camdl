@@ -36,10 +36,11 @@ balance {
 }
 
 observations {
-  prevalence : {
-    projected  = prevalence(I)
-    every      = 10 'days
-    likelihood = poisson(rate = projected)
+  prevalence {
+    columns       { time : time, prevalence : count }
+    projected     = prevalence(I)
+    emit_schedule = every 10 'days
+    prevalence    ~ poisson(rate = projected)
   }
 }
 

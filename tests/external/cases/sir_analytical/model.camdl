@@ -21,10 +21,11 @@ transitions {
 }
 
 observations {
-  recoveries : {
-    projected  = incidence(recovery)
-    every      = 1 'days
-    likelihood = poisson(rate = projected)
+  recoveries {
+    columns       { time : time, recoveries : count }
+    projected     = incidence(recovery)
+    emit_schedule = every 1 'days
+    recoveries    ~ poisson(rate = projected)
   }
 }
 

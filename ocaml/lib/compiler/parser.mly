@@ -4,6 +4,78 @@
   let extract_ident_list = function
     | EList items -> List.filter_map (function EIdent (n, _) -> Some n | _ -> None) items
     | _ -> []
+
+  (* Assemble an [obs_decl] from the header (name, indices, source) and the
+     block's key/value entries. The entries are the polymorphic variants
+     produced by [obs_kv]; we fold them into the record fields. A bare
+     `likelihood = D(...)` on the (rejected) migration path arrives as a
+     `Lik`; we wrap it into a measurement with an empty scored column so the
+     parse completes — the E273 diagnostic already fired. *)
+  (* Desugar a distribution call `D(kw = ..., ...)` into a [likelihood_kind].
+     Shared by the `~` measurement form and the (rejected) migration
+     `likelihood = D(...)` path. `diagnostic_test(...)` is compile-time sugar
+     that reparameterizes a binomial/bernoulli `p` by sensitivity/specificity. *)
+  let lik_of_funcall kind args ~sp ~ep =
+    match kind with
+    | "neg_binomial"  -> LikNegBinomial  args
+    | "poisson"       -> LikPoisson      args
+    | "normal"        -> LikNormal       args
+    | "binomial"      -> LikBinomial     args
+    | "beta_binomial" -> LikBetaBinomial args
+    | "bernoulli"     -> LikBernoulli    args
+    | "diagnostic_test" ->
+      let find k = List.assoc_opt k args in
+      (match find "base", find "sens", find "spec" with
+       | Some (EFuncCall (base_kind, base_args)), Some sens_e, Some spec_e ->
+         let one_minus e = EBinOp (Sub, EConst 1.0, e) in
+         let rewrite_p =
+           List.map (fun (k, v) ->
+             if k = "p" then
+               let p_adj =
+                 EBinOp (Add,
+                   EBinOp (Mul, sens_e, v),
+                   EBinOp (Mul, one_minus spec_e, one_minus v))
+               in (k, p_adj)
+             else (k, v))
+         in
+         (match base_kind with
+          | "binomial"  -> LikBinomial  (rewrite_p base_args)
+          | "bernoulli" -> LikBernoulli (rewrite_p base_args)
+          | other ->
+            Parser_errors.push_error ~sp ~ep
+              ~code:"E253"
+              ~msg:(Printf.sprintf
+                "diagnostic_test base must be binomial(...) or bernoulli(...); got %s(...)"
+                other);
+            LikBinomial [])
+       | _ ->
+         Parser_errors.push_error ~sp ~ep
+           ~code:"E254"
+           ~msg:"diagnostic_test requires keyword args base = <binomial|bernoulli>(...), sens = <expr>, spec = <expr>";
+         LikBinomial [])
+    | s ->
+      Parser_errors.push_error ~sp ~ep
+        ~code:"E104"
+        ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test" s);
+      LikPoisson args
+
+  let build_obs_decl name ibs src kvs ~sp ~ep =
+    let cols  = ref None in
+    let sched = ref None in
+    let proj  = ref None in
+    let meas  = ref None in
+    List.iter (function
+      | `Columns c     -> cols  := Some c
+      | `Schedule s    -> sched := Some s
+      | `Proj p        -> proj  := Some p
+      | `Measurement m -> meas  := Some m
+      | `Lik l         -> meas  := Some { om_scored = ""; om_lik = l }
+    ) kvs;
+    { oname = name; oindices = ibs;
+      osource = src; ocolumns = !cols;
+      omeasurement = !meas; oprojection = !proj;
+      oschedule = !sched;
+      oloc = Parser_errors.ast_loc_of ~sp ~ep }
 %}
 
 (* ── Literals & identifiers ────────────────────────────────────────────── *)
@@ -37,6 +109,7 @@
 %token CONSECUTIVE IN BY DIMENSIONS ONLY REAL INTEGER RATE PROBABILITY POSITIVE COUNT
 %token INSTANT DURATION
 %token AND OR NOT IF THEN ELSE EVERY UNTIL AT_KW FORMAT DESCRIPTION NULL TRANSFER LIKELIHOOD ORIGIN BALANCE EVENTS ADD AT_DAY
+%token COLUMNS EMIT_SCHEDULE
 %token PIPE
 
 %token EOF
@@ -459,80 +532,124 @@ index_binding:
 obs_list:
   | obs = list(obs_decl) { obs }
 
+(* Header: `name [p in dim] (from <source>)? { ... }` — NO colon (§2.2/§2.4).
+   The old `name : { ... }` form is rejected by [obs_decl_colon] below with a
+   migration diagnostic. *)
 obs_decl:
-  | name = IDENT ibs = index_bindings_opt COLON LBRACE obs_kvs = list(obs_kv) RBRACE
-      { let sched = ref None in
-        let proj = ref None in
-        let lik = ref None in
-        List.iter (function
-          | `Schedule sc  -> sched := Some sc
-          | `Proj p       -> proj := Some p
-          | `Lik l        -> lik := Some l
-        ) obs_kvs;
-        { oname = name; oindices = ibs;
-          oschedule = !sched; oprojection = !proj; olikelihood = !lik;
-          oloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | name = IDENT ibs = index_bindings_opt src = obs_source_opt LBRACE obs_kvs = list(obs_kv) RBRACE
+      { build_obs_decl name ibs src obs_kvs ~sp:$startpos ~ep:$endpos }
+  (* Migration: the stream header colon was dropped (2026-06-10 §9). Reject
+     `name : { ... }` with a diagnostic that names the rewrite, not a bare
+     E001. *)
+  | name = IDENT ibs = index_bindings_opt src = obs_source_opt COLON LBRACE obs_kvs = list(obs_kv) RBRACE
+      { Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+          ~code:"E270"
+          ~msg:(Printf.sprintf
+            "observation '%s': the stream-header colon was removed" name)
+          ~hint:(Printf.sprintf
+            "write `%s { ... }` (no colon) — see `camdl docs language-changes`" name);
+        build_obs_decl name ibs src obs_kvs ~sp:$startpos ~ep:$endpos }
+
+obs_source_opt:
+  | (* empty *)        { None }
+  | FROM src = IDENT   { Some src }
 
 obs_kv:
-  | s = schedule_core { `Schedule s }
+  (* `columns { name : role }` — the explicit file schema (§2.2). Entries may
+     be comma-separated (`{ time : time, cases : count }`) or newline-separated
+     (one per line) — the comma after each entry is optional, matching the rest
+     of camdl's block style. *)
+  | COLUMNS LBRACE cols = list(obs_column) RBRACE { `Columns cols }
+  (* `emit_schedule = every N 'unit | at [...] 'unit` — simulate-only cadence
+     (§2.5). NOTE the literal form `every N` / `at [...]` (no inner `=`),
+     distinct from the `every = ...` field form used by output/interventions. *)
+  | EMIT_SCHEDULE EQ s = emit_schedule_spec { `Schedule s }
+  (* `<scored_col> ~ Dist(kw = ..., ...)` — the measurement model (§2.1).
+     The `| dim` pooling suffix (legal on a prior `~`) is meaningless here and
+     is rejected by [obs_measurement_pooled] below. *)
+  | scored = IDENT TILDE lik = obs_likelihood
+      { `Measurement { om_scored = scored; om_lik = lik } }
+  (* Migration: a likelihood `~` does NOT carry the prior's `| dim` pooling
+     suffix (§2.1). Point the author at the bracket-index form. *)
+  | scored = IDENT TILDE lik = obs_likelihood PIPE dim = IDENT
+      { Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+          ~code:"E271"
+          ~msg:(Printf.sprintf
+            "observation '%s ~ ...': the `| %s` pooling suffix is a PRIOR \
+             construct and is meaningless on a likelihood" scored dim)
+          ~hint:(Printf.sprintf
+            "to stratify the observation, index the stream header: \
+             `%s[a in %s] from <source> { ... }`" scored dim);
+        `Measurement { om_scored = scored; om_lik = lik } }
+  (* Migration: `every`/`at` at the top of an observation block was the old
+     emission cadence; it is now `emit_schedule = ...` (§2.5). Reject the bare
+     form with the rewrite. *)
+  | s = schedule_core
+      { Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+          ~code:"E272"
+          ~msg:"the observation emission cadence is now written `emit_schedule = ...`"
+          ~hint:(match s with
+            | SchedEvery _ -> "write `emit_schedule = every N 'unit` — see `camdl docs language-changes`"
+            | SchedAt _    -> "write `emit_schedule = at [t1, t2, ...] 'unit` — see `camdl docs language-changes`");
+        `Schedule s }
   | IDENT EQ proj = obs_projection { `Proj proj }
+  (* Migration: `likelihood = D(...)` → `<col> ~ D(...)` (§9). Reject with the
+     rewrite naming the new operator. *)
   | LIKELIHOOD EQ e = expr
-      { `Lik (match e with
-        | EFuncCall (kind, args) -> (match kind with
-            | "neg_binomial"  -> LikNegBinomial  args
-            | "poisson"       -> LikPoisson      args
-            | "normal"        -> LikNormal       args
-            | "binomial"      -> LikBinomial     args
-            | "beta_binomial" -> LikBetaBinomial args
-            | "bernoulli"     -> LikBernoulli    args
-            (* diagnostic_test(base = <binomial|bernoulli>(…, p = π), sens, spec)
-               is pure compile-time sugar: it rewrites the inner `p`
-               expression from π to  sens·π + (1−spec)·(1−π)
-               — the probability that a truly-positive fraction π
-               produces a positive observation under an imperfect
-               test. The IR sees just Binomial/Bernoulli, so the
-               runtime path is identical to hand-inlining the same
-               algebra (see wave 1 / malaria #4). *)
-            | "diagnostic_test" ->
-              let find k = List.assoc_opt k args in
-              (match find "base", find "sens", find "spec" with
-               | Some (EFuncCall (base_kind, base_args)), Some sens_e, Some spec_e ->
-                 let one_minus e = EBinOp (Sub, EConst 1.0, e) in
-                 let rewrite_p =
-                   List.map (fun (k, v) ->
-                     if k = "p" then
-                       let p_adj =
-                         EBinOp (Add,
-                           EBinOp (Mul, sens_e, v),
-                           EBinOp (Mul, one_minus spec_e, one_minus v))
-                       in (k, p_adj)
-                     else (k, v))
-                 in
-                 (match base_kind with
-                  | "binomial"  -> LikBinomial  (rewrite_p base_args)
-                  | "bernoulli" -> LikBernoulli (rewrite_p base_args)
-                  | other ->
-                    Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-                      ~code:"E253"
-                      ~msg:(Printf.sprintf
-                        "diagnostic_test base must be binomial(...) or bernoulli(...); got %s(...)"
-                        other);
-                    LikBinomial [])
-               | _ ->
-                 Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-                   ~code:"E254"
-                   ~msg:"diagnostic_test requires keyword args base = <binomial|bernoulli>(...), sens = <expr>, spec = <expr>";
-                 LikBinomial [])
-            | s ->
-              Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-                ~code:"E104"
-                ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test" s);
-              LikPoisson args)
+      { Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+          ~code:"E273"
+          ~msg:"`likelihood = D(...)` was replaced by the `~` form"
+          ~hint:"write `<value_col> ~ D(...)` where <value_col> is a declared \
+                 column — see `camdl docs language-changes`";
+        `Lik (match e with
+        | EFuncCall (kind, args) -> lik_of_funcall kind args ~sp:$startpos ~ep:$endpos
         | _ ->
           Parser_errors.push_error ~sp:$startpos ~ep:$endpos
             ~code:"E104"
-            ~msg:"likelihood value must be a function call, e.g. likelihood = neg_binomial(mean = projected, dispersion = k)";
+            ~msg:"likelihood value must be a function call, e.g. cases ~ neg_binomial(mean = projected, r = k)";
           LikPoisson []) }
+
+(* The `emit_schedule` literal (§2.5): `every N 'unit` (regular) or
+   `at [t1, t2, ...] 'unit` (explicit times). Lowers to the same
+   [schedule_core] the expander already handles. The `'unit` on the `at` form
+   rides on the list elements (each `expr` may carry a unit). *)
+emit_schedule_spec:
+  | EVERY e = expr
+      { SchedEvery e }
+  | AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET
+      { SchedAt ts }
+
+(* The `~` RHS distribution: `D(kw = ..., ...)` — keyword-only (the positional
+   case is rejected downstream in the expander as E250). *)
+obs_likelihood:
+  | name = IDENT LPAREN args = separated_list(COMMA, kw_expr) RPAREN
+      { lik_of_funcall name args ~sp:$startpos ~ep:$endpos }
+
+(* `columns { name : role }` — one entry per declared file column (§2.2).
+   role ∈ { time, dim, <value-type> }. `time`/`dim` are not reserved
+   keywords; they are matched here by text so a model may still use those
+   words as identifiers elsewhere. *)
+obs_column:
+  | name = IDENT COLON role = IDENT comma_opt
+      { let r = match role with
+          | "time" -> ColTime
+          | "dim"  -> ColDim name
+          | other  ->
+            Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+              ~code:"E274"
+              ~msg:(Printf.sprintf
+                "column '%s': unknown role '%s'" name other)
+              ~hint:"role must be `time`, `dim`, or a value type \
+                     (count, real, probability, positive)";
+            ColValue PReal
+        in { oc_name = name; oc_role = r } }
+  | name = IDENT COLON pk = param_kind comma_opt
+      { { oc_name = name; oc_role = ColValue pk } }
+
+(* Optional separator: columns may be comma- or newline-separated. *)
+comma_opt:
+  | (* empty *) { () }
+  | COMMA       { () }
 
 obs_projection:
   | e = expr { ProjDerived e }

@@ -897,10 +897,11 @@ transitions {
   recovery  : I --> R @ gamma * I
 }
 observations {
-  pos : {
+  pos {
+    columns       { time : time, pos : count }
     projected  = I / N
-    every      = 7 'days
-    likelihood = binomial(n = 100, p = projected)
+    emit_schedule = every 7 'days
+    pos ~ binomial(n = 100, p = projected)
   }
 }
 |camdl} in

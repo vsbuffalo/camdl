@@ -29,13 +29,14 @@ transitions {
 }
 
 observations {
-  weekly_cases : {
-    projected  = incidence(infection)
-    every      = 7 'days
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
     # BUG: NegBinomial's `r` / `dispersion` must be dimensionless.
     # `projected` (a count) is wrong-units; the intended dispersion
     # value would be a fixed scalar or a dimensionless parameter.
-    likelihood = neg_binomial(mean = projected, r = projected)
+    weekly_cases ~ neg_binomial(mean = projected, r = projected)
   }
 }
 

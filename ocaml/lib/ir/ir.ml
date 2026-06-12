@@ -249,41 +249,6 @@ type likelihood =
   | BetaBinomial of beta_binomial_likelihood
   | Bernoulli    of bernoulli_likelihood
 
-type regular_obs_schedule = { start: float; step: float; end_: float }
-
-type observation_schedule =
-  | ObsAtTimes of float list
-  | ObsRegular of regular_obs_schedule
-
-type observation_model = {
-  name:        string;
-  schedule:    observation_schedule;
-  projection:  projection;
-  likelihood:  likelihood;
-}
-
-(* ── Parameters ──────────────────────────────────────────────────────────────── *)
-
-type uniform_prior    = { lower: float; upper: float }
-type normal_prior     = { mean: float; sd: float }
-type log_normal_prior = { mu: float; sigma: float }
-type half_normal_prior = { sigma: float }
-type beta_prior       = { alpha: float; beta: float }
-type gamma_prior      = { shape: float; rate: float }
-type exponential_prior = { rate: float }
-
-type prior_dist =
-  | Uniform     of uniform_prior
-  | Normal_p    of normal_prior
-  | LogNormal   of log_normal_prior
-  | HalfNormal  of half_normal_prior
-  | Beta        of beta_prior
-  | Gamma       of gamma_prior
-  | Exponential of exponential_prior
-  | Fixed       of float
-
-type transform = Log | Logit | Identity
-
 (* DSL parameter-type keyword (the [param_kind] production in parser.mly:
    `rate`, `probability`, `count`, `positive`, `real`, `instant`,
    `duration`). Was a free [string option]; the typed enum is rejected at IR
@@ -318,6 +283,68 @@ let param_kind_of_name = function
   | "instant"     -> Some Instant
   | "duration"    -> Some Duration
   | _             -> None
+
+type regular_obs_schedule = { start: float; step: float; end_: float }
+
+type observation_schedule =
+  | ObsAtTimes of float list
+  | ObsRegular of regular_obs_schedule
+
+(* The role of a declared file column (2026-06-10 observation data-entry §2.2):
+   - [RoleTime]    — the time axis (the FIT time source).
+   - [RoleDim d]   — a model dimension `d`; values bind to its levels.
+   - [RoleValue k] — an observed value of DSL type `k` (count/real/…). *)
+type obs_column_role =
+  | RoleTime
+  | RoleDim   of string
+  | RoleValue of param_kind
+
+type obs_column = {
+  col_name: string;
+  col_role: obs_column_role;
+}
+
+type observation_model = {
+  name:          string;
+  (* `from <label>` — the data SOURCE key the Rust loader binds a file to
+     (`--data label=file`); defaults to [name]. Named [obs_source] (not
+     [source]) to avoid colliding with [table.source : table_source]; the IR
+     JSON key is "source". *)
+  obs_source:    string;
+  (* The explicit file schema (`columns { name : role }`). The Rust loader
+     binds the file's columns by these names. *)
+  columns:       obs_column list;
+  (* The `~` LHS — the declared value column the likelihood scores. *)
+  scored:        string;
+  (* SIMULATE-only emission cadence (`emit_schedule`); the fit path reads the
+     data file's time column and never consults this. [None] for a fit-only
+     model that omits it. *)
+  emit_schedule: observation_schedule option;
+  projection:    projection;
+  likelihood:    likelihood;
+}
+
+(* ── Parameters ──────────────────────────────────────────────────────────────── *)
+
+type uniform_prior    = { lower: float; upper: float }
+type normal_prior     = { mean: float; sd: float }
+type log_normal_prior = { mu: float; sigma: float }
+type half_normal_prior = { sigma: float }
+type beta_prior       = { alpha: float; beta: float }
+type gamma_prior      = { shape: float; rate: float }
+type exponential_prior = { rate: float }
+
+type prior_dist =
+  | Uniform     of uniform_prior
+  | Normal_p    of normal_prior
+  | LogNormal   of log_normal_prior
+  | HalfNormal  of half_normal_prior
+  | Beta        of beta_prior
+  | Gamma       of gamma_prior
+  | Exponential of exponential_prior
+  | Fixed       of float
+
+type transform = Log | Logit | Identity
 
 (** Distribution family for a hierarchical (pooled) prior leaf.
     Mirrors [prior_dist] variants but excludes Fixed (no meaning for

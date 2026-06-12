@@ -702,10 +702,11 @@ let test_obs_output_start_divergence () =
     init { S = N0 - I0  I = I0 }
     simulate { from = 10 'days  to = 120 'days }
     observations {
-      cases : {
-        projected  = incidence(recovery)
-        every      = 1 'days
-        likelihood = poisson(rate = rho * projected)
+      cases {
+        columns       { time : time, cases : count }
+        projected     = incidence(recovery)
+        emit_schedule = every 1 'days
+        cases         ~ poisson(rate = rho * projected)
       }
     }
     output { trajectories { every = 1 'days } }
@@ -719,11 +720,11 @@ let test_obs_output_start_divergence () =
      | _ -> Alcotest.fail "expected OutRegular output schedule");
     (match m.Ir.observations with
      | om :: _ ->
-       (match om.Ir.schedule with
-        | Ir.ObsRegular r ->
+       (match om.Ir.emit_schedule with
+        | Some (Ir.ObsRegular r) ->
           Alcotest.(check (float 1e-9))
             "obs.start = t_start = 10 (NOT min(0,t_start))" 10.0 r.Ir.start
-        | _ -> Alcotest.fail "expected ObsRegular obs schedule")
+        | _ -> Alcotest.fail "expected ObsRegular emit_schedule")
      | [] -> Alcotest.fail "expected an observation model")
 
 (* ── BUG-2: Parameterised table values ───────────────────────────────────────
@@ -1361,10 +1362,11 @@ let test_incidence_positional_and_named_produce_equal_projections () =
     init { S_north = 100  I_north = 1 }
     simulate { from = 0 'days  to = 10 'days }
     observations {
-      north_cases : {
+      north_cases {
+        columns       { time : time, north_cases : count }
         projected  = incidence(recovery[north])
-        every      = 1 'days
-        likelihood = poisson(rate = rho * projected)
+        emit_schedule = every 1 'days
+        north_cases ~ poisson(rate = rho * projected)
       }
     }
   |} in
@@ -1382,10 +1384,11 @@ let test_incidence_positional_and_named_produce_equal_projections () =
     init { S_north = 100  I_north = 1 }
     simulate { from = 0 'days  to = 10 'days }
     observations {
-      north_cases : {
+      north_cases {
+        columns       { time : time, north_cases : count }
         projected  = incidence(recovery[patch = north])
-        every      = 1 'days
-        likelihood = poisson(rate = rho * projected)
+        emit_schedule = every 1 'days
+        north_cases ~ poisson(rate = rho * projected)
       }
     }
   |} in
@@ -3616,10 +3619,11 @@ let test_prevalence_on_stratified_compartment () =
       recovery : I --> R @ gamma * I
     }
     observations {
-      in_latent : {
+      in_latent {
+        columns       { time : time, in_latent : count }
         projected  = prevalence(E)
-        every      = 1 'days
-        likelihood = neg_binomial(mean = projected, r = k)
+        emit_schedule = every 1 'days
+        in_latent ~ neg_binomial(mean = projected, r = k)
       }
     }
     init { S = 990  E[e1] = 5  I = 5 }
@@ -3662,10 +3666,11 @@ let test_projected_bare_stratified_compartment () =
       recovery : I --> R @ gamma * I
     }
     observations {
-      latent_total : {
+      latent_total {
+        columns       { time : time, latent_total : count }
         projected  = E
-        every      = 1 'days
-        likelihood = neg_binomial(mean = projected, r = k)
+        emit_schedule = every 1 'days
+        latent_total ~ neg_binomial(mean = projected, r = k)
       }
     }
     init { S = 990  E[e1] = 5  I = 5 }
@@ -3705,10 +3710,11 @@ let test_prevalence_fully_indexed_stratified () =
       recovery : I --> R @ gamma * I
     }
     observations {
-      first_latent : {
+      first_latent {
+        columns       { time : time, first_latent : count }
         projected  = prevalence(E[e1])
-        every      = 1 'days
-        likelihood = neg_binomial(mean = projected, r = k)
+        emit_schedule = every 1 'days
+        first_latent ~ neg_binomial(mean = projected, r = k)
       }
     }
     init { S = 990  E[e1] = 5  I = 5 }
@@ -3738,10 +3744,11 @@ let test_prevalence_unstratified () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      prev : {
+      prev {
+        columns       { time : time, prev : count }
         projected  = prevalence(I)
-        every      = 1 'days
-        likelihood = neg_binomial(mean = projected, r = k)
+        emit_schedule = every 1 'days
+        prev ~ neg_binomial(mean = projected, r = k)
       }
     }
     init { S = 999  I = 1 }
@@ -3789,10 +3796,11 @@ let stratified_age_seir_with_obs obs_block =
 let test_incidence_on_stratified_transition_sums_strata () =
   let src = stratified_age_seir_with_obs {|
     observations {
-      weekly_cases : {
+      weekly_cases {
+        columns       { time : time, weekly_cases : count }
         projected  = incidence(infection)
-        every      = 7 'days
-        likelihood = neg_binomial(mean = projected, r = k)
+        emit_schedule = every 7 'days
+        weekly_cases ~ neg_binomial(mean = projected, r = k)
       }
     }
   |} in
@@ -3815,10 +3823,11 @@ let test_incidence_on_stratified_transition_sums_strata () =
 let test_incidence_positional_indexed_pins_one_stratum () =
   let src = stratified_age_seir_with_obs {|
     observations {
-      child_cases : {
+      child_cases {
+        columns       { time : time, child_cases : count }
         projected  = incidence(infection[child])
-        every      = 7 'days
-        likelihood = neg_binomial(mean = projected, r = k)
+        emit_schedule = every 7 'days
+        child_cases ~ neg_binomial(mean = projected, r = k)
       }
     }
   |} in
@@ -3835,10 +3844,11 @@ let test_incidence_positional_indexed_pins_one_stratum () =
 let test_incidence_named_indexed_pins_one_stratum () =
   let src = stratified_age_seir_with_obs {|
     observations {
-      adult_cases : {
+      adult_cases {
+        columns       { time : time, adult_cases : count }
         projected  = incidence(infection[age = adult])
-        every      = 7 'days
-        likelihood = neg_binomial(mean = projected, r = k)
+        emit_schedule = every 7 'days
+        adult_cases ~ neg_binomial(mean = projected, r = k)
       }
     }
   |} in
@@ -3862,10 +3872,11 @@ let test_incidence_unstratified () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      cases : {
+      cases {
+        columns       { time : time, cases : count }
         projected  = incidence(infection)
-        every      = 1 'days
-        likelihood = neg_binomial(mean = projected, r = k)
+        emit_schedule = every 1 'days
+        cases ~ neg_binomial(mean = projected, r = k)
       }
     }
     init { S = 999  I = 1 }
@@ -3886,10 +3897,11 @@ let test_let_bound_projection_inlines () =
   let src = stratified_age_seir_with_obs {|
     let I_total = I[child] + I[adult]
     observations {
-      prevalence_total : {
+      prevalence_total {
+        columns       { time : time, prevalence_total : count }
         projected  = I_total
-        every      = 7 'days
-        likelihood = neg_binomial(mean = projected, r = k)
+        emit_schedule = every 7 'days
+        prevalence_total ~ neg_binomial(mean = projected, r = k)
       }
     }
   |} in
@@ -3937,10 +3949,11 @@ let test_poisson_rate_kwarg_parses () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      in_bed : {
+      in_bed {
+        columns       { time : time, in_bed : count }
         projected = prevalence(I)
-        every = 1 'days
-        likelihood = poisson(rate = projected)
+        emit_schedule = every 1 'days
+        in_bed ~ poisson(rate = projected)
       }
     }
     init { S = 999  I = 1 }
@@ -3964,10 +3977,11 @@ let test_poisson_positional_errors () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      in_bed : {
+      in_bed {
+        columns       { time : time, in_bed : count }
         projected = prevalence(I)
-        every = 1 'days
-        likelihood = poisson(projected)
+        emit_schedule = every 1 'days
+        in_bed ~ poisson(projected)
       }
     }
     init { S = 999  I = 1 }
@@ -3988,10 +4002,11 @@ let test_likelihood_unknown_kwarg_errors () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      in_bed : {
+      in_bed {
+        columns       { time : time, in_bed : count }
         projected = prevalence(I)
-        every = 1 'days
-        likelihood = poisson(lambda = projected)
+        emit_schedule = every 1 'days
+        in_bed ~ poisson(lambda = projected)
       }
     }
     init { S = 999  I = 1 }
@@ -4363,10 +4378,11 @@ let test_projected_bare_sum_emits_derived_expr () =
       recover_s : I_s --> R   @ gamma * I_s
     }
     observations {
-      prev : {
+      prev {
+        columns       { time : time, prev : count }
         projected = I_m + I_s
-        every     = 1 'weeks
-        likelihood = poisson(rate = projected)
+        emit_schedule = every 1 'weeks
+        prev ~ poisson(rate = projected)
       }
     }
     init { S = 999  I_m = 1 }
@@ -4402,10 +4418,11 @@ let test_projected_proportion_compiles () =
       recover_s : I_s --> R   @ gamma * I_s
     }
     observations {
-      slide : {
+      slide {
+        columns       { time : time, slide : count }
         projected = (I_m + I_s) / (S + I_m + I_s + R)
-        every     = 1 'weeks
-        likelihood = diagnostic_test(
+        emit_schedule = every 1 'weeks
+        slide ~ diagnostic_test(
           base = binomial(n = N_tested, p = projected),
           sens = rho_sens, spec = rho_spec
         )
@@ -4717,10 +4734,11 @@ let test_diagnostic_test_parses () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      slide_positivity : {
+      slide_positivity {
+        columns       { time : time, slide_positivity : count }
         projected = prevalence(I)
-        every = 1 'weeks
-        likelihood = diagnostic_test(
+        emit_schedule = every 1 'weeks
+        slide_positivity ~ diagnostic_test(
           base = binomial(n = N_tested, p = projected),
           sens = rho_sens,
           spec = rho_spec
@@ -4754,10 +4772,11 @@ let test_diagnostic_test_equivalence () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      slide_positivity : {
+      slide_positivity {
+        columns       { time : time, slide_positivity : count }
         projected = prevalence(I)
-        every = 1 'weeks
-        likelihood = diagnostic_test(
+        emit_schedule = every 1 'weeks
+        slide_positivity ~ diagnostic_test(
           base = binomial(n = N_tested, p = projected),
           sens = rho_sens,
           spec = rho_spec
@@ -4782,10 +4801,11 @@ let test_diagnostic_test_equivalence () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      slide_positivity : {
+      slide_positivity {
+        columns       { time : time, slide_positivity : count }
         projected = prevalence(I)
-        every = 1 'weeks
-        likelihood = binomial(
+        emit_schedule = every 1 'weeks
+        slide_positivity ~ binomial(
           n = N_tested,
           p = rho_sens * projected + (1 - rho_spec) * (1 - projected)
         )
@@ -4819,10 +4839,11 @@ let test_diagnostic_test_bernoulli () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      any_positive : {
+      any_positive {
+        columns       { time : time, any_positive : count }
         projected = prevalence(I)
-        every = 1 'days
-        likelihood = diagnostic_test(
+        emit_schedule = every 1 'days
+        any_positive ~ diagnostic_test(
           base = bernoulli(p = projected),
           sens = rho_sens,
           spec = rho_spec
@@ -4847,10 +4868,11 @@ let test_diagnostic_test_bad_base () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      cases : {
+      cases {
+        columns       { time : time, cases : count }
         projected = prevalence(I)
-        every = 1 'weeks
-        likelihood = diagnostic_test(
+        emit_schedule = every 1 'weeks
+        cases ~ diagnostic_test(
           base = poisson(rate = projected),
           sens = rho_sens,
           spec = rho_spec
@@ -4872,10 +4894,11 @@ let test_diagnostic_test_missing_kwargs () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      cases : {
+      cases {
+        columns       { time : time, cases : count }
         projected = prevalence(I)
-        every = 1 'weeks
-        likelihood = diagnostic_test(
+        emit_schedule = every 1 'weeks
+        cases ~ diagnostic_test(
           base = binomial(n = N_tested, p = projected),
           sens = rho_sens
         )
@@ -6139,10 +6162,11 @@ let outcome_model_ok = {|
       recovery    : I --> R  @ gamma * I
     }
     observations {
-      weekly_cases : {
+      weekly_cases {
+        columns       { time : time, weekly_cases : count }
         projected  = incidence(infection)
-        every      = 7 'days
-        likelihood = neg_binomial(mean = rho * projected, r = k)
+        emit_schedule = every 7 'days
+        weekly_cases ~ neg_binomial(mean = rho * projected, r = k)
       }
     }
     init { S = 100  I = 1 }
@@ -6166,10 +6190,11 @@ let outcome_model_late_err = {|
       recovery    : I --> R  @ gamma * I
     }
     observations {
-      weekly_cases : {
+      weekly_cases {
+        columns       { time : time, weekly_cases : count }
         projected  = incidence(infektion)
-        every      = 7 'days
-        likelihood = neg_binomial(mean = rho * projected, r = k)
+        emit_schedule = every 7 'days
+        weekly_cases ~ neg_binomial(mean = rho * projected, r = k)
       }
     }
     init { S = 100  I = 1 }
@@ -6240,10 +6265,11 @@ let test_validate_reference_error_has_location () =
       recovery  : I --> R @ gamma * I
     }
     observations {
-      cases : {
+      cases {
+        columns       { time : time, cases : count }
         projected  = incidence(recoveryX)
-        every      = 1 'days
-        likelihood = poisson(rate = rho * projected)
+        emit_schedule = every 1 'days
+        cases ~ poisson(rate = rho * projected)
       }
     }
     init { S = 100  I = 1 }

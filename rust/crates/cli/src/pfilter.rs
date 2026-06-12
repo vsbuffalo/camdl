@@ -157,7 +157,19 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         Vec::with_capacity(n_streams);
     for (sname, spath) in &bound_streams {
         let path_str = spath.to_string_lossy().into_owned();
-        match load_data_tsv_column_cells(&path_str, sname, &time_opts) {
+        // Bind columns BY NAME from the stream's `columns { }`: the declared
+        // `time` column is the axis (by-name-time flip), `scored` is the value.
+        let obs_block = model.observations.iter()
+            .find(|o| &o.name == sname)
+            .unwrap_or_else(|| {
+                eprintln!("error: no observation block named '{}'", sname);
+                std::process::exit(1);
+            });
+        let time_col = obs_time_column(obs_block).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+        match load_data_tsv_column_cells(&path_str, time_col, &obs_block.scored, &time_opts) {
             Ok((times, cells)) => {
                 // Dense placeholder view (holes → 0.0) for diagnostics/time.
                 let obs: Vec<Observation> = times.iter().zip(cells.iter())
@@ -743,33 +755,49 @@ pub fn load_data_observations_from_fit_toml(
 fn parse_column_cells<'a>(
     content: &'a str,
     path: &str,
+    time_column: &str,
     column: &str,
 ) -> Result<(Vec<&'a str>, Vec<Option<f64>>, Vec<usize>), String> {
     let mut lines = content.lines();
     let header = lines.next().ok_or("empty data file")?;
     let cols: Vec<&str> = header.split('\t').collect();
 
-    // Find the column index for the requested stream name. Binding is
+    // Find the TIME column index BY NAME (the by-name-time flip — no
+    // positional "column 0 is time" fallback; 2026-06-10 §6.2). A file whose
+    // headers do not match the declared `time` column is a located error.
+    let time_idx = cols.iter().position(|&c| c == time_column)
+        .ok_or_else(|| format!(
+            "time column '{time_column}' not found in data file '{path}'. \
+             Headers present: [{}]. Fix: rename the data column to \
+             '{time_column}' (it must match the declared `time : time` column \
+             name, case-sensitive).",
+            cols.join(", ")))?;
+
+    // Find the VALUE column index for the requested stream. Binding is
     // strict by name — there is NO positional fallback. A typo'd,
     // wrong-cased, or renamed header is a located error, not a silent
     // bind to whatever column happens to be positionally first (G1: a
     // wrong-answer-with-exit-0). The data column header must match the
-    // model's `observe` name exactly.
+    // declared `scored` column exactly.
     let col_idx = cols.iter().position(|&c| c == column)
         .ok_or_else(|| {
-            let available = if cols.len() > 1 {
-                cols[1..].join(", ")
-            } else {
+            let available = cols.iter().filter(|&&c| c != time_column)
+                .copied().collect::<Vec<_>>();
+            let available = if available.is_empty() {
                 "(no value columns — only a time column)".to_string()
+            } else {
+                available.join(", ")
             };
             format!(
-                "observation stream '{column}' not found in data file '{path}'. \
+                "observation column '{column}' not found in data file '{path}'. \
                  Value column headers present: [{available}]. \
                  Fix: rename the data column to '{column}' (it must match the \
-                 model's `observe` name exactly, case-sensitive), or rename the \
-                 model's observation block to match the data header."
+                 declared `scored` column exactly, case-sensitive), or rename the \
+                 model's `columns {{ }}` to match the data header."
             )
         })?;
+
+    let max_idx = time_idx.max(col_idx);
 
     // Two-pass: collect raw time cells + cells, then convert the whole
     // time column at once (whole-column detection — proposal §6.3).
@@ -779,9 +807,9 @@ fn parse_column_cells<'a>(
     for (line_num, line) in lines.enumerate() {
         if line.trim().is_empty() { continue; }
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() <= col_idx {
+        if fields.len() <= max_idx {
             return Err(format!("line {}: expected {}+ columns, got {}",
-                line_num + 2, col_idx + 1, fields.len()));
+                line_num + 2, max_idx + 1, fields.len()));
         }
         let raw = fields[col_idx].trim();
         // TODO: make the missing-value token (`NA`) a user option (CLI flag /
@@ -797,11 +825,11 @@ fn parse_column_cells<'a>(
                     "line {} (t='{}'): non-finite observation value '{}' in column '{}' \
                      — NaN and infinities are not valid observations (a missing value \
                      is the token `NA`). Fix or remove the row.",
-                    line_num + 2, fields[0].trim(), fields[col_idx].trim(), column));
+                    line_num + 2, fields[time_idx].trim(), fields[col_idx].trim(), column));
             }
             Some(value)
         };
-        time_cells.push(fields[0]);
+        time_cells.push(fields[time_idx]);
         rows.push(line_num + 2);
         cells.push(cell);
     }
@@ -809,20 +837,37 @@ fn parse_column_cells<'a>(
     Ok((time_cells, cells, rows))
 }
 
-/// Load observations from a specific column in a TSV file.
-/// The column name must match a header field. First column is always time.
+/// The declared `Time`-role column name for an observation stream — the fit
+/// time source (the by-name-time flip; 2026-06-10 §2.5/§6.2). A stream's
+/// `columns { }` must declare exactly one `: time` column (the OCaml expander
+/// enforces this at compile); this surfaces a clear error if a malformed IR
+/// (no time column) somehow reaches the loader.
+pub fn obs_time_column(obs: &ir::observation::ObservationModel) -> Result<&str, String> {
+    obs.columns.iter()
+        .find(|c| c.role == ir::observation::ColumnRole::Time)
+        .map(|c| c.name.as_str())
+        .ok_or_else(|| format!(
+            "observation stream '{}' declares no `: time` column in `columns {{ }}` \
+             — cannot determine the time axis to bind.",
+            obs.name))
+}
+
+/// Load observations from a TSV by NAME: both `time_column` (the time axis)
+/// and `column` (the value) must match header fields exactly — no positional
+/// fallback for either (the by-name-time flip; 2026-06-10 §6.2).
 ///
 /// DENSE path: a hole (`NA`) is an error here — callers on this path
 /// (survey, profile, fit) do not yet support holes. The sparse/holes pfilter
 /// path uses [`load_data_tsv_column_cells`].
 pub fn load_data_tsv_column(
     path: &str,
+    time_column: &str,
     column: &str,
     opts: &TimeOpts,
 ) -> Result<Vec<Observation>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: {}", path, e))?;
-    let (time_cells, cells, rows) = parse_column_cells(&content, path, column)?;
+    let (time_cells, cells, rows) = parse_column_cells(&content, path, time_column, column)?;
     // Reject holes on the dense path with a located message.
     let mut values: Vec<f64> = Vec::with_capacity(cells.len());
     for (i, c) in cells.iter().enumerate() {
@@ -845,13 +890,14 @@ pub fn load_data_tsv_column(
 /// [`load_data_tsv_column`]; only the value column may contain `NA`.
 pub fn load_data_tsv_column_cells(
     path: &str,
+    time_column: &str,
     column: &str,
     opts: &TimeOpts,
 ) -> Result<(Vec<f64>, Vec<Option<sim::inference::ObsCell>>), String> {
     use sim::inference::ObsCell;
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: {}", path, e))?;
-    let (time_cells, cells, rows) = parse_column_cells(&content, path, column)?;
+    let (time_cells, cells, rows) = parse_column_cells(&content, path, time_column, column)?;
 
     // Convert the time column + run the distinct-substep/off-grid/ordering
     // checks via the same back-half used by the dense path — but on the time
@@ -1114,7 +1160,7 @@ mod tests {
     #[test]
     fn load_data_rejects_out_of_order() {
         let path = write_temp_tsv("out_of_order", "time\tcases\n7\t10\n14\t20\n10\t15\n21\t30\n");
-        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        let result = load_data_tsv_column(&path, "time", "cases", &numeric_opts());
         assert!(result.is_err(), "should reject out-of-order times");
         let err = result.err().unwrap();
         assert!(err.contains("not in chronological order"), "error message: {}", err);
@@ -1126,7 +1172,7 @@ mod tests {
     fn load_data_accepts_equal_times() {
         // Equal times are valid (multi-stream observations at same time point)
         let path = write_temp_tsv("equal_times", "time\tcases\n7\t10\n7\t5\n14\t20\n");
-        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        let result = load_data_tsv_column(&path, "time", "cases", &numeric_opts());
         assert!(result.is_ok(), "equal times should be accepted: {:?}", result.err());
         let obs = result.unwrap();
         assert_eq!(obs.len(), 3);
@@ -1136,7 +1182,7 @@ mod tests {
     #[test]
     fn load_data_accepts_sorted() {
         let path = write_temp_tsv("sorted", "time\tcases\n7\t10\n14\t20\n21\t30\n");
-        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        let result = load_data_tsv_column(&path, "time", "cases", &numeric_opts());
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 3);
         std::fs::remove_file(&path).ok();
@@ -1157,7 +1203,7 @@ mod tests {
         // Pre-fix: 2-column fallback binds column 1 and loads. Post-fix:
         // located error naming the requested column + available headers.
         let path = write_temp_tsv("miscased_2col", "time\tCases\n7\t10\n14\t20\n");
-        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        let result = load_data_tsv_column(&path, "time", "cases", &numeric_opts());
         assert!(result.is_err(),
             "a mis-cased column name must NOT silently bind by position; got Ok({:?})",
             result.as_ref().ok());
@@ -1175,7 +1221,7 @@ mod tests {
         // errored pre-fix, but pin the located-message quality.)
         let path = write_temp_tsv("renamed_wide",
             "time\tcase_count\tdeaths\n7\t10\t1\n14\t20\t2\n");
-        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        let result = load_data_tsv_column(&path, "time", "cases", &numeric_opts());
         assert!(result.is_err(), "absent column name must error");
         let err = result.err().unwrap();
         assert!(err.contains("cases"), "error must name requested column: {}", err);
@@ -1193,7 +1239,7 @@ mod tests {
     #[test]
     fn load_data_tsv_column_rejects_nan_value() {
         let path = write_temp_tsv("nan_value", "time\tcases\n7\t10\n14\tNaN\n21\t30\n");
-        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        let result = load_data_tsv_column(&path, "time", "cases", &numeric_opts());
         assert!(result.is_err(),
             "a NaN observation value must be rejected at load; got Ok({:?})",
             result.as_ref().ok());
@@ -1207,7 +1253,7 @@ mod tests {
     #[test]
     fn load_data_tsv_column_rejects_inf_value() {
         let path = write_temp_tsv("inf_value", "time\tcases\n7\t10\n14\tinf\n21\t30\n");
-        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        let result = load_data_tsv_column(&path, "time", "cases", &numeric_opts());
         assert!(result.is_err(),
             "an infinite observation value must be rejected at load; got Ok({:?})",
             result.as_ref().ok());
@@ -1229,7 +1275,7 @@ mod tests {
         // must pick column 2's values, not deaths in column 1.
         let path = write_temp_tsv("happy_wide",
             "time\tdeaths\tcases\n7\t1\t10\n14\t2\t20\n21\t3\t30\n");
-        let obs = load_data_tsv_column(&path, "cases", &numeric_opts())
+        let obs = load_data_tsv_column(&path, "time", "cases", &numeric_opts())
             .expect("well-formed named column must load");
         assert_eq!(obs.len(), 3);
         assert_eq!(obs[0].value, 10.0);
@@ -1247,7 +1293,7 @@ mod tests {
         // this is the legacy single-stream schema, unchanged by the
         // fallback deletion.
         let path = write_temp_tsv("happy_2col", "time\tcases\n7\t10\n14\t20\n21\t30\n");
-        let obs = load_data_tsv_column(&path, "cases", &numeric_opts())
+        let obs = load_data_tsv_column(&path, "time", "cases", &numeric_opts())
             .expect("named single-stream load");
         assert_eq!(obs.len(), 3);
         assert_eq!(obs[0], Observation { time: 7.0, value: 10.0 });
@@ -1267,8 +1313,8 @@ mod tests {
         let numeric = write_temp_tsv("dated_num", "time\tcases\n0\t10\n7\t20\n14\t30\n");
         let mut o = numeric_opts();
         o.origin = Some("2020-03-01");
-        let from_dates = load_data_tsv_column(&dated, "cases", &o).unwrap();
-        let from_nums = load_data_tsv_column(&numeric, "cases", &numeric_opts()).unwrap();
+        let from_dates = load_data_tsv_column(&dated, "time", "cases", &o).unwrap();
+        let from_nums = load_data_tsv_column(&numeric, "time", "cases", &numeric_opts()).unwrap();
         assert_eq!(from_dates, from_nums);
         std::fs::remove_file(&dated).ok();
         std::fs::remove_file(&numeric).ok();
@@ -1285,7 +1331,7 @@ mod tests {
         use sim::inference::ObsCell;
         // Three weekly rows; the middle one is NA (a hole).
         let path = write_temp_tsv("na_hole", "time\tcases\n7\t10\n14\tNA\n21\t30\n");
-        let (times, cells) = load_data_tsv_column_cells(&path, "cases", &numeric_opts())
+        let (times, cells) = load_data_tsv_column_cells(&path, "time", "cases", &numeric_opts())
             .expect("NA must load as a hole, not error");
 
         // All three grid times are retained — the hole's time stays.
@@ -1306,7 +1352,7 @@ mod tests {
             ("cells_inf", "time\tcases\n7\t10\n14\tinf\n21\t30\n"),
         ] {
             let path = write_temp_tsv(name, body);
-            let result = load_data_tsv_column_cells(&path, "cases", &numeric_opts());
+            let result = load_data_tsv_column_cells(&path, "time", "cases", &numeric_opts());
             assert!(result.is_err(),
                 "non-finite values must still be rejected on the cells path ({name})");
             let err = result.err().unwrap();
@@ -1320,7 +1366,7 @@ mod tests {
         // The dense path (survey/profile/fit) does not support holes yet — an
         // `NA` there is a located error, not a silent placeholder.
         let path = write_temp_tsv("dense_na", "time\tcases\n7\t10\n14\tNA\n21\t30\n");
-        let result = load_data_tsv_column(&path, "cases", &numeric_opts());
+        let result = load_data_tsv_column(&path, "time", "cases", &numeric_opts());
         assert!(result.is_err(), "dense loader must reject NA");
         let err = result.err().unwrap();
         assert!(err.contains("NA") && err.contains("cases"),

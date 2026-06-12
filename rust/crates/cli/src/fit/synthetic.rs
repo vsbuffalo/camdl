@@ -139,7 +139,7 @@ fn generate_one_dataset(
     let mut all_times: Vec<Vec<f64>> = Vec::with_capacity(model.observations.len());
     let mut all_draws: Vec<Vec<f64>> = Vec::with_capacity(model.observations.len());
     for obs_ir in &model.observations {
-        let times = crate::obs_schedule_times(&obs_ir.schedule);
+        let times = crate::obs_emit_schedule_times(obs_ir)?;
         let projected = crate::project_all_obs_times(&traj, obs_ir, &model, &times);
 
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
@@ -287,10 +287,11 @@ transitions {
   recovery  : I --> R @ gamma * I
 }
 observations {
-  cases : {
+  cases {
+    columns       { time : time, cases : count }
     projected  = prevalence(I)
-    every      = 1 'days
-    likelihood = poisson(rate = projected)
+    emit_schedule = every 1 'days
+    cases ~ poisson(rate = projected)
   }
 }
 init { S = 999  I = 1 }

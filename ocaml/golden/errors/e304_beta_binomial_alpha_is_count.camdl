@@ -30,12 +30,13 @@ transitions {
 }
 
 observations {
-  detection_overdisp : {
-    projected  = prevalence(I)
-    every      = 14 'days
+  detection_overdisp {
+    columns       { time : time, detection_overdisp : count }
+    projected     = prevalence(I)
+    emit_schedule = every 14 'days
     # BUG: BetaBinomial's `alpha` is a Beta-distribution shape param
     # — dimensionless by definition. A count is a wrong-units error.
-    likelihood = beta_binomial(n = 1000, alpha = projected, beta = 1.0)
+    detection_overdisp ~ beta_binomial(n = 1000, alpha = projected, beta = 1.0)
   }
 }
 

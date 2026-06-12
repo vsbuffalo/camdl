@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.11",
+  "ir_version": "0.12",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "two_state",
@@ -83,7 +83,13 @@
     "observations": [
       {
         "name": "state_A",
-        "schedule": {
+        "source": "state_A",
+        "columns": [
+          { "name": "time", "role": "time" },
+          { "name": "state_A", "role": { "value": "count" } }
+        ],
+        "scored": "state_A",
+        "emit_schedule": {
           "regular": {
             "start": 1.0,
             "step": 1.0,

@@ -22,10 +22,11 @@ transitions {
   recovery  : I --> R  @ gamma * I
 }
 observations {
-  cases : {
-    projected  = incidence(infection)
-    every      = 2.5 'days
-    likelihood = poisson(rate = projected)
+  cases {
+    columns       { time : time, cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 2.5 'days
+    cases         ~ poisson(rate = projected)
   }
 }
 init {

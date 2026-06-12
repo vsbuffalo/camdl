@@ -132,10 +132,11 @@ balance {
 #   mean = rho * C
 #   var  = rho * C * (1 - rho + psi^2 * rho * C)
 observations {
-  weekly_cases : {
-    projected  = incidence(recovery)
-    every      = 7 'days
-    likelihood = normal(
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(recovery)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ normal(
       mean = rho * projected,
       sd   = sqrt(rho * projected * (1.0 - rho + psi * psi * rho * projected))
     )

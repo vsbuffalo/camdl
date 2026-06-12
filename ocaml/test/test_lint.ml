@@ -185,8 +185,11 @@ let test_observation_only_not_dead () =
       ~stoich:[("S", -1); ("I", 1)]
       (param "beta" *. pop "S" *. pop "I") in
   let obs : observation_model =
-    { name = "recovered";
-      schedule = ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 };
+    { name = "recovered"; obs_source = "recovered";
+      columns = [{ col_name = "time"; col_role = RoleTime };
+                 { col_name = "recovered"; col_role = RoleValue Count }];
+      scored = "recovered";
+      emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
       projection = CurrentPop "R";
       likelihood = Poisson { rate = Projected } } in
   let m = empty_model
@@ -208,8 +211,11 @@ let test_derived_observation_only_not_dead () =
       ~stoich:[("S", -1); ("I", 1)]
       (param "beta" *. pop "S" *. pop "I") in
   let obs : observation_model =
-    { name = "frac_recovered";
-      schedule = ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 };
+    { name = "frac_recovered"; obs_source = "frac_recovered";
+      columns = [{ col_name = "time"; col_role = RoleTime };
+                 { col_name = "frac_recovered"; col_role = RoleValue Real }];
+      scored = "frac_recovered";
+      emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
       projection = DerivedExpr (pop "R" /. (pop "S" +. pop "I" +. pop "R"));
       likelihood = Normal { mean = Projected; sd = const 1.0 } } in
   let m = empty_model

@@ -74,10 +74,11 @@ observations {
   # sens/spec correction — the DSL reads like the biology (what fraction
   # of surveyed hosts are patent), with the measurement-model algebra
   # handled by the compiler (wave 1 / malaria #4).
-  slide_positivity : {
-    projected = prevalence(I_h)
-    every     = 1 'weeks
-    likelihood = diagnostic_test(
+  slide_positivity {
+    columns       { time : time, slide_positivity : count }
+    projected     = prevalence(I_h)
+    emit_schedule = every 1 'weeks
+    slide_positivity ~ diagnostic_test(
       base = binomial(n = N_tested, p = projected / H),
       sens = rho_sens,
       spec = rho_spec

@@ -36,15 +36,17 @@ transitions {
 }
 
 observations {
-  cases_child : {
-    projected  = incidence(recovery_child)
-    every      = 7 'days
-    likelihood = neg_binomial(mean = rho * projected, r = k)
+  cases_child {
+    columns       { time : time, cases_child : count }
+    projected     = incidence(recovery_child)
+    emit_schedule = every 7 'days
+    cases_child   ~ neg_binomial(mean = rho * projected, r = k)
   }
-  cases_adult : {
-    projected  = incidence(recovery_adult)
-    every      = 7 'days
-    likelihood = neg_binomial(mean = rho * projected, r = k)
+  cases_adult {
+    columns       { time : time, cases_adult : count }
+    projected     = incidence(recovery_adult)
+    emit_schedule = every 7 'days
+    cases_adult   ~ neg_binomial(mean = rho * projected, r = k)
   }
 }
 

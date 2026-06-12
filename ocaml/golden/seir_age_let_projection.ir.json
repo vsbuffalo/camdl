@@ -1,4 +1,4 @@
-{"ir_version":"0.11","validated_by":"ocaml-compiler-v0.11","model":{"name":"seir_age_let_projection","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.12","validated_by":"ocaml-compiler-v0.12","model":{"name":"seir_age_let_projection","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_child","kind":"integer"},
 {"name":"S_adult","kind":"integer"},
 {"name":"E_child","kind":"integer"},
@@ -17,7 +17,7 @@
 ],"ode_equations":[],"time_functions":[],"tables":[
 {"name":"C_age","values":[{"const":12.0},{"const":4.0},{"const":4.0},{"const":8.0}],"out_of_bounds":"error"}
 ],"interventions":[],"observations":[
-{"name":"prevalence_total","schedule":{"regular":{"start":0.0,"step":7.0,"end":100.0}},"projection":{"derived_expr":{"pop_sum":["I_child","I_adult"]}},"likelihood":{"neg_binomial":{"mean":{"projected":null},"dispersion":{"param":"k"}}}}
+{"name":"prevalence_total","source":"prevalence_total","columns":[{"name":"time","role":"time"},{"name":"prevalence_total","role":{"value":"count"}}],"scored":"prevalence_total","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":100.0}},"projection":{"derived_expr":{"pop_sum":["I_child","I_adult"]}},"likelihood":{"neg_binomial":{"mean":{"projected":null},"dispersion":{"param":"k"}}}}
 ],"parameters":[
 {"name":"beta","value":{"mode":"estimated","bounds":[0.001,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},

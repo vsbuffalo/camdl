@@ -61,7 +61,13 @@ fn model_with_obs(
         interventions: vec![],
         observations: vec![IrObservationModel {
             name: "obs".into(),
-            schedule: ObservationSchedule::AtTimes(vec![5.0]),
+            source: "obs".into(),
+            columns: vec![
+                ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                ir::observation::ObsColumn { name: "obs".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "obs".into(),
+            emit_schedule: Some(ObservationSchedule::AtTimes(vec![5.0])),
             projection,
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 // rate = projected + 0.1 (floor to avoid Poisson(0) → -inf)
@@ -325,7 +331,13 @@ fn snapshot_reads_post_intervention_state() {
         }],
         observations: vec![IrObservationModel {
             name: "obs".into(),
-            schedule: ObservationSchedule::AtTimes(vec![5.0]),
+            source: "obs".into(),
+            columns: vec![
+                ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                ir::observation::ObsColumn { name: "obs".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "obs".into(),
+            emit_schedule: Some(ObservationSchedule::AtTimes(vec![5.0])),
             projection: Projection::CurrentPop("S".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: Expr::BinOp(BinOpWrap {

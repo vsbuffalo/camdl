@@ -228,7 +228,13 @@ fn pgas_obs_model(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> MultiStre
         projection: StreamProjection::IntCompSum(vec![0]), // N
         ir_model: ir::observation::ObservationModel {
             name: "n_obs".into(),
-            schedule: ir::observation::ObservationSchedule::AtTimes(vec![]),
+            source: "n_obs".into(),
+            columns: vec![
+                ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                ir::observation::ObsColumn { name: "n_obs".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "n_obs".into(),
+            emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
             projection: ir::observation::Projection::CurrentPop("N".into()),
             likelihood: ir::observation::Likelihood::Poisson(
                 ir::observation::PoissonLikelihood {

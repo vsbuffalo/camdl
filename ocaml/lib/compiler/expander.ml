@@ -4321,23 +4321,118 @@ let expand_observations ctx =
         ~message:(Printf.sprintf
           "observation '%s': missing required field '%s'" od.oname name)
         ~hint:(match name with
-          | "schedule" -> "add `every = <period>` or `at = [t1, t2, ...]`"
-          | "projection" -> "add `incidence = <transition>` or `prevalence = <compartment>`"
-          | "likelihood" -> "add `likelihood = poisson(rate = ...)`, `neg_binomial(mean = ..., r = ...)`, etc."
+          | "columns" -> "add `columns { time : time, <value_col> : count }` — the explicit file schema"
+          | "projection" -> "add `projected = incidence(<transition>)` or `projected = prevalence(<compartment>)`"
+          | "measurement" -> "add `<value_col> ~ poisson(rate = ...)`, `neg_binomial(mean = ..., r = ...)`, etc."
           | _ -> "required field")
         ()
     in
-    let sched_v = match od.oschedule with
-      | Some s -> s
-      | None -> missing_field "schedule"; SchedEvery (EConst 1.0)
-    in
+    (* `emit_schedule` is OPTIONAL (§2.5): simulate-only, ignored in fit. *)
+    let sched_v = od.oschedule in
     let proj_v = match od.oprojection with
       | Some p -> p
       | None -> missing_field "projection"; ProjIncidence (od.oname, [])
     in
-    let lik_v = match od.olikelihood with
-      | Some l -> l
-      | None -> missing_field "likelihood"; LikPoisson [("rate", EConst 1.0)]
+    let meas_v = match od.omeasurement with
+      | Some m -> m
+      | None -> missing_field "measurement"; { om_scored = od.oname; om_lik = LikPoisson [("rate", EConst 1.0)] }
+    in
+    let lik_v = meas_v.om_lik in
+    (* `columns { }` coherence checks (OCaml-side, internal — §2.2/§4.1).
+       The file header is not seen here; only the declared schema. *)
+    let columns_v = match od.ocolumns with
+      | Some c -> c
+      | None -> missing_field "columns"; []
+    in
+    (* A "real" measurement is one parsed from a `~` line (non-empty scored).
+       The migration error path (`likelihood = ...`) yields an empty scored —
+       its E273 already fired, so we don't pile on the scored/dead-column
+       coherence checks (E276/E277), which would be spurious noise. *)
+    let has_real_measurement = od.omeasurement <> None && meas_v.om_scored <> "" in
+    let () =
+      (* exactly one `: time` column *)
+      let time_cols = List.filter (fun c -> c.oc_role = ColTime) columns_v in
+      (match time_cols with
+       | [] when od.ocolumns <> None ->
+         Diagnostics.error ctx.diags ~code:"E275" ~loc:od_loc
+           ~message:(Printf.sprintf
+             "observation '%s': `columns { }` declares no `: time` column" od.oname)
+           ~hint:"every stream needs exactly one time axis, e.g. `time : time`" ()
+       | _ :: _ :: _ ->
+         Diagnostics.error ctx.diags ~code:"E275" ~loc:od_loc
+           ~message:(Printf.sprintf
+             "observation '%s': `columns { }` declares %d `: time` columns; exactly one is allowed"
+             od.oname (List.length time_cols))
+           ~hint:"a stream has a single time axis" ()
+       | _ -> ());
+      (* the `~` LHS (scored) must be a declared value column *)
+      let value_cols = List.filter_map (fun c ->
+        match c.oc_role with ColValue _ -> Some c.oc_name | _ -> None) columns_v in
+      if has_real_measurement && od.ocolumns <> None
+         && not (List.mem meas_v.om_scored value_cols) then
+        Diagnostics.error ctx.diags ~code:"E276" ~loc:od_loc
+          ~message:(Printf.sprintf
+            "observation '%s': the scored column '%s' (`%s ~ ...`) is not a declared value column"
+            od.oname meas_v.om_scored meas_v.om_scored)
+          ~hint:(Printf.sprintf
+            "declare it in `columns { }`, e.g. `%s : count`" meas_v.om_scored) ();
+      (* no dead value columns: every value column is the scored LHS or
+         referenced by name on the `~` RHS *)
+      let rhs_names =
+        let rec names_of = function
+          | EIdent (n, _) -> [n]
+          | EIndex (n, items) -> n :: List.concat_map (function
+              | IPosn e -> names_of e | INamed (_, e) -> names_of e) items
+          | EBinOp (_, a, b) -> names_of a @ names_of b
+          | EUnOp (_, e) -> names_of e
+          | ECond (p, a, b) -> names_of p @ names_of a @ names_of b
+          | EFuncCall (_, args) -> List.concat_map (fun (_, e) -> names_of e) args
+          | ESum (_, _, e) -> names_of e
+          | EList es -> List.concat_map names_of es
+          | ERange (a, b) -> names_of a @ names_of b
+          | EConst _ | EUnit _ -> []
+        in
+        match meas_v.om_lik with
+        | LikNegBinomial k | LikPoisson k | LikNormal k
+        | LikBinomial k | LikBetaBinomial k | LikBernoulli k ->
+          List.concat_map (fun (_, e) -> names_of e) k
+      in
+      if has_real_measurement && od.ocolumns <> None then
+        List.iter (fun vc ->
+          if vc <> meas_v.om_scored && not (List.mem vc rhs_names) then
+            Diagnostics.error ctx.diags ~code:"E277" ~loc:od_loc
+              ~message:(Printf.sprintf
+                "observation '%s': value column '%s' is declared but never used \
+                 (neither the scored outcome nor referenced in the likelihood)"
+                od.oname vc)
+              ~hint:"remove the dead column, or reference it in the `~` RHS" ()
+        ) value_cols;
+      (* `[p in dim]` ↔ `: dim` cross-check (§4.1). Every header index needs a
+         `: dim` column; every `: dim` column needs a header index. *)
+      let dim_cols = List.filter_map (fun c ->
+        match c.oc_role with ColDim d -> Some d | _ -> None) columns_v in
+      let header_dims = List.filter_map (function
+        | IBind (_, d) -> Some d | _ -> None) od.oindices in
+      if od.ocolumns <> None then begin
+        List.iter (fun d ->
+          if not (List.mem d dim_cols) then
+            Diagnostics.error ctx.diags ~code:"E278" ~loc:od_loc
+              ~message:(Printf.sprintf
+                "observation '%s': header index `[_ in %s]` has no `%s : dim` column"
+                od.oname d d)
+              ~hint:(Printf.sprintf "declare `%s : dim` in `columns { }`" d) ()
+        ) header_dims;
+        List.iter (fun d ->
+          if not (List.mem d header_dims) then
+            Diagnostics.error ctx.diags ~code:"E278" ~loc:od_loc
+              ~message:(Printf.sprintf
+                "observation '%s': column `%s : dim` has no matching header index `[_ in %s]`"
+                od.oname d d)
+              ~hint:(Printf.sprintf
+                "index the stream header, e.g. `%s[p in %s] { ... }`, or remove the column"
+                od.oname d) ()
+        ) dim_cols
+      end
     in
     let combos = cartesian_product od.oindices ctx in
     (* If no indices, combos = [[]] — one iteration with empty env *)
@@ -4350,12 +4445,13 @@ let expand_observations ctx =
       | None    -> 100.0
       | Some sd -> resolve_float_expr ctx sd.sim_to
     in
-    let schedule = match sched_v with
-      | SchedEvery every ->
+    let emit_schedule = match sched_v with
+      | None -> None
+      | Some (SchedEvery every) ->
         let step = resolve_float_expr ctx every in
-        Ir.ObsRegular { Ir.start = t_start; Ir.step; Ir.end_ = t_end }
-      | SchedAt ts ->
-        Ir.ObsAtTimes (List.map (resolve_float_expr ctx) ts)
+        Some (Ir.ObsRegular { Ir.start = t_start; Ir.step; Ir.end_ = t_end })
+      | Some (SchedAt ts) ->
+        Some (Ir.ObsAtTimes (List.map (resolve_float_expr ctx) ts))
     in
     (* `prevalence(X)` projects a compartment snapshot at observation time.
        If X is Erlang- or otherwise-stratified, the bare name has no concrete
@@ -4533,8 +4629,21 @@ let expand_observations ctx =
       if parts = [] then od.oname
       else od.oname ^ "_" ^ String.concat "_" parts
     in
+    (* `from <label>` data-source key; defaults to the (unexpanded) stream
+       name — every expanded leaf of a stratified stream shares the source. *)
+    let source = match od.osource with Some s -> s | None -> od.oname in
+    let ir_columns = List.map (fun c ->
+      { Ir.col_name = c.oc_name;
+        Ir.col_role = (match c.oc_role with
+          | ColTime    -> Ir.RoleTime
+          | ColDim d   -> Ir.RoleDim d
+          | ColValue k -> Ir.RoleValue (ir_param_kind_of_ast k)); }
+    ) columns_v in
     Some { Ir.name        = obs_name;
-      Ir.schedule;
+      Ir.obs_source     = source;
+      Ir.columns       = ir_columns;
+      Ir.scored        = meas_v.om_scored;
+      Ir.emit_schedule = emit_schedule;
       Ir.projection;
       Ir.likelihood;
     }

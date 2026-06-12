@@ -68,10 +68,11 @@ transitions {
   recovery  : I --> R @ gamma * I
 }
 observations {
-  cases : {
+  cases {
+    columns       { time : time, cases : count }
     projected  = prevalence(I)
-    every      = 1 'days
-    likelihood = poisson(rate = projected)
+    emit_schedule = every 1 'days
+    cases ~ poisson(rate = projected)
   }
 }
 init { S = 999  I = 1 }

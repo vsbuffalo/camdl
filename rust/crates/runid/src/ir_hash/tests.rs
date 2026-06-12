@@ -118,11 +118,17 @@ fn representative_model() -> Model {
         }],
         observations: vec![ObservationModel {
             name: "cases".into(),
-            schedule: ObservationSchedule::Regular(RegularSchedule {
+            source: "cases".into(),
+            columns: vec![
+                ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                ir::observation::ObsColumn { name: "cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "cases".into(),
+            emit_schedule: Some(ObservationSchedule::Regular(RegularSchedule {
                 start: 0.0,
                 step: 7.0,
                 end: 364.0,
-            }),
+            })),
             projection: Projection::CumulativeFlow("infection".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: Expr::bin_op(
@@ -185,13 +191,13 @@ fn representative_model() -> Model {
 /// this value; an unintended change to any hand impl trips it.
 #[test]
 fn model_golden_hash() {
-    // Updated for the gh#191 ParamValue ADT (IR 0.11): `Parameter.value` is
-    // now Fixed|Estimated|Required with `PriorSpec`, replacing the flat
-    // value/bounds/prior/hierarchical/transform/initial_value fields. All hash
-    // via typed variant indices, so every run_id moves; the version handshake
-    // (ir/VERSION -> 0.11) signposts it. (Earlier moves: param_kind/kind
-    // enum-ification at 0.10; table OOB Clamp/Wrap -> Error before that.)
-    const GOLDEN: &str = "7ddadb88875ca30334f60180b5dfa4694a3dfe5aa56b25c5ed94b3eef826ec5f";
+    // Updated for IR 0.12 (observation data-entry, 2026-06-10): the
+    // `ObservationModel` gained `source`/`columns`/`scored` and renamed
+    // `schedule` -> optional `emit_schedule`. All hash into the content
+    // address, so every run_id moves; the version handshake (ir/VERSION ->
+    // 0.12) signposts it. (Earlier moves: gh#191 ParamValue ADT at 0.11;
+    // param_kind/kind enum-ification at 0.10; table OOB Clamp/Wrap -> Error.)
+    const GOLDEN: &str = "4387f80bbbbd67410ae95abf13da602ff77030d04505600c65656bf915959baf";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }

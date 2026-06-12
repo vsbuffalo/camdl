@@ -1374,9 +1374,7 @@ fn write_obs_into_cas(
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
             obs_ir, compiled.clone(), &params,
         );
-        let obs_times = crate::obs_schedule_times(
-            &obs_ir.schedule,
-        );
+        let obs_times = crate::obs_emit_schedule_times(obs_ir)?;
         let projected = crate::project_all_obs_times(traj, obs_ir, model, &obs_times);
 
         let path = obs_dir.join(format!("{}.tsv", obs_ir.name));

@@ -748,7 +748,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 .find(|o| o.name == **stream_name).cloned()
                 .ok_or_else(|| format!(
                     "no observation block named '{}' in model", stream_name))?;
-            let observations = load_observations_from_tsv(data_path, stream_name, &time_opts)?;
+            let observations = load_observations_from_tsv(data_path, &obs_model_ir, &time_opts)?;
             let times: Vec<f64> = observations.iter().map(|o| o.time).collect();
             match &canonical_times {
                 None => canonical_times = Some(times),
@@ -883,7 +883,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             format: crate::caltime_load::TimeFormat::Auto,
         };
         for obs in sorted_obs {
-            let observations = load_observations_from_tsv(&data_path, &obs.name, &time_opts)?;
+            let observations = load_observations_from_tsv(&data_path, obs, &time_opts)?;
             let times: Vec<f64> = observations.iter().map(|o| o.time).collect();
             match &canonical_times {
                 None => canonical_times = Some(times),
@@ -918,16 +918,17 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
     }
 }
 
-/// Load (time, value) pairs from a TSV column by NAME — the data column
-/// header must match the model's `observe` name exactly. There is no
-/// positional fallback (G1): a typo'd/wrong-cased header is a located
-/// error, not a silent bind to the positionally-first value column.
+/// Load (time, value) pairs from a TSV by NAME — the declared `time` column is
+/// the axis (by-name-time flip), and `scored` is the value column. Both must
+/// match the file header exactly. There is no positional fallback (G1): a
+/// typo'd/wrong-cased header is a located error, not a silent bind.
 fn load_observations_from_tsv(
     path: &str,
-    column: &str,
+    obs: &ir::observation::ObservationModel,
     opts: &crate::caltime_load::TimeOpts,
 ) -> Result<Vec<Observation>, String> {
-    let raw = crate::pfilter::load_data_tsv_column(path, column, opts)?;
+    let time_col = crate::pfilter::obs_time_column(obs)?;
+    let raw = crate::pfilter::load_data_tsv_column(path, time_col, &obs.scored, opts)?;
     Ok(raw.into_iter().map(|o| Observation { time: o.time, value: o.value }).collect())
 }
 

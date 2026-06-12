@@ -453,10 +453,11 @@ if (give_log) lik = log(lik);
 
 ```camdl
 observations {
-  weekly_cases : {
-    projected  = incidence(recovery)
-    every      = 7 'days
-    likelihood = neg_binomial(mean = rho * projected, r = k)
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(recovery)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
   }
 }
 ```

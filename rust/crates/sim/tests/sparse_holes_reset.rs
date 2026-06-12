@@ -74,7 +74,13 @@ fn model(k_per_unit: f64) -> Arc<CompiledModel> {
         observations: vec![
             IrObs {
                 name: "cases".into(),
-                schedule: ObservationSchedule::AtTimes(vec![]),
+                source: "cases".into(),
+                columns: vec![
+                    ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                    ir::observation::ObsColumn { name: "cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+                ],
+                scored: "cases".into(),
+                emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                 projection: Projection::CumulativeFlow("inflow".into()),
                 likelihood: Likelihood::Normal(NormalLikelihood {
                     // mean = projected (the weekly incidence tally)

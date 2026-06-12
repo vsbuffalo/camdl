@@ -35,10 +35,11 @@ transitions {
 }
 
 observations {
-  prevalence_total : {
-    projected  = I_total
-    every      = 7 'days
-    likelihood = neg_binomial(mean = projected, r = k)
+  prevalence_total {
+    columns          { time : time, prevalence_total : count }
+    projected        = I_total
+    emit_schedule    = every 7 'days
+    prevalence_total ~ neg_binomial(mean = projected, r = k)
   }
 }
 

@@ -67,10 +67,11 @@ init {
 simulate { from = 0 'days  to = 30 'days }
 
 observations {
-  cases : {
+  cases {
+    columns       { time : time, cases : count }
     projected  = incidence(infection)
-    every      = 1 'days
-    likelihood = poisson(rate = rho * projected)
+    emit_schedule = every 1 'days
+    cases ~ poisson(rate = rho * projected)
   }
 }
 "#;

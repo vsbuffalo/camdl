@@ -490,11 +490,22 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let mut canonical_times: Option<Vec<f64>> = None;
     for (sname, spath) in &bound_streams {
         let path_str = spath.to_string_lossy().into_owned();
-        // Strict by-name binding — no positional fallback (G1). The data
-        // column header must match the model's `observe` name exactly; a
-        // typo'd/wrong-cased header is a located error, not a silent bind
-        // to the positionally-first value column.
-        let result = crate::pfilter::load_data_tsv_column(&path_str, sname, &time_opts);
+        // Strict by-name binding — no positional fallback (G1). The declared
+        // `time` column is the axis (by-name-time flip) and `scored` is the
+        // value; both must match the file header exactly (a typo'd/wrong-cased
+        // header is a located error, not a silent positional bind).
+        let obs_block = model.observations.iter()
+            .find(|o| &o.name == sname)
+            .unwrap_or_else(|| {
+                eprintln!("error: no observation block named '{}'", sname);
+                std::process::exit(1);
+            });
+        let time_col = crate::pfilter::obs_time_column(obs_block).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+        let result = crate::pfilter::load_data_tsv_column(
+            &path_str, time_col, &obs_block.scored, &time_opts);
         let stream_obs: Vec<Observation> = match result {
             Ok(v) => v.into_iter().map(|o| Observation { time: o.time, value: o.value }).collect(),
             Err(e) => {
