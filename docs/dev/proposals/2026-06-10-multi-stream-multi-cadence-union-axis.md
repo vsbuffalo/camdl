@@ -52,14 +52,16 @@ already allow it (surface per proposal A):
 ```camdl
 observations {
   afp[p in patch] from afp_data {
-    columns   { time : time, patch : dim, cases : count }
-    projected = incidence(paralysis[patch = p])   every = 30 'days
-    cases ~ neg_binomial(mean = rho * projected, r = k)
+    columns       { time : time, patch : dim, cases : count }
+    projected     = incidence(paralysis[patch = p])
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+    emit_schedule = every 30 'days     # simulate-only (proposal A §2.5)
   }
   es[p in patch] from es_data {
-    columns   { time : time, patch : dim, conc : real }
-    projected = prevalence(I_shed[patch = p])     every = 14 'days
-    conc ~ normal(mean = lambda * projected, sd = sigma)
+    columns       { time : time, patch : dim, conc : real }
+    projected     = prevalence(I_shed[patch = p])
+    conc          ~ normal(mean = lambda * projected, sd = sigma)
+    emit_schedule = every 14 'days     # simulate-only
   }
 }
 ```
@@ -412,12 +414,13 @@ compartment, a `paralysis` flow, and two stream blocks (proposal A's surface) at
 different cadences:
 
 - **`afp[p in patch]`** — `incidence(paralysis[patch = p])`, **monthly**
-  (`every = 30 'days`), low / zero-heavy counts (paralysis is a small fraction
-  of infection), `neg_binomial`. Per-patch stratified (one cell per patch — not
-  a cross-strata sum). Exercises incidence reset + low-mean NB + holes.
+  (`emit_schedule = every 30 'days`), low / zero-heavy counts (paralysis is a
+  small fraction of infection), `neg_binomial`. Per-patch stratified (one cell
+  per patch — not a cross-strata sum). Exercises incidence reset + low-mean NB +
+  holes.
 - **`es[p in patch]`** — `prevalence(I_shed[patch = p])`, **biweekly**
-  (`every = 14 'days`), `poisson` for v1. (When `Counted` lands, `es` upgrades
-  to binomial positivity — the denominator follow-up meets here.)
+  (`emit_schedule = every 14 'days`), `poisson` for v1. (When `Counted` lands,
+  `es` upgrades to binomial positivity — the denominator follow-up meets here.)
 
 A mixed **incidence + prevalence at different cadences** is the hardest case and
 the one the union axis must get right. Synthetic data via

@@ -90,10 +90,10 @@ The likelihood is written with `~` — the operator the language already uses fo
 ```camdl
 observations {
   weekly_cases from flu {
-    columns   { time : time, cases : count }
-    projected = incidence(infection)
-    every     = 7 'days
-    cases ~ neg_binomial(mean = rho * projected, r = k)
+    columns       { time : time, cases : count }
+    projected     = incidence(infection)
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+    emit_schedule = every 7 'days     # simulate-only (§2.5); fit reads the `time` column
   }
 }
 ```
@@ -137,14 +137,14 @@ name**:
 ```camdl
 es[p in patch] from es_data {
   columns {
-    time     : time         # the time axis (exactly one)
+    time     : time         # the time axis (exactly one) — the FIT time source
     patch    : dim          # a model dimension; values validated against patch levels
     positive : count        # observed value (the ~ LHS)
     tested   : count        # auxiliary value (the denominator, referenced on the RHS)
   }
-  projected = prevalence(I_shed[patch = p]) / (baseline + rain(t))
-  every     = 14 'days
-  positive ~ binomial(n = tested, p = detect(projected))
+  projected     = prevalence(I_shed[patch = p]) / (baseline + rain(t))
+  positive      ~ binomial(n = tested, p = detect(projected))
+  emit_schedule = every 14 'days     # simulate-only (§2.5)
 }
 ```
 
@@ -232,6 +232,38 @@ complexity out of the common case.
 The header form is `IDENT index_bindings_opt (FROM IDENT)? LBRACE … RBRACE` —
 **no colon**. (Was `name : { }`; the colon is dropped — see migration §9.)
 
+### 2.5 `emit_schedule` — simulate-only emission, not a fit constraint
+
+`emit_schedule` (renamed from the old `schedule` / `every`) is the **emission**
+schedule: it tells `camdl simulate --obs` _when_ to emit synthetic observations
+for this stream. It plays **no role in fitting** — verified against the code:
+the inference path builds observation times from the data file's `time` column
+and never reads the declared schedule (the inference loaders even stub it to
+`ObservationSchedule::AtTimes(vec![])`), and the per-stream incidence-bin
+cadence is derived from the _observed_ times (the modal gap), not the schedule.
+So for data the times are matched exactly from the `time` column;
+`emit_schedule` is ignored.
+
+Consequences:
+
+- **Optional.** A model you only ever _fit_ omits `emit_schedule` entirely; it
+  is required only to `simulate --obs` (generate synthetic data). That
+  optionality is the clearest signal it is not a fit-time constraint.
+- It takes a schedule literal: `every N 'unit` (regular cadence) or
+  `at [t1, t2, …] 'unit` (explicit times) — the IR's `Regular | AtTimes`.
+- The fit time source is unambiguously `columns { time : time }`; the emission
+  schedule is a distinct, simulate-side field. The old name `schedule` — and
+  jamming `every` onto the `projected` line — wrongly implied a fit-time role.
+
+```camdl
+# fit-only: no emit_schedule needed; the data's `time` column drives everything
+weekly_cases from flu {
+  columns   { time : time, cases : count }
+  projected = incidence(infection)
+  cases     ~ neg_binomial(mean = rho * projected, r = k)
+}
+```
+
 ## 3. Per-observation auxiliary data — declared, typed value columns
 
 The denominator `n` in `binomial(n = tested, p)` references the declared column
@@ -318,9 +350,9 @@ cases[p in patch, a in age] from flu {
     age   : dim
     cases : count
   }
-  projected = incidence(infection[patch = p, age = a])
-  every     = 7 'days
-  cases ~ neg_binomial(mean = rho * projected, r = k)
+  projected     = incidence(infection[patch = p, age = a])
+  cases         ~ neg_binomial(mean = rho * projected, r = k)
+  emit_schedule = every 7 'days     # simulate-only (§2.5)
 }
 ```
 
@@ -515,14 +547,35 @@ proposal's validation, and the split decides what the IR contract must carry:
   names_; the per-row `value ≤ n`/`n > 0` data check (§3.2); missing-token →
   hole (§6.3); partial-coverage holes (§4.2).
 
-**IR contract consequence:** because level matching is Rust-side, **the IR must
-carry each stream's dimension level names** (the ordered level set of every
-`: dim` column), not just the dimension's arity. Today the expanded IR flattens
-strata into per-cell names; the binder needs the _level labels_ to match file
-values by name. This is the one schema-touching item in this proposal (a
-`levels: [String]` per indexed stream dimension) — flagged for the atomic
-OCaml+Rust+golden update, and called out so it is not discovered
-mid-implementation.
+**IR contract consequence — `observation_model` gains fields (the atomic
+OCaml+Rust+golden update).** Today `observation_model` requires only
+`{name, schedule, projection, likelihood}` (`schema.json:649`) — no column
+schema, and `schedule` doubles as both the simulate-emission cadence and the
+(ignored-in-fit) declared times. This proposal extends and clarifies it, split
+across the two stages (§10):
+
+Stage 1 (surface + binding):
+
+- rename `schedule` → `emit_schedule` — simulate-emission only (§2.5); the fit
+  time source is the `columns` `Time` column, not this field;
+- add `source: String` — the `from <label>` data key (defaults to `name`);
+- add `columns: [{ name, role: Time | Dim(dim) | Value(type) }]` — the file
+  schema the Rust loader binds by name (the `Time` column is the fit time
+  source);
+- add `scored: String` — the `~` LHS column the likelihood scores.
+
+Stage 2 (rich data):
+
+- add `levels: [String]` per `: dim` column — the ordered level set, so the Rust
+  binder can match a `: dim` column's _values_ against the model dimension's
+  level names (§4.2); today the expanded IR flattens strata into per-cell names
+  without the labels;
+- represent the denominator/aux column references in the likelihood (binomial
+  `n = <col>`), so `ObsCell::Counted` can carry them.
+
+Both stages bump `ir/VERSION` and break every golden — the atomic
+OCaml(`ir/`)+Rust(`ir/src/`)+golden update per "Changing the IR schema." Flagged
+here so it is not discovered mid-implementation.
 
 ## 7. Two evaluation paths must agree; and the spine connection
 
@@ -594,6 +647,10 @@ replacement (and a `docs/language-changes.md` entry):
   moves to the `~` RHS (spec §14.2), `projected =` stays its own field (§2.1).
 - **stream header colon dropped:** `name : { … }` → `name { … }` (and the new
   optional `name from <label> { … }`). Diagnostic names the rewrite.
+- **`every`/`schedule` → `emit_schedule`** (§2.5): the emission cadence is
+  renamed and clarified as simulate-only (`emit_schedule = every 7 'days`); for
+  fitting it is optional and ignored (the `time` column drives). Diagnostic
+  names the rewrite.
 - positional/implicit column binding → required `columns { }` with by-name
   headers; positional "column 0 is time" → `time : time`.
 - un-indexed cross-strata auto-sum on a stratified model → the §5.2 hard error.
@@ -601,31 +658,45 @@ replacement (and a `docs/language-changes.md` entry):
   (spec:890) — table dimension columns already bind by level name (§6.2). No
   code or golden change; tables' binding is unchanged in v1.
 
-## 10. Implementation phases + tests
+## 10. Implementation in two stages
 
-1. **`~` surface + header reshape** — parser production reusing `TILDE` (without
-   the `| dim` suffix; keyword-only RHS); the stream header drops the colon and
-   gains optional `from <label>`
-   (`IDENT index_bindings_opt (FROM IDENT)? LBRACE`); no IR change yet;
-   `likelihood =` and `name : {` migration diagnostics.
-2. **`read_long` reader unification (obs + forcings) + per-source binding** —
-   one core, `ByName` policy for obs/forcings (tables untouched, §6.2); the
-   by-name-time flip lands here; `from <label>` source resolution + per-source
-   column-completeness. Tests: G1 unconstructible; positional-time gone; a
-   header absent from the source's union of `columns { }` errors; two streams
-   sharing one source bind cleanly.
-3. **`columns { }` + declared aux + extensible `ObsCell` + the dimcheck-`n` fix
-   - the `levels` IR field** — tests: dimcheck rejects a dimensionally-wrong
-     `n`; name-collision hard error; positivity fit recovers params; person-time
-     offset; `value ≤ n` row check in `bind` with a located row. (The
-     `levels: [String]` IR field — §6.4 — rides the atomic OCaml+Rust+golden
-     update here.)
-4. **Header-form indexing** — by-name level matching, per-cell scoring,
-   partial-coverage holes, bins-differ errors, brackets↔columns cross-check.
-5. **National aggregation** — the §5.2 hard error; explicit `sum(...)` forms.
-6. **Cross-path agreement matrix** (§7) + the shared `dt`-boundary `EvalCtx`.
+Two clean, independently-landable breaking changes. **Stage 1** delivers the new
+surface + binding (the headline `~` + typed columns + by-name file reading) and
+migrates the 32 `.camdl` fixtures + goldens **once** to the final scalar shape.
+**Stage 2** adds the rich data layer (survey denominators + stratified
+semantics). Both bump `ir/VERSION`.
 
-Tests follow the matrix (family × aux-role × path) — no single-point coverage.
+### Stage 1 — the surface + binding (IR change: `emit_schedule` rename + `source`/`columns`/`scored`)
+
+- **`~` surface + header reshape:** parser production reusing `TILDE` (without
+  the `| dim` suffix; keyword-only RHS); header drops the colon and gains
+  optional `from <label>` (`IDENT index_bindings_opt (FROM IDENT)? LBRACE`);
+  `emit_schedule` replaces `every`/`schedule` (§2.5). Migration diagnostics for
+  each.
+- **`columns { }` (always required)** + the `read_long` by-name reader for obs +
+  forcings (the by-name-time flip; tables untouched, §6.2); `from <label>`
+  source resolution + per-source column-completeness.
+- **IR schema (atomic OCaml+Rust+golden, §6.4):** rename `schedule` →
+  `emit_schedule`; add `source`, `columns`, `scored`. Scalar values; keep
+  today's `[p in dim]` indexing; **no** denominators / by-name level matching /
+  aggregation yet.
+- **Migrate** the 32 `likelihood =` fixtures + ocaml/golden models to the new
+  form; regenerate `ir/golden` + `ir/expected` (reviewed).
+- Tests: G1 unconstructible; positional-time gone; a header absent from the
+  source's union of `columns { }` errors; two streams sharing one source bind;
+  `emit_schedule` ignored in fit (data times drive); existing fits recover
+  params unchanged.
+
+### Stage 2 — the rich data layer (IR change: `levels` + denominator column-refs)
+
+- **Per-obs aux / survey denominators** — `binomial(n = tested)`, extensible
+  `ObsCell::Counted`, the dimcheck-`n` fix (`constrain_known`), the `value ≤ n`
+  row check; the IR carries the likelihood's column references.
+- **By-name level matching** for `[p in dim]` indexed streams (the `levels` IR
+  field, §4.2): per-cell scoring, partial-coverage holes, bins-differ errors.
+- **National aggregation** — the §5.2 hard error; explicit `sum(...)` forms.
+- **Cross-path agreement matrix** (§7) + the shared `dt`-boundary `EvalCtx`.
+- Tests follow the matrix (family × aux-role × path) — no single-point coverage.
 
 ## 11. References
 
