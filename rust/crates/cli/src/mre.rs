@@ -64,20 +64,59 @@ struct BundledInput {
 
 // ── a file to bundle, before it is copied ────────────────────────────────────
 
+/// What a bundled file is. Drives the manifest label and the consent banner;
+/// `is_data` is derived so there is one source of truth.
+#[derive(Clone, Copy)]
+enum InputRole {
+    Model,
+    ReadClosure,
+    FitConfig,
+    Data,
+    FixedFile,      // `[fixed] from_file`
+    SyntheticTruth, // `[synthetic] true_params`
+}
+
+impl InputRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            InputRole::Model => "model",
+            InputRole::ReadClosure => "read_closure",
+            InputRole::FitConfig => "fit_config",
+            InputRole::Data => "data",
+            InputRole::FixedFile => "fixed_file",
+            InputRole::SyntheticTruth => "synthetic_truth",
+        }
+    }
+
+    fn is_data(self) -> bool {
+        matches!(self, InputRole::Data)
+    }
+}
+
 struct InputRef {
-    role: &'static str,
+    role: InputRole,
     /// Absolute source path on disk.
     src: PathBuf,
     /// Bundle-relative destination (== path relative to the project root).
     dest: String,
-    /// Observed-data file → eligible for the consent banner + row count.
-    is_data: bool,
+}
+
+/// A resolved bundle plan: the file closure, the manifest `kind`, and the exact
+/// reproduce command. Everything `write_bundle` needs — command-agnostic.
+struct BundlePlan {
+    inputs: Vec<InputRef>,
+    kind: &'static str,
+    reproduce: String,
 }
 
 // ── entry points ─────────────────────────────────────────────────────────────
 
 pub(crate) fn cmd_mre_fit(args: &MreFitArgs) {
-    if let Err(e) = run_fit(args) {
+    let out = args
+        .bundle
+        .clone()
+        .unwrap_or_else(|| default_bundle_path(&args.config));
+    if let Err(e) = collect_fit(args).and_then(|plan| write_bundle(&plan, &out)) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
@@ -92,9 +131,24 @@ pub(crate) fn cmd_mre_simulate(_args: &MreSimulateArgs) {
     std::process::exit(1);
 }
 
-// ── fit bundler ──────────────────────────────────────────────────────────────
+// ── default bundle path ───────────────────────────────────────────────────────
 
-fn run_fit(args: &MreFitArgs) -> Result<(), String> {
+/// `<stem>.mre.tar.gz` in the cwd, from a config or model path.
+fn default_bundle_path(from: &Path) -> PathBuf {
+    let stem = from
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "mre".to_string());
+    PathBuf::from(format!("{stem}.mre.tar.gz"))
+}
+
+// ── fit collector ──────────────────────────────────────────────────────────────
+
+/// Enumerate a fit's input closure → a [`BundlePlan`]. Config-driven: every path
+/// comes from the resolved `FitConfigV2` plus the model's compile-time `read()`
+/// closure. The fit.toml's directory is the root, so the config's own dest is
+/// its bare name and the reproduce command points at that.
+fn collect_fit(args: &MreFitArgs) -> Result<BundlePlan, String> {
     let config = args.config.as_path();
     if !config.exists() {
         return Err(format!("fit config not found: {}", config.display()));
@@ -114,8 +168,12 @@ fn run_fit(args: &MreFitArgs) -> Result<(), String> {
 
     check_supported(&cfg)?;
 
-    // ── collect the input closure ──
     let mut inputs: Vec<InputRef> = Vec::new();
+
+    // The fit.toml itself. root == its directory, so its dest is the bare name.
+    let cfg_ref = input_ref(InputRole::FitConfig, config, &root)?;
+    let reproduce = format!("camdl fit run {}", cfg_ref.dest);
+    inputs.push(cfg_ref);
 
     // Model + its compile-time read() closure (asked of the compiler).
     let model_path = root.join(&cfg.model.camdl);
@@ -123,107 +181,88 @@ fn run_fit(args: &MreFitArgs) -> Result<(), String> {
         return Err(format!("model not found: {} (from [model] camdl = \"{}\")",
             model_path.display(), cfg.model.camdl));
     }
-    inputs.push(input_ref("model", &model_path, &root)?);
-
-    let deps = read_closure(&model_path)?;
-    for resolved in deps {
-        inputs.push(input_ref("read_closure", Path::new(&resolved), &root)?);
+    inputs.push(input_ref(InputRole::Model, &model_path, &root)?);
+    for resolved in read_closure(&model_path)? {
+        inputs.push(input_ref(InputRole::ReadClosure, Path::new(&resolved), &root)?);
     }
 
     // Observed data (unless --no-data) + fixed params + synthetic truth.
-    let include_data = !args.no_data;
-    if let Some(ds) = &cfg.data {
-        if include_data {
+    if !args.no_data {
+        if let Some(ds) = &cfg.data {
             for rel in data_files(ds) {
-                inputs.push(input_ref_data(&root.join(&rel), &root)?);
+                inputs.push(input_ref(InputRole::Data, &root.join(&rel), &root)?);
             }
         }
     }
     if let Some(ff) = &cfg.fixed.from_file {
-        inputs.push(input_ref("fixed_params", &root.join(ff), &root)?);
+        inputs.push(input_ref(InputRole::FixedFile, &root.join(ff), &root)?);
     }
     if let Some(sy) = &cfg.synthetic {
-        inputs.push(input_ref("true_params", &root.join(&sy.true_params), &root)?);
+        inputs.push(input_ref(InputRole::SyntheticTruth, &root.join(&sy.true_params), &root)?);
     }
-
-    // The fit.toml itself, at the bundle root.
-    let config_dest = config
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "fit.toml".to_string());
 
     // Dedup by destination (a read() file could coincide with another input).
     inputs.sort_by(|a, b| a.dest.cmp(&b.dest));
     inputs.dedup_by(|a, b| a.dest == b.dest);
 
-    // ── stage → manifest → README → tarball ──
+    Ok(BundlePlan { inputs, kind: "fit", reproduce })
+}
+
+// ── shared bundle writer ────────────────────────────────────────────────────────
+
+/// Stage the closure into a temp dir preserving each file's contained-relative
+/// layout, write `manifest.toml` + `README.md`, tar+gzip to `out`, and print the
+/// report (+ a consent banner if observed data is included). Command-agnostic:
+/// it consumes a [`BundlePlan`] and never inspects how the closure was found.
+fn write_bundle(plan: &BundlePlan, out: &Path) -> Result<(), String> {
     let staging = tempfile::tempdir()
         .map_err(|e| format!("cannot create staging dir: {e}"))?;
     let stage_root = staging.path();
 
-    // Copy the (possibly path-contained) inputs, recording the inventory.
     let mut manifest_inputs: Vec<BundledInput> = Vec::new();
     let mut data_banner: Vec<(String, u64)> = Vec::new();
-    for inp in &inputs {
+    for inp in &plan.inputs {
         let dst = stage_root.join(&inp.dest);
         copy_into(&inp.src, &dst)?;
         let (bytes, sha) = digest_file(&dst)?;
-        let rows = if inp.is_data { Some(count_data_rows(&dst)?) } else { None };
-        if inp.is_data {
+        let rows = if inp.role.is_data() { Some(count_data_rows(&dst)?) } else { None };
+        if inp.role.is_data() {
             data_banner.push((inp.dest.clone(), rows.unwrap_or(0)));
         }
         manifest_inputs.push(BundledInput {
-            role: inp.role.to_string(),
+            role: inp.role.as_str().to_string(),
             dest: inp.dest.clone(),
             bytes,
             sha256: sha,
             rows,
         });
     }
-    // The fit.toml (copied verbatim — all input paths are contained-relative,
-    // so they resolve unchanged inside the bundle).
-    copy_into(config, &stage_root.join(&config_dest))?;
-    let (cfg_bytes, cfg_sha) = digest_file(&stage_root.join(&config_dest))?;
-    manifest_inputs.push(BundledInput {
-        role: "fit_config".to_string(),
-        dest: config_dest.clone(),
-        bytes: cfg_bytes,
-        sha256: cfg_sha,
-        rows: None,
-    });
 
-    let reproduce = format!("camdl fit run {config_dest}");
+    let data_included = !data_banner.is_empty();
     let manifest = MreManifest {
         schema_version: SCHEMA_VERSION,
-        kind: "fit".to_string(),
-        reproduce: reproduce.clone(),
+        kind: plan.kind.to_string(),
+        reproduce: plan.reproduce.clone(),
         camdl_version: crate::version::VERSION_SHORT.to_string(),
-        data_included: include_data && !data_banner.is_empty(),
+        data_included,
         inputs: manifest_inputs,
     };
     let manifest_toml = toml::to_string_pretty(&manifest)
         .map_err(|e| format!("cannot serialize manifest: {e}"))?;
     fs::write(stage_root.join("manifest.toml"), manifest_toml)
         .map_err(|e| format!("cannot write manifest: {e}"))?;
-    fs::write(stage_root.join("README.md"), readme(&reproduce, include_data))
+    fs::write(stage_root.join("README.md"), readme(&plan.reproduce, data_included))
         .map_err(|e| format!("cannot write README: {e}"))?;
 
     // ── tarball ──
-    let out = args.bundle.clone().unwrap_or_else(|| {
-        let stem = config
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "fit".to_string());
-        PathBuf::from(format!("{stem}.mre.tar.gz"))
-    });
     let bundle_name = out
         .file_name()
         .map(|n| n.to_string_lossy().trim_end_matches(".tar.gz").to_string())
         .unwrap_or_else(|| "mre".to_string());
-    write_tarball(&out, &bundle_name, stage_root)?;
+    write_tarball(out, &bundle_name, stage_root)?;
 
     // ── report + consent banner ──
-    if !data_banner.is_empty() {
+    if data_included {
         let listed = data_banner
             .iter()
             .map(|(name, rows)| format!("{name} ({rows} rows)"))
@@ -232,8 +271,8 @@ fn run_fit(args: &MreFitArgs) -> Result<(), String> {
         eprintln!("\u{26a0}  This bundle contains observed data: {listed}.");
         eprintln!("   Share only with the maintainer. (Use --no-data for a structure-only bundle.)");
     }
-    println!("\u{2713} wrote {} ({} files)", out.display(), inputs.len() + 1);
-    println!("  reproduce: {reproduce}");
+    println!("\u{2713} wrote {} ({} files)", out.display(), plan.inputs.len());
+    println!("  reproduce: {}", plan.reproduce);
     Ok(())
 }
 
@@ -311,11 +350,8 @@ fn data_files(ds: &DataSpec) -> Vec<String> {
     out
 }
 
-fn input_ref(role: &'static str, file: &Path, root: &Path) -> Result<InputRef, String> {
-    Ok(InputRef { role, src: file.to_path_buf(), dest: rel_to_root(root, file)?, is_data: false })
-}
-fn input_ref_data(file: &Path, root: &Path) -> Result<InputRef, String> {
-    Ok(InputRef { role: "data", src: file.to_path_buf(), dest: rel_to_root(root, file)?, is_data: true })
+fn input_ref(role: InputRole, file: &Path, root: &Path) -> Result<InputRef, String> {
+    Ok(InputRef { role, src: file.to_path_buf(), dest: rel_to_root(root, file)? })
 }
 
 /// A bundled input's destination = its path relative to the project root.
