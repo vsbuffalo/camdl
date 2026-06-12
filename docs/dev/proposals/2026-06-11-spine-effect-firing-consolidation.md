@@ -236,8 +236,9 @@ consumers) fixes all three at once.
   (`round(on_grid_effect/dt)` hits that step). New path == old path. This is the
   **load-bearing gate** (Test 2), because it is the boundary between
   "byte-identical" and "the fix changed something."
-- Behaviour changes **only** for off-grid effect times under `Exact` (the gh#216
-  case), where today is wrong.
+- Behaviour changes **only** under `Exact` where today's `round()`-keyed firing
+  is already fragile — off-grid observations re-tiling the grid, or off-grid
+  effect times that `round()` snaps (the gh#216 case), where today is wrong.
 
 ### 3.6 Parametric `AtTimesExpr` schedules under IF2 — guarded (loud), deferred
 
@@ -248,12 +249,17 @@ immutable `Schedule` can hold. Supporting it would require per-particle
 schedules, which breaks the one-shared-`Schedule` CRN invariant (`schedule.rs`
 module header — N particles must walk an identically-ordered boundary sequence).
 **v1 hard-errors `AtTimesExpr` + IF2 + Exact** with a message naming the
-limitation (it is not silently dropped). This is IF2-specific: PGAS/PMMH/PF run
-at a uniform θ per filter run (§3.1), so a single recomputed `effect_times` is
-exact for them. (Orthogonal, not this proposal: fitting an intervention _time_
-parameter under PGAS-NUTS is non-smooth across a substep boundary — the spine-v2
-§E `Target=Parameter` / time-invariant-θ deferral, a gradient concern, not the
-per-particle-schedule one.)
+limitation (it is not silently dropped). This hard-error lands with **phase 2**
+(the real fix that registers a shared `effect_times`) — **not** the stopgap:
+`AtTimesExpr` + IF2 is _not_ silently-wrong today (IF2 uses per-particle
+`fire_steps`, so on-grid it fits, and off-grid-obs cases are already caught by
+the stopgap's obs guard); the per-particle-schedule limit only bites once a
+single shared `effect_times` is introduced. This is IF2-specific: PGAS/PMMH/PF
+run at a uniform θ per filter run (§3.1), so a single recomputed `effect_times`
+is exact for them. (Orthogonal, not this proposal: fitting an intervention
+_time_ parameter under PGAS-NUTS is non-smooth across a substep boundary — the
+spine-v2 §E `Target=Parameter` / time-invariant-θ deferral, a gradient concern,
+not the per-particle-schedule one.)
 
 ## 4. Why the scheduling system didn't already solve it
 
@@ -265,8 +271,8 @@ naturally: the filters were built around the observation grid, interventions
 reused `step_one`'s `fire_steps` mechanism, spine-v2 added the boundary types
 and the apply seam, and the §C driver that would have switched the due-ness key
 was dropped. No single choice was wrong; the smell is the two clocks, which
-diverge only under Exact + off-grid effects — a case the multi-cadence work
-makes the norm.
+diverge only under Exact + off-grid observations (with effects present) — a case
+the multi-cadence work makes the norm.
 
 ## 5. The plug-in question — and the leak check
 
@@ -298,10 +304,19 @@ interventions binding onto the same spine (this proposal) are the same operation
 - **Retained, named (not retired):** `round(t/dt)` firing on Snap (forward +
   inference) and **Exact-forward** (ODE/gillespie) — correct there; pinned by a
   test (§8.6).
-- **Stopgap, ship first (§9 phase 1):** hard-error
-  `Exact + off-grid effect times` in all four Exact filters — so there is no
-  silent-wrong interim. Scoped to **off-grid** only (on-grid Exact +
-  interventions is correct today and must keep working).
+- **Stopgap, ship first (§9 phase 1):** hard-error `Exact` + **any off-grid
+  observation time** + a **scheduled** (`!is_event`) intervention present, in
+  all four Exact filters — so there is no silent-wrong interim. The trigger is
+  off-grid _obs_ (which re-tile the Exact substep grid, §1.4), **not** off-grid
+  effect times — the gh#216 reproduction has an _on-grid_ intervention (day 35,
+  dt 7) shifted by off-grid obs, so an off-grid-_effect_-time guard misses it.
+  **Scheduled interventions only:** always-active events fire keyed on the
+  nominal `grid_dt` (the StepClock fix), so they are handled separately
+  (PF/IF2/correlated-PF) or by PGAS's existing events-only guard — a
+  pre-existing test asserts off-grid-obs + event _runs_ under Exact PF, so
+  rejecting events would over-reject. On-grid obs is correct today and must keep
+  working, and a model with no scheduled intervention (proposal B's plain
+  multi-cadence fit, or an events-only model) is fine — do not block it.
 - **Out (named):** Snap migration (correct today; uniformity cleanup, not
   needed); always-active **events** under Exact (they fire mid-step at PROPOSE,
   fused with the kernel draw — a separate fix; they stay hard-errored, §10);
@@ -319,8 +334,8 @@ interventions binding onto the same spine (this proposal) are the same operation
   `n_cursors_identical_sequence`).
 - **PGAS density + gradient.** Producer fires; value and gradient score records
   and are in lockstep by construction (§3.4); `shape = dt_actual/σ²` unchanged.
-- **Capability matrix.** Removes a silent-wrong cell (Exact + off-grid effects
-  in PF/IF2/correlated-PF) by making it correct; expresses the IF2 +
+- **Capability matrix.** Removes a silent-wrong cell (Exact + off-grid obs +
+  effects in PF/IF2/correlated-PF) by making it correct; expresses the IF2 +
   `AtTimesExpr` limit as a loud hard-error (§3.6); changes no other cell.
 
 ## 8. Tests (red → green; inference-math — paste red/green in commits)
@@ -343,20 +358,25 @@ interventions binding onto the same spine (this proposal) are the same operation
    `pgas.rs:1594`).
 6. **Retained paths** — ODE-forward and Snap with an off-grid intervention are
    **unchanged** (round path still correct); pins §3.2's "retained, named."
-7. **Stopgap** — before the fix, `Exact + off-grid` interventions hard-error in
-   all four filters; **on-grid** Exact + interventions still fits (no
-   over-rejection, the gh#187 on-grid case). `AtTimesExpr + IF2 + Exact`
-   hard-errors (§3.6).
+7. **Stopgap** — the reproduction shape (an **on-grid** intervention +
+   **off-grid obs**) hard-errors in all four filters (exactly the case a naive
+   off-grid-_effect_-time guard misses); **on-grid obs** + interventions still
+   fits (no over-rejection — the gh#187 case, and He-2010's on-grid weekly obs
+   with its off-grid recurring event); **off-grid obs + no interventions** still
+   fits (proposal B's case).
 
 ## 9. Implementation phases
 
-1. **Stopgap guard (S, ship immediately).** Hard-error
-   `Exact + off-grid effect
-   times` at all four Exact entry points
-   (PF/IF2/correlated-PF hardcode Exact → an unconditional check there; PGAS
-   widened from events-only to also off-grid scheduled). **Off-grid only** — do
-   not reject on-grid fits. Add the `AtTimesExpr
-   - IF2` hard-error. Independently landable; Test 7.
+1. **Stopgap guard (S, ship immediately).** Hard-error `Exact` + **any off-grid
+   observation time** (relative to `t_start`) + a **scheduled** (`!is_event`)
+   intervention present, at all four Exact entry points (PF/IF2/correlated-PF
+   hardcode Exact → an unconditional check after `obs_times` is built; PGAS
+   respects `config.step_policy` and keeps its existing events-only guard
+   untouched). The key is off-grid **obs**, not effect times (§1.4): on-grid obs
+   is correct today, and a model with no scheduled intervention (events-only or
+   intervention-free) must still fit. The `AtTimesExpr + IF2` hard-error is
+   **not** here — it lands with phase 2 (it is a shared-`effect_times`
+   constraint, not silently-wrong today). Independently landable; Test 7.
 2. **Register `effect_times`** in the inference `Schedule` +
    `build_substep_grid`, **and** the §3.3 cursor-advance + fire-signal, **and**
    the §3.2 caller-side firing (retire `round()` on the Exact-inference path) —
@@ -364,8 +384,10 @@ interventions binding onto the same spine (this proposal) are the same operation
    `round()` double-fires (substeps at 35 and 37 both round to step 5 — the
    failure mode of incident `2026-04-17-chain-binomial-double-fire.md`), so
    phases "register" and "retire" cannot be separated for intervention models.
-   The stopgap guard stays up through this and is lifted only at the end. Tests
-   1, 2, 3, 4, 5, 6.
+   The stopgap guard stays up through this and is lifted only at the end. Add
+   the `AtTimesExpr + IF2 + Exact` hard-error here (§3.6) — it becomes
+   load-bearing once a single shared `effect_times` is registered. Tests 1, 2,
+   3, 4, 5, 6.
 3. **Docs** — mark spine-v2 §B fully adopted (due-ness key now cursor); update
    `capabilities-system.md` (the `obs_alignment × algorithm` axis); close gh#216
    with the reproduction-as-regression; lift the stopgap guard.

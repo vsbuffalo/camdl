@@ -1534,6 +1534,19 @@ pub fn run_pgas(
         ));
     }
 
+    // gh#216 stopgap: under Exact the substep grid re-anchors at every
+    // observation, so an OFF-grid observation re-tiles the grid and a scheduled
+    // intervention that keys on round(t/dt) fires at the wrong substep — even when
+    // the intervention time itself is on-grid. Complement the events-only guard
+    // above (always-active events) by also refusing a model with a SCHEDULED
+    // intervention and any off-grid obs under Exact, until the cursor-keyed-firing
+    // fix lands. On-grid obs (the gh187_pgas_scheduled_intervention case) pass;
+    // PGAS uses `config.step_policy` (Snap is fine, so this is a no-op there).
+    let pgas_obs_times: Vec<f64> = observations.iter().map(|o| o.time).collect();
+    crate::intervention::guard_exact_offgrid_obs(
+        &pgas_obs_times, t_start, config.dt, model, config.step_policy,
+    )?;
+
     // The realized substep grid (uniform under Snap; window-tiled with shortened
     // remainders under Exact) and its obs→substep map — the single grid every
     // producer and density consumer tiles against. Under Snap this is

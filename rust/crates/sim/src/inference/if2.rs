@@ -238,6 +238,20 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     // iterations, so built once; reproduces dt.min(obs_time - t) exactly. Substep
     // TIME stays accumulated (s*dt deferred, task #14).
     let obs_times: Vec<f64> = (0..n_obs).map(|i| obs_model.obs_time(i)).collect();
+
+    // gh#216 stopgap: IF2 hardcodes `StepPolicy::Exact` (below). Under Exact an
+    // OFF-grid observation re-tiles the substep grid, so a scheduled intervention
+    // that keys on round(t/dt) can fire at the wrong substep — even when the
+    // intervention time is on-grid. Refuse a model with a SCHEDULED intervention
+    // and any off-grid obs until the cursor-keyed-firing fix lands. (No scheduled
+    // intervention, and on-grid obs, pass; always-active events are keyed on
+    // grid_dt and out of scope.)
+    if let Some(model) = process.try_compiled_model() {
+        crate::intervention::guard_exact_offgrid_obs(
+            &obs_times, config.t_start, config.dt, model, StepPolicy::Exact,
+        )?;
+    }
+
     let sched_t_end = obs_times.last().copied().unwrap_or(config.t_start);
     let schedule = Schedule::new(
         config.dt, sched_t_end, config.dt, StepPolicy::Exact, Vec::new(), Vec::new(),

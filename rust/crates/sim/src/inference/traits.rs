@@ -73,6 +73,21 @@ pub trait ProcessModel: Send + Sync {
 
     /// Allocate a fresh scratch buffer sized for this model.
     fn new_scratch(&self) -> Self::Scratch;
+
+    /// The underlying `CompiledModel`, when this process wraps one.
+    ///
+    /// Default `None` so non-model process mocks (e.g. the watchdog's
+    /// `CountingProcess`) need not synthesize one. The production
+    /// `ChainBinomialProcess` returns `Some`, which lets the generic PF/IF2
+    /// drivers reach the model for setup-time guards (gh#216: refuse Exact +
+    /// off-grid observations for a scheduled-intervention-bearing model). Named
+    /// distinctly from
+    /// `DensityProcess::compiled_model` (PGAS-only, infallible `&CompiledModel`)
+    /// to avoid a two-trait method-name collision; this is the optional,
+    /// `ProcessModel`-level hook.
+    fn try_compiled_model(&self) -> Option<&crate::compiled_model::CompiledModel> {
+        None
+    }
 }
 
 /// Observation model: maps latent state to data likelihood.

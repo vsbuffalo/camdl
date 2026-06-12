@@ -116,6 +116,10 @@ impl ProcessModel for ChainBinomialProcess {
     fn new_scratch(&self) -> StepScratch {
         StepScratch::new(&self.compiled)
     }
+
+    fn try_compiled_model(&self) -> Option<&CompiledModel> {
+        Some(&self.compiled)
+    }
 }
 
 impl DensityProcess for ChainBinomialProcess {

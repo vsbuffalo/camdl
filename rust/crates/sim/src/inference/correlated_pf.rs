@@ -246,6 +246,18 @@ pub fn bootstrap_filter_correlated(
     // Substeps per window the pre-drawn-noise arrays are sized for. CPM requires
     // (near-)uniform observation spacing because that block size is fixed.
     let obs_times: Vec<f64> = (0..n_obs).map(|i| obs_model.obs_time(i)).collect();
+
+    // gh#216 stopgap: the correlated PF hardcodes `StepPolicy::Exact` (below).
+    // Under Exact an OFF-grid observation re-tiles the substep grid, so a scheduled
+    // intervention that keys on round(t/dt) can fire at the wrong substep — even
+    // when the intervention time itself is on-grid. Refuse a model with a SCHEDULED
+    // intervention and any off-grid obs until the cursor-keyed-firing fix lands.
+    // (No scheduled intervention, and on-grid obs, pass; always-active events are
+    // keyed on grid_dt and out of scope.)
+    crate::intervention::guard_exact_offgrid_obs(
+        &obs_times, config.t_start, dt, model, StepPolicy::Exact,
+    )?;
+
     let steps_per_obs = cpm_steps_per_obs(&obs_times, config.t_start, dt);
 
     // Validate the obs grid against the pre-drawn-noise indexing. A leading
