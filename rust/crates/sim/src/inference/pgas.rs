@@ -47,7 +47,9 @@ fn collect_param_refs(e: &ir::expr::Expr, out: &mut std::collections::HashSet<St
         ir::expr::Expr::PopSum(_) | ir::expr::Expr::Pop(_)
         | ir::expr::Expr::Const(_) | ir::expr::Expr::Time(_)
         | ir::expr::Expr::Dt(_)   | ir::expr::Expr::TimeFunc(_)
-        | ir::expr::Expr::Projected(_) => {}
+        | ir::expr::Expr::Projected(_)
+        // A per-observation aux column is data (∂/∂θ = 0): no param to collect.
+        | ir::expr::Expr::ObsColumnRef(_) => {}
         ir::expr::Expr::TableLookup(w) => {
             for ix in &w.table_lookup.indices {
                 collect_param_refs(ix, out);
@@ -574,7 +576,7 @@ pub fn log_transition_density_substep(
     eval_propensities(model, &int_s, &real_s, params, t, dt, &mut propensities)?;
 
     let ctx = EvalCtx {
-        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, int_float_override: None,
+        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None,
     };
 
     // Per-transition: is it deterministic? What's its sigma_sq?
@@ -773,7 +775,7 @@ pub fn complete_data_loglik(
             let ctx = EvalCtx {
                 model, int_s: &int_s_local, real_s: &real_s_local,
                 params, t, dt: dt_s,
-                projected: None, int_float_override: None,
+                projected: None, aux: None, int_float_override: None,
             };
             let mut gamma_idx_local = 0;
             for &(src_local, ref group) in &model.source_groups {

@@ -78,6 +78,10 @@ let dep_of_expr ~binding_dep (e : Ir.expr) : dep =
     | Ir.TableLookup (_, idxs) -> join Data (join_list (List.map go idxs))
     | Ir.BindingRef name -> binding_dep name
     | Ir.Projected -> Projected
+    (* A per-observation aux column is external data supplied at load, not a
+       function of simulator state — classify as Data (like a constant-indexed
+       table cell). It is differentiated to 0 (a data constant) in autodiff. *)
+    | Ir.ObsColumnRef _ -> Data
     | Ir.BinOp b -> join (go b.left) (go b.right)
     | Ir.UnOp u  -> go u.arg
     | Ir.Cond c  -> join (go c.pred) (join (go c.then_) (go c.else_))

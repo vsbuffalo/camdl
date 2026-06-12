@@ -1,7 +1,12 @@
-# SEIR with age mixing + un-indexed incidence over a stratified
-# transition (spec §25.4). `incidence(infection)` must expand to the
-# SUM of per-stratum cumulative flows: Add(infection_child,
-# infection_adult). gh#160/#164/#165.
+# SEIR with age mixing + EXPLICIT cross-strata incidence aggregation on a
+# stratified transition. National (un-indexed) weekly_cases reports the SUM of
+# per-stratum cumulative flows with uniform reporting `rho`, written as the
+# explicit `rho * sum(a in age, incidence(infection[a]))` form. A bare
+# `incidence(infection)` over a stratified family is now rejected (E280, the
+# cross-strata aggregation gate, 2026-06-10 observation data-entry §5.2) because
+# it would silently sum all strata and apply reporting uniformly; the explicit
+# form computes the identical CumulativeFlowSum but states the reporting choice.
+# (gh#160/#164/#165.)
 time_unit = 'days
 
 compartments { S, E, I, R }
@@ -37,7 +42,7 @@ transitions {
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
-    projected     = incidence(infection)
+    projected     = sum(a in age, incidence(infection[a]))
     emit_schedule = every 7 'days
     weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
   }

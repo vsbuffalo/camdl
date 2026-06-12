@@ -173,6 +173,16 @@ pub struct ProjectedExpr {
     pub projected: (),
 }
 
+/// `{"obs_column_ref": "<col>"}` — a per-observation auxiliary data column
+/// referenced by name in a likelihood (e.g. binomial `n = tested`). Only valid
+/// in observation-model likelihood fields; the Rust binder resolves the name
+/// against the enclosing stream's bound aux columns and fills its value per
+/// observation. 2026-06-10 observation data-entry §3, §6.1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObsColumnRefExpr {
+    pub obs_column_ref: String,
+}
+
 /// Per-expression dimensional escape. Asserts that the wrapped
 /// subexpression has dimension `(dim_p, dim_t)` without the
 /// dim-checker verifying — the programmer takes responsibility.
@@ -227,6 +237,7 @@ pub enum Expr {
     UncheckedDim(UncheckedDimWrap),
     Reduce(ReduceWrap),
     BindingRef(BindingRefWrap),
+    ObsColumnRef(ObsColumnRefExpr),
 }
 
 // ── Convenience constructors ──────────────────────────────────────────────────
@@ -265,6 +276,9 @@ impl Expr {
     }
     pub fn binding_ref(name: impl Into<String>) -> Self {
         Expr::BindingRef(BindingRefWrap { binding_ref: name.into() })
+    }
+    pub fn obs_column_ref(name: impl Into<String>) -> Self {
+        Expr::ObsColumnRef(ObsColumnRefExpr { obs_column_ref: name.into() })
     }
 }
 
@@ -347,11 +361,15 @@ impl<'de> Deserialize<'de> for Expr {
                     }
                     "reduce" => Expr::Reduce(ReduceWrap { reduce: map.next_value()? }),
                     "binding_ref" => Expr::BindingRef(BindingRefWrap { binding_ref: map.next_value()? }),
+                    "obs_column_ref" => {
+                        Expr::ObsColumnRef(ObsColumnRefExpr { obs_column_ref: map.next_value()? })
+                    }
                     other => {
                         return Err(de::Error::custom(format!(
                             "unknown expression node kind '{other}' (expected one of: const, \
                              param, pop, pop_sum, time, dt, bin_op, un_op, cond, time_func, \
-                             table_lookup, projected, unchecked_dim, reduce, binding_ref)"
+                             table_lookup, projected, unchecked_dim, reduce, binding_ref, \
+                             obs_column_ref)"
                         )))
                     }
                 };
@@ -402,6 +420,7 @@ mod deserialize_tests {
             Expr::reduce(vec![Expr::const_(1.0), Expr::param("kappa"), Expr::pop("I_p1")]),
             Expr::reduce(vec![]), // empty sum (= 0)
             Expr::binding_ref("N_patch1"),
+            Expr::obs_column_ref("tested"),
         ] {
             roundtrip(&e);
         }

@@ -266,7 +266,7 @@ pub fn run_gillespie_with_observer(
                 lambda_total = propensities.iter().sum();
             } else {
                 // Time advanced but no state change: re-evaluate time-dependent transitions
-                let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, int_float_override: None };
+                let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, aux: None, int_float_override: None };
                 for &tr_idx in &model.time_dep_transitions {
                     let old = propensities[tr_idx];
                     let new_p = eval_one(tr_idx, &ctx);
@@ -363,7 +363,7 @@ pub fn run_gillespie_with_observer(
             // avoid evaluating the same transition twice when multiple stoich entries
             // share a dependent transition (e.g., N[p] = S[p] + E[p] + ...).
             let mut updated: Vec<usize> = Vec::with_capacity(16);
-            let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, int_float_override: None };
+            let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, aux: None, int_float_override: None };
 
             // Compartment-dependent transitions
             for &(local, _) in &model.transition_stoich[fired_idx] {

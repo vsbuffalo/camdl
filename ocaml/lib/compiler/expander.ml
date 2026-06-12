@@ -60,6 +60,14 @@ type context = {
      inlined rate exactly as before — it cannot see through a state-bearing
      BindingRef. The same let is still hoisted at its non-lineage use sites. *)
   mutable suppress_hoist  : bool;
+  (* Declared value-column names of the observation stream currently being
+     expanded (2026-06-10 observation data-entry §3). While set, an identifier
+     in a likelihood expression matching one of these names resolves to
+     [Ir.ObsColumnRef name] — a per-observation aux data reference the Rust
+     binder fills by name (e.g. binomial `n = tested`) — instead of falling
+     through name resolution to E100. Empty outside the likelihood-resolution
+     scope. *)
+  mutable obs_aux_cols    : string list;
 }
 
 let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
@@ -100,6 +108,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   hoisted_tbl          = Hashtbl.create 64;
   hoisted_rev          = [];
   suppress_hoist       = false;
+  obs_aux_cols         = [];
 }
 
 (* ── Model summary ────────────────────────────────────────────────────────── *)
@@ -2371,6 +2380,31 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     Ir.Const 0.0
 
 and resolve_ident_name ctx name ~loc =
+  (* Per-observation aux data column (§3): inside a likelihood, a declared
+     value-column name (other than the scored outcome) is a reference to that
+     observation's auxiliary data — e.g. the binomial denominator `n = tested`.
+     It is resolved by name by the Rust binder, NOT by model name resolution.
+     A column name that also collides with a compartment/parameter/let/forcing
+     is a hard error naming both (§3.1) — never a silent re-bind. *)
+  if List.mem name ctx.obs_aux_cols then begin
+    if Hashtbl.mem ctx.expanded_comp_tbl name
+       || Hashtbl.mem ctx.comp_tbl name
+       || Hashtbl.mem ctx.scalar_param_tbl name
+       || is_expanded_indexed_param_name ctx name
+       || Hashtbl.mem ctx.let_tbl name
+       || Hashtbl.mem ctx.func_tbl name
+    then
+      Diagnostics.error ctx.diags
+        ~code:"E279"
+        ~loc
+        ~message:(Printf.sprintf
+          "observation column '%s' collides with a model name (compartment / \
+           parameter / let / forcing of the same name)" name)
+        ~hint:"rename the data column (upstream) or the model declaration so \
+               the likelihood reference is unambiguous"
+        ();
+    Ir.ObsColumnRef name
+  end else
   (* Name resolution order follows spec §26.10: compartments → parameters →
      lets → forcings. `check_declaration_names` (gh#117) already makes a name
      live in at most one namespace — a cross-namespace collision is a hard
@@ -3204,7 +3238,7 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ctx ~pname
                    `%s` is not a declared parameter."
           ~hint:"Check spelling, or declare the hyperparameter first."
           ()
-      | Ir.Param _ | Ir.Const _ | Ir.Projected | Ir.Time | Ir.Dt -> ()
+      | Ir.Param _ | Ir.Const _ | Ir.Projected | Ir.ObsColumnRef _ | Ir.Time | Ir.Dt -> ()
       | Ir.BinOp b -> check_refs b.left; check_refs b.right
       | Ir.UnOp  u -> check_refs u.arg
       | Ir.Cond  c -> check_refs c.pred; check_refs c.then_; check_refs c.else_
@@ -3683,6 +3717,7 @@ let resolve_comp_name ctx env e =
       | Ir.Time       -> "the time symbol"
       | Ir.Dt         -> "the integrator step `dt`"
       | Ir.Projected  -> "a projected value"
+      | Ir.ObsColumnRef c -> Printf.sprintf "an observation data column ('%s')" c
       | Ir.Pop _      -> "a compartment" (* unreachable by pattern *)
       | Ir.UncheckedDim _ -> "a dimensional-escape expression"
       | Ir.Reduce _   -> "a sum (reduce)"
@@ -4485,7 +4520,31 @@ let expand_observations ctx =
       | None         -> Ir.CumulativeFlow base
       | Some []      -> Ir.CumulativeFlow base
       | Some [single] -> Ir.CumulativeFlow single
-      | Some many    -> Ir.CumulativeFlowSum many
+      | Some many    ->
+        (* Cross-strata aggregation gate (§5.2). A bare, un-indexed incidence
+           projection over a STRATIFIED transition family on an UN-INDEXED
+           stream would silently sum all strata and apply reporting uniformly.
+           That decision must be explicit. (When the stream is itself indexed
+           — `cases[p in patch]` — each cell resolves through the `EIndex`
+           branch, never here; the explicit `sum(p in dim, ...)` forms parse as
+           ESum and resolve through `ProjDerived`, also never here. So this
+           fires precisely on the silent case.) *)
+        if od.oindices = [] then begin
+          Diagnostics.error ctx.diags
+            ~code:"E280"
+            ~loc:od_loc
+            ~message:(Printf.sprintf
+              "observation '%s' is un-indexed, but `incidence(%s)` would silently \
+               sum all %d strata of '%s' and apply reporting uniformly"
+              od.oname base (List.length many) base)
+            ~hint:(Printf.sprintf
+              "state the aggregation explicitly:\n\
+              \  • uniform reporting:   <col> ~ ...( rho * sum(p in <dim>, incidence(%s[p])) )\n\
+              \  • per-stratum reporting: <col> ~ ...( sum(p in <dim>, rho[p] * incidence(%s[p])) )"
+              base base)
+            ()
+        end;
+        Ir.CumulativeFlowSum many
     in
     let projection = match proj_v with
       | ProjIncidence (name, idxs) ->
@@ -4532,6 +4591,35 @@ let expand_observations ctx =
           prevalence_projection name idx_vals
         else
           Ir.CumulativeFlow concrete
+      (* EXPLICIT cross-strata incidence aggregation (§5.2):
+         `sum(a in dim, incidence(tr[a]))` is the uniform-reporting form the
+         aggregation gate (E280) directs the modeller to. It lowers to a
+         CumulativeFlowSum over the per-level transitions — the SAME value the
+         (now-rejected) bare `incidence(tr)` produced, but stated explicitly.
+         The loop variable indexes the transition; each level instantiates one
+         concrete flow. (A `sum` whose body is anything else falls through to
+         the generic DerivedExpr arm below.) *)
+      | ProjDerived (ESum (loop_var, dim, EFuncCall ("incidence", iargs)))
+        when (match List.assoc_opt "" iargs with
+              | Some (EIndex (_, _)) -> true | _ -> false) ->
+        let inner = match List.assoc_opt "" iargs with
+          | Some (EIndex (tr, idxs)) -> Some (tr, idxs) | _ -> None in
+        (match inner with
+         | Some (tr, idxs) ->
+           let levels = match List.assoc_opt dim ctx.dim_registry with
+             | Some ls -> ls | None -> [] in
+           (* For each level, bind loop_var → level in a local env and resolve
+              the transition's concrete name. *)
+           let flows = List.map (fun lvl ->
+             let local_env = (loop_var, lvl) :: env in
+             let idx_vals = List.map (index_item_to_str local_env) idxs in
+             String.concat "_" (tr :: idx_vals)
+           ) levels in
+           (match flows with
+            | []       -> Ir.CumulativeFlow tr
+            | [single] -> Ir.CumulativeFlow single
+            | many     -> Ir.CumulativeFlowSum many)
+         | None -> Ir.DerivedExpr (resolve_expr ctx env (ESum (loop_var, dim, EConst 0.0))))
       | ProjDerived e ->
         Ir.DerivedExpr (resolve_expr ctx env e)
     in
@@ -4583,6 +4671,19 @@ let expand_observations ctx =
             (String.concat ", " required_kwargs))
           ()
     ) current_kwargs;
+    (* Declared value columns other than the scored outcome are the
+       per-observation aux data the likelihood may reference by name (§3): the
+       binomial denominator `n = tested`, a person-time offset, a reporting
+       fraction. Register them so `resolve_expr` maps those identifiers to
+       `Ir.ObsColumnRef` rather than E100. Scoped to this stream's likelihood
+       resolution; cleared after. *)
+    let aux_cols =
+      List.filter_map (fun c ->
+        match c.oc_role with
+        | ColValue _ when c.oc_name <> meas_v.om_scored -> Some c.oc_name
+        | _ -> None) columns_v
+    in
+    ctx.obs_aux_cols <- aux_cols;
     let resolve_kw kwargs name =
       match List.assoc_opt name kwargs with
       | Some e -> resolve_expr ctx env e
@@ -4624,6 +4725,7 @@ let expand_observations ctx =
       | LikBernoulli kwargs ->
         Ir.Bernoulli { Ir.p = resolve_kw kwargs "p" }
     in
+    ctx.obs_aux_cols <- [];
     let parts = name_parts_from_bindings od.oindices env in
     let obs_name =
       if parts = [] then od.oname
@@ -5498,7 +5600,8 @@ let build_model_structure ctx expanded_trs =
         c.else_
     | Ir.TableLookup (_, args) ->
       List.fold_left collect_numerator_pops acc args
-    | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.TimeFunc _ -> acc
+    | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.Projected
+    | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> acc
     | Ir.UncheckedDim u -> collect_numerator_pops acc u.inner
     (* Every term of a sum is a numerator contribution (like Add). *)
     | Ir.Reduce terms -> List.fold_left collect_numerator_pops acc terms
@@ -5554,7 +5657,7 @@ let rec expr_contains_param_or_pop = function
   | Ir.TableLookup (_, args) -> List.exists expr_contains_param_or_pop args
   | Ir.Reduce terms -> List.exists expr_contains_param_or_pop terms
   | Ir.BindingRef _ -> false
-  | Ir.Const _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.TimeFunc _ -> false
+  | Ir.Const _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> false
 
 (* Treat `UncheckedDim { inner = Const c; ... }` (the IR form of unit
    literals like `1 'days`) as a constant for L401 matching. *)
@@ -5623,7 +5726,7 @@ let rec walk_expr_for_l401 ~on_match e =
   | Ir.Reduce terms -> List.iter (walk_expr_for_l401 ~on_match) terms
   | Ir.BindingRef _ -> ()
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
-  | Ir.Time | Ir.Dt | Ir.Projected | Ir.TimeFunc _ -> ()
+  | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> ()
 
 let lint_l401 ctx (expanded_trs : Ir.transition list) =
   (* Avoid duplicate emits when the same expanded transition rate fires

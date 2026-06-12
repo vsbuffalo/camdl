@@ -68,6 +68,10 @@ pub enum ResolvedExpr {
     },
     /// Returns `ctx.projected` (observation likelihood context only).
     Projected,
+    /// Per-observation auxiliary data column referenced by name (e.g. a binomial
+    /// denominator `n = tested`). Reads `ctx.aux` by name — observation
+    /// likelihood context only. 2026-06-10 observation data-entry §3.
+    ObsColumnRef(String),
     /// Dimensional escape; transparent at eval time (identity over
     /// `inner`). The asserted dim is a compile-time concern only and
     /// isn't stored here — the dim-checker has already consumed it.
@@ -224,6 +228,12 @@ pub fn resolve_expr(expr: &Expr, ctx: &ResolveCtx<'_>) -> Result<ResolvedExpr, S
         }
 
         Expr::Projected(_) => Ok(ResolvedExpr::Projected),
+
+        Expr::ObsColumnRef(w) => {
+            // Resolved by name at eval against `ctx.aux` (filled per
+            // observation by the scoring loop) — no index map to consult here.
+            Ok(ResolvedExpr::ObsColumnRef(w.obs_column_ref.clone()))
+        }
 
         Expr::UncheckedDim(w) => {
             let inner = resolve_expr(&w.unchecked_dim.inner, ctx)?;
@@ -558,6 +568,17 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
             ctx.projected.unwrap_or(0.0)
         }
 
+        ResolvedExpr::ObsColumnRef(name) => {
+            // Per-observation aux value, looked up by name in `ctx.aux` (filled
+            // by the scoring loop). Only appears in a likelihood; outside that
+            // context (no aux) it floors to 0.0, like `Projected`. A
+            // referenced-but-absent aux is a binder error (the cell is a hole),
+            // so this miss is not reached on the scored path.
+            ctx.aux
+                .and_then(|kvs| kvs.iter().find(|(k, _)| k == name).map(|(_, v)| *v))
+                .unwrap_or(0.0)
+        }
+
         ResolvedExpr::UncheckedDim { inner } => {
             // Identity at eval time. The dim assertion was consumed at
             // compile time by the dim-checker.
@@ -674,6 +695,7 @@ pub fn eval_resolved_deriv(expr: &ResolvedExpr, wrt: usize, ctx: &EvalCtx<'_>) -
         | ResolvedExpr::Time
         | ResolvedExpr::Dt
         | ResolvedExpr::Projected
+        | ResolvedExpr::ObsColumnRef(_)
         | ResolvedExpr::TimeFunc(_)
         | ResolvedExpr::TableLookup { .. } => 0.0,
 

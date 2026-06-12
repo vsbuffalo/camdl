@@ -133,6 +133,7 @@ fn pf_and_pgas_likelihood_paths_agree() {
         projection: StreamProjection::IntCompSum(vec![i_idx]), // prevalence of I
         observations: dense_cells(vec![12.0, 30.0]),
         obs_times: vec![1.0, 5.0],
+        aux: vec![],
     };
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap();

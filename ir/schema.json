@@ -238,6 +238,14 @@
             "binding_ref": { "type": "string" }
           },
           "additionalProperties": false
+        },
+        {
+          "comment": "Per-observation auxiliary data column referenced by name in a likelihood (e.g. binomial `n = tested`). Resolved by the Rust binder against the bound aux columns of the enclosing observation stream; evaluates per observation. Only valid inside a likelihood argument expression (2026-06-10 observation data-entry §3, §6.1).",
+          "required": ["obs_column_ref"],
+          "properties": {
+            "obs_column_ref": { "type": "string" }
+          },
+          "additionalProperties": false
         }
       ]
     },

@@ -66,6 +66,78 @@ use super::obs_model::{
     sample_obs_resolved, eval_obs_mean_resolved,
 };
 
+/// Collect every aux column name referenced (by `Expr::ObsColumnRef`) anywhere
+/// in a likelihood's argument expressions. These are the per-observation aux
+/// columns the stream must bind present-together-or-hole (§3, §6.1).
+fn aux_refs_in_likelihood(lik: &ir::observation::Likelihood) -> Vec<String> {
+    use ir::observation::Likelihood as L;
+    let mut out: Vec<String> = Vec::new();
+    let args: Vec<&ir::expr::Expr> = match lik {
+        L::Poisson(p) => vec![&p.rate],
+        L::NegBinomial(nb) => vec![&nb.mean, &nb.dispersion],
+        L::Normal(n) => vec![&n.mean, &n.sd],
+        L::Binomial(b) => vec![&b.n, &b.p],
+        L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha, &bb.beta],
+        L::Bernoulli(b) => vec![&b.p],
+    };
+    for e in args {
+        collect_obs_column_refs(e, &mut out);
+    }
+    out
+}
+
+fn collect_obs_column_refs(e: &ir::expr::Expr, out: &mut Vec<String>) {
+    use ir::expr::Expr;
+    match e {
+        Expr::ObsColumnRef(w) => {
+            if !out.iter().any(|n| n == &w.obs_column_ref) {
+                out.push(w.obs_column_ref.clone());
+            }
+        }
+        Expr::BinOp(w) => {
+            collect_obs_column_refs(&w.bin_op.left, out);
+            collect_obs_column_refs(&w.bin_op.right, out);
+        }
+        Expr::UnOp(w) => collect_obs_column_refs(&w.un_op.arg, out),
+        Expr::Cond(w) => {
+            collect_obs_column_refs(&w.cond.pred, out);
+            collect_obs_column_refs(&w.cond.then, out);
+            collect_obs_column_refs(&w.cond.else_, out);
+        }
+        Expr::TableLookup(w) => {
+            for ix in &w.table_lookup.indices {
+                collect_obs_column_refs(ix, out);
+            }
+        }
+        Expr::UncheckedDim(w) => collect_obs_column_refs(&w.unchecked_dim.inner, out),
+        Expr::Reduce(w) => {
+            for t in &w.reduce {
+                collect_obs_column_refs(t, out);
+            }
+        }
+        Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
+        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
+        | Expr::BindingRef(_) => {}
+    }
+}
+
+/// If the likelihood's trial denominator `n` is a single `ObsColumnRef`, return
+/// that aux column's name (for the `value ≤ n` / `n > 0` per-row data check,
+/// §3.2). Only the binomial / beta-binomial families have a capping `n`;
+/// everything else returns `None` (no cap to check at bind).
+fn denominator_aux_name(lik: &ir::observation::Likelihood) -> Option<&str> {
+    use ir::observation::Likelihood as L;
+    let n_expr = match lik {
+        L::Binomial(b) => &b.n,
+        L::BetaBinomial(bb) => &bb.n,
+        _ => return None,
+    };
+    match n_expr {
+        ir::expr::Expr::ObsColumnRef(w) => Some(w.obs_column_ref.as_str()),
+        _ => None,
+    }
+}
+
 /// One observation cell on a stream's grid.
 ///
 /// A stream's per-observation data is `Vec<Option<ObsCell>>`: `None` is a
@@ -257,7 +329,7 @@ pub fn eval_stream_projection(
                     model: compiled, int_s: scratch, real_s, params,
                     // dt: 0.0 — observation projection runs at obs
                     // boundaries with no integrator step in scope.
-                    t, dt: 0.0, projected: None, int_float_override: None,
+                    t, dt: 0.0, projected: None, aux: None, int_float_override: None,
                 };
                 eval_resolved(expr, &ctx)
             })
@@ -351,6 +423,14 @@ struct BoundStream {
     /// hole (no likelihood term; the grid time still resets incidence).
     /// INVARIANT (enforced by `bind`): `values.len() == BoundObs.times.len()`.
     values: Vec<Option<ObsCell>>,
+    /// Per-observation auxiliary data (a binomial denominator `n = tested`, a
+    /// person-time offset), indexed by observation-time index, each a
+    /// name→value list the likelihood reads by `Expr::ObsColumnRef` (§3, §6.1).
+    /// An entry is empty when the stream's likelihood references no aux column
+    /// OR the cell is a hole (no term scored). INVARIANT (enforced by `bind`):
+    /// `aux.len() == values.len()`, and at a non-hole cell every aux column the
+    /// likelihood references is present (present-together-or-hole).
+    aux: Vec<Vec<(String, f64)>>,
 }
 
 /// A validated, model-shaped observation set. The ONLY way to obtain one is
@@ -384,7 +464,7 @@ impl BoundObs {
     /// invariant `values.len() == times.len()` then holds by construction.
     ///
     /// Reproduces today's dense/homogeneous semantics exactly.
-    pub fn bind(streams: Vec<StreamSpec>) -> Result<(BoundObs, BindReport), BindReport> {
+    pub fn bind(mut streams: Vec<StreamSpec>) -> Result<(BoundObs, BindReport), BindReport> {
         let mut findings: Vec<Finding> = Vec::new();
 
         // (1) Empty stream list.
@@ -447,6 +527,93 @@ impl BoundObs {
             }
         }
 
+        // An EMPTY aux vector means "this stream declares no aux columns" — the
+        // common scalar-outcome case (and every `StreamSpec::dense` site already
+        // fills it length-matched). Normalize it to per-observation empties so
+        // the downstream `aux.len() == cells.len()` invariant holds. A non-empty
+        // but wrong-length aux is still a hard error below (a real binder bug).
+        for spec in &mut streams {
+            if spec.aux.is_empty() && !spec.observations.is_empty() {
+                spec.aux = vec![Vec::new(); spec.observations.len()];
+            }
+        }
+
+        // (5) Per-observation auxiliary data (§3, §6.1): present-together-or-hole
+        // and the binomial-`n` row check (`value ≤ n`, `n > 0`). The aux vector
+        // must be length-matched to the cells, every referenced aux present at a
+        // non-hole cell (else a hole), and a capping denominator well-formed.
+        for spec in &streams {
+            let stream_name = &spec.ir_model.name;
+            let required = aux_refs_in_likelihood(&spec.ir_model.likelihood);
+            let denom = denominator_aux_name(&spec.ir_model.likelihood);
+
+            if spec.aux.len() != spec.observations.len() {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "observation stream '{}': aux data has {} rows but {} \
+                         observation cells (internal binder error)",
+                        stream_name, spec.aux.len(), spec.observations.len()
+                    ),
+                });
+                continue;
+            }
+
+            for (i, (cell, aux_row)) in
+                spec.observations.iter().zip(spec.aux.iter()).enumerate()
+            {
+                let observed = match cell {
+                    // A hole scores no term; the missing-together rule made it a
+                    // hole upstream, so no aux check applies here.
+                    None => continue,
+                    Some(ObsCell::Scalar(v)) => *v,
+                };
+                // present-together: every referenced aux column must be present
+                // at a scored cell. (A missing aux should have been turned into
+                // a hole by the loader; if it reaches here, it is a hard error —
+                // `binomial(n = NaN)` must be unconstructible.)
+                for col in &required {
+                    if !aux_row.iter().any(|(k, _)| k == col) {
+                        findings.push(Finding {
+                            severity: Severity::Error,
+                            message: format!(
+                                "observation stream '{}' row {}: scored value present \
+                                 but referenced aux column '{}' is missing — value and \
+                                 every aux column must be present together, or the row \
+                                 is a hole",
+                                stream_name, i, col
+                            ),
+                        });
+                    }
+                }
+                // n > 0 and value ≤ n for a binomial denominator (§3.2).
+                if let Some(dn) = denom {
+                    if let Some((_, n)) = aux_row.iter().find(|(k, _)| k == dn) {
+                        if !(*n > 0.0) {
+                            findings.push(Finding {
+                                severity: Severity::Error,
+                                message: format!(
+                                    "observation stream '{}' row {}: denominator '{}' = {} \
+                                     must be > 0",
+                                    stream_name, i, dn, n
+                                ),
+                            });
+                        } else if observed > *n {
+                            findings.push(Finding {
+                                severity: Severity::Error,
+                                message: format!(
+                                    "observation stream '{}' row {}: scored value {} exceeds \
+                                     denominator '{}' = {} (value ≤ n required) — check the \
+                                     data file (a transposed row?)",
+                                    stream_name, i, observed, dn, n
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         let report = BindReport::new(findings);
         if report.is_fatal() {
             return Err(report);
@@ -461,6 +628,7 @@ impl BoundObs {
                 ir_model: spec.ir_model,
                 projection: spec.projection,
                 values: spec.observations,
+                aux: spec.aux,
             })
             .collect();
 
@@ -487,6 +655,9 @@ struct Stream {
     /// hole: it contributes no likelihood term (the incidence reset still
     /// fires at its grid index — see `particle_filter.rs`).
     observations: Vec<Option<ObsCell>>,
+    /// Per-observation auxiliary data (binomial `n`, Poisson offset), indexed
+    /// by observation time index; read by `Expr::ObsColumnRef` at scoring.
+    aux: Vec<Vec<(String, f64)>>,
 }
 
 /// Multi-stream observation model.
@@ -514,6 +685,28 @@ pub struct StreamSpec {
     pub ir_model: ir::observation::ObservationModel,
     pub observations: Vec<Option<ObsCell>>,
     pub obs_times: Vec<f64>,
+    /// Per-observation auxiliary data (a binomial denominator `n = tested`, a
+    /// person-time offset), indexed by observation-time index — each a
+    /// name→value list the likelihood reads by name (§3, §6.1). The loader
+    /// fills this; dense call sites pass empties via [`StreamSpec::dense`].
+    /// INVARIANT (checked in `bind`): `aux.len() == observations.len()`.
+    pub aux: Vec<Vec<(String, f64)>>,
+}
+
+impl StreamSpec {
+    /// Build a spec with NO auxiliary data — the common scalar-outcome stream
+    /// (no binomial denominator / offset). The aux vector is all-empty,
+    /// length-matched to `observations`. Dense and aux-free call sites use this
+    /// so they need not spell out the empty `aux`.
+    pub fn dense(
+        projection: StreamProjection,
+        ir_model: ir::observation::ObservationModel,
+        observations: Vec<Option<ObsCell>>,
+        obs_times: Vec<f64>,
+    ) -> Self {
+        let aux = vec![Vec::new(); observations.len()];
+        StreamSpec { projection, ir_model, observations, obs_times, aux }
+    }
 }
 
 impl MultiStreamObsModel {
@@ -558,6 +751,7 @@ impl MultiStreamObsModel {
                 projection: spec.projection,
                 resolved,
                 observations: spec.values,
+                aux: spec.aux,
             });
         }
 
@@ -623,7 +817,7 @@ impl MultiStreamObsModel {
             // surveys wildly inconsistent with true prevalence.
             with_scratch_int_from_counts(counts, |int_s| {
                 eval_likelihood_resolved(
-                    &s.resolved, t, projected, observed,
+                    &s.resolved, t, projected, observed, &s.aux[obs_idx],
                     params, &self.compiled, int_s, &self.real_s,
                 )
             })
@@ -671,7 +865,7 @@ impl MultiStreamObsModel {
             let projected = self.project_stream_with_params(si, cum_flows, counts, params, t);
             with_scratch_int_from_counts(counts, |int_s| {
                 eval_likelihood_resolved_grad(
-                    &s.resolved, t, projected, observed,
+                    &s.resolved, t, projected, observed, &s.aux[obs_idx],
                     params, &self.compiled, int_s, &self.real_s,
                     estimated_to_model, &mut grad,
                 );
@@ -723,7 +917,7 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
             // in p/mean/sd expressions blow up.
             with_scratch_int_from_counts(&state.counts, |int_s| {
                 sample_obs_resolved(
-                    &s.resolved, t, projected, params,
+                    &s.resolved, t, projected, &s.aux[obs_idx], params,
                     &self.compiled, int_s, &self.real_s, rng,
                 )
             })
@@ -742,7 +936,7 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
             // GitHub #6: actual state, not zero scratch.
             with_scratch_int_from_counts(&state.counts, |int_s| {
                 eval_obs_mean_resolved(
-                    &s.resolved, t, projected, params,
+                    &s.resolved, t, projected, &s.aux[obs_idx], params,
                     &self.compiled, int_s, &self.real_s,
                 )
             })
@@ -801,12 +995,12 @@ mod bind_tests {
     }
 
     fn spec(name: &str, obs_times: Vec<f64>, observations: Vec<f64>) -> StreamSpec {
-        StreamSpec {
-            projection: StreamProjection::FlowSum(vec![0]),
-            ir_model: ir_obs(name),
-            observations: dense_cells(observations),
+        StreamSpec::dense(
+            StreamProjection::FlowSum(vec![0]),
+            ir_obs(name),
+            dense_cells(observations),
             obs_times,
-        }
+        )
     }
 
     /// Extract the fatal `BindReport` from a `bind` call expected to fail —
@@ -1061,12 +1255,12 @@ mod hole_scoring_tests {
         let compiled = model();
         let rec = compiled.model.transitions.iter()
             .position(|t| t.name == "recovery").unwrap();
-        let spec = StreamSpec {
-            projection: StreamProjection::FlowSum(vec![rec]),
-            ir_model: compiled.model.observations[0].clone(),
-            observations: cells,
+        let spec = StreamSpec::dense(
+            StreamProjection::FlowSum(vec![rec]),
+            compiled.model.observations[0].clone(),
+            cells,
             obs_times,
-        };
+        );
         MultiStreamObsModel::new(
             BoundObs::bind(vec![spec]).expect("bind").0, compiled).unwrap()
     }

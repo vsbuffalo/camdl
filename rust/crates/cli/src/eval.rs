@@ -185,7 +185,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
 
     for &t in &times {
         write!(out, "{}", t).unwrap();
-        let ctx = EvalCtx { model: &compiled, int_s: &int_s, real_s: &real_s, params: &params, t, dt: 0.0, projected: None, int_float_override: None };
+        let ctx = EvalCtx { model: &compiled, int_s: &int_s, real_s: &real_s, params: &params, t, dt: 0.0, projected: None, aux: None, int_float_override: None };
         for (name, expr) in &resolved {
             match eval_expr(expr, &ctx) {
                 Ok(val) => write!(out, "\t{:.6}", val).unwrap(),

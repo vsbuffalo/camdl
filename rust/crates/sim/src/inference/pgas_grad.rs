@@ -76,7 +76,7 @@ pub fn log_transition_density_grad(
     eval_propensities(model, &int_s, &real_s, params, t, dt, &mut propensities)?;
 
     let ctx = EvalCtx {
-        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, int_float_override: None,
+        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None,
     };
 
     let mut log_p = 0.0;
@@ -298,7 +298,7 @@ fn log_gamma_density_grad_substep(
 
     let ctx = EvalCtx {
         model, int_s: &int_s, real_s: &real_s, params, t, dt,
-        projected: None, int_float_override: None,
+        projected: None, aux: None, int_float_override: None,
     };
 
     let mut gamma_idx_local: usize = 0;

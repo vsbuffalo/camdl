@@ -286,6 +286,7 @@ impl TransitionObserver for EventRecorder<'_> {
                 t: time,
                 dt: self.model.model.simulation.dt.unwrap_or(1.0),
                 projected: None,
+                aux: None,
                 int_float_override: None,
             };
             let mut masses = Vec::with_capacity(exprs.len());

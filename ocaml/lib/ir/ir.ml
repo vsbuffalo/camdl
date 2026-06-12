@@ -38,6 +38,13 @@ and expr =
      instead of being inlined into every (patch,age) rate. *)
   | BindingRef of string
   | Projected                    (* refers to projection output in likelihoods *)
+  (* Per-observation auxiliary data column referenced by name in a likelihood
+     (e.g. binomial `n = tested`). The Rust binder resolves it against the
+     enclosing stream's bound aux columns and evaluates it per observation —
+     symmetric to [Projected], which the binder fills per observation from the
+     projection. Only valid inside a likelihood argument expression
+     (2026-06-10 observation data-entry §3, §6.1). *)
+  | ObsColumnRef of string
   (* Per-expression dimensional escape: asserts the wrapped subexpression
      has dimension `(dim_p, dim_t)` without the checker verifying. The
      user-supplied `reason` is retained for audit trails (run.json) and

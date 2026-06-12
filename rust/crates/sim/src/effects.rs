@@ -204,7 +204,7 @@ fn resolve_one(
 ) -> Result<(), SimError> {
     let ctx = EvalCtx {
         model, int_s: snap.int, real_s: snap.real, params, t, dt,
-        projected: None, int_float_override: None,
+        projected: None, aux: None, int_float_override: None,
     };
     let v = eval_resolved(&model.resolved.intervention_exprs[iv_idx][action_idx], &ctx);
     let v = crate::intervention::finite_action_value(v, iv_name, action, t)?;
@@ -335,7 +335,7 @@ fn eval_amount_f64(
     let rs = RealState::from_vec(real_f64.to_vec());
     let ctx = EvalCtx {
         model, int_s: &placeholder, real_s: &rs, params, t, dt,
-        projected: None, int_float_override: Some(int_f64),
+        projected: None, aux: None, int_float_override: Some(int_f64),
     };
     eval_resolved(&model.resolved.intervention_exprs[iv_idx][action_idx], &ctx)
 }

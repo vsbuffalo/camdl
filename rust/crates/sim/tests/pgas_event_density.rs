@@ -386,6 +386,7 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
             },
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
+            aux: vec![],
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();

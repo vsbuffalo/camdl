@@ -71,7 +71,7 @@ pub fn apply_post_advance(
     if let Some(bal) = balance {
         let ctx = EvalCtx {
             model, int_s: current, real_s: real,
-            params, t: t_end, dt, projected: None, int_float_override: None,
+            params, t: t_end, dt, projected: None, aux: None, int_float_override: None,
         };
         let val = eval_resolved(&bal.expr, &ctx);
         let bal_count = val.round() as i64;

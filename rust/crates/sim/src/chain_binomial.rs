@@ -361,7 +361,7 @@ pub fn step_one(
     // Pre-evaluate draw methods from start-of-step state
     scratch.draws.clear();
     {
-        let ctx = EvalCtx { model, int_s: &scratch.int_s, real_s: &scratch.real_s, params, t, dt, projected: None, int_float_override: None };
+        let ctx = EvalCtx { model, int_s: &scratch.int_s, real_s: &scratch.real_s, params, t, dt, projected: None, aux: None, int_float_override: None };
         for (i, tr) in model.model.transitions.iter().enumerate() {
             scratch.draws.push(match &tr.draw_method {
                 ir::transition::DrawMethod::Poisson => ResolvedDraw::Poisson,

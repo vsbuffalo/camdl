@@ -62,13 +62,18 @@ pub(crate) fn eval_likelihood_resolved(
     t: f64,
     projected: f64,
     observed: f64,
+    // Per-observation auxiliary data (e.g. a binomial denominator `n = tested`),
+    // keyed by declared column name. `Expr::ObsColumnRef` reads from this. Empty
+    // when the likelihood references no aux column. (§3.)
+    aux: &[(String, f64)],
     params: &[f64],
     compiled: &CompiledModel,
     int_s: &IntState,
     real_s: &RealState,
 ) -> f64 {
     let ctx = |proj: f64| EvalCtx {
-        model: compiled, int_s, real_s, params, t, dt: 0.0, projected: Some(proj), int_float_override: None,
+        model: compiled, int_s, real_s, params, t, dt: 0.0, projected: Some(proj),
+        aux: Some(aux), int_float_override: None,
     };
 
     match likelihood {
@@ -155,6 +160,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
     t: f64,
     projected: f64,
     observed: f64,
+    aux: &[(String, f64)],
     params: &[f64],
     compiled: &CompiledModel,
     int_s: &IntState,
@@ -164,7 +170,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
 ) {
     let ctx_at = |proj: f64| EvalCtx {
         model: compiled, int_s, real_s, params, t, dt: 0.0,
-        projected: Some(proj), int_float_override: None,
+        projected: Some(proj), aux: Some(aux), int_float_override: None,
     };
     let ctx = ctx_at(projected);
 
@@ -289,7 +295,11 @@ pub fn compile_obs_sample_pf(
         assert_eq!(counts.len(), n_int,
             "compile_obs_sample_pf: counts length {} != expected {}", counts.len(), n_int);
         let int_s = IntState::from_vec(counts.to_vec());
-        sample_obs_resolved(&resolved, t, projected, &params, &compiled, &int_s, &real_s, rng)
+        // No per-observation aux at emission time (simulate --obs has no data
+        // file). A likelihood referencing an aux column (binomial `n = tested`)
+        // can't be sampled without a denominator — its `ObsColumnRef` would
+        // error at eval, the honest behaviour.
+        sample_obs_resolved(&resolved, t, projected, &[], &params, &compiled, &int_s, &real_s, rng)
     })
 }
 
@@ -301,6 +311,7 @@ pub(crate) fn sample_obs_resolved(
     likelihood: &ResolvedLikelihood,
     t: f64,
     projected: f64,
+    aux: &[(String, f64)],
     params: &[f64],
     compiled: &CompiledModel,
     int_s: &IntState,
@@ -308,7 +319,8 @@ pub(crate) fn sample_obs_resolved(
     rng: &mut StatefulRng,
 ) -> f64 {
     let ctx = |proj: f64| EvalCtx {
-        model: compiled, int_s, real_s, params, t, dt: 0.0, projected: Some(proj), int_float_override: None,
+        model: compiled, int_s, real_s, params, t, dt: 0.0, projected: Some(proj),
+        aux: Some(aux), int_float_override: None,
     };
 
     match likelihood {
@@ -364,13 +376,15 @@ pub(crate) fn eval_obs_mean_resolved(
     likelihood: &ResolvedLikelihood,
     t: f64,
     projected: f64,
+    aux: &[(String, f64)],
     params: &[f64],
     compiled: &CompiledModel,
     int_s: &IntState,
     real_s: &RealState,
 ) -> f64 {
     let ctx = |proj: f64| EvalCtx {
-        model: compiled, int_s, real_s, params, t, dt: 0.0, projected: Some(proj), int_float_override: None,
+        model: compiled, int_s, real_s, params, t, dt: 0.0, projected: Some(proj),
+        aux: Some(aux), int_float_override: None,
     };
 
     match likelihood {

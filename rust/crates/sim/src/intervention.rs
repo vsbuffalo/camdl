@@ -78,6 +78,7 @@ pub fn intervention_fire_times(
                 t: 0.0,
                 dt: 0.0,
                 projected: None,
+                aux: None,
                 int_float_override: None,
             };
             resolved.iter().map(|e| eval_resolved(e, &ctx)).collect()

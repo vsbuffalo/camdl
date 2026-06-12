@@ -54,7 +54,8 @@ let rec pops_in_expr (acc : string list) (e : expr) : string list =
   | Pop name -> name :: acc
   | PopSum names -> List.rev_append names acc
   (* Leaves with no compartment reference and no sub-expression. *)
-  | Const _ | Param _ | Time | Dt | TimeFunc _ | BindingRef _ | Projected ->
+  | Const _ | Param _ | Time | Dt | TimeFunc _ | BindingRef _ | Projected
+  | ObsColumnRef _ ->
     acc
   (* Compound nodes: recurse into every sub-expression. *)
   | BinOp { op = _; left; right } ->

@@ -911,6 +911,74 @@ observations {
   Alcotest.(check bool)
     "proportion projection (I/N) as binomial p must not E304" false has_e304
 
+(* dimcheck-n fix (2026-06-10 observation data-entry §3.1). The binomial/
+   beta-binomial `n` and the Poisson `rate` were inferred-and-discarded —
+   un-checked. They are now constrained: `n` is a count, the Poisson rate is a
+   count (expected events over the interval). A `count`-declared aux column
+   feeding `n` passes; a Known-wrong dim (a `probability` column) is E304. A
+   `real` column (Unknown dim) is NOT flagged — `constrain_known` deliberately
+   never false-positives on an inferred-Unknown dim. *)
+let has_e304_in src =
+  let diags = Compiler.collect_diagnostics ~filename:"<n-check>" src in
+  List.exists (fun (d : Diagnostics.diagnostic) -> d.code = "E304") diags
+
+let survey_n_src n_role n_expr = Printf.sprintf {camdl|
+compartments { S, I, R }
+parameters { beta : rate  gamma : rate }
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  survey {
+    columns       { time : time, pos : count, denom : %s }
+    projected  = prevalence(I)
+    emit_schedule = every 7 'days
+    pos ~ binomial(n = %s, p = projected / N)
+  }
+}
+|camdl} n_role n_expr
+
+let test_binomial_n_count_column_ok () =
+  (* `denom : count` feeding `n = denom` — a count, passes. *)
+  Alcotest.(check bool) "count column feeding binomial n must not E304"
+    false (has_e304_in (survey_n_src "count" "denom"))
+
+let test_binomial_n_probability_column_rejected () =
+  (* `denom : probability` (Known dimensionless) feeding `n = denom` — E304. *)
+  Alcotest.(check bool) "probability column feeding binomial n must E304"
+    true (has_e304_in (survey_n_src "probability" "denom"))
+
+let test_binomial_n_literal_ok () =
+  (* A bare literal `n = 100` is a count by context (like a seeding const) —
+     exempt from the n-dimension check. *)
+  Alcotest.(check bool) "literal binomial n must not E304"
+    false (has_e304_in (survey_n_src "count" "100"))
+
+let test_poisson_rate_probability_rejected () =
+  (* Poisson `rate = frac` where `frac : probability` (Known dimensionless) is
+     E304 — the rate must be a count. *)
+  let src = {camdl|
+compartments { S, I, R }
+parameters { beta : rate  gamma : rate }
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  counts {
+    columns       { time : time, k : count, frac : probability }
+    projected  = prevalence(I)
+    emit_schedule = every 7 'days
+    k ~ poisson(rate = frac)
+  }
+}
+|camdl} in
+  Alcotest.(check bool) "probability column feeding poisson rate must E304"
+    true (has_e304_in src)
+
 (* ── Test Registration ─────────────────────────────────────────────────── *)
 
 let () =
@@ -1047,6 +1115,15 @@ let () =
         (test_error_golden "E304" "e304_neg_binomial_dispersion_is_count");
       Alcotest.test_case "e304_proportion_projection_ok"  `Quick
         test_e304_proportion_projection_ok;
+      (* dimcheck-n fix (2026-06-10 obs data-entry §3.1) *)
+      Alcotest.test_case "binomial n = count column ok"  `Quick
+        test_binomial_n_count_column_ok;
+      Alcotest.test_case "binomial n = probability column → E304"  `Quick
+        test_binomial_n_probability_column_rejected;
+      Alcotest.test_case "binomial n = literal ok"  `Quick
+        test_binomial_n_literal_ok;
+      Alcotest.test_case "poisson rate = probability column → E304"  `Quick
+        test_poisson_rate_probability_rejected;
     ];
 
     (* ── Property-based tests (QCheck) ─────────────────────────────── *)

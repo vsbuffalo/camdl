@@ -107,6 +107,7 @@ fn build_obs_model(compiled: &Arc<CompiledModel>, projection: StreamProjection, 
             ir_model: obs_ir,
             observations: dense_cells(vec![observed]),
             obs_times: vec![5.0],
+            aux: vec![],
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap()
@@ -153,6 +154,7 @@ fn current_pop_sum_from_ir_resolves_stratified_compartments() {
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(vec![20.0]),
             obs_times: vec![5.0],
+            aux: vec![],
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
@@ -404,6 +406,7 @@ fn snapshot_reads_post_intervention_state() {
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(vec![500.0]),
             obs_times: vec![5.0],
+            aux: vec![],
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();

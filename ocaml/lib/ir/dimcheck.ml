@@ -137,6 +137,13 @@ type state = {
      for a `DerivedExpr` proportion like `I / N`. None outside an
      observation, where it falls back to a population count. *)
   mutable projected_dim : dim option;
+  (* Dimension of each per-observation aux column (`columns { tested : count }`),
+     keyed by column name; set per-observation before its likelihood check. An
+     [ObsColumnRef name] in a likelihood (e.g. binomial `n = tested`) infers this
+     dim, so a declared `count` feeding `n` is verified as a count and a
+     dimensionally-wrong column (a `real` feeding `n`) is a located E304. Cleared
+     after each observation. (2026-06-10 observation data-entry §3.1.) *)
+  obs_col_dims : (string, dim) Hashtbl.t;
 }
 
 let create_state () = {
@@ -152,6 +159,7 @@ let create_state () = {
   permissive_dim = false;
   subject = None;
   projected_dim = None;
+  obs_col_dims = Hashtbl.create 8;
 }
 
 let fresh_var st =
@@ -304,6 +312,13 @@ let rec infer st ~ctx (e : expr) : dim =
      | None -> fresh_var st)
   | Projected ->
     (match st.projected_dim with Some d -> resolve st d | None -> Known population)
+  | ObsColumnRef name ->
+    (* The aux column's declared dim (e.g. `tested : count` → population),
+       registered per-observation in [obs_col_dims]. An unregistered ref
+       (invalid model) floors to a fresh var so no spurious mismatch fires. *)
+    (match Hashtbl.find_opt st.obs_col_dims name with
+     | Some d -> resolve st d
+     | None -> fresh_var st)
   | UncheckedDim u ->
     (* Per-expression dimensional escape. The declared dim is
        authoritative; we do NOT recurse into `u.inner` for unification
@@ -437,7 +452,7 @@ let rec propagate st ~ctx (e : expr) (expected : dim_vec) : unit =
         | Unknown id -> bind st id expected
         | _ -> ())
      | None -> ())
-  | Pop _ | PopSum _ | Time | Dt | Projected -> ()
+  | Pop _ | PopSum _ | Time | Dt | Projected | ObsColumnRef _ -> ()
   | UncheckedDim _ ->
     (* The escape stops dim-propagation at this boundary — the inner
        is explicitly exempted from checker-driven dimensional
@@ -611,6 +626,10 @@ let rec read_dim st (e : expr) : dim =
      | None -> Unknown (-1))
   | Projected ->
     (match st.projected_dim with Some d -> resolve st d | None -> Known population)
+  | ObsColumnRef name ->
+    (match Hashtbl.find_opt st.obs_col_dims name with
+     | Some d -> resolve st d
+     | None -> Unknown (-1))
   | UncheckedDim u -> Known (make u.dim_p u.dim_t)
   | BinOp b -> read_dim_binop st b
   | UnOp u -> read_dim_unop st u
@@ -700,6 +719,7 @@ let rec expr_to_short_string (e : expr) : string =
   | TimeFunc s -> Printf.sprintf "%s(t)" s
   | TableLookup (s, _) -> Printf.sprintf "%s[...]" s
   | Projected -> "projected"
+  | ObsColumnRef c -> c
   | UncheckedDim u ->
     Printf.sprintf "unchecked_dim(%s)" (expr_to_short_string u.inner)
   | BinOp b ->
@@ -816,6 +836,18 @@ let check_model (m : model) : result =
     List.iter (fun (obs : observation_model) ->
       st.subject <- Some (SObservation obs.name);
       let ctx = Printf.sprintf "observation '%s'" obs.name in
+      (* Register each declared value column's dim so an [ObsColumnRef name] in
+         this likelihood (e.g. binomial `n = tested`, Poisson `offset` folded
+         into the rate) infers its declared dimension. This is what makes the
+         dimcheck of `n`/rate below actually bite: declaring `tested : count`
+         registers it as a count, so a `real` column feeding `n` is an E304.
+         (2026-06-10 observation data-entry §3.1.) *)
+      Hashtbl.reset st.obs_col_dims;
+      List.iter (fun (c : obs_column) ->
+        match c.col_role with
+        | RoleValue k -> Hashtbl.replace st.obs_col_dims c.col_name (param_dim_of_kind st (Some k))
+        | RoleTime | RoleDim _ -> ()
+      ) obs.columns;
       (* The Projected leaf in this likelihood stands for the projection's
          value, so it carries the projection's dimension: a population count
          for prevalence/incidence, the inferred dim for a DerivedExpr — e.g.
@@ -838,10 +870,38 @@ let check_model (m : model) : result =
            ~message:(Printf.sprintf
              "%s: NegBinomial `dispersion` must be dimensionless" ctx)
            disp_dim dimensionless
-       | Poisson p -> ignore (infer st ~ctx p.rate)
+       | Poisson p ->
+         (* The Poisson `rate` is the expected COUNT of events over the
+            reporting interval — dimension [population], not a per-time rate.
+            A person-time offset is folded into this argument
+            (`rate = lambda * person_time`), which keeps the product a count.
+            Previously inferred-and-discarded (un-checked); now constrained so a
+            dimensionally-wrong rate is a located E304. A bare numeric literal
+            (`rate = 100`) carries no real dimension — it is a count by context,
+            like a seeding constant — so it is exempt. (2026-06-10 §3.1.) *)
+         if not (is_bare_const p.rate) then begin
+           let rate_dim = infer st ~ctx p.rate in
+           constrain_known st ~code:"E304"
+             ~message:(Printf.sprintf
+               "%s: Poisson `rate` must have the dimension of a count \
+                (expected events over the reporting interval)" ctx)
+             rate_dim population
+         end else ignore (infer st ~ctx p.rate)
        | Normal n -> ignore (infer st ~ctx n.mean); ignore (infer st ~ctx n.sd)
        | Binomial b ->
-         ignore (infer st ~ctx b.n);
+         (* The binomial `n` is an external DENOMINATOR — a count (e.g. number
+            tested). Previously inferred-and-discarded; now constrained so a
+            declared `tested : count` is verified, and a `real`/probability
+            column feeding `n` is a located E304. A bare numeric literal
+            (`n = 100`) is a count by context and exempt. (2026-06-10 §3.1.) *)
+         if not (is_bare_const b.n) then begin
+           let n_dim = infer st ~ctx b.n in
+           constrain_known st ~code:"E304"
+             ~message:(Printf.sprintf
+               "%s: Binomial `n` must be a count (the trial denominator); \
+                declare the column feeding `n` as `count`." ctx)
+             n_dim population
+         end else ignore (infer st ~ctx b.n);
          (* gh#116: `p` must be a probability (dimensionless on
             [0, 1]). A count here is the textbook missing-`/N` bug. *)
          let p_dim = infer st ~ctx b.p in
@@ -851,7 +911,16 @@ let check_model (m : model) : result =
               a count here is almost certainly a missing `/N`." ctx)
            p_dim dimensionless
        | BetaBinomial bb ->
-         ignore (infer st ~ctx bb.n);
+         (* BetaBinomial `n` is the same external count denominator as the
+            Binomial; constrain it likewise (bare literal exempt). (§3.1.) *)
+         if not (is_bare_const bb.n) then begin
+           let n_dim = infer st ~ctx bb.n in
+           constrain_known st ~code:"E304"
+             ~message:(Printf.sprintf
+               "%s: BetaBinomial `n` must be a count (the trial denominator); \
+                declare the column feeding `n` as `count`." ctx)
+             n_dim population
+         end else ignore (infer st ~ctx bb.n);
          (* gh#116: alpha/beta are shape parameters of a Beta
             distribution — both dimensionless by definition. *)
          let a_dim = infer st ~ctx bb.alpha in
@@ -872,7 +941,8 @@ let check_model (m : model) : result =
              "%s: Bernoulli `p` must be dimensionless (probability); \
               a count here is almost certainly a missing `/N`." ctx)
            p_dim dimensionless);
-      st.projected_dim <- None
+      st.projected_dim <- None;
+      Hashtbl.reset st.obs_col_dims
     ) m.observations;
     st.permissive_dim <- prev_permissive
   done;

@@ -795,13 +795,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     &obs.projection, &compiled, &obs.name,
                 ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
             };
-            stream_specs.push(StreamSpec {
+            // profile is dense + aux-free in v1 (survey denominators are a
+            // `camdl fit` / `pfilter` feature; profile rejects NA upstream).
+            stream_specs.push(StreamSpec::dense(
                 projection,
-                ir_model: (*obs).clone(),
-                observations: sim::inference::dense_cells(
+                (*obs).clone(),
+                sim::inference::dense_cells(
                     stream_obs.iter().map(|o| o.value).collect()),
-                obs_times: obs_times_vec.clone(),
-            });
+                obs_times_vec.clone(),
+            ));
         }
         let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
             eprintln!("error: observation data invalid:\n{}", report.render());

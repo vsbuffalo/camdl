@@ -130,7 +130,7 @@ pub fn eval_prior_arg<E: ParamEnv>(expr: &Expr, env: &E) -> f64 {
         // NaN ensures a bogus prior args propagates to `-∞` log-density
         // rather than undefined behaviour.
         Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_)
-        | Expr::TableLookup(_) | Expr::Projected(_) => f64::NAN,
+        | Expr::TableLookup(_) | Expr::Projected(_) | Expr::ObsColumnRef(_) => f64::NAN,
         // Dimensional escape is transparent — evaluate the inner.
         Expr::UncheckedDim(w) => eval_prior_arg(&w.unchecked_dim.inner, env),
         Expr::Reduce(w) => w.reduce.iter().map(|t| eval_prior_arg(t, env)).sum(),

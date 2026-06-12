@@ -103,7 +103,7 @@ fn main() {
     sim::eval_stats::set_allow_degenerate_rates(true);
     let ctx = EvalCtx {
         model: &cm, int_s: &int_s, real_s: &real_s,
-        params: &params, t: 0.0, dt: 1.0, projected: None, int_float_override: None,
+        params: &params, t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None,
     };
     let mut mismatches = 0u64;
     let mut max_abs_diff = 0.0f64;
@@ -124,7 +124,7 @@ fn main() {
             let p = black_box(params.as_slice());
             let ctx = EvalCtx {
                 model: &cm, int_s: &int_s, real_s: &real_s,
-                params: p, t: black_box(0.0), dt: 1.0, projected: None, int_float_override: None,
+                params: p, t: black_box(0.0), dt: 1.0, projected: None, aux: None, int_float_override: None,
             };
             for i in 0..n_tr {
                 acc += eval_resolved(&cm.resolved.rates[i], &ctx);
@@ -140,7 +140,7 @@ fn main() {
             let p = black_box(params.as_slice());
             let ctx = EvalCtx {
                 model: &cm, int_s: &int_s, real_s: &real_s,
-                params: p, t: black_box(0.0), dt: 1.0, projected: None, int_float_override: None,
+                params: p, t: black_box(0.0), dt: 1.0, projected: None, aux: None, int_float_override: None,
             };
             for (i, tr) in cm.model.transitions.iter().enumerate() {
                 let _ = i;

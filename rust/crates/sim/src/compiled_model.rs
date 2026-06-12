@@ -275,6 +275,7 @@ fn expr_refs_param(expr: &Expr) -> bool {
         | Expr::Dt(_)
         | Expr::TimeFunc(_)
         | Expr::Projected(_)
+        | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_) => false,
     }
 }
@@ -415,7 +416,8 @@ fn collect_param_names(expr: &Expr, out: &mut Vec<String>) {
         Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_param_names(e, out)),
         Expr::UncheckedDim(w) => collect_param_names(&w.unchecked_dim.inner, out),
         Expr::Const(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_)
-        | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::BindingRef(_) => {}
+        | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
+        | Expr::BindingRef(_) => {}
     }
 }
 
@@ -598,6 +600,7 @@ fn expr_contains_dt(e: &Expr) -> bool {
         | Expr::PopSum(_)
         | Expr::Time(_)
         | Expr::Projected(_)
+        | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_) => false,
         Expr::BinOp(w) => {
             expr_contains_dt(&w.bin_op.left) || expr_contains_dt(&w.bin_op.right)
@@ -1283,7 +1286,7 @@ impl CompiledModel {
                 // dt: 0.0 — initial-condition expressions don't have
                 // access to a meaningful integrator step (init runs once,
                 // before stepping). Users referencing `dt` here get 0.0.
-                let ctx = EvalCtx { model: self, int_s: &zero_int, real_s: &zero_real, params, t: 0.0, dt: 0.0, projected: None, int_float_override: None };
+                let ctx = EvalCtx { model: self, int_s: &zero_int, real_s: &zero_real, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None };
                 for (name, expr) in map {
                     let global = self.comp_index.get(name.as_str())
                         .copied()

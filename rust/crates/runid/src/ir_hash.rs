@@ -191,6 +191,10 @@ impl ContentAddressed for Expr {
                 h.write_u32(14);
                 h.write_str(&w.binding_ref);
             }
+            Expr::ObsColumnRef(w) => {
+                h.write_u32(15);
+                h.write_str(&w.obs_column_ref);
+            }
         }
     }
 }

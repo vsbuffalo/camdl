@@ -90,7 +90,7 @@ fn eval_ode_derivs(
     t: f64,
     dt: f64,
 ) -> Result<Vec<f64>, SimError> {
-    let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, int_float_override: None };
+    let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, aux: None, int_float_override: None };
     let mut derivs = vec![0.0; model.ode_real_indices.len()];
     for (i, _eq) in model.model.ode_equations.iter().enumerate() {
         derivs[i] = eval_resolved(&model.resolved.ode_derivatives[i], &ctx);

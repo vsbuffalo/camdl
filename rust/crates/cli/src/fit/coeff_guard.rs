@@ -62,6 +62,7 @@ fn collect(e: &Expr, out: &mut HashSet<String>) {
         | Expr::Dt(_)
         | Expr::TimeFunc(_)
         | Expr::Projected(_)
+        | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_) => {}
     }
 }

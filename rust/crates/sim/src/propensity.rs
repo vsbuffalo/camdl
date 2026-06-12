@@ -28,6 +28,13 @@ pub struct EvalCtx<'a> {
     /// Projected observation value — only set when evaluating likelihood Exprs.
     /// `Expr::Projected` returns this value; errors if None.
     pub projected: Option<f64>,
+    /// Per-observation auxiliary data, keyed by declared column name (a binomial
+    /// denominator `n = tested`, a person-time offset). Only set when scoring an
+    /// observation likelihood; `Expr::ObsColumnRef` / `ResolvedExpr::ObsColumnRef`
+    /// looks its name up here. `None` (or a missing name) outside the likelihood
+    /// scoring path — a referenced-but-absent aux is a binder error, not reached
+    /// at eval (the cell is then a hole). 2026-06-10 observation data-entry §3.
+    pub aux: Option<&'a [(String, f64)]>,
     /// RM8 in 2026-04-19 engine review: the ODE backend uses f64 for
     /// integer compartment state between snapshots. When Some, `Pop`
     /// and `PopSum` read from this slice (indexed by local-int index)
@@ -210,6 +217,16 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
             ))
         }
 
+        Expr::ObsColumnRef(w) => {
+            let name = w.obs_column_ref.as_str();
+            ctx.aux
+                .and_then(|kvs| kvs.iter().find(|(k, _)| k == name).map(|(_, v)| *v))
+                .ok_or_else(|| SimError::Validation(format!(
+                    "observation aux column '{name}' referenced outside a scored \
+                     observation (no per-observation value bound)"
+                )))
+        }
+
         Expr::UncheckedDim(w) => {
             // Dimensional escape is a type-level assertion only; at
             // runtime it's identity semantics — evaluate the inner
@@ -260,7 +277,7 @@ pub fn eval_expr_deriv(expr: &Expr, wrt: usize, ctx: &EvalCtx<'_>) -> f64 {
             if idx == wrt { 1.0 } else { 0.0 }
         }
         Expr::Const(_) | Expr::Pop(_) | Expr::PopSum(_)
-        | Expr::Time(_) | Expr::Dt(_) | Expr::Projected(_)
+        | Expr::Time(_) | Expr::Dt(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
         | Expr::TimeFunc(_) | Expr::TableLookup(_) => 0.0,
 
         Expr::BinOp(w) => {
@@ -529,7 +546,7 @@ pub fn eval_propensities(
         }
     }
 
-    let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, int_float_override: None };
+    let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, aux: None, int_float_override: None };
     // Activate the per-state binding cache for this propensity vector: each
     // model binding is evaluated at most once instead of on every BindingRef
     // (the on-demand path is restored when `_cache` drops at function exit).

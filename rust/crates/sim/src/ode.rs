@@ -66,6 +66,7 @@ fn ode_derivs(
     let ctx = EvalCtx {
         model, int_s: &int_s, real_s: &real_s, params, t, dt,
         projected: None,
+        aux: None,
         int_float_override: Some(int_vals),
     };
 

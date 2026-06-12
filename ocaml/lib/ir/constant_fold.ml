@@ -64,7 +64,7 @@ let fold_bin_consts op a b : expr option =
 let rec fold tbls (e : expr) : expr =
   match e with
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
-  | Projected ->
+  | Projected | ObsColumnRef _ ->
       e
   | UnOp { op; arg } -> UnOp { op; arg = fold tbls arg }
   | Cond { pred; then_; else_ } ->

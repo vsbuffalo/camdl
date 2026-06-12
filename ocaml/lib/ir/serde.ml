@@ -114,6 +114,7 @@ let rec expr_to_json (e : expr) : Yojson.Safe.t =
   | Time         -> obj [("time", null)]
   | Dt           -> obj [("dt", null)]
   | Projected    -> obj [("projected", null)]
+  | ObsColumnRef c -> obj [("obs_column_ref", str c)]
   | BinOp b      ->
     obj [("bin_op", obj [
       ("op",    str (bin_op_str b.op));
@@ -172,6 +173,7 @@ let rec expr_of_json (j : Yojson.Safe.t) : expr =
     | ["time"]         -> Time
     | ["dt"]           -> Dt
     | ["projected"]    -> Projected
+    | ["obs_column_ref"] -> ObsColumnRef (as_string (List.assoc "obs_column_ref" kvs))
     | ["bin_op"]       ->
       let b = List.assoc "bin_op" kvs in
       BinOp {

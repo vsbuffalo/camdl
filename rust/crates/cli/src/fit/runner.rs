@@ -40,6 +40,11 @@ pub struct ObsStream {
     /// observed value `v`. Threaded into the obs model so the already
     /// hole-correct scoring seam (`MultiStreamObsModel`) handles missing values.
     pub cells: Vec<Option<sim::inference::ObsCell>>,
+    /// Per-observation auxiliary data (binomial `n = tested`, person-time
+    /// offset), parallel to `cells`; each row a name→value list the likelihood
+    /// reads by `Expr::ObsColumnRef`. Empty inner vec when the likelihood
+    /// references no aux column or the cell is a hole. (§3, §6.1.)
+    pub aux: Vec<Vec<(String, f64)>>,
 }
 
 pub struct FitRunConfig {
@@ -336,7 +341,7 @@ impl FitRunConfig {
             let stream_name = obs_model.name.clone();
             let data_path = effective.get(&obs_model.source)
                 .expect("filtered to bound sources above");
-            let (obs, cells) = load_observations(data_path, obs_model, dt, &time_opts)?;
+            let (obs, cells, aux) = load_observations(data_path, obs_model, dt, &time_opts)?;
             let obs_model: ir::observation::ObservationModel = (*obs_model).clone();
             let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
                 &obs_model.projection, &compiled, &stream_name,
@@ -398,6 +403,7 @@ impl FitRunConfig {
                 obs_model_ir: obs_model,
                 data: obs,
                 cells,
+                aux,
             });
         }
 
@@ -477,6 +483,9 @@ impl FitRunConfig {
                 for s in &mut streams {
                     s.data.insert(0, Observation { time: cond_from, value: 0.0 });
                     s.cells.insert(0, None);
+                    // Keep aux parallel to cells: the leading reset-only cell is
+                    // a hole, so it carries no aux.
+                    s.aux.insert(0, Vec::new());
                 }
             }
         }
@@ -622,6 +631,7 @@ impl FitRunConfig {
                 // grid, so the per-obs-index incidence reset still fires at it.
                 observations: s.cells.clone(),
                 obs_times: self.observations.iter().map(|o| o.time).collect(),
+                aux: s.aux.clone(),
             }).collect();
         let (bound, _report) = sim::inference::BoundObs::bind(specs).unwrap_or_else(|report| {
             eprintln!("error: observation data invalid:\n{}", report.render());
@@ -1301,14 +1311,31 @@ fn load_observations(
     obs_model: &ir::observation::ObservationModel,
     dt: f64,
     opts: &crate::caltime_load::TimeOpts,
-) -> Result<(Vec<Observation>, Vec<Option<sim::inference::ObsCell>>), String> {
+) -> Result<
+    (Vec<Observation>, Vec<Option<sim::inference::ObsCell>>, Vec<Vec<(String, f64)>>),
+    String,
+> {
     // Bind the file columns BY NAME: the declared `Time`-role column is the
     // time axis (the by-name-time flip — no positional "column 0 is time"),
     // and `scored` is the value column.
     let time_col = crate::pfilter::obs_time_column(obs_model)?;
     let value_col = &obs_model.scored;
-    let (times, cells) =
+    let (times, mut cells) =
         crate::pfilter::load_data_tsv_column_cells(path, time_col, value_col, opts)?;
+    // Per-observation auxiliary data (binomial `n = tested`, person-time offset;
+    // §3, §6.1). A row where the scored value OR any referenced aux is `NA` is a
+    // hole (present-together-or-hole) — clear the aux for a hole.
+    let aux_cols = crate::pfilter::stream_aux_columns(obs_model);
+    let (mut aux, force_hole) =
+        crate::pfilter::load_stream_aux(path, &aux_cols, cells.len())?;
+    for r in 0..cells.len() {
+        if force_hole[r] {
+            cells[r] = None;
+        }
+        if cells[r].is_none() {
+            aux[r].clear();
+        }
+    }
     // Validate time alignment (holes keep their time, so this is unaffected by
     // missing values).
     for &time in &times {
@@ -1333,7 +1360,7 @@ fn load_observations(
             },
         })
         .collect();
-    Ok((observations, cells))
+    Ok((observations, cells, aux))
 }
 
 
@@ -4308,12 +4335,12 @@ dt = 1.0
                 Some(ObsCell::Scalar(data21)), // t=21 (the probe)
                 Some(ObsCell::Scalar(weekly)), // t=28
             ];
-            let spec = StreamSpec {
-                projection: StreamProjection::FlowSum(vec![inflow_idx]),
-                ir_model: compiled.model.observations[0].clone(),
-                observations: cells,
-                obs_times: times.clone(),
-            };
+            let spec = StreamSpec::dense(
+                StreamProjection::FlowSum(vec![inflow_idx]),
+                compiled.model.observations[0].clone(),
+                cells,
+                times.clone(),
+            );
             let obs_model = MultiStreamObsModel::new(
                 BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap();
             super::compute_ode_loglik(&compiled, &obs_model, &times, dt, &params).unwrap()

@@ -54,7 +54,7 @@ let map2 (da : deriv) (db : deriv) (f : expr -> expr -> expr) : deriv =
 let rec mentions (param : string) (e : expr) : bool =
   match e with
   | Param n -> n = param
-  | Const _ | Pop _ | Time | Dt | Projected -> false
+  | Const _ | Pop _ | Time | Dt | Projected | ObsColumnRef _ -> false
   | PopSum _ -> false
   | BinOp b -> mentions param b.left || mentions param b.right
   | UnOp u -> mentions param u.arg
@@ -142,7 +142,7 @@ let differentiate (top : expr) (param : string)
   let rec d (e : expr) : deriv =
     match e with
     (* Constants in the θ|X step — derivative is zero. *)
-    | Const _ | Pop _ | PopSum _ | Time | Dt | Projected -> Known (Const 0.0)
+    | Const _ | Pop _ | PopSum _ | Time | Dt | Projected | ObsColumnRef _ -> Known (Const 0.0)
 
     (* Dimensional escape: differentiate the inner, drop the wrapper. *)
     | UncheckedDim u -> d u.inner

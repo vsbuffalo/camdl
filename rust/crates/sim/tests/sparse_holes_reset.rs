@@ -121,6 +121,7 @@ fn obs_model(compiled: Arc<CompiledModel>, cells: Vec<Option<ObsCell>>, obs_time
         ir_model: compiled.model.observations[0].clone(),
         observations: cells,
         obs_times,
+        aux: vec![],
     };
     MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, compiled).unwrap()
 }

@@ -25,7 +25,8 @@ let prec_binop = function
 
 let prec_expr : Ir.expr -> int = function
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
-  | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.TableLookup _ | Ir.Projected -> 10
+  | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.TableLookup _ | Ir.Projected
+  | Ir.ObsColumnRef _ -> 10
   | Ir.UncheckedDim _ -> 10   (* function-call-like, atomic *)
   | Ir.Reduce _ -> 10         (* rendered self-parenthesized, atomic *)
   | Ir.BindingRef _ -> 10     (* a name, atomic *)
@@ -115,6 +116,8 @@ and pp_inner ~mode ~split ~ascii ppf = function
     Term_style.table Fmt.string ppf name
   | Ir.Projected ->
     Fmt.pf ppf "projected"
+  | Ir.ObsColumnRef c ->
+    Term_style.param Fmt.string ppf c
   | Ir.TableLookup (name, idxs) ->
     Term_style.table Fmt.string ppf name;
     Term_style.dim_style (fun ppf () ->

@@ -155,6 +155,9 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let mut per_stream_obs: Vec<Vec<Observation>> = Vec::with_capacity(n_streams);
     let mut per_stream_cells: Vec<Vec<Option<sim::inference::ObsCell>>> =
         Vec::with_capacity(n_streams);
+    // Per-observation auxiliary data (binomial `n = tested`, person-time offset)
+    // bound by name alongside the scored value (§3, §6.1).
+    let mut per_stream_aux: Vec<Vec<Vec<(String, f64)>>> = Vec::with_capacity(n_streams);
     for (sname, spath) in &bound_streams {
         let path_str = spath.to_string_lossy().into_owned();
         // Bind columns BY NAME from the stream's `columns { }`: the declared
@@ -170,7 +173,26 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             std::process::exit(1);
         });
         match load_data_tsv_column_cells(&path_str, time_col, &obs_block.scored, &time_opts) {
-            Ok((times, cells)) => {
+            Ok((times, mut cells)) => {
+                // Load the stream's aux columns (Stage 2). A row where the
+                // scored value OR any referenced aux is `NA` is a hole
+                // (present-together-or-hole) — clear the aux for a hole.
+                let aux_cols = stream_aux_columns(obs_block);
+                let (mut aux, force_hole) =
+                    load_stream_aux(&path_str, &aux_cols, cells.len())
+                        .unwrap_or_else(|e| {
+                            eprintln!("error: cannot load aux data for stream '{}' from {}: {}",
+                                sname, path_str, e);
+                            std::process::exit(1);
+                        });
+                for r in 0..cells.len() {
+                    if force_hole[r] {
+                        cells[r] = None;
+                    }
+                    if cells[r].is_none() {
+                        aux[r].clear();
+                    }
+                }
                 // Dense placeholder view (holes → 0.0) for diagnostics/time.
                 let obs: Vec<Observation> = times.iter().zip(cells.iter())
                     .map(|(&time, cell)| Observation {
@@ -182,6 +204,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                     }).collect();
                 per_stream_obs.push(obs);
                 per_stream_cells.push(cells);
+                per_stream_aux.push(aux);
             }
             Err(e) => {
                 eprintln!("error: cannot load data column '{}' from {}: {}",
@@ -363,11 +386,13 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // incidence accumulator at its grid index (the filter loop reset is
     // per-obs-index, not gated on value presence).
     let stream_specs: Vec<StreamSpec> = bound_ir.iter().zip(projections.into_iter())
-        .zip(per_stream_cells.into_iter()).map(|((o, projection), cells)| StreamSpec {
+        .zip(per_stream_cells.into_iter()).zip(per_stream_aux.into_iter())
+        .map(|(((o, projection), cells), aux)| StreamSpec {
             projection,
             ir_model: o.clone(),
             observations: cells,
             obs_times: obs_times.clone(),
+            aux,
         }).collect();
     let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
         eprintln!("error: observation data invalid:\n{}", report.render());
@@ -913,6 +938,87 @@ pub fn load_data_tsv_column_cells(
         .map(|c| c.map(ObsCell::Scalar))
         .collect();
     Ok((times, obs_cells))
+}
+
+/// The aux column names a stream's likelihood references (`Expr::ObsColumnRef`):
+/// a binomial denominator `n = tested`, a person-time offset, a reporting
+/// fraction. Returns them in declaration-stable order (de-duplicated).
+pub fn stream_aux_columns(obs: &ir::observation::ObservationModel) -> Vec<String> {
+    fn walk(e: &ir::expr::Expr, out: &mut Vec<String>) {
+        use ir::expr::Expr;
+        match e {
+            Expr::ObsColumnRef(w) => {
+                if !out.iter().any(|n| n == &w.obs_column_ref) {
+                    out.push(w.obs_column_ref.clone());
+                }
+            }
+            Expr::BinOp(w) => { walk(&w.bin_op.left, out); walk(&w.bin_op.right, out); }
+            Expr::UnOp(w) => walk(&w.un_op.arg, out),
+            Expr::Cond(w) => { walk(&w.cond.pred, out); walk(&w.cond.then, out); walk(&w.cond.else_, out); }
+            Expr::TableLookup(w) => { for ix in &w.table_lookup.indices { walk(ix, out); } }
+            Expr::UncheckedDim(w) => walk(&w.unchecked_dim.inner, out),
+            Expr::Reduce(w) => { for t in &w.reduce { walk(t, out); } }
+            _ => {}
+        }
+    }
+    use ir::observation::Likelihood as L;
+    let args: Vec<&ir::expr::Expr> = match &obs.likelihood {
+        L::Poisson(p) => vec![&p.rate],
+        L::NegBinomial(nb) => vec![&nb.mean, &nb.dispersion],
+        L::Normal(n) => vec![&n.mean, &n.sd],
+        L::Binomial(b) => vec![&b.n, &b.p],
+        L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha, &bb.beta],
+        L::Bernoulli(b) => vec![&b.p],
+    };
+    let mut out = Vec::new();
+    for e in args { walk(e, &mut out); }
+    out
+}
+
+/// Load the per-observation auxiliary data for one stream (§3, §6.1): one
+/// `Option<f64>` per aux column per row (`None` for `NA`). Row count matches
+/// the scored column's. Returns, per row, the name→value list of PRESENT aux
+/// values, plus a per-row `force_hole` flag set when any referenced aux is
+/// missing (`NA`) — the scored cell then becomes a hole (present-together-or-
+/// hole; `binomial(n = NA)` is unconstructible). An aux column declared but
+/// whose header is absent is a located error (strict by-name, no fallback).
+pub fn load_stream_aux(
+    path: &str,
+    aux_cols: &[String],
+    n_rows_expected: usize,
+) -> Result<(Vec<Vec<(String, f64)>>, Vec<bool>), String> {
+    if aux_cols.is_empty() {
+        return Ok((vec![Vec::new(); n_rows_expected], vec![false; n_rows_expected]));
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+    // Parse each aux column independently (reusing the strict by-name +
+    // NA-hole parser via a synthetic "time" pin — we only need the value cells,
+    // so pass the aux column itself as the time column to satisfy the parser's
+    // header check, then discard the time side).
+    let mut per_col: Vec<Vec<Option<f64>>> = Vec::with_capacity(aux_cols.len());
+    for col in aux_cols {
+        // The parser requires a time column; reuse the aux column as both —
+        // we only consume the value cells.
+        let (_t, cells, _rows) = parse_column_cells(&content, path, col, col)?;
+        if cells.len() != n_rows_expected {
+            return Err(format!(
+                "aux column '{}' in '{}' has {} data rows but the scored column has {} \
+                 — every column of a stream's file must have the same rows",
+                col, path, cells.len(), n_rows_expected));
+        }
+        per_col.push(cells);
+    }
+    let mut aux = vec![Vec::new(); n_rows_expected];
+    let mut force_hole = vec![false; n_rows_expected];
+    for (ci, col) in aux_cols.iter().enumerate() {
+        for r in 0..n_rows_expected {
+            match per_col[ci][r] {
+                Some(v) => aux[r].push((col.clone(), v)),
+                None => force_hole[r] = true, // present-together-or-hole
+            }
+        }
+    }
+    Ok((aux, force_hole))
 }
 
 /// Shared back-half: convert the raw time column, run the distinct-substep +
