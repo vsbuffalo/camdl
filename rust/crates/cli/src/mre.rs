@@ -70,10 +70,15 @@ struct BundledInput {
 enum InputRole {
     Model,
     ReadClosure,
-    FitConfig,
-    Data,
-    FixedFile,      // `[fixed] from_file`
-    SyntheticTruth, // `[synthetic] true_params`
+    FitConfig,      // fit: the fit.toml
+    Data,           // fit: `[data]`
+    FixedFile,      // fit: `[fixed] from_file`
+    SyntheticTruth, // fit: `[synthetic] true_params`
+    Table,          // simulate: `--table NAME=FILE`
+    Params,         // simulate: `--params FILE`
+    ParamVec,       // simulate: `--param-vec PREFIX=FILE`
+    Draws,          // simulate: `--draws FILE` (path form only)
+    Fit,            // simulate: `--fit fit.toml` (priors for `--draws prior`)
 }
 
 impl InputRole {
@@ -85,6 +90,11 @@ impl InputRole {
             InputRole::Data => "data",
             InputRole::FixedFile => "fixed_file",
             InputRole::SyntheticTruth => "synthetic_truth",
+            InputRole::Table => "table",
+            InputRole::Params => "params",
+            InputRole::ParamVec => "param_vec",
+            InputRole::Draws => "draws",
+            InputRole::Fit => "fit",
         }
     }
 
@@ -122,13 +132,16 @@ pub(crate) fn cmd_mre_fit(args: &MreFitArgs) {
     }
 }
 
-pub(crate) fn cmd_mre_simulate(_args: &MreSimulateArgs) {
-    eprintln!(
-        "error: `camdl mre simulate` is not implemented yet (gh#212).\n  \
-         `camdl mre fit <fit.toml>` is available now; the simulate bundler \
-         lands in the next increment."
-    );
-    std::process::exit(1);
+pub(crate) fn cmd_mre_simulate(args: &MreSimulateArgs) {
+    let argv: Vec<String> = std::env::args().collect();
+    let out = args
+        .bundle
+        .clone()
+        .unwrap_or_else(|| default_bundle_path(&args.sim.model));
+    if let Err(e) = collect_simulate(args, &argv).and_then(|plan| write_bundle(&plan, &out)) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
 }
 
 // ── default bundle path ───────────────────────────────────────────────────────
@@ -206,6 +219,118 @@ fn collect_fit(args: &MreFitArgs) -> Result<BundlePlan, String> {
     inputs.dedup_by(|a, b| a.dest == b.dest);
 
     Ok(BundlePlan { inputs, kind: "fit", reproduce })
+}
+
+// ── simulate collector ──────────────────────────────────────────────────────────
+
+/// Enumerate a forward sim's input closure → a [`BundlePlan`]. Flag-driven: the
+/// model + its compile-time `read()` closure, plus the file-bearing flags
+/// (`--table`, `--params`, `--param-vec`, `--draws PATH`, `--fit`). The root is
+/// the cwd (a simulate command has no config to anchor on); every input must be
+/// relative-and-contained under it, enforced by `rel_to_root`. A forward sim has
+/// no observed data, so there is nothing to exclude (`mre simulate` has no
+/// `--no-data`).
+fn collect_simulate(args: &MreSimulateArgs, argv: &[String]) -> Result<BundlePlan, String> {
+    let a = &args.sim;
+    let root = std::env::current_dir()
+        .map_err(|e| format!("cannot resolve current directory: {e}"))?;
+
+    let mut inputs: Vec<InputRef> = Vec::new();
+
+    if !a.model.exists() {
+        return Err(format!("model not found: {}", a.model.display()));
+    }
+    inputs.push(input_ref(InputRole::Model, &a.model, &root)?);
+    // A `.camdl` source has a compile-time read() closure; a pre-compiled
+    // `.ir.json` has its tables already baked in (nothing to recompile).
+    if a.model.extension().and_then(|e| e.to_str()) == Some("camdl") {
+        for resolved in read_closure(&a.model)? {
+            inputs.push(input_ref(InputRole::ReadClosure, Path::new(&resolved), &root)?);
+        }
+    }
+
+    for t in &a.model_overrides.table {
+        inputs.push(input_ref(InputRole::Table, &t.path, &root)?);
+    }
+    for p in &a.model_overrides.params {
+        inputs.push(input_ref(InputRole::Params, p, &root)?);
+    }
+    for pv in &a.param_vec {
+        inputs.push(input_ref(InputRole::ParamVec, Path::new(&pv.file), &root)?);
+    }
+    // `--draws` is a path only when it is not the `uniform`/`prior` keyword.
+    if let Some(d) = &a.draws {
+        if d != "uniform" && d != "prior" {
+            inputs.push(input_ref(InputRole::Draws, Path::new(d), &root)?);
+        }
+    }
+    // `--fit` supplies priors under `--draws prior`.
+    if let Some(f) = &a.fit {
+        inputs.push(input_ref(InputRole::Fit, f, &root)?);
+    }
+
+    inputs.sort_by(|x, y| x.dest.cmp(&y.dest));
+    inputs.dedup_by(|x, y| x.dest == y.dest);
+
+    Ok(BundlePlan { inputs, kind: "simulate", reproduce: simulate_reproduce(argv)? })
+}
+
+/// Flags whose VALUE is a write-destination path, dropped from the reproduce
+/// command. The run always writes its content-addressed store leaf, so output
+/// mirrors are the maintainer's choice — and an absolute mirror path would break
+/// the bundle's relocatability (the same reason inputs must be contained). The
+/// mre-only `-b`/`--bundle` is dropped on the same footing. Input flags can't be
+/// absolute (`rel_to_root` hard-errors), so stripping these leaves a reproduce
+/// command whose every remaining path is contained-relative. A new output flag
+/// belongs here; the round-trip test (run the unpacked bundle) is the backstop.
+const SIM_DROP_WITH_VALUE: &[&str] = &[
+    "-b", "--bundle",
+    "-o", "--output",
+    "--obs", "--obs-dir", "--obs-only", "--obs-only-dir",
+    "--draws-out", "--output-dir",
+];
+
+/// Reconstruct the `camdl simulate …` reproduce command from the captured argv,
+/// dropping the write-destination flags above. Because `mre simulate` flattens
+/// the real `SimulateArgs`, every other token after `simulate` is a genuine
+/// simulate flag; the contained-relative layout makes the (relative) input paths
+/// resolve unchanged inside the bundle, so no rewriting is needed.
+fn simulate_reproduce(argv: &[String]) -> Result<String, String> {
+    let start = argv
+        .iter()
+        .position(|t| t == "simulate")
+        .ok_or("internal: no `simulate` token in argv")?;
+    let mut out = vec!["camdl".to_string(), "simulate".to_string()];
+    let mut it = argv[start + 1..].iter();
+    while let Some(tok) = it.next() {
+        if SIM_DROP_WITH_VALUE.contains(&tok.as_str()) {
+            it.next(); // drop the flag's value too (space form)
+        } else if let Some(eq) = tok.find('=') {
+            if !SIM_DROP_WITH_VALUE.contains(&&tok[..eq]) {
+                out.push(tok.clone()); // a non-output `--flag=value`
+            }
+        } else {
+            out.push(tok.clone());
+        }
+    }
+    Ok(shell_join(&out))
+}
+
+/// Join argv into a copy-pasteable command line, single-quoting tokens that
+/// contain whitespace (the reproduce string is documentation, not executed by
+/// us, so a minimal POSIX quoter suffices).
+fn shell_join(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|t| {
+            if t.is_empty() || t.contains(char::is_whitespace) {
+                format!("'{}'", t.replace('\'', "'\\''"))
+            } else {
+                t.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ── shared bundle writer ────────────────────────────────────────────────────────
@@ -498,5 +623,22 @@ cooling = 0.7
         // a file outside the root (absolute, escaping) → hard error
         let outside = tempfile::NamedTempFile::new().unwrap();
         assert!(rel_to_root(root, outside.path()).is_err());
+    }
+
+    #[test]
+    fn simulate_reproduce_keeps_inputs_drops_outputs_and_bundle_flags() {
+        let argv: Vec<String> = [
+            "camdl", "mre", "simulate", "model/m.camdl",
+            "--params", "p.toml",          // input → kept
+            "--seed", "7",                 // run-shaping → kept
+            "--obs-only", "/tmp/abs/o.tsv", // absolute output (space form) → dropped
+            "-b", "/tmp/out.tar.gz",       // mre-only → dropped
+            "--obs=/tmp/x.tsv",            // output (`=` form) → dropped
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let repro = simulate_reproduce(&argv).unwrap();
+        assert_eq!(repro, "camdl simulate model/m.camdl --params p.toml --seed 7");
     }
 }

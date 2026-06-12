@@ -2301,7 +2301,8 @@ pub struct MreFitArgs {
 /// `camdl mre simulate <model.camdl> [sim flags…]` — bundle a forward-sim
 /// reproduction. Flattens the real `SimulateArgs` so every simulate flag
 /// parses identically; the bundle output is `-b` (simulate's own `-o` keeps
-/// its trajectory-output meaning).
+/// its trajectory-output meaning). No `--no-data`: a forward sim has no observed
+/// data, and its tables/params can't be dropped without breaking the run.
 #[derive(Args)]
 pub struct MreSimulateArgs {
     #[command(flatten)]
@@ -2310,10 +2311,6 @@ pub struct MreSimulateArgs {
     /// Output bundle path. Defaults to `<model-stem>.mre.tar.gz`.
     #[arg(short = 'b', long = "bundle", value_name = "FILE")]
     pub bundle: Option<PathBuf>,
-
-    /// Exclude observed data values (structure-only bundle).
-    #[arg(long)]
-    pub no_data: bool,
 }
 
 #[cfg(test)]

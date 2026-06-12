@@ -37,6 +37,23 @@ tar xzf fit.mre.tar.gz
 cd fit && camdl fit run fit.toml
 ```
 
+## Bundling a forward simulation
+
+The same closure logic packs a `simulate` reproduction — pass the model and the
+exact simulate flags you ran:
+
+```sh
+camdl mre simulate model.camdl --params p.toml --seed 1
+```
+
+The bundle captures the model and its compile-time `read()` files, plus any
+`--table` / `--params` / `--param-vec` / `--draws PATH` / `--fit` inputs. The
+recorded reproduce command keeps your run-shaping flags (seed, backend, `dt`,
+scenarios) but drops output destinations like `--obs` / `-o` — the run always
+writes its content-addressed store leaf, and the maintainer chooses where to
+mirror it. The root is the current directory, so run `mre simulate` from where
+your input paths are relative.
+
 ## Sharing data
 
 By default the bundle **includes your observed data** and prints a banner naming
@@ -71,12 +88,11 @@ relative path changes the id.
 
 ## Requirements and current limits
 
-- **Relative, contained paths.** Every input must live under the `fit.toml`'s
-  directory. Absolute or `../`-escaping paths are non-portable and error (move
-  the file under the project, or make its path relative).
+- **Relative, contained paths.** Every input must live under the root — the
+  `fit.toml`'s directory for `mre fit`, the current directory for
+  `mre simulate`. Absolute or `../`-escaping paths are non-portable and error
+  (move the file under the project, or make its path relative).
 - **Self-contained init.** Fits whose chains seed from an upstream artifact
   (`init = "survey_top_k"` / `"from_mle"` / `"from_posterior"` /
   `"from_params"`) aren't bundled yet and error with guidance — switch to
   `init = "lhs"` / `"single"` / `"from_prior"` to make a self-contained MRE.
-- **`mre simulate`** (bundling a forward-simulation reproduction) is planned;
-  `camdl mre fit` is available now.

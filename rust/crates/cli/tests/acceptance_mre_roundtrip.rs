@@ -1,8 +1,8 @@
-//! Integration round-trip for `camdl mre fit` (gh#212).
+//! Integration round-trip for `camdl mre fit` and `camdl mre simulate` (gh#212).
 //!
 //! Pack the committed fixture into a bundle, unpack it in an ISOLATED temp dir
-//! with no path back to the repo, run the fit there, and assert it reproduces
-//! the in-place run by `run_id`.
+//! with no path back to the repo, run it there, and assert it reproduces the
+//! in-place run by `run_id`.
 //!
 //! `run_id` is a content hash of (model, data, config). Equality proves the
 //! bundle's input closure is byte-identical and COMPLETE — in particular the
@@ -177,5 +177,103 @@ fn mre_bundle_reproduces_fit_by_run_id() {
         ids_a, ids_b,
         "bundle reproduced a DIFFERENT run_id — the input closure differs \
          (a missing or altered read() table would do exactly this)"
+    );
+}
+
+#[test]
+fn mre_simulate_bundle_reproduces_by_run_id() {
+    let camdl = skip_if_missing_binary();
+    let fixture = fixture_dir();
+    let work = tempfile::tempdir().expect("tempdir");
+    let bundle = work.path().join("s.tar.gz");
+    // An ABSOLUTE --obs-only path: it must NOT survive into the reproduce
+    // command (output destinations are the maintainer's choice, and an absolute
+    // one would break relocation).
+    let abs_obs = work.path().join("obs.tsv");
+
+    // 1. pack — run from the fixture dir so the root is the cwd (a simulate
+    //    command has no config to anchor on). The model read()s model/pop.tsv
+    //    at compile time; the bundle must capture it (it is named nowhere on the
+    //    command line).
+    let pack = Command::new(&camdl)
+        .args([
+            "mre", "simulate", "model/sir_patches.camdl",
+            "--params", "params.toml", "--seed", "1", "--obs-only",
+        ])
+        .arg(&abs_obs)
+        .arg("-b")
+        .arg(&bundle)
+        .current_dir(&fixture)
+        .output()
+        .expect("spawn `mre simulate`");
+    assert!(
+        pack.status.success(),
+        "`mre simulate` failed:\n{}",
+        String::from_utf8_lossy(&pack.stderr)
+    );
+
+    let listing = tar_list(&bundle);
+    assert!(
+        listing.iter().any(|p| p.ends_with("model/pop.tsv")),
+        "bundle missing the model's read() table (model/pop.tsv); contents:\n{}",
+        listing.join("\n")
+    );
+
+    // 2. in-place run for the run_id baseline
+    let out_a = work.path().join("out_a");
+    let run_a = Command::new(&camdl)
+        .args(["simulate", "model/sir_patches.camdl", "--params", "params.toml", "--seed", "1"])
+        .current_dir(&fixture)
+        .env("CAMDL_OUTPUT_DIR", &out_a)
+        .output()
+        .expect("spawn in-place `simulate`");
+    assert!(
+        run_a.status.success(),
+        "in-place simulate failed:\n{}",
+        String::from_utf8_lossy(&run_a.stderr)
+    );
+    let ids_a = run_ids(&out_a);
+    assert!(!ids_a.is_empty(), "in-place run produced no run.json");
+
+    // 3. unpack into an ISOLATED dir (no path back to the repo)
+    let iso = work.path().join("iso");
+    std::fs::create_dir_all(&iso).unwrap();
+    let untar = Command::new("tar")
+        .arg("xzf")
+        .arg(&bundle)
+        .arg("-C")
+        .arg(&iso)
+        .output()
+        .expect("untar");
+    assert!(untar.status.success(), "untar failed");
+    let bundle_root = iso.join("s"); // bundle_name = stem of `s.tar.gz`
+
+    // the reproduce command must carry NO absolute output path
+    let manifest = std::fs::read_to_string(bundle_root.join("manifest.toml")).unwrap();
+    assert!(
+        !manifest.contains(abs_obs.to_str().unwrap()),
+        "reproduce command leaked the absolute --obs-only path:\n{manifest}"
+    );
+
+    // 4. run from inside the unpacked bundle
+    let out_b = work.path().join("out_b");
+    let run_b = Command::new(&camdl)
+        .args(["simulate", "model/sir_patches.camdl", "--params", "params.toml", "--seed", "1"])
+        .current_dir(&bundle_root)
+        .env("CAMDL_OUTPUT_DIR", &out_b)
+        .output()
+        .expect("spawn bundled `simulate`");
+    assert!(
+        run_b.status.success(),
+        "bundled simulate failed — bundle is NOT self-contained:\n{}",
+        String::from_utf8_lossy(&run_b.stderr)
+    );
+    let ids_b = run_ids(&out_b);
+
+    // 5. identity-faithful + complete closure (a missing read() table would
+    //    fail the compile or shift the IR digest)
+    assert_eq!(
+        ids_a, ids_b,
+        "simulate bundle reproduced a DIFFERENT run_id — the input closure differs"
     );
 }
