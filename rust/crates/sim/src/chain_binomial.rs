@@ -57,11 +57,13 @@ pub struct StepScratch {
     /// apply to the real reservoir. Cleared per `step_one`.
     event_deltas: crate::effects::EffectDeltas,
     /// Reusable due-batch for this substep — the interventions/events firing at
-    /// `t + dt`, derived ONCE per `step_one` via `due_effects` and consumed by
-    /// both the PROPOSE (event_idx) and INTERVENE (intervention_idx) stages.
-    /// Reused across substeps (one batch per particle) — no per-step allocation
-    /// on the inference hot path.
-    effect_batch: crate::schedule::EffectBatch,
+    /// `t + dt`. The CALLER populates it before each `step_one` (gh#216): the
+    /// Snap-forward driver via the `round(t/dt)` key, the Exact-inference callers
+    /// via cursor-keyed scheduled interventions plus `grid_dt`-keyed events.
+    /// `step_one` consumes it at the PROPOSE (event_idx) and INTERVENE
+    /// (intervention_idx) stages. Reused across substeps (one batch per particle)
+    /// — no per-step allocation on the inference hot path.
+    pub effect_batch: crate::schedule::EffectBatch,
 }
 
 /// How event counts are drawn — resolved from the IR at step start.
@@ -240,7 +242,11 @@ pub fn run_chain_binomial_with_observer(
         // (once at t_end inside step_one, once at the new t here).
         // See docs/dev/incidents/2026-04-17-chain-binomial-double-fire.md.
         flows.fill(0);
-        step_one(model, &mut int_s.counts, &mut flows, &mut real_s, params, t_grid, dt, cfg.dt, &mut rng, &mut scratch, &fire_steps)?;
+        // Snap policy: decide the due batch on the `round(t/dt)` key at the
+        // boundary t_grid + dt (the firing key step_one used internally before
+        // gh#216 lifted the decision to the caller). Byte-identical.
+        crate::effects::due_effects(model, &fire_steps, t_grid + dt, cfg.dt, &mut scratch.effect_batch);
+        step_one(model, &mut int_s.counts, &mut flows, &mut real_s, params, t_grid, dt, &mut rng, &mut scratch)?;
 
         // Lineage observer: feed each transition's per-step flow count against
         // the frozen start-of-step state. step_one has already drawn from the
@@ -311,12 +317,15 @@ pub fn trace_enabled() -> bool {
 /// `dt` is `dt_actual` — the realized substep length the kernel advances:
 /// rate evaluation, the transition probability `1 − exp(−rate·dt)`, the
 /// overdispersion `shape = dt/σ²`, and the event-amount evaluation all use it.
-/// `grid_dt` is the nominal model dt the `fire_steps` step-index table was built
-/// on; it keys the always-active-event and scheduled-intervention FIRING only
-/// (`time_to_step(t_end, grid_dt)`). The two are equal under the Snap forward
-/// policy and for on-grid Exact substeps, and diverge only when an inference
-/// filter clips a substep to land on an off-grid observation — see
-/// docs/dev/proposals/2026-06-07-scheduling-spine-v2.md §A (the `StepClock`).
+///
+/// `step_one` no longer DECIDES which effects fire — it APPLIES the batch the
+/// CALLER has pre-populated in `scratch.effect_batch` (`event_idx` at PROPOSE,
+/// `intervention_idx` at INTERVENE). This lifts the firing decision out of the
+/// shared step (gh#216): the Snap-forward driver fills the batch via the
+/// `round(t/dt)` key ([`crate::effects::due_effects`]); the Exact-inference
+/// callers fire scheduled interventions CURSOR-keyed (from the timeline's effect
+/// boundaries) and keep events on the `grid_dt` key ([`crate::effects::due_events`]).
+/// See docs/dev/proposals/2026-06-11-spine-effect-firing-consolidation.md §3.2.
 ///
 /// `scratch` holds pre-allocated buffers to avoid heap allocation per call.
 /// Create one `StepScratch` per particle and reuse across all time steps.
@@ -329,10 +338,8 @@ pub fn step_one(
     params: &[f64],
     t: f64,
     dt: f64,
-    grid_dt: f64,
     rng: &mut StatefulRng,
     scratch: &mut StepScratch,
-    fire_steps: &[std::collections::BTreeSet<i64>],
 ) -> Result<(), SimError> {
     // Copy current counts into scratch IntState for propensity evaluation.
     // This is a memcpy into pre-allocated memory, not a heap allocation.
@@ -489,11 +496,11 @@ pub fn step_one(
         flows[i] += count;
     }
 
-    // Compute the due batch for this substep ONCE (the single
-    // time_to_step + fire_steps.contains check), keyed on grid_dt at the
-    // boundary t + dt. Consumed by PROPOSE (event_idx) here and INTERVENE
-    // (intervention_idx) below — neither stage re-derives due-ness.
-    crate::effects::due_effects(model, fire_steps, t + dt, grid_dt, &mut scratch.effect_batch);
+    // The due batch for this substep was pre-populated in `scratch.effect_batch`
+    // by the caller (gh#216): the Snap-forward driver via the `round(t/dt)` key,
+    // the Exact-inference callers via cursor-keyed scheduled interventions plus
+    // `grid_dt`-keyed events. Consumed by PROPOSE (event_idx) here and INTERVENE
+    // (intervention_idx) below — `step_one` never re-derives due-ness.
 
     // PROPOSE (stage 1): always_active event deltas from the start-of-step
     // snapshot (`scratch.int_s`/`scratch.real_s`, captured at the top of this

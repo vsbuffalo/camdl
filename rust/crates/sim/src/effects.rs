@@ -276,6 +276,35 @@ pub fn due_effects(
     }
 }
 
+/// The always-active-EVENT half of [`due_effects`], keyed on `grid_dt`: clear
+/// `out.event_idx` and refill it with the events firing at the boundary `t_end`
+/// (`time_to_step(t_end, grid_dt) ∈ fire_steps[iv]`). Scheduled (`!is_event`)
+/// interventions are NOT touched — `out.intervention_idx` is left for the caller.
+///
+/// This is the seam for the Exact-INFERENCE caller (gh#216): scheduled
+/// interventions fire CURSOR-keyed (the caller fills `intervention_idx` from the
+/// timeline's effect boundaries), while always-active events keep the `grid_dt`
+/// firing key (the StepClock fix, spine-v2 §A — out of scope for the gh#216
+/// firing change). The Snap-forward caller uses [`due_effects`] (both halves on
+/// the `grid_dt` key); PGAS under Exact rejects events entirely (its events-only
+/// guard) so `event_idx` comes back empty there. See
+/// docs/dev/proposals/2026-06-11-spine-effect-firing-consolidation.md §3.2.
+pub fn due_events(
+    model: &CompiledModel,
+    fire_steps: &[std::collections::BTreeSet<i64>],
+    t_end: f64,
+    grid_dt: f64,
+    out: &mut crate::schedule::EffectBatch,
+) {
+    out.event_idx.clear();
+    let current_step = crate::time::time_to_step(t_end, grid_dt);
+    for (iv_idx, iv) in model.model.interventions.iter().enumerate() {
+        if iv.kind.is_event() && fire_steps[iv_idx].contains(&current_step) {
+            out.event_idx.push(iv_idx);
+        }
+    }
+}
+
 /// Resolve a known batch of always-active events into typed deltas. The EVENT
 /// path's apply half: every action of each event in `event_idx` resolves against
 /// the frozen pre-advance snapshot at the boundary `t_end` (so events fuse with

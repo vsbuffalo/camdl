@@ -61,6 +61,14 @@ pub trait ProcessModel: Send + Sync {
     ///
     /// This is the hot path — called n_particles × n_substeps × n_obs times.
     /// Must not allocate. Uses scratch buffers for temporaries.
+    ///
+    /// `due_interventions` lists the SCHEDULED (`!is_event`) interventions that
+    /// fire at the END of this substep (`t + dt`), decided CURSOR-keyed by the
+    /// driver from the timeline's effect boundaries (gh#216). It is empty on
+    /// every off-boundary substep. Always-active EVENTS are NOT carried here —
+    /// the process keys their firing on the nominal `grid_dt` internally (the
+    /// StepClock convention). See
+    /// docs/dev/proposals/2026-06-11-spine-effect-firing-consolidation.md §3.2.
     fn step(
         &self,
         state: &mut Self::State,
@@ -69,6 +77,7 @@ pub trait ProcessModel: Send + Sync {
         dt: f64,
         rng: &mut StatefulRng,
         scratch: &mut Self::Scratch,
+        due_interventions: &[usize],
     ) -> Result<(), SimError>;
 
     /// Allocate a fresh scratch buffer sized for this model.

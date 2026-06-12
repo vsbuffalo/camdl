@@ -78,6 +78,7 @@ impl ProcessModel for ChainBinomialProcess {
         dt: f64,
         rng: &mut StatefulRng,
         scratch: &mut StepScratch,
+        due_interventions: &[usize],
     ) -> Result<(), SimError> {
         // Re-resolve fire_steps per call from the caller's params.
         // For models without parametric event schedules, this is a
@@ -87,8 +88,16 @@ impl ProcessModel for ChainBinomialProcess {
         // parameter and gets its own fire_steps. Cost: linear walk
         // over the intervention list (typically O(few)) — small
         // compared to a chain-binomial step's per-transition
-        // propensity eval and multinomial draws.
+        // propensity eval and multinomial draws. Used ONLY for the
+        // grid_dt-keyed always-active EVENT half of the batch below.
         let fire_steps = self.compiled.resolve_fire_steps(self.dt, params);
+        // Populate the due batch for this substep (gh#216): always-active EVENTS
+        // keyed on the nominal `self.dt` grid at the boundary `t + dt`, and the
+        // SCHEDULED interventions the driver decided cursor-keyed (empty off a
+        // boundary). step_one applies what we put here; it no longer decides.
+        crate::effects::due_events(&self.compiled, &fire_steps, t + dt, self.dt, &mut scratch.effect_batch);
+        scratch.effect_batch.intervention_idx.clear();
+        scratch.effect_batch.intervention_idx.extend_from_slice(due_interventions);
         // KNOWN LIMITATION (docs/dev/incidents/2026-06-07-chain-binomial-
         // stale-real-state.md, §inference scope): inference particles
         // (`ParticleState`) track integer counts only — there is no real
@@ -101,15 +110,13 @@ impl ProcessModel for ChainBinomialProcess {
         // (the particle state must carry and RK4-advance the real reservoir).
         let mut real = crate::state::RealState::new(self.compiled.real_local_to_global.len());
         // `dt` is the realized substep the filter handed us (clipped under Exact
-        // to land on an off-grid observation); `self.dt` is the nominal model grid
-        // the `fire_steps` were built on, so it keys the event/intervention firing.
+        // to land on an off-grid observation).
         step_one(
             &self.compiled,
             &mut state.counts,
             &mut state.flow_accumulators,
             &mut real,
-            params, t, dt, self.dt, rng, scratch,
-            &fire_steps,
+            params, t, dt, rng, scratch,
         )
     }
 

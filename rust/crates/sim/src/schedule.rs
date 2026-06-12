@@ -386,7 +386,17 @@ impl Schedule {
     /// per-particle walk — the divergence hazard of a second hand-rolled copy).
     /// Returns `t_start` for an empty window (no substep due).
     pub fn window_end(&self, cursor: Cursor, t_start: f64) -> f64 {
-        self.substeps(cursor, t_start).last().map_or(t_start, |(t0, step_dt)| t0 + step_dt)
+        self.substeps(cursor, t_start).last().map_or(t_start, |(t0, step_dt, _)| t0 + step_dt)
+    }
+
+    /// The effect-cursor position for a window beginning at `t`: the number of
+    /// effect boundaries already fired by `t` (those `<= t + EFFECT_EPS`). The
+    /// inference filters position each observation window's `Cursor.effect_idx`
+    /// here, so the monotone scheduled-effect cursor carries correctly across
+    /// windows (effects coincident with a previous window's closing obs counted
+    /// as already fired). `effect_times` is sorted, so this is a partition point.
+    pub fn effect_idx_at(&self, t: f64) -> usize {
+        self.effect_times.partition_point(|&e| e <= t + EFFECT_EPS)
     }
 
     /// Emit a snapshot at every output time due at or before `until`, advancing
@@ -409,9 +419,13 @@ impl Schedule {
 }
 
 /// Iterator over one observation window's substeps; see [`Schedule::substeps`].
-/// Yields `(t_local, step_dt)`, terminating at the cursor's current observation
-/// boundary (`obs_time(cursor) - EFFECT_EPS`), exactly reproducing the
-/// `while t_local < obs_time - 1e-10 { … }` loops it replaces.
+/// Yields `(t_local, step_dt, fired_effect)`, terminating at the cursor's current
+/// observation boundary (`obs_time(cursor) - EFFECT_EPS`), reproducing the
+/// `while t_local < obs_time - 1e-10 { … }` loops it replaces. `fired_effect` is
+/// `Some(effect_idx)` when this substep LANDS on a scheduled-effect boundary —
+/// the caller reads the due batch (e.g. [`crate::intervention::ScheduledEffects`]
+/// `.batches[effect_idx]`) and fires it CURSOR-keyed (gh#216), instead of the
+/// `round(t/dt)` key inside `step_one`.
 pub struct Substeps<'a> {
     schedule: &'a Schedule,
     cursor: Cursor,
@@ -419,7 +433,7 @@ pub struct Substeps<'a> {
 }
 
 impl Iterator for Substeps<'_> {
-    type Item = (f64, f64);
+    type Item = (f64, f64, Option<usize>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let obs_time = self.schedule.obs_time(&self.cursor)?;
@@ -429,7 +443,20 @@ impl Iterator for Substeps<'_> {
         let step_dt = self.schedule.substep(&self.cursor, self.t)?;
         let t0 = self.t;
         self.t += step_dt;
-        Some((t0, step_dt))
+        // Did this substep land on a scheduled-effect boundary? Surface its
+        // effect_idx (so the caller fires the due batch) and ADVANCE the effect
+        // cursor (`pass_effect`) so the NEXT substep clips past it. Without the
+        // advance, once `effect_times` is populated `substep()` would clip every
+        // later step to this same boundary and the walk would stall on a run of
+        // zero-length substeps (proposal §3.3).
+        let fired = if self.schedule.effect_due_at(&self.cursor, self.t) {
+            let idx = self.cursor.effect_idx;
+            self.cursor.pass_effect();
+            Some(idx)
+        } else {
+            None
+        };
+        Some((t0, step_dt, fired))
     }
 }
 
@@ -710,6 +737,40 @@ mod tests {
     }
 
     #[test]
+    fn substeps_fire_signal_and_cursor_advance_no_stall() {
+        // gh#216: with effect_times populated, the Substeps iterator must surface
+        // a fire signal at the effect landing AND advance the effect cursor so the
+        // walk progresses (no zero-substep stall, proposal §3.3). dt=1, one obs at
+        // 4, one on-grid effect at 2: substeps 0→1→2(fire)→3→4.
+        let s = Schedule::new(1.0, 4.0, 1.0, StepPolicy::Exact, vec![], vec![2.0])
+            .with_obs(vec![4.0]);
+        let cur = Cursor { obs_idx: 0, effect_idx: s.effect_idx_at(0.0), ..Default::default() };
+        // `take` bounds the walk so the MUTATION check (omitting `pass_effect` in
+        // `next`) fails the length assertion cleanly instead of hanging on an
+        // unbounded run of zero-length substeps clipped to the un-passed effect.
+        let walk: Vec<(f64, f64, Option<usize>)> = s.substeps(cur, 0.0).take(50).collect();
+        // Four substeps, terminating at obs 4 (NOT stalling on the effect at 2).
+        assert_eq!(walk.len(), 4, "walk must reach obs 4 in four unit substeps, not stall");
+        let fired: Vec<(f64, Option<usize>)> =
+            walk.iter().map(|&(t0, dt, f)| (t0 + dt, f)).collect();
+        assert_eq!(
+            fired,
+            vec![(1.0, None), (2.0, Some(0)), (3.0, None), (4.0, None)],
+            "the effect fires exactly once, at the substep landing on t=2 (effect_idx 0)"
+        );
+    }
+
+    #[test]
+    fn effect_idx_at_partitions_fired_effects() {
+        let s = exact(1.0, 20.0, vec![], vec![3.0, 7.0, 11.0]);
+        assert_eq!(s.effect_idx_at(0.0), 0, "no effect fired yet at t=0");
+        assert_eq!(s.effect_idx_at(3.0), 1, "effect at 3 counts as fired by t=3 (coincident-obs window)");
+        assert_eq!(s.effect_idx_at(6.999), 1);
+        assert_eq!(s.effect_idx_at(7.0), 2);
+        assert_eq!(s.effect_idx_at(100.0), 3, "all effects fired past the end");
+    }
+
+    #[test]
     fn n_cursors_identical_sequence() {
         // THE CRN invariant: N independent cursors over one immutable Schedule
         // walk a byte-identical boundary sequence (next_boundary is pure; the
@@ -741,9 +802,14 @@ mod tests {
                 manual.push((t.to_bits(), dt.to_bits()));
                 t += dt;
             }
-            // Iterator walk.
-            let iter: Vec<(u64, u64)> =
-                s.substeps(cur, window_start).map(|(t0, dt)| (t0.to_bits(), dt.to_bits())).collect();
+            // Iterator walk (no effect_times here ⇒ fired is always None).
+            let iter: Vec<(u64, u64)> = s
+                .substeps(cur, window_start)
+                .map(|(t0, dt, fired)| {
+                    assert!(fired.is_none(), "no effects registered ⇒ no firing");
+                    (t0.to_bits(), dt.to_bits())
+                })
+                .collect();
             assert_eq!(iter, manual, "iterator must reproduce the manual walk for window {obs_idx}");
             assert!(!manual.is_empty());
             // window_end is the catch-up advance: byte-identical to the manual

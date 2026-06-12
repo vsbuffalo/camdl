@@ -526,6 +526,7 @@ impl ProcessModel for CountingProcess {
         _dt: f64,
         _rng: &mut StatefulRng,
         _scratch: &mut (),
+        _due_interventions: &[usize],
     ) -> Result<(), SimError> {
         let n = self.steps.fetch_add(1, Ordering::Relaxed);
         if n >= self.cap {

@@ -65,10 +65,10 @@ fn reference_trajectory(
 ) -> sim::inference::pgas::PGASTrajectory {
     let t_start = compiled.model.simulation.t_start;
     let observations = obs_at(OBS_TIMES);
-    let grid = build_substep_grid(t_start, DT, &observations, StepPolicy::Exact)
+    let grid = build_substep_grid(t_start, DT, &observations, &[], StepPolicy::Exact)
         .expect("build exact substep grid");
     let mut rng = StatefulRng::new(SEED);
-    simulate_reference_on_grid(compiled, params, DT, &grid.steps, &mut rng)
+    simulate_reference_on_grid(compiled, params, DT, &grid.steps, None, &mut rng)
         .expect("simulate_reference_on_grid on dt_rate")
 }
 

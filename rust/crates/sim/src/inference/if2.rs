@@ -239,22 +239,27 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     // TIME stays accumulated (s*dt deferred, task #14).
     let obs_times: Vec<f64> = (0..n_obs).map(|i| obs_model.obs_time(i)).collect();
 
-    // gh#216 stopgap: IF2 hardcodes `StepPolicy::Exact` (below). Under Exact an
-    // OFF-grid observation re-tiles the substep grid, so a scheduled intervention
-    // that keys on round(t/dt) can fire at the wrong substep — even when the
-    // intervention time is on-grid. Refuse a model with a SCHEDULED intervention
-    // and any off-grid obs until the cursor-keyed-firing fix lands. (No scheduled
-    // intervention, and on-grid obs, pass; always-active events are keyed on
-    // grid_dt and out of scope.)
-    if let Some(model) = process.try_compiled_model() {
-        crate::intervention::guard_exact_offgrid_obs(
-            &obs_times, config.t_start, config.dt, model, StepPolicy::Exact,
+    // gh#216: scheduled interventions fire CURSOR-keyed off the timeline's effect
+    // boundaries, so an off-grid observation re-tiling the Exact substep grid no
+    // longer moves the firing instant. Built ONCE here (constant across IF2
+    // iterations: a parametric `at [<param>]` schedule — whose fire times would be
+    // per-particle and per-iteration — is refused by `guard_attimesexpr_exact`, so
+    // every scheduled fire time is `base_params`-independent). An off-grid
+    // scheduled fire time and always-active events are the other unsupported Exact
+    // cases (refused / out of scope). See particle_filter.rs for the same pattern.
+    let scheduled = if let Some(model) = process.try_compiled_model() {
+        crate::intervention::guard_attimesexpr_exact(model, StepPolicy::Exact)?;
+        crate::intervention::guard_exact_offgrid_effect_time(
+            model, base_params, config.t_start, config.dt, StepPolicy::Exact,
         )?;
-    }
+        crate::intervention::scheduled_effects(model, base_params)
+    } else {
+        crate::intervention::ScheduledEffects::default()
+    };
 
     let sched_t_end = obs_times.last().copied().unwrap_or(config.t_start);
     let schedule = Schedule::new(
-        config.dt, sched_t_end, config.dt, StepPolicy::Exact, Vec::new(), Vec::new(),
+        config.dt, sched_t_end, config.dt, StepPolicy::Exact, Vec::new(), scheduled.times.clone(),
     )
     .with_obs(obs_times);
 
@@ -413,7 +418,11 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             let obs_time = obs_model.obs_time(obs_idx);
             let t_start = t;
             let dt = config.dt;
-            let cur = Cursor { obs_idx, ..Default::default() };
+            let cur = Cursor {
+                obs_idx,
+                effect_idx: schedule.effect_idx_at(t_start),
+                ..Default::default()
+            };
 
             // gh#147 (M3.1). Deterministic compute-budget guard, PRE-window
             // (same closed-form scalar cost + placement as bootstrap_filter):
@@ -431,8 +440,13 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 .map(|(((state, pp), rng), scratch)| {
                     // Shared inner-substep walk (Schedule::substeps); IF2's body is
                     // just the kernel step with the per-particle perturbed params.
-                    for (t_local, step_dt) in schedule.substeps(cur, t_start) {
-                        process.step(state, pp, t_local, step_dt, rng, scratch)?;
+                    // `fired` lands the cursor-keyed scheduled-intervention batch.
+                    for (t_local, step_dt, fired) in schedule.substeps(cur, t_start) {
+                        let due_iv: &[usize] = match fired {
+                            Some(idx) => &scheduled.batches[idx],
+                            None => &[],
+                        };
+                        process.step(state, pp, t_local, step_dt, rng, scratch, due_iv)?;
                     }
                     Ok(())
                 })

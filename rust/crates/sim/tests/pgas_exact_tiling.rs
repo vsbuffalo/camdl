@@ -104,9 +104,9 @@ fn exact_equals_snap_on_grid() {
     let mut rng_snap = StatefulRng::new(SEED);
     let snap = simulate_reference(&compiled, &params, last_obs, dt, &mut rng_snap).unwrap();
 
-    let grid = build_substep_grid(t_start, dt, &observations, StepPolicy::Exact).unwrap();
+    let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
     let mut rng_exact = StatefulRng::new(SEED);
-    let exact = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, &mut rng_exact).unwrap();
+    let exact = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, &mut rng_exact).unwrap();
 
     assert!(
         trajectories_bit_identical(&snap, &exact),
@@ -134,9 +134,9 @@ fn exact_shortened_substep_density_recompute() {
     // first remainder and produce only one shortened substep).
     let observations = obs_at(&[40.5, 90.2, 140.8, 190.3]);
 
-    let grid = build_substep_grid(t_start, dt, &observations, StepPolicy::Exact).unwrap();
+    let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
     let mut rng = StatefulRng::new(SEED);
-    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, &mut rng).unwrap();
+    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, &mut rng).unwrap();
 
     // Non-vacuity: genuinely shortened substeps exist, each in (0, dt).
     let n_short = traj.substeps.iter().filter(|r| r.dt_substep != dt).count();
@@ -201,9 +201,9 @@ fn exact_shortened_substep_gradient_matches_fd() {
     let observations = obs_at(&[40.5, 90.2, 140.8, 190.3]);
     let n_params = compiled.param_index.len();
 
-    let grid = build_substep_grid(t_start, dt, &observations, StepPolicy::Exact).unwrap();
+    let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
     let mut rng = StatefulRng::new(SEED);
-    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, &mut rng).unwrap();
+    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, &mut rng).unwrap();
     assert!(traj.substeps.iter().any(|r| r.dt_substep != dt),
         "gate is vacuous without a shortened substep");
 

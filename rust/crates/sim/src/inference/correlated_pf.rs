@@ -247,16 +247,17 @@ pub fn bootstrap_filter_correlated(
     // (near-)uniform observation spacing because that block size is fixed.
     let obs_times: Vec<f64> = (0..n_obs).map(|i| obs_model.obs_time(i)).collect();
 
-    // gh#216 stopgap: the correlated PF hardcodes `StepPolicy::Exact` (below).
-    // Under Exact an OFF-grid observation re-tiles the substep grid, so a scheduled
-    // intervention that keys on round(t/dt) can fire at the wrong substep — even
-    // when the intervention time itself is on-grid. Refuse a model with a SCHEDULED
-    // intervention and any off-grid obs until the cursor-keyed-firing fix lands.
-    // (No scheduled intervention, and on-grid obs, pass; always-active events are
-    // keyed on grid_dt and out of scope.)
-    crate::intervention::guard_exact_offgrid_obs(
-        &obs_times, config.t_start, dt, model, StepPolicy::Exact,
+    // gh#216: scheduled interventions fire CURSOR-keyed off the timeline's effect
+    // boundaries (registered as `effect_times` below), so an off-grid observation
+    // re-tiling the Exact substep grid no longer moves the firing instant. The two
+    // unsupported Exact cases are refused loudly (parametric `at [<param>]`; a
+    // scheduled fire time off the dt grid — which would also add a substep and
+    // break the CPM fixed-`steps_per_obs` noise indexing); events are out of scope.
+    crate::intervention::guard_attimesexpr_exact(model, StepPolicy::Exact)?;
+    crate::intervention::guard_exact_offgrid_effect_time(
+        model, params, config.t_start, dt, StepPolicy::Exact,
     )?;
+    let scheduled = crate::intervention::scheduled_effects(model, params);
 
     let steps_per_obs = cpm_steps_per_obs(&obs_times, config.t_start, dt);
 
@@ -276,8 +277,10 @@ pub fn bootstrap_filter_correlated(
     // and the pre-drawn-noise indexing (noise_idx = i*steps_per_obs + substep)
     // is unaffected. Substep TIME stays accumulated (s*dt deferred, task #14).
     let sched_t_end = obs_times.last().copied().unwrap_or(config.t_start);
-    let schedule =
-        Schedule::new(dt, sched_t_end, dt, StepPolicy::Exact, Vec::new(), Vec::new()).with_obs(obs_times);
+    let schedule = Schedule::new(
+        dt, sched_t_end, dt, StepPolicy::Exact, Vec::new(), scheduled.times.clone(),
+    )
+    .with_obs(obs_times);
 
     // Gamma shape/scale for the overdispersed transition (precompute).
     //
@@ -382,9 +385,14 @@ pub fn bootstrap_filter_correlated(
 
     for obs_idx in 0..n_obs {
         // The substep walk terminates at this obs via Schedule::substeps (cursor
-        // points at obs_idx); no explicit obs_time needed.
+        // points at obs_idx); no explicit obs_time needed. The effect cursor is
+        // positioned at the first scheduled-effect boundary not yet fired by `t`.
         let t_start = t;
-        let cur = Cursor { obs_idx, ..Default::default() };
+        let cur = Cursor {
+            obs_idx,
+            effect_idx: schedule.effect_idx_at(t_start),
+            ..Default::default()
+        };
 
         // Propagate particles with pre-drawn correlated noise (parallel)
         let gamma_row = &randoms.gamma_noise[obs_idx];
@@ -398,7 +406,7 @@ pub fn bootstrap_filter_correlated(
                 // Shared inner-substep walk (Schedule::substeps); the CPM body
                 // injects the pre-drawn correlated noise keyed on the within-window
                 // substep index before each kernel step.
-                for (substep, (t_local, step_dt)) in schedule.substeps(cur, t_start).enumerate() {
+                for (substep, (t_local, step_dt, fired)) in schedule.substeps(cur, t_start).enumerate() {
                     // Inject pre-drawn Gamma multiplier.
                     //
                     // After the uniform-window gate above, every window has exactly
@@ -457,8 +465,20 @@ pub fn bootstrap_filter_correlated(
 
                     // Re-resolve per-particle: parametric event
                     // schedules (gh#69) carry params; each particle
-                    // can have a different schedule.
+                    // can have a different schedule. Used for the grid_dt-keyed
+                    // always-active EVENT half of the batch only.
                     let fire_steps = process.compiled.resolve_fire_steps(process.dt, params);
+                    // gh#216: events keyed on `process.dt` at the boundary
+                    // t_local + step_dt; scheduled interventions cursor-keyed from
+                    // the timeline's effect boundary (`fired`). step_one applies
+                    // the batch we put in scratch.
+                    crate::effects::due_events(
+                        model, &fire_steps, t_local + step_dt, process.dt, &mut scratch.effect_batch,
+                    );
+                    scratch.effect_batch.intervention_idx.clear();
+                    if let Some(idx) = fired {
+                        scratch.effect_batch.intervention_idx.extend_from_slice(&scheduled.batches[idx]);
+                    }
                     // KNOWN LIMITATION (docs/dev/incidents/2026-06-07-chain-
                     // binomial-stale-real-state.md, §inference scope): the
                     // correlated PF tracks integer counts only — no real
@@ -467,14 +487,11 @@ pub fn bootstrap_filter_correlated(
                     // models (n_real == 0) this is empty and byte-identical.
                     let mut real = crate::state::RealState::new(
                         process.compiled.real_local_to_global.len());
-                    // `step_dt` is the realized substep (clipped under Exact);
-                    // `process.dt` is the nominal grid the `fire_steps` were built
-                    // on → it keys the event/intervention firing.
+                    // `step_dt` is the realized substep (clipped under Exact).
                     crate::chain_binomial::step_one(
                         model, &mut state.counts, &mut state.flow_accumulators,
                         &mut real,
-                        params, t_local, step_dt, process.dt, rng, scratch,
-                        &fire_steps,
+                        params, t_local, step_dt, rng, scratch,
                     )?;
                 }
                 Ok(())

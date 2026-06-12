@@ -217,79 +217,99 @@ pub fn all_intervention_times(model: &CompiledModel, params: &[f64]) -> Vec<f64>
 /// a float-rounded on-grid time.
 const GRID_TOL: f64 = 1e-9;
 
-/// gh#216 STOPGAP GUARD (no-silent-gap interim; the real fix is cursor-keyed
-/// effect firing — see
-/// `docs/dev/proposals/2026-06-11-spine-effect-firing-consolidation.md`).
+/// The on-grid scheduled (`!is_event`) effect boundaries for one filter run,
+/// the cursor-keyed replacement for the `round(t/dt)` firing key (gh#216).
 ///
-/// Under `StepPolicy::Exact` the inference filters re-anchor the substep grid at
-/// **every observation time** (`build_substep_grid` sets `window_start = obs_t`
-/// at each obs it lands on, `pgas.rs:405`), but the firing DECISION for a
-/// SCHEDULED (`!is_event`) intervention is still made on a SECOND clock —
-/// `round(t/dt)` against a precomputed `fire_steps` table (`effects.rs`). When
-/// an OBSERVATION time is off the integrator grid, it re-tiles the Exact substep
-/// grid so that an otherwise ON-grid intervention's substep lands at a time
-/// `round(t/dt)` rounds to the WRONG step — a silent likelihood error whose
-/// firing instant moves when the observation streams move. The gh#216
-/// reproduction is exactly this: an intervention at day 35 (= 5·7, ON the dt=7
-/// grid) fires at day 35 with AFP-only obs, but at day 37 once a biweekly ES
-/// stream contributes OFF-grid observation times that re-anchor the grid. So the
-/// trigger is OFF-GRID OBSERVATIONS, not off-grid effect times.
+/// `times` is the sorted, deduplicated set of fire times of every scheduled
+/// intervention — IDENTICAL to the `effect_times` registered on the inference
+/// [`crate::schedule::Schedule`], so a [`crate::schedule::Cursor`]'s `effect_idx`
+/// indexes both. `batches[i]` lists, in declaration order, the scheduled
+/// interventions firing at `times[i]`; when the integrator lands on an effect
+/// boundary the caller reads `batches[effect_idx]` and fires it. Always-active
+/// EVENTS are excluded — they keep the `grid_dt` firing key (see
+/// [`crate::effects::due_events`]) and registering their times would re-tile the
+/// Exact grid for events-only models (breaking byte-identity).
 ///
-/// Until the firing decision moves onto the timeline (the real fix), refuse the
-/// combination loudly.
+/// Recomputed once per filter run from `params` (§3.1 of the proposal). For the
+/// supported case every scheduled fire time is constant (parametric `at [<param>]`
+/// schedules under Exact are rejected by [`guard_attimesexpr_exact`]).
+#[derive(Clone, Debug, Default)]
+pub struct ScheduledEffects {
+    pub times: Vec<f64>,
+    pub batches: Vec<Vec<usize>>,
+}
+
+/// Build the [`ScheduledEffects`] for `model` at `params`: group the scheduled
+/// (`!is_event`) interventions' fire times into sorted, distinct boundaries. The
+/// resulting `times` is what the inference `Schedule`'s `effect_times` must carry.
+pub fn scheduled_effects(model: &CompiledModel, params: &[f64]) -> ScheduledEffects {
+    let fire_times = model.resolve_fire_times(params);
+    // (time, iv_idx) for scheduled interventions only, collected in declaration
+    // order so a stable sort keeps per-boundary firing order = declaration order.
+    let mut pairs: Vec<(f64, usize)> = Vec::new();
+    for (iv_idx, iv) in model.model.interventions.iter().enumerate() {
+        if iv.kind.is_event() {
+            continue;
+        }
+        for &t in &fire_times[iv_idx] {
+            pairs.push((t, iv_idx));
+        }
+    }
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out = ScheduledEffects::default();
+    for (t, iv_idx) in pairs {
+        match out.times.last() {
+            // Distinct boundaries by exact equality, matching `all_intervention_times`'
+            // dedup; a scheduled intervention sharing a fire time joins the batch.
+            Some(&last) if last == t => out.batches.last_mut().unwrap().push(iv_idx),
+            _ => {
+                out.times.push(t);
+                out.batches.push(vec![iv_idx]);
+            }
+        }
+    }
+    out
+}
+
+/// gh#216 RESIDUAL GUARD (replaces the off-grid-OBS stopgap): under `Exact`,
+/// reject a model whose SCHEDULED (`!is_event`) intervention fires at a time OFF
+/// the dt grid (relative to `t_start`). The cursor-keyed firing fixes off-grid
+/// OBS re-tiling an ON-grid intervention (the gh#216 reproduction); an off-grid
+/// intervention TIME is a separate generalization deferred to a follow-up (the
+/// PGAS drift-free substep-time walk would need to re-anchor at off-grid effect
+/// boundaries). Until then, refuse it loudly with a migration, rather than fire
+/// it at a snapped grid step (the old `round()` behaviour this proposal retires).
 ///
-/// Scope (exactly):
-/// - `Exact` ONLY (`Snap` and forward simulation are never rejected — they stay
-///   on / clip to the grid, so `round(t/dt)` is correct);
-/// - models with at least one SCHEDULED (`!is_event`) intervention ONLY.
-///   Always-active EVENTS are OUT of scope: PF/IF2/correlated-PF key event
-///   firing on the NOMINAL `grid_dt` (the StepClock fix, spine-v2 §A), so an
-///   off-grid observation does NOT misfire an event — pinned by
-///   `inference_event_misfire_guard::pf_runs_off_grid_obs_with_always_active_event`.
-///   (PGAS rejects event-bearing models under Exact via its own events-only
-///   guard at `pgas.rs:1518`, left untouched.) A model with NO scheduled
-///   intervention — no interventions at all (proposal B's plain multi-cadence
-///   fit), or events-only — has no scheduled effect to misfire, so it returns
-///   `Ok`;
-/// - at least one OBSERVATION time OFF the integrator grid, measured RELATIVE TO
-///   `t_start` (`r = (obs - t_start)/dt; (r - r.round()).abs() > GRID_TOL`). The
-///   t_start-relative key mirrors `correlated_pf::cpm_steps_per_obs` /
-///   `validate_cpm_obs_grid`, which already anchor the obs grid at `t_start`.
-///
-/// On-grid observations (every `obs` an integer multiple of `dt` past `t_start`)
-/// keep the substep grid coincident with the global grid, so `round(t/dt)`
-/// resolves correctly — that case (the He-2010 weekly-obs and the gh#187 on-grid
-/// intervention fits) passes.
-pub fn guard_exact_offgrid_obs(
-    obs_times: &[f64],
+/// Events are exempt (they key on `grid_dt`, out of scope). `Snap` and forward
+/// simulation are never rejected (they stay on / clip to the grid).
+pub fn guard_exact_offgrid_effect_time(
+    model: &CompiledModel,
+    params: &[f64],
     t_start: f64,
     dt: f64,
-    model: &CompiledModel,
     policy: StepPolicy,
 ) -> Result<(), SimError> {
     if policy != StepPolicy::Exact {
         return Ok(());
     }
-    // Only SCHEDULED (non-event) interventions misfire under off-grid obs.
-    // Always-active events are handled by the StepClock grid_dt key (PF/IF2/
-    // correlated-PF) or PGAS's events-only guard — out of scope here. A model
-    // with no scheduled intervention (proposal B's plain multi-cadence fit, or an
-    // events-only model) has nothing to misfire — accept it.
-    let has_scheduled = model.model.interventions.iter().any(|iv| !iv.kind.is_event());
-    if !has_scheduled {
-        return Ok(());
+    let fire_times = model.resolve_fire_times(params);
+    let mut off_grid: Vec<f64> = Vec::new();
+    for (iv_idx, iv) in model.model.interventions.iter().enumerate() {
+        if iv.kind.is_event() {
+            continue;
+        }
+        for &e in &fire_times[iv_idx] {
+            let r = (e - t_start) / dt;
+            if (r - r.round()).abs() > GRID_TOL {
+                off_grid.push(e);
+            }
+        }
     }
-    let off_grid: Vec<f64> = obs_times
-        .iter()
-        .copied()
-        .filter(|&obs| {
-            let r = (obs - t_start) / dt;
-            (r - r.round()).abs() > GRID_TOL
-        })
-        .collect();
     if off_grid.is_empty() {
         return Ok(());
     }
+    off_grid.sort_by(|a, b| a.total_cmp(b));
+    off_grid.dedup();
     let shown: Vec<String> = off_grid.iter().take(4).map(|t| format!("{t:.4}")).collect();
     let more = if off_grid.len() > 4 {
         format!(", … ({} total)", off_grid.len())
@@ -297,16 +317,49 @@ pub fn guard_exact_offgrid_obs(
         String::new()
     };
     Err(SimError::Validation(format!(
-        "exact obs-alignment is not yet supported for a model with a scheduled \
-         intervention when an OBSERVATION time is off the dt grid (dt={dt}, t_start={t_start}): \
-         under Exact the substep grid re-anchors at every observation, so an off-grid \
-         observation re-tiles the grid and a scheduled intervention that keys on round(t/dt) \
-         fires at the wrong substep — even when the intervention time itself is on-grid (gh#216). \
-         Off-grid observation time(s): [{}{more}]. Use `obs_alignment = \"snap\"`, or \
-         place the observation time(s) on the dt grid (t_start + an integer multiple of \
-         dt).",
+        "exact obs-alignment does not yet support a scheduled intervention whose \
+         fire time is OFF the dt grid (dt={dt}, t_start={t_start}): under Exact the \
+         integrator lands exactly on each observation, and firing the intervention \
+         at its off-grid time requires re-anchoring the substep grid there — a \
+         deferred generalization of the gh#216 cursor-keyed firing fix. Off-grid \
+         scheduled intervention time(s): [{}{more}]. Use `obs_alignment = \"snap\"`, \
+         or place the intervention time(s) on the dt grid (t_start + an integer \
+         multiple of dt).",
         shown.join(", "),
     )))
+}
+
+/// §3.6 hard-error: a parametric `at [<param>]` (`AtTimesExpr`) scheduled
+/// intervention under `Exact` inference. The cursor-keyed firing registers ONE
+/// shared `effect_times` per filter run; a parametric schedule resolves to
+/// per-particle fire times (IF2 carries per-particle params) that a single
+/// immutable `Schedule` cannot represent. Reject it loudly rather than silently
+/// fire at the swarm-mean times. (Constant `at [..]`, `Recurring`, and `AtTimes`
+/// schedules are unaffected.)
+pub fn guard_attimesexpr_exact(
+    model: &CompiledModel,
+    policy: StepPolicy,
+) -> Result<(), SimError> {
+    if policy != StepPolicy::Exact {
+        return Ok(());
+    }
+    for iv in &model.model.interventions {
+        if iv.kind.is_event() {
+            continue;
+        }
+        if matches!(iv.schedule, InterventionSchedule::AtTimesExpr(_)) {
+            return Err(SimError::Validation(format!(
+                "exact obs-alignment does not support a parametric `at [<param>]` \
+                 schedule on scheduled intervention '{}': the cursor-keyed effect \
+                 firing registers one shared set of fire times per filter run, but a \
+                 parametric schedule resolves to per-particle fire times. Use \
+                 `obs_alignment = \"snap\"`, or a constant `at [..]` / `recurring` \
+                 schedule.",
+                iv.name,
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
