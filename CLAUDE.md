@@ -170,6 +170,13 @@ Now that camdl is alpha:
   in on the next substantive commit (or forces an amend after a push — `main` is
   a protected branch, so a post-push reformat can't be force-pushed; it has to
   be a fresh follow-up commit).
+  - **EXCEPTION: never run `mdfmt`/`dprint fmt` on
+    `docs/camdl-language-spec.md`.** The spec embeds ~30
+    `<!-- camdl-doctest-preamble -->` markers and fenced `camdl` snippets that
+    the doc-test harness parses; `dprint`'s reflow disturbs that structure and
+    turns passing doc-tests into failures/ICEs. Edit the spec by hand and leave
+    its formatting alone. (Any other `.md` with embedded doctest preambles is
+    the same hazard — check before formatting.)
 
 ## Project Overview
 
