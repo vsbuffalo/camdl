@@ -327,10 +327,14 @@ declared-column denominator apply to it for free — no extra surface.
 
 ### 3.3 Deferred, not foreclosed
 
-- **Multinomial / compositional outcomes** (serotype/variant splits; two
-  outcomes sharing one denominator). `ObsCell` is designed **extensible**
-  (`Scalar | Counted | Vector`) so the type does not wall this off; the
-  multinomial likelihood itself is deferred.
+- **Multinomial / compositional outcomes** (serotype/variant splits sharing a
+  denominator) are a **vector-valued scored outcome** — the one axis that _is_ a
+  cell-variant extension (`ObsCell = Scalar | Vector`), distinct from aux: a
+  multinomial's shared denominator is still an aux column (§3.2), and the
+  `Vector` reserved variant is for the outcome vector only. The multinomial
+  likelihood itself is deferred. (There is **no** `Counted` variant — a
+  per-observation denominator is an aux column carried by `columns { }`, not a
+  cell shape; see §6.1.)
 - **Censoring** (detection limits, reporting triangles) — changes the
   likelihood's functional form; deferred, named loudly.
 
@@ -458,14 +462,29 @@ rollup is named in §9.
 
 ## 6. The binding seam — one validated reader for obs + forcings
 
-### 6.1 `BoundObs`, typed columns, extensible cells
+### 6.1 `BoundObs`, typed columns, and where aux lives (no `Counted`)
 
 `bind(streams) -> Result<(BoundObs, BindReport), BindReport>` stays the single
-validated constructor every path routes through. `ObsCell` becomes
-**extensible** (`Scalar | Counted { value, denom } | …`, Vector reserved for
-multinomial); the denominator/offset/covariate columns are typed fields the
-compiler knows; the strata index (§4) and aggregation (§5) resolve in `bind`,
-where the model's dimension levels and the file header are both in hand.
+validated constructor every path routes through. Two axes, kept separate:
+
+- **The scored outcome** is the `ObsCell` variant — `Scalar` today, `Vector`
+  reserved for a multinomial outcome (§3.3). That is the _only_ cell-variant
+  axis.
+- **The per-observation aux** (a binomial denominator, a Poisson person-time
+  offset, a reporting fraction — zero, one, or several) is **not** a cell
+  variant. It is carried by the `columns { }` binding: a stream's bound cells
+  carry the scored value, and the referenced aux columns are bound per
+  observation alongside, read by the likelihood **by name** (`n = tested`,
+  `offset = person_time`). `bind` enforces present-together-or-hole (value and
+  every referenced aux present, or the cell is a hole) and the row checks
+  (`value ≤ n`, `n > 0`).
+
+This **replaces the old `ObsCell::Counted { value, denom }`** — that variant
+conflated the outcome with a single, hardcoded "denom" aux, which (per §3.2)
+cannot express an offset or a second aux column. `columns { }` subsumes it: the
+denominator is just one declared aux column. The strata index (§4) and
+aggregation (§5) resolve in `bind`, where the model's dimension levels and the
+file header are both in hand.
 
 ### 6.2 Unify the reader for obs + forcings; keep the concepts distinct
 
@@ -571,7 +590,8 @@ Stage 2 (rich data):
   level names (§4.2); today the expanded IR flattens strata into per-cell names
   without the labels;
 - represent the denominator/aux column references in the likelihood (binomial
-  `n = <col>`), so `ObsCell::Counted` can carry them.
+  `n = <col>`), so the bind layer resolves them against the per-observation aux
+  columns (§6.1) — no `Counted` cell variant.
 
 Both stages bump `ir/VERSION` and break every golden — the atomic
 OCaml(`ir/`)+Rust(`ir/src/`)+golden update per "Changing the IR schema." Flagged
@@ -689,9 +709,10 @@ semantics). Both bump `ir/VERSION`.
 
 ### Stage 2 — the rich data layer (IR change: `levels` + denominator column-refs)
 
-- **Per-obs aux / survey denominators** — `binomial(n = tested)`, extensible
-  `ObsCell::Counted`, the dimcheck-`n` fix (`constrain_known`), the `value ≤ n`
-  row check; the IR carries the likelihood's column references.
+- **Per-obs aux / survey denominators** — `binomial(n = tested)` etc. carried as
+  declared aux columns bound per observation (§6.1, **not** an
+  `ObsCell::Counted` variant); the dimcheck-`n` fix (`constrain_known`); the
+  `value ≤ n` row check; the IR carries the likelihood's column references.
 - **By-name level matching** for `[p in dim]` indexed streams (the `levels` IR
   field, §4.2): per-cell scoring, partial-coverage holes, bins-differ errors.
 - **National aggregation** — the §5.2 hard error; explicit `sum(...)` forms.

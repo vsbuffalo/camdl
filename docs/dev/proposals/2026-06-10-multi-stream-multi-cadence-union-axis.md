@@ -21,9 +21,10 @@ TSV per stream); only the inference path rejects it.
 The **data-layer surface** (`columns { }`, `from <label>`, `~`, `[p in dim]`
 indexing) is the sibling proposal A
 (`2026-06-10-observation-data-entry-dsl.md`). The **survey-denominator surface**
-(`Counted { value, denom }` for binomial positivity) is a separate additive
-follow-up (§9). This proposal is the union time axis and the per-stream flow
-reset that sit underneath both.
+(a binomial `n = <col>` denominator carried as a declared aux column — proposal
+A's Stage 2, not a special cell variant) is a separate additive follow-up (§9).
+This proposal is the union time axis and the per-stream flow reset that sit
+underneath both.
 
 **Required reading before implementing:**
 
@@ -419,8 +420,9 @@ different cadences:
   per patch — not a cross-strata sum). Exercises incidence reset + low-mean NB +
   holes.
 - **`es[p in patch]`** — `prevalence(I_shed[patch = p])`, **biweekly**
-  (`emit_schedule = every 14 'days`), `poisson` for v1. (When `Counted` lands,
-  `es` upgrades to binomial positivity — the denominator follow-up meets here.)
+  (`emit_schedule = every 14 'days`), `poisson` for v1. (When the denominator
+  aux column lands — proposal A Stage 2 — `es` upgrades to binomial positivity
+  (`n = tested`); the denominator follow-up meets here.)
 
 A mixed **incidence + prevalence at different cadences** is the hardest case and
 the one the union axis must get right. Synthetic data via
@@ -494,9 +496,10 @@ is self-contained and recover-known-params.
 
 ## 9. Out of scope (named, not forgotten)
 
-- **`Counted { value, denom }` / survey denominators** — an additive `ObsCell`
-  variant on top of this union-axis `BoundObs`; a separate proposal. ES-as-
-  binomial-positivity is its natural first consumer.
+- **Survey denominators** — a binomial `n = <col>` denominator carried as a
+  declared aux column (proposal A Stage 2), on top of this union-axis
+  `BoundObs`; not a special cell variant. ES-as-binomial-positivity is its
+  natural first consumer.
 - **`survey` multi-cadence** — its loader is separate from `bind` (§1); a
   follow-up that routes it through the same lift.
 - **Explicit per-stream `condition_from` in the observation block** — the

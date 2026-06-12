@@ -78,8 +78,11 @@ use super::obs_model::{
 /// A hole is NOT an observed zero: `None` ≠ `Some(Scalar(0.0))`. The former
 /// omits the likelihood factor; the latter scores the density at `y = 0`.
 ///
-/// Only `Scalar` exists today. A `Counted { value, denom }` variant (for
-/// binomial-with-known-denominator survey data) is a later phase.
+/// Only `Scalar` exists today. The cell-variant axis is the scored OUTCOME
+/// shape — a `Vector` variant (multinomial / compositional outcomes) is the
+/// planned extension. A per-observation denominator/offset is NOT a cell
+/// variant: it is a declared aux column bound from `columns { }` and read by
+/// the likelihood by name (observation data-entry proposal, Stage 2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ObsCell {
     /// A single observed scalar value.
