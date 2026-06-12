@@ -1,6 +1,6 @@
 ---
 date: 2026-06-09
-status: accepted — implementing v1 (pack side); decisions resolved
+status: accepted — fit shipped; simulate increment finalized 2026-06-12, implementing
 area: cli / compiler (camdlc) / bundle format
 related:
   - 2026-06-02-cas-run-identity (runid crate; ContentHash identity)
@@ -9,6 +9,74 @@ issues: gh#212 (tracking)
 ---
 
 # `camdl mre`: one-command minimal-reproducible-example bundles
+
+## Update 2026-06-12 — `mre simulate` finalized
+
+`mre fit` shipped (`45264bf1`); this update closes the simulate gap the original
+left under-specified and pins the structure both subcommands share. It finalizes
+the _shape_ within the v1 scope below, not new surface.
+
+**One funnel, per-command collectors.** The bundle writer is command-agnostic;
+only the closure enumeration differs — `fit` reads paths from the resolved
+`FitConfigV2`, `simulate` from the parsed `SimulateArgs`. The seam is a
+`BundlePlan` produced per command and consumed by one shared writer:
+
+```rust
+struct BundlePlan { inputs: Vec<InputRef>, kind: &'static str, reproduce: String }
+
+fn collect_fit(&MreFitArgs) -> Result<BundlePlan, String>;                              // config-walk
+fn collect_simulate(&MreSimulateArgs, argv: &[String]) -> Result<BundlePlan, String>;  // flag-walk
+fn write_bundle(&BundlePlan, out: &Path) -> Result<(), String>;  // stage → manifest → README → tar.gz → banner
+```
+
+`write_bundle` never branches on command; the collectors never touch tar/gzip.
+`InputRole` becomes an enum
+(`Model, ReadClosure, FitConfig, Data, FixedFile,
+SyntheticTruth, Table, Params, ParamVec, Draws, Fit`)
+with `is_data()` derived, replacing the `role: &'static str` + `is_data: bool`
+pair so the consent banner has one source of truth. The fit.toml folds into
+`inputs` as `FitConfig` — its root-relative dest is the bare name, since the fit
+root _is_ its directory — so there is no special entry-file path.
+
+**Reproduce is per-command, by structure.** `fit` constructs
+`camdl fit run <bundled-config>`, because `mre fit <config>` is structurally a
+different command from `fit run <config>` and the config relocates to a bare
+name. `simulate` captures `std::env::args`, strips the three mre-only tokens
+(`-b`/`--bundle <v>`, `--no-data`), and re-prefixes `camdl simulate …` — because
+`mre simulate` flattens the real `SimulateArgs`, the post-`simulate` argv _is_
+the real simulate argv. This avoids a hand-written struct→argv serializer (clap
+has no inverse), so a new simulate flag carries into the reproduce command for
+free; the only maintained surface is "new _file-bearing_ flag → add to the
+collector," which is inherent and gated by the round-trip test.
+
+**Roots and path containment (Option A, deliberate).** Fit anchors the root at
+the fit.toml's directory; simulate has no config anchor, so the root is the CWD.
+Both enforce the same rule via `rel_to_root` (`mre.rs:324`): every input must be
+relative-and-contained, and absolute or `../`-escaping paths **hard-error**
+rather than being rewritten. This is by design (gh#211: an absolute `read()` is
+a portability smell) — the captured argv and the copied config then resolve
+unchanged inside the bundle, with no path rewriting. The read-closure itself is
+captured automatically and exhaustively by `camdlc --emit-deps`: inline
+`read()`, `DRead` dimension files, and `interpolated()` forcings all route
+through the one `read_csv_rows` chokepoint.
+
+**`runid` is the oracle, not the enumerator.** The content-addressing layer
+(`runid::inputs`) hashes _content + logical inputs_ into a `run_id`; it
+deliberately discards the source-file _paths_ MRE must copy (the read-closure is
+kept out of identity so absolute paths cannot poison the hash). MRE therefore
+hand-enumerates the physical closure, and the round-trip test (pack → unpack →
+re-run → assert identical `run_id`) is what proves the enumeration was complete.
+
+**Resolved refinements.**
+
+- **`--no-data` dropped from `mre simulate`.** A forward sim has no observed
+  data (`--data` is on pfilter/profile); tables/params cannot be omitted without
+  breaking the run. A no-op flag is a loose-semantics smell.
+- **Roles renamed** `fixed_params`/`true_params` → `FixedFile`
+  (`[fixed]
+  from_file`) / `SyntheticTruth` (`[synthetic] true_params`) so each
+  traces to exactly one fit.toml block. They are mutually exclusive —
+  `[synthetic]` replaces `[data]` — never a fixed-vs-true dichotomy.
 
 ## Problem
 
