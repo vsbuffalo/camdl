@@ -727,6 +727,57 @@ let test_obs_output_start_divergence () =
         | _ -> Alcotest.fail "expected ObsRegular emit_schedule")
      | [] -> Alcotest.fail "expected an observation model")
 
+(* ── §4.2 — stratified observation header emits a `stratum` selector ──────────
+   A `cases[p in patch]` observation expands to one IR leaf per patch level
+   (`cases_urban`, `cases_rural`). Each leaf must carry a structured
+   `stratum = [("patch", <level>)]` selector (the by-name routing key the Rust
+   long-form loader uses), and it must round-trip through serde. ───────────── *)
+let test_stratified_observation_emits_stratum () =
+  let src = {|
+    time_unit = 'days
+    dimensions { patch = [urban, rural] }
+    compartments { S, I, R }
+    stratify(by = patch)
+    parameters { beta : rate  gamma : rate  rho : probability }
+    let N[p in patch] = S[p] + I[p] + R[p]
+    transitions {
+      infection[p in patch] : S[p] --> I[p]  @ beta * S[p] * I[p] / N[p]
+      recovery[p in patch]  : I[p] --> R[p]  @ gamma * I[p]
+    }
+    init { S[urban] = 990  I[urban] = 10  S[rural] = 999  I[rural] = 1 }
+    simulate { from = 0 'days  to = 100 'days }
+    observations {
+      cases[p in patch] {
+        columns       { time : time, patch : dim, cases : count }
+        projected     = incidence(infection[p])
+        emit_schedule = every 7 'days
+        cases         ~ poisson(rate = rho * projected)
+      }
+    }
+  |} in
+  let m = compile_expect_ok src in
+  let find name =
+    List.find (fun (o : Ir.observation_model) -> o.Ir.name = name) m.Ir.observations in
+  let check_leaf name level =
+    let o = find name in
+    Alcotest.(check (list (pair string string)))
+      (Printf.sprintf "%s stratum = [(patch, %s)]" name level)
+      [("patch", level)] o.Ir.stratum
+  in
+  check_leaf "cases_urban" "urban";
+  check_leaf "cases_rural" "rural";
+  (* Round-trip through serde: the `stratum` field survives serialise +
+     deserialise (and is OMITTED when empty — an unstratified golden is
+     byte-identical, asserted by the golden gate). *)
+  let json = Serde.model_to_string m in
+  let m2 = match Serde.model_of_string json with
+    | Ok m -> m
+    | Error e -> Alcotest.failf "round-trip parse failed: %s" e in
+  let o2 = List.find
+    (fun (o : Ir.observation_model) -> o.Ir.name = "cases_urban") m2.Ir.observations in
+  Alcotest.(check (list (pair string string)))
+    "round-tripped stratum" [("patch", "urban")] o2.Ir.stratum
+
 (* ── BUG-2: Parameterised table values ───────────────────────────────────────
    Compile a model with a table that references a parameter. The compiled
    table values should include Ir.Param "beta_mf", not drop it. ─────────── *)
@@ -6697,6 +6748,8 @@ let () =
       Alcotest.test_case "every and at conflict → error" `Quick test_output_every_and_at_conflict;
       Alcotest.test_case "obs.start=t_start vs output.start=0 (A.2 lowering divergence guard)"
         `Quick test_obs_output_start_divergence;
+      Alcotest.test_case "stratified obs header emits (dim,level) stratum + serde round-trip"
+        `Quick test_stratified_observation_emits_stratum;
     ];
     "parameterised_tables", [
       Alcotest.test_case "param survives as Ir.Param" `Quick test_parameterised_table;

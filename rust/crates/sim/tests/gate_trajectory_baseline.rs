@@ -224,6 +224,13 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("surveillance_likelihoods", "gillespie", 0xd289093f707a3cea),
     ("surveillance_likelihoods", "chain_binomial", 0xcfa2b111d613f1e7),
     ("surveillance_likelihoods", "ode", 0xad279a4387e666c2),
+    // §4.2 long-form stratified-observation fixture (sir_two_patch_long_obs):
+    // a 2-patch SIR with an indexed `cases[p in patch]` header. The trajectory
+    // hash excludes observations, so it pins only the dynamics (identical-shape
+    // to sir_two_patch but distinct params/levels).
+    ("sir_two_patch_long_obs", "gillespie", 0x695d50d1cbec83fc),
+    ("sir_two_patch_long_obs", "chain_binomial", 0xcd2756793661993f),
+    ("sir_two_patch_long_obs", "ode", 0x1a92a4c0784ba9c8),
 ];
 
 #[test]

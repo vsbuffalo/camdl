@@ -1,0 +1,64 @@
+# Two-patch SIR with a STRATIFIED observation header `cases[p in patch]`.
+#
+# The observation expands to one IR leaf per patch level (`cases_urban`,
+# `cases_rural`), each carrying a structured `stratum = [("patch", <level>)]`
+# selector. A single LONG-FORM data file (`time, patch, cases`) is routed to
+# the matching leaf BY NAME (2026-06-10 observation data-entry §4.2): the
+# `patch : dim` column's values match the model's `patch` levels, and each row
+# `(t, p, cases)` scores against the leaf whose stratum is `patch = p`.
+
+time_unit = 'days
+
+dimensions { patch = [urban, rural] }
+
+compartments { S, I, R }
+
+stratify(by = patch)
+
+parameters {
+  beta  : rate        in [0.001, 0.5]
+  gamma : rate        in [0.01, 1.0]
+  rho   : probability in [0.0, 1.0]
+  k     : real        in [0.1, 100.0]
+}
+
+let N[p in patch] = S[p] + I[p] + R[p]
+
+transitions {
+  infection[p in patch] : S[p] --> I[p]  @ beta * S[p] * I[p] / N[p]
+  recovery[p in patch]  : I[p] --> R[p]  @ gamma * I[p]
+}
+
+observations {
+  cases[p in patch] {
+    columns       { time : time, patch : dim, cases : count }
+    projected     = incidence(infection[p])
+    emit_schedule = every 7 'days
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+init {
+  S[urban] = 990
+  I[urban] = 10
+  S[rural] = 999
+  I[rural] = 1
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}
+
+scenarios {
+  baseline {
+    label = "default"
+    simulate { to = 100 'days }
+    set = {
+      beta  = 0.05
+      gamma = 0.1
+      rho   = 0.6
+      k     = 5.0
+    }
+  }
+}

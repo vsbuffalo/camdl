@@ -86,6 +86,7 @@ fn model() -> Arc<CompiledModel> {
                 ],
                 scored: "cases".into(),
                 emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
+                stratum: vec![],
                 projection: Projection::CurrentPop("I".into()),
                 likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {
                     // mean = rho * I  (Pop ref → reads counts)

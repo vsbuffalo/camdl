@@ -4731,6 +4731,23 @@ let expand_observations ctx =
       if parts = [] then od.oname
       else od.oname ^ "_" ^ String.concat "_" parts
     in
+    (* Structured (dimension, level) selector for this expanded leaf — the
+       by-name routing key the Rust long-form loader uses (§4.2). Parallels
+       [name_parts_from_bindings] but keeps the dimension name alongside the
+       level. Only [IBind]/[IConsec] carry a dimension; [IComp] (iterate over
+       compartments) has none, so it contributes no stratum pair. An
+       unstratified stream ([od.oindices = []]) yields []. *)
+    let stratum_of_bindings ibs env : (string * string) list =
+      List.filter_map (fun ib ->
+        match ib with
+        | IBind (v, d) | IConsec (v, _, d) ->
+          (match List.assoc_opt v env with
+           | Some level -> Some (d, level)
+           | None -> None)
+        | IComp _ -> None
+      ) ibs
+    in
+    let stratum = stratum_of_bindings od.oindices env in
     (* `from <label>` data-source key; defaults to the (unexpanded) stream
        name — every expanded leaf of a stratified stream shares the source. *)
     let source = match od.osource with Some s -> s | None -> od.oname in
@@ -4746,6 +4763,7 @@ let expand_observations ctx =
       Ir.columns       = ir_columns;
       Ir.scored        = meas_v.om_scored;
       Ir.emit_schedule = emit_schedule;
+      Ir.stratum;
       Ir.projection;
       Ir.likelihood;
     }

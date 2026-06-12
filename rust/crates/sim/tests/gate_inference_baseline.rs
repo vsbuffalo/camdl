@@ -123,6 +123,7 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
             ],
             scored: "weekly_cases".into(),
             emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
+            stratum: vec![],
             projection: Projection::CumulativeFlow("infection".into()),
             likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {
                 mean: mul(p("rho"), Expr::Projected(ProjectedExpr { projected: () })),

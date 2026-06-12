@@ -190,6 +190,7 @@ let test_observation_only_not_dead () =
                  { col_name = "recovered"; col_role = RoleValue Count }];
       scored = "recovered";
       emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
+      stratum = [];
       projection = CurrentPop "R";
       likelihood = Poisson { rate = Projected } } in
   let m = empty_model
@@ -216,6 +217,7 @@ let test_derived_observation_only_not_dead () =
                  { col_name = "frac_recovered"; col_role = RoleValue Real }];
       scored = "frac_recovered";
       emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
+      stratum = [];
       projection = DerivedExpr (pop "R" /. (pop "S" +. pop "I" +. pop "R"));
       likelihood = Normal { mean = Projected; sd = const 1.0 } } in
   let m = empty_model

@@ -129,6 +129,7 @@ fn representative_model() -> Model {
                 step: 7.0,
                 end: 364.0,
             })),
+            stratum: vec![],
             projection: Projection::CumulativeFlow("infection".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: Expr::bin_op(

@@ -81,6 +81,7 @@ fn model(k_per_unit: f64) -> Arc<CompiledModel> {
                 ],
                 scored: "cases".into(),
                 emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
+                stratum: vec![],
                 projection: Projection::CumulativeFlow("inflow".into()),
                 likelihood: Likelihood::Normal(NormalLikelihood {
                     // mean = projected (the weekly incidence tally)

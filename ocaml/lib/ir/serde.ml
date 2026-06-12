@@ -740,6 +740,12 @@ let obs_column_of_json j =
   { col_name = as_string (member "name" j);
     col_role = obs_column_role_of_json (member "role" j); }
 
+let stratum_key_to_json ((d, l) : string * string) : Yojson.Safe.t =
+  obj [("dim", str d); ("level", str l)]
+
+let stratum_key_of_json j =
+  (as_string (member "dim" j), as_string (member "level" j))
+
 let observation_model_to_json (om : observation_model) : Yojson.Safe.t =
   let base = [
     ("name",          str om.name);
@@ -751,7 +757,14 @@ let observation_model_to_json (om : observation_model) : Yojson.Safe.t =
     | None   -> []
     | Some s -> [("emit_schedule", obs_schedule_to_json s)]
   in
-  obj (base @ sched @ [
+  (* Omit the `stratum` key when empty (unstratified stream) — mirrors the
+     Rust `skip_serializing_if = "Vec::is_empty"`, so existing goldens for
+     un-indexed observations are byte-identical. *)
+  let stratum = match om.stratum with
+    | [] -> []
+    | ss -> [("stratum", arr (List.map stratum_key_to_json ss))]
+  in
+  obj (base @ sched @ stratum @ [
     ("projection",  projection_to_json om.projection);
     ("likelihood",  likelihood_to_json om.likelihood);
   ])
@@ -764,6 +777,9 @@ let observation_model_of_json j =
     emit_schedule = (match member_opt "emit_schedule" j with
                      | Some `Null | None -> None
                      | Some s -> Some (obs_schedule_of_json s));
+    stratum       = (match member_opt "stratum" j with
+                     | Some `Null | None -> []
+                     | Some s -> List.map stratum_key_of_json (as_list s));
     projection    = projection_of_json  (member "projection" j);
     likelihood    = likelihood_of_json  (member "likelihood" j);
   }

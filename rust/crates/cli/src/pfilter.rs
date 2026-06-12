@@ -168,50 +168,66 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 eprintln!("error: no observation block named '{}'", sname);
                 std::process::exit(1);
             });
-        let time_col = obs_time_column(obs_block).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        });
-        match load_data_tsv_column_cells(&path_str, time_col, &obs_block.scored, &time_opts) {
-            Ok((times, mut cells)) => {
-                // Load the stream's aux columns (Stage 2). A row where the
-                // scored value OR any referenced aux is `NA` is a hole
-                // (present-together-or-hole) — clear the aux for a hole.
-                let aux_cols = stream_aux_columns(obs_block);
-                let (mut aux, force_hole) =
-                    load_stream_aux(&path_str, &aux_cols, cells.len())
-                        .unwrap_or_else(|e| {
-                            eprintln!("error: cannot load aux data for stream '{}' from {}: {}",
-                                sname, path_str, e);
-                            std::process::exit(1);
-                        });
-                for r in 0..cells.len() {
-                    if force_hole[r] {
-                        cells[r] = None;
-                    }
-                    if cells[r].is_none() {
-                        aux[r].clear();
-                    }
-                }
-                // Dense placeholder view (holes → 0.0) for diagnostics/time.
-                let obs: Vec<Observation> = times.iter().zip(cells.iter())
-                    .map(|(&time, cell)| Observation {
-                        time,
-                        value: match cell {
-                            Some(sim::inference::ObsCell::Scalar(v)) => *v,
-                            None => 0.0,
-                        },
-                    }).collect();
-                per_stream_obs.push(obs);
-                per_stream_cells.push(cells);
-                per_stream_aux.push(aux);
-            }
-            Err(e) => {
-                eprintln!("error: cannot load data column '{}' from {}: {}",
-                    sname, path_str, e);
+        // DISPATCH: a stratified (long-form) stream — its `columns { }` declares
+        // at least one `: dim` column — loads via the long-form router, which
+        // routes file rows to the matching stratum leaf BY NAME and builds the
+        // partial-coverage union axis. An unstratified stream keeps the existing
+        // wide/by-name path UNCHANGED (one value column per file).
+        let (times, cells, aux) = if is_long_form_stream(obs_block) {
+            let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
+                .filter(|o| o.source == obs_block.source)
+                .collect();
+            load_long_form_stream(&path_str, obs_block, &siblings, &time_opts)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: cannot load long-form data for stream '{}' from {}: {}",
+                        sname, path_str, e);
+                    std::process::exit(1);
+                })
+        } else {
+            let time_col = obs_time_column(obs_block).unwrap_or_else(|e| {
+                eprintln!("error: {}", e);
                 std::process::exit(1);
+            });
+            let (times, mut cells) =
+                load_data_tsv_column_cells(&path_str, time_col, &obs_block.scored, &time_opts)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: cannot load data column '{}' from {}: {}",
+                            sname, path_str, e);
+                        std::process::exit(1);
+                    });
+            // Load the stream's aux columns (Stage 2). A row where the scored
+            // value OR any referenced aux is `NA` is a hole (present-together-
+            // or-hole) — clear the aux for a hole.
+            let aux_cols = stream_aux_columns(obs_block);
+            let (mut aux, force_hole) =
+                load_stream_aux(&path_str, &aux_cols, cells.len())
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: cannot load aux data for stream '{}' from {}: {}",
+                            sname, path_str, e);
+                        std::process::exit(1);
+                    });
+            for r in 0..cells.len() {
+                if force_hole[r] {
+                    cells[r] = None;
+                }
+                if cells[r].is_none() {
+                    aux[r].clear();
+                }
             }
-        }
+            (times, cells, aux)
+        };
+        // Dense placeholder view (holes → 0.0) for diagnostics/time.
+        let obs: Vec<Observation> = times.iter().zip(cells.iter())
+            .map(|(&time, cell)| Observation {
+                time,
+                value: match cell {
+                    Some(sim::inference::ObsCell::Scalar(v)) => *v,
+                    None => 0.0,
+                },
+            }).collect();
+        per_stream_obs.push(obs);
+        per_stream_cells.push(cells);
+        per_stream_aux.push(aux);
     }
 
     // Holes (missing observations via `NA`) are correct for the filter
@@ -940,6 +956,235 @@ pub fn load_data_tsv_column_cells(
     Ok((times, obs_cells))
 }
 
+/// Is this stream's data in LONG (stratified) form? True iff its declared
+/// `columns { }` contains at least one `: dim` column — the dispatch axis
+/// between the wide/by-name loader (one value column per file) and the
+/// long-form loader (one row per `(time, level, value)`, routed by name to
+/// the matching stratum leaf; 2026-06-10 observation data-entry §4.2).
+pub fn is_long_form_stream(obs: &ir::observation::ObservationModel) -> bool {
+    obs.columns.iter()
+        .any(|c| matches!(c.role, ir::observation::ColumnRole::Dim(_)))
+}
+
+/// The declared `: dim` column names of a stream, in declaration order. Empty
+/// for an unstratified stream.
+fn dim_column_names(obs: &ir::observation::ObservationModel) -> Vec<&str> {
+    obs.columns.iter()
+        .filter_map(|c| match &c.role {
+            ir::observation::ColumnRole::Dim(d) => Some(d.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Load ONE leaf of a stratified observation family from a LONG-FORM file
+/// (§4.2). The file carries a `time` column, one or more `: dim` columns, the
+/// scored value column, and any aux columns; each row is `(time, {dim→level},
+/// value, aux…)`. This loader:
+///
+/// - builds the UNION time axis across every row in the file (all strata
+///   share it — the normal partial-coverage serosurvey shape);
+/// - routes each row to the leaf whose `stratum` matches the row's
+///   `{dim→level}` BY NAME (order-independent (dim,level) set match);
+/// - for THIS `obs_block`, emits one cell per union time: `Some(Scalar(v))`
+///   when a matching row carries a finite value, `None` for a hole — both a
+///   `NA` value in a present row AND a union time where the leaf has no row
+///   (partial coverage). A hole carries no likelihood term and no false zero.
+///
+/// `siblings` is every observation block sharing this leaf's `source` (the
+/// whole stratified family, including `obs_block`); their strata define the
+/// valid level set per dim. A row whose level for some dim is absent from
+/// every sibling's stratum is a hard error (E281) — never silently remapped.
+///
+/// Returns `(union_times, cells, aux)` in the SAME shape the wide cells loader
+/// produces, so nothing downstream of the loader changes.
+#[allow(clippy::type_complexity)]
+pub fn load_long_form_stream(
+    path: &str,
+    obs_block: &ir::observation::ObservationModel,
+    siblings: &[&ir::observation::ObservationModel],
+    opts: &TimeOpts,
+) -> Result<
+    (Vec<f64>, Vec<Option<sim::inference::ObsCell>>, Vec<Vec<(String, f64)>>),
+    String,
+> {
+    use sim::inference::ObsCell;
+    use std::collections::BTreeMap;
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("{}: {}", path, e))?;
+    let mut lines = content.lines();
+    let header = lines.next().ok_or("empty data file")?;
+    let cols: Vec<&str> = header.split('\t').collect();
+
+    let col_idx = |name: &str, what: &str| -> Result<usize, String> {
+        cols.iter().position(|&c| c == name).ok_or_else(|| format!(
+            "{what} column '{name}' not found in data file '{path}'. \
+             Headers present: [{}]. Fix: rename the data column to '{name}' \
+             (it must match the declared `columns {{ }}` name, case-sensitive).",
+            cols.join(", ")))
+    };
+
+    let time_col = obs_time_column(obs_block)?;
+    let time_idx = col_idx(time_col, "time")?;
+    let value_idx = col_idx(&obs_block.scored, "observation value")?;
+
+    let dim_names = dim_column_names(obs_block);
+    let dim_idxs: Vec<(String, usize)> = dim_names.iter()
+        .map(|d| Ok::<_, String>(((*d).to_string(), col_idx(d, "dimension")?)))
+        .collect::<Result<_, _>>()?;
+
+    let aux_cols = stream_aux_columns(obs_block);
+    let aux_idxs: Vec<(String, usize)> = aux_cols.iter()
+        .map(|c| Ok::<_, String>((c.clone(), col_idx(c, "aux")?)))
+        .collect::<Result<_, _>>()?;
+
+    // Valid level set per dim = the UNION of all sibling leaves' strata for
+    // that dim. The IR is self-contained: a level the model iterates over is
+    // exactly a level some sibling leaf observes. (Sorted for a stable error.)
+    let mut valid_levels: BTreeMap<&str, std::collections::BTreeSet<String>> =
+        BTreeMap::new();
+    for sib in siblings {
+        for sk in &sib.stratum {
+            valid_levels.entry(sk.dim.as_str()).or_default().insert(sk.level.clone());
+        }
+    }
+
+    // This leaf's stratum as a `{dim→level}` map for the routing match.
+    let leaf_key: BTreeMap<&str, &str> = obs_block.stratum.iter()
+        .map(|sk| (sk.dim.as_str(), sk.level.as_str()))
+        .collect();
+
+    // Pass 1: parse every row of the file. Collect (raw_time, file_row,
+    // {dim→level}, scored cell, aux cells). Validate levels against the model
+    // (E281) here so an unknown level fails regardless of which leaf owns it.
+    struct Row<'a> {
+        raw_time: &'a str,
+        file_row: usize,
+        key:      BTreeMap<&'a str, String>,
+        value:    Option<f64>,
+        aux:      Vec<(String, Option<f64>)>,
+    }
+    let max_idx = [time_idx, value_idx].into_iter()
+        .chain(dim_idxs.iter().map(|(_, i)| *i))
+        .chain(aux_idxs.iter().map(|(_, i)| *i))
+        .max().unwrap();
+
+    let parse_cell = |raw: &str, what: &str, file_row: usize| -> Result<Option<f64>, String> {
+        let raw = raw.trim();
+        if raw == "NA" { return Ok(None); }
+        let v: f64 = raw.parse().map_err(|_| format!(
+            "line {file_row}: cannot parse {what} value '{raw}'"))?;
+        if !v.is_finite() {
+            return Err(format!(
+                "line {file_row}: non-finite {what} value '{raw}' — NaN and \
+                 infinities are not valid observations (a missing value is the \
+                 token `NA`). Fix or remove the row."));
+        }
+        Ok(Some(v))
+    };
+
+    let mut rows: Vec<Row> = Vec::new();
+    for (line_num, line) in lines.enumerate() {
+        if line.trim().is_empty() { continue; }
+        let file_row = line_num + 2;
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() <= max_idx {
+            return Err(format!("line {}: expected {}+ columns, got {}",
+                file_row, max_idx + 1, fields.len()));
+        }
+        // Dim levels — validate each against the model's level set (E281).
+        let mut key: BTreeMap<&str, String> = BTreeMap::new();
+        for (dim, idx) in &dim_idxs {
+            let level = fields[*idx].trim().to_string();
+            let known = valid_levels.get(dim.as_str())
+                .is_some_and(|set| set.contains(&level));
+            if !known {
+                let levels = valid_levels.get(dim.as_str())
+                    .map(|s| s.iter().cloned().collect::<Vec<_>>().join(", "))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "[E281] line {file_row} in '{path}': unknown level '{level}' \
+                     in column '{dim}'; model '{dim}' levels are [{levels}]. \
+                     A `: dim` column's values match the model dimension's levels \
+                     BY NAME — re-bin the data upstream (or aggregate, §5); never \
+                     silently remapped."));
+            }
+            key.insert(dim.as_str(), level);
+        }
+        let value = parse_cell(fields[value_idx], "observation", file_row)?;
+        let mut aux = Vec::with_capacity(aux_idxs.len());
+        for (name, idx) in &aux_idxs {
+            aux.push((name.clone(), parse_cell(fields[*idx], "aux", file_row)?));
+        }
+        rows.push(Row {
+            raw_time: fields[time_idx],
+            file_row,
+            key,
+            value,
+            aux,
+        });
+    }
+
+    // UNION time axis: the distinct raw-time strings across ALL rows, in
+    // first-seen order (every leaf shares it). Convert the union axis ONCE so
+    // every leaf's cells align to identical model times. Map each raw-time to
+    // its converted model time.
+    let mut union_raw: Vec<&str> = Vec::new();
+    for r in &rows {
+        if !union_raw.iter().any(|&t| t == r.raw_time) {
+            union_raw.push(r.raw_time);
+        }
+    }
+    let union_rows: Vec<usize> = (0..union_raw.len()).map(|i| 2 + i).collect();
+    // Reuse the shared time back-half on a placeholder value vector (the union
+    // axis is value-free until per-leaf routing fills it). This runs the
+    // dated/numeric detection + substep/off-grid/ordering checks once.
+    let placeholder = vec![0.0_f64; union_raw.len()];
+    let union_obs = finalize_observations(union_raw.clone(), placeholder, union_rows, opts)?;
+    let union_times: Vec<f64> = union_obs.iter().map(|o| o.time).collect();
+    // Position of each union raw-time (post-sort the times are non-decreasing,
+    // but finalize_observations preserves input order, which is first-seen; we
+    // match on raw string to be order-independent).
+    let raw_to_pos: BTreeMap<&str, usize> = union_raw.iter()
+        .enumerate().map(|(i, &t)| (t, i)).collect();
+
+    // Route this leaf's rows onto the union axis. A row belongs to this leaf
+    // iff its `{dim→level}` equals the leaf's stratum (set match). Two rows of
+    // the SAME leaf at the SAME time is a data error (ambiguous cell).
+    let n = union_times.len();
+    let mut cells: Vec<Option<ObsCell>> = vec![None; n]; // default hole = no coverage
+    let mut filled: Vec<bool> = vec![false; n];
+    let mut aux: Vec<Vec<(String, f64)>> = vec![Vec::new(); n];
+    for r in &rows {
+        let belongs = leaf_key.len() == r.key.len()
+            && leaf_key.iter().all(|(&d, &lv)| r.key.get(d).map(String::as_str) == Some(lv));
+        if !belongs { continue; }
+        let pos = raw_to_pos[r.raw_time];
+        if filled[pos] {
+            return Err(format!(
+                "line {} in '{}': duplicate row for stratum {:?} at the same time \
+                 — each (time, stratum) cell must be unique.",
+                r.file_row, path,
+                leaf_key.iter().map(|(d, l)| format!("{d}={l}")).collect::<Vec<_>>()));
+        }
+        filled[pos] = true;
+        // present-together-or-hole: a `NA` scored value OR any `NA` aux ⇒ hole.
+        let any_aux_na = r.aux.iter().any(|(_, v)| v.is_none());
+        match (r.value, any_aux_na) {
+            (Some(v), false) => {
+                cells[pos] = Some(ObsCell::Scalar(v));
+                aux[pos] = r.aux.iter()
+                    .map(|(name, v)| (name.clone(), v.expect("checked no NA")))
+                    .collect();
+            }
+            _ => { cells[pos] = None; } // hole: value or aux absent
+        }
+    }
+
+    Ok((union_times, cells, aux))
+}
+
 /// The aux column names a stream's likelihood references (`Expr::ObsColumnRef`):
 /// a binomial denominator `n = tested`, a person-time offset, a reporting
 /// fraction. Returns them in declaration-stable order (de-duplicated).
@@ -1477,6 +1722,110 @@ mod tests {
         let err = result.err().unwrap();
         assert!(err.contains("NA") && err.contains("cases"),
             "error must name the NA token and the column: {}", err);
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ── §4.2 long-form by-name level matching ───────────────────────────
+    //
+    // Build one expanded leaf of a stratified `cases[p in patch]` family.
+    // `level` is this leaf's patch level; the sibling list defines the valid
+    // level set (the model's `patch` levels).
+    fn long_form_leaf(level: &str) -> ir::observation::ObservationModel {
+        use ir::observation::{
+            ColumnRole, Likelihood, ObsColumn, ObservationModel, PoissonLikelihood,
+            Projection, StratumKey,
+        };
+        use ir::parameter::ParamKind;
+        ObservationModel {
+            name:   format!("cases_{level}"),
+            source: "cases".into(),
+            columns: vec![
+                ObsColumn { name: "time".into(),  role: ColumnRole::Time },
+                ObsColumn { name: "patch".into(), role: ColumnRole::Dim("patch".into()) },
+                ObsColumn { name: "cases".into(), role: ColumnRole::Value(ParamKind::Count) },
+            ],
+            scored: "cases".into(),
+            emit_schedule: None,
+            stratum: vec![StratumKey { dim: "patch".into(), level: level.into() }],
+            projection: Projection::CumulativeFlow(format!("infection_{level}")),
+            likelihood: Likelihood::Poisson(PoissonLikelihood {
+                rate: ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () }),
+            }),
+        }
+    }
+
+    #[test]
+    fn long_form_routes_rows_to_strata_by_name() {
+        use sim::inference::ObsCell;
+        // A 2-level patch family; long-form file with interleaved rows. Each
+        // leaf must carry only its own stratum's values, by name (NOT by
+        // position — the rows alternate p1/p2).
+        let p1 = long_form_leaf("p1");
+        let p2 = long_form_leaf("p2");
+        let siblings: Vec<&ir::observation::ObservationModel> = vec![&p1, &p2];
+        let path = write_temp_tsv("lf_route",
+            "time\tpatch\tcases\n7\tp1\t10\n7\tp2\t99\n14\tp1\t20\n14\tp2\t88\n");
+
+        let (t1, c1, _a1) = load_long_form_stream(&path, &p1, &siblings, &numeric_opts())
+            .expect("p1 leaf loads");
+        let (t2, c2, _a2) = load_long_form_stream(&path, &p2, &siblings, &numeric_opts())
+            .expect("p2 leaf loads");
+
+        assert_eq!(t1, vec![7.0, 14.0], "union time axis");
+        assert_eq!(t2, vec![7.0, 14.0], "union time axis shared across leaves");
+        // p1 gets 10, 20 — NOT 99, 88 (the sibling's column).
+        assert_eq!(c1, vec![Some(ObsCell::Scalar(10.0)), Some(ObsCell::Scalar(20.0))],
+            "p1 leaf must carry p1's rows, routed by name");
+        assert_eq!(c2, vec![Some(ObsCell::Scalar(99.0)), Some(ObsCell::Scalar(88.0))],
+            "p2 leaf must carry p2's rows, routed by name");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn long_form_unknown_level_is_rejected() {
+        // A row carries patch=p3, which is absent from every leaf's stratum
+        // (the model only has p1, p2). E281, located, listing the valid levels.
+        let p1 = long_form_leaf("p1");
+        let p2 = long_form_leaf("p2");
+        let siblings: Vec<&ir::observation::ObservationModel> = vec![&p1, &p2];
+        let path = write_temp_tsv("lf_unknown",
+            "time\tpatch\tcases\n7\tp1\t10\n7\tp3\t5\n");
+
+        let result = load_long_form_stream(&path, &p1, &siblings, &numeric_opts());
+        assert!(result.is_err(), "an unknown level must be a hard error");
+        let err = result.err().unwrap();
+        assert!(err.contains("E281"), "must be E281: {err}");
+        assert!(err.contains("p3"), "must name the offending level p3: {err}");
+        assert!(err.contains("patch"), "must name the dim column: {err}");
+        assert!(err.contains("p1") && err.contains("p2"),
+            "must list the valid level set [p1, p2]: {err}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn long_form_partial_coverage_makes_holes() {
+        use sim::inference::ObsCell;
+        // p1 has rows at all union times (7, 14, 21); p2 only at 7 and 21
+        // (missing 14). The union axis is {7, 14, 21}; p2's cell at 14 is a
+        // partial-coverage hole (None) — no term, NOT a false zero.
+        let p1 = long_form_leaf("p1");
+        let p2 = long_form_leaf("p2");
+        let siblings: Vec<&ir::observation::ObservationModel> = vec![&p1, &p2];
+        let path = write_temp_tsv("lf_partial",
+            "time\tpatch\tcases\n\
+             7\tp1\t10\n7\tp2\t1\n\
+             14\tp1\t20\n\
+             21\tp1\t30\n21\tp2\t3\n");
+
+        let (t2, c2, _a2) = load_long_form_stream(&path, &p2, &siblings, &numeric_opts())
+            .expect("p2 leaf loads");
+        assert_eq!(t2, vec![7.0, 14.0, 21.0], "union axis includes 14 (from p1)");
+        assert_eq!(c2[0], Some(ObsCell::Scalar(1.0)));
+        assert_eq!(c2[1], None, "p2 has no row at t=14 → partial-coverage HOLE, not 0");
+        assert_eq!(c2[2], Some(ObsCell::Scalar(3.0)));
+        // The hole is genuinely absent — distinct from an observed zero.
+        assert_ne!(c2[1], Some(ObsCell::Scalar(0.0)),
+            "a coverage hole must be None, never an observed 0");
         std::fs::remove_file(&path).ok();
     }
 }

@@ -1,4 +1,4 @@
-{"ir_version":"0.13","validated_by":"ocaml-compiler-v0.13","model":{"name":"sir_init_table","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.14","validated_by":"ocaml-compiler-v0.14","model":{"name":"sir_init_table","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_north","kind":"integer"},
 {"name":"S_south","kind":"integer"},
 {"name":"S_east","kind":"integer"},

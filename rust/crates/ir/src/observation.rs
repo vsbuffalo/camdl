@@ -146,6 +146,15 @@ pub struct ObsColumn {
     pub role: ColumnRole,
 }
 
+/// One `(dimension, level)` pair identifying a stratum cell. Named fields
+/// (not a tuple) so an illegal half-built selector is unrepresentable, and
+/// the JSON shape mirrors `ColumnRole::Dim`'s `{"dim": d}` object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StratumKey {
+    pub dim:   String,
+    pub level: String,
+}
+
 // ── Observation model ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,6 +173,14 @@ pub struct ObservationModel {
     /// fit-only model that omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emit_schedule: Option<ObservationSchedule>,
+    /// For a stratified observation stream (`cases[p in patch] ~ ...`), the
+    /// (dimension, level) pairs identifying which stratum cell this expanded
+    /// leaf observes — `[{dim: "patch", level: "p1"}]`. Empty for an
+    /// unstratified stream. Populated by the OCaml expander from the stream's
+    /// header indices; the long-form loader routes each file row to the leaf
+    /// whose `stratum` matches the row's `: dim` column values BY NAME.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stratum:       Vec<StratumKey>,
     pub projection:    Projection,
     pub likelihood:    Likelihood,
 }

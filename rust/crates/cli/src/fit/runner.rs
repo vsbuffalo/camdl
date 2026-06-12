@@ -341,7 +341,11 @@ impl FitRunConfig {
             let stream_name = obs_model.name.clone();
             let data_path = effective.get(&obs_model.source)
                 .expect("filtered to bound sources above");
-            let (obs, cells, aux) = load_observations(data_path, obs_model, dt, &time_opts)?;
+            let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
+                .filter(|o| o.source == obs_model.source)
+                .collect();
+            let (obs, cells, aux) =
+                load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
             let obs_model: ir::observation::ObservationModel = (*obs_model).clone();
             let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
                 &obs_model.projection, &compiled, &stream_name,
@@ -1309,29 +1313,42 @@ pub fn auto_rw_sd_from_value(_current_value: f64, lower: f64, upper: f64, transf
 fn load_observations(
     path: &str,
     obs_model: &ir::observation::ObservationModel,
+    siblings: &[&ir::observation::ObservationModel],
     dt: f64,
     opts: &crate::caltime_load::TimeOpts,
 ) -> Result<
     (Vec<Observation>, Vec<Option<sim::inference::ObsCell>>, Vec<Vec<(String, f64)>>),
     String,
 > {
-    // Bind the file columns BY NAME: the declared `Time`-role column is the
-    // time axis (the by-name-time flip — no positional "column 0 is time"),
-    // and `scored` is the value column.
-    let time_col = crate::pfilter::obs_time_column(obs_model)?;
-    let value_col = &obs_model.scored;
-    let (times, mut cells) =
-        crate::pfilter::load_data_tsv_column_cells(path, time_col, value_col, opts)?;
-    // Per-observation auxiliary data (binomial `n = tested`, person-time offset;
-    // §3, §6.1). A row where the scored value OR any referenced aux is `NA` is a
-    // hole (present-together-or-hole) — clear the aux for a hole.
-    let aux_cols = crate::pfilter::stream_aux_columns(obs_model);
-    let (mut aux, force_hole) =
-        crate::pfilter::load_stream_aux(path, &aux_cols, cells.len())?;
-    for r in 0..cells.len() {
-        if force_hole[r] {
-            cells[r] = None;
+    // DISPATCH: a stratified (long-form) stream — its `columns { }` declares at
+    // least one `: dim` column — loads via the long-form router (routes file
+    // rows to the matching stratum leaf BY NAME, builds the partial-coverage
+    // union axis). An unstratified stream keeps the existing wide/by-name path.
+    let (times, cells, mut aux) = if crate::pfilter::is_long_form_stream(obs_model) {
+        crate::pfilter::load_long_form_stream(path, obs_model, siblings, opts)?
+    } else {
+        // Bind the file columns BY NAME: the declared `Time`-role column is the
+        // time axis (the by-name-time flip — no positional "column 0 is time"),
+        // and `scored` is the value column.
+        let time_col = crate::pfilter::obs_time_column(obs_model)?;
+        let value_col = &obs_model.scored;
+        let (times, cells) =
+            crate::pfilter::load_data_tsv_column_cells(path, time_col, value_col, opts)?;
+        // Per-observation auxiliary data (binomial `n = tested`, person-time
+        // offset; §3, §6.1). A row where the scored value OR any referenced aux
+        // is `NA` is a hole (present-together-or-hole).
+        let aux_cols = crate::pfilter::stream_aux_columns(obs_model);
+        let (aux, force_hole) =
+            crate::pfilter::load_stream_aux(path, &aux_cols, cells.len())?;
+        let mut cells = cells;
+        for r in 0..cells.len() {
+            if force_hole[r] {
+                cells[r] = None;
+            }
         }
+        (times, cells, aux)
+    };
+    for r in 0..cells.len() {
         if cells[r].is_none() {
             aux[r].clear();
         }
@@ -4289,6 +4306,7 @@ dt = 1.0
                     ],
                     scored: "cases".into(),
                     emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
+                    stratum: vec![],
                     projection: Projection::CumulativeFlow("inflow".into()),
                     likelihood: Likelihood::Normal(NormalLikelihood {
                         mean: Expr::Projected(ProjectedExpr { projected: () }),

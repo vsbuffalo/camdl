@@ -987,6 +987,7 @@ mod bind_tests {
             ],
             scored: name.into(),
             emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
+            stratum: vec![],
             projection: Projection::CumulativeFlow("inc".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: Expr::Projected(ProjectedExpr { projected: () }),
@@ -1216,6 +1217,7 @@ mod hole_scoring_tests {
                     ],
                     scored: "cases".into(),
                     emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
+                    stratum: vec![],
                     projection: Projection::CumulativeFlow("recovery".into()),
                     likelihood: Likelihood::Poisson(PoissonLikelihood {
                         // rate = rho * projected

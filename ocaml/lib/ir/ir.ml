@@ -327,6 +327,12 @@ type observation_model = {
      data file's time column and never consults this. [None] for a fit-only
      model that omits it. *)
   emit_schedule: observation_schedule option;
+  (* For a stratified observation stream (`cases[p in patch] ~ ...`), the
+     (dimension, level) pairs identifying which stratum cell this expanded
+     leaf observes — e.g. [("patch", "p1")]. Empty ([]) for an unstratified
+     stream. The Rust long-form loader routes each data-file row to the leaf
+     whose [stratum] matches the row's `: dim` column values BY NAME. *)
+  stratum:       (string * string) list;
   projection:    projection;
   likelihood:    likelihood;
 }

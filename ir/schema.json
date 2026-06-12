@@ -664,8 +664,23 @@
         },
         "scored": { "type": "string" },
         "emit_schedule": { "$ref": "#/definitions/observation_schedule" },
+        "stratum": {
+          "type": "array",
+          "default": [],
+          "items": { "$ref": "#/definitions/stratum_key" }
+        },
         "projection": { "$ref": "#/definitions/projection" },
         "likelihood": { "$ref": "#/definitions/likelihood" }
+      },
+      "additionalProperties": false
+    },
+
+    "stratum_key": {
+      "type": "object",
+      "required": ["dim", "level"],
+      "properties": {
+        "dim": { "type": "string" },
+        "level": { "type": "string" }
       },
       "additionalProperties": false
     },

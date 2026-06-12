@@ -34,7 +34,7 @@ use ir::model::{
 };
 use ir::observation::{
     ColumnRole, Likelihood, ObsColumn, ObservationModel, ObservationSchedule, Projection,
-    RegularSchedule,
+    RegularSchedule, StratumKey,
 };
 use ir::ode_equation::OdeEquation;
 use ir::parameter::{
@@ -538,6 +538,14 @@ impl ContentAddressed for ObsColumn {
     }
 }
 
+impl ContentAddressed for StratumKey {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::observation::StratumKey");
+        h.write_str(&self.dim);
+        h.write_str(&self.level);
+    }
+}
+
 impl ContentAddressed for ObservationModel {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::observation::ObservationModel");
@@ -546,6 +554,16 @@ impl ContentAddressed for ObservationModel {
         self.columns.hash_into(h);
         h.write_str(&self.scored);
         self.emit_schedule.hash_into(h);
+        // `stratum` is hashed ONLY when non-empty: an empty stratum (every
+        // model without a stratified observation header) writes nothing, so
+        // existing run_ids are byte-identical. A non-empty stratum exists only
+        // on new stratified-obs leaves (no stored run_ids yet) and is
+        // load-bearing — it routes file rows to this leaf — so it must enter
+        // the hash. (`Vec::hash_into` would write a `len=0` prefix even when
+        // empty, churning every existing id; guard against that.)
+        if !self.stratum.is_empty() {
+            self.stratum.hash_into(h);
+        }
         self.projection.hash_into(h);
         self.likelihood.hash_into(h);
     }

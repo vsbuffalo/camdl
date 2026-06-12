@@ -1,4 +1,4 @@
-{"ir_version":"0.13","validated_by":"ocaml-compiler-v0.13","model":{"name":"seir_age_table_rates","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.14","validated_by":"ocaml-compiler-v0.14","model":{"name":"seir_age_table_rates","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_a02","kind":"integer"},
 {"name":"S_a25","kind":"integer"},
 {"name":"S_a510","kind":"integer"},

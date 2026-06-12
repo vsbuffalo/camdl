@@ -2842,7 +2842,7 @@ mod tests {
     /// in IR envelope so it parses through the new ir::from_str path.
     fn ir_with_prior(name: &str, bounds: &str, prior_json: &str, extras: &str) -> String {
         format!(r#"{{
-          "ir_version": "0.13",
+          "ir_version": "0.14",
           "validated_by": "test-fixture",
           "model": {{
             "name": "t", "version": "0.3", "time_unit": "days",
@@ -2921,7 +2921,7 @@ mod tests {
         // should succeed (sampled beta + fixed N0).
         // gh#audit-C8: wrap in IR envelope.
         let json = r#"{
-          "ir_version": "0.13",
+          "ir_version": "0.14",
           "validated_by": "test-fixture",
           "model": {
             "name": "t", "version": "0.3", "time_unit": "days",
@@ -3226,7 +3226,7 @@ I0    = { bounds = [1, 1000] }
     fn prior_draws_errors_only_when_neither_fit_toml_nor_ir_has_a_prior() {
         // Hand-rolled IR: `beta` has a log_normal prior, `gamma` has none.
         let ir_json = r#"{
-          "ir_version": "0.13",
+          "ir_version": "0.14",
           "validated_by": "test-fixture",
           "model": {
             "name": "t", "version": "0.3", "time_unit": "days",
@@ -3282,7 +3282,7 @@ gamma = { bounds = [0.05, 1.0] }
     fn prior_draws_fit_toml_prior_wins_over_ir_prior() {
         // beta declared with normal(0, 1) — very narrow around 0.
         let ir_json = r#"{
-          "ir_version": "0.13",
+          "ir_version": "0.14",
           "validated_by": "test-fixture",
           "model": {
             "name": "t", "version": "0.3", "time_unit": "days",

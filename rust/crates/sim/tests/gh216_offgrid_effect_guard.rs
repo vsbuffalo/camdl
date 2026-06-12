@@ -235,6 +235,7 @@ fn pgas_obs_model(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> MultiStre
             ],
             scored: "n_obs".into(),
             emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
+            stratum: vec![],
             projection: ir::observation::Projection::CurrentPop("N".into()),
             likelihood: ir::observation::Likelihood::Poisson(
                 ir::observation::PoissonLikelihood {
