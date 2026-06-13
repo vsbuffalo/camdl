@@ -629,8 +629,8 @@ mod tests {
     /// fold into the fit-level blob hash and re-key the fit; an UNSET value
     /// (the common case) must leave the hash bit-identical so existing fits'
     /// `run_id`s are unchanged. `skip_serializing_if = Option::is_none` is what
-    /// makes the unset case inert. Both surface forms (absolute number, string)
-    /// re-key, and distinct values produce distinct hashes.
+    /// makes the unset case inert. Both surface forms (`All` string, `PerStream`
+    /// table) re-key, and distinct values produce distinct hashes.
     /// A `minimal_config` variant with a TOP-LEVEL `condition_from` line. The
     /// `minimal_config(extra)` helper splices `extra` inside `[fixed]`, which is
     /// wrong for a top-level key (it would be absorbed by `FixedParams`'
@@ -652,27 +652,27 @@ mod tests {
     fn condition_from_changes_the_fit_identity_when_set() {
         let unset = fit_config_blob_hash(&config_with_top_level("")).unwrap();
 
-        // A SET value (number form) re-keys the fit.
-        let set_num = fit_config_blob_hash(
-            &config_with_top_level("condition_from = 14.0\n")).unwrap();
-        assert_ne!(unset, set_num,
-            "a SET condition_from must fold into the fit identity (gh#134)");
-
-        // The string form also re-keys.
+        // A SET value (`All` string form) re-keys the fit.
         let set_str = fit_config_blob_hash(
             &config_with_top_level("condition_from = \"first_obs - 1 week\"\n")).unwrap();
         assert_ne!(unset, set_str,
-            "a string-form condition_from must fold into the fit identity");
+            "a SET condition_from must fold into the fit identity (gh#134)");
+
+        // The `PerStream` table form also re-keys.
+        let set_table = fit_config_blob_hash(&config_with_top_level(
+            "[condition_from]\ndefault = \"first_obs - 1 week\"\n")).unwrap();
+        assert_ne!(unset, set_table,
+            "a [condition_from] table must fold into the fit identity");
 
         // Two DIFFERENT conditioning windows are two different fits.
-        let set_num2 = fit_config_blob_hash(
-            &config_with_top_level("condition_from = 21.0\n")).unwrap();
-        assert_ne!(set_num, set_num2,
+        let set_str2 = fit_config_blob_hash(
+            &config_with_top_level("condition_from = \"first_obs - 2 weeks\"\n")).unwrap();
+        assert_ne!(set_str, set_str2,
             "distinct condition_from values must produce distinct fit hashes");
 
         // No spurious sensitivity: identical value → identical hash.
-        assert_eq!(set_num, fit_config_blob_hash(
-            &config_with_top_level("condition_from = 14.0\n")).unwrap());
+        assert_eq!(set_str, fit_config_blob_hash(
+            &config_with_top_level("condition_from = \"first_obs - 1 week\"\n")).unwrap());
     }
 
     /// gh#134 (the bit-identical guarantee): an UNSET `condition_from` must NOT

@@ -392,10 +392,29 @@ process noise) but not scored — and the first observation is scored against on
 normal cadence `(condition_from, first_obs]`.
 
 ```toml
-condition_from = "first_obs - 1 week" # one cadence before the data
-# condition_from = "date(\"2014-08-18\")"  # or an absolute calendar date
-# condition_from = 19.0                    # or a bare model-time number
+condition_from = "first_obs - 1 week" # the default for every stream
+# condition_from = "date(\"2014-08-18\")"   # or an absolute calendar date
+# condition_from = "19"                      # or an absolute model-time number (quoted)
 ```
+
+For a multi-cadence model the conditioning window is **per observation stream**.
+A table form carries an optional all-streams `default` plus per-stream
+**shadows** keyed by the observation-block label (its `[data.observations]`
+key); a stream with no shadow falls to the `default`:
+
+```toml
+[condition_from]
+default = "first_obs - 1 week" # applied to every stream …
+es = "first_obs - 2 weeks" # … except `es`, which this shadows
+```
+
+Conditioning is **explicit, not inferred**: an incidence stream whose first
+observation lands anomalously far after `t_start` (a wide leading window
+relative to its own cadence) with _no_ conditioning window is a **hard error**
+(W329) naming the `condition_from.<label> = …` fix — the single first datum
+cannot constrain that whole warm-up span, and an _inferred_ boundary would fail
+silently on irregular data. A stream whose first observation is ~one cadence
+after `t_start` needs nothing.
 
 Mechanically the boundary is a leading **reset-only hole** on the shared
 observation grid: its grid time resets the incidence accumulator (so the first

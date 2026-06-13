@@ -1,11 +1,11 @@
 ---
 date: 2026-06-10
-status: Phases 1 (2ea5f44c) + 2a (per-stream reset, Option Z, 87897e61) + fixture (2a04da45) + 2b (open the gate, bc31545b) landed — heterogeneous fits run end-to-end. Remaining: Phase 3 (per-stream first bin), Phase 5 (docs), Phase 6 (Z→X profiling)
-  related:
-    - 2026-06-10-observation-data-entry-dsl.md # the data-layer companion (proposal A): the DSL surface this consumes
-    - 2026-06-09-burnin-conditioning-window.md # the per-stream first-bin boundary generalizes condition_from
-  area: inference / multi-cadence observation axis / per-stream flow reset
-  issue: gh#171 (the multi-cadence remainder of the sparse-observation lift)
+status: Phases 1-3 + fixture landed; heterogeneous fits run end-to-end. Remaining Phase 5 (docs) + 6 (Z->X profiling)
+related:
+  - 2026-06-10-observation-data-entry-dsl.md # the data-layer companion (proposal A): the DSL surface this consumes
+  - 2026-06-09-burnin-conditioning-window.md # the per-stream first-bin boundary generalizes condition_from
+area: inference / multi-cadence observation axis / per-stream flow reset
+issue: gh#171 (the multi-cadence remainder of the sparse-observation lift)
 ---
 
 # Multi-stream multi-cadence: the union observation axis + per-stream reset
@@ -199,56 +199,59 @@ is unambiguous: 5 ∉ A's grid, so A does not reset at 5; A's bin closes at 8 ov
 simply is not in it. Membership is exactly `at_union`: scheduled (member) vs
 not-scheduled (non-member), holes being members whose value is `None`.
 
-#### First-bin boundary, per stream (no hard error for late starters)
+#### First-bin boundary, per stream — EXPLICIT, not inferred (shipped Phase 3)
 
-For incidence, an observation at time `t` on a stream with cadence Δ (its
-`every` interval) is scored against the flow over `(t − Δ, t]`. The stream's
-**first** observation is no different — its first scored bin opens at
+> **Design reversal (decided 2026-06-13).** An earlier draft of this section
+> _inferred_ each incidence stream's first-bin boundary automatically as
+> `max(t_start, first_obs_s − Δ_s)` (Δ_s = the stream's cadence). That was
+> dropped: the particle filter is fragile to a mis-placed first bin (a wide bin
+> makes the predicted obs an integral no particle matches → ESS collapse), and
+> an _inferred_ boundary fails exactly on the irregular/sparse data this lift
+> targets — and fails **silently** (the modeller never chose the window). For
+> public-health software that is the wrong default. Conditioning is therefore
+> **explicit**: the modeller states it, the filter never guesses.
 
-> **`max(t_start, first_obs_s − every_s)`** — one of that stream's own cadences
-> back, but never before the simulation begins.
+For incidence, observation `t` is scored against the flow over `(t − Δ, t]`; the
+**first** observation is the only one whose left edge isn't a prior obs. The
+modeller sets that edge with `condition_from` (per-stream, below); when set, the
+leading span `[t_start, cond_from_s)` warms up (simulated, not scored) and the
+first scored bin is `(cond_from_s, first_obs_s]`. The boundary is realised as a
+per-stream **leading reset-only hole** at `cond_from_s` (the burn-in mechanism,
+`2026-06-09-burnin-conditioning-window.md`, generalised per stream — it rides
+the Phase-2a hole+reset seam, no new mechanism).
 
-This is per-stream and independent of siblings:
+**`condition_from` is a default + per-stream shadows** (a serde-`untagged`
+`All(String) | PerStream(table)`):
 
-- **He-style** (`t_start = 0`, first obs day 7, weekly) → `max(0, 0) = 0`, first
-  bin `(0, 7]`.
-- **A late ES stream** (first obs day 365, biweekly, AFP running since day 0) →
-  `max(t_start, 351) = 351`, first ES bin `(351, 365]` — **one ES interval, no
-  error.** Flow before 351 is discarded for ES; AFP keeps accumulating on its
-  own 30-day schedule.
-- **An early warm-up** (`t_start = −365`, weekly, first obs 0) →
-  `max(−365, −7) =
-  −7`; the year of warm-up flow is discarded.
+```toml
+condition_from = "first_obs - 1 week" # All: the default for every stream
+# — or —
+[condition_from] # PerStream: default + shadows
+default = "first_obs - 1 week"
+es = "first_obs - 2 weeks" # shadows the `es` stream only
+```
 
-Mechanically this is a per-stream **leading reset** — the burn-in mechanism
-(`2026-06-09-burnin-conditioning-window.md`), inserted at
-`first_obs_s − every_s` on each incidence stream's own grid whenever that
-exceeds `t_start`. So a late-starting stream is a normal surveillance situation,
-not a hard error.
+Resolution per stream `s`: `shadows[s]` → else `default`/`All` → else **none**.
+Non-exhaustive (a stream with neither falls to none). The `default` key is
+reserved; an unknown shadow label is a hard error (typo-safety).
 
-For an **irregular** stream (no `every`, hence no Δ), the first-bin width is not
-implied by a cadence; the author states it with the existing surface,
-`condition_from = first_obs − <duration>`. The default for irregular streams in
-the absence of that is the conservative `(t_start, first_obs]` (the author's own
-simulation window), which they can narrow explicitly. **Caveat (verified):**
-`condition_from` is wired on the **`fit` path only** today — it lives on
-`FitRunArgs` and is consumed in `fit/runner.rs`; `pfilter`/`profile` have no
-such surface. And it is a single **global** boundary (per-stream
-`condition_from` is a §9 follow-up), so using it to narrow one irregular stream
-shifts the leading boundary for every stream. So the irregular-stream fallback
-is fit-path-only until `condition_from` extends to `pfilter`/`profile` — which
-§7 test 4's "pfilter/profile accept multi-cadence" claim must scope to the
-regular-cadence (`every`-driven) case, or name the `condition_from` extension as
-a prerequisite.
+**The W329 guard is the per-stream enforcer** (it was _not_ repurposed to a
+report — that earlier idea is superseded by the explicit-required decision). For
+each incidence stream that resolves to **none**, W329 runs against that stream's
+_own_ times: if its first window is anomalously wide relative to its own modal
+cadence (`first_obs_s − t_start ≫ Δ_s`, the K=5 criterion), it is a **hard
+error** naming the fix — `condition_from.<label> = first_obs - <duration>`. The
+modal gap is used only to _detect_ the anomaly, never to _set_ a boundary. A
+stream whose first window is ~one cadence (He-2010, the polio fixture's
+t=0-anchored AFP/ES) is silent and needs no `condition_from`. A prevalence
+(`Instant`) stream is exempt from the hard error (free-running drift the first
+datum corrects) — soft-warn only.
 
-This default makes the gh#134 wide-first-bin condition unreachable for incidence
-**by construction**, which means the `W329` wide-first-bin guard becomes vacuous
-for incidence — to be retired or repurposed (e.g. to _report_ how much warm-up
-is being discarded per stream). The single-stream behaviour change is real and
-toward correctness: a single-stream model with an _early_ `t_start` gets the
-correct one-cadence first bin instead of the wide one. Because this touches the
-just-shipped burn-in default, the implementation must call the `W329`
-disposition out explicitly rather than flip it silently.
+**Scope (verified):** `condition_from` + the W329 enforcer are **`fit`-path
+only** today (`FitRunArgs` / `fit/runner.rs`); `pfilter`/`profile` are
+unchanged. Extending the surface to them is a §9 follow-up; §7 test 4's
+"pfilter/profile accept multi-cadence" is the regular-cadence case (first window
+≈ one cadence, no conditioning needed).
 
 ### 3.2 Identity and merging are on integer steps — no tolerance
 
@@ -616,10 +619,13 @@ is self-contained and recover-known-params.
    fixture's `synthetic_fit_recovers_params` is un-ignored (a real IF2-scout
    heterogeneous fit recovers R0/rho) and `binding_both_cadences_…` is inverted
    to `…_now_fits`. (`survey` stays loud-rejecting — §9.) Tests 4, 5.
-2. **Per-stream first bin** (§3.1) — the leading reset at
-   `max(t_start, first_obs_s − every_s)`; irregular via `condition_from`
-   (fit-path-only today — see §3.1 caveat); the `W329` disposition (repurpose to
-   report discarded warm-up). Test 7.
+2. **Per-stream first bin — EXPLICIT** (§3.1) — **LANDED.** No automatic
+   inference (reversed): `condition_from` is a default+shadow type
+   (`All | PerStream`); the W329 guard is the per-stream HARD-ERROR enforcer
+   naming `condition_from.<label>` for a wide-window incidence stream with no
+   conditioning; the boundary, when given, is a per-stream leading reset-only
+   hole. He-2010 + the polio fixture (windows ≈ one cadence) need none and are
+   unchanged. Fit-path only. Test 7.
 3. **Fixture + end-to-end** (§6) — **the model + synthetic data + forward-sim
    smoke LANDED `2a04da45`** (`tests/fixtures/polio_afp_es_2patch.camdl` +
    `polio_afp_es_multicadence.rs`); the recover-known-params fit is `#[ignore]`d
@@ -645,12 +651,10 @@ is self-contained and recover-known-params.
   natural first consumer.
 - **`survey` multi-cadence** — its loader is separate from `bind` (§1); a
   follow-up that routes it through the same lift.
-- **Explicit per-stream `condition_from` in the observation block** — the
-  automatic `max(t_start, first_obs_s − every_s)` default (§3.1) covers the
-  common case; an explicit per-stream override is a small follow-up if a model
-  needs a conditioning window other than one cadence.
-- **`W329` on the `pfilter` path** — the first-window guard is fit-path-only;
-  orthogonal to this lift.
+- **Per-stream `condition_from`** — **LANDED in Phase 3** (the `All | PerStream`
+  default+shadow type, §3.1). What remains out of scope: extending the
+  `condition_from` surface + the W329 enforcer to the **`pfilter`/`profile`**
+  paths (fit-path-only today).
 
 ## 10. References
 

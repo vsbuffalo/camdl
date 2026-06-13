@@ -165,14 +165,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // fit-identity hash is computed (`cas::fit_level_hash` serializes this
     // config via `fit_config_blob_hash`), so a CLI-set conditioning window
     // re-keys the fit exactly as a toml-set one does — no silent identity
-    // bypass. A bare number is absolute model time; anything else is a
-    // date / relative-offset spec resolved at build time.
+    // bypass. The CLI carries one value, so it always sets the all-streams
+    // default (`ConditionFrom::All`); per-stream shadows are toml-only. The
+    // spec string (bare number / date / `first_obs - <N> <unit>`) is resolved
+    // per stream at build time.
     if let Some(raw) = &a.condition_from {
-        let raw = raw.trim();
-        config.condition_from = Some(match raw.parse::<f64>() {
-            Ok(v) => config_v2::ConditionFrom::Absolute(v),
-            Err(_) => config_v2::ConditionFrom::Spec(raw.to_string()),
-        });
+        config.condition_from = Some(config_v2::ConditionFrom::All(raw.trim().to_string()));
     }
 
     // Compile `model.camdl` → IR EXACTLY ONCE for the whole fit. Every

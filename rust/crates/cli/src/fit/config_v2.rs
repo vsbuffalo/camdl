@@ -125,18 +125,37 @@ pub struct FitConfigV2 {
     /// term — the same machinery sparse-obs `NA` cells use), so PF / IF2 /
     /// PGAS / PMMH all get it through the shared `BoundObs`/obs grid.
     ///
-    /// Accepted forms (see [`ConditionFrom`]):
-    /// - absolute model-time number (`condition_from = 14.0`),
-    /// - absolute `date("…")` / bare ISO date (`condition_from = "date(\"2020-02-01\")"`),
-    ///   resolved via the model origin + `time_unit`,
-    /// - relative `"first_obs - <N> <unit>"` (`condition_from = "first_obs - 1 week"`),
-    ///   resolved as `first_obs_time − N·unit` in model time.
+    /// Per-stream and explicit (multi-cadence Phase 3). The conditioning window
+    /// is resolved **per incidence stream** keyed on its observation-block label
+    /// (the `[data.observations]` key / IR `source`). Two surface forms (see
+    /// [`ConditionFrom`]):
     ///
-    /// Validation (in `FitRunConfig::build`): `cond_from ∈ [t_start, first_obs)`.
-    /// `cond_from == t_start` (or unset) is a no-op (bit-identical to today —
-    /// no hole inserted). Orthogonal to `ic_free`; setting BOTH errors loudly
-    /// (the inserted leading hole trips the existing "nothing to condition on"
-    /// guard).
+    /// - `condition_from = "first_obs - 1 week"` — a single spec applied as the
+    ///   default for **every** stream;
+    /// - `[condition_from]` — a table whose optional `default` key is the
+    ///   all-streams default and whose other keys *shadow* individual streams by
+    ///   label (`es = "first_obs - 2 weeks"`).
+    ///
+    /// A stream with no shadow and no `default` resolves to NO conditioning. The
+    /// wide-first-window detector (`W329`,
+    /// `crate::util::check_first_interval_window`) is the enforcer: a
+    /// late-starting incidence stream that resolves to no conditioning
+    /// HARD-ERRORS, naming `condition_from.<label>` as the fix.
+    /// There is no automatic / inferred boundary — the boundary comes only from
+    /// an explicit spec.
+    ///
+    /// Each per-stream value accepts:
+    /// - absolute model-time number string (`"14"`),
+    /// - absolute `date("…")` / bare ISO date (`"date(\"2020-02-01\")"`),
+    ///   resolved via the model origin + `time_unit`,
+    /// - relative `"first_obs - <N> <unit>"` (`"first_obs - 1 week"`),
+    ///   resolved as `first_obs_s − N·unit` against THAT stream's first obs.
+    ///
+    /// Validation (in `FitRunConfig::build`): each resolved `cond_from_s ∈
+    /// [t_start, first_obs_s)`. `cond_from_s == t_start` (or no spec) is a no-op
+    /// (bit-identical — no hole inserted). Orthogonal to `ic_free`; setting BOTH
+    /// errors loudly (the inserted leading hole trips the existing "nothing to
+    /// condition on" guard).
     ///
     /// `skip_serializing_if None` keeps it OUT of the fit identity hash when
     /// unset, so existing fits' `run_id`s are unchanged. A *set* value re-keys
@@ -162,55 +181,105 @@ pub struct FitConfigV2 {
 
 /// The user-facing `condition_from` value before resolution to model time.
 ///
-/// Two surface forms, dispatched on the TOML value type (a number vs a
-/// string), mirroring [`SeedsSpec`]:
+/// Per-stream and explicit (multi-cadence Phase 3). Two surface forms,
+/// dispatched on the TOML value type (a string vs a table):
 ///
-/// - [`ConditionFrom::Absolute`] — a bare model-time number
-///   (`condition_from = 14.0`). Used verbatim.
-/// - [`ConditionFrom::Spec`] — a string. Either an absolute calendar date
-///   (`date("YYYY-MM-DD")` or a bare `"YYYY-MM-DD"`, resolved via the model
-///   origin + `time_unit`) or a relative offset off the first observation
-///   (`"first_obs - <N> <unit>"`, resolved as `first_obs_time − N·unit`).
+/// - [`ConditionFrom::All`] — `condition_from = "first_obs - 1 week"`. One spec
+///   used as the default for **every** stream; no per-stream shadows.
+/// - [`ConditionFrom::PerStream`] — `[condition_from]`. A table mapping a
+///   reserved `default` key (the all-streams default, optional) and/or
+///   observation-block labels (per-stream shadows) to spec strings. A stream
+///   resolves to its shadow if present, else `default`, else NO conditioning.
 ///
-/// Resolution to a concrete `cond_from` (model time) happens in
-/// [`crate::fit::runner::resolve_condition_from`], which needs the
-/// `first_obs_time`, `t_start`, `origin`, and `time_unit` from the loaded
-/// model + data. Serialization emits the matching TOML primitive (number for
-/// `Absolute`, string for `Spec`) so the round-trip through the fit-identity
-/// hash is stable.
-#[derive(Debug, Clone, PartialEq)]
+/// Each spec string accepts the same three forms (resolved per stream by
+/// [`crate::fit::runner::resolve_condition_from`]): a bare model-time number
+/// (`"14"`), an absolute calendar date (`date("YYYY-MM-DD")` or a bare
+/// `"YYYY-MM-DD"`, resolved via the model origin + `time_unit`), or a relative
+/// offset off that stream's first observation (`"first_obs - <N> <unit>"`).
+///
+/// `#[serde(untagged)]`: a TOML string deserializes to `All`, a TOML table to
+/// `PerStream`. The `BTreeMap` keeps the table key order stable, so the
+/// round-trip through the fit-identity hash is deterministic.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
 pub enum ConditionFrom {
-    /// A model-time number, used verbatim as `cond_from`.
-    Absolute(f64),
-    /// A string form: `date("…")` / bare ISO date (absolute), or
-    /// `"first_obs - <N> <unit>"` (relative). Parsed at resolution time.
-    Spec(String),
+    /// `condition_from = "<spec>"` — one spec, the default for every stream.
+    All(String),
+    /// `[condition_from]` — `default = "<spec>"` (all-streams default, optional)
+    /// plus zero or more `<label> = "<spec>"` per-stream shadows. The `default`
+    /// key is reserved; a stream literally named `default` collides (a hard
+    /// error in [`ConditionFrom::resolve_for`]'s caller).
+    PerStream(std::collections::BTreeMap<String, String>),
 }
 
-impl<'de> Deserialize<'de> for ConditionFrom {
-    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let v = toml::Value::deserialize(de)?;
-        match v {
-            toml::Value::Integer(n) => Ok(ConditionFrom::Absolute(n as f64)),
-            toml::Value::Float(f) => Ok(ConditionFrom::Absolute(f)),
-            toml::Value::String(s) => Ok(ConditionFrom::Spec(s)),
-            other => Err(D::Error::custom(format!(
-                "condition_from must be a model-time number, a date string \
-                 like date(\"2020-02-01\") or \"2020-02-01\", or a relative \
-                 offset like \"first_obs - 1 week\"; got {:?}",
-                other
-            ))),
+/// The reserved key in a `[condition_from]` table that names the all-streams
+/// default (vs a per-stream shadow). A stream whose observation-block label is
+/// literally this string collides with the reserved key.
+pub const CONDITION_FROM_DEFAULT_KEY: &str = "default";
+
+impl ConditionFrom {
+    /// Resolve the conditioning spec string for the stream labelled `label`
+    /// (its observation-block label / IR `source`). Returns the per-stream
+    /// shadow if present, else the all-streams default, else `None` (no
+    /// conditioning for this stream). Resolution to a concrete model-time
+    /// boundary (and `[t_start, first_obs_s)` validation) is the caller's job
+    /// via [`crate::fit::runner::resolve_condition_from`].
+    pub fn resolve_for(&self, label: &str) -> Option<&str> {
+        match self {
+            ConditionFrom::All(spec) => Some(spec.as_str()),
+            ConditionFrom::PerStream(map) => map
+                .get(label)
+                .or_else(|| map.get(CONDITION_FROM_DEFAULT_KEY))
+                .map(String::as_str),
         }
     }
-}
 
-impl Serialize for ConditionFrom {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            ConditionFrom::Absolute(v) => s.serialize_f64(*v),
-            ConditionFrom::Spec(spec) => s.serialize_str(spec),
+    /// Validate the `[condition_from]` shadow labels against the set of real
+    /// observation-stream labels (`valid_labels`, the distinct IR `source`s of
+    /// the bound streams). Two hard errors (located, naming the valid labels):
+    ///
+    /// 1. an unknown shadow label (a typo'd stream name) — listing the valid
+    ///    labels so the user can correct it;
+    /// 2. a stream literally named `default`, which collides with the reserved
+    ///    all-streams-default key.
+    ///
+    /// `All(_)` has no labels to validate, so it always passes. Returns `Ok(())`
+    /// for the no-op cases.
+    pub fn validate_labels(&self, valid_labels: &[String]) -> Result<(), String> {
+        let map = match self {
+            ConditionFrom::All(_) => return Ok(()),
+            ConditionFrom::PerStream(map) => map,
+        };
+        // (2) A stream named `default` is indistinguishable from the reserved
+        //     all-streams-default key — refuse rather than silently shadow.
+        if valid_labels.iter().any(|l| l == CONDITION_FROM_DEFAULT_KEY) {
+            return Err(format!(
+                "[condition_from]: an observation stream is labelled \
+                 '{CONDITION_FROM_DEFAULT_KEY}', which collides with the \
+                 reserved all-streams-default key. Rename the stream's \
+                 observation-block label (its `[data.observations]` key) so it \
+                 is not '{CONDITION_FROM_DEFAULT_KEY}'."
+            ));
         }
+        // (1) Every shadow key must name a real stream (or be `default`).
+        for key in map.keys() {
+            if key == CONDITION_FROM_DEFAULT_KEY {
+                continue;
+            }
+            if !valid_labels.iter().any(|l| l == key) {
+                let mut labels: Vec<&str> = valid_labels.iter().map(String::as_str).collect();
+                labels.sort_unstable();
+                return Err(format!(
+                    "[condition_from]: '{key}' is not an observation stream. \
+                     `condition_from.<label>` shadows a stream by its \
+                     observation-block label; valid labels are: {} (or \
+                     '{CONDITION_FROM_DEFAULT_KEY}' for the all-streams \
+                     default).",
+                    labels.join(", ")
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

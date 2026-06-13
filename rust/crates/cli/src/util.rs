@@ -999,11 +999,12 @@ pub fn check_obs_before_origin(
 ///
 /// Nothing in the existing pipeline points at the cause — the fit just starts
 /// badly. This detector only reports the anomaly (the gap, the modal cadence,
-/// the ratio); the *severity* decision lives in [`first_window_guard`], which —
-/// per the §6.8 escalation of the burn-in/conditioning proposal — turns it into
-/// a hard error for incidence streams (where the wide window is the gh#134
-/// wrong-number) and keeps it a soft warning for prevalence (where it is only
-/// free-running drift the first datum corrects).
+/// the ratio); the *severity* decision lives in the per-stream conditioning pass
+/// in `FitRunConfig::build` (multi-cadence Phase 3), which — when a stream
+/// resolves to no `condition_from` — turns it into a hard error for incidence
+/// streams (where the wide window is the gh#134 wrong-number) and keeps it a
+/// soft warning ([`FirstWindowAnomaly::warn_message`]) for prevalence (where it
+/// is only free-running drift the first datum corrects).
 ///
 /// **Modal vs median spacing.** We use the *mode* of the consecutive-diffs
 /// (the most common gap), not the median, deliberately. The median is itself
@@ -1028,7 +1029,7 @@ pub fn check_obs_before_origin(
 /// Returns `None` when there is nothing to say (fewer than 3 observations — too
 /// few for a meaningful mode; a non-positive or degenerate modal gap; or a
 /// first window within `K *` the cadence). Returns `Some(FirstWindowAnomaly)`
-/// otherwise; the caller routes it through [`first_window_guard`].
+/// otherwise; the caller (the per-stream conditioning pass) decides severity.
 pub fn check_first_interval_window(
     t_start: f64,
     obs_times: &[f64],
@@ -1083,7 +1084,8 @@ pub fn check_first_interval_window(
 
 /// The numbers behind a flagged oversized first window (W329): the leading gap
 /// `first_obs − t_start`, the modal observation cadence, and their ratio.
-/// Severity (soft warn vs hard error) is decided by [`first_window_guard`].
+/// Severity (soft warn vs hard error) is decided by the per-stream conditioning
+/// pass in `FitRunConfig::build`.
 #[derive(Debug, Clone, Copy)]
 pub struct FirstWindowAnomaly {
     pub first_window: f64,
@@ -1108,52 +1110,6 @@ impl FirstWindowAnomaly {
              pre-data burn-in is intentional — set `condition_from` to begin \
              scoring one cadence before the data (`camdl docs fit-toml`)."
         )
-    }
-
-    /// Hard-error text (incidence streams, §6.8). The first incidence bin would
-    /// accumulate the whole leading gap and score it against one datum — the
-    /// gh#134 wrong-number. Names both fixes and the explicit opt-out.
-    pub fn error_message(&self) -> String {
-        let FirstWindowAnomaly { first_window, modal_gap, ratio } = *self;
-        format!(
-            "[W329] the first observation is {first_window:.4} after the model \
-             start (`simulate.from`) — {ratio:.1}x the typical {modal_gap:.4} \
-             observation cadence. This is an incidence (cumulative-flow) \
-             observation, so the first window would accumulate the entire \
-             {first_window:.4}-long flow and score it against a single datum, a \
-             wrong likelihood (gh#134). Fix one of:\n  \
-             • set `condition_from` to one cadence before the first datum (e.g. \
-             `condition_from = first_obs - 1 week`) to run a covariate-informed \
-             warm-up and score the first datum against one cadence; or\n  \
-             • move `simulate.from` closer to the first observation.\n\
-             To deliberately score the whole leading window, set `condition_from` \
-             to the model start explicitly. See `camdl docs fit-toml`."
-        )
-    }
-}
-
-/// Route a flagged first-window anomaly to the right severity (§6.8). Setting
-/// `condition_from` suppresses the guard entirely — the modeler has engaged with
-/// the boundary, and `resolve_condition_from` validates the value. With no
-/// `condition_from`: an `Interval` (incidence) stream over the threshold is a
-/// hard error (`Err`); an `Instant` (prevalence) stream is a soft warn
-/// (`Ok(Some(msg))`, for the caller to emit). `Ok(None)` means nothing to say.
-pub fn first_window_guard(
-    has_condition_from: bool,
-    t_start: f64,
-    obs_times: &[f64],
-    kind: ir::observation::TemporalKind,
-) -> Result<Option<String>, String> {
-    use ir::observation::TemporalKind;
-    if has_condition_from {
-        return Ok(None);
-    }
-    match check_first_interval_window(t_start, obs_times) {
-        None => Ok(None),
-        Some(anomaly) => match kind {
-            TemporalKind::Interval => Err(anomaly.error_message()),
-            TemporalKind::Instant => Ok(Some(anomaly.warn_message())),
-        },
     }
 }
 
@@ -1209,17 +1165,6 @@ mod first_interval_tests {
         assert!(msg.contains("free-run"), "must explain the free-run footgun: {msg}");
         assert!(msg.contains("simulate.from"), "must give the move-origin hint: {msg}");
         assert!(msg.contains("condition_from"), "must point at condition_from: {msg}");
-        assert!(!msg.contains("tcond.md"), "must NOT dangle the retired proposal: {msg}");
-    }
-
-    #[test]
-    fn error_message_names_incidence_and_the_fixes() {
-        let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
-        let msg = check_first_interval_window(0.0, &obs).unwrap().error_message();
-        assert!(msg.contains("incidence"), "must name the incidence cause: {msg}");
-        assert!(msg.contains("gh#134"), "must cite the bug: {msg}");
-        assert!(msg.contains("condition_from"), "must name the boundary fix: {msg}");
-        assert!(msg.contains("simulate.from"), "must name the move-origin fix: {msg}");
         assert!(!msg.contains("tcond.md"), "must NOT dangle the retired proposal: {msg}");
     }
 
@@ -1291,51 +1236,6 @@ mod first_interval_tests {
         );
         // Same data, origin back at 0 → 1000/7 ≈ 143x → warns.
         assert!(check_first_interval_window(0.0, &obs).is_some());
-    }
-
-    // ── first_window_guard: the §6.8 severity policy ────────────────────────
-
-    #[test]
-    fn guard_rejects_incidence_wide_gap_without_condition_from() {
-        use ir::observation::TemporalKind;
-        let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
-        let err = super::first_window_guard(false, 0.0, &obs, TemporalKind::Interval)
-            .expect_err("incidence + wide gap + no condition_from must hard-error");
-        assert!(err.contains("condition_from"), "must name the fix: {err}");
-        assert!(err.contains("incidence"), "must name the cause: {err}");
-    }
-
-    #[test]
-    fn guard_warns_but_does_not_reject_prevalence_wide_gap() {
-        use ir::observation::TemporalKind;
-        let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
-        let warn = super::first_window_guard(false, 0.0, &obs, TemporalKind::Instant)
-            .expect("prevalence must not hard-error")
-            .expect("prevalence wide gap must still warn");
-        assert!(warn.contains("[warn W329]"), "{warn}");
-    }
-
-    #[test]
-    fn guard_suppressed_when_condition_from_set() {
-        use ir::observation::TemporalKind;
-        let obs = [1000.0, 1007.0, 1014.0, 1021.0, 1028.0];
-        // Even for incidence: setting condition_from suppresses the guard
-        // (the modeler engaged with the boundary; resolve_condition_from validates).
-        assert!(
-            super::first_window_guard(true, 0.0, &obs, TemporalKind::Interval)
-                .expect("condition_from set ⇒ no error")
-                .is_none(),
-            "condition_from set ⇒ guard suppressed (no warn, no error)"
-        );
-    }
-
-    #[test]
-    fn guard_silent_when_no_anomaly() {
-        use ir::observation::TemporalKind;
-        // First window = one cadence (7) → no anomaly → Ok(None) for both kinds.
-        let obs = [7.0, 14.0, 21.0, 28.0];
-        assert!(super::first_window_guard(false, 0.0, &obs, TemporalKind::Interval).unwrap().is_none());
-        assert!(super::first_window_guard(false, 0.0, &obs, TemporalKind::Instant).unwrap().is_none());
     }
 }
 

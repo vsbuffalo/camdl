@@ -823,10 +823,12 @@ pub struct FitRunArgs {
     pub label: Option<String>,
 
     /// Burn-in / conditioning window (gh#134). Mirrors the top-level
-    /// `condition_from` key in fit.toml; the CLI value overrides it. The
-    /// model warms up over `[t_start, condition_from)` (full process noise,
-    /// interventions, forcings) but scores nothing there, then the incidence
-    /// accumulator is reset at the boundary so the first scored bin is
+    /// `condition_from` key in fit.toml; the CLI value overrides it. The CLI
+    /// carries ONE value, so it sets the all-streams DEFAULT (the `All` form);
+    /// per-stream shadows (`[condition_from] <label> = ...`) are toml-only. Each
+    /// incidence stream warms up over `[t_start, condition_from)` (full process
+    /// noise, interventions, forcings) but scores nothing there, then the
+    /// incidence accumulator is reset at the boundary so the first scored bin is
     /// `(condition_from, first_obs]`. Accepts a model-time number
     /// (`--condition-from 14`), a calendar date
     /// (`--condition-from 'date("2020-02-01")'` or `--condition-from 2020-02-01`),
