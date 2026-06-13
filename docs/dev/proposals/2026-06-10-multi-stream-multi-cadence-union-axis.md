@@ -1,11 +1,11 @@
 ---
 date: 2026-06-10
-status: Phase 1 (bind union axis, 2ea5f44c) + Phase 2a (per-stream reset, Option Z, 87897e61) + fixture (2a04da45) landed; Phase 2b (open the gate) remaining
-related:
-  - 2026-06-10-observation-data-entry-dsl.md # the data-layer companion (proposal A): the DSL surface this consumes
-  - 2026-06-09-burnin-conditioning-window.md # the per-stream first-bin boundary generalizes condition_from
-area: inference / multi-cadence observation axis / per-stream flow reset
-issue: gh#171 (the multi-cadence remainder of the sparse-observation lift)
+status: Phases 1 (2ea5f44c) + 2a (per-stream reset, Option Z, 87897e61) + fixture (2a04da45) + 2b (open the gate, bc31545b) landed — heterogeneous fits run end-to-end. Remaining: Phase 3 (per-stream first bin), Phase 5 (docs), Phase 6 (Z→X profiling)
+  related:
+    - 2026-06-10-observation-data-entry-dsl.md # the data-layer companion (proposal A): the DSL surface this consumes
+    - 2026-06-09-burnin-conditioning-window.md # the per-stream first-bin boundary generalizes condition_from
+  area: inference / multi-cadence observation axis / per-stream flow reset
+  issue: gh#171 (the multi-cadence remainder of the sparse-observation lift)
 ---
 
 # Multi-stream multi-cadence: the union observation axis + per-stream reset
@@ -606,15 +606,16 @@ is self-contained and recover-known-params.
    lockstep. **CLI guards retained** — heterogeneous still loud-rejected
    end-to-end; validated by the directly-bound `per_stream_reset` canary (+ its
    mutation guard), the bit-identical suite, and the camdl-vs-pomp He-2010 value
-   oracle (DRIFT 0). Tests 1, 3. 2b. **Open the gate** (§3.3) — drop the three
-   CLI identical-times guards (`runner.rs`, `pfilter.rs`, `profile.rs`), feed
-   each stream its own times, make the union the canonical vector, and replace
-   the `sample`/`mean` not-scheduled `f64::NAN` sentinel with a real
-   "scheduled-here?" mask at the prequential/prediction consumers (else NaN
-   poisons the ribbon/CRPS the moment the gate drops). Un-ignore the polio
-   fixture's `synthetic_fit_recovers_params`
-   - flip its `binding_both_cadences_is_loud_rejected_until_phase_2`. Tests
-     4, 5.
+   oracle (DRIFT 0). Tests 1, 3.
+
+   **2b. Open the gate** (§3.3) — **LANDED `bc31545b`.** Dropped the three CLI
+   identical-times guards (`runner.rs`, `pfilter.rs`, `profile.rs`), made the
+   canonical `observations` the union, fed each stream its own times to `bind`,
+   and replaced the `sample`/`mean` not-scheduled `f64::NAN` sentinel with a
+   `.filter(is_finite)` mask at the prequential/prediction consumers. The polio
+   fixture's `synthetic_fit_recovers_params` is un-ignored (a real IF2-scout
+   heterogeneous fit recovers R0/rho) and `binding_both_cadences_…` is inverted
+   to `…_now_fits`. (`survey` stays loud-rejecting — §9.) Tests 4, 5.
 2. **Per-stream first bin** (§3.1) — the leading reset at
    `max(t_start, first_obs_s − every_s)`; irregular via `condition_from`
    (fit-path-only today — see §3.1 caveat); the `W329` disposition (repurpose to
