@@ -1127,63 +1127,64 @@ pub fn load_long_form_stream(
         });
     }
 
-    // UNION time axis: the distinct raw-time strings across ALL rows, in
-    // first-seen order (every leaf shares it). Convert the union axis ONCE so
-    // every leaf's cells align to identical model times. Map each raw-time to
-    // its converted model time.
-    let mut union_raw: Vec<&str> = Vec::new();
-    for r in &rows {
-        if !union_raw.iter().any(|&t| t == r.raw_time) {
-            union_raw.push(r.raw_time);
-        }
-    }
-    let union_rows: Vec<usize> = (0..union_raw.len()).map(|i| 2 + i).collect();
-    // Reuse the shared time back-half on a placeholder value vector (the union
-    // axis is value-free until per-leaf routing fills it). This runs the
-    // dated/numeric detection + substep/off-grid/ordering checks once.
-    let placeholder = vec![0.0_f64; union_raw.len()];
-    let union_obs = finalize_observations(union_raw.clone(), placeholder, union_rows, opts)?;
-    let union_times: Vec<f64> = union_obs.iter().map(|o| o.time).collect();
-    // Position of each union raw-time (post-sort the times are non-decreasing,
-    // but finalize_observations preserves input order, which is first-seen; we
-    // match on raw string to be order-independent).
-    let raw_to_pos: BTreeMap<&str, usize> = union_raw.iter()
-        .enumerate().map(|(i, &t)| (t, i)).collect();
-
-    // Route this leaf's rows onto the union axis. A row belongs to this leaf
-    // iff its `{dim→level}` equals the leaf's stratum (set match). Two rows of
-    // the SAME leaf at the SAME time is a data error (ambiguous cell).
-    let n = union_times.len();
-    let mut cells: Vec<Option<ObsCell>> = vec![None; n]; // default hole = no coverage
-    let mut filled: Vec<bool> = vec![false; n];
-    let mut aux: Vec<Vec<(String, f64)>> = vec![Vec::new(); n];
+    // Per-leaf OWN time axis: only the rows whose `{dim→level}` equals THIS
+    // leaf's stratum (set match), in file order. Each leaf reports its OWN
+    // schedule to `bind` (exactly like an unstratified separate stream), which
+    // merges the family onto the union axis and marks the times where this leaf
+    // has NO row as NOT-SCHEDULED (`at_union = None`). That distinction is
+    // load-bearing for INCIDENCE: a leaf's accumulator resets only at ITS OWN
+    // observations, never at a sibling stratum's time. Routing every leaf onto a
+    // shared union with holes at sibling-only times instead would make each leaf
+    // "scheduled" everywhere and reset incidence bins on the union cadence —
+    // silently truncating a ragged-per-stratum incidence stream (PR#218 #1).
+    //
+    // An explicit `NA` row (value or aux missing) that BELONGS to the leaf stays
+    // a HOLE on the leaf's own axis (scheduled, no term, still resets for
+    // incidence) — the "we sampled, got nothing usable" case, distinct from an
+    // absent row ("we don't sample on this cadence", not-scheduled).
+    let mut own_raw: Vec<&str> = Vec::new();
+    let mut own_file_rows: Vec<usize> = Vec::new();
+    let mut cells: Vec<Option<ObsCell>> = Vec::new();
+    let mut aux: Vec<Vec<(String, f64)>> = Vec::new();
     for r in &rows {
         let belongs = leaf_key.len() == r.key.len()
             && leaf_key.iter().all(|(&d, &lv)| r.key.get(d).map(String::as_str) == Some(lv));
         if !belongs { continue; }
-        let pos = raw_to_pos[r.raw_time];
-        if filled[pos] {
+        // Two rows of the SAME leaf at the SAME time is a data error (ambiguous
+        // cell). `own_raw` is short (this leaf's rows), so a linear scan is fine.
+        if own_raw.contains(&r.raw_time) {
             return Err(format!(
                 "line {} in '{}': duplicate row for stratum {:?} at the same time \
                  — each (time, stratum) cell must be unique.",
                 r.file_row, path,
                 leaf_key.iter().map(|(d, l)| format!("{d}={l}")).collect::<Vec<_>>()));
         }
-        filled[pos] = true;
+        own_raw.push(r.raw_time);
+        own_file_rows.push(r.file_row);
         // present-together-or-hole: a `NA` scored value OR any `NA` aux ⇒ hole.
         let any_aux_na = r.aux.iter().any(|(_, v)| v.is_none());
         match (r.value, any_aux_na) {
             (Some(v), false) => {
-                cells[pos] = Some(ObsCell::Scalar(v));
-                aux[pos] = r.aux.iter()
+                cells.push(Some(ObsCell::Scalar(v)));
+                aux.push(r.aux.iter()
                     .map(|(name, v)| (name.clone(), v.expect("checked no NA")))
-                    .collect();
+                    .collect());
             }
-            _ => { cells[pos] = None; } // hole: value or aux absent
+            _ => {
+                cells.push(None); // hole: value or aux absent
+                aux.push(Vec::new());
+            }
         }
     }
 
-    Ok((union_times, cells, aux))
+    // Convert + validate THIS leaf's own times (per-leaf dated/numeric detection
+    // + substep/off-grid/ordering checks, with the leaf's REAL file-row line
+    // numbers in any diagnostic — not synthetic union positions).
+    let placeholder = vec![0.0_f64; own_raw.len()];
+    let own_obs = finalize_observations(own_raw, placeholder, own_file_rows, opts)?;
+    let own_times: Vec<f64> = own_obs.iter().map(|o| o.time).collect();
+
+    Ok((own_times, cells, aux))
 }
 
 /// The aux column names a stream's likelihood references (`Expr::ObsColumnRef`):
@@ -1804,15 +1805,18 @@ mod tests {
     }
 
     #[test]
-    fn long_form_partial_coverage_makes_holes() {
+    fn long_form_absent_row_is_not_scheduled() {
         use sim::inference::ObsCell;
-        // p1 has rows at all union times (7, 14, 21); p2 only at 7 and 21
-        // (missing 14). The union axis is {7, 14, 21}; p2's cell at 14 is a
-        // partial-coverage hole (None) — no term, NOT a false zero.
+        // p1 has rows at {7,14,21}; p2 only at {7,21} (NO row at 14). p2 is not
+        // OBSERVED at 14 — that is a SIBLING's time. Each leaf reports its OWN
+        // schedule, so 14 is absent from p2's axis: `bind` marks it not-scheduled
+        // for p2 (no score AND no reset). Routing p2 onto the full union with a
+        // hole at 14 instead would reset p2's incidence accumulator at a sibling's
+        // cadence — the ragged-cadence bin truncation this fixes (PR#218 review #1).
         let p1 = long_form_leaf("p1");
         let p2 = long_form_leaf("p2");
         let siblings: Vec<&ir::observation::ObservationModel> = vec![&p1, &p2];
-        let path = write_temp_tsv("lf_partial",
+        let path = write_temp_tsv("lf_absent",
             "time\tpatch\tcases\n\
              7\tp1\t10\n7\tp2\t1\n\
              14\tp1\t20\n\
@@ -1820,11 +1824,33 @@ mod tests {
 
         let (t2, c2, _a2) = load_long_form_stream(&path, &p2, &siblings, &numeric_opts())
             .expect("p2 leaf loads");
-        assert_eq!(t2, vec![7.0, 14.0, 21.0], "union axis includes 14 (from p1)");
-        assert_eq!(c2[0], Some(ObsCell::Scalar(1.0)));
-        assert_eq!(c2[1], None, "p2 has no row at t=14 → partial-coverage HOLE, not 0");
-        assert_eq!(c2[2], Some(ObsCell::Scalar(3.0)));
-        // The hole is genuinely absent — distinct from an observed zero.
+        assert_eq!(t2, vec![7.0, 21.0],
+            "p2's OWN schedule is {{7,21}} — 14 is a sibling's time, not p2's");
+        assert_eq!(c2, vec![Some(ObsCell::Scalar(1.0)), Some(ObsCell::Scalar(3.0))]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn long_form_explicit_na_row_is_a_hole() {
+        use sim::inference::ObsCell;
+        // p2 HAS a row at 14 with value NA → 14 IS p2's own scheduled time, scored
+        // as a hole (None — no term, NOT a false zero) and, for incidence,
+        // resetting the bin there. The explicit-NA hole is the bookkeeping
+        // distinction from an ABSENT row (not-scheduled, above): "we sampled and
+        // got nothing usable" vs "we don't sample on this cadence".
+        let p1 = long_form_leaf("p1");
+        let p2 = long_form_leaf("p2");
+        let siblings: Vec<&ir::observation::ObservationModel> = vec![&p1, &p2];
+        let path = write_temp_tsv("lf_na_hole",
+            "time\tpatch\tcases\n\
+             7\tp1\t10\n7\tp2\t1\n\
+             14\tp1\t20\n14\tp2\tNA\n\
+             21\tp1\t30\n21\tp2\t3\n");
+
+        let (t2, c2, _a2) = load_long_form_stream(&path, &p2, &siblings, &numeric_opts())
+            .expect("p2 leaf loads");
+        assert_eq!(t2, vec![7.0, 14.0, 21.0], "explicit NA row keeps 14 in p2's schedule");
+        assert_eq!(c2, vec![Some(ObsCell::Scalar(1.0)), None, Some(ObsCell::Scalar(3.0))]);
         assert_ne!(c2[1], Some(ObsCell::Scalar(0.0)),
             "a coverage hole must be None, never an observed 0");
         std::fs::remove_file(&path).ok();
