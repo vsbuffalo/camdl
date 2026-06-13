@@ -28,17 +28,22 @@ es  = "data/es.tsv"
 
 # Free parameters: the transmission rates, spatial coupling, shedding/clearance,
 # and the two reporting params (AFP reporting fraction, ES sampling intensity).
-# Starts are near truth — this is a parameter-recovery fixture, not an
-# exploration of the whole landscape. Flat priors → the IF2 scout targets the
-# MLE and the PGAS posterior the scaled (unconditioned) likelihood; the
-# likelihood is the object of interest (no informative prior to pull θ̂).
+# The CHECKED params (R0_urban, R0_rural, rho) START OFF TRUTH — outside the
+# recovery test's tolerance band — so the test actually exercises recovery: IF2
+# must CLIMB from a wrong point to truth, which only works if the multi-cadence
+# scoring is correct. (A fixture that started at truth could not detect broken
+# scoring — the asserted answer would already be the starting point.) Starts:
+# R0_urban 2.2←truth 3.0, R0_rural 3.0←truth 2.2 (swapped — the filter must
+# distinguish the two patches' rates from the union-axis data), rho 0.40←0.6.
+# Flat priors → the IF2 scout targets the MLE and the PGAS posterior the scaled
+# (unconditioned) likelihood; the likelihood is the object of interest.
 [estimate]
-R0_urban  = { bounds = [1.0, 6.0],   start = 3.0,  prior = { flat = {} } }
-R0_rural  = { bounds = [1.0, 6.0],   start = 2.2,  prior = { flat = {} } }
+R0_urban  = { bounds = [1.0, 6.0],   start = 2.2,  prior = { flat = {} } }
+R0_rural  = { bounds = [1.0, 6.0],   start = 3.0,  prior = { flat = {} } }
 kappa     = { bounds = [0.0, 0.3],   start = 0.05, prior = { flat = {} } }
 gamma     = { bounds = [0.02, 0.5],  start = 0.1,  prior = { flat = {} } }
 delta     = { bounds = [0.01, 0.3],  start = 0.05, prior = { flat = {} } }
-rho       = { bounds = [0.1, 0.95],  start = 0.6,  prior = { flat = {} } }
+rho       = { bounds = [0.1, 0.95],  start = 0.40, prior = { flat = {} } }
 lambda    = { bounds = [0.001, 0.1], start = 0.01, prior = { flat = {} } }
 
 # Held at truth: progression, paralysis fraction, waning, populations, seed,
