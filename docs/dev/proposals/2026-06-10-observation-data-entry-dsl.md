@@ -1,6 +1,6 @@
 ---
 date: 2026-06-10
-status: proposal — design review (no code yet)
+status: implemented — Stage 1-2 + §4.2 stratified long-form (IR 0.14)
 supersedes: 2026-06-06-observation-system.md
 related:
   - 2026-06-10-multi-stream-multi-cadence-union-axis.md # the inference-side companion (proposal B)

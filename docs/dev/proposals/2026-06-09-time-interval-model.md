@@ -1,13 +1,16 @@
 # A unified time-interval model for simulate, fit, and forecast
 
 - **Status:** Draft — design from a verified code + reproduction surface audit
-  (2026-06-09). Proposes the abstraction; the per-area fixes are phased in §9.
-- **Supersedes:** `2026-06-09-burnin-conditioning-window.md` (the burn-in /
-  conditioning-boundary design, now ON HOLD). Its inference math — the
-  flow-accumulator reset at the conditioning boundary, the faithful stochastic
-  warm-up, the per-filter reset sites — is **preserved** here as the
-  conditioning window's mechanism (§7.2); only its _surface_ (a lone
-  `condition_from` fit.toml scalar) is replaced by the interval model.
+  (2026-06-09); the interval abstraction (`RunWindows`, `cond_to`, the
+  `forecast` operation) is **unbuilt**. The per-area fixes are phased in §9.
+- **Generalizes (future direction, not yet superseding):**
+  `2026-06-09-burnin-conditioning-window.md`. That design's `condition_from`
+  fit.toml scalar **shipped** (per-stream, in the sparse/multi-cadence
+  observation work) and is the current reality; this interval model would
+  generalize the lone scalar to an interval, but until `RunWindows` is built it
+  does **not** replace it. The conditioning inference math — the flow-accumulator
+  reset at the boundary, the faithful stochastic warm-up, the per-filter reset
+  sites — is unchanged and lives in the shipped scalar (§7.2 documents it).
 - **Issues:** gh#134 (incidence over-accumulation), gh#143 (output vs dynamics
   end — open), and the CAS horizon-keying fix (the proposal cites gh#142; the
   code comment at `hashing.rs` labels the same fix gh#147 — a citation drift to
