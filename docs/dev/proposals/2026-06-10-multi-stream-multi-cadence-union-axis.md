@@ -98,9 +98,12 @@ permanent stance; the give-away is `BoundObs`'s own comment, "the single shared
 observation axis (homogeneous across streams **today**)."
 
 This lift covers `fit` / `pfilter` / `profile` and the shared `bind`. **`survey`
-stays loud-rejecting** — it has its own hand-rolled loader (its two sites do not
-route through `bind`), and lifting it is a separate follow-up (§9). It is named
-here so the matrix is honestly enumerated, not silently excluded.
+stays loud-rejecting** — it _does_ call `bind` (`survey.rs:410`), but its own
+**hand-rolled identical-schedule guards** (`survey.rs:762`/`:897`) fire first
+and collapse every stream to stream-0 times, so it never feeds `bind` a real
+union; routing it properly through the multi-cadence path is a separate
+follow-up (§9). It is named here so the matrix is honestly enumerated, not
+silently excluded.
 
 ## 2. The architecture before this lift (why one `obs_idx` worked)
 
@@ -227,7 +230,16 @@ For an **irregular** stream (no `every`, hence no Δ), the first-bin width is no
 implied by a cadence; the author states it with the existing surface,
 `condition_from = first_obs − <duration>`. The default for irregular streams in
 the absence of that is the conservative `(t_start, first_obs]` (the author's own
-simulation window), which they can narrow explicitly.
+simulation window), which they can narrow explicitly. **Caveat (verified):**
+`condition_from` is wired on the **`fit` path only** today — it lives on
+`FitRunArgs` and is consumed in `fit/runner.rs`; `pfilter`/`profile` have no
+such surface. And it is a single **global** boundary (per-stream
+`condition_from` is a §9 follow-up), so using it to narrow one irregular stream
+shifts the leading boundary for every stream. So the irregular-stream fallback
+is fit-path-only until `condition_from` extends to `pfilter`/`profile` — which
+§7 test 4's "pfilter/profile accept multi-cadence" claim must scope to the
+regular-cadence (`every`-driven) case, or name the `condition_from` extension as
+a prerequisite.
 
 This default makes the gh#134 wide-first-bin condition unreachable for incidence
 **by construction**, which means the `W329` wide-first-bin guard becomes vacuous
@@ -239,6 +251,13 @@ just-shipped burn-in default, the implementation must call the `W329`
 disposition out explicitly rather than flip it silently.
 
 ### 3.2 Identity and merging are on integer steps — no tolerance
+
+> **Phase 1 note:** the landed merge (`2ea5f44c`) uses **exact-f64** identity,
+> not step indices — sound today because one deterministic parser gives byte-
+> identical f64 for the same calendar instant across streams (all streams share
+> the model's `origin`/`time_unit`), and sub-`dt` collisions are still caught
+> downstream by `build_obs_at_substep`. The step-index merging + `1e-9` deletion
+> below is the Phase-2/3 target, not yet shipped.
 
 Observation times are not arbitrary floats. They enter through **one**
 deterministic parser as `rata_die` **integer day-counts** (`caltime.rs:59`;
@@ -338,6 +357,10 @@ at every union-index) this reproduces today's blanket reset exactly — the
 **bit-identical-homogeneous test** (§7) is the guard. `if2.rs:338` stays
 blanket: it is a per-iteration re-init, not a per-observation reset, and turning
 it into `reset_due_flows` would leave stale flow in particles across iterations.
+**There is a seventh** per-observation blanket reset outside the inference
+filters — ODE-inference's `cum_flows.fill(0)` (`fit/runner.rs:760`), which
+scores through the same seam; it is enumerated in §3.6 and must convert in
+lockstep.
 
 **Two reset forms, one shared piece.** `particle_filter` / `if2` /
 `correlated_pf` reset a `&mut ParticleState`; PGAS resets a bare `Vec<u64>` /
@@ -348,25 +371,50 @@ computation (`at_union[union_idx]` → which streams' flow indices are due). Thi
 is the existing natural seam the codebase already lives with (`log_likelihood`
 delegates to `log_likelihood_from_flows_and_counts`).
 
-**`step_one` is shared — fold via a scratch delta, don't change it.** The
-substep kernel `step_one` (`chain_binomial.rs:333`) is called by **both** the
-forward simulation and the inference filters, and it _accumulates_
-per-transition flows in place: `flows[tr_idx] += count`
-(`chain_binomial.rs:479`/`:496`). Its semantics must not change — the forward
-path relies on the cumulative per-transition tally for trajectory output. So the
-inference filter passes `step_one` a **per-substep-zeroed scratch delta buffer**
-(a per-transition `Vec<u64>` in `StepScratch`), then, after `step_one` returns,
-folds that delta into each `Interval` stream's running sum:
-`for s in interval_streams: acc[s] += Σ_{i ∈ flows(s)} delta[i]`. The fold
-attaches where the filter currently hands `step_one` the state accumulator —
-`chain_binomial_process.rs:114` (PF / IF2 / correlated-PF) and the PGAS
-per-substep `cum_flows[i] += f` sites (`pgas.rs:861` value, `pgas.rs:1324`
-`csmc_as`). `ParticleState.flow_accumulators: Vec<u64>` (per-transition,
-`types.rs:240`) is **replaced** by `acc: Vec<u64>` (one per `Interval` stream);
-PGAS's bare `cum_flows: Vec<u64>` / `Vec<Vec<u64>>` become per-stream the same
-way. Resampling copies the per-stream `acc` with the particle exactly where it
-copies `flow_accumulators` today (`particle_filter.rs:416`, `if2.rs:580`,
+**`step_one` writes into a caller-owned buffer; the three families accumulate
+differently.** The substep kernel `step_one` (`chain_binomial.rs:333`) does
+`flows[tr_idx] += count` (`chain_binomial.rs:479`/`:496`) — an _additive write
+into a buffer the caller owns and the caller chooses when to zero_. The current
+disciplines differ per path, and the design works precisely because the buffer
+is caller-owned:
+
+- **forward sim** zeroes per substep — `flows.fill(0)` immediately _before_
+  `step_one` (`chain_binomial.rs:244`), so its `flows` is a per-substep delta
+  (it feeds the trajectory's separate `Trajectory.flows` snapshot, not a
+  cumulative tally — see §3.6);
+- **PF / IF2 / correlated-PF** hand `step_one` `state.flow_accumulators`
+  directly and never zero between substeps (`chain_binomial_process.rs:114`,
+  `correlated_pf.rs:492`) — the accumulator _is_ the cross-substep tally,
+  blanket-reset only at the obs boundary;
+- **PGAS** already folds a delta: `csmc_as` zeroes `substep_flows` then folds
+  into `cum_flows[j]` (`pgas.rs:1216`/`:1324`); value/grad fold the recorded
+  `rec.flows` delta (`pgas.rs:861`, `pgas_grad.rs:438`).
+
+So Phase 2 does **not** change `step_one`. It introduces a per-substep-zeroed
+**scratch delta** (a per-transition `Vec<u64>` in `StepScratch`) for the
+PF-family (which today has no delta) and folds it into each `Interval` stream's
+running sum: `for s in interval_streams: acc[s] += Σ_{i ∈ flows(s)} delta[i]`;
+the PGAS family already has the delta and needs only its fold _target_
+retargeted from per-transition `cum_flows` to per-stream `acc`.
+`ParticleState.flow_accumulators: Vec<u64>` (per-transition, `types.rs:240`) is
+**replaced** by `acc: Vec<u64>` (one per `Interval` stream); PGAS's bare
+`cum_flows: Vec<u64>` / `Vec<Vec<u64>>` become per-stream the same way.
+Resampling copies the per-stream `acc` with the particle exactly where it copies
+`flow_accumulators` today (`particle_filter.rs:416`, `if2.rs:580`,
 `pgas.rs:1196`).
+
+**The accumulator shape comes from the obs model, not the transition count.**
+Today `ParticleState::new(n_compartments, n_transitions)` (`types.rs:244`) and
+every swarm allocation size on `n_transitions`. Per-stream `acc` is sized by
+`n_interval_streams` — a number the **obs model** owns, not the compiled model.
+So the filter constructor must take `n_interval_streams` (and per-stream flow
+index sets) from `MultiStreamObsModel`, and `reset_due_flows` becomes an
+**obs-model method** that knows which `acc` slot each `Interval` stream owns and
+which are due at a union index (`at_union[union_idx].is_some()`). This is a real
+type-contract change between the filters and the obs model — the filters today
+treat the obs model as a black box (`obs_model.log_likelihood(state, …)`); the
+seam (`n_interval_streams()`, `interval_flow_indices(s)`, `fold_substep`,
+`reset_due`) is the load-bearing part, not the six reset calls.
 
 **Storage.** With the single-`u64`-per-stream accumulator, the added
 per-particle storage is **`O(particles × n_interval_streams)`** — one counter
@@ -376,11 +424,18 @@ projects). The earlier per-index sketch (`O(particles × Σ_s |flows(s)|)`) is
 unnecessary: `FlowSum` is a sum, so the per-bin value is one number, not a
 per-transition vector.
 
-**Per-substep cost.** The _fold_ (not the storage) is the `O(Σ_s |flows(s)|)`
-work per particle per substep — summing each stream's projected flows out of the
-delta. This is the one place **overlap** bites: a flow projected by `m` streams
-is summed `m` times (a national rollup over per-LGA flows is the worst case).
-§7's scaling test bounds it at the 774-LGA scale.
+**Per-substep cost — a real shift, not just storage.** Today the projection sum
+runs **once per observation** (deferred to score time: `eval_stream_projection`
+sums `idxs` out of the global accumulator, `multi_stream_obs.rs:320`). The
+per-stream design moves that `O(Σ_s |flows(s)|)` sum to the **fold, which runs
+every substep** — with ~weekly obs on a daily `dt` that is ≈7× more often,
+multiplied by the **overlap** factor (a flow projected by `m` streams is summed
+`m` times; a national rollup over per-LGA flows, `|flows(rollup)| = 774`, is the
+worst case). So the asymptotic comparison is `O(n_obs × Σ|flows|)` today vs
+`O(n_substeps × Σ|flows|)` after. §7's scaling test (test 8) must bound the
+_time_ axis, not just memory; if a dense national rollup dominates, consider a
+third "deferred" projection mode for non-overlapping rollup streams (keep the
+once-per-obs read) rather than folding every substep.
 
 **Honest scope: this is not "six reset calls."** The per-stream accumulator
 changes `ParticleState` (replaces `flow_accumulators` with per-stream `acc`),
@@ -415,14 +470,52 @@ are the small part.
   collision diagnostics are unchanged — they already operate on a time list (now
   the union).
 
-**The gradient path is a reset site, not an exemption.** The value-path
-objective `complete_data_loglik` (which drives PGAS's Metropolis–Hastings
-acceptance) and the gradient-path objective `complete_data_loglik_grad` (which
-drives the NUTS leapfrog) are **separate functions with separate reset sites** —
-`pgas.rs:843` and `pgas_grad.rs:456` — sharing one `SubstepGrid`. Both must move
-to per-stream `reset_due_flows` **in lockstep**. If only the value path becomes
-per-stream, the sampler accepts against one incidence binning while it
-differentiates another — a silent bias NUTS cannot detect. Test 6 pins this.
+**Three PGAS legs in lockstep, not two.** PGAS has **three** separate
+accumulate+reset implementations over the one shared `SubstepGrid`, and all
+three must move to per-stream `reset_due_flows` together:
+
+- the **value** objective `complete_data_loglik` (drives MH acceptance) — fold
+  `rec.flows`, reset `cum_flows.fill(0)` (`pgas.rs:861`/`:884`);
+- the **gradient** objective `complete_data_loglik_grad` (drives the NUTS
+  leapfrog) — fold `rec.flows`, reset (`pgas_grad.rs:438`/`:456`);
+- the **`csmc_as`** sweep that **produces the reference trajectory** the value
+  path then scores — per-particle `Vec<Vec<u64>>`, fold `substep_flows`, reset
+  (`pgas.rs:1324`/`:1335`).
+
+Value↔gradient is the obvious one (test 6's finite-difference mutation check).
+But `csmc_as` is the **producer**: if it stays blanket while the value path goes
+per-stream, the conditioned trajectory is binned one way and scored another — a
+silent bias _worse_ than value↔grad, because it feeds both. Test 6 must add a
+**value↔csmc_as agreement** check (a multi-cadence CSMC reference trajectory's
+incidence bins, as produced, equal the value path's bins on re-scoring), not
+only value↔grad.
+
+### 3.6 Every reader of the flow accumulator (verified enumeration)
+
+Replacing `ParticleState.flow_accumulators` (and the PGAS bare `cum_flows`) with
+per-stream `acc` touches more than the scoring seam. Each reader below was
+verified against the code; each needs an explicit disposition in Phase 2 — a
+missed one is a silent-wrong (a wrong likelihood, or a perturbed but
+plausible-looking result):
+
+| reader                                                                       | what it reads                                                                                                             | disposition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| scoring seams (loglik / grad / `sample` / `mean`)                            | global `cum_flows` via `eval_stream_projection` `FlowSum`                                                                 | **read per-stream `acc`** (the fork). `mean`/`sample` go through `project_stream_with_params` → `eval_stream_projection` — the **same** helper the forward path keeps — so the fork is a branch _inside_ that helper (read `acc` for inference incidence streams), not a clean signature swap. The gh#48 pre-reset ancestor capture (`particle_filter.rs:371`) reads at the same instant and must read `acc`.                                                                                                                               |
+| **ODE-inference `compute_ode_loglik`** (`fit/runner.rs:728`/`:748`/`:760`)   | its **own** hand-rolled global `cum_flows: Vec<u64>`, blanket-reset `fill(0)` at `:760`, scored through the **same seam** | **THE seventh reset site**, on a path with **no `ParticleState`/no `acc`**. In-scope (`fit` ODE-MLE + `profile`). The §3.4 six-site list omits it; the seam-signature change orphans it. It must convert to per-stream `acc` + `reset_due_flows` **in the same commit** that drops the CLI guards, or ODE-inference becomes the gh#187-class silently-mis-scoring cell. (Alternatively: capability-gate ODE-MLE/profile to homogeneous-only and say so — but that contradicts §7 test 4's requirement that `profile` accept multi-cadence.) |
+| **correlated-PF resampling sort key** (`correlated_pf.rs:520`)               | `Σ` over **all** per-transition `flow_accumulators`, as the CRN sort key                                                  | replacing per-transition storage with per-stream `acc` **changes this sum → changes resampling order → changes correlated-PF / PMMH / profile output**. It is a _heuristic_ key (correctness preserved either way), but the **homogeneous-bit-identical claim is false here** unless decided deliberately. Pin the decision; the bit-identical test (test 3) must cover correlated-PF, not just the bootstrap PF.                                                                                                                           |
+| **`write_final_states`** (`pfilter.rs:1359`, `--save-final-state`)           | per-transition `flow_<transition>` columns from `flow_accumulators`                                                       | after the field becomes per-stream there is no per-transition cumulative buffer to dump — re-derive the columns from the `StepScratch` delta, or redefine/drop the column set. Explicit.                                                                                                                                                                                                                                                                                                                                                    |
+| forward / CLI synthetic-obs (`main.rs::project_all_obs_times`)               | `Trajectory.flows` (a **separate** `FlowVec` on `Trajectory`, `state.rs:107`)                                             | **untouched** — it never reads `ParticleState`. The §3.5 fork is safe on this side because it is a _different buffer_, not because it shares a global one.                                                                                                                                                                                                                                                                                                                                                                                  |
+| transition-density + its gradient (`pgas.rs:597`/`:775`, `pgas_grad.rs:415`) | per-substep `rec.flows` (distinct from the cumulative `cum_flows`)                                                        | **untouched** — no coupling to the accumulator.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+
+**The NaN sentinel must become a real mask before the gate drops.** Phase 1's
+`sample`/`mean` return `f64::NAN` for a not-scheduled stream (to preserve the
+output-vector shape), and the prediction/prequential reductions sum the
+per-stream vector (`particle_filter.rs:302`/`:308`/`:338`/`:371`) — so a NaN
+poisons the ribbon, CRPS, and PIT. This is unreachable today (the CLI guards
+keep every path homogeneous), but the moment Phase 2 drops those guards it is a
+live silent-wrong. Replace the NaN sentinel with a real per-stream "scheduled
+here?" mask at the consumer seam (an absent cell is structurally skipped, not a
+number), and add a heterogeneous prequential/paths test as the guard.
 
 ## 4. What stays loud (capability honesty)
 
@@ -499,14 +592,16 @@ is self-contained and recover-known-params.
 5. **Single-patch reduction cross-check** — one patch, AFP+ES, against a hand /
    pomp-style computation of each stream's bin, anchoring the mechanism where an
    oracle is tractable (no oracle exists for spatial multi-cadence).
-6. **Gradient consistency** — the §3.4 per-stream reset reaches the gradient
-   path (`pgas_grad.rs:456`) in lockstep with the value path (`pgas.rs:843`);
+6. **Three-leg PGAS consistency** — the §3.4 per-stream reset reaches the
+   gradient path (`pgas_grad.rs:456`) **and** the `csmc_as` producer
+   (`pgas.rs:1335`) in lockstep with the value path (`pgas.rs:884`). (a)
    finite-difference value-vs-grad on a genuinely **multi-cadence** fixture
-   (homogeneous would not separate the two reset policies), including a
-   near-`k =
-   n` boundary point. Mutation check: leaving `pgas_grad.rs:456`
-   blanket while the value path is per-stream makes the finite-difference check
-   fail.
+   (homogeneous would not separate the reset policies), including a near-`k = n`
+   boundary point; mutation check: leaving `pgas_grad.rs:456` blanket while the
+   value path is per-stream fails the finite-difference. (b) **value↔csmc_as
+   agreement**: a multi-cadence CSMC reference trajectory's incidence bins, as
+   produced, equal the value path's bins on re-scoring; mutation check: leaving
+   `pgas.rs:1335` blanket biases the conditioned trajectory.
 7. **Late-starting stream** — ES first observation a year after AFP's: the first
    ES bin is `(first_obs − 14, first_obs]`, **not** `(t_start, first_obs]`, and
    the fit does **not** hard-error. Pins the §3.1 first-bin rule.
@@ -568,17 +663,20 @@ is self-contained and recover-known-params.
 - The Im5 canary: `rust/crates/sim/src/inference/particle_filter.rs:401-413`
   (2026-04-19 inference review) — predicts this feature and scopes the reset
   fix.
-- The six rejection sites: `multi_stream_obs.rs:439` (`bind`),
-  `fit/runner.rs:356`, `pfilter.rs:209`, `profile.rs:516`, `survey.rs:760`,
-  `survey.rs:895`.
-- `bind` exact-equality check: `multi_stream_obs.rs:435`. Scoring seam:
-  `multi_stream_obs.rs:593` (signature), `:613` (per-stream projection).
-  Emission: `:708` (`sample`), `:730` (`mean`).
-- Per-observation reset sites (→ `reset_due_flows`): `particle_filter.rs:415`,
-  `if2.rs:559`, `correlated_pf.rs:521`, `pgas.rs:843` (value), `pgas.rs:1250`
-  (csmc_as), `pgas_grad.rs:456` (gradient). Per-iteration re-init (stays
-  blanket): `if2.rs:319`. Resampling copy of accumulators: `pgas.rs:1117`,
-  `particle_filter.rs:381`.
+- The rejection sites (re-grounded; the `bind` one resolved in Phase 1):
+  `fit/runner.rs:397`, `pfilter.rs:260`, `profile.rs:527`, `survey.rs:762`,
+  `survey.rs:897`.
+- Scoring seam (current): `eval_stream_projection` `FlowSum` arm
+  `multi_stream_obs.rs:320`; `log_likelihood_from_flows_and_counts` / `_grad` /
+  `sample` / `mean` all resolve `at_union[obs_idx]` (Phase 1).
+- Per-observation reset sites (→ `reset_due_flows`, re-grounded after Phase 1 +
+  gh#216): `particle_filter.rs:448`, `if2.rs:587`, `correlated_pf.rs:550`,
+  `pgas.rs:884` (value), `pgas.rs:1335` (csmc_as), `pgas_grad.rs:456`
+  (gradient), and **`fit/runner.rs:760`** (ODE-inference — the seventh, §3.6).
+  Per-iteration re-init (stays blanket): `if2.rs:338`. Resampling copy of
+  accumulators: `pgas.rs:1196`, `particle_filter.rs:416`, `if2.rs:580`.
+  Non-scoring readers of `flow_accumulators` (§3.6): `correlated_pf.rs:520`
+  (sort key), `pfilter.rs:1359` (`--save-final-state`).
 - The CLI canonical-grid collapse: `fit/runner.rs:373` / `build_obs_model`,
   `pfilter.rs:217`.
 - Integer time representation: `rata_die` in `ir/src/caltime.rs:59`;

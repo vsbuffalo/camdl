@@ -7,10 +7,14 @@
   parameter — that is the burn-in this proposal makes expressible. The
   `condition_from` surface and warm-up mechanics (§2–§4) are implemented on the
   `camdl fit` path (588a40e); they ride the shared hole/reset seam, so PF / IF2
-  / PGAS / PMMH all receive the boundary reset through `BoundObs`.
-  **Remaining:** the §6.8 guard escalation (W329 soft-warn → hard error on the
-  incidence case), the doc updates (§8), and per-stream boundaries (§6.10,
-  deferred).
+  / PGAS / PMMH all receive the boundary reset through `BoundObs`. The §6.8
+  guard escalation (W329 soft-warn → hard error on the incidence case)
+  **shipped** (`2b065ad6`): `first_window_guard` (`util.rs`) is `TemporalKind`-
+  gated — Interval → hard error, Instant → soft warn — suppressed by
+  `condition_from`. **Remaining:** the doc updates (§8) and per-stream
+  boundaries (§6.10, deferred — now subsumed by the multi-cadence proposal's
+  per-stream first bin, `2026-06-10-multi-stream-multi-cadence-union-axis.md`
+  §3.1).
 - **Supersedes:** `2026-06-09-burnin-conditioning-dsl-surface.md` (the "no new
   keyword — early `simulate.from` + leading-window unweighting" surface) and
   `2026-05-30-conditioning-boundary-tcond.md` (the `t_cond` inference-math
@@ -260,12 +264,15 @@ layer against the loaded data:
   through `origin` exactly as `simulate.from` does.
 - Omitted — default `simulate.from` (`cond_from = t_start`), no warm-up.
 
-**CLI.** `--condition-from <DATE|first_obs-DUR>` overrides the fit.toml key, on
-every subcommand that runs the filter (`camdl fit`, `camdl pfilter`,
-`camdl profile`). Every behavior is expressible as a flag; fit.toml bundles, it
-does not gate. (This is a deliberate departure from the IC-free proposal's "no
-CLI flag" line, in keeping with the project's CLI-first ethos in CLAUDE.md;
-inference knobs like `--seed`, `--particles`, `--stage`, `--init` are already
+**CLI.** `--condition-from <DATE|first_obs-DUR>` overrides the fit.toml key.
+**As shipped it is wired on the `fit` path only** (it lives on `FitRunArgs`,
+consumed in `fit/runner.rs`; `pfilter`/`profile` have no such surface yet) —
+extending it to `pfilter`/`profile` is a follow-up (and a prerequisite for
+irregular-stream conditioning on those paths, per the multi-cadence proposal
+§3.1). Every behavior is expressible as a flag; fit.toml bundles, it does not
+gate. (This is a deliberate departure from the IC-free proposal's "no CLI flag"
+line, in keeping with the project's CLI-first ethos in CLAUDE.md; inference
+knobs like `--seed`, `--particles`, `--stage`, `--init` are already
 CLI-exposed.)
 
 **Domain.** `condition_from ∈ (t_start, first_obs)`. A value `≥ first_obs` is
