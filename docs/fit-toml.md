@@ -89,29 +89,74 @@ not a setting.
 
 ## Conditioning boundary (`condition_from`)
 
-A top-level key. By default the filter conditions from the model origin
-(`simulate.from`): the first observation is scored against the flow accumulated
-since `t_start`. When `simulate.from` sits well before the first datum — e.g.
-you start dynamics in 2011 so births and SIA/MCV covariates shape the
-susceptible pool, but case data begins in 2014 — that first incidence window
-spans the whole gap, and the opening likelihood term is meaningless (gh#134).
+### Why it exists
 
-`condition_from` moves the conditioning boundary to one cadence before the first
-datum. The leading span becomes a covariate-informed **warm-up** — simulated
-with the full stochastic dynamics (births, campaigns, seasonality, process
-noise) but **not scored** — and the first observation is scored against one
-normal cadence:
+An **incidence** observation (a weekly case count, say) is the flow accumulated
+over one reporting interval — `(t_{k-1}, t_k]`. The _first_ observation is the
+only one whose left edge isn't a previous observation; by default the filter
+opens it at the model origin (`simulate.from` / `t_start`), so `y_1` is scored
+against every event since the dynamics began. That is correct when the data
+starts about one cadence after `t_start`. It is **wrong** when `t_start` sits
+far behind the first datum — e.g. you start dynamics in 2011 so births and
+SIA/MCV covariates shape the susceptible pool, but case data begins in 2014. The
+first bin then spans the whole 2011–2014 warm-up, and scoring one weekly count
+against three years of flow is meaningless (gh#134) — and it collapses the
+particle filter (no particle's three-year integral matches a single datum).
+
+The fix is a **conditioning boundary**: the leading span `[t_start, cond_from)`
+becomes a covariate-informed **warm-up** — simulated with the full stochastic
+dynamics (births, campaigns, seasonality, process noise) but **not scored** —
+and the first observation is scored against one normal cadence
+`(cond_from, first_obs]`. Mechanically it is a leading reset-only point on the
+stream's grid: the incidence accumulator resets at `cond_from`, discarding the
+warm-up flow, with no likelihood term there.
+
+### Conditioning is explicit — you state it, the filter never guesses
+
+camdl does **not** infer the boundary. An inferred boundary would be fragile (it
+fails exactly on the irregular/sparse surveillance data this is for) and fail
+_silently_. So you set it, and it is **required** precisely when it matters: an
+**incidence** stream whose first observation lands anomalously far after
+`t_start` (a wide leading window relative to that stream's own cadence) with no
+`condition_from` is a **hard error (W329)** that names the fix. A stream whose
+first observation is ~one cadence after `t_start` (the common, well-set-up case)
+needs nothing. A **prevalence** stream is exempt (its `y_1` reads the state at
+the instant, not a flow integral) — a wide gap there is only a soft warning.
+
+### The surface — one default, optional per-stream shadows
+
+`condition_from` is a top-level key with two forms:
 
 ```toml
-condition_from = "first_obs - 1 week" # idiomatic: one cadence before the data
-# condition_from = "date(\"2014-08-18\")"  # or an absolute calendar date
+# (1) a string — the default applied to EVERY stream:
+condition_from = "first_obs - 1 week" # one cadence before the data
+# condition_from = "date(\"2014-08-18\")"  # an absolute calendar date
+# condition_from = "19"                     # an absolute model-time number (quoted)
 ```
 
-It must resolve to a time strictly between `simulate.from` and the first
-observation (and onto the `dt` grid). For an **incidence** stream, omitting it
-when the leading gap is large is a hard error (W329) naming this fix; for
-**prevalence** it is only a soft warning. `condition_from` and `ic_free` cannot
-be combined.
+```toml
+# (2) a table — an optional all-streams `default` plus per-observation-label
+#     SHADOWS, for multi-cadence models (streams on different schedules):
+[condition_from]
+default = "first_obs - 1 week" # applied to every stream …
+es = "first_obs - 2 weeks" # … except `es`, which this shadows
+afp = "first_obs - 1 month" # … and `afp`
+```
+
+**Resolution per stream:** its shadow → else the `default` → else _none_ (and
+then W329 decides whether none is fine or a hard error). The shadow key is the
+observation-block label (the `[data]` key). `default` is reserved — a stream
+literally labelled `default` is a hard error; so is a shadow naming a stream
+that doesn't exist (typo-safety, the error lists the valid labels).
+
+A spec must resolve to a time strictly between `t_start` and that stream's first
+observation (and onto the `dt` grid). The duration form (`first_obs - 1 week`)
+is anchored to **each stream's own** first observation, so in a multi-cadence
+model the same `default` gives each stream a window in its own cadence.
+
+`condition_from` and `ic_free` cannot be combined (the leading hole would leave
+`y_1` with nothing to condition on). It is a **`fit`-path** key today (`pfilter`
+/ `profile` don't read it yet).
 
 ## Priors
 

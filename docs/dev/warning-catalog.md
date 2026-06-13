@@ -199,13 +199,23 @@ range): a legitimately missed observation or two gives a 2–4× first window,
 which is normal and must not warn; `K = 5` clears that band with margin while
 still firing decisively on the pathological case.
 
-**Fix / silence:** set `condition_from = first_obs - 1 week` to run a
-covariate-informed warm-up and score the first datum against one cadence (the
+**Per-stream (multi-cadence).** The check runs **per observation stream**
+against that stream's own first window + modal cadence, so it fires only on the
+offending stream — and the message names the per-stream fix
+(`condition_from.<label> = first_obs - 1 'week`). The boundary is **explicit**:
+camdl does not infer it (an inferred boundary would fail silently on irregular
+data), so a wide-window incidence stream with no conditioning is a hard error,
+not an auto-corrected default.
+
+**Fix / silence:** set `condition_from = "first_obs - 1 week"` (all streams) or
+`[condition_from] <label> = "first_obs - 1 week"` (the offending stream) to run
+a covariate-informed warm-up and score the first datum against one cadence (the
 principled fix when the early origin is intentional); or move `simulate.from`
 closer to the first observation (when it was accidental). To deliberately score
 the whole leading window, set `condition_from` to the model start explicitly.
-See `docs/dev/proposals/2026-06-09-burnin-conditioning-window.md` and
-`camdl docs fit-toml`.
+See `docs/dev/proposals/2026-06-09-burnin-conditioning-window.md`,
+`docs/dev/proposals/2026-06-10-multi-stream-multi-cadence-union-axis.md` (§3.1),
+and `camdl docs fit-toml`.
 
 ## Info
 

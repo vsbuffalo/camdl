@@ -290,9 +290,51 @@ observation is scored against one normal cadence:
 condition_from = "first_obs - 1 week"
 ```
 
-`camdl fit` rejects an incidence model with a wide pre-data gap and no
-`condition_from` (W329), naming this fix. See the conditioning-boundary section
-(§3.9) of `camdl-inference-spec.md`.
+Conditioning is **explicit, not inferred** — `camdl fit` rejects an incidence
+model with a wide pre-data gap and no `condition_from` (W329), naming the fix,
+rather than guessing a boundary (which would fail silently on irregular data).
+For a **multi-cadence** model (streams on different schedules) `condition_from`
+is per-stream: a table with an optional all-streams `default` plus
+per-observation-label **shadows** —
+
+```toml
+[condition_from]
+default = "first_obs - 1 week"
+es = "first_obs - 2 weeks" # shadows the `es` stream only
+```
+
+Resolution per stream: its shadow → else `default` → else none. See
+`camdl docs fit-toml` (the `condition_from` section) and §3.9 of
+`camdl-inference-spec.md`.
+
+### Multi-cadence: streams on different schedules
+
+Surveillance streams often arrive on different schedules — polio AFP (acute
+flaccid paralysis) reported roughly monthly, environmental surveillance (ES,
+poliovirus in sewage) sampled roughly biweekly. `camdl fit` / `pfilter` /
+`profile` accept this directly: you supply one data file per stream (each on its
+own time axis), and the filter merges them onto a **union observation axis** —
+the sorted set of all streams' observation times.
+
+Two things make this correct rather than a fudge:
+
+- **Each stream is scored only at its own observation times.** At a union time
+  where a stream has no observation (a sibling's reporting date), that stream
+  contributes no likelihood term — it is simply not observed then.
+- **Each incidence stream's bin closes on its own cadence.** The flow
+  accumulator for an incidence stream resets only at _its_ observations, never
+  at a sibling's. So an ES sampling date does not truncate AFP's monthly count;
+  AFP's bin runs the full month regardless of how often ES reports in between.
+  (Prevalence streams read state at the instant and never accumulate, so the
+  reset doesn't apply to them.)
+
+Each stream is conditioned independently (see `condition_from`, above — the
+per-stream table form is exactly for this). A homogeneous model (every stream on
+one cadence) is the special case where the union _is_ the shared axis and every
+stream is observed at every time — and it fits byte-for-byte as before.
+
+`camdl simulate --obs-dir <dir>` writes one file per stream at its own cadence,
+which is the natural input back into a multi-cadence fit.
 
 ### The `--trace` output
 
