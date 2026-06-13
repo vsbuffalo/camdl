@@ -1,0 +1,134 @@
+# Spatial polio with TWO surveillance streams on DIFFERENT cadences.
+#
+# Fixture for the multi-stream multi-cadence union-axis lift
+# (docs/dev/proposals/2026-06-10-multi-stream-multi-cadence-union-axis.md §6).
+#
+# Structure: gravity-coupled 2-patch SEIR with an explicit infectious-shedding
+# compartment (I_shed) and a low-probability paralysis flow — the two distinct
+# polio surveillance signals:
+#
+#   - AFP (acute flaccid paralysis): MONTHLY incidence of the `paralysis` flow.
+#     Paralysis is a small fraction (here ~1/2000 of acute cases, the low end of
+#     the realistic WPV1 range — chosen so AFP counts are surveillance-shaped:
+#     low and zero-heavy) — neg_binomial with a reporting fraction.
+#   - ES (environmental surveillance): BIWEEKLY prevalence of the shedding pool
+#     I_shed (poliovirus in sewage). Poisson on the shedding prevalence (v1; the
+#     binomial-denominator upgrade is a separate follow-up).
+#
+# Both streams are per-patch STRATIFIED (`[p in patch]`) — one scored cell per
+# patch, NOT a cross-strata sum, so neither trips the §5.2 aggregation gate.
+#
+# Base structure (gravity coupling `importation[p,q] @ kappa*W[p,q]*S[p]*I[q]/N[q]`)
+# follows ocaml/golden/polio_spatial_5.camdl, reduced to 2 patches and extended
+# with I_shed + paralysis + the observations block.
+
+time_unit = 'days
+
+compartments { S, E, I, I_shed, R }
+
+dimensions {
+  patch = [urban, rural]
+}
+
+stratify(by = patch)
+
+let N[p in patch] = S[p] + E[p] + I[p] + I_shed[p] + R[p]
+
+parameters {
+  sigma     : rate        in [0.01,  1.0]    # E -> I progression
+  gamma     : rate        in [0.01,  1.0]    # I -> I_shed (acute -> shedding)
+  delta     : rate        in [0.01,  1.0]    # I_shed -> R (shedding clearance)
+  para_frac : probability in [0.0,   0.05]   # fraction of acute cases paralysed
+  omega     : rate        in [0.0001, 0.1]   # waning immunity: R -> S
+  kappa     : rate        in [0.0,   0.5]    # importation coupling strength
+  R0[patch] : positive    in [0.5,   10.0]
+  N0[patch] : count        in [1000,  2000000]
+  I0        : count        in [1,     1000]
+  rho       : probability in [0.0,   1.0]    # AFP reporting fraction
+  k         : positive    in [1.0,   100.0]  # AFP neg-binomial dispersion
+  lambda    : positive    in [0.001, 10.0]   # ES sampling intensity (counts per shedder)
+}
+
+let beta[p in patch] = R0[p] * gamma
+
+tables {
+  # Gravity coupling weights (off-diagonal only; used in importation transitions).
+  # Row p, col q = relative coupling strength from patch q into patch p.
+  W_patch : patch × patch = [[0.00, 0.10],
+                             [0.10, 0.00]]
+}
+
+transitions {
+  # Local transmission within each patch (acute infectious I drives FOI)
+  infection[p in patch] : S[p] --> E[p]
+    @ beta[p] * S[p] * I[p] / N[p]
+
+  # Cross-patch importation: infectious in q drive infection in p (where p != q)
+  importation[p in patch, q in patch] : S[p] --> E[p]
+    @ kappa * W_patch[p, q] * S[p] * I[q] / N[q] where p != q
+
+  progression[p in patch] : E[p] --> I[p]       @ sigma * E[p]
+
+  # Acute infectious become shedding (the ES signal source)
+  shedding[p in patch]    : I[p] --> I_shed[p]  @ gamma * I[p]
+
+  # A small fraction of acute cases is paralysed — the AFP incidence signal.
+  # Modelled as a low-rate outflow I -> R; the AFP stream observes this flow.
+  paralysis[p in patch]   : I[p] --> R[p]       @ para_frac * gamma * I[p]
+
+  # Shedding clears
+  clearance[p in patch]   : I_shed[p] --> R[p]  @ delta * I_shed[p]
+
+  waning[p in patch]      : R[p] --> S[p]       @ omega * R[p]
+}
+
+observations {
+  # AFP — monthly incidence of the paralysis flow, per patch, low/zero-heavy.
+  afp[p in patch] {
+    columns       { time : time, patch : dim, cases : count }
+    projected     = incidence(paralysis[p])
+    emit_schedule = every 30 'days
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+  }
+
+  # ES — biweekly prevalence of the shedding pool, per patch.
+  es[p in patch] {
+    columns       { time : time, patch : dim, conc : count }
+    projected     = prevalence(I_shed[p])
+    emit_schedule = every 14 'days
+    conc          ~ poisson(rate = lambda * projected)
+  }
+}
+
+init {
+  S[urban] = N0[urban] - I0
+  S[rural] = N0[rural]
+  I[urban] = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 2 'years
+}
+
+scenarios {
+  baseline {
+    label = "AFP + ES multi-cadence surveillance"
+    set = {
+      sigma        = 0.2
+      gamma        = 0.1
+      delta        = 0.05
+      para_frac    = 0.0005
+      omega        = 0.003
+      kappa        = 0.05
+      R0[urban]    = 3.0
+      R0[rural]    = 2.2
+      N0[urban]    = 500000
+      N0[rural]    = 150000
+      I0           = 20
+      rho          = 0.6
+      k            = 10.0
+      lambda       = 1.0
+    }
+  }
+}

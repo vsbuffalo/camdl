@@ -1,0 +1,17 @@
+# Ground-truth parameters for the spatial polio AFP+ES multi-cadence fixture.
+# Used to generate the per-stream synthetic data (afp / es TSVs) and as the
+# recovery target for the (future) multi-cadence fit.
+sigma     = 0.2
+gamma     = 0.1
+delta     = 0.05
+para_frac = 0.0005
+omega     = 0.003
+kappa     = 0.05
+R0_urban  = 3.0
+R0_rural  = 2.2
+N0_urban  = 500000
+N0_rural  = 150000
+I0        = 20
+rho       = 0.6
+k         = 10.0
+lambda    = 1.0
