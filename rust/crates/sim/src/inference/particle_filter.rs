@@ -317,14 +317,22 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
 
         // Prediction diagnostics
         if has_predictions {
+            // Multi-cadence: `mean`/`sample` return `f64::NAN` for a stream NOT
+            // scheduled at this union index (proposal 2026-06-10 §3.6). Filter
+            // the non-finite entries before summing — a not-scheduled stream
+            // contributes nothing to the summed prediction at this union time.
+            // Homogeneous (every stream scheduled at every index) never yields a
+            // NaN, so this filter is a no-op there.
             let means: Vec<f64> = swarm.states.iter()
-                .map(|s| obs_model.mean(s, obs_idx, params).into_iter().sum::<f64>())
+                .map(|s| obs_model.mean(s, obs_idx, params)
+                    .into_iter().filter(|v| v.is_finite()).sum::<f64>())
                 .collect();
             let equal_lw = vec![0.0_f64; n_particles];
             let (state_mean, state_q05, state_q50, state_q95) = weighted_quantiles(&means, &equal_lw);
 
             let obs_draws: Vec<f64> = swarm.states.iter().enumerate()
-                .map(|(i, s)| obs_model.sample(s, obs_idx, params, &mut diag_rngs[i]).into_iter().sum())
+                .map(|(i, s)| obs_model.sample(s, obs_idx, params, &mut diag_rngs[i])
+                    .into_iter().filter(|v| v.is_finite()).sum())
                 .collect();
             let (_, obs_q05, obs_q50, obs_q95) = weighted_quantiles(&obs_draws, &equal_lw);
 
@@ -353,9 +361,12 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // particles via obs_model.sample and feed CRPS/PIT.
         if config.record_prequential {
             let log_liks: Vec<f64> = swarm.log_weights.clone();
+            // Multi-cadence: drop the not-scheduled streams' NaN before summing
+            // (else the prequential sample poisons CRPS/PIT). Homogeneous is a
+            // no-op (no NaN). See the prediction block above.
             let y_draws: Vec<f64> = swarm.states.iter().enumerate()
                 .map(|(i, s)| obs_model.sample(s, obs_idx, params, &mut diag_rngs[i])
-                    .into_iter().sum::<f64>())
+                    .into_iter().filter(|v| v.is_finite()).sum::<f64>())
                 .collect();
             preq_times.push(obs_time);
             preq_log_liks.push(log_liks);
@@ -386,6 +397,15 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
             // which is what incidence projections need. After
             // resampling + reset two lines below, flow_accumulators
             // start the next interval at zero.
+            //
+            // Multi-cadence: this stores the PER-STREAM vector unchanged. A
+            // stream NOT scheduled at this union index yields `f64::NAN` from
+            // `mean()` (proposal 2026-06-10 §3.6). That NaN is NOT summed — it
+            // is walked along the ancestor chain into its OWN per-stream column
+            // in `--save-paths` (`write_sampled_paths`, which already emits NaN
+            // for an absent stream cell). So a not-scheduled stream reads NaN in
+            // its column at that union row — the honest "no observation here"
+            // marker, NOT a fictitious 0. Homogeneous never produces a NaN.
             let step_projections: Vec<Vec<f64>> = swarm.states.iter()
                 .map(|s| obs_model.mean(s, obs_idx, params))
                 .collect();

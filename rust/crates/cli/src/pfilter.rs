@@ -247,31 +247,24 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         std::process::exit(1);
     }
 
-    // Validate every stream shares the same obs_times schedule.
-    {
-        let first_times: Vec<f64> = per_stream_obs[0].iter().map(|o| o.time).collect();
-        for (i, obs) in per_stream_obs.iter().enumerate().skip(1) {
-            let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
-            if times.len() != first_times.len()
-                || times.iter().zip(&first_times).any(|(a, b)| (a - b).abs() > 1e-9)
-            {
-                eprintln!(
-                    "error: observation times for stream '{}' differ from \
-                     stream '{}'. All streams must share identical observation \
-                     times.",
-                    bound_streams[i].0, bound_streams[0].0);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // Canonical observations: first stream's vector. Downstream
-    // single-stream code paths (trace, prequential, save_filtering,
-    // save_paths, save_final_state) consume `obs.time` and
-    // `obs.value`; for multi-stream the `.value` is the first
-    // stream's, which is fine for trace timestamps and the
-    // single-loglik scalar output (which sums across streams).
-    let observations = per_stream_obs[0].clone();
+    // Canonical observations: the sorted-unique UNION of every stream's
+    // observation times (multi-cadence, proposal 2026-06-10 §3.3). `bind`
+    // re-merges each stream's own schedule to this union and records per-stream
+    // `at_union` membership; the per-stream incidence reset (Phase 2a) fires
+    // only where a stream is scheduled. Downstream single-stream code paths
+    // (trace, prequential, save_filtering, save_paths, save_final_state) consume
+    // `obs.time` (the union grid) and `obs.value` (a never-scored placeholder
+    // 0.0 — the per-stream scored values live in `per_stream_cells`). The old
+    // "must share identical observation times" guard was the no-silent-gaps
+    // stance for machinery that did not yet exist; it now exists.
+    let observations: Vec<Observation> = {
+        let mut times: Vec<f64> = per_stream_obs.iter()
+            .flat_map(|obs| obs.iter().map(|o| o.time))
+            .collect();
+        times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
+        times.dedup();
+        times.into_iter().map(|time| Observation { time, value: 0.0 }).collect()
+    };
 
     eprintln!("pfilter: {} observations × {} streams, {} particles, dt={}, seed={}",
         observations.len(), n_streams, n_particles, dt, seed);
@@ -395,19 +388,27 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let compiled = std::sync::Arc::new(compiled);
     let process = ChainBinomialProcess::new(compiled.clone(), dt);
 
-    let obs_times: Vec<f64> = observations.iter().map(|o| o.time).collect();
     // Authoritative per-stream cells (holes = `None`) thread into the obs
     // model; `per_stream_obs` is only the dense placeholder view for
     // diagnostics. A hole contributes no likelihood term but still resets the
     // incidence accumulator at its grid index (the filter loop reset is
     // per-obs-index, not gated on value presence).
+    //
+    // Multi-cadence (§3.3): each stream feeds `bind` its OWN schedule (derived
+    // from `per_stream_obs`, the per-stream time vector), NOT the union
+    // `obs_times`. `bind` re-merges them to the union and records per-stream
+    // `at_union` membership. `cells.len()` == this stream's own obs_times.len().
+    let per_stream_times: Vec<Vec<f64>> = per_stream_obs.iter()
+        .map(|obs| obs.iter().map(|o| o.time).collect())
+        .collect();
     let stream_specs: Vec<StreamSpec> = bound_ir.iter().zip(projections.into_iter())
         .zip(per_stream_cells.into_iter()).zip(per_stream_aux.into_iter())
-        .map(|(((o, projection), cells), aux)| StreamSpec {
+        .zip(per_stream_times.into_iter())
+        .map(|((((o, projection), cells), aux), stream_times)| StreamSpec {
             projection,
             ir_model: o.clone(),
             observations: cells,
-            obs_times: obs_times.clone(),
+            obs_times: stream_times,
             aux,
         }).collect();
     let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {

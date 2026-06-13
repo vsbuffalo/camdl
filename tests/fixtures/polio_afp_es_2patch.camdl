@@ -47,6 +47,7 @@ parameters {
   rho       : probability in [0.0,   1.0]    # AFP reporting fraction
   k         : positive    in [1.0,   100.0]  # AFP neg-binomial dispersion
   lambda    : positive    in [0.001, 10.0]   # ES sampling intensity (counts per shedder)
+  k_es      : positive    in [1.0,   100.0]  # ES neg-binomial dispersion (overdispersed ES signal)
 }
 
 let beta[p in patch] = R0[p] * gamma
@@ -91,12 +92,17 @@ observations {
     cases         ~ neg_binomial(mean = rho * projected, r = k)
   }
 
-  # ES — biweekly prevalence of the shedding pool, per patch.
+  # ES — biweekly prevalence of the shedding pool, per patch. Environmental
+  # surveillance is notoriously noisy (sampling, dilution, assay variability),
+  # so the concentration signal is overdispersed: neg_binomial about a mean
+  # proportional to the shedding prevalence. The overdispersion (r = k_es) keeps
+  # the observation band wide enough to track in a bootstrap filter even at the
+  # large shedding prevalence of a near-deterministic large-population model.
   es[p in patch] {
     columns       { time : time, patch : dim, conc : count }
     projected     = prevalence(I_shed[p])
     emit_schedule = every 14 'days
-    conc          ~ poisson(rate = lambda * projected)
+    conc          ~ neg_binomial(mean = lambda * projected, r = k_es)
   }
 }
 
@@ -128,7 +134,8 @@ scenarios {
       I0           = 20
       rho          = 0.6
       k            = 10.0
-      lambda       = 1.0
+      lambda       = 0.01
+      k_es         = 10.0
     }
   }
 }

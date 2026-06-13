@@ -291,7 +291,6 @@ impl FitRunConfig {
         }
 
         let mut streams = Vec::new();
-        let mut canonical_times: Option<Vec<f64>> = None;
 
         // Iterate the model's observation blocks whose `source` is BOUND to a
         // data file (sorted by name for deterministic ordering — two fits with
@@ -386,20 +385,13 @@ impl FitRunConfig {
                 )?;
             }
 
-            // Validate all streams share the same observation times
-            let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
-            match &canonical_times {
-                None => canonical_times = Some(times),
-                Some(ct) => {
-                    if ct.len() != times.len() || ct.iter().zip(&times).any(|(a, b)| (a - b).abs() > 1e-9) {
-                        return Err(format!(
-                            "observation times for stream '{}' differ from first stream. \
-                             All streams must have identical observation times.",
-                            stream_name
-                        ));
-                    }
-                }
-            }
+            // Multi-cadence (proposal 2026-06-10 §3.3): each stream keeps its
+            // OWN observation times + cells. `bind` merges the streams to the
+            // sorted-unique UNION axis and records per-stream membership
+            // (`at_union`); the per-stream incidence reset (Phase 2a) fires only
+            // where a stream is scheduled. The old "must have identical
+            // observation times" guard was the no-silent-gaps stance for
+            // machinery that did not yet exist — that machinery now exists.
 
             streams.push(ObsStream {
                 name: stream_name.to_string(),
@@ -411,8 +403,23 @@ impl FitRunConfig {
             });
         }
 
-        // Canonical observations (from first stream)
-        let mut observations = streams[0].data.clone();
+        // Canonical observations: the sorted-unique UNION of every stream's
+        // observation times (multi-cadence, proposal 2026-06-10 §3.3). This is
+        // what feeds the filter's substep grid, `n_observations`, the W329
+        // first-window guard, the obs-alignment gate, and the single-stream
+        // output labels — so it MUST be the union, not stream 0's schedule
+        // (else heterogeneous streams silently collapse onto stream 0's dates).
+        // The per-stream scored VALUES live in each `ObsStream.cells`; the
+        // canonical's `value` is a never-scored placeholder (0.0). `bind`
+        // re-derives this same union from each stream's own times below.
+        let mut observations: Vec<Observation> = {
+            let mut times: Vec<f64> = streams.iter()
+                .flat_map(|s| s.data.iter().map(|o| o.time))
+                .collect();
+            times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
+            times.dedup();
+            times.into_iter().map(|time| Observation { time, value: 0.0 }).collect()
+        };
 
         // gh#134 W329: the leading gap (first_obs − t_start) vs the modal
         // cadence. For an INCIDENCE (Interval) canonical stream a wide gap is the
@@ -424,10 +431,16 @@ impl FitRunConfig {
         // with the boundary, and `resolve_condition_from` (below) validates it.
         {
             use ir::observation::TemporalKind;
-            // All streams share identical obs times (validated above), so the
-            // leading gap is the same for every stream. The wrong-number is an
+            // Under multi-cadence streams no longer share one schedule, so this
+            // is a CONSERVATIVE GLOBAL check on the UNION's first time (the
+            // earliest observation across all streams). The wrong-number is an
             // incidence problem, so escalate to a hard error if ANY stream is
-            // incidence; warn only when every stream is prevalence.
+            // incidence; warn only when every stream is prevalence. The
+            // per-stream first-bin refinement — each incidence stream's leading
+            // bin opening at `max(t_start, first_obs_s − every_s)` — is Phase 3
+            // (proposal 2026-06-10 §3.1); until then a t=0-start fixture (no
+            // leading gap) passes this guard and late-starting streams are not
+            // yet auto-conditioned per-stream.
             let effective_kind = if streams.iter().any(|s| {
                 s.projection.temporal_kind() == TemporalKind::Interval
             }) {
@@ -634,7 +647,14 @@ impl FitRunConfig {
                 // contributes no likelihood term but its obs time stays in the
                 // grid, so the per-obs-index incidence reset still fires at it.
                 observations: s.cells.clone(),
-                obs_times: self.observations.iter().map(|o| o.time).collect(),
+                // Multi-cadence (§3.3): feed each stream its OWN schedule, NOT
+                // the union (`self.observations`). `bind` re-merges these to the
+                // union and records per-stream `at_union` membership; `s.cells`
+                // is already this stream's own cells (cells.len() == this
+                // stream's obs_times.len()). The union `bind` produces equals
+                // `self.observations` (both sorted-unique over the same
+                // per-stream times).
+                obs_times: s.data.iter().map(|o| o.time).collect(),
                 aux: s.aux.clone(),
             }).collect();
         let (bound, _report) = sim::inference::BoundObs::bind(specs).unwrap_or_else(|report| {

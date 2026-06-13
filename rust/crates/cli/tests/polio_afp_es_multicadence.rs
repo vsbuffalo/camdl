@@ -9,17 +9,19 @@
 //!     flow, neg_binomial, low/zero-heavy counts;
 //!   - `es[p in patch]`  — biweekly (every 14 d) prevalence of `I_shed`, poisson.
 //!
-//! What this pins TODAY (the deliverable's proof — no inference code changed):
+//! What this pins (Phase 2b opens the gate — `bind` merges the per-stream
+//! schedules to the union axis and the per-stream incidence reset scores each
+//! stream over its own cadence):
 //!   1. the model SIMULATES and `--obs-only-dir` emits one TSV per stratum leaf,
 //!      AFP on a 30-day grid and ES on a 14-day grid (two distinct cadences);
 //!   2. each source's long-form file (`time, patch, <scored>`) LOADS through the
 //!      §4.2 long-form router and scores a finite loglik (rows routed by name);
-//!   3. binding BOTH sources at once is LOUD-REJECTED — the heterogeneous-cadence
-//!      gate the multi-cadence Phase 2 will open ("must share identical
-//!      observation times"). This is the no-silent-gaps stance, verified.
-//!
-//! The recover-known-params end-to-end fit is `#[ignore]`d below — un-ignore it
-//! when multi-cadence Phase 2 opens the gate (it currently rejects, by design).
+//!   3. binding BOTH sources at once (AFP monthly + ES biweekly) now FITS — the
+//!      heterogeneous-cadence gate is open; the union axis carries both cadences
+//!      and the filter scores a finite loglik over all four stratum leaves;
+//!   4. the recover-known-params end-to-end fit (`camdl fit run` IF2 scout on the
+//!      committed multi-cadence data) recovers the well-identified transmission +
+//!      reporting params within a Monte-Carlo tolerance.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -214,15 +216,18 @@ fn simulates_two_streams_at_distinct_cadences_and_each_source_loads() {
 }
 
 #[test]
-fn binding_both_cadences_is_loud_rejected_until_phase_2() {
+fn binding_both_cadences_now_fits() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let ir = compile_model(tmp.path());
     let (afp, es) = generate_data(&bin, &ir, tmp.path());
 
-    // Property 3: AFP (monthly) + ES (biweekly) together hit the heterogeneous-
-    // cadence gate. This is the precise rejection multi-cadence Phase 2 opens
-    // (docs/dev/proposals/2026-06-10-multi-stream-multi-cadence-union-axis.md §1).
+    // Property 3 (Phase 2b — the opened gate): AFP (monthly) + ES (biweekly)
+    // bound TOGETHER now load and score. `bind` merges the two cadences to the
+    // union observation axis; the per-stream incidence reset closes each stream's
+    // bin on its own schedule. The old heterogeneous-cadence rejection ("must
+    // share identical observation times") is gone — this pins the opened gate.
+    // (proposal 2026-06-10-multi-stream-multi-cadence-union-axis.md §3.3, Phase 2b.)
     let (ok, out, err) = run_pfilter(
         &bin,
         &ir,
@@ -231,38 +236,136 @@ fn binding_both_cadences_is_loud_rejected_until_phase_2() {
             format!("--data=es={}", es.to_string_lossy()),
         ],
     );
-    assert!(!ok,
-        "two streams on different cadences must be rejected until Phase 2:\n\
+    assert!(ok,
+        "two streams on different cadences must now FIT (Phase 2b opened the gate):\n\
          stdout={out}\nstderr={err}");
-    assert!(err.contains("identical observation times"),
-        "expected the heterogeneous-cadence gate message: {err}");
+    assert!(!err.contains("identical observation times"),
+        "the heterogeneous-cadence rejection must be gone: {err}");
+    // All four stratum leaves bind (both sources, both patches).
+    assert!(
+        err.contains("afp_urban") && err.contains("afp_rural")
+            && err.contains("es_urban") && err.contains("es_rural"),
+        "all four leaves must bind from the two long-form sources: {err}");
+    let ll: f64 = out.trim().parse()
+        .unwrap_or_else(|_| panic!("multi-cadence loglik parse: {out:?}"));
+    assert!(ll.is_finite() && ll < 0.0,
+        "the merged multi-cadence loglik must be finite and negative: {ll}");
 }
 
-/// Recover-known-params end-to-end fit on the `[synthetic]` config.
+/// Read a `mle_params.toml` value by key (`<name> = <float>` lines in the
+/// leading bare-key section, before the `[provenance]` table). Returns `None`
+/// if the key is absent. (The header comment mentions "[provenance]" in prose,
+/// so we stop at the first real TOML table header line, not a substring match.)
+fn read_mle_param(mle_toml: &str, key: &str) -> Option<f64> {
+    for line in mle_toml.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() { continue; }
+        if line.starts_with('[') { break; } // first table header → end of bare keys
+        if let Some((name, val)) = line.split_once('=') {
+            if name.trim() == key {
+                return val.trim().parse::<f64>().ok();
+            }
+        }
+    }
+    None
+}
+
+/// Recover-known-params end-to-end fit — the Phase 2b proof that the
+/// heterogeneous multi-cadence path FITS, not just loads.
 ///
-/// IGNORED: the multi-cadence FIT path is being implemented separately
-/// (multi-stream multi-cadence union-axis proposal, Phase 2). `camdl fit run`
-/// on this config is currently REJECTED at the heterogeneous-cadence gate.
-/// Un-ignore when Phase 2b opens the gate; assert recovery of the transmission
-/// + reporting params within Monte-Carlo tolerance.
+/// Runs the IF2 scout (`--stage scout`) of `polio_afp_es/fit.toml` on the
+/// committed multi-cadence data (AFP monthly + ES biweekly long-form files) and
+/// asserts the fitted point estimate (`mle_params.toml`, the best chain) lands
+/// near the truth for the WELL-IDENTIFIED parameters: the two transmission rates
+/// (R0_urban, R0_rural) and the AFP reporting fraction (rho).
+///
+/// Scope + tolerance (flagged deliberately): this runs the IF2 SCOUT only (the
+/// PGAS posterior stage is the slow part and is not needed to prove the gate is
+/// open). From a SINGLE synthetic realization (gen_data.sh seed 1) the scout's
+/// likelihood surface is multimodal, so the shedding / spatial-coupling / ES
+/// parameters (delta, kappa, gamma, lambda) are only weakly identified and are
+/// NOT asserted — asserting them would be a flaky test that fails for the wrong
+/// reason. R0 (±25%) and rho (±20%) are the robustly identifiable signals; the
+/// θ̂ is content-addressed and seed-pinned, so the check is deterministic.
 #[test]
-#[ignore = "un-ignore when multi-cadence Phase 2b opens the gate"]
 fn synthetic_fit_recovers_params() {
     let bin = skip_if_missing_binary();
+    // Absolute toml path: model + data paths inside the toml resolve against the
+    // toml's own directory (gh#22), so they bind correctly regardless of CWD.
+    // `output_dir` is NOT rebased — it lands relative to CWD — so we run from a
+    // tempdir to keep `results/` out of the committed source tree.
     let fit_toml = fixture("polio_afp_es/fit.toml");
-    let out = Command::new(bin)
+    let tmp = tempfile::tempdir().unwrap();
+    let out = Command::new(&bin)
+        .current_dir(tmp.path())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        // Compile the model with the dune-built camdlc (a stale PATH camdlc
+        // predates the stratified-observation header), mirroring compile_model.
+        .env("CAMDLC", camdlc_bin())
         .args([
             "fit", "run", &fit_toml.to_string_lossy(),
+            "--stage", "scout",
             "--allow-nonconverged-scout",
         ])
         .output()
         .expect("spawn fit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "synthetic multi-cadence fit failed:\nstderr={}",
-        String::from_utf8_lossy(&out.stderr)
+        "multi-cadence IF2 scout fit failed:\nstderr={stderr}",
     );
-    // TODO(phase-2b): parse the fitted point estimates and assert |θ̂ − θ| within
-    // Monte-Carlo tolerance for R0_urban/R0_rural/kappa/gamma/delta/rho/lambda.
+    // Proof the heterogeneous union path actually ran: all four leaves bound.
+    assert!(
+        stderr.contains("4 observation streams")
+            && stderr.contains("afp_urban") && stderr.contains("es_urban"),
+        "the scout must have run over all four multi-cadence leaves:\n{stderr}",
+    );
+
+    // Locate the stored best-chain point estimate (`mle_params.toml`).
+    let mle_path = {
+        let mut found = None;
+        for entry in walk_files(&tmp.path().join("results")) {
+            if entry.file_name().is_some_and(|n| n == "mle_params.toml") {
+                found = Some(entry);
+                break;
+            }
+        }
+        found.unwrap_or_else(|| panic!(
+            "no mle_params.toml under {}/results — fit did not store a point estimate",
+            tmp.path().display()))
+    };
+    let mle = std::fs::read_to_string(&mle_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", mle_path.display()));
+
+    // Truth (../polio_afp_es_2patch.params.toml) for the well-identified params.
+    let checks = [
+        ("R0_urban", 3.0, 0.25),
+        ("R0_rural", 2.2, 0.25),
+        ("rho", 0.6, 0.20),
+    ];
+    for (name, truth, rel_tol) in checks {
+        let est = read_mle_param(&mle, name)
+            .unwrap_or_else(|| panic!("{name} missing from mle_params.toml:\n{mle}"));
+        let rel_err = (est - truth).abs() / truth;
+        assert!(
+            rel_err <= rel_tol,
+            "{name}: θ̂ = {est:.4}, truth = {truth}, rel.err = {:.1}% > tol {:.0}%\n\
+             (multi-cadence recovery — IF2 scout on the committed AFP+ES data)",
+            rel_err * 100.0, rel_tol * 100.0,
+        );
+    }
+}
+
+/// Recursively list files under `root` (depth-first). Empty if `root` is absent.
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() { stack.push(p); } else { out.push(p); }
+        }
+    }
+    out
 }

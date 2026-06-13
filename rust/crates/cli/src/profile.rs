@@ -487,7 +487,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     };
 
     let mut per_stream_obs: Vec<Vec<Observation>> = Vec::with_capacity(bound_streams.len());
-    let mut canonical_times: Option<Vec<f64>> = None;
     for (sname, spath) in &bound_streams {
         let path_str = spath.to_string_lossy().into_owned();
         // Strict by-name binding — no positional fallback (G1). The declared
@@ -514,29 +513,23 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 std::process::exit(1);
             }
         };
-        let times: Vec<f64> = stream_obs.iter().map(|o| o.time).collect();
-        match &canonical_times {
-            None => canonical_times = Some(times),
-            Some(ct) => {
-                if ct.len() != times.len()
-                    || ct.iter().zip(&times).any(|(a, b)| (a - b).abs() > 1e-9)
-                {
-                    eprintln!(
-                        "error: observation times for stream '{}' differ from \
-                         the first resolved stream. All streams in a profile \
-                         must share identical observation times.",
-                        sname,
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
         per_stream_obs.push(stream_obs);
     }
 
-    // First stream's obs vector is the canonical schedule; downstream
-    // code reads it for `obs_times` only.
-    let observations: Vec<Observation> = per_stream_obs[0].clone();
+    // Canonical schedule: the sorted-unique UNION of every stream's observation
+    // times (multi-cadence, proposal 2026-06-10 §3.3). Downstream code reads it
+    // for `obs_times` (the substep grid + the ODE-MLE / PMMH consumers); `bind`
+    // re-merges each stream's own schedule to this union and records per-stream
+    // `at_union` membership. The old "must share identical observation times"
+    // guard was the no-silent-gaps stance for machinery that did not yet exist.
+    let observations: Vec<Observation> = {
+        let mut times: Vec<f64> = per_stream_obs.iter()
+            .flat_map(|obs| obs.iter().map(|o| o.time))
+            .collect();
+        times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
+        times.dedup();
+        times.into_iter().map(|time| Observation { time, value: 0.0 }).collect()
+    };
     let observations = Arc::new(observations);
 
     let flow_indices = crate::util::resolve_flow_indices(&model, flow_name.as_deref())
@@ -797,12 +790,16 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             };
             // profile is dense + aux-free in v1 (survey denominators are a
             // `camdl fit` / `pfilter` feature; profile rejects NA upstream).
+            // Multi-cadence (§3.3): feed each stream its OWN schedule (from
+            // `stream_obs`), NOT the union `obs_times_vec`. `bind` re-merges to
+            // the union and records per-stream `at_union` membership; the dense
+            // cells have len == this stream's own obs_times.len().
             stream_specs.push(StreamSpec::dense(
                 projection,
                 (*obs).clone(),
                 sim::inference::dense_cells(
                     stream_obs.iter().map(|o| o.value).collect()),
-                obs_times_vec.clone(),
+                stream_obs.iter().map(|o| o.time).collect(),
             ));
         }
         let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
