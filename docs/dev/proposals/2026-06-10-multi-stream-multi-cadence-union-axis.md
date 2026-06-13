@@ -1,6 +1,6 @@
 ---
 date: 2026-06-10
-status: proposal — design review (no code yet)
+status: Phase 1 landed (2ea5f44c — bind() union axis + at_union); Phase 2 (per-stream reset) in design
 related:
   - 2026-06-10-observation-data-entry-dsl.md # the data-layer companion (proposal A): the DSL surface this consumes
   - 2026-06-09-burnin-conditioning-window.md # the per-stream first-bin boundary generalizes condition_from
@@ -31,13 +31,14 @@ underneath both.
 - this document end-to-end;
 - `rust/crates/sim/src/inference/multi_stream_obs.rs` — the `BoundObs` / `bind`
   / scoring types;
-- the **six per-observation flow-reset sites** (`particle_filter.rs:415`,
-  `if2.rs:559`, `correlated_pf.rs:521`, `pgas.rs:843`, `pgas.rs:1250`, and the
-  gradient path `pgas_grad.rs:456`) and the **Im5 canary** comment at
-  `particle_filter.rs:401-413`. Note `if2.rs:319` is a separate
-  **per-iteration** re-init (it zeroes accumulators when re-seeding particles
-  each IF2 iteration), **not** a per-observation reset — it stays blanket
-  (§3.4);
+- the **six per-observation flow-reset sites** (re-grounded after Phase 1 + the
+  gh#216 spine fix): `particle_filter.rs:448`, `if2.rs:587`,
+  `correlated_pf.rs:550`, `pgas.rs:884` (value), `pgas.rs:1335` (`csmc_as`), and
+  the gradient path `pgas_grad.rs:456`; the **Im5 canary** comment at
+  `particle_filter.rs:436` (the `flow_accumulators` blanket-reset note). Note
+  `if2.rs:338` is a separate **per-iteration** re-init (it zeroes accumulators
+  when re-seeding particles each IF2 iteration), **not** a per-observation reset
+  — it stays blanket (§3.4);
 - `pgas.rs::build_obs_at_substep` / `SubstepGrid`; `schedule.rs` (`Schedule`,
   `with_obs`); `time.rs::time_to_step` (the one f64→step conversion);
 - `docs/camdl-inference-spec.md` §3 (observation model).
@@ -76,17 +77,19 @@ single wide `--obs` file (different cadences cannot share one time column),
 naming the directory escape hatch (`acceptance_obs_only_dir.rs`).
 
 `camdl fit` / `pfilter` / `profile` **reject it.** The inference loaders require
-every stream to share **identical** observation times. There are **six**
-rejection sites:
+every stream to share **identical** observation times. The six original
+rejection sites — the **`bind`** one is now **resolved** (Phase 1, `2ea5f44c`:
+`bind` merges to the union); the five CLI/`survey` guards remain (Phase 2 drops
+the in-scope three atomically with the per-stream reset):
 
-| site                               | message                                               | reached by    |
-| ---------------------------------- | ----------------------------------------------------- | ------------- |
-| `multi_stream_obs.rs:439` (`bind`) | "obs_times that differ from stream 0"                 | the substrate |
-| `fit/runner.rs:356`                | "All streams must have identical observation times."  | `fit`         |
-| `pfilter.rs:209`                   | "All streams must share identical observation times." | `pfilter`     |
-| `profile.rs:516`                   | "must share identical observation times."             | `profile`     |
-| `survey.rs:760`                    | "all streams must share identical schedules."         | `survey`      |
-| `survey.rs:895`                    | "all streams must share identical schedules."         | `survey`      |
+| site                           | message                                               | reached by    | status                 |
+| ------------------------------ | ----------------------------------------------------- | ------------- | ---------------------- |
+| `multi_stream_obs.rs` (`bind`) | (was "obs_times that differ from stream 0")           | the substrate | **resolved (Phase 1)** |
+| `fit/runner.rs:397`            | "All streams must have identical observation times."  | `fit`         | Phase 2                |
+| `pfilter.rs:260`               | "All streams must share identical observation times." | `pfilter`     | Phase 2                |
+| `profile.rs:527`               | "must share identical observation times."             | `profile`     | Phase 2                |
+| `survey.rs:762`                | "all streams must share identical schedules."         | `survey`      | §9 follow-up           |
+| `survey.rs:897`                | "all streams must share identical schedules."         | `survey`      | §9 follow-up           |
 
 So a modeller can _simulate_ a polio AFP+ES model and **cannot fit the result
 back**. That asymmetry is the gap this proposal closes. The rejection is the
@@ -99,17 +102,22 @@ stays loud-rejecting** — it has its own hand-rolled loader (its two sites do n
 route through `bind`), and lifting it is a separate follow-up (§9). It is named
 here so the matrix is honestly enumerated, not silently excluded.
 
-## 2. Current architecture (why one `obs_idx` works today)
+## 2. The architecture before this lift (why one `obs_idx` worked)
+
+This section describes the **pre-multi-cadence baseline**. Phase 1 (`2ea5f44c`)
+has since added `BoundStream.at_union` and made `bind` merge to the union;
+`values` was renamed `cells`. The flow-source description below — one global
+per-transition `cum_flows` with a blanket reset — is what Phase 2 changes.
 
 ```rust
 struct BoundStream { ir_model, projection, values: Vec<Option<ObsCell>> }
 pub struct BoundObs { times: Vec<f64>, streams: Vec<BoundStream> }   // ONE shared axis
 ```
 
-`bind(streams)` checks every stream's `obs_times` equals stream 0's (an
-**exact** `Vec<f64>` comparison, `multi_stream_obs.rs:435`), then **collapses**
-them to one `times`; the invariant `values.len() == times.len()` holds for every
-stream. Scoring is keyed by a **single** `obs_idx`:
+`bind(streams)` checked every stream's `obs_times` equals stream 0's (an
+**exact** `Vec<f64>` comparison), then **collapsed** them to one `times`; the
+invariant `values.len() == times.len()` held for every stream. Scoring was keyed
+by a **single** `obs_idx`:
 
 ```rust
 fn log_likelihood_from_flows_and_counts(&self, cum_flows, counts, obs_idx, params) -> f64 {
@@ -294,9 +302,12 @@ union has to reach those consumers, or they silently keep using stream 0.
 Per the Im5 canary, the reset becomes "flow since **this stream's** last
 observation":
 
-- each `Interval` (incidence) stream carries **its own** flow accumulator over
-  the flows it projects (summed by its `FlowSum` indices), advanced every
-  substep with the dynamics;
+- each `Interval` (incidence) stream carries **its own single-`u64`
+  accumulator** — the running sum of the flows it projects. A `FlowSum`
+  projection is a plain sum over transition indices (`eval_stream_projection`,
+  `multi_stream_obs.rs:320`: `idxs.iter().map(|&i| flows[i]).sum()`), so the
+  per-bin quantity collapses to **one counter per stream**, not a per-transition
+  vector. Advanced every substep with the dynamics;
 - at a union-time where the stream is scheduled (member of its grid — value or
   hole), it is scored against its accumulator, then **its accumulator resets to
   0**;
@@ -316,12 +327,15 @@ and the baseline-desync under ancestor resampling.)
 
 The blanket per-observation reset is replaced by `reset_due_flows(...)` — reset
 exactly the incidence streams scheduled at the current union-index — at **all
-six per-observation reset sites**: `particle_filter.rs:415`, `if2.rs:559`,
-`correlated_pf.rs:521`, `pgas.rs:843` (value), `pgas.rs:1250` (csmc_as), and
-`pgas_grad.rs:456` (gradient). `TemporalKind` gates it (only `Interval` streams
-accumulate and reset). For the homogeneous case (every stream scheduled at every
-union-index) this reproduces today's blanket reset exactly — the
-**bit-identical-homogeneous test** (§7) is the guard. `if2.rs:319` stays
+six per-observation reset sites** (re-grounded after multi-cadence Phase 1 + the
+gh#216 spine fix, which moved these): `particle_filter.rs:448`, `if2.rs:587`,
+`correlated_pf.rs:550`, `pgas.rs:884` (value path `cum_flows.fill(0)`),
+`pgas.rs:1335` (`csmc_as` per-particle `for f in &mut
+cum_flows[j] { *f = 0 }`),
+and `pgas_grad.rs:456` (gradient). `TemporalKind` gates it (only `Interval`
+streams accumulate and reset). For the homogeneous case (every stream scheduled
+at every union-index) this reproduces today's blanket reset exactly — the
+**bit-identical-homogeneous test** (§7) is the guard. `if2.rs:338` stays
 blanket: it is a per-iteration re-init, not a per-observation reset, and turning
 it into `reset_due_flows` would leave stale flow in particles across iterations.
 
@@ -334,38 +348,68 @@ computation (`at_union[union_idx]` → which streams' flow indices are due). Thi
 is the existing natural seam the codebase already lives with (`log_likelihood`
 delegates to `log_likelihood_from_flows_and_counts`).
 
-**Storage.** The added per-particle storage is
-**`O(particles × Σ_s |flows(s)|)`** — particles times the total flow-count
-summed over incidence streams. This is usually **smaller** than today's single
-accumulator, which is sized by **all** model transitions
-(`flow_accumulators: vec![0; n_transitions]`): a model with waning, importation,
-etc. stores flows no stream projects, whereas the per-stream design stores only
-projected flows. The only way it can _exceed_ today is **overlap** — a flow
-projected by `m` streams is stored `m` times (a national rollup over per-LGA
-flows is the worst case, each LGA flow stored twice).
+**`step_one` is shared — fold via a scratch delta, don't change it.** The
+substep kernel `step_one` (`chain_binomial.rs:333`) is called by **both** the
+forward simulation and the inference filters, and it _accumulates_
+per-transition flows in place: `flows[tr_idx] += count`
+(`chain_binomial.rs:479`/`:496`). Its semantics must not change — the forward
+path relies on the cumulative per-transition tally for trajectory output. So the
+inference filter passes `step_one` a **per-substep-zeroed scratch delta buffer**
+(a per-transition `Vec<u64>` in `StepScratch`), then, after `step_one` returns,
+folds that delta into each `Interval` stream's running sum:
+`for s in interval_streams: acc[s] += Σ_{i ∈ flows(s)} delta[i]`. The fold
+attaches where the filter currently hands `step_one` the state accumulator —
+`chain_binomial_process.rs:114` (PF / IF2 / correlated-PF) and the PGAS
+per-substep `cum_flows[i] += f` sites (`pgas.rs:861` value, `pgas.rs:1324`
+`csmc_as`). `ParticleState.flow_accumulators: Vec<u64>` (per-transition,
+`types.rs:240`) is **replaced** by `acc: Vec<u64>` (one per `Interval` stream);
+PGAS's bare `cum_flows: Vec<u64>` / `Vec<Vec<u64>>` become per-stream the same
+way. Resampling copies the per-stream `acc` with the particle exactly where it
+copies `flow_accumulators` today (`particle_filter.rs:416`, `if2.rs:580`,
+`pgas.rs:1196`).
 
-**Per-substep cost.** Beyond storage, each substep must now fold the global
-flows into each stream's accumulator — an added `O(Σ_s |flows(s)|)` work per
-particle per substep (a _time_ axis, distinct from memory). §7's scaling test
-bounds both.
+**Storage.** With the single-`u64`-per-stream accumulator, the added
+per-particle storage is **`O(particles × n_interval_streams)`** — one counter
+per incidence stream, far smaller than today's `vec![0; n_transitions]` (which
+stores a counter for _every_ model transition, including ones no stream
+projects). The earlier per-index sketch (`O(particles × Σ_s |flows(s)|)`) is
+unnecessary: `FlowSum` is a sum, so the per-bin value is one number, not a
+per-transition vector.
+
+**Per-substep cost.** The _fold_ (not the storage) is the `O(Σ_s |flows(s)|)`
+work per particle per substep — summing each stream's projected flows out of the
+delta. This is the one place **overlap** bites: a flow projected by `m` streams
+is summed `m` times (a national rollup over per-LGA flows is the worst case).
+§7's scaling test bounds it at the 774-LGA scale.
 
 **Honest scope: this is not "six reset calls."** The per-stream accumulator
-changes `ParticleState` (it gains per-stream accumulators), the per-substep
-accumulation loop, the scoring-seam signature (§3.5), and the `mean`/`sample`
-emission paths. It is the bulk of the work; the reset call sites are the small
-part.
+changes `ParticleState` (replaces `flow_accumulators` with per-stream `acc`),
+adds the per-substep fold + the `StepScratch` delta buffer, forks the projection
+read (§3.5), changes the scoring-seam signature (§3.5), and reworks the
+`mean`/`sample` emission paths. It is the bulk of the work; the reset call sites
+are the small part.
 
 ### 3.5 Scoring and emission generalize
 
-- `log_likelihood_from_flows_and_counts` no longer takes one global
-  `cum_flows: &[u64]` (`multi_stream_obs.rs:593`); it reads **per-stream
-  accumulators**, projecting each stream from its own (today every stream
-  projects from the single slice at `:613`). It skips any stream not scheduled
-  at the union-index (`at_union[union_idx] == None`); holes omit the term;
-  prevalence projects state directly.
-- `sample` and `mean` (`multi_stream_obs.rs:708` / `:730`) project incidence
-  from the same per-stream accumulators — the identical rework, not just the
-  loglik path.
+- The union-index skip and hole-omission already **landed in Phase 1**: the four
+  scoring seams (`log_likelihood_from_flows_and_counts`, the gradient path,
+  `sample`, `mean`) resolve the union index through `at_union[union_idx]` and
+  omit not-scheduled / hole terms. Phase 2's change is the **flow source**.
+- **The projection read forks.** Today every incidence stream projects from one
+  global per-transition slice via `eval_stream_projection`'s `FlowSum` arm
+  (`Σ_{i ∈ idxs} flows[i]`, `multi_stream_obs.rs:320`). After Phase 2, the
+  **inference** scoring reads each stream's **own accumulator directly** (it is
+  already the summed incidence — no `idxs` fold at score time), so
+  `log_likelihood_from_flows_and_counts` / `_grad` no longer take a global
+  `cum_flows: &[u64]`; they read the per-stream `acc`. The **forward / CLI
+  synthetic-obs** path (`main.rs::project_all_obs_times`) keeps
+  `eval_stream_projection`'s `Σ`-over-idxs on the global per-transition buffer
+  with its "delta between consecutive obs times" convention — it has no
+  per-stream accumulators and does not reset per cadence. This fork is the real
+  scoring-seam surgery; `prevalence` (`Instant`) is unaffected (it projects
+  state directly, never touches flows).
+- `sample` and `mean` project incidence from the same per-stream accumulators —
+  the identical rework, not just the loglik path.
 - `build_obs_at_substep` / `SubstepGrid` map `substep → union_idx` over the
   union axis; `at_union` then selects who is due. The snap/exact alignment and
   collision diagnostics are unchanged — they already operate on a time list (now
@@ -474,16 +518,26 @@ is self-contained and recover-known-params.
 
 ## 8. Implementation phases
 
-1. **Types + `bind()` merge + CLI plumbing** (§3.1–3.3) —
-   `BoundStream.at_union`, union `times` on step indices, remove the homogeneous
-   rejection; `ObsStream` per-stream times; the canonical vector becomes the
-   union; the in-scope CLI loaders (`runner.rs`, `pfilter.rs`, `profile.rs`)
-   drop their identical-times checks. Tests 2, 3.
-2. **Per-stream reset** (§3.4–3.5) — per-stream accumulators in `ParticleState`;
-   the per-substep accumulation loop; `reset_due_flows` (two forms) at the six
-   sites incl. `pgas_grad.rs:456` in lockstep with `pgas.rs:843`; the
-   scoring-seam signature and `mean`/`sample` rework. Tests 1, 3, 6.
-   Highest-risk.
+1. **`bind()` merge + scoring substrate** (§3.1–3.2) — **LANDED `2ea5f44c`.**
+   `BoundStream.at_union`, union `times` on exact-f64 identity, the "must equal
+   stream 0" rejection removed; the four scoring seams resolve the union index
+   through `at_union`. Tests: `bind_merges_heterogeneous_schedules` (the
+   inverted reject test) + the homogeneous happy-path `at_union` assertion; the
+   existing suite is the bit-identical-homogeneous guard. **Deliberately NOT in
+   Phase 1:** the CLI loaders (`runner.rs`, `pfilter.rs`, `profile.rs`) **keep**
+   their identical-times guards, so heterogeneous fits stay loud-rejected
+   END-TO-END. Removing the CLI checks without the per-stream reset (Phase 2)
+   would open a silent-wrong window — the blanket reset corrupting incidence
+   bins across cadences. The merge is exercised by the unit test only.
+2. **Per-stream reset + open the gate** (§3.3–3.5) — the highest-risk piece.
+   Replace `ParticleState.flow_accumulators` with per-stream `acc`; the
+   `StepScratch` delta buffer + the per-substep fold (`step_one` unchanged); the
+   projection-read fork; `reset_due_flows` (two forms) at the six sites incl.
+   `pgas_grad.rs:456` in lockstep with `pgas.rs:884`; the scoring-seam signature
+   and `mean`/`sample` rework. **Atomically** with the reset: the CLI plumbing
+   (§3.3 — feed each stream its own times, union becomes canonical, **drop** the
+   identical-times guards), so heterogeneous opens end-to-end exactly when it
+   becomes correct. Tests 1, 3, 6.
 3. **Per-stream first bin** (§3.1) — the leading reset at
    `max(t_start, first_obs_s − every_s)`; irregular via `condition_from`; the
    `W329` disposition (retire/repurpose for incidence, called out explicitly).
