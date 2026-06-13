@@ -293,7 +293,7 @@ impl StreamProjection {
 
 /// Evaluate a pre-resolved [`StreamProjection`] at a single snapshot
 /// of (flows, counts, params). Shared between the in-sim scoring path
-/// (`MultiStreamObsModel::project_stream_with_params`) and the CLI's
+/// (`MultiStreamObsModel::project_stream_from_acc`) and the CLI's
 /// synthetic-obs emission path (`main.rs::project_all_obs_times`).
 ///
 /// For `FlowSum`, `flows` holds per-transition cumulative counters
