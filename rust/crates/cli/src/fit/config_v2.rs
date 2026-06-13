@@ -2131,6 +2131,23 @@ impl FitConfigV2 {
                     return Err(format!("stage '{}': {}", stage_name, msg));
                 }
             }
+            // condition_from + ic_free are mutually exclusive. The conditioning
+            // warm-up REPLACES the first observation with a reset-only leading
+            // hole, leaving ic_free nothing real to condition the initial state
+            // on. This must be rejected EXPLICITLY here: the runtime "nothing to
+            // condition on" guard fires only when EVERY stream's first cell is a
+            // hole (`.all()`), which a PER-STREAM `condition_from` (holing one
+            // stream of several) does not satisfy — so relying on that guard lets
+            // a multi-stream config slip through and silently condition on the
+            // warm-up boundary instead of a real y₁.
+            if self.condition_from.is_some() {
+                return Err(
+                    "condition_from and ic_free cannot be combined: the \
+                     conditioning warm-up replaces the first observation with a \
+                     reset-only boundary (a leading hole), leaving ic_free nothing \
+                     real to condition the initial state on. Use one or the other."
+                        .into());
+            }
         }
 
         // IF2 stages require at least one iteration — zero iterations would
@@ -3390,6 +3407,44 @@ cooling = 0.9
             "error should call out mutual exclusion: {}", err);
         assert!(err.contains("file") && err.contains("observations"),
             "error should name both forms: {}", err);
+    }
+
+    #[test]
+    fn condition_from_with_ic_free_is_rejected() {
+        // condition_from inserts a leading reset-only hole that REPLACES y₁;
+        // ic_free needs a real y₁ to condition the initial state on. Setting
+        // both must be rejected EXPLICITLY at config-load — not left to the
+        // runtime "nothing to condition on" guard, which fires only when EVERY
+        // stream's first cell is a hole (`.all()`) and so misses a PER-STREAM
+        // `condition_from` that holes only one stream.
+        let cfg = parse(r#"
+ic_free = true
+condition_from = "first_obs - 1 week"
+
+[model]
+camdl = "models/sir.camdl"
+
+[data.observations]
+weekly_cases = "data/cases.tsv"
+
+[estimate]
+beta = { bounds = [0.01, 2.0], ivp = true }
+
+[fixed]
+N0 = 1000
+
+[stages.scout]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 4
+particles = 500
+iterations = 30
+cooling = 0.9
+        "#).unwrap();
+
+        let err = cfg.validate(&["beta".into(), "N0".into()]).unwrap_err();
+        assert!(err.contains("condition_from") && err.contains("ic_free"),
+            "error should name both condition_from and ic_free: {}", err);
     }
 
     #[test]
