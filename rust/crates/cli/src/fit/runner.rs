@@ -468,7 +468,7 @@ impl FitRunConfig {
                     Some(raw) => {
                         // Explicit conditioning for this stream. Resolve against
                         // ITS first obs + validate ∈ [t_start, first_obs_s).
-                        if let Some(cond_from) = resolve_condition_from(
+                        match resolve_condition_from(
                             raw,
                             first_obs_s,
                             t_start,
@@ -476,20 +476,53 @@ impl FitRunConfig {
                             &model.time_unit,
                             dt,
                         ).map_err(|e| format!("stream '{}': {e}", s.name))? {
-                            eprintln!(
-                                "  \x1b[36mconditioning window:\x1b[0m stream \
-                                 '{}': warm-up [{t_start}, {cond_from}) simulated \
-                                 but not scored; first scored bin is \
-                                 ({cond_from}, {first_obs_s}]",
-                                s.name
-                            );
-                            // Prepend the per-stream leading reset-only hole. The
-                            // `cells` are authoritative for scoring; the `data`
-                            // row's value (0.0) is a never-read placeholder.
-                            s.data.insert(0, Observation { time: cond_from, value: 0.0 });
-                            s.cells.insert(0, None);
-                            s.aux.insert(0, Vec::new());
-                            union_inserts.push(cond_from);
+                            Some(cond_from) => {
+                                eprintln!(
+                                    "  \x1b[36mconditioning window:\x1b[0m stream \
+                                     '{}': warm-up [{t_start}, {cond_from}) simulated \
+                                     but not scored; first scored bin is \
+                                     ({cond_from}, {first_obs_s}]",
+                                    s.name
+                                );
+                                // Prepend the per-stream leading reset-only hole.
+                                // The `cells` are authoritative for scoring; the
+                                // `data` row's value (0.0) is a never-read
+                                // placeholder.
+                                s.data.insert(0, Observation { time: cond_from, value: 0.0 });
+                                s.cells.insert(0, None);
+                                s.aux.insert(0, Vec::new());
+                                union_inserts.push(cond_from);
+                            }
+                            None => {
+                                // cond_from == t_start: the user explicitly set
+                                // conditioning to the model origin — the documented
+                                // "score the whole leading window" opt-in. No
+                                // warm-up is discarded; the first bin is the full
+                                // (t_start, first_obs_s]. This is the deliberate
+                                // escape hatch out of W329, NOT a no-op to hide: on
+                                // a WIDE incidence window (the gh#134 shape) say so
+                                // loudly so the choice is visible, not silent.
+                                if kind == TemporalKind::Interval {
+                                    let obs_times: Vec<f64> =
+                                        s.data.iter().map(|o| o.time).collect();
+                                    if let Some(anomaly) =
+                                        crate::util::check_first_interval_window(t_start, &obs_times)
+                                    {
+                                        eprintln!(
+                                            "  \x1b[36mconditioning window:\x1b[0m \
+                                             incidence stream '{name}': condition_from \
+                                             resolves to the model origin (t_start = \
+                                             {t_start}) — scoring the FULL \
+                                             {window}-{unit} leading window against the \
+                                             first datum, no warm-up discarded (the \
+                                             gh#134 wide window, opted into explicitly).",
+                                            name = s.name,
+                                            window = fmt_span(anomaly.first_window),
+                                            unit = cadence_word(&model.time_unit),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     None => {
@@ -515,10 +548,9 @@ impl FitRunConfig {
                                          {window}-{unit} first window against a \
                                          ~{cadence}-{unit} cadence; the first \
                                          datum cannot constrain that whole span. \
-                                         State the conditioning window: \
-                                         condition_from.{label} = first_obs - 1 \
-                                         'week  (or a longer warm-up to \
-                                         discard).",
+                                         State the conditioning window, e.g. \
+                                         `condition_from.{label} = \"first_obs - 1 week\"` \
+                                         (or a longer warm-up to discard).",
                                         name = s.name,
                                         window = fmt_span(anomaly.first_window),
                                         cadence = fmt_span(anomaly.modal_gap),
