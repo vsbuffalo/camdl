@@ -509,6 +509,22 @@ impl BoundObs {
                     ),
                 });
             }
+            // Non-finite times (NaN / ±inf) must be rejected here: the union
+            // merge sorts the times, and `NaN.partial_cmp` is `None`, which
+            // would panic the sort. (The CLI time-column parser also guards
+            // this at the source with a located message; this is the
+            // defense-in-depth so `bind` never panics on garbage input.)
+            if let Some(bad) = spec.obs_times.iter().find(|t| !t.is_finite()) {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "observation stream '{}' has a non-finite observation time \
+                         ({}); times must be finite — NaN and infinities are not valid \
+                         observation times. Fix or remove the offending data row.",
+                        spec.ir_model.name, bad
+                    ),
+                });
+            }
             // (3) gh#188: each stream's own observation times must be strictly
             // increasing.
             if let Some(w) = spec.obs_times.windows(2).find(|w| w[1] <= w[0]) {
@@ -639,7 +655,10 @@ impl BoundObs {
         // used). A homogeneous model yields a union equal to the shared axis.
         let mut times: Vec<f64> =
             streams.iter().flat_map(|s| s.obs_times.iter().copied()).collect();
-        times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
+        // Finiteness is enforced by the per-stream validation above (a
+        // non-finite time is a fatal finding → early return before this sort),
+        // so `partial_cmp` never returns `None` here.
+        times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite (checked above)"));
         times.dedup();
 
         // Each stream keeps its own schedule; `at_union` records, per union
@@ -1144,6 +1163,32 @@ mod bind_tests {
             "out-of-order observation times must be rejected",
         );
         assert!(oo.is_fatal());
+    }
+
+    #[test]
+    fn non_finite_obs_time_is_fatal_not_a_panic() {
+        // A NaN/inf time token must produce a located fatal finding, not a
+        // panic. The union merge sorts the times; `NaN.partial_cmp` is `None`,
+        // which would `.expect`-panic at the sort if bind did not reject
+        // non-finite times first.
+        let nan = expect_fatal(
+            BoundObs::bind(vec![spec(
+                "cases", vec![1.0, f64::NAN, 3.0], vec![0.0, 0.0, 0.0],
+            )]),
+            "a NaN observation time must be rejected, not panic",
+        );
+        assert!(nan.is_fatal());
+        assert!(nan.findings().iter().any(|f|
+            f.message.contains("finite") && f.message.contains("cases")),
+            "message must name the stream and the rule: {:?}", nan.findings());
+
+        let inf = expect_fatal(
+            BoundObs::bind(vec![spec(
+                "cases", vec![1.0, f64::INFINITY], vec![0.0, 0.0],
+            )]),
+            "an infinite observation time must be rejected",
+        );
+        assert!(inf.is_fatal());
     }
 
     #[test]

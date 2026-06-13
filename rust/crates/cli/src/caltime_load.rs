@@ -199,6 +199,18 @@ pub fn convert_time_column(
                         }
                     )
                 })?;
+                // Rust's f64 parser accepts "NaN"/"inf"/"-inf" — reject them:
+                // a non-finite time is not a valid observation instant (and
+                // would later panic the union-axis sort in `bind`).
+                if !v.is_finite() {
+                    return Err(format!(
+                        "line {}: time '{}' is not a finite number — NaN and \
+                         infinities are not valid observation times. Fix or \
+                         remove the row.",
+                        row_offset + i,
+                        c.trim(),
+                    ));
+                }
                 out.push(v);
             }
             Ok(out)
@@ -324,6 +336,24 @@ mod tests {
         let o = opts_days(None);
         let t = convert_time_column(&cells, &o, 2).unwrap();
         assert_eq!(t, vec![0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn non_finite_numeric_time_is_a_located_error() {
+        // Rust's f64 parser accepts these as Ok(non-finite); they must be
+        // rejected with a located message (not flow downstream to panic the
+        // union-axis sort in bind).
+        let o = opts_days(None);
+        for (cells, tok) in [
+            (["0", "NaN", "2"], "NaN"),
+            (["0", "inf", "2"], "inf"),
+            (["0", "-inf", "2"], "-inf"),
+        ] {
+            let err = convert_time_column(&cells, &o, 2).unwrap_err();
+            assert!(err.contains("finite"), "must name the rule: {err}");
+            assert!(err.contains("line 3"), "must locate the row: {err}");
+            assert!(err.contains(tok), "must echo the token: {err}");
+        }
     }
 
     #[test]
