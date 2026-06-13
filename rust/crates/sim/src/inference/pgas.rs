@@ -744,8 +744,11 @@ pub fn complete_data_loglik(
         });
     }
 
-    // Cumulative flows since last observation (for projection)
+    // Cumulative flows since last observation (per-transition tally; UNCHANGED
+    // lifecycle). Phase 2a adds the per-Interval-stream persistent `acc` bin,
+    // folded once per observation interval and reset per-stream.
     let mut cum_flows = vec![0u64; n_tr];
+    let mut acc = vec![0u64; obs_model.n_interval_streams()];
     let t_start = model.model.simulation.t_start;
     // Exact-tiling invariant (debug): the realized (t0, dt_substep) records
     // partition the run contiguously, each duration in (0, dt]. This is the
@@ -865,8 +868,12 @@ pub fn complete_data_loglik(
         // projections read post-step state (after step_one fired any
         // scheduled intervention at t+dt).
         if let Some(&obs_idx) = obs_at_substep.get(&s) {
+            // FOLD (Phase 2a): close this interval's per-transition `cum_flows`
+            // into each Interval stream's persistent `acc` bin BEFORE scoring;
+            // score reads the per-stream `acc`.
+            obs_model.fold_into_acc(&cum_flows, &mut acc);
             let obs_ll = obs_model.log_likelihood_from_flows_and_counts(
-                &cum_flows, &rec.counts_after, obs_idx, params);
+                &acc, &rec.counts_after, obs_idx, params);
             if !obs_ll.is_finite() {
                 log::debug!("complete_data_loglik: obs density -inf at substep {} (obs_idx={})", s, obs_idx);
             }
@@ -881,7 +888,10 @@ pub fn complete_data_loglik(
                     ivp: ivp_ll,
                 });
             }
+            // `cum_flows` blanket-zeroed (unchanged); the per-stream `acc` bins
+            // per-stream — only Interval streams scheduled at THIS union index.
             cum_flows.fill(0);
+            obs_model.reset_due_acc(obs_idx, &mut acc);
         }
     }
 
@@ -1115,9 +1125,16 @@ pub fn csmc_as(
         .map(|_| crate::state::RealState::new(n_real))
         .collect();
 
-    // Cumulative flows since last observation (for projection)
+    // Cumulative flows since last observation (per-transition tally; UNCHANGED
+    // lifecycle). Phase 2a adds the per-particle per-Interval-stream persistent
+    // `acc` bin, folded once per observation interval and reset per-stream. It
+    // travels with the particle at resampling exactly like `cum_flows`.
     let mut cum_flows: Vec<Vec<u64>> = (0..n_particles)
         .map(|_| vec![0u64; n_tr])
+        .collect();
+    let n_acc = obs_model.n_interval_streams();
+    let mut acc: Vec<Vec<u64>> = (0..n_particles)
+        .map(|_| vec![0u64; n_acc])
         .collect();
 
     // Store initial counts per particle BEFORE propagation (for traceback).
@@ -1190,17 +1207,24 @@ pub fn csmc_as(
             // Apply resampling to free particles (not reference)
             let mut new_counts = Vec::with_capacity(n_particles);
             let mut new_cum_flows = Vec::with_capacity(n_particles);
+            // Phase 2a: the per-stream `acc` bins travel with the particle,
+            // following EXACTLY the `cum_flows` resampling (reference kept,
+            // free particles take their ancestor's bins).
+            let mut new_acc = Vec::with_capacity(n_particles);
             for j in 0..n_particles {
                 if j == j_ref {
                     new_counts.push(counts[j_ref].clone());
                     new_cum_flows.push(cum_flows[j_ref].clone());
+                    new_acc.push(acc[j_ref].clone());
                 } else {
                     new_counts.push(counts[indices[j]].clone());
                     new_cum_flows.push(cum_flows[indices[j]].clone());
+                    new_acc.push(acc[indices[j]].clone());
                 }
             }
             counts = new_counts;
             cum_flows = new_cum_flows;
+            acc = new_acc;
             substep_ancestors = indices;
         }
 
@@ -1328,11 +1352,18 @@ pub fn csmc_as(
         // ── 5. Compute weights — joint across all streams ──
         if let Some(&obs_idx) = obs_at_substep.get(&s) {
             for j in 0..n_particles {
+                // FOLD (Phase 2a): close this interval's per-transition
+                // `cum_flows[j]` into the per-stream `acc[j]` BEFORE scoring.
+                obs_model.fold_into_acc(&cum_flows[j], &mut acc[j]);
                 log_weights[j] = obs_model.log_likelihood_from_flows_and_counts(
-                    &cum_flows[j], &counts[j], obs_idx, params);
+                    &acc[j], &counts[j], obs_idx, params);
             }
             for j in 0..n_particles {
+                // `cum_flows[j]` blanket-zeroed (unchanged); the per-stream
+                // `acc[j]` bins per-stream — only Interval streams scheduled at
+                // THIS union index zero.
                 for f in &mut cum_flows[j] { *f = 0; }
+                obs_model.reset_due_acc(obs_idx, &mut acc[j]);
             }
         } else {
             // Non-observation substep: uniform weights

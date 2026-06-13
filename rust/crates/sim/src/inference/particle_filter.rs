@@ -100,10 +100,18 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     let n_obs = obs_model.n_observations();
     let n_int = process.n_compartments();
     let n_tr = process.n_transitions();
+    // Per-Interval-stream `acc` bins (multi-cadence Phase 2a): one `u64` per
+    // incidence stream, sized from the OBS model (the process does not know it).
+    let n_acc = obs_model.n_interval_streams();
 
-    // Initialize particles from model init
-    let init = process.initial_state(params)?;
-    let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr);
+    // Initialize particles from model init. The process sizes `acc` to 0 (it
+    // does not know `n_interval_streams`); resize the init state's `acc` to
+    // `n_acc` so the `has_predictions` probe (`obs_model.mean(&init, …)`, which
+    // projects `acc[k]`) does not index out of bounds. Swarm states are sized
+    // by `ParticleSwarm::new`.
+    let mut init = process.initial_state(params)?;
+    init.acc.resize(n_acc, 0);
+    let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr, n_acc);
     for p in &mut swarm.states {
         p.counts.copy_from_slice(&init.counts);
     }
@@ -120,7 +128,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
 
     // Double-buffer for resampling (avoids clone allocation)
     let mut states_buf: Vec<ParticleState> = (0..n_particles)
-        .map(|_| ParticleState::new(n_int, n_tr))
+        .map(|_| ParticleState::new(n_int, n_tr, n_acc))
         .collect();
 
     // Per-particle scratch buffers (allocated once, reused across all steps)
@@ -296,6 +304,17 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         }
         t = schedule.window_end(cur, t);
 
+        // FOLD (multi-cadence Phase 2a, "Option Z"): close this interval's flow
+        // into each Interval stream's persistent `acc` bin, ONCE per
+        // observation (serial — NOT inside the per-substep par_iter above). The
+        // `flow_accumulators` tally is left untouched (blanket-zeroed only at
+        // the per-obs reset below, exactly as before). Every reader of `acc`
+        // downstream this iteration (predictions via `mean`/`sample`, the gh#48
+        // capture, scoring) sees the just-folded bin.
+        for state in &mut swarm.states {
+            obs_model.fold_into_acc(&state.flow_accumulators, &mut state.acc);
+        }
+
         // Prediction diagnostics
         if has_predictions {
             let means: Vec<f64> = swarm.states.iter()
@@ -414,6 +433,10 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         for (i, &src) in indices.iter().enumerate() {
             states_buf[i].counts.copy_from_slice(&swarm.states[src].counts);
             states_buf[i].flow_accumulators.copy_from_slice(&swarm.states[src].flow_accumulators);
+            // Phase 2a: the per-stream `acc` bins travel with the particle, so
+            // an ancestor swap carries the right partial bins for streams not
+            // observed at this union index.
+            states_buf[i].acc.copy_from_slice(&swarm.states[src].acc);
         }
         std::mem::swap(&mut swarm.states, &mut states_buf);
 
@@ -444,8 +467,17 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // per-stream observation" at different cadences per stream,
         // this reset needs to become per-flow and indexed by which
         // stream last observed. Keep this comment as the canary.
+        //
+        // Phase 2a (the feature the canary predicted): `flow_accumulators` is
+        // STILL blanket-reset here (its lifecycle unchanged); the per-stream
+        // `acc` bins are reset SEPARATELY and per-stream — only the Interval
+        // streams scheduled at THIS union index (`at_union[obs_idx].is_some()`)
+        // zero, so a sibling on a different cadence keeps its running bin.
+        // Homogeneous (every stream scheduled every interval) ⇒ every `acc`
+        // zeroes every interval ⇒ identical to the blanket reset.
         for state in &mut swarm.states {
             state.reset_flows();
+            obs_model.reset_due_acc(obs_idx, &mut state.acc);
         }
 
         // Reset weights

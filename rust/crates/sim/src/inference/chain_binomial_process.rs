@@ -63,8 +63,13 @@ impl ProcessModel for ChainBinomialProcess {
 
     fn initial_state(&self, params: &[f64]) -> Result<ParticleState, SimError> {
         let (init_int, _) = self.compiled.initial_state(params)?;
+        // `acc` sized 0 here: the process does not know `n_interval_streams`
+        // (the obs model owns it). The filter copies only `init.counts` into the
+        // swarm and allocates each swarm state's `acc` sized from
+        // `obs_model.n_interval_streams()`, so this init state's `acc` is never
+        // read.
         let mut state = ParticleState::new(
-            self.n_compartments(), self.n_transitions(),
+            self.n_compartments(), self.n_transitions(), 0,
         );
         state.counts.copy_from_slice(&init_int.counts);
         Ok(state)

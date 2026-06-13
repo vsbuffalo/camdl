@@ -127,9 +127,13 @@ fn obs_likelihood_uses_observation_time_not_zero() {
     let obs_m = time_varying_obs(&compiled, vec![10.0, 20.0], vec![11.0, 11.0]);
 
     // State is identical for both; projection value is unused by `rate = t + 1`.
-    let mut state = ParticleState::new(compiled.int_local_to_global.len(), 1);
+    // One `FlowSum` stream ⇒ one `acc` slot; the trait scoring reads `acc[0]`.
+    // (The rate ignores `projected`, so the value is immaterial — but `acc` must
+    // be sized for the single Interval stream.)
+    let mut state = ParticleState::new(compiled.int_local_to_global.len(), 1, 1);
     state.counts[0] = 100;
     state.flow_accumulators[0] = 5;
+    state.acc[0] = 5;
 
     let ll0 = obs_m.log_likelihood(&state, 0, &params); // t = 10 → rate = 11
     let ll1 = obs_m.log_likelihood(&state, 1, &params); // t = 20 → rate = 21

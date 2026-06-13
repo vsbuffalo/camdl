@@ -142,7 +142,7 @@ fn current_pop_sum_from_ir_resolves_stratified_compartments() {
     ).expect("CurrentPopSum over declared compartments must resolve");
 
     // Build a state and verify the projection sums E_e1 + E_e2 + E_e3 = 20.
-    let mut state = ParticleState::new(5, 0);
+    let mut state = ParticleState::new(5, 0, 0);
     state.counts[0] = 900;
     state.counts[1] = 10;
     state.counts[2] = 7;
@@ -163,7 +163,7 @@ fn current_pop_sum_from_ir_resolves_stratified_compartments() {
     let ll_at_truth = obs_model.log_likelihood(&state, 0, &params);
     assert!(ll_at_truth.is_finite(), "log-lik must be finite: {}", ll_at_truth);
     // Sanity: a state where only E_e1 is nonzero scores worse.
-    let mut state_skewed = ParticleState::new(5, 0);
+    let mut state_skewed = ParticleState::new(5, 0, 0);
     state_skewed.counts[1] = 20;
     let ll_skewed = obs_model.log_likelihood(&state_skewed, 0, &params);
     assert!((ll_at_truth - ll_skewed).abs() < 1e-9,
@@ -214,7 +214,7 @@ fn prevalence_projection_reads_compartment_count() {
     let params = compiled.default_params.clone();
 
     // Fabricate a particle state with S=100, I=42.
-    let mut state = ParticleState::new(2, 0);
+    let mut state = ParticleState::new(2, 0, 0);
     // Local int order follows declaration order: S=0, I=1.
     state.counts[0] = 100;
     state.counts[1] = 42;
@@ -270,7 +270,7 @@ fn derived_expr_matches_comp_sum() {
     let compiled_sum = Arc::new(CompiledModel::new(model_sum).unwrap());
     let params = compiled_expr.default_params.clone();
 
-    let mut state = ParticleState::new(2, 0);
+    let mut state = ParticleState::new(2, 0, 0);
     state.counts[0] = 13;
     state.counts[1] = 27;
 
@@ -414,9 +414,11 @@ fn snapshot_reads_post_intervention_state() {
         compiled.clone(),
     ).unwrap();
 
-    let cum_flows = vec![0u64; compiled.model.transitions.len()];
+    // Prevalence (`CurrentPop`) stream + no transitions ⇒ no `Interval` slot,
+    // so the per-stream `acc` bin vector is empty; scoring reads `counts`.
+    let acc: Vec<u64> = vec![];
     let ll_at_post = obs_model.log_likelihood_from_flows_and_counts(
-        &cum_flows, &counts, 0, &params,
+        &acc, &counts, 0, &params,
     );
     // Compare to "if the snapshot had read pre-intervention state": hand
     // in counts [1000, 0] and score the same observation (500). Poisson
@@ -424,7 +426,7 @@ fn snapshot_reads_post_intervention_state() {
     // (observed=500, rate=500), so this strongly dominates.
     let pre_counts = vec![1000i64, 0i64];
     let ll_at_pre = obs_model.log_likelihood_from_flows_and_counts(
-        &cum_flows, &pre_counts, 0, &params,
+        &acc, &pre_counts, 0, &params,
     );
 
     assert!(ll_at_post.is_finite());

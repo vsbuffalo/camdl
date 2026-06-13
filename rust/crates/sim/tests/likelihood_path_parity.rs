@@ -145,14 +145,21 @@ fn pf_and_pgas_likelihood_paths_agree() {
     let flows  = vec![7u64];            // a non-empty flow vector (recovery)
     let params = compiled.default_params.clone();
 
-    let state = ParticleState { counts: counts.clone(), flow_accumulators: flows.clone() };
+    // Prevalence stream (`IntCompSum` over I) ⇒ no `Interval` slot, so `acc` is
+    // empty; both paths score from `counts`. `flow_accumulators` is kept
+    // populated to prove neither path reads it for a prevalence projection.
+    let state = ParticleState {
+        counts: counts.clone(),
+        flow_accumulators: flows.clone(),
+        acc: vec![],
+    };
 
     for obs_idx in 0..2 {
-        // PF/IF2/PMMH path (trait):
+        // PF/IF2/PMMH path (trait), reads `state.acc`:
         let via_state = obs_model.log_likelihood(&state, obs_idx, &params);
-        // PGAS path (flat arrays):
+        // PGAS path (flat arrays), takes the per-stream `acc` (empty here):
         let via_flat =
-            obs_model.log_likelihood_from_flows_and_counts(&flows, &counts, obs_idx, &params);
+            obs_model.log_likelihood_from_flows_and_counts(&[], &counts, obs_idx, &params);
 
         assert!(via_state.is_finite(),
             "obs {obs_idx}: trait path must be finite, got {via_state}");

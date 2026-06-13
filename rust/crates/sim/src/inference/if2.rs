@@ -232,6 +232,9 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     let n_int = process.n_compartments();
     let n_tr = process.n_transitions();
     let n_obs = obs_model.n_observations();
+    // Per-Interval-stream `acc` bins (multi-cadence Phase 2a), sized from the
+    // obs model (the process does not know `n_interval_streams`).
+    let n_acc = obs_model.n_interval_streams();
 
     // Merged timeline spine: the EXACT policy clips each substep to the next
     // observation boundary (same idiom as the bootstrap PF). Constant across IF2
@@ -317,7 +320,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     // Pre-allocate particle state, params, RNGs, and scratch buffers once.
     // Re-initialized from current_params at the start of each iteration.
     let mut states: Vec<ParticleState> = (0..n)
-        .map(|_| ParticleState::new(n_int, n_tr))
+        .map(|_| ParticleState::new(n_int, n_tr, n_acc))
         .collect();
     let mut particle_params: Vec<Vec<f64>> = vec![vec![0.0; base_params.len()]; n];
     let mut scratches: Vec<P::Scratch> = (0..n)
@@ -325,7 +328,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         .collect();
     // Double-buffers for resampling (avoids clone allocation)
     let mut states_buf: Vec<ParticleState> = (0..n)
-        .map(|_| ParticleState::new(n_int, n_tr))
+        .map(|_| ParticleState::new(n_int, n_tr, n_acc))
         .collect();
     let mut params_buf: Vec<Vec<f64>> = vec![vec![0.0; base_params.len()]; n];
 
@@ -336,6 +339,10 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         for s in &mut states {
             s.counts.copy_from_slice(&init_state.counts);
             s.reset_flows();
+            // Per-ITERATION re-seed (NOT a per-observation reset): zero BOTH the
+            // per-transition tally and the per-stream `acc` bins blanket, so no
+            // stale incidence carries across IF2 iterations (Phase 2a).
+            for a in &mut s.acc { *a = 0; }
         }
 
         // Re-initialize per-particle parameter vectors from current estimate
@@ -453,6 +460,14 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 .collect();
             for r in errors { r?; }
             t = schedule.window_end(cur, t);
+
+            // FOLD (multi-cadence Phase 2a): close this interval's flow into
+            // each Interval stream's persistent `acc` bin, once per observation,
+            // serial, BEFORE scoring. `flow_accumulators` left untouched
+            // (blanket-zeroed only at the per-obs reset below).
+            for s in &mut states {
+                obs_model.fold_into_acc(&s.flow_accumulators, &mut s.acc);
+            }
 
             // Perturb parameters at observation time (per-step cooling).
             // IVP params and simplex members are skipped — IVP perturbed at t=0 only,
@@ -578,13 +593,20 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             for (i, &src) in indices.iter().enumerate() {
                 states_buf[i].counts.copy_from_slice(&states[src].counts);
                 states_buf[i].flow_accumulators.copy_from_slice(&states[src].flow_accumulators);
+                // Phase 2a: the per-stream `acc` bins travel with the particle.
+                states_buf[i].acc.copy_from_slice(&states[src].acc);
                 params_buf[i].copy_from_slice(&particle_params[src]);
             }
             std::mem::swap(&mut states, &mut states_buf);
             std::mem::swap(&mut particle_params, &mut params_buf);
 
-            // Reset
-            for s in &mut states { s.reset_flows(); }
+            // Reset. `flow_accumulators` blanket (unchanged); the per-stream
+            // `acc` bins per-stream — only Interval streams scheduled at THIS
+            // union index zero (Phase 2a).
+            for s in &mut states {
+                s.reset_flows();
+                obs_model.reset_due_acc(obs_idx, &mut s.acc);
+            }
             log_weights.fill(0.0);
         }
 

@@ -392,6 +392,11 @@ pub fn complete_data_loglik_grad(
     }
 
     let mut cum_flows = vec![0u64; n_tr];
+    // Phase 2a: the gradient path mirrors the value path's per-stream `acc` bin
+    // EXACTLY. If value bins per-stream while grad stays blanket, NUTS would
+    // differentiate a different binning than the value objective accepts — a
+    // silent bias. They MUST match (fold + reset_due in lockstep).
+    let mut acc = vec![0u64; obs_model.n_interval_streams()];
     // Exact-tiling invariant (debug): records partition the run contiguously,
     // each duration in (0, dt]. Replaces the 2b snap invariant (rec.t0 ==
     // t_start+s·dt) a shortened exact substep violates. Value and gradient must
@@ -441,19 +446,26 @@ pub fn complete_data_loglik_grad(
         // gh#76: observation density + its gradient.
         // Snapshot projections read post-step state from the trajectory record.
         if let Some(&obs_idx) = obs_at_substep.get(&s) {
+            // FOLD (Phase 2a): close this interval's per-transition `cum_flows`
+            // into the per-stream `acc` BEFORE scoring — EXACTLY mirroring the
+            // value path. Both the loglik and its gradient read `acc`.
+            obs_model.fold_into_acc(&cum_flows, &mut acc);
             log_p += obs_model.log_likelihood_from_flows_and_counts(
-                &cum_flows, &rec.counts_after, obs_idx, params);
+                &acc, &rec.counts_after, obs_idx, params);
 
             // Per-distribution gradient helpers in `obs_loglik.rs` give
             // d(log L)/d(mean), d(log L)/d(k), etc.; the per-stream method
             // chain-rules through each likelihood arg expression via
             // `eval_resolved_deriv` to reach the estimated parameters.
             let obs_grad = obs_model.log_likelihood_grad_from_flows_and_counts(
-                &cum_flows, &rec.counts_after, obs_idx, params, estimated_to_model,
+                &acc, &rec.counts_after, obs_idx, params, estimated_to_model,
             );
             for i in 0..d { grad[i] += obs_grad[i]; }
 
+            // `cum_flows` blanket-zeroed (unchanged); the per-stream `acc` bins
+            // per-stream (mirrors value path's reset_due_acc).
             cum_flows.fill(0);
+            obs_model.reset_due_acc(obs_idx, &mut acc);
         }
     }
 

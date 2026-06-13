@@ -515,7 +515,8 @@ impl ProcessModel for CountingProcess {
     fn n_transitions(&self) -> usize { self.n_tr }
 
     fn initial_state(&self, _params: &[f64]) -> Result<ParticleState, SimError> {
-        Ok(ParticleState::new(self.n_int, self.n_tr))
+        // Mock process: `acc` sized 0 (the filter resizes from the obs model).
+        Ok(ParticleState::new(self.n_int, self.n_tr, 0))
     }
 
     fn step(

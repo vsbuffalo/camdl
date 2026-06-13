@@ -726,6 +726,10 @@ pub fn compute_ode_loglik(
         .map(|s| s.flows.counts.len())
         .unwrap_or(0);
     let mut cum_flows: Vec<u64> = vec![0; n_transitions];
+    // Phase 2a: per-Interval-stream persistent bin, folded once per obs interval
+    // and reset per-stream — ODE-inference is the seventh reset site and scores
+    // through the SAME seam as the particle filters.
+    let mut acc: Vec<u64> = vec![0; obs_model.n_interval_streams()];
     let mut next_obs_idx = 0;
     let n_obs = obs_times.len();
     let mut total_ll = 0.0;
@@ -745,8 +749,11 @@ pub fn compute_ode_loglik(
         while next_obs_idx < n_obs
             && (snap.t - obs_times[next_obs_idx]).abs() < 1e-9
         {
+            // FOLD (Phase 2a): close this interval's per-transition `cum_flows`
+            // into the per-stream `acc` BEFORE scoring; score reads `acc`.
+            obs_model.fold_into_acc(&cum_flows, &mut acc);
             let ll = obs_model.log_likelihood_from_flows_and_counts(
-                &cum_flows,
+                &acc,
                 &snap.int_state.counts,
                 next_obs_idx,
                 params,
@@ -755,9 +762,11 @@ pub fn compute_ode_loglik(
                 return Ok(f64::NEG_INFINITY);
             }
             total_ll += ll;
-            // Reset cumulative for the next obs interval. After reset,
-            // subsequent snapshots' flows accumulate fresh.
+            // Reset for the next obs interval. `cum_flows` blanket-zeroed
+            // (unchanged); the per-stream `acc` bins per-stream — only Interval
+            // streams scheduled at THIS union index zero.
             cum_flows.fill(0);
+            obs_model.reset_due_acc(next_obs_idx, &mut acc);
             next_obs_idx += 1;
         }
 

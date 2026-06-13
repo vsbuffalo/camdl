@@ -744,6 +744,25 @@ pub struct MultiStreamObsModel {
     /// Zero real state; likelihood eval never reads real compartments and
     /// `RealState` has no interior mutability.
     real_s: RealState,
+    /// One slot per `Interval` (incidence / `FlowSum`) stream, in dense order =
+    /// the `ParticleState.acc` layout (multi-cadence Phase 2a). `stream_idx`
+    /// points back into `streams`; `flow_indices` are the per-transition indices
+    /// this stream sums (the `FlowSum(idxs)` set). Prevalence/`Instant` streams
+    /// own no slot.
+    interval_slots: Vec<IntervalSlot>,
+    /// Per-stream → `acc` slot map (len == `streams.len()`): `Some(k)` if stream
+    /// `si` is the k-th Interval slot, `None` for a prevalence/`Instant` stream.
+    /// The scoring fork reads `acc[k]` for `Some(k)` and projects from `counts`
+    /// for `None`.
+    stream_to_slot: Vec<Option<usize>>,
+}
+
+/// One `acc` bin for an `Interval` (incidence) stream (multi-cadence Phase 2a).
+/// `flow_indices` is exactly the stream's `FlowSum(idxs)` transition set; the
+/// fold sums `flow_accumulators` over them once per interval into `acc[k]`.
+struct IntervalSlot {
+    stream_idx: usize,
+    flow_indices: Vec<usize>,
 }
 
 /// Specification for building one observation stream.
@@ -794,6 +813,8 @@ impl MultiStreamObsModel {
             obs_times: vec![],
             compiled,
             real_s,
+            interval_slots: vec![],
+            stream_to_slot: vec![],
         }
     }
 
@@ -828,6 +849,27 @@ impl MultiStreamObsModel {
             });
         }
 
+        // Precompute the per-Interval-stream `acc` layout (Phase 2a): one slot
+        // per `FlowSum` (incidence) stream, in stream order = the dense `acc`
+        // index. `stream_to_slot[si]` is `Some(k)` iff stream `si` is the k-th
+        // Interval slot. Prevalence/`Instant` streams own no slot.
+        let mut interval_slots: Vec<IntervalSlot> = Vec::new();
+        let mut stream_to_slot: Vec<Option<usize>> = Vec::with_capacity(streams.len());
+        for (si, s) in streams.iter().enumerate() {
+            match &s.projection {
+                StreamProjection::FlowSum(idxs) => {
+                    stream_to_slot.push(Some(interval_slots.len()));
+                    interval_slots.push(IntervalSlot {
+                        stream_idx: si,
+                        flow_indices: idxs.clone(),
+                    });
+                }
+                StreamProjection::IntCompSum(_) | StreamProjection::Expr(_) => {
+                    stream_to_slot.push(None);
+                }
+            }
+        }
+
         let real_s = RealState::new(compiled.real_local_to_global.len());
 
         Ok(MultiStreamObsModel {
@@ -835,34 +877,76 @@ impl MultiStreamObsModel {
             obs_times,
             compiled,
             real_s,
+            interval_slots,
+            stream_to_slot,
         })
     }
 
-    /// Evaluate a stream's projection given current particle state and
-    /// params. `flows` is the per-stream flow counter slice (ignored for
-    /// non-flow projections); `counts` is the integer compartment vector.
-    /// `t` is the observation time, threaded so a time-dependent
-    /// `StreamProjection::Expr` evaluates at the right instant.
-    fn project_stream_with_params(
+    /// Number of `Interval` (incidence) streams — the length of each particle's
+    /// `acc` bin vector (Phase 2a).
+    pub fn n_interval_streams(&self) -> usize {
+        self.interval_slots.len()
+    }
+
+    /// Fold this interval's per-transition `flow_accumulators` into the
+    /// per-stream `acc`: for each Interval slot `k`,
+    /// `acc[k] += Σ_{i ∈ flow_indices(k)} flow_accumulators[i]`. Once per
+    /// observation interval, after substeps and BEFORE scoring. Never zeroes
+    /// `flow_accumulators`.
+    pub fn fold_into_acc(&self, flow_accumulators: &[u64], acc: &mut [u64]) {
+        for (k, slot) in self.interval_slots.iter().enumerate() {
+            let bin: u64 = slot.flow_indices.iter()
+                .map(|&i| flow_accumulators[i])
+                .sum();
+            acc[k] += bin;
+        }
+    }
+
+    /// Zero the `acc` bins for the Interval streams scheduled at union index
+    /// `union_idx` (`at_union[union_idx].is_some()`). A stream not scheduled
+    /// here keeps its running bin toward its own next observation.
+    pub fn reset_due_acc(&self, union_idx: usize, acc: &mut [u64]) {
+        for (k, slot) in self.interval_slots.iter().enumerate() {
+            let si = slot.stream_idx;
+            if self.streams[si].at_union[union_idx].is_some() {
+                acc[k] = 0;
+            }
+        }
+    }
+
+    /// Project stream `si` for SCORING given the per-stream folded `acc` and the
+    /// integer `counts` (Phase 2a fork). An Interval stream reads its already-
+    /// summed bin `acc[k]` directly (no `idxs` re-sum); a prevalence/`Instant`
+    /// stream projects from `counts` via `eval_stream_projection` (flows unused).
+    fn project_stream_from_acc(
         &self,
         stream_idx: usize,
-        flows: &[u64],
+        acc: &[u64],
         counts: &[i64],
         params: &[f64],
         t: f64,
     ) -> f64 {
-        eval_stream_projection(
-            &self.streams[stream_idx].projection,
-            flows, counts, params, &self.compiled, &self.real_s, t,
-        )
+        match self.stream_to_slot[stream_idx] {
+            Some(k) => acc[k] as f64,
+            None => eval_stream_projection(
+                &self.streams[stream_idx].projection,
+                // Interval flows are never read for an `Instant` stream; pass
+                // an empty slice to make that explicit.
+                &[], counts, params, &self.compiled, &self.real_s, t,
+            ),
+        }
     }
 
     /// Project + score from raw per-particle arrays. Used by PGAS which
-    /// carries `counts` and `cum_flows` as flat Vec<i64>/Vec<u64> and has
-    /// no `ParticleState`.
+    /// carries `counts` and the per-stream `acc` as flat Vec<i64>/Vec<u64> and
+    /// has no `ParticleState`.
+    ///
+    /// `acc` is the per-Interval-stream folded bin vector (Phase 2a), length
+    /// `n_interval_streams()`, indexed by `stream_to_slot`. An Interval stream
+    /// reads `acc[k]` directly; a prevalence stream projects from `counts`.
     pub fn log_likelihood_from_flows_and_counts(
         &self,
-        cum_flows: &[u64],
+        acc: &[u64],
         counts: &[i64],
         obs_idx: usize,
         params: &[f64],
@@ -886,7 +970,7 @@ impl MultiStreamObsModel {
                 Some(ObsCell::Scalar(v)) => v,
                 None => return 0.0,
             };
-            let projected = self.project_stream_with_params(si, cum_flows, counts, params, t);
+            let projected = self.project_stream_from_acc(si, acc, counts, params, t);
             // GitHub #6 fix: the likelihood's p/mean/sd expressions can
             // reference compartment state (e.g. `p = projected / N`
             // with `N = S + I + R`). Evaluate against actual counts,
@@ -905,13 +989,13 @@ impl MultiStreamObsModel {
 
     /// Deprecated-shape helper kept for tests that exercise the flow-only
     /// branch. Equivalent to passing a zeroed counts slice; snapshot streams
-    /// would project 0.
+    /// would project 0. `acc` is the per-Interval-stream bin vector (Phase 2a).
     #[doc(hidden)]
     pub fn log_likelihood_from_flows(
-        &self, cum_flows: &[u64], obs_idx: usize, params: &[f64],
+        &self, acc: &[u64], obs_idx: usize, params: &[f64],
     ) -> f64 {
         let zeros = vec![0i64; self.compiled.int_local_to_global.len()];
-        self.log_likelihood_from_flows_and_counts(cum_flows, &zeros, obs_idx, params)
+        self.log_likelihood_from_flows_and_counts(acc, &zeros, obs_idx, params)
     }
 
     /// Gradient of `log_likelihood_from_flows_and_counts` w.r.t. estimated
@@ -924,7 +1008,7 @@ impl MultiStreamObsModel {
     /// step changes from "score" to "score-grad".
     pub fn log_likelihood_grad_from_flows_and_counts(
         &self,
-        cum_flows: &[u64],
+        acc: &[u64],
         counts: &[i64],
         obs_idx: usize,
         params: &[f64],
@@ -947,7 +1031,7 @@ impl MultiStreamObsModel {
                 Some(ObsCell::Scalar(v)) => v,
                 None => continue,
             };
-            let projected = self.project_stream_with_params(si, cum_flows, counts, params, t);
+            let projected = self.project_stream_from_acc(si, acc, counts, params, t);
             with_scratch_int_from_counts(counts, |int_s| {
                 eval_likelihood_resolved_grad(
                     &s.resolved, t, projected, observed, &s.aux[local],
@@ -970,12 +1054,13 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
         // the other is the GH#6 / incident-2026-04-22 class of bug
         // (state-dependent likelihoods scored against a zero scratch →
         // log-ll off by ~100×), which has bitten this file twice. Since
-        // `ParticleState` is exactly `{ counts, flow_accumulators }`,
-        // the trait method is just the flat method with the fields
-        // unpacked — so delegate, and keep the per-stream scoring
-        // (including the GH#6 actual-state handling) in ONE seam.
+        // `ParticleState` carries the per-stream folded `acc` (Phase 2a); the
+        // trait method is just the flat method with the fields unpacked — so
+        // delegate, and keep the per-stream scoring (including the GH#6
+        // actual-state handling) in ONE seam. `acc` is the per-Interval-stream
+        // bin (the filter folds `flow_accumulators` into it before scoring).
         self.log_likelihood_from_flows_and_counts(
-            &state.flow_accumulators, &state.counts, obs_idx, params,
+            &state.acc, &state.counts, obs_idx, params,
         )
     }
 
@@ -1002,8 +1087,8 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
                 Some(l) => l,
                 None => return f64::NAN,
             };
-            let projected = self.project_stream_with_params(
-                si, &state.flow_accumulators, &state.counts, params, t,
+            let projected = self.project_stream_from_acc(
+                si, &state.acc, &state.counts, params, t,
             );
             // GitHub #6: evaluate likelihood args against actual state,
             // not zero scratch. Otherwise state-dependent denominators
@@ -1029,8 +1114,8 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
                 Some(l) => l,
                 None => return f64::NAN,
             };
-            let projected = self.project_stream_with_params(
-                si, &state.flow_accumulators, &state.counts, params, t,
+            let projected = self.project_stream_from_acc(
+                si, &state.acc, &state.counts, params, t,
             );
             // GitHub #6: actual state, not zero scratch.
             with_scratch_int_from_counts(&state.counts, |int_s| {
@@ -1040,6 +1125,20 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
                 )
             })
         }).collect()
+    }
+
+    // Multi-cadence per-stream incidence bins (Phase 2a). The trait-object
+    // filters (PF / IF2 / correlated-PF) reach these through the trait; PGAS
+    // calls the inherent methods directly on the concrete type. Both resolve to
+    // the same implementations above.
+    fn n_interval_streams(&self) -> usize {
+        MultiStreamObsModel::n_interval_streams(self)
+    }
+    fn fold_into_acc(&self, flow_accumulators: &[u64], acc: &mut [u64]) {
+        MultiStreamObsModel::fold_into_acc(self, flow_accumulators, acc)
+    }
+    fn reset_due_acc(&self, union_idx: usize, acc: &mut [u64]) {
+        MultiStreamObsModel::reset_due_acc(self, union_idx, acc)
     }
 }
 
@@ -1497,8 +1596,15 @@ mod hole_scoring_tests {
         let m = obs_model(dense_cells(values.clone()), times.clone());
 
         // Also build via the trait path (ParticleState) to confirm both seams
-        // agree on dense cells.
-        let state = ParticleState { counts: counts.clone(), flow_accumulators: flows.clone() };
+        // agree on dense cells. The model has one `FlowSum(vec![recovery])`
+        // stream ⇒ one `acc` slot; the seam reads `acc[0]` directly. `flows`
+        // here IS that already-summed per-stream bin (single transition), so the
+        // flat `acc` arg and `state.acc` are the same vector.
+        let state = ParticleState {
+            counts: counts.clone(),
+            flow_accumulators: flows.clone(),
+            acc: flows.clone(),
+        };
         for idx in 0..3 {
             let flat = m.log_likelihood_from_flows_and_counts(&flows, &counts, idx, &params);
             let via_state = m.log_likelihood(&state, idx, &params);

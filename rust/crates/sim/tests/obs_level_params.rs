@@ -139,9 +139,12 @@ fn test_obs_param_changes_loglik() {
         compiled.clone(),
     ).unwrap();
 
-    // Create a particle state with some flow accumulator values
-    let mut state = ParticleState::new(1, 1);
-    state.flow_accumulators[0] = 10; // projected = 10
+    // Create a particle state with some flow accumulator values. One
+    // `FlowSum(vec![0])` stream ⇒ one `acc` slot; the trait scoring reads
+    // `acc[0]` (the already-folded bin), so set it to the intended bin (10).
+    let mut state = ParticleState::new(1, 1, 1);
+    state.flow_accumulators[0] = 10;
+    state.acc[0] = 10; // projected = 10
 
     // Evaluate obs loglik with k=10
     let mut params_k10 = params.clone();
@@ -193,15 +196,17 @@ fn test_obs_param_from_flows() {
         compiled.clone(),
     ).unwrap();
 
-    let cum_flows: Vec<u64> = vec![10];
+    // Phase 2a: the flat helper's first arg is now the per-stream `acc` bin.
+    // One `FlowSum(vec![0])` stream ⇒ one slot, so `acc[0]` is the bin (10).
+    let acc: Vec<u64> = vec![10];
 
     let mut params_k10 = params.clone();
     params_k10[k_idx] = 10.0;
-    let ll_k10 = obs_model.log_likelihood_from_flows(&cum_flows, 0, &params_k10);
+    let ll_k10 = obs_model.log_likelihood_from_flows(&acc, 0, &params_k10);
 
     let mut params_k1 = params.clone();
     params_k1[k_idx] = 1.0;
-    let ll_k1 = obs_model.log_likelihood_from_flows(&cum_flows, 0, &params_k1);
+    let ll_k1 = obs_model.log_likelihood_from_flows(&acc, 0, &params_k1);
 
     assert!(ll_k10.is_finite());
     assert!(ll_k1.is_finite());
@@ -212,7 +217,9 @@ fn test_obs_param_from_flows() {
 /// T3: Consistency between ParticleState and flow-based evaluation.
 ///
 /// log_likelihood(state, obs_idx, params) should equal
-/// log_likelihood_from_flows(state.flow_accumulators, obs_idx, params).
+/// log_likelihood_from_flows(state.acc, obs_idx, params) — both read the
+/// per-stream `acc` bin (Phase 2a). The trait path unpacks `state.acc`; the
+/// flat helper takes `acc` directly.
 #[test]
 fn test_obs_model_consistency() {
     let (compiled, params) = model_with_obs_param();
@@ -228,12 +235,15 @@ fn test_obs_model_consistency() {
         compiled.clone(),
     ).unwrap();
 
-    let mut state = ParticleState::new(1, 1);
+    // One `FlowSum` stream ⇒ one `acc` slot. Set `acc[0]` to the bin (15); the
+    // trait path reads `state.acc`, the flat path takes the same `acc`.
+    let mut state = ParticleState::new(1, 1, 1);
     state.flow_accumulators[0] = 15;
+    state.acc[0] = 15;
 
     for obs_idx in 0..2 {
         let ll_state = obs_model.log_likelihood(&state, obs_idx, &params);
-        let ll_flows = obs_model.log_likelihood_from_flows(&state.flow_accumulators, obs_idx, &params);
+        let ll_flows = obs_model.log_likelihood_from_flows(&state.acc, obs_idx, &params);
         assert!((ll_state - ll_flows).abs() < 1e-12,
             "state-based and flow-based logliks must match at obs_idx={}: {} vs {}",
             obs_idx, ll_state, ll_flows);

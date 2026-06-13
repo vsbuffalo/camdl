@@ -217,9 +217,12 @@ pub fn bootstrap_filter_correlated(
 
     let n_int = model.int_local_to_global.len();
     let n_tr = model.model.transitions.len();
+    // Per-Interval-stream `acc` bins (multi-cadence Phase 2a), sized from the
+    // obs model (the process does not know `n_interval_streams`).
+    let n_acc = obs_model.n_interval_streams();
 
     let (init_int, _init_real) = model.initial_state(params)?;
-    let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr);
+    let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr, n_acc);
     for p in &mut swarm.states {
         p.counts.copy_from_slice(&init_int.counts);
     }
@@ -230,7 +233,7 @@ pub fn bootstrap_filter_correlated(
         .collect();
 
     let mut states_buf: Vec<ParticleState> = (0..n_particles)
-        .map(|_| ParticleState::new(n_int, n_tr))
+        .map(|_| ParticleState::new(n_int, n_tr, n_acc))
         .collect();
 
     let mut scratches: Vec<StepScratch> = (0..n_particles)
@@ -500,6 +503,14 @@ pub fn bootstrap_filter_correlated(
         for r in errors { r?; }
         t = schedule.window_end(cur, t);
 
+        // FOLD (multi-cadence Phase 2a): close this interval's flow into each
+        // Interval stream's persistent `acc` bin, once per observation, serial,
+        // BEFORE scoring. `flow_accumulators` left untouched — the resampling
+        // sort key below still reads it bit-identically.
+        for state in &mut swarm.states {
+            obs_model.fold_into_acc(&state.flow_accumulators, &mut state.acc);
+        }
+
         // Compute log-weights
         for (i, state) in swarm.states.iter().enumerate() {
             swarm.log_weights[i] = obs_model.log_likelihood(state, obs_idx, params);
@@ -542,12 +553,17 @@ pub fn bootstrap_filter_correlated(
             let orig_idx = sort_order[sorted_idx];
             states_buf[i].counts.copy_from_slice(&swarm.states[orig_idx].counts);
             states_buf[i].flow_accumulators.copy_from_slice(&swarm.states[orig_idx].flow_accumulators);
+            // Phase 2a: the per-stream `acc` bins travel with the particle.
+            states_buf[i].acc.copy_from_slice(&swarm.states[orig_idx].acc);
         }
         std::mem::swap(&mut swarm.states, &mut states_buf);
 
-        // Reset flow accumulators
+        // Reset. `flow_accumulators` blanket (unchanged — the sort key above
+        // reads it); the per-stream `acc` bins per-stream — only Interval
+        // streams scheduled at THIS union index zero (Phase 2a).
         for state in &mut swarm.states {
             state.reset_flows();
+            obs_model.reset_due_acc(obs_idx, &mut state.acc);
         }
         for lw in &mut swarm.log_weights { *lw = 0.0; }
     }

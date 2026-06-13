@@ -237,18 +237,47 @@ pub struct ParticleState {
     pub counts: Vec<i64>,
     /// Cumulative transition flows since last observation.
     /// Reset after each observation time (used for incidence projections).
+    ///
+    /// This is the per-TRANSITION, this-interval tally written by `step_one`
+    /// (an additive `flows[tr] += count` per substep), blanket-reset by
+    /// `reset_flows()` once per observation interval. Its lifecycle is
+    /// UNCHANGED by multi-cadence Phase 2a — the forward/substep path, the
+    /// correlated-PF resampling sort key (`correlated_pf.rs`), and
+    /// `write_final_states` (`pfilter.rs`) all keep reading it exactly as
+    /// before.
     pub flow_accumulators: Vec<u64>,
+    /// Per-Interval-stream incidence bin (multi-cadence Phase 2a, "Option Z").
+    /// One `u64` per incidence (`FlowSum`) observation stream, in the obs
+    /// model's `interval_slots` order. PERSISTENT across observation intervals:
+    /// folded once per interval from `flow_accumulators` (via
+    /// `ObservationModel::fold_into_acc`), read at scoring time as the stream's
+    /// already-summed bin, and reset PER-STREAM (only the streams scheduled at
+    /// the current union index — `ObservationModel::reset_due_acc`), NOT
+    /// blanket-reset by `reset_flows()`.
+    ///
+    /// Homogeneous (every stream scheduled every interval) ⇒ folded-scored-reset
+    /// every interval ⇒ byte-identical to scoring the global accumulator.
+    pub acc: Vec<u64>,
 }
 
 impl ParticleState {
-    pub fn new(n_compartments: usize, n_transitions: usize) -> Self {
+    /// `n_interval_streams` sizes `acc` (one bin per incidence stream — owned by
+    /// the OBS model, not the compiled model). The process model's
+    /// `initial_state` does not know it and passes `0`; the FILTER (which holds
+    /// the obs model) allocates the swarm states with the real count, since the
+    /// filter copies only `init.counts` into the swarm.
+    pub fn new(n_compartments: usize, n_transitions: usize, n_interval_streams: usize) -> Self {
         ParticleState {
             counts: vec![0; n_compartments],
             flow_accumulators: vec![0; n_transitions],
+            acc: vec![0; n_interval_streams],
         }
     }
 
     /// Reset flow accumulators to zero (called after each observation).
+    /// Zeroes ONLY `flow_accumulators` — the per-transition this-interval tally.
+    /// The per-stream `acc` is reset SEPARATELY and per-stream by the obs model
+    /// (`reset_due_acc`), because it must survive a sibling stream's union-time.
     pub fn reset_flows(&mut self) {
         self.reset_accumulators();
     }
@@ -278,11 +307,16 @@ pub struct ParticleSwarm {
 }
 
 impl ParticleSwarm {
-    pub fn new(n_particles: usize, n_compartments: usize, n_transitions: usize) -> Self {
+    pub fn new(
+        n_particles: usize,
+        n_compartments: usize,
+        n_transitions: usize,
+        n_interval_streams: usize,
+    ) -> Self {
         ParticleSwarm {
             n_particles,
             states: (0..n_particles)
-                .map(|_| ParticleState::new(n_compartments, n_transitions))
+                .map(|_| ParticleState::new(n_compartments, n_transitions, n_interval_streams))
                 .collect(),
             log_weights: vec![0.0; n_particles],
         }
