@@ -414,22 +414,34 @@ impl BindReport {
 }
 
 /// One validated stream inside a [`BoundObs`]. Private — the only way to
-/// obtain a `BoundStream` is through [`BoundObs::bind`], whose constructor
-/// guarantees `values.len() == BoundObs.times.len()`.
+/// obtain a `BoundStream` is through [`BoundObs::bind`].
+///
+/// Multi-cadence (Phase 1): each stream keeps **its own** schedule
+/// authoritative (`obs_times`) and derives membership against the shared
+/// **union** axis (`at_union`). `cells`/`aux` are per-stream-local, indexed by
+/// this stream's own observation index — NOT the union index.
 struct BoundStream {
     ir_model: ir::observation::ObservationModel,
     projection: StreamProjection,
-    /// Per-observation cells, indexed by observation-time index. `None` is a
-    /// hole (no likelihood term; the grid time still resets incidence).
-    /// INVARIANT (enforced by `bind`): `values.len() == BoundObs.times.len()`.
-    values: Vec<Option<ObsCell>>,
+    /// Per-observation cells, indexed by THIS stream's own observation index
+    /// (`cells.len() == obs_times.len()`). `None` is a **hole** — a scheduled
+    /// observation whose value is missing (no likelihood term; the incidence
+    /// bin still resets, because the stream IS scheduled here). Distinct from
+    /// "not scheduled" (a sibling's union-time), which is `at_union == None`.
+    cells: Vec<Option<ObsCell>>,
+    /// Membership of this stream in the union axis: for each union-index,
+    /// `Some(local)` if this stream is scheduled at that time (`local` indexes
+    /// `cells`/`obs_times`/`aux`), `None` if not scheduled (a sibling's time —
+    /// no term, and in Phase 2 no reset). INVARIANT (`bind`):
+    /// `at_union.len() == BoundObs.times.len()`.
+    at_union: Vec<Option<usize>>,
     /// Per-observation auxiliary data (a binomial denominator `n = tested`, a
-    /// person-time offset), indexed by observation-time index, each a
-    /// name→value list the likelihood reads by `Expr::ObsColumnRef` (§3, §6.1).
-    /// An entry is empty when the stream's likelihood references no aux column
-    /// OR the cell is a hole (no term scored). INVARIANT (enforced by `bind`):
-    /// `aux.len() == values.len()`, and at a non-hole cell every aux column the
-    /// likelihood references is present (present-together-or-hole).
+    /// person-time offset), indexed by THIS stream's own observation index,
+    /// each a name→value list the likelihood reads by `Expr::ObsColumnRef`
+    /// (§3, §6.1). An entry is empty when the stream references no aux column
+    /// OR the cell is a hole. INVARIANT (`bind`): `aux.len() == cells.len()`,
+    /// and at a non-hole cell every referenced aux column is present
+    /// (present-together-or-hole).
     aux: Vec<Vec<(String, f64)>>,
 }
 
@@ -437,12 +449,13 @@ struct BoundStream {
 /// [`BoundObs::bind`], whose constructor enforces every construction-time
 /// invariant — so [`MultiStreamObsModel::new`] consumes it without re-checking.
 ///
-/// Today's semantics are dense and homogeneous: all streams share ONE
-/// observation axis (`times`), and each stream carries one value per time.
-/// The sparse / per-stream-axis generalization is a later phase; this type is
-/// deliberately dense.
+/// `times` is the **union** of every stream's schedule (sorted-unique). Each
+/// stream carries its own schedule + a `at_union` membership map; a homogeneous
+/// model is the special case where every stream is scheduled at every union
+/// time. Holes (scheduled-but-missing) live in each stream's `cells`;
+/// not-scheduled (a sibling's cadence) is `at_union == None`.
 pub struct BoundObs {
-    /// The single shared observation axis (homogeneous across streams today).
+    /// The union observation axis: `sorted_unique(⋃ streams.obs_times)`.
     times: Vec<f64>,
     streams: Vec<BoundStream>,
 }
@@ -476,56 +489,57 @@ impl BoundObs {
             return Err(BindReport::new(findings));
         }
 
-        // The shared axis is stream 0's schedule; every other stream is pinned
-        // to it below.
-        let times = streams[0].obs_times.clone();
-
-        // (2) Empty observation series — a header row but no data rows. Left
-        // unchecked this panics downstream (`obs_times[0]` on a zero-length
-        // vec). Reject with an actionable message.
-        if times.is_empty() {
-            findings.push(Finding {
-                severity: Severity::Error,
-                message: format!(
-                    "observation stream '{}' has no observations — the data file \
-                     has a header row but no data rows. A particle filter needs at \
-                     least one observation; check that the --data file is non-empty \
-                     and that its time/value columns parse.",
-                    streams[0].ir_model.name
-                ),
-            });
-            // No shared axis exists, so further checks are not meaningful.
-            return Err(BindReport::new(findings));
-        }
-
-        // (3) gh#188: stream 0's observation times must be strictly increasing.
-        // The cross-stream pin below carries this to every stream.
-        if let Some(w) = times.windows(2).find(|w| w[1] <= w[0]) {
-            findings.push(Finding {
-                severity: Severity::Error,
-                message: format!(
-                    "observation stream '{}' has non-increasing observation \
-                     times ({} then {}); observation times must be strictly increasing — \
-                     remove duplicate rows or sort the --data file by time.",
-                    streams[0].ir_model.name, w[0], w[1]
-                ),
-            });
-        }
-
-        // (4) Heterogeneous schedules: every other stream must share stream 0's
-        // times. Collapsing to one shared axis is only valid once this holds.
-        for (si, spec) in streams.iter().enumerate().skip(1) {
-            if spec.obs_times != times {
+        // (2,3) Per-stream schedule validity. Multi-cadence: each stream keeps
+        // its OWN schedule (no longer pinned to stream 0), so the non-empty and
+        // strictly-increasing (gh#188) checks run per stream. Findings
+        // accumulate; the union is built only from validated schedules below.
+        for spec in &streams {
+            // (2) Empty observation series — a header row but no data rows.
+            // Left unchecked this panics downstream (`obs_times[0]` on a
+            // zero-length vec).
+            if spec.obs_times.is_empty() {
                 findings.push(Finding {
                     severity: Severity::Error,
                     message: format!(
-                        "observation stream {} has obs_times that differ from stream 0; \
-                         heterogeneous schedules are not supported yet",
-                        si
+                        "observation stream '{}' has no observations — the data file \
+                         has a header row but no data rows. A particle filter needs at \
+                         least one observation; check that the --data file is non-empty \
+                         and that its time/value columns parse.",
+                        spec.ir_model.name
+                    ),
+                });
+            }
+            // (3) gh#188: each stream's own observation times must be strictly
+            // increasing.
+            if let Some(w) = spec.obs_times.windows(2).find(|w| w[1] <= w[0]) {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "observation stream '{}' has non-increasing observation \
+                         times ({} then {}); observation times must be strictly increasing — \
+                         remove duplicate rows or sort the --data file by time.",
+                        spec.ir_model.name, w[0], w[1]
+                    ),
+                });
+            }
+            // cells are per-stream-local, indexed by this stream's own
+            // schedule: `cells.len() == obs_times.len()` (the at_union walk
+            // indexes `cells[local]` for each scheduled union time).
+            if spec.observations.len() != spec.obs_times.len() {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "observation stream '{}': {} cells but {} observation times \
+                         (internal binder error — cells must match the stream's own \
+                         schedule length)",
+                        spec.ir_model.name, spec.observations.len(), spec.obs_times.len()
                     ),
                 });
             }
         }
+        // (4) Heterogeneous schedules are now SUPPORTED: streams on different
+        // cadences merge to the union axis below (multi-cadence Phase 1). The
+        // former "must equal stream 0" rejection is gone.
 
         // An EMPTY aux vector means "this stream declares no aux columns" — the
         // common scalar-outcome case (and every `StreamSpec::dense` site already
@@ -619,25 +633,58 @@ impl BoundObs {
             return Err(report);
         }
 
-        // All schedules validated and identical to `times`; collapse to one
-        // shared axis with per-stream values. `values.len() == times.len()`
-        // holds because `spec.obs_times == times` for every stream.
+        // Union axis: the sorted-unique merge of every stream's schedule.
+        // Identity is EXACT f64 — one deterministic time parser gives one value
+        // per calendar instant (§3.2), so no tolerance is needed (and none is
+        // used). A homogeneous model yields a union equal to the shared axis.
+        let mut times: Vec<f64> =
+            streams.iter().flat_map(|s| s.obs_times.iter().copied()).collect();
+        times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
+        times.dedup();
+
+        // Each stream keeps its own schedule; `at_union` records, per union
+        // index, this stream's own local cell index (or `None` where a sibling
+        // observes but this stream does not). Built by a two-pointer walk over
+        // the sorted union and the stream's own sorted (subset) schedule.
         let bound_streams = streams
             .into_iter()
-            .map(|spec| BoundStream {
-                ir_model: spec.ir_model,
-                projection: spec.projection,
-                values: spec.observations,
-                aux: spec.aux,
+            .map(|spec| {
+                let mut at_union = Vec::with_capacity(times.len());
+                let mut local = 0usize;
+                for &ut in &times {
+                    if local < spec.obs_times.len() && spec.obs_times[local] == ut {
+                        at_union.push(Some(local));
+                        local += 1;
+                    } else {
+                        at_union.push(None);
+                    }
+                }
+                debug_assert_eq!(
+                    local, spec.obs_times.len(),
+                    "every stream observation time must appear in the union",
+                );
+                BoundStream {
+                    ir_model: spec.ir_model,
+                    projection: spec.projection,
+                    cells: spec.observations,
+                    at_union,
+                    aux: spec.aux,
+                }
             })
             .collect();
 
         Ok((BoundObs { times, streams: bound_streams }, report))
     }
 
-    /// The single shared observation axis.
+    /// The union observation axis (sorted-unique over all streams' schedules).
     pub fn times(&self) -> &[f64] {
         &self.times
+    }
+
+    /// Test-only: a stream's `at_union` membership over the union axis.
+    #[cfg(test)]
+    pub(crate) fn at_union_for_test(&self, stream_idx: usize) -> &[Option<usize>] {
+        &self.streams[stream_idx].at_union
     }
 }
 
@@ -651,12 +698,18 @@ struct Stream {
     /// Resolved likelihood expression tree (pre-resolved at construction,
     /// but evaluates with params at call time — no baked-in values).
     resolved: ResolvedLikelihood,
-    /// Per-observation cells indexed by observation time index. `None` is a
-    /// hole: it contributes no likelihood term (the incidence reset still
-    /// fires at its grid index — see `particle_filter.rs`).
+    /// Membership over the model's union observation axis: for each union
+    /// index, `Some(local)` if this stream is scheduled there (`local` indexes
+    /// `observations`/`aux`), `None` if not scheduled (a sibling's cadence —
+    /// no term). For a homogeneous model `at_union[i] == Some(i)`.
+    at_union: Vec<Option<usize>>,
+    /// Per-observation cells indexed by THIS stream's own observation index
+    /// (NOT the union index — resolve via `at_union`). `None` is a hole: no
+    /// likelihood term (the incidence reset still fires at its grid index —
+    /// see `particle_filter.rs`).
     observations: Vec<Option<ObsCell>>,
     /// Per-observation auxiliary data (binomial `n`, Poisson offset), indexed
-    /// by observation time index; read by `Expr::ObsColumnRef` at scoring.
+    /// by this stream's own observation index; read by `Expr::ObsColumnRef`.
     aux: Vec<Vec<(String, f64)>>,
 }
 
@@ -750,7 +803,8 @@ impl MultiStreamObsModel {
                 name: spec.ir_model.name.clone(),
                 projection: spec.projection,
                 resolved,
-                observations: spec.values,
+                at_union: spec.at_union,
+                observations: spec.cells,
                 aux: spec.aux,
             });
         }
@@ -797,13 +851,19 @@ impl MultiStreamObsModel {
         let t = self.obs_times[obs_idx];
         (0..self.streams.len()).map(|si| {
             let s = &self.streams[si];
-            // Hole: this stream has no observed value at `obs_idx`. Omit the
-            // likelihood factor entirely (log-contribution 0) — the missing
-            // value is marginalized, NOT scored as zero. The projection +
-            // accumulator reset are NOT gated on value presence: the filter
-            // loop resets per-obs-index regardless, so a hole still closes
-            // the fixed incidence bin on schedule (pomp `accumvars`).
-            let observed = match s.observations[obs_idx] {
+            // `obs_idx` indexes the UNION axis; `at_union` maps it to this
+            // stream's own local cell. Not scheduled here (a sibling's cadence)
+            // ⇒ omit the term entirely.
+            let local = match s.at_union[obs_idx] {
+                Some(l) => l,
+                None => return 0.0,
+            };
+            // Hole: scheduled but value missing. Omit the likelihood factor
+            // (log-contribution 0) — marginalized, NOT scored as zero. The
+            // projection + accumulator reset are NOT gated on value presence:
+            // the filter loop resets per-obs-index regardless, so a hole still
+            // closes the fixed incidence bin on schedule (pomp `accumvars`).
+            let observed = match s.observations[local] {
                 Some(ObsCell::Scalar(v)) => v,
                 None => return 0.0,
             };
@@ -817,7 +877,7 @@ impl MultiStreamObsModel {
             // surveys wildly inconsistent with true prevalence.
             with_scratch_int_from_counts(counts, |int_s| {
                 eval_likelihood_resolved(
-                    &s.resolved, t, projected, observed, &s.aux[obs_idx],
+                    &s.resolved, t, projected, observed, &s.aux[local],
                     params, &self.compiled, int_s, &self.real_s,
                 )
             })
@@ -856,16 +916,22 @@ impl MultiStreamObsModel {
         let t = self.obs_times[obs_idx];
         for si in 0..self.streams.len() {
             let s = &self.streams[si];
+            // Not scheduled at this union index ⇒ no term, no gradient.
+            // Mirrors the scoring seam exactly.
+            let local = match s.at_union[obs_idx] {
+                Some(l) => l,
+                None => continue,
+            };
             // Hole: no term, so no gradient contribution (∂/∂θ of an omitted
-            // factor is 0). Mirrors the scoring seam exactly.
-            let observed = match s.observations[obs_idx] {
+            // factor is 0).
+            let observed = match s.observations[local] {
                 Some(ObsCell::Scalar(v)) => v,
                 None => continue,
             };
             let projected = self.project_stream_with_params(si, cum_flows, counts, params, t);
             with_scratch_int_from_counts(counts, |int_s| {
                 eval_likelihood_resolved_grad(
-                    &s.resolved, t, projected, observed, &s.aux[obs_idx],
+                    &s.resolved, t, projected, observed, &s.aux[local],
                     params, &self.compiled, int_s, &self.real_s,
                     estimated_to_model, &mut grad,
                 );
@@ -908,16 +974,24 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
     ) -> Vec<f64> {
         let t = self.obs_times[obs_idx];
         (0..self.streams.len()).map(|si| {
+            let s = &self.streams[si];
+            // Not scheduled at this union index (a sibling's cadence): this
+            // stream emits no value here. NaN marks the absent cell, keeping
+            // the per-stream output-vector shape; no RNG is consumed for it.
+            // (Homogeneous: always `Some`, so order and draws are unchanged.)
+            let local = match s.at_union[obs_idx] {
+                Some(l) => l,
+                None => return f64::NAN,
+            };
             let projected = self.project_stream_with_params(
                 si, &state.flow_accumulators, &state.counts, params, t,
             );
-            let s = &self.streams[si];
             // GitHub #6: evaluate likelihood args against actual state,
             // not zero scratch. Otherwise state-dependent denominators
             // in p/mean/sd expressions blow up.
             with_scratch_int_from_counts(&state.counts, |int_s| {
                 sample_obs_resolved(
-                    &s.resolved, t, projected, &s.aux[obs_idx], params,
+                    &s.resolved, t, projected, &s.aux[local], params,
                     &self.compiled, int_s, &self.real_s, rng,
                 )
             })
@@ -929,14 +1003,20 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
     ) -> Vec<f64> {
         let t = self.obs_times[obs_idx];
         (0..self.streams.len()).map(|si| {
+            let s = &self.streams[si];
+            // Not scheduled at this union index: no value here (NaN placeholder,
+            // preserving the output-vector shape). Homogeneous: always `Some`.
+            let local = match s.at_union[obs_idx] {
+                Some(l) => l,
+                None => return f64::NAN,
+            };
             let projected = self.project_stream_with_params(
                 si, &state.flow_accumulators, &state.counts, params, t,
             );
-            let s = &self.streams[si];
             // GitHub #6: actual state, not zero scratch.
             with_scratch_int_from_counts(&state.counts, |int_s| {
                 eval_obs_mean_resolved(
-                    &s.resolved, t, projected, &s.aux[obs_idx], params,
+                    &s.resolved, t, projected, &s.aux[local], params,
                     &self.compiled, int_s, &self.real_s,
                 )
             })
@@ -1067,18 +1147,43 @@ mod bind_tests {
     }
 
     #[test]
-    fn heterogeneous_schedules_are_fatal() {
-        let report = expect_fatal(
-            BoundObs::bind(vec![
-                spec("a", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
-                spec("b", vec![1.0, 2.0, 4.0], vec![20.0, 21.0, 22.0]),
-            ]),
-            "a stream whose schedule differs from stream 0 must be rejected",
+    fn bind_merges_heterogeneous_schedules() {
+        // Multi-cadence Phase 1: two streams on DIFFERENT schedules bind to the
+        // sorted-unique UNION axis (no longer a hard error). AFP-like {1,3,8} +
+        // ES-like {5} → union {1,3,5,8}. Each stream's `at_union` records, per
+        // union-index, its own local cell index (or None where it is not
+        // scheduled — a sibling's time).
+        let (bound, report) = BoundObs::bind(vec![
+            spec("afp", vec![1.0, 3.0, 8.0], vec![10.0, 11.0, 12.0]),
+            spec("es", vec![5.0], vec![20.0]),
+        ]).expect("heterogeneous schedules must bind to the union axis");
+        assert!(!report.is_fatal(), "a valid heterogeneous input is not fatal");
+
+        // The union axis is the sorted-unique merge of both schedules.
+        assert_eq!(bound.times(), &[1.0, 3.0, 5.0, 8.0]);
+
+        // afp is scheduled at union-indices 0,1,3 (times 1,3,8 → local 0,1,2),
+        // NOT at union-index 2 (time 5, an ES-only time).
+        assert_eq!(
+            bound.at_union_for_test(0),
+            &[Some(0), Some(1), None, Some(2)],
+            "afp membership over the union",
         );
-        assert!(report.is_fatal());
-        assert!(report.findings().iter().any(|f|
-            f.message.contains("heterogeneous schedules") && f.message.contains("stream 1")),
-            "message must name the offending stream index: {:?}", report.findings());
+        // es is scheduled only at union-index 2 (time 5 → local 0).
+        assert_eq!(
+            bound.at_union_for_test(1),
+            &[None, None, Some(0), None],
+            "es membership over the union",
+        );
+
+        // A third stream on yet another cadence also binds (prevalence-family
+        // projection — irrelevant to the merge, which is purely on times).
+        let (bound3, _) = BoundObs::bind(vec![
+            spec("afp", vec![1.0, 3.0, 8.0], vec![10.0, 11.0, 12.0]),
+            spec("es", vec![5.0], vec![20.0]),
+            spec("sero", vec![2.0, 6.0], vec![30.0, 31.0]),
+        ]).expect("a third cadence must also bind");
+        assert_eq!(bound3.times(), &[1.0, 2.0, 3.0, 5.0, 6.0, 8.0]);
     }
 
     #[test]
@@ -1096,14 +1201,15 @@ mod bind_tests {
         assert_ne!(report.verdict(), Severity::Error);
         assert!(report.findings().is_empty(), "valid dense input has no findings");
 
-        // One shared axis (= stream 0's), collapsed from the identical schedules.
+        // Homogeneous: the union equals the shared axis, and every stream is
+        // scheduled at every union index (`at_union[i] == Some(i)`).
         assert_eq!(bound.times(), &[1.0, 2.0, 3.0]);
-        // Equal-length invariant holds by construction for every stream.
         for s in &bound.streams {
-            assert_eq!(s.values.len(), bound.times().len());
+            assert_eq!(s.cells.len(), bound.times().len());
+            assert_eq!(s.at_union, vec![Some(0), Some(1), Some(2)]);
         }
-        assert_eq!(bound.streams[0].values, dense_cells(vec![10.0, 11.0, 12.0]));
-        assert_eq!(bound.streams[1].values, dense_cells(vec![20.0, 21.0, 22.0]));
+        assert_eq!(bound.streams[0].cells, dense_cells(vec![10.0, 11.0, 12.0]));
+        assert_eq!(bound.streams[1].cells, dense_cells(vec![20.0, 21.0, 22.0]));
     }
 }
 
