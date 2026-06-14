@@ -636,3 +636,52 @@ fn run_pgas_exact(compiled: &Arc<CompiledModel>, obs_times: &[f64], run_id: &str
     run_pgas(compiled, &if2_params, &priors, &params, &config, &observations, &obs_model, 1, None, None, run_id.into())
         .map(|_| ())
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Property: firing-invariance over RANDOM schedules (the gh#216 generalization)
+// ════════════════════════════════════════════════════════════════════════════
+
+use proptest::prelude::*;
+
+proptest! {
+    /// For ANY on-grid effect time and ANY observation schedule (including
+    /// OFF-grid obs), the effect fires EXACTLY ONCE at its own time — invariants
+    /// A1 (instant-invariance), A2 (fire-once) and A3 (no spurious fire) at once,
+    /// read off the integer `M` trajectory (0 before the fire, `TRANSFER` after;
+    /// `2·TRANSFER` would be a double-fire). This is the generated-combination
+    /// generalization of the example-based firing tests above: it covers the
+    /// (effect_time, obs_times) pairs no hand-written table enumerates — exactly
+    /// the class that hid the gh#216 events bug (`obs=[3.5], event@4, dt=1`).
+    /// Runs for both kinds, since events and scheduled interventions now share
+    /// the one cursor-keyed firing path. See docs/dev/scheduling-spine.md §2.
+    #[test]
+    fn prop_effect_fires_once_at_its_time_for_any_obs_schedule(
+        // On-grid effect time ∈ {1.0 .. 8.0} (dt = 1, window [0, 10]).
+        fire_step in 1u32..9,
+        // Observation times at n·0.5 ∈ {0.5 .. 9.5} — a MIX of on-grid (integer)
+        // and OFF-grid (half) times, the off-grid ones being where round(t/dt)
+        // collided. 1–5 distinct, sorted ascending.
+        obs_halfsteps in prop::collection::vec(1u32..19, 1..6),
+        is_event in any::<bool>(),
+    ) {
+        let kind = if is_event { InterventionKind::Event } else { InterventionKind::Scenario };
+        let fire_time = fire_step as f64;
+        let compiled = Arc::new(firing_model(
+            InterventionSchedule::AtTimes(vec![fire_time]), kind));
+
+        let mut obs_times: Vec<f64> = obs_halfsteps.iter().map(|&n| n as f64 * 0.5).collect();
+        obs_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        obs_times.dedup();
+
+        let m = pf_m_trajectory(&compiled, &obs_times);
+        let expected: Vec<i64> = obs_times.iter()
+            .map(|&t| if t >= fire_time - 1e-9 { TRANSFER as i64 } else { 0 })
+            .collect();
+        prop_assert_eq!(
+            m, expected,
+            "effect@{} (kind={:?}) must fire ONCE at its own time — M=0 before / \
+             TRANSFER after — regardless of the obs schedule {:?}",
+            fire_time, kind, obs_times
+        );
+    }
+}

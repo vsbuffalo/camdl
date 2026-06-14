@@ -146,16 +146,21 @@ fn run(with_event: bool, obs_times: Vec<f64>) -> Result<f64, sim::SimError> {
     bootstrap_filter(&process, &obs_model, &params, &config, 42).map(|r| r.log_likelihood)
 }
 
-/// GREEN (was RED — previously rejected): with an always-active event, off-grid
-/// observations now RUN. Under Exact the final substep of each off-grid window is
-/// clipped, so `dt_actual ≠ grid_dt`; the firing key is computed on `grid_dt`, so
-/// the events still land on the correct nominal grid steps. Pre-fix this returned
-/// an error at filter setup (`reject_event_misfire`); the fix makes it a correct
-/// run with a finite likelihood.
+/// With an always-active event, off-grid observations RUN with a finite
+/// likelihood (pre-fix this was rejected by `reject_event_misfire`).
+///
+/// NOTE: a finite likelihood does NOT prove the event fired at the RIGHT time —
+/// this model's death rate (`mu = 0.01`) is stochastic, so `M`/`N` can't pin the
+/// firing instant. This test asserted only finiteness and so passed green the
+/// whole time the gh#216 events arm was MISFIRING (early + double fire). Firing
+/// *correctness* is now pinned by the deterministic-`mu=0` tests in
+/// `gh216_cursor_firing` (`pf_event_firing_invariant_*` + the proptest
+/// `prop_effect_fires_once_at_its_time_for_any_obs_schedule`). This case stays as
+/// the does-it-run / no-spurious-rejection check only.
 #[test]
 fn pf_runs_off_grid_obs_with_always_active_event() {
     let ll = run(true, vec![3.5, 7.5])
-        .expect("off-grid obs + always-active event must now RUN (StepClock fix), not be rejected");
+        .expect("off-grid obs + always-active event must RUN, not be rejected");
     assert!(ll.is_finite(), "log-likelihood should be finite, got {ll}");
 }
 
