@@ -171,7 +171,7 @@ fn test_if2_converges_from_dispersed_start() {
     let (obs_times, obs_values) = generate_data(&compiled, &true_params);
 
     let compiled = Arc::new(compiled);
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let obs_model = NegBinFlowObs {
         observations: obs_values,
         obs_times,
@@ -245,7 +245,7 @@ fn test_if2_respects_bounds() {
     let (obs_times, obs_values) = generate_data(&compiled, &true_params);
 
     let compiled = Arc::new(compiled);
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let obs_model = NegBinFlowObs {
         observations: obs_values,
         obs_times,
@@ -298,7 +298,7 @@ fn test_if2_no_cooling_explores() {
     let (obs_times, obs_values) = generate_data(&compiled, &true_params);
 
     let compiled = Arc::new(compiled);
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let obs_model = NegBinFlowObs {
         observations: obs_values,
         obs_times,

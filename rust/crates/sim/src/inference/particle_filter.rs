@@ -170,9 +170,9 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         crate::intervention::guard_exact_offgrid_effect_time(
             model, params, config.t_start, dt, StepPolicy::Exact,
         )?;
-        crate::intervention::scheduled_effects(model, params)
+        crate::intervention::timeline_effects(model, params)
     } else {
-        crate::intervention::ScheduledEffects::default()
+        crate::intervention::TimelineEffects::default()
     };
 
     let sched_t_end = obs_times.last().copied().unwrap_or(config.t_start);

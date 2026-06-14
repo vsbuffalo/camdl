@@ -201,7 +201,7 @@ const BASELINES: &[(&str, f64)] = &[
 
 fn run(builder: RefBuilder) -> f64 {
     let (obs_model, compiled, params) = builder();
-    let process = ChainBinomialProcess::new(compiled, DT);
+    let process = ChainBinomialProcess::new(compiled);
     let config = SMCConfig {
         n_particles: N_PARTICLES,
         dt: DT,

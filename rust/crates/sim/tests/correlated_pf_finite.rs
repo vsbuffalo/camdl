@@ -216,7 +216,7 @@ fn compare_filters(compiled: CompiledModel, params: &[f64], inf_idx: usize, n_pa
 
     let compiled = Arc::new(compiled);
     let dt = 1.0;
-    let process = ChainBinomialProcess::new(compiled.clone(), dt);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let config = SMCConfig {
         n_particles, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -283,7 +283,7 @@ fn correlated_pf_finite_on_t0_starting_grid() {
 
     let compiled = Arc::new(compiled);
     let dt = 1.0;
-    let process = ChainBinomialProcess::new(compiled.clone(), dt);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let config = SMCConfig {
         n_particles: 200, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -337,7 +337,7 @@ fn correlated_pf_finite_where_plain_pf_is() {
     let compiled = Arc::new(compiled);
     let n_particles = 100;
     let dt = 1.0;
-    let process = ChainBinomialProcess::new(compiled.clone(), dt);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let config = SMCConfig {
         n_particles,
         dt,

@@ -144,7 +144,7 @@ fn hole_does_not_suppress_incidence_reset() {
         Some(ObsCell::Scalar(weekly)),
     ];
 
-    let process = ChainBinomialProcess::new(compiled.clone(), dt);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let cfg = SMCConfig {
         n_particles: 4,
         dt,
@@ -216,7 +216,7 @@ fn conditioning_boundary_resets_leading_incidence() {
         Some(ObsCell::Scalar(weekly)),
     ];
 
-    let process = ChainBinomialProcess::new(compiled.clone(), dt);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let cfg = SMCConfig {
         n_particles: 4, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -266,7 +266,7 @@ fn dense_baseline_matches_predictions_at_non_hole_indices() {
     let weekly = 7.0 * k;
     let times = vec![7.0, 14.0, 21.0, 28.0];
 
-    let process = ChainBinomialProcess::new(compiled.clone(), dt);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let cfg = SMCConfig {
         n_particles: 4, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,

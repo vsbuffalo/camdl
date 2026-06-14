@@ -217,50 +217,51 @@ pub fn all_intervention_times(model: &CompiledModel, params: &[f64]) -> Vec<f64>
 /// a float-rounded on-grid time.
 const GRID_TOL: f64 = 1e-9;
 
-/// The on-grid scheduled (`!is_event`) effect boundaries for one filter run,
-/// the cursor-keyed replacement for the `round(t/dt)` firing key (gh#216).
+/// The effect boundaries for one inference filter run — the cursor-keyed firing
+/// timeline, the replacement for the `round(t/dt)` firing key (gh#216).
 ///
-/// `times` is the sorted, deduplicated set of fire times of every scheduled
-/// intervention — IDENTICAL to the `effect_times` registered on the inference
-/// [`crate::schedule::Schedule`], so a [`crate::schedule::Cursor`]'s `effect_idx`
-/// indexes both. `batches[i]` lists, in declaration order, the scheduled
-/// interventions firing at `times[i]`; when the integrator lands on an effect
-/// boundary the caller reads `batches[effect_idx]` and fires it. Always-active
-/// EVENTS are excluded — they keep the `grid_dt` firing key (see
-/// [`crate::effects::due_events`]) and registering their times would re-tile the
-/// Exact grid for events-only models (breaking byte-identity).
+/// `times` is the sorted, deduplicated set of fire times of EVERY effect — both
+/// always-active events and scheduled interventions — IDENTICAL to the
+/// `effect_times` registered on the inference [`crate::schedule::Schedule`], so a
+/// [`crate::schedule::Cursor`]'s `effect_idx` indexes both. `batches[i]` lists, in
+/// declaration order, the effects firing at `times[i]`; when the integrator lands
+/// on an effect boundary the caller reads `batches[effect_idx]` and splits it by
+/// kind ([`crate::effects::split_due_batch`]) into the PROPOSE (events) /
+/// INTERVENE (interventions) lifecycle halves. Events are included here precisely
+/// so the integrator LANDS on each event time — the same treatment the forward
+/// Exact backends (ode, gillespie) already give events via `all_intervention_times`
+/// — instead of rounding an obs-anchored off-grid substep end onto a `fire_step`.
 ///
 /// Recomputed once per filter run from `params` (§3.1 of the proposal). For the
-/// supported case every scheduled fire time is constant (parametric `at [<param>]`
+/// supported case every fire time is constant (parametric `at [<param>]`
 /// schedules under Exact are rejected by [`guard_attimesexpr_exact`]).
 #[derive(Clone, Debug, Default)]
-pub struct ScheduledEffects {
+pub struct TimelineEffects {
     pub times: Vec<f64>,
     pub batches: Vec<Vec<usize>>,
 }
 
-/// Build the [`ScheduledEffects`] for `model` at `params`: group the scheduled
-/// (`!is_event`) interventions' fire times into sorted, distinct boundaries. The
-/// resulting `times` is what the inference `Schedule`'s `effect_times` must carry.
-pub fn scheduled_effects(model: &CompiledModel, params: &[f64]) -> ScheduledEffects {
+/// Build the [`TimelineEffects`] for `model` at `params`: group EVERY effect's
+/// (events + scheduled interventions) fire times into sorted, distinct
+/// boundaries. The resulting `times` is what the inference `Schedule`'s
+/// `effect_times` must carry, so the integrator lands on each one.
+pub fn timeline_effects(model: &CompiledModel, params: &[f64]) -> TimelineEffects {
     let fire_times = model.resolve_fire_times(params);
-    // (time, iv_idx) for scheduled interventions only, collected in declaration
-    // order so a stable sort keeps per-boundary firing order = declaration order.
+    // (time, iv_idx) for EVERY effect, collected in declaration order so a stable
+    // sort keeps per-boundary firing order = declaration order. The kind→stage
+    // split happens at apply time (split_due_batch), not here.
     let mut pairs: Vec<(f64, usize)> = Vec::new();
-    for (iv_idx, iv) in model.model.interventions.iter().enumerate() {
-        if iv.kind.is_event() {
-            continue;
-        }
+    for (iv_idx, _iv) in model.model.interventions.iter().enumerate() {
         for &t in &fire_times[iv_idx] {
             pairs.push((t, iv_idx));
         }
     }
     pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut out = ScheduledEffects::default();
+    let mut out = TimelineEffects::default();
     for (t, iv_idx) in pairs {
         match out.times.last() {
             // Distinct boundaries by exact equality, matching `all_intervention_times`'
-            // dedup; a scheduled intervention sharing a fire time joins the batch.
+            // dedup; an effect sharing a fire time joins the batch.
             Some(&last) if last == t => out.batches.last_mut().unwrap().push(iv_idx),
             _ => {
                 out.times.push(t);

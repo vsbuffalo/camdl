@@ -386,7 +386,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
 
     // Build process + observation model via traits
     let compiled = std::sync::Arc::new(compiled);
-    let process = ChainBinomialProcess::new(compiled.clone(), dt);
+    let process = ChainBinomialProcess::new(compiled.clone());
 
     // Authoritative per-stream cells (holes = `None`) thread into the obs
     // model; `per_stream_obs` is only the dense placeholder view for

@@ -16,36 +16,21 @@ use super::types::ParticleState;
 /// Wraps a `CompiledModel` and delegates to `step_one` for simulation.
 /// Implements `ProcessModel` (for PF, IF2, PMMH) and `DensityProcess`
 /// (for PGAS). The only process backend that supports PGAS.
+///
+/// Holds no `dt`: the integrator step arrives per call (`step`/`density` take
+/// `dt`), and effect firing is decided CURSOR-keyed by the driver from the
+/// timeline — there is no per-process `fire_steps`/`round(t/dt)` view to resolve
+/// at a stored `dt` any more (that round-key path was the gh#216 events bug;
+/// see `effects::split_due_batch`).
 pub struct ChainBinomialProcess {
     pub compiled: Arc<CompiledModel>,
-    /// Integrator step for this process. gh#53 — the CompiledModel
-    /// stores dt-invariant `fire_times`; the per-run `fire_steps`
-    /// view depends on the runtime dt and must be resolved with that
-    /// value, not the compile-time `model.simulation.dt`. Resolution
-    /// now happens per-step inside `step` (was pre-resolved at
-    /// construction; broken for parametric event schedules per gh#69).
-    pub(crate) dt: f64,
 }
 
 impl ChainBinomialProcess {
-    /// Construct a process for a model with integrator step `dt`.
-    /// `dt` is required because `fire_steps` (the runtime view of
-    /// the model's intervention schedule) must be resolved with it
-    /// (see gh#53). Reusing the same process across runs at
-    /// different dts is unsupported — build a fresh process per
-    /// dt; the gh#52 Richardson ladder already does this via
-    /// `run_quick_pfilter_with_dt`'s per-rung config rebuild.
-    pub fn new(compiled: Arc<CompiledModel>, dt: f64) -> Self {
-        // fire_steps used to be pre-resolved here against default
-        // params. That was incorrect for models with parametric event
-        // schedules (`events { ... at [param] }`, gh#69): different
-        // particles / different PMMH proposals carry different values
-        // for `param`, so each `step` call needs fire_steps resolved
-        // against THIS call's `params`. The pre-resolved value is
-        // dropped; `step` re-resolves per call (linear walk over the
-        // intervention list — negligible compared to a chain-binomial
-        // step's propensity eval + multinomial draws).
-        ChainBinomialProcess { compiled, dt }
+    /// Construct a process for `compiled`. The integrator step is supplied per
+    /// call (`step`/`density` take `dt`); the process stores none.
+    pub fn new(compiled: Arc<CompiledModel>) -> Self {
+        ChainBinomialProcess { compiled }
     }
 }
 
@@ -83,26 +68,16 @@ impl ProcessModel for ChainBinomialProcess {
         dt: f64,
         rng: &mut StatefulRng,
         scratch: &mut StepScratch,
-        due_interventions: &[usize],
+        due_effects: &[usize],
     ) -> Result<(), SimError> {
-        // Re-resolve fire_steps per call from the caller's params.
-        // For models without parametric event schedules, this is a
-        // pure function of `dt` (and identical across calls); for
-        // models WITH parametric schedules (gh#69), each particle /
-        // PMMH proposal carries its own value of the schedule
-        // parameter and gets its own fire_steps. Cost: linear walk
-        // over the intervention list (typically O(few)) — small
-        // compared to a chain-binomial step's per-transition
-        // propensity eval and multinomial draws. Used ONLY for the
-        // grid_dt-keyed always-active EVENT half of the batch below.
-        let fire_steps = self.compiled.resolve_fire_steps(self.dt, params);
-        // Populate the due batch for this substep (gh#216): always-active EVENTS
-        // keyed on the nominal `self.dt` grid at the boundary `t + dt`, and the
-        // SCHEDULED interventions the driver decided cursor-keyed (empty off a
-        // boundary). step_one applies what we put here; it no longer decides.
-        crate::effects::due_events(&self.compiled, &fire_steps, t + dt, self.dt, &mut scratch.effect_batch);
-        scratch.effect_batch.intervention_idx.clear();
-        scratch.effect_batch.intervention_idx.extend_from_slice(due_interventions);
+        // The driver decided due-ness CURSOR-keyed from the timeline (events AND
+        // scheduled interventions are both registered on `effect_times` via
+        // `timeline_effects`, so the integrator landed on each effect time and the
+        // cursor reports the firing batch here — empty off a boundary). Split it
+        // by kind into the lifecycle halves: events at PROPOSE (fused with the
+        // kernel draw), interventions at INTERVENE. step_one applies what we put
+        // here; it no longer decides. No `round(t/dt)` for events (gh#216).
+        crate::effects::split_due_batch(&self.compiled, due_effects, &mut scratch.effect_batch);
         // KNOWN LIMITATION (docs/dev/incidents/2026-06-07-chain-binomial-
         // stale-real-state.md, §inference scope): inference particles
         // (`ParticleState`) track integer counts only — there is no real

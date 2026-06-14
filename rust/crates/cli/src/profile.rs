@@ -746,7 +746,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 ).map(Arc::new),
         };
 
-    let process = Arc::new(ChainBinomialProcess::new(compiled.clone(), dt));
+    let process = Arc::new(ChainBinomialProcess::new(compiled.clone()));
     // Build one StreamSpec per resolved IR observation. For
     // single-stream profiles `--flow <name>` overrides the IR
     // projection (forces incidence over the named transition family);
@@ -1377,9 +1377,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 // PF process kernel + obs model for this cell. PMMH on
                 // profile is chain_binomial-only (rejected upstream for
                 // --backend ode), so wire ChainBinomialProcess directly.
-                let pf_process = ChainBinomialProcess::new(
-                    compiled.clone(), pmmh_config.dt,
-                );
+                let pf_process = ChainBinomialProcess::new(compiled.clone());
                 let pf_obs_model = Arc::clone(&obs_model_obj);
                 let smc_cfg = sim::inference::traits::SMCConfig {
                     n_particles: pmmh_config.n_particles,
@@ -1406,9 +1404,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     &[f64],
                     &sim::inference::correlated_pf::PFRandomState,
                 ) -> f64>> = if pmmh_config.rho.is_some() {
-                    let pf_process2 = ChainBinomialProcess::new(
-                        compiled.clone(), pmmh_config.dt,
-                    );
+                    let pf_process2 = ChainBinomialProcess::new(compiled.clone());
                     let pf_obs_model2 = Arc::clone(&obs_model_obj);
                     let smc_cfg2 = smc_cfg.clone();
                     let cell_seed = job_seed;

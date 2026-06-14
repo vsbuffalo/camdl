@@ -133,7 +133,7 @@ fn run(with_event: bool, obs_times: Vec<f64>) -> Result<f64, sim::SimError> {
     let event_times = with_event.then(|| (1..=10).map(|k| k as f64).collect());
     let compiled = Arc::new(death_model(event_times));
     let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled, 1.0);
+    let process = ChainBinomialProcess::new(compiled);
     let obs_model = PoissonPrevalenceObs {
         observations: obs_times.iter().map(|&t| 100.0 * (-0.01 * t).exp()).collect(),
         obs_times,

@@ -62,7 +62,7 @@ use sim::{
         traits::{ObservationModel, SMCConfig},
         ChainBinomialProcess, ParticleState,
     },
-    intervention::scheduled_effects,
+    intervention::timeline_effects,
     rng::StatefulRng,
     schedule::StepPolicy,
 };
@@ -211,7 +211,7 @@ fn smc_config() -> SMCConfig {
 /// intervention fires and `TRANSFER` once (and only once) it has.
 fn pf_m_trajectory(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> Vec<i64> {
     let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let (obs, _) = obs_on_m(obs_times);
     let mut config = smc_config();
     config.record_ancestry = true;
@@ -260,6 +260,31 @@ fn pf_firing_invariant_to_offgrid_obs_stream() {
          and exactly once (final M=10, not 20) — the firing instant is invariant to the obs stream");
 }
 
+/// PF, ALWAYS-ACTIVE EVENT arm (gh#216 events; PR#218 review #4). Events keep the
+/// `grid_dt` firing key (NOT cursor-keyed — registering event times would re-tile
+/// the Exact grid and break events-only byte-identity). That key must still fire
+/// the event at its OWN nominal time (day 4) regardless of an off-grid sibling
+/// obs: not early at the off-grid obs boundary (3.5 → `round(3.5)=4` collision)
+/// and not twice (3.5 AND 4.0). Read off the integer `M`: a misfire shows as
+/// M≠0 at the 3.5 obs (early) or final M=20 (double). The scheduled arm above is
+/// cursor-keyed; this pins the SEPARATE event firing path.
+#[test]
+fn pf_event_firing_invariant_to_offgrid_obs_stream() {
+    let compiled = Arc::new(firing_model(
+        InterventionSchedule::AtTimes(vec![FIRE_TIME]),
+        InterventionKind::Event,
+    ));
+
+    let on_grid = pf_m_trajectory(&compiled, &[4.0, 8.0]);
+    assert_eq!(on_grid, vec![TRANSFER as i64, TRANSFER as i64],
+        "event arm, on-grid baseline: fires once at day 4");
+
+    let off_grid = pf_m_trajectory(&compiled, &[3.5, 4.0, 8.0]);
+    assert_eq!(off_grid, vec![0, TRANSFER as i64, TRANSFER as i64],
+        "event arm: the off-grid 3.5 obs must see M=0 (no early fire at the obs-anchored \
+         boundary), the event fires at day 4 (M=10) and exactly once (final M=10, not 20)");
+}
+
 /// IF2: same invariance via the (deterministic) perturbed loglik. `dummy` is the
 /// estimated parameter — unused in the dynamics, so the trajectory and loglik are
 /// independent of the perturbation. RED before the fix (stopgap); GREEN after.
@@ -270,7 +295,7 @@ fn if2_firing_invariant_to_offgrid_obs_stream() {
         InterventionKind::Scenario,
     ));
     let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
 
     let off_grid_times = [3.5, 4.0, 8.0];
     let (obs, data) = obs_on_m(&off_grid_times);
@@ -313,7 +338,7 @@ fn correlated_pf_firing_correct_under_offgrid_obs() {
         InterventionKind::Scenario,
     ));
     let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
 
     let off_grid_times = [3.5, 7.0];
     let (obs, _data) = obs_on_m(&off_grid_times);
@@ -327,6 +352,70 @@ fn correlated_pf_firing_correct_under_offgrid_obs() {
     assert_eq!(
         final_m, TRANSFER as i64,
         "correlated-PF: intervention must fire EXACTLY ONCE at day 4 (final M=10, not 0 or 20)"
+    );
+}
+
+/// IF2, EVENT arm (gh#216 events / PR#218 #4): the same off-grid firing
+/// invariance via the perturbed loglik, with an always-active EVENT instead of a
+/// scheduled intervention. Events are now cursor-keyed like interventions
+/// (`split_due_batch`), so the event fires at day 4 regardless of the off-grid
+/// 3.5 obs — a mis-timed firing would shift `M` at an obs and move the loglik.
+#[test]
+fn if2_event_firing_invariant_to_offgrid_obs_stream() {
+    let compiled = Arc::new(firing_model(
+        InterventionSchedule::AtTimes(vec![FIRE_TIME]),
+        InterventionKind::Event,
+    ));
+    let params = compiled.default_params.clone();
+    let process = ChainBinomialProcess::new(compiled.clone());
+
+    let off_grid_times = [3.5, 4.0, 8.0];
+    let (obs, data) = obs_on_m(&off_grid_times);
+    let if2_params = vec![EstimatedParam {
+        name: "dummy".into(), index: compiled.param_index["dummy"],
+        initial: 1.0, rw_sd: 0.1,
+        transform: Transform::Log { lo: 1e-3, hi: 10.0 },
+        lower: 1e-3, upper: 10.0, rw_sd_auto: false, ivp: false,
+    }];
+    let config = IF2Config {
+        n_particles: 64, n_iterations: 1, cooling_fraction: 0.5,
+        cooling_target_iters: 50, dt: 1.0, t_start: 0.0,
+        simplex_groups: vec![], skip_first_obs_from_loglik: false,
+        pf_wallclock_disabled: false,
+    };
+    let res = run_if2(&process, &obs, &params, &if2_params, &config, 42)
+        .expect("off-grid obs + always-active event must fit under IF2 (gh#216 events arm)");
+    let expected = expected_loglik_fired_once(&off_grid_times, &data);
+    assert!(
+        (res.last_loglik - expected).abs() < 1e-6,
+        "IF2 event: must fire at day 4 regardless of the off-grid 3.5 obs \
+         (loglik {} vs fired-at-4 {})", res.last_loglik, expected
+    );
+}
+
+/// Correlated-PF, EVENT arm: an always-active event fires exactly once at day 4
+/// under off-grid (uniform) obs — final `M = 10`, not 0 (missed) or 20 (double).
+#[test]
+fn correlated_pf_event_firing_correct_under_offgrid_obs() {
+    let compiled = Arc::new(firing_model(
+        InterventionSchedule::AtTimes(vec![FIRE_TIME]),
+        InterventionKind::Event,
+    ));
+    let params = compiled.default_params.clone();
+    let process = ChainBinomialProcess::new(compiled.clone());
+
+    let off_grid_times = [3.5, 7.0];
+    let (obs, _data) = obs_on_m(&off_grid_times);
+    let config = smc_config();
+    let n_source_groups = compiled.source_groups.len();
+    let mut rng = StatefulRng::new(7);
+    let randoms = PFRandomState::draw_fresh(config.n_particles, 2, 4, n_source_groups, &mut rng);
+    let res = bootstrap_filter_correlated(&process, &obs, &params, &config, &randoms, 42)
+        .expect("off-grid obs + always-active event must fit under correlated-PF");
+    let final_m = res.final_states.as_ref().unwrap()[0].counts[1];
+    assert_eq!(
+        final_m, TRANSFER as i64,
+        "correlated-PF event: must fire EXACTLY ONCE at day 4 (final M=10, not 0 or 20)"
     );
 }
 
@@ -379,7 +468,7 @@ fn pgas_producer_fires_once_at_registered_boundary() {
     );
     let params = compiled.default_params.clone();
     let observations = pgas_observations(&[3.5, 8.0]); // off-grid 3.5 re-tiles
-    let scheduled = scheduled_effects(&compiled, &params);
+    let scheduled = timeline_effects(&compiled, &params);
     assert_eq!(scheduled.times, vec![FIRE_TIME], "the scheduled boundary is the intervention time");
 
     let grid = build_substep_grid(0.0, 1.0, &observations, &scheduled.times, StepPolicy::Exact)
@@ -446,7 +535,7 @@ fn pf_rejects_off_grid_effect_time() {
         InterventionKind::Scenario,
     ));
     let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled, 1.0);
+    let process = ChainBinomialProcess::new(compiled);
     let (obs, _) = obs_on_m(&[2.0, 6.0]); // on-grid obs — only the effect time is off-grid
     let msg = expect_err(
         bootstrap_filter(&process, &obs, &params, &smc_config(), 42),
@@ -467,7 +556,7 @@ fn if2_rejects_at_times_expr_under_exact() {
         InterventionKind::Scenario,
     ));
     let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let (obs, _) = obs_on_m(&[2.0, 6.0]);
     let if2_params = vec![EstimatedParam {
         name: "dummy".into(), index: compiled.param_index["dummy"],

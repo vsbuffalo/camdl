@@ -333,7 +333,7 @@ fn bootstrap_filter_runs_multi_cadence() {
     let obs = MultiStreamObsModel::new(
         BoundObs::bind(vec![afp, es]).expect("bind").0, compiled.clone()).unwrap();
 
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let cfg = SMCConfig {
         n_particles: 8, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false,

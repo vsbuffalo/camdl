@@ -125,7 +125,7 @@ fn pure_death_obs() -> PoissonPrevalenceObs {
 fn run_pf(n_particles: usize, seed: u64) -> f64 {
     let (compiled, params) = pure_death_model();
     let compiled = Arc::new(compiled);
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let obs_model = pure_death_obs();
 
     let config = SMCConfig { n_particles, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false, pf_wallclock_disabled: false };
@@ -187,7 +187,7 @@ fn test_pf_more_particles_lower_variance() {
 fn test_pf_ess_reasonable() {
     let (compiled, params) = pure_death_model();
     let compiled = Arc::new(compiled);
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let obs_model = pure_death_obs();
 
     let config = SMCConfig { n_particles: 500, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false, pf_wallclock_disabled: false };
@@ -225,7 +225,7 @@ fn run_pf_full(
 ) -> sim::inference::particle_filter::PFilterResult {
     let (compiled, params) = pure_death_model();
     let compiled = Arc::new(compiled);
-    let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+    let process = ChainBinomialProcess::new(compiled.clone());
     let obs_model = pure_death_obs();
     let config = SMCConfig {
         n_particles, dt: 1.0, t_start: 0.0,

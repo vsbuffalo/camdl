@@ -333,7 +333,7 @@ pub struct SubstepGrid {
     /// that observation time (where the likelihood is scored).
     pub obs_at_substep: ObsAtSubstep,
     /// substep index → scheduled-effect-boundary index (into a
-    /// [`crate::intervention::ScheduledEffects`]): the substep whose end lands on
+    /// [`crate::intervention::TimelineEffects`]): the substep whose end lands on
     /// that scheduled intervention's fire time, where the producer fires it
     /// CURSOR-keyed (gh#216). Empty under `Snap` (effects fire on the `round(t/dt)`
     /// key in the producer's `due_effects`); populated only under `Exact`.
@@ -910,15 +910,16 @@ pub fn complete_data_loglik(
 /// The scheduled-effect firing plan a PGAS producer fires by (gh#216): `None`
 /// selects the Snap `round(t/dt)` whole-batch path; `Some((effect_at_substep,
 /// batches))` selects cursor-keyed firing — `effect_at_substep[s]` indexes
-/// `batches` (the [`crate::intervention::ScheduledEffects`] per-boundary lists).
+/// `batches` (the [`crate::intervention::TimelineEffects`] per-boundary lists).
 pub type EffectFiring<'a> = Option<(&'a ObsAtSubstep, &'a [Vec<usize>])>;
 
 /// Fill `out` with the effects firing at the boundary `t_end` for producer
 /// substep `s`. `None` (Snap): the whole batch on the `round(t/dt)` key
-/// ([`crate::effects::due_effects`]). `Some(..)` (Exact): always-active EVENTS on
-/// the `grid_dt` key ([`crate::effects::due_events`]) — none reach here since
-/// PGAS rejects events under Exact — plus the scheduled interventions the timeline
-/// landed at this substep, CURSOR-keyed. step_one then applies `out`.
+/// ([`crate::effects::due_effects`]). `Some(..)` (Exact): the effects the
+/// timeline landed at this substep, CURSOR-keyed, split by kind via
+/// [`crate::effects::split_due_batch`]. PGAS still rejects always-active events
+/// under Exact (the residual guard below), so in practice only scheduled
+/// interventions reach the `Some` branch here. step_one then applies `out`.
 fn fill_producer_batch(
     model: &CompiledModel,
     fire_steps: &[std::collections::BTreeSet<i64>],
@@ -931,10 +932,16 @@ fn fill_producer_batch(
     match firing {
         None => crate::effects::due_effects(model, fire_steps, t_end, grid_dt, out),
         Some((effect_at_substep, batches)) => {
-            crate::effects::due_events(model, fire_steps, t_end, grid_dt, out);
-            out.intervention_idx.clear();
+            // Exact: every effect is cursor-keyed from the timeline. Split the
+            // boundary's batch by kind (events at PROPOSE / interventions at
+            // INTERVENE); empty off a boundary. Always-active events under Exact
+            // PGAS are still rejected upstream (the residual guard below), so in
+            // practice `batches` carries only scheduled interventions here — but
+            // routing through the shared `split_due_batch` keeps PGAS on the same
+            // firing path as the other cells (no `due_events` round key).
+            out.clear();
             if let Some(&eff_idx) = effect_at_substep.get(&s) {
-                out.intervention_idx.extend_from_slice(&batches[eff_idx]);
+                crate::effects::split_due_batch(model, &batches[eff_idx], out);
             }
         }
     }
@@ -1664,7 +1671,7 @@ pub fn run_pgas(
     crate::intervention::guard_exact_offgrid_effect_time(
         model, &current_params, t_start, config.dt, config.step_policy,
     )?;
-    let scheduled = crate::intervention::scheduled_effects(model, &current_params);
+    let scheduled = crate::intervention::timeline_effects(model, &current_params);
 
     // The realized substep grid (uniform under Snap; window-tiled with shortened
     // remainders under Exact) and its obs→substep + effect→substep maps — the

@@ -379,7 +379,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // user-tunable dt knob). gh#53: process must be built at the same
     // dt so its internal fire_steps resolves correctly.
     let smc_dt = 1.0_f64;
-    let process = Arc::new(ChainBinomialProcess::new(resolved.compiled.clone(), smc_dt));
+    let process = Arc::new(ChainBinomialProcess::new(resolved.compiled.clone()));
     let t_start = resolved.compiled.model.simulation.t_start;
 
     // Concrete `Arc<MultiStreamObsModel>`: trait-typed obs models could

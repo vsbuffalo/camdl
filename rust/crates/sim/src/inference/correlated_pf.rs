@@ -260,7 +260,7 @@ pub fn bootstrap_filter_correlated(
     crate::intervention::guard_exact_offgrid_effect_time(
         model, params, config.t_start, dt, StepPolicy::Exact,
     )?;
-    let scheduled = crate::intervention::scheduled_effects(model, params);
+    let scheduled = crate::intervention::timeline_effects(model, params);
 
     let steps_per_obs = cpm_steps_per_obs(&obs_times, config.t_start, dt);
 
@@ -466,21 +466,16 @@ pub fn bootstrap_filter_correlated(
                         scratch.binomial_z_values.push(binom_row[binom_idx]);
                     }
 
-                    // Re-resolve per-particle: parametric event
-                    // schedules (gh#69) carry params; each particle
-                    // can have a different schedule. Used for the grid_dt-keyed
-                    // always-active EVENT half of the batch only.
-                    let fire_steps = process.compiled.resolve_fire_steps(process.dt, params);
-                    // gh#216: events keyed on `process.dt` at the boundary
-                    // t_local + step_dt; scheduled interventions cursor-keyed from
-                    // the timeline's effect boundary (`fired`). step_one applies
-                    // the batch we put in scratch.
-                    crate::effects::due_events(
-                        model, &fire_steps, t_local + step_dt, process.dt, &mut scratch.effect_batch,
-                    );
-                    scratch.effect_batch.intervention_idx.clear();
+                    // gh#216: every effect (events + scheduled interventions) is
+                    // cursor-keyed from the timeline's effect boundary (`fired`),
+                    // registered on `effect_times` via `timeline_effects`. Split
+                    // the boundary's batch by kind into the lifecycle halves;
+                    // empty off a boundary. step_one applies what we put here.
+                    scratch.effect_batch.clear();
                     if let Some(idx) = fired {
-                        scratch.effect_batch.intervention_idx.extend_from_slice(&scheduled.batches[idx]);
+                        crate::effects::split_due_batch(
+                            model, &scheduled.batches[idx], &mut scratch.effect_batch,
+                        );
                     }
                     // KNOWN LIMITATION (docs/dev/incidents/2026-06-07-chain-
                     // binomial-stale-real-state.md, §inference scope): the

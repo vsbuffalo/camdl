@@ -323,9 +323,10 @@ pub fn trace_enabled() -> bool {
 /// `intervention_idx` at INTERVENE). This lifts the firing decision out of the
 /// shared step (gh#216): the Snap-forward driver fills the batch via the
 /// `round(t/dt)` key ([`crate::effects::due_effects`]); the Exact-inference
-/// callers fire scheduled interventions CURSOR-keyed (from the timeline's effect
-/// boundaries) and keep events on the `grid_dt` key ([`crate::effects::due_events`]).
-/// See docs/dev/proposals/2026-06-11-spine-effect-firing-consolidation.md §3.2.
+/// callers fire EVERY effect — events and scheduled interventions alike —
+/// CURSOR-keyed from the timeline's effect boundaries, splitting the boundary's
+/// batch by kind via [`crate::effects::split_due_batch`] (no `round(t/dt)` for
+/// events; gh#216 events arm).
 ///
 /// `scratch` holds pre-allocated buffers to avoid heap allocation per call.
 /// Create one `StepScratch` per particle and reuse across all time steps.

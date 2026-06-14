@@ -700,16 +700,13 @@ impl FitRunConfig {
         })
     }
 
+    /// Build the inference process. The integrator `dt` is supplied per call to
+    /// `step`/`density` (and per rung by the gh#52 Richardson dt-check via the
+    /// SMCConfig), so the process itself is dt-agnostic — there is no stored
+    /// `fire_steps` to resolve at a particular dt any more (effect firing is
+    /// cursor-keyed from the timeline; see `effects::split_due_batch`).
     pub fn build_process(&self) -> sim::inference::ChainBinomialProcess {
-        self.build_process_with_dt(self.if2_config.dt)
-    }
-    /// Build a Process with an explicit `dt` override — used by the
-    /// gh#52 Richardson dt-check, where each ladder rung evaluates
-    /// `loglik(θ̂; dt)` at a different dt and therefore needs a
-    /// process whose internal `fire_steps` is resolved at the rung's
-    /// dt, not the fit's. gh#53.
-    pub fn build_process_with_dt(&self, dt: f64) -> sim::inference::ChainBinomialProcess {
-        sim::inference::ChainBinomialProcess::new(self.compiled.clone(), dt)
+        sim::inference::ChainBinomialProcess::new(self.compiled.clone())
     }
     pub fn build_obs_model(&self) -> sim::inference::MultiStreamObsModel {
         let specs: Vec<sim::inference::multi_stream_obs::StreamSpec> = self.streams.iter()
@@ -1059,7 +1056,7 @@ pub fn run_quick_pfilter_with_dt(
     // gh#53: Process must be built with the same dt the SMCConfig
     // will use, so its internal fire_steps resolves correctly for
     // dt-override calls (gh#52 Richardson ladder).
-    let process = config.build_process_with_dt(dt);
+    let process = config.build_process();
     let obs_model = config.build_obs_model();
     let smc_config = sim::inference::traits::SMCConfig {
         n_particles,
@@ -1095,7 +1092,7 @@ pub fn run_quick_pfilter_with_dt_typed(
     seed: u64,
 ) -> Result<f64, sim::error::SimError> {
     let dt = dt_override.unwrap_or(config.if2_config.dt);
-    let process = config.build_process_with_dt(dt);
+    let process = config.build_process();
     let obs_model = config.build_obs_model();
     let smc_config = sim::inference::traits::SMCConfig {
         n_particles,

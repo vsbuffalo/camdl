@@ -276,31 +276,33 @@ pub fn due_effects(
     }
 }
 
-/// The always-active-EVENT half of [`due_effects`], keyed on `grid_dt`: clear
-/// `out.event_idx` and refill it with the events firing at the boundary `t_end`
-/// (`time_to_step(t_end, grid_dt) ∈ fire_steps[iv]`). Scheduled (`!is_event`)
-/// interventions are NOT touched — `out.intervention_idx` is left for the caller.
+/// Split a flat list of due effect indices — the batch the timeline cursor
+/// reports at one effect boundary (`timeline_effects().batches[effect_idx]`) —
+/// into the lifecycle-stage halves of an [`EffectBatch`]: always-active EVENTS
+/// fire at PROPOSE (`event_idx`, fused with the kernel draw against the
+/// start-of-step snapshot); scheduled interventions fire at INTERVENE
+/// (`intervention_idx`, applied on the post-advance state). Indices are into
+/// `model.model.interventions`, declaration order preserved.
 ///
-/// This is the seam for the Exact-INFERENCE caller (gh#216): scheduled
-/// interventions fire CURSOR-keyed (the caller fills `intervention_idx` from the
-/// timeline's effect boundaries), while always-active events keep the `grid_dt`
-/// firing key (the StepClock fix, spine-v2 §A — out of scope for the gh#216
-/// firing change). The Snap-forward caller uses [`due_effects`] (both halves on
-/// the `grid_dt` key); PGAS under Exact rejects events entirely (its events-only
-/// guard) so `event_idx` comes back empty there. See
-/// docs/dev/proposals/2026-06-11-spine-effect-firing-consolidation.md §3.2.
-pub fn due_events(
+/// This is the ONE place the kind→stage routing lives for every Exact-INFERENCE
+/// caller (bootstrap PF / IF2 / correlated PF / PGAS producer). It replaces the
+/// former `due_events` `round(t_end/grid_dt)` event path: once events are
+/// registered on the timeline (`timeline_effects` no longer excludes them), the
+/// integrator LANDS on each event time and the cursor reports it in the batch, so
+/// firing is cursor-keyed for every kind — no `round()` on an off-grid,
+/// obs-anchored substep end (gh#216, the events arm). The Snap-forward backends
+/// keep their on-grid `round(t/dt)` key via [`due_effects`].
+pub fn split_due_batch(
     model: &CompiledModel,
-    fire_steps: &[std::collections::BTreeSet<i64>],
-    t_end: f64,
-    grid_dt: f64,
+    due: &[usize],
     out: &mut crate::schedule::EffectBatch,
 ) {
-    out.event_idx.clear();
-    let current_step = crate::time::time_to_step(t_end, grid_dt);
-    for (iv_idx, iv) in model.model.interventions.iter().enumerate() {
-        if iv.kind.is_event() && fire_steps[iv_idx].contains(&current_step) {
+    out.clear();
+    for &iv_idx in due {
+        if model.model.interventions[iv_idx].kind.is_event() {
             out.event_idx.push(iv_idx);
+        } else {
+            out.intervention_idx.push(iv_idx);
         }
     }
 }

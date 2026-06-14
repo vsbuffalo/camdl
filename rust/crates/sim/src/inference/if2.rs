@@ -255,9 +255,9 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         crate::intervention::guard_exact_offgrid_effect_time(
             model, base_params, config.t_start, config.dt, StepPolicy::Exact,
         )?;
-        crate::intervention::scheduled_effects(model, base_params)
+        crate::intervention::timeline_effects(model, base_params)
     } else {
-        crate::intervention::ScheduledEffects::default()
+        crate::intervention::TimelineEffects::default()
     };
 
     let sched_t_end = obs_times.last().copied().unwrap_or(config.t_start);

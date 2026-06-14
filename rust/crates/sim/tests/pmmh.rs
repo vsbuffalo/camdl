@@ -132,7 +132,7 @@ fn make_eval_loglik(
     n_particles: usize,
 ) -> impl Fn(&[f64], u64) -> f64 {
     move |params: &[f64], pf_seed: u64| -> f64 {
-        let process = ChainBinomialProcess::new(compiled.clone(), 1.0);
+        let process = ChainBinomialProcess::new(compiled.clone());
         let obs_model = pure_death_observations();
         let config = SMCConfig { n_particles, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false, pf_wallclock_disabled: false };
 
@@ -407,7 +407,7 @@ fn test_pmmh_different_seeds_differ() {
 /// `PoissonPrevalenceObs` at the given obs times, run `bootstrap_filter_correlated`.
 fn run_cpm(obs_times: Vec<f64>, dt: f64) -> Result<f64, sim::error::SimError> {
     let (compiled, params) = pure_death_model();
-    let process = ChainBinomialProcess::new(Arc::new(compiled), dt);
+    let process = ChainBinomialProcess::new(Arc::new(compiled));
     let n_obs = obs_times.len();
     let obs_model = PoissonPrevalenceObs {
         observations: vec![50.0; n_obs],

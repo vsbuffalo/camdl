@@ -423,7 +423,7 @@ impl Schedule {
 /// observation boundary (`obs_time(cursor) - EFFECT_EPS`), reproducing the
 /// `while t_local < obs_time - 1e-10 { … }` loops it replaces. `fired_effect` is
 /// `Some(effect_idx)` when this substep LANDS on a scheduled-effect boundary —
-/// the caller reads the due batch (e.g. [`crate::intervention::ScheduledEffects`]
+/// the caller reads the due batch (e.g. [`crate::intervention::TimelineEffects`]
 /// `.batches[effect_idx]`) and fires it CURSOR-keyed (gh#216), instead of the
 /// `round(t/dt)` key inside `step_one`.
 pub struct Substeps<'a> {
