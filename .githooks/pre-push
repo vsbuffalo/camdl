@@ -59,21 +59,6 @@ if ! git diff --quiet ir/golden/ ocaml/golden/ 2>/dev/null; then
     exit 1
 fi
 
-# ── mdbook: build the docs book to catch broken links / symlinks ──────
-# The docs-deploy CI job runs `cd docs/book && mdbook build`. Run it
-# here too. In 2026-04 this caught absolute symlinks under
-# docs/book/src/ pointing at /Users/vsb/... — fine locally, dangling on
-# every CI runner and every other dev's machine.
-if command -v mdbook > /dev/null 2>&1; then
-    echo "pre-push: mdbook build..."
-    (cd docs/book && mdbook build 2>&1 > /dev/null) || {
-        echo "error: mdbook build failed. Check docs/book/src/ symlinks + SUMMARY.md."
-        exit 1
-    }
-else
-    echo "pre-push: (skipping mdbook — not installed)"
-fi
-
 # ── Integration: shell out to the built binary against fixtures ───────
 # `make test-integration` runs tests/test_ocaml_to_rust.sh — the script
 # that actually exercises `camdl simulate batch FILE` end-to-end against

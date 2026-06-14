@@ -113,6 +113,14 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("seir_age_let_projection", "chain_binomial", 0x1ea29e011a7eba67),
     ("seir_age_table_rates", "gillespie", 0xaefb0972f1798fc5),
     ("seir_age_table_rates", "chain_binomial", 0x87d0504d39dc8044),
+    // Joint patch×age stratification (4 patches × 3 ages = 48 compartments,
+    // 120 transitions): the only golden exercising the 2-axis cross-product
+    // expander + cross-dimension transitions (aging within patch, spatial FOI
+    // summed across patches within an age band, age-contact mixing within a
+    // patch). Single-axis goldens reassociate identically; this one doesn't.
+    ("seir_cross_dim", "gillespie", 0x238f6ca444053ff0),
+    ("seir_cross_dim", "chain_binomial", 0x1385ec55aeecbc76),
+    ("seir_cross_dim", "ode", 0xbb8d6802f3159bc8),
     ("seir_defines_adj", "gillespie", 0x6f777f70cb7742ca),
     ("seir_defines_adj", "chain_binomial", 0xa443c47393008cf7),
     ("seir_defines_patch", "gillespie", 0xa7c867674ed33cf9),

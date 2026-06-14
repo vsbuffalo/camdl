@@ -1,1 +1,0 @@
-../../../compartmental-ir-spec.md

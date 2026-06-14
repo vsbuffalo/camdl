@@ -3,7 +3,7 @@ time_unit = 'days
 compartments { S, E, I, R }
 
 dimensions {
-  patch = read("data/patch_features.tsv", column = "patch")
+  patch = read("data/seir_cross_dim_patch.tsv", column = "patch")
   age   = [child, adult, elder]
 }
 
@@ -23,8 +23,8 @@ let N_total[p in patch]     = sum(a in age, N[p, a])
 let I_total[p in patch]     = sum(a in age, I[p, a])
 
 tables {
-  pop_pa  : patch × age   = read("data/patch_age_pop3.tsv")
-  adj     : patch × patch = read("data/spatial_adj.tsv", default = 0.0)
+  pop_pa  : patch × age   = read("data/seir_cross_dim_pop.tsv")
+  adj     : patch × patch = read("data/seir_cross_dim_adj.tsv", default = 0.0)
 
   age_dur : age = [5475, 16425, 36500]   # days: ~15yr child, ~45yr adult, 100yr elder
 

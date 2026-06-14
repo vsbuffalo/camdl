@@ -1,1 +1,0 @@
-../../../camdl-data-spec.md
