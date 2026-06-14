@@ -1099,6 +1099,30 @@ mod tests {
     }
 
     #[test]
+    fn split_due_batch_routes_by_kind_and_clears_on_reuse() {
+        // The shared seam every Exact-inference caller routes through (gh#216
+        // events arm): a flat due list — the timeline cursor's per-boundary batch
+        // — splits into the lifecycle halves by KIND, events at PROPOSE
+        // (event_idx) / scheduled interventions at INTERVENE (intervention_idx).
+        // iv 0 is the always-active event, iv 1 the scheduled intervention.
+        let m = model_event_and_intervention();
+        let mut batch = crate::schedule::EffectBatch::default();
+
+        split_due_batch(&m, &[0, 1], &mut batch);
+        assert_eq!(batch.event_idx.as_slice(), &[0], "always-active event → event_idx");
+        assert_eq!(batch.intervention_idx.as_slice(), &[1], "scheduled → intervention_idx");
+
+        // Reused per substep on the hot path: a second call CLEARS first, so a
+        // stale half can't leak into the next boundary.
+        split_due_batch(&m, &[1], &mut batch);
+        assert!(batch.event_idx.is_empty(), "clear() reset the event half");
+        assert_eq!(batch.intervention_idx.as_slice(), &[1]);
+
+        split_due_batch(&m, &[], &mut batch);
+        assert!(batch.is_empty(), "empty due list → empty batch");
+    }
+
+    #[test]
     fn due_effects_empty_off_step() {
         let m = model_event_and_intervention();
         let fire = m.resolve_fire_steps(1.0, &m.default_params);
