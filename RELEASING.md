@@ -159,15 +159,20 @@ user-visible event even though it does not drive the release number.
 
 ## Setup improvements (as beta nears)
 
-These reduce the chance of a botched release; none is in place yet.
+- **A tag-triggered release workflow — done.** `.github/workflows/release.yml`
+  fires on `v*` tags: it re-gates the tagged commit with `make test`, then
+  publishes the GitHub release from `RELEASE_NOTES-<version>.md` (auto-generated
+  notes as a fallback) and attaches a release `camdl` binary. It is idempotent
+  with `make release-publish`'s local `gh release create` — it creates the
+  release only if absent, otherwise just attaches the binary — so pushing the
+  tag is enough whether or not you also published locally.
 
-- **Single-source the crate version.** Each of the seven
-  `rust/crates/*/Cargo.toml` hardcodes its own `version`. Move to workspace
-  inheritance (`[workspace.package] version = "…"` + `version.workspace = true`
-  per crate) so a release bumps one line and the manifests can't drift.
-- **A tag-triggered release workflow.** `release.yml` was removed while
-  unfinished. Before beta, add a workflow that fires on `v*` tags, runs the full
-  gate, and drafts the GitHub release from `CHANGELOG.md` — so step 7 is
-  reproducible rather than manual.
+These remain (lower priority):
+
+- **Single-source the crate version.** Each `rust/crates/*/Cargo.toml` hardcodes
+  its own `version`; `scripts/release.sh` bumps them all in one pass, but moving
+  to workspace inheritance (`[workspace.package] version = "…"` +
+  `version.workspace = true` per crate) would make a release a one-line bump
+  that can't drift.
 - **Tag hygiene.** Delete merged backup tags; namespace future scratch tags
   under `backup/`.

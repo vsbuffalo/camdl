@@ -1,0 +1,70 @@
+name: Release
+
+# Fires on a pushed version tag (vX.Y.Z, or a -alpha/-beta/-rc prerelease).
+# Gates the tagged commit with the full suite, then publishes the GitHub Release
+# from the committed RELEASE_NOTES-<version>.md (or auto-generated notes) and
+# attaches a release `camdl` binary. The policy is VERSIONING.md; the cut
+# procedure is RELEASING.md (`make release-{suggest,prep,publish}`).
+#
+# Idempotent with the local `make release-publish`: it creates the release if it
+# does not exist yet, otherwise just uploads/refreshes the binary — so it never
+# fights a release the maintainer already created locally.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create releases + upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+          dune-cache: true
+      - name: Install OCaml dependencies
+        run: cd ocaml && opam install . --deps-only --with-test --yes
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # The release artifact is verified in CI, not just on the maintainer's
+      # machine. The tagged commit is already on main (CI-green), so this is a
+      # belt-and-suspenders re-gate on the exact release commit. `make test`
+      # builds the release `camdl` (via its build-rust dep), so a separate build
+      # step is unnecessary.
+      - name: Gate (full test suite)
+        run: opam exec -- make test
+
+      - name: Resolve version + prerelease flag
+        id: ver
+        run: |
+          tag="${GITHUB_REF_NAME}"        # e.g. v0.2.0 or v0.2.0-rc.1
+          echo "tag=$tag"  >> "$GITHUB_OUTPUT"
+          echo "ver=${tag#v}" >> "$GITHUB_OUTPUT"
+          case "$tag" in
+            *-alpha*|*-beta*|*-rc*) echo "pre=--prerelease" >> "$GITHUB_OUTPUT" ;;
+            *)                      echo "pre=" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Publish GitHub release (idempotent) + attach binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.ver.outputs.tag }}"
+          ver="${{ steps.ver.outputs.ver }}"
+          notes="RELEASE_NOTES-${ver}.md"
+          # Create the release if it doesn't exist yet; if the maintainer already
+          # created it via `make release-publish`, this no-ops and we just attach.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            if [ -f "$notes" ]; then
+              gh release create "$tag" --title "camdl $tag" ${{ steps.ver.outputs.pre }} --notes-file "$notes"
+            else
+              gh release create "$tag" --title "camdl $tag" ${{ steps.ver.outputs.pre }} --generate-notes
+            fi
+          fi
+          gh release upload "$tag" rust/target/release/camdl --clobber
