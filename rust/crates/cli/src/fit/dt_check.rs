@@ -21,7 +21,7 @@
 
 use crate::fit::config_v2::{CombineMode, DtCheckConfig};
 use crate::fit::loglik_eval::combine_with_se;
-use crate::fit::runner::{run_quick_pfilter_with_dt, FitRunConfig};
+use crate::fit::runner::{run_quick_pfilter_with_dt, ruled_out_or_surface, FitRunConfig};
 use crate::run_meta::Backend;
 use serde::{Deserialize, Serialize};
 
@@ -236,9 +236,9 @@ pub fn run_richardson_ladder(
     strict: bool,
     inherits: &DtCheckInherits,
     seed: u64,
-) -> DtCheckResult {
+) -> Result<DtCheckResult, String> {
     if !config.enabled {
-        return DtCheckResult {
+        return Ok(DtCheckResult {
             verdict: DtCheckVerdict::Skipped,
             ladder: Vec::new(),
             leg1_delta_nats: f64::NAN,
@@ -248,7 +248,7 @@ pub fn run_richardson_ladder(
             threshold_se_aware_nats: f64::NAN,
             pf_se_inflation: false,
             notes: "skipped: dt_check.enabled = false.".into(),
-        };
+        });
     }
 
     let n_particles  = config.n_particles.unwrap_or(inherits.n_particles);
@@ -278,15 +278,20 @@ pub fn run_richardson_ladder(
             let pf_seed = seed
                 .wrapping_add((rung_i as u64).wrapping_mul(1_000_003))
                 .wrapping_add(k as u64);
-            let (ll, _stats) = run_quick_pfilter_with_dt(
-                run_config, theta_hat, n_particles, Some(dt), pf_seed);
+            // gh#224: a ruled-out θ scores −∞; a structural error aborts the
+            // dt-check rather than poisoning the ladder with a hidden failure.
+            let (ll, _stats) = ruled_out_or_surface(run_quick_pfilter_with_dt(
+                run_config, theta_hat, n_particles, Some(dt), pf_seed))
+                .map_err(|e| format!(
+                    "dt-check: structural error at dt={} (rung {}, rep {}): {}",
+                    dt, rung_i, k, e))?;
             per_rep.push(ll);
         }
         let (loglik, se) = combine_with_se(&per_rep, combine);
         ladder.push(LadderEntry { dt, loglik, se });
     }
 
-    compute_verdict(&ladder, threshold_floor)
+    Ok(compute_verdict(&ladder, threshold_floor))
 }
 
 /// Render the dt-check verdict to stderr in the proposal's

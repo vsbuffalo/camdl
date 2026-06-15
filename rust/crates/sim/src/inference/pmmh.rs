@@ -18,6 +18,7 @@
 
 use serde::{Serialize, Deserialize};
 use crate::rng::StatefulRng;
+use crate::error::SimError;
 use super::types::{EstimatedParam, restore_z_values};
 use super::if2::Observation;
 pub use super::prior::Prior;
@@ -236,18 +237,23 @@ impl AdaptiveProposal {
 /// than `ProcessModel`/`ObservationModel` traits. This is the right design:
 /// PMMH wraps a Metropolis-Hastings loop around a black-box likelihood
 /// estimator. It doesn't need to know how the PF is constructed — only that
-/// `eval_loglik(params, seed) -> log L̂(θ)` returns an unbiased estimate.
+/// `eval_loglik(params, seed) -> Result<log L̂(θ)>` returns an unbiased estimate.
 /// This decoupling means PMMH works with any likelihood estimator (vanilla
 /// PF, correlated PF, importance sampling, etc.) without code changes.
 ///
-/// `eval_loglik` runs a particle filter at the given params and returns log L̂(θ).
-/// Built in the CLI layer from `run_quick_pfilter`. Takes `(full_params, pf_seed) → log L̂`.
+/// `eval_loglik` runs a particle filter at the given params and returns
+/// `Ok(log L̂(θ))` — where `Ok(-∞)` is a legitimate "θ ruled out" result the
+/// MH ratio rejects — or `Err(structural)` for a non-recoverable model failure
+/// the caller must surface rather than mistake for a ruled-out θ (gh#224). The
+/// closure owns the recoverable-vs-structural classification
+/// (`SimError::is_per_particle_recoverable`); `run_pmmh` only propagates.
+/// Built in the CLI layer from `run_quick_pfilter`. Takes `(full_params, pf_seed)`.
 ///
 /// `on_step` optional progress callback: `(step, loglik, accepted)`.
 /// Correlated PF evaluator for CPM-MCMC.
-/// Takes (params, randoms) → (loglik, randoms_used).
+/// Takes (params, randoms) → `Ok(loglik)` / `Err(structural)`, same contract.
 pub type CorrelatedEvalFn<'a> = dyn Fn(&[f64], &super::correlated_pf::PFRandomState)
-    -> f64 + 'a;
+    -> Result<f64, SimError> + 'a;
 
 // `param_names`: full parameter names, parallel to `base_params` (positional,
 // not subset to estimated params). Used to build the name → value env for
@@ -260,13 +266,13 @@ pub fn run_pmmh(
     param_names: &[String],
     config: &PMMHConfig,
     observations: &[Observation],
-    eval_loglik: &dyn Fn(&[f64], u64) -> f64,
+    eval_loglik: &dyn Fn(&[f64], u64) -> Result<f64, SimError>,
     eval_loglik_correlated: Option<&CorrelatedEvalFn>,
     seed: u64,
     on_step: Option<&dyn Fn(usize, f64, bool, &[f64])>,
     resume_from: Option<PMMHResumeState>,
     config_hash: String,
-) -> PMMHResult {
+) -> Result<PMMHResult, SimError> {
     let d = if2_params.len();
     assert_eq!(d, priors.len(), "priors must match if2_params length");
     assert_eq!(d, config.proposal_sd.len(), "proposal_sd must match if2_params length");
@@ -350,9 +356,9 @@ pub fn run_pmmh(
         current_ll = if let (Some(ref randoms), Some(eval_corr)) =
             (&current_randoms, &eval_loglik_correlated)
         {
-            eval_corr(&current_params, randoms)
+            eval_corr(&current_params, randoms)?
         } else {
-            eval_loglik(&current_params, seed.wrapping_add(0))
+            eval_loglik(&current_params, seed.wrapping_add(0))?
         };
         {
             let env = crate::inference::hierarchical::NamedParams {
@@ -437,11 +443,11 @@ pub fn run_pmmh(
             (config.rho, &current_randoms, &eval_loglik_correlated)
         {
             let pr = cur_rand.correlate(rho, &mut rng);
-            proposed_ll = eval_corr(&proposed_params, &pr);
+            proposed_ll = eval_corr(&proposed_params, &pr)?;
             proposed_randoms = Some(pr);
         } else {
             let pf_seed = seed.wrapping_add(step as u64 + 1);
-            proposed_ll = eval_loglik(&proposed_params, pf_seed);
+            proposed_ll = eval_loglik(&proposed_params, pf_seed)?;
             proposed_randoms = None;
         };
 
@@ -533,7 +539,7 @@ pub fn run_pmmh(
         map_log_posterior,
     };
 
-    PMMHResult {
+    Ok(PMMHResult {
         steps,
         acceptance_rate,
         n_steps: config.n_steps,
@@ -541,7 +547,7 @@ pub fn run_pmmh(
         map_loglik,
         map_log_posterior,
         resume_state,
-    }
+    })
 }
 
 // ── MCMC diagnostics ───────────────────────────────────────────────

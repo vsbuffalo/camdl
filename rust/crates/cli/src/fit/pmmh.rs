@@ -249,7 +249,8 @@ pub fn run_stage(
 
     let logliks: Vec<f64> = (0..20)
         .map(|i| runner::run_quick_pfilter(&config, &base, n_particles, seed + i))
-        .collect();
+        .collect::<Result<Vec<f64>, _>>()
+        .map_err(|e| format!("pmmh: structural error during PF-variance check at base θ: {}", e))?;
     let ll_mean = logliks.iter().sum::<f64>() / logliks.len() as f64;
     let ll_var = logliks.iter().map(|&l| (l - ll_mean).powi(2)).sum::<f64>() / (logliks.len() - 1) as f64;
     let ll_sd = ll_var.sqrt();
@@ -281,12 +282,16 @@ pub fn run_stage(
             let obs_model_trait = config.build_obs_model();
             let smc_config = config.smc_config();
 
-            let eval_corr = |params: &[f64], randoms: &sim::inference::correlated_pf::PFRandomState| -> f64 {
+            let eval_corr = |params: &[f64], randoms: &sim::inference::correlated_pf::PFRandomState|
+                -> Result<f64, sim::error::SimError> {
+                // gh#224: structural failures surface; a degenerate/recoverable
+                // correlated-PF run is a ruled-out θ (−∞).
                 match sim::inference::correlated_pf::bootstrap_filter_correlated(
                     &process, &obs_model_trait, params, &smc_config, randoms, seed,
                 ) {
-                    Ok(r) => r.log_likelihood,
-                    Err(_) => f64::NEG_INFINITY,
+                    Ok(r) => Ok(r.log_likelihood),
+                    Err(e) if e.is_structural() => Err(e),
+                    Err(_) => Ok(f64::NEG_INFINITY),
                 }
             };
 
@@ -297,8 +302,10 @@ pub fn run_stage(
                     n_particles, n_obs, steps_per_obs, n_source_groups, &mut corr_rng,
                 );
                 let u_prime = u.correlate(rho, &mut corr_rng);
-                let la = eval_corr(&base, &u);
-                let lb = eval_corr(&base, &u_prime);
+                let la = eval_corr(&base, &u)
+                    .map_err(|e| format!("pmmh: structural error during CPM correlation check: {}", e))?;
+                let lb = eval_corr(&base, &u_prime)
+                    .map_err(|e| format!("pmmh: structural error during CPM correlation check: {}", e))?;
                 ll_a.push(la);
                 ll_b.push(lb);
                 eprint!("\r  pair {}/50: Δ={:.2}    ", i + 1, (la - lb).abs());
@@ -466,17 +473,18 @@ pub fn run_stage(
 
     let t0 = std::time::Instant::now();
 
-    // Run chains in parallel. Each chain produces either Some(result)
-    // or None when its init-eval surfaces SimError::PFDegenerate
-    // (gh#110). None chains are skipped with a BadInit diagnostic and
-    // omitted from downstream R̂/ESS/MAP aggregation; surviving chains
-    // continue to completion. This is "skip + continue", explicitly
-    // chosen over whole-run failure so a 6-chain run with one
-    // bound-pathological survey_top_k init still gives the user 5
-    // chains worth of inference.
+    // Run chains in parallel. Each chain yields `Ok(Some(result))`, or
+    // `Ok(None)` when its init-eval surfaces a `PFDegenerate` bail (gh#110)
+    // — skipped with a BadInit diagnostic and omitted from downstream
+    // R̂/ESS/MAP aggregation, surviving chains continue ("skip + continue",
+    // so a 6-chain run with one bound-pathological survey_top_k init still
+    // gives 5 chains of inference). A `Err` is a structural failure
+    // (gh#224): the model/config cannot run, so the whole fit aborts rather
+    // than reporting a degenerate posterior — `collect` short-circuits on
+    // the first such error.
     let results: Vec<(usize, PMMHResult)> = (0..n_chains)
         .into_par_iter()
-        .filter_map(|chain_id| {
+        .map(|chain_id| -> Result<Option<(usize, PMMHResult)>, String> {
             let chain_seed = crate::util::derive_chain_seed(seed, chain_id);
 
             // gh#110 init-eval guard. Run a single PF at the chain's
@@ -493,7 +501,7 @@ pub fn run_stage(
             // a degenerate region during sampling) spuriously
             // mark a working chain as bad.
             if resume_states[chain_id].is_none() {
-                match runner::run_quick_pfilter_with_dt_typed(
+                match runner::run_quick_pfilter_with_dt(
                     &config, &chain_starts[chain_id],
                     n_particles, None, chain_seed,
                 ) {
@@ -526,16 +534,18 @@ pub fn run_stage(
                             chain_id + 1, reason);
                         // The bar is cleared in the post-loop finish; the skip
                         // is already loud on stderr above.
-                        return None;
+                        return Ok(None);
                     }
                     Err(other) => {
                         // Non-degeneracy structural error — surface as
                         // a hard failure rather than a skip. These are
                         // config bugs (UnknownCompartment, etc.) that
-                        // every chain would hit, so abort here.
-                        eprintln!("chain {} init-eval failed with structural error: {:?}",
-                            chain_id + 1, other);
-                        std::process::exit(1);
+                        // every chain would hit, so abort the whole fit
+                        // (gh#224: a structural error must not be hidden
+                        // as a ruled-out θ). `collect` short-circuits.
+                        return Err(format!(
+                            "chain {} init-eval failed with structural error: {}",
+                            chain_id + 1, other));
                     }
                     Ok(_) => {
                         // Finite (or even -inf-but-not-degenerate)
@@ -559,8 +569,10 @@ pub fn run_stage(
                 n_source_groups: config.compiled.source_groups.len(),
             };
 
-            // Build the loglik evaluator closure for this chain
-            let eval_loglik = |params: &[f64], pf_seed: u64| -> f64 {
+            // Build the loglik evaluator closure for this chain. It already
+            // returns the inference convention (Ok(−∞) = θ ruled out, Err =
+            // structural — gh#224) via `run_quick_pfilter`.
+            let eval_loglik = |params: &[f64], pf_seed: u64| -> Result<f64, sim::error::SimError> {
                 runner::run_quick_pfilter(&config, params, n_particles, pf_seed)
             };
 
@@ -568,21 +580,24 @@ pub fn run_stage(
             let process = config.build_process();
             let obs_model_trait = config.build_obs_model();
             let smc_cfg = config.smc_config();
-            let eval_correlated: Option<Box<dyn Fn(&[f64], &sim::inference::correlated_pf::PFRandomState) -> f64>> =
+            let eval_correlated: Option<Box<dyn Fn(&[f64], &sim::inference::correlated_pf::PFRandomState) -> Result<f64, sim::error::SimError>>> =
                 if pmmh_config.rho.is_some() {
-                    Some(Box::new(move |params: &[f64], randoms: &sim::inference::correlated_pf::PFRandomState| -> f64 {
+                    Some(Box::new(move |params: &[f64], randoms: &sim::inference::correlated_pf::PFRandomState| -> Result<f64, sim::error::SimError> {
+                        // gh#224: structural failures surface; a degenerate or
+                        // recoverable correlated-PF run is a ruled-out θ (−∞).
                         match sim::inference::correlated_pf::bootstrap_filter_correlated(
                             &process, &obs_model_trait, params, &smc_cfg, randoms, chain_seed,
                         ) {
-                            Ok(r) => r.log_likelihood,
-                            Err(_) => f64::NEG_INFINITY,
+                            Ok(r) => Ok(r.log_likelihood),
+                            Err(e) if e.is_structural() => Err(e),
+                            Err(_) => Ok(f64::NEG_INFINITY),
                         }
                     }))
                 } else {
                     None
                 };
 
-            let eval_corr_ref: Option<&dyn Fn(&[f64], &sim::inference::correlated_pf::PFRandomState) -> f64> =
+            let eval_corr_ref: Option<&dyn Fn(&[f64], &sim::inference::correlated_pf::PFRandomState) -> Result<f64, sim::error::SimError>> =
                 eval_correlated.as_deref();
 
             let task = &bars[chain_id];
@@ -636,12 +651,15 @@ pub fn run_stage(
                 task.inc(1);
             };
 
+            // gh#224: a structural error from the sampling PF aborts the fit
+            // (config/model can't run); a ruled-out θ is handled internally as
+            // a rejected −∞ proposal, so `run_pmmh` only `Err`s on structural.
             let result = run_pmmh(
                 &config.estimated_params, &priors, &chain_starts[chain_id],
                 &config.param_names,
                 &pmmh_config, &config.observations, &eval_loglik, eval_corr_ref, chain_seed,
                 Some(&progress_cb), resume_states[chain_id].clone(), config_hash.clone(),
-            );
+            ).map_err(|e| format!("chain {} failed with structural error: {}", chain_id + 1, e))?;
 
             // Final metric (MAP ll + acceptance) on the bar; the driver clears
             // it after the par_iter (`Task::finish` consumes, so it can't run
@@ -655,8 +673,11 @@ pub fn run_stage(
                 let _ = std::fs::write(&resume_path, encoded);
             }
 
-            Some((chain_id, result))
+            Ok(Some((chain_id, result)))
         })
+        .collect::<Result<Vec<Option<(usize, PMMHResult)>>, String>>()?
+        .into_iter()
+        .flatten()
         .collect();
 
     // Clear all chain bars now that the parallel phase is done (`Task::finish`

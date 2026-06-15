@@ -84,10 +84,10 @@ pub enum SimError {
     ///   the limit case of ESS collapse, but cheap to detect and
     ///   diagnostically distinct.
     ///
-    /// Not per-particle-recoverable — this is a whole-call bail.
-    /// `Err(PFDegenerate)` collapses to NEG_INFINITY through the
-    /// existing `run_quick_pfilter_with_dt → Err(_) → NEG_INFINITY`
-    /// path so PMMH iteration steps reject the proposal cleanly.
+    /// Not per-particle-recoverable — this is a whole-call bail. It is
+    /// also not `is_structural` (gh#224): at a *proposed* θ a degenerate
+    /// filter means "this θ is uninformative," so the PMMH / PF eval
+    /// closures report −∞ and the MH step rejects the proposal cleanly.
     /// Init-eval callers detect the bail explicitly to surface a
     /// `BadInit` diagnostic and skip the chain.
     #[error("particle filter degeneracy ({kind:?}) at obs_window {obs_window}, elapsed {elapsed_s:.2}s")]
@@ -274,6 +274,74 @@ impl SimError {
             | SimError::TableLookup(..)
         )
     }
+
+    /// gh#224. Inference-eval discriminator: does this error mean the
+    /// **model or its configuration cannot run** (→ surface as a hard
+    /// failure), as opposed to a per-θ excursion or a degenerate /
+    /// over-budget particle filter (→ the likelihood evaluator reports
+    /// −∞ and the MH step rejects that θ)?
+    ///
+    /// The PMMH / PF parameter-eval closures use this to separate a
+    /// legitimate "θ ruled out" (−∞, seen routinely and rejected) from a
+    /// structural failure that must NOT be mistaken for one — otherwise a
+    /// model that cannot run returns a degenerate posterior with a
+    /// successful (exit-0) status. This is a *different* question from
+    /// `is_per_particle_recoverable` (which asks whether the per-particle
+    /// dead-mask can absorb the error inside one filter call): a
+    /// `PFDegenerate` bail is `false` for both — not dead-mask-absorbable,
+    /// but also not structural — because at a *proposed* θ it means "this
+    /// filter run is uninformative," which the MH ratio rejects.
+    ///
+    /// The match is exhaustive on purpose: a new `SimError` variant must
+    /// be classified here (it will not compile otherwise), so the
+    /// surface-vs-reject decision can never be silently defaulted.
+    ///
+    /// `true` (surface): model/config errors that fire regardless of θ —
+    /// every proposal would hit them, so the fit is meaningless — plus
+    /// `PFIterationBudget`, the *deterministic* compute-budget bail that,
+    /// per its own contract (gh#147 M3.1), trips identically for every
+    /// chain and is meant to be fatal rather than retried.
+    ///
+    /// `false` (reject as −∞): per-particle excursions, θ-dependent
+    /// runtime conditions (`DivisionByZero`, `NegativePropensity`,
+    /// `AbsorbingState`), and the whole-call PF bails (`PFDegenerate`,
+    /// `PFWallclockTimeout`). Init-eval callers treat the PF bails
+    /// specially — a `BadInit` skip — via the CLI init guard.
+    pub fn is_structural(&self) -> bool {
+        use NegativeCountCause::*;
+        match self {
+            // Model / configuration errors — fire regardless of θ.
+            SimError::ConfigMismatch { .. }
+            | SimError::UnknownCompartment(_)
+            | SimError::UnknownParameter(_)
+            | SimError::UnknownTimeFunction(_)
+            | SimError::UnknownTable(_)
+            | SimError::UnknownOp(_)
+            | SimError::WrongArgCount { .. }
+            | SimError::Validation(_)
+            // Deterministic compute-budget bail: trips identically for
+            // every chain/iteration; meant to be fatal, not retried.
+            | SimError::PFIterationBudget { .. } => true,
+
+            // A config-bug intervention (adds / leaves a compartment
+            // negative) is structural; a binomial overshoot is a transient
+            // per-θ excursion the inference layer rejects.
+            SimError::NegativeCount { cause, .. } => {
+                matches!(cause, InterventionAddNegative | InterventionNegative)
+            }
+
+            // Per-θ excursions, θ-dependent runtime conditions, and
+            // whole-call PF degeneracy/timeout bails — reject this θ as −∞.
+            SimError::TableLookup(_)
+            | SimError::DivisionByZero(_)
+            | SimError::NegativePropensity { .. }
+            | SimError::AbsorbingState(_)
+            | SimError::NumericalCollapse { .. }
+            | SimError::NonFiniteParameter { .. }
+            | SimError::PFDegenerate { .. }
+            | SimError::PFWallclockTimeout { .. } => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -355,5 +423,41 @@ mod tests {
             obs_window: 0,
             elapsed_s: 0.0,
         }.is_per_particle_recoverable());
+    }
+
+    /// gh#224. The inference-eval discriminator must surface model/config
+    /// errors as fatal while rejecting per-θ excursions and PF bails as
+    /// −∞. The load-bearing case is `PFDegenerate`: it is NOT structural,
+    /// so adaptive PMMH (whose wide warmup proposals routinely hit
+    /// degenerate θ regions) rejects them rather than aborting the fit.
+    #[test]
+    fn structural_set_surfaces_config_errors_not_per_theta_excursions() {
+        // Surface (model/config can't run):
+        assert!(SimError::Validation("bad model".into()).is_structural());
+        assert!(SimError::UnknownCompartment("ghost".into()).is_structural());
+        assert!(SimError::UnknownParameter("ghost".into()).is_structural());
+        assert!(SimError::ConfigMismatch { expected: "a", got: "b" }.is_structural());
+        assert!(SimError::NegativeCount {
+            compartment: "S".into(), attempted_value: -1, t: 1.0,
+            cause: NegativeCountCause::InterventionAddNegative,
+        }.is_structural());
+        // Deterministic compute-budget bail is meant to be fatal (gh#147).
+        assert!(SimError::PFIterationBudget {
+            obs_window: 3, attempted_substeps: 10, budget_substeps: 5,
+        }.is_structural());
+
+        // Reject as −∞ (per-θ / PF-uninformative, NOT structural):
+        assert!(!SimError::PFDegenerate {
+            kind: PFDegenerateKind::EssCollapsed { last_ess: vec![1.0, 1.0, 1.0] },
+            obs_window: 6, elapsed_s: 0.01,
+        }.is_structural());
+        assert!(!SimError::PFWallclockTimeout { obs_window: 6, elapsed_s: 120.0 }.is_structural());
+        assert!(!SimError::NumericalCollapse { kind: CollapseKind::DivByZero, t: 1.0 }.is_structural());
+        assert!(!SimError::NonFiniteParameter { name: "beta".into(), value: f64::NAN, t: 1.0 }.is_structural());
+        assert!(!SimError::NegativeCount {
+            compartment: "S".into(), attempted_value: -1, t: 1.0,
+            cause: NegativeCountCause::BinomialOvershoot,
+        }.is_structural());
+        assert!(!SimError::AbsorbingState(0.0).is_structural());
     }
 }

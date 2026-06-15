@@ -18,6 +18,7 @@ use ir::{
 };
 use sim::{
     compiled_model::CompiledModel,
+    error::SimError,
     inference::{
         obs_loglik::poisson_logpmf,
         particle_filter::bootstrap_filter,
@@ -130,18 +131,19 @@ fn pure_death_observations() -> PoissonPrevalenceObs {
 fn make_eval_loglik(
     compiled: Arc<CompiledModel>,
     n_particles: usize,
-) -> impl Fn(&[f64], u64) -> f64 {
-    move |params: &[f64], pf_seed: u64| -> f64 {
+) -> impl Fn(&[f64], u64) -> Result<f64, SimError> {
+    move |params: &[f64], pf_seed: u64| -> Result<f64, SimError> {
         let process = ChainBinomialProcess::new(compiled.clone());
         let obs_model = pure_death_observations();
         let config = SMCConfig { n_particles, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false, pf_wallclock_disabled: false };
 
-        let result = bootstrap_filter(
-            &process, &obs_model, params, &config, pf_seed,
-        );
-        match result {
-            Ok(r) => r.log_likelihood,
-            Err(_) => f64::NEG_INFINITY,
+        // gh#224 classification: a per-θ excursion or a degenerate filter
+        // is a legitimate "θ ruled out" (-∞); only a structural error
+        // (model/config can't run) surfaces.
+        match bootstrap_filter(&process, &obs_model, params, &config, pf_seed) {
+            Ok(r) => Ok(r.log_likelihood),
+            Err(e) if e.is_structural() => Err(e),
+            Err(_) => Ok(f64::NEG_INFINITY),
         }
     }
 }
@@ -183,7 +185,7 @@ fn test_pmmh_posterior_covers_truth() {
         burn_in: 500, rho: None, n_source_groups: 0,
     };
 
-    let result = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new());
+    let result = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new()).unwrap();
 
     // Extract μ samples (index 0 in param vector)
     let mu_samples: Vec<f64> = result.steps.iter().map(|s| s.params[0]).collect();
@@ -227,8 +229,8 @@ fn test_pmmh_determinism() {
         burn_in: 0, rho: None, n_source_groups: 0,
     };
 
-    let r1 = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new());
-    let r2 = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new());
+    let r1 = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new()).unwrap();
+    let r2 = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new()).unwrap();
 
     assert_eq!(r1.steps.len(), r2.steps.len());
     for (s1, s2) in r1.steps.iter().zip(r2.steps.iter()) {
@@ -260,7 +262,7 @@ fn test_pmmh_acceptance_rate() {
         burn_in: 0, rho: None, n_source_groups: 0,
     };
 
-    let result = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new());
+    let result = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new()).unwrap();
 
     assert!(result.acceptance_rate > 0.05,
         "acceptance rate {:.3} too low (chain stuck)", result.acceptance_rate);
@@ -290,7 +292,7 @@ fn test_pmmh_flat_prior_finds_near_mle() {
         burn_in: 500, rho: None, n_source_groups: 0,
     };
 
-    let result = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new());
+    let result = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new()).unwrap();
 
     // MAP should be close to true μ=0.01
     let map_mu = result.map_params[0];
@@ -321,7 +323,7 @@ fn test_pmmh_adaptive_improves_acceptance() {
         burn_in: 0, rho: None, n_source_groups: 0,
     };
 
-    let result = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new());
+    let result = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 42, None, None, String::new()).unwrap();
 
     // Compute acceptance rate in the second half (after adaptation kicks in)
     let half = result.steps.len() / 2;
@@ -380,8 +382,8 @@ fn test_pmmh_different_seeds_differ() {
         burn_in: 0, rho: None, n_source_groups: 0,
     };
 
-    let r1 = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 1, None, None, String::new());
-    let r2 = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 2, None, None, String::new());
+    let r1 = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 1, None, None, String::new()).unwrap();
+    let r2 = run_pmmh(&if2_params, &priors, &base_params, &[], &config, &[], &eval_loglik, None, 2, None, None, String::new()).unwrap();
 
     // At least some steps should differ
     let any_differ = r1.steps.iter().zip(r2.steps.iter())
@@ -498,4 +500,59 @@ fn cpm_accepts_uniform_single_obs() {
     let ll = run_cpm(vec![10.0], 1.0)
         .expect("single-observation CPM (window == whole run) must run");
     assert!(ll.is_finite(), "single-obs CPM run must return a finite loglik, got {ll}");
+}
+
+/// gh#224. A structural (non-recoverable) error from the likelihood
+/// evaluator must propagate out of `run_pmmh` as `Err`, not be silently
+/// mistaken for a ruled-out θ. Before the typed-channel fix the eval
+/// closures collapsed *every* error to −∞, so a model that cannot run
+/// produced a degenerate posterior with a successful (exit-0) return.
+#[test]
+fn pmmh_surfaces_structural_eval_error() {
+    let if2_params = vec![mu_param()];
+    let priors = vec![Prior::Normal { mean: 0.01, sd: 0.01 }];
+    let base_params = vec![0.01];
+    let config = PMMHConfig {
+        n_steps: 50, n_particles: 10, dt: 1.0, proposal_sd: vec![0.2],
+        adapt: false, adapt_start: 0, thin: 1, burn_in: 0,
+        rho: None, n_source_groups: 0,
+    };
+    // Evaluator that always fails with a non-recoverable error.
+    let eval = |_params: &[f64], _seed: u64| -> Result<f64, SimError> {
+        Err(SimError::Validation("structural: model cannot run".into()))
+    };
+    let result = run_pmmh(
+        &if2_params, &priors, &base_params, &[], &config, &[],
+        &eval, None, 42, None, None, String::new(),
+    );
+    assert!(
+        matches!(result, Err(SimError::Validation(_))),
+        "a structural eval error must surface as Err, got {:?}",
+        result.map(|_| "Ok"),
+    );
+}
+
+/// gh#224 companion: `Ok(−∞)` is a *legitimate* loglik ("θ ruled out")
+/// that PMMH handles via the MH reject path — it must NOT be promoted to
+/// an error. The chain runs to completion and returns `Ok`.
+#[test]
+fn pmmh_tolerates_ruled_out_neg_inf() {
+    let if2_params = vec![mu_param()];
+    let priors = vec![Prior::Normal { mean: 0.01, sd: 0.01 }];
+    let base_params = vec![0.01];
+    let config = PMMHConfig {
+        n_steps: 50, n_particles: 10, dt: 1.0, proposal_sd: vec![0.2],
+        adapt: false, adapt_start: 0, thin: 1, burn_in: 0,
+        rho: None, n_source_groups: 0,
+    };
+    // A recoverable per-particle excursion legitimately yields −∞; the
+    // closure has already classified it as Ok. PMMH must accept it.
+    let eval = |_params: &[f64], _seed: u64| -> Result<f64, SimError> {
+        Ok(f64::NEG_INFINITY)
+    };
+    let result = run_pmmh(
+        &if2_params, &priors, &base_params, &[], &config, &[],
+        &eval, None, 42, None, None, String::new(),
+    );
+    assert!(result.is_ok(), "Ok(−∞) is a valid ruled-out loglik, must not error");
 }

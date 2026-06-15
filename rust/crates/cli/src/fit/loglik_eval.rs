@@ -208,7 +208,12 @@ pub fn run_loglik_eval(
         cfg,
         seed,
         |theta, n_particles, pf_seed| {
-            runner::run_quick_pfilter_full(run_config, theta, n_particles, pf_seed)
+            // gh#224: a ruled-out θ scores −∞; a structural error (model/config
+            // can't run) aborts the clean-eval rather than reporting a
+            // degenerate loglik at θ̂.
+            runner::ruled_out_or_surface(
+                runner::run_quick_pfilter_full(run_config, theta, n_particles, pf_seed))
+                .map_err(|e| format!("loglik-eval: structural error at θ̂: {}", e))
         },
     )
 }
@@ -228,7 +233,7 @@ pub fn run_loglik_eval_with_scorer<F>(
     scorer: F,
 ) -> Result<LoglikEvalOutcome, String>
 where
-    F: Fn(&[f64], usize, u64) -> (f64, FilterStats),
+    F: Fn(&[f64], usize, u64) -> Result<(f64, FilterStats), String>,
 {
     if results.is_empty() {
         return Err("run_loglik_eval: no chain results to score".into());
@@ -257,7 +262,7 @@ where
             let pf_seed = seed
                 .wrapping_add((*chain_id as u64).wrapping_mul(10_000))
                 .wrapping_add(k as u64);
-            let (ll, stats) = scorer(&theta, cfg.n_particles, pf_seed);
+            let (ll, stats) = scorer(&theta, cfg.n_particles, pf_seed)?;
             per_rep.push(ll);
             per_rep_stats.push(stats);
         }
@@ -349,7 +354,7 @@ mod tests {
         // Scorer just records the theta it was called with.
         let scorer = |theta: &[f64], _: usize, _: u64| {
             // Return the sum of theta as the loglik so we can verify.
-            (theta.iter().sum::<f64>(), FilterStats::failed())
+            Ok((theta.iter().sum::<f64>(), FilterStats::failed()))
         };
         let cfg = LoglikEvalConfig {
             n_particles: 1, n_replicates: 1, combine: CombineMode::Mean,
@@ -377,7 +382,7 @@ mod tests {
         ];
         // Scorer: -10 for small thetas, -5 for large thetas.
         let scorer = |theta: &[f64], _: usize, _: u64| {
-            (if theta[0] < 5.0 { -10.0 } else { -5.0 }, FilterStats::failed())
+            Ok((if theta[0] < 5.0 { -10.0 } else { -5.0 }, FilterStats::failed()))
         };
         let cfg = LoglikEvalConfig {
             n_particles: 1, n_replicates: 4, combine: CombineMode::LogMeanExp,
@@ -405,7 +410,7 @@ mod tests {
         // the seed scheme: pf_seed = 0 + 7*10_000 + k → rep_k = seed % 10_000).
         let scorer = |_t: &[f64], _: usize, seed: u64| {
             let rep_k = (seed % 10_000) as f64;
-            (rep_k + 1.0, FilterStats::failed())
+            Ok((rep_k + 1.0, FilterStats::failed()))
         };
         let cfg = LoglikEvalConfig {
             n_particles: 1, n_replicates: 4, combine: CombineMode::Mean,
@@ -436,7 +441,7 @@ mod tests {
         // Two replicates: -100 and -98.
         let scorer = |_t: &[f64], _: usize, seed: u64| {
             let rep_k = (seed % 10_000) as i64;
-            ([-100.0_f64, -98.0_f64][rep_k as usize], FilterStats::failed())
+            Ok(([-100.0_f64, -98.0_f64][rep_k as usize], FilterStats::failed()))
         };
         let cfg = LoglikEvalConfig {
             n_particles: 1, n_replicates: 2, combine: CombineMode::LogMeanExp,
@@ -456,7 +461,7 @@ mod tests {
         let results = vec![(0usize, r)];
         let scorer = |_t: &[f64], _: usize, seed: u64| {
             let rep_k = (seed % 10_000) as f64;
-            (-10.0 + rep_k, FilterStats::failed())
+            Ok((-10.0 + rep_k, FilterStats::failed()))
         };
         let cfg_mean = LoglikEvalConfig {
             n_particles: 1, n_replicates: 4, combine: CombineMode::Mean,
@@ -474,7 +479,7 @@ mod tests {
     fn run_loglik_eval_errors_on_empty_iterations() {
         let r = synthetic_result(vec![]);
         let results = vec![(0usize, r)];
-        let scorer = |_: &[f64], _: usize, _: u64| (0.0, FilterStats::failed());
+        let scorer = |_: &[f64], _: usize, _: u64| Ok((0.0, FilterStats::failed()));
         let cfg = LoglikEvalConfig {
             n_particles: 1, n_replicates: 1, combine: CombineMode::Mean,
         };
@@ -487,7 +492,7 @@ mod tests {
         // silently picking chain 0.
         let mk = || synthetic_result(vec![iter(0, -5.0, -5.0, vec![1.0])]);
         let results = vec![(0usize, mk()), (1usize, mk())];
-        let scorer = |_: &[f64], _: usize, _: u64| (f64::NAN, FilterStats::failed());
+        let scorer = |_: &[f64], _: usize, _: u64| Ok((f64::NAN, FilterStats::failed()));
         let cfg = LoglikEvalConfig {
             n_particles: 1, n_replicates: 2, combine: CombineMode::Mean,
         };
@@ -567,7 +572,7 @@ mod tests {
             // Closure that mimics a high-particle clean PF.
             let clean_scorer = |_: &[f64], _: usize, seed: u64| {
                 let mut rng = StatefulRng::new(seed);
-                (pf_sample(&mut rng, SIGMA_CLEAN), FilterStats::failed())
+                Ok((pf_sample(&mut rng, SIGMA_CLEAN), FilterStats::failed()))
             };
             let outcome = run_loglik_eval_with_scorer(
                 &results, &cfg, trial_seed, clean_scorer,

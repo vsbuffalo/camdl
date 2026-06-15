@@ -1017,10 +1017,34 @@ fn build_if2_params(
     Ok(params)
 }
 
-/// Run a quick pfilter at given params and return the loglik.
-/// Used by scout for initial_loglik baseline.
-pub fn run_quick_pfilter(config: &FitRunConfig, params: &[f64], n_particles: usize, seed: u64) -> f64 {
-    run_quick_pfilter_full(config, params, n_particles, seed).0
+/// gh#224. Map a raw particle-filter eval `Result` to the inference
+/// convention: a **structural** error (`SimError::is_structural` — the
+/// model or its configuration cannot run) surfaces unchanged; every
+/// other failure is a per-θ excursion or a degenerate / over-budget
+/// filter that the MH step rejects, so it collapses to `-∞` (with
+/// `FilterStats::failed()`). This is the single classification seam the
+/// PMMH / IF2 / PF parameter evaluators share — a structural error must
+/// never be silently mistaken for a ruled-out θ (which would yield a
+/// degenerate posterior with a successful exit status).
+pub fn ruled_out_or_surface(
+    r: Result<(f64, super::loglik_eval::FilterStats), sim::error::SimError>,
+) -> Result<(f64, super::loglik_eval::FilterStats), sim::error::SimError> {
+    match r {
+        Ok(v) => Ok(v),
+        Err(e) if e.is_structural() => Err(e),
+        Err(_) => Ok((f64::NEG_INFINITY, super::loglik_eval::FilterStats::failed())),
+    }
+}
+
+/// Run a quick pfilter at given params and return the loglik under the
+/// inference convention (`Ok(-∞)` = θ ruled out, `Err` = structural —
+/// see `ruled_out_or_surface`). Used by scout for the initial_loglik
+/// baseline and by the PMMH / IF2 parameter evaluators.
+pub fn run_quick_pfilter(
+    config: &FitRunConfig, params: &[f64], n_particles: usize, seed: u64,
+) -> Result<f64, sim::error::SimError> {
+    ruled_out_or_surface(run_quick_pfilter_full(config, params, n_particles, seed))
+        .map(|(ll, _)| ll)
 }
 
 /// Variant of `run_quick_pfilter` that also returns filter-health
@@ -1030,13 +1054,15 @@ pub fn run_quick_pfilter(config: &FitRunConfig, params: &[f64], n_particles: usi
 /// ll_increments}` — phase 2 of the fit-summary proposal just plumbs
 /// them out instead of throwing them away.
 ///
-/// On filter error returns `(NEG_INFINITY, FilterStats::failed())`.
+/// Returns the **raw** filter outcome: `Err` carries the underlying
+/// `SimError` so the caller can distinguish structural from recoverable
+/// (apply `ruled_out_or_surface` for the inference convention).
 pub fn run_quick_pfilter_full(
     config: &FitRunConfig,
     params: &[f64],
     n_particles: usize,
     seed: u64,
-) -> (f64, super::loglik_eval::FilterStats) {
+) -> Result<(f64, super::loglik_eval::FilterStats), sim::error::SimError> {
     run_quick_pfilter_with_dt(config, params, n_particles, None, seed)
 }
 
@@ -1044,14 +1070,17 @@ pub fn run_quick_pfilter_full(
 /// integrator step `dt`. `dt_override = None` keeps the fit's
 /// `if2_config.dt`. Used by the gh#52 Richardson dt-convergence
 /// check at θ̂ to evaluate `loglik(θ̂; dt)` on a halving ladder
-/// without rebuilding the run config.
+/// without rebuilding the run config. Returns the **raw** filter
+/// outcome (see `run_quick_pfilter_full`); the gh#110 init-eval guard
+/// matches on the raw `Err` to distinguish a `PFDegenerate` bail
+/// (→ `BadInit`, skip the chain) from a structural error (→ fatal).
 pub fn run_quick_pfilter_with_dt(
     config: &FitRunConfig,
     params: &[f64],
     n_particles: usize,
     dt_override: Option<f64>,
     seed: u64,
-) -> (f64, super::loglik_eval::FilterStats) {
+) -> Result<(f64, super::loglik_eval::FilterStats), sim::error::SimError> {
     let dt = dt_override.unwrap_or(config.if2_config.dt);
     // gh#53: Process must be built with the same dt the SMCConfig
     // will use, so its internal fire_steps resolves correctly for
@@ -1064,43 +1093,10 @@ pub fn run_quick_pfilter_with_dt(
         ..config.smc_config()
     };
 
-    match sim::inference::bootstrap_filter(&process, &obs_model, params, &smc_config, seed) {
-        Ok(result) => {
-            let stats = super::loglik_eval::FilterStats::from_pfilter_result(
-                &result.ess_trace, &result.ll_increments);
-            (result.log_likelihood, stats)
-        }
-        Err(_) => (f64::NEG_INFINITY, super::loglik_eval::FilterStats::failed()),
-    }
-}
-
-/// gh#110. Variant of `run_quick_pfilter_with_dt` that surfaces the
-/// raw `SimError` instead of collapsing every failure to
-/// `NEG_INFINITY`. Used by the PMMH / IF2 chain runners for the
-/// init-eval guard: we want to distinguish a genuine `PFDegenerate`
-/// bail (→ `BadInit` diagnostic, skip the chain) from a finite-but-
-/// uninformative loglik (→ chain proceeds, MH ratio handles it).
-///
-/// All other call sites continue to use `run_quick_pfilter_with_dt`
-/// — the collapse-to-NEG_INFINITY semantics is exactly what PMMH's
-/// iteration loop and IF2's perturbed-PF re-eval want.
-pub fn run_quick_pfilter_with_dt_typed(
-    config: &FitRunConfig,
-    params: &[f64],
-    n_particles: usize,
-    dt_override: Option<f64>,
-    seed: u64,
-) -> Result<f64, sim::error::SimError> {
-    let dt = dt_override.unwrap_or(config.if2_config.dt);
-    let process = config.build_process();
-    let obs_model = config.build_obs_model();
-    let smc_config = sim::inference::traits::SMCConfig {
-        n_particles,
-        dt,
-        ..config.smc_config()
-    };
-    sim::inference::bootstrap_filter(&process, &obs_model, params, &smc_config, seed)
-        .map(|r| r.log_likelihood)
+    let result = sim::inference::bootstrap_filter(&process, &obs_model, params, &smc_config, seed)?;
+    let stats = super::loglik_eval::FilterStats::from_pfilter_result(
+        &result.ess_trace, &result.ll_increments);
+    Ok((result.log_likelihood, stats))
 }
 
 /// Print preflight transform report to stderr, pushing diagnostics to collector.
@@ -1787,7 +1783,7 @@ pub fn run_chains_with_per_chain_params(
     per_chain_params: Option<&[Vec<EstimatedParam>]>,
     collector: &DiagnosticCollector,
     stage_dir: Option<&str>,
-) -> ChainResults {
+) -> Result<ChainResults, String> {
     eprintln!("running {} chains × {} particles × {} iterations, cooling={}, dt={}",
         config.n_chains, config.if2_config.n_particles, config.if2_config.n_iterations,
         config.if2_config.cooling_fraction, config.if2_config.dt);
@@ -1895,11 +1891,16 @@ pub fn run_chains_with_per_chain_params(
         for (chain_id, result) in results.iter_mut() {
             for it in &mut result.iterations {
                 if it.iteration % eval_interval == 0 || it.iteration == config.if2_config.n_iterations - 1 {
+                    // gh#224: a ruled-out θ scores −∞; a structural error
+                    // (model/config can't run) aborts the clean-eval rather
+                    // than silently reporting a degenerate true-loglik.
                     it.loglik = run_quick_pfilter(
                         config, &it.param_means,
                         n_eval_particles,
                         config.seed + *chain_id as u64 * 1000 + it.iteration as u64,
-                    );
+                    ).map_err(|e| format!(
+                        "if2 clean-eval: structural error at chain {} iteration {}: {}",
+                        *chain_id + 1, it.iteration, e))?;
                 }
             }
             // Overwrite final_loglik with the true loglik
@@ -2058,13 +2059,13 @@ pub fn run_chains_with_per_chain_params(
         }
     }
 
-    ChainResults {
+    Ok(ChainResults {
         results,
         best_chain,
         best_loglik,
         chain_agreement,
         loglik_eval: loglik_eval_outcome,
-    }
+    })
 }
 
 impl ChainResults {
@@ -2890,7 +2891,7 @@ mod tests {
         let scorer = |theta: &[f64], _: usize, _: u64| {
             // Clean PF prefers theta around 50.
             let ll = if theta[0] < 10.0 { -100.0 } else { -50.0 };
-            (ll, crate::fit::loglik_eval::FilterStats::failed())
+            Ok((ll, crate::fit::loglik_eval::FilterStats::failed()))
         };
         let cfg = LoglikEvalConfig {
             n_particles: 1, n_replicates: 4, combine: CombineMode::LogMeanExp,

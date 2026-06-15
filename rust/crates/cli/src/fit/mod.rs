@@ -1055,7 +1055,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let stage_dir_str = stage_dir.to_string_lossy();
                 let chain_results = runner::run_chains_with_per_chain_params(
                     &run_config, per_chain_params.as_deref(), &collector,
-                    Some(stage_dir_str.as_ref()));
+                    Some(stage_dir_str.as_ref()))
+                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
                 let elapsed = t0.elapsed();
 
                 // Gate 2 — post-stage: refine must not regress below
@@ -1164,7 +1165,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         combine:      effective_loglik_eval.combine,
                     },
                     dt_check_seed,
-                );
+                )
+                .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
                 dt_check::print_terminal_report(&dt_check_result);
                 let fit_state = state::FitState {
                     stage: stage_name.to_string(),

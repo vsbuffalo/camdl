@@ -1406,12 +1406,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     pf_wallclock_disabled: false,
                 };
 
-                let eval_loglik = |theta: &[f64], pf_seed: u64| -> f64 {
+                // gh#224: structural failures surface; a degenerate/recoverable
+                // PF run is a ruled-out θ (−∞).
+                let eval_loglik = |theta: &[f64], pf_seed: u64| -> Result<f64, sim::error::SimError> {
                     match sim::inference::bootstrap_filter(
                         &pf_process, &*pf_obs_model, theta, &smc_cfg, pf_seed,
                     ) {
-                        Ok(r) => r.log_likelihood,
-                        Err(_) => f64::NEG_INFINITY,
+                        Ok(r) => Ok(r.log_likelihood),
+                        Err(e) if e.is_structural() => Err(e),
+                        Err(_) => Ok(f64::NEG_INFINITY),
                     }
                 };
 
@@ -1420,18 +1423,19 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 let eval_correlated: Option<Box<dyn Fn(
                     &[f64],
                     &sim::inference::correlated_pf::PFRandomState,
-                ) -> f64>> = if pmmh_config.rho.is_some() {
+                ) -> Result<f64, sim::error::SimError>>> = if pmmh_config.rho.is_some() {
                     let pf_process2 = ChainBinomialProcess::new(compiled.clone());
                     let pf_obs_model2 = Arc::clone(&obs_model_obj);
                     let smc_cfg2 = smc_cfg.clone();
                     let cell_seed = job_seed;
-                    Some(Box::new(move |theta: &[f64], randoms| -> f64 {
+                    Some(Box::new(move |theta: &[f64], randoms| -> Result<f64, sim::error::SimError> {
                         match sim::inference::correlated_pf::bootstrap_filter_correlated(
                             &pf_process2, &*pf_obs_model2, theta,
                             &smc_cfg2, randoms, cell_seed,
                         ) {
-                            Ok(r) => r.log_likelihood,
-                            Err(_) => f64::NEG_INFINITY,
+                            Ok(r) => Ok(r.log_likelihood),
+                            Err(e) if e.is_structural() => Err(e),
+                            Err(_) => Ok(f64::NEG_INFINITY),
                         }
                     }))
                 } else {
@@ -1444,7 +1448,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 // `param_names` can be empty (avoids the
                 // base_params/param_names length check inside run_pmmh
                 // when no Hierarchical priors are present).
-                let result = run_pmmh(
+                // gh#224: a ruled-out θ is rejected internally as −∞; an `Err`
+                // is a structural failure (model/config can't run). Every cell
+                // would hit it identically, so abort the whole profile run
+                // rather than silently emitting degenerate per-cell MLEs.
+                let result = match run_pmmh(
                     per_start_specs,
                     &priors,
                     &params,
@@ -1457,7 +1465,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     None,
                     None,
                     String::new(),
-                );
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("error: profile PMMH cell (grid {}, start {}) \
+                            failed with structural error: {}", grid_idx, start_idx, e);
+                        std::process::exit(1);
+                    }
+                };
                 // gh#74 Option B: PMMH diagnostics from the engine's
                 // returned result. `acceptance_rate` is already
                 // post-burn-in (see pmmh.rs:508-514). Trace carries
