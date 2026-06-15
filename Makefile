@@ -208,7 +208,22 @@ update-corner-golden: build-ocaml
 	@$(CAMDLC) $(CORNER_DIR)/dt_rate.camdl                     --set beta=1.0 --set gamma=0.2 --set tau=1.0 -o $(CORNER_DIR)/ir/dt_rate.ir.json
 # ── Release / changelog ───────────────────────────────────────────────────────
 
-.PHONY: changelog version-bump
+.PHONY: changelog version-bump release-suggest release-prep release-publish
+
+# Cutting a release — the short path (full runbook: RELEASING.md, policy:
+# VERSIONING.md). Three steps:
+#   make release-suggest                 # what changed since last tag + suggested bump
+#   make release-prep VERSION=0.2.0      # bump manifests + regenerate changelog (review it)
+#   ... draft RELEASE_NOTES-0.2.0.md (/release-notes skill), run `make test` ...
+#   make release-publish VERSION=0.2.0   # commit + tag + push + gh release (irreversible)
+release-suggest:
+	@scripts/release.sh suggest
+release-prep:
+	@test -n "$(VERSION)" || { echo "usage: make release-prep VERSION=0.2.0"; exit 1; }
+	@scripts/release.sh prep "$(VERSION)"
+release-publish:
+	@test -n "$(VERSION)" || { echo "usage: make release-publish VERSION=0.2.0"; exit 1; }
+	@scripts/release.sh publish "$(VERSION)"
 
 # Deterministic changelog spine from Conventional Commits (last tag -> HEAD).
 # git-cliff is the renderer: `brew install git-cliff` or `cargo install git-cliff`.
