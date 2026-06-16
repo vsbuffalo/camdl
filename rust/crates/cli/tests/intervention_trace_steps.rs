@@ -24,8 +24,10 @@ fn binary() -> PathBuf {
 ///     Action::FractionTransfer; fires only when `--enable`'d)
 /// No transitions, so state moves only via these actions.
 fn trace_model_ir() -> String {
+    // `__IR_VERSION__` → the build's IR_VERSION (envelope-checked on load), so a
+    // schema bump never staleness-breaks this fixture.
     r#"{
-      "ir_version": "0.15",
+      "ir_version": "__IR_VERSION__",
       "validated_by": "test-fixture",
       "model": {
         "name": "trace_arms", "version": "0.3", "time_unit": "days",
@@ -69,7 +71,7 @@ fn trace_model_ir() -> String {
         "model_structure": null, "balance": null
       }
     }"#
-    .to_string()
+    .replace("__IR_VERSION__", ir::IR_VERSION.trim())
 }
 
 fn write_ir(tmp: &tempfile::TempDir) -> PathBuf {

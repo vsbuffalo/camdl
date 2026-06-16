@@ -3399,15 +3399,17 @@ prior can still be fixed at a known value via `--params` files.
 
 **Supported distributions**:
 
-| Distribution  | Syntax                            | Parameters              |
-| ------------- | --------------------------------- | ----------------------- |
-| `uniform`     | `~ uniform(lower = L, upper = U)` | bounds                  |
-| `normal`      | `~ normal(mu = M, sigma = S)`     | mean, sd (natural)      |
-| `log_normal`  | `~ log_normal(mu = M, sigma = S)` | log-scale mu, sigma     |
-| `half_normal` | `~ half_normal(sigma = S)`        | sd of underlying normal |
-| `beta`        | `~ beta(alpha = A, beta = B)`     | shape parameters        |
-| `gamma`       | `~ gamma(shape = K, rate = R)`    | shape, rate (NOT scale) |
-| `exponential` | `~ exponential(rate = R)`         | rate = 1/mean           |
+| Distribution       | Syntax                                       | Parameters              |
+| ------------------ | -------------------------------------------- | ----------------------- |
+| `uniform`          | `~ uniform(lower = L, upper = U)`            | bounds                  |
+| `normal`           | `~ normal(mu = M, sigma = S)`                | mean, sd (natural)      |
+| `log_normal`       | `~ log_normal(mu = M, sigma = S)`            | log-scale mu, sigma     |
+| `half_normal`      | `~ half_normal(sigma = S)`                   | sd of underlying normal |
+| `beta`             | `~ beta(alpha = A, beta = B)`                | shape parameters        |
+| `gamma`            | `~ gamma(shape = K, rate = R)`               | shape, rate (NOT scale) |
+| `exponential`      | `~ exponential(rate = R)`                    | rate = 1/mean           |
+| `log_uniform`      | `~ log_uniform(lower = L, upper = U)`        | bounds, `L, U > 0`      |
+| `truncated_normal` | `~ truncated_normal(mean = M, sd = S)`       | mean, sd; bounds from `in [..]` |
 
 All arguments are keyword (named), never positional. All arguments must be
 compile-time constants.
@@ -3418,6 +3420,17 @@ compile-time constants.
   `log(X) ~ Normal(mu, sigma)`. Median of X is `exp(mu)`.
 - `half_normal(sigma)`: sigma is the SD of the underlying (unfolded) normal.
 - `gamma(shape, rate)`: rate parameterization (`E[X] = shape/rate`).
+- `log_uniform(lower, upper)`: **uniform on the log scale** —
+  `log(X) ~ Uniform(log lower, log upper)`, so every order of magnitude in
+  `[lower, upper]` is equally likely. The honest weakly-informative choice for a
+  scale parameter known only to within orders of magnitude (e.g. a coupling
+  rate). Requires `lower, upper > 0`. Use the `Log` transform (the default for
+  `rate`/`positive` parameters).
+- `truncated_normal(mean, sd)`: a `normal(mean, sd)` truncated to the
+  parameter's declared `in [lo, hi]` range — the bounds are the truncation,
+  with no second place to disagree. A parameter with a `truncated_normal` prior
+  **must** declare `in [lo, hi]`. Exact and warning-free, unlike a plain
+  `normal(...)` whose out-of-bounds mass is rejected at draw time.
 
 Priors in the model are the primary source; `fit.toml [estimate]` priors
 override them for sensitivity analysis. See the run spec §12 for the full

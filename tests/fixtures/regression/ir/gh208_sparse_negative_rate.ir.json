@@ -1,4 +1,4 @@
-{"ir_version":"0.15","validated_by":"ocaml-compiler-v0.15","model":{"name":"gh208_sparse_negative_rate","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.16","validated_by":"ocaml-compiler-v0.16","model":{"name":"gh208_sparse_negative_rate","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}

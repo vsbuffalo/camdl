@@ -1,4 +1,4 @@
-{"ir_version":"0.15","validated_by":"ocaml-compiler-v0.15","model":{"name":"off_grid_intervention","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.16","validated_by":"ocaml-compiler-v0.16","model":{"name":"off_grid_intervention","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}

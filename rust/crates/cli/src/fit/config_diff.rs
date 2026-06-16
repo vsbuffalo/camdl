@@ -260,6 +260,10 @@ pub fn format_prior(spec: &crate::fit::config_v2::EstimatePriorSpec) -> String {
                 format!("gamma(shape={}, rate={})", q.shape, q.rate),
             PriorDist::Exponential(q) =>
                 format!("exponential(rate={})", q.rate),
+            PriorDist::LogUniform(q) =>
+                format!("log_uniform(lower={}, upper={})", q.lower, q.upper),
+            PriorDist::TruncatedNormal(q) =>
+                format!("truncated_normal(mean={}, sd={}, lower={}, upper={})", q.mean, q.sd, q.lower, q.upper),
             PriorDist::Fixed(v) =>
                 format!("fixed({})", v),
         }

@@ -1588,6 +1588,21 @@ fn prior_log_density_and_grad_z(
             let dlp_dtheta = -rate;
             dlp_dtheta * param.transform_deriv(z)
         }
+        Prior::LogUniform { lower, upper } => {
+            if theta < *lower || theta > *upper { return (lp, 0.0); }
+            // d/dθ[−ln θ − const] = −1/θ; chain to z. With the Log transform
+            // this is −1, which the caller's jacobian_grad (+1) cancels → the
+            // z-scale density is flat, as it must be.
+            let dlp_dtheta = -1.0 / theta;
+            dlp_dtheta * param.transform_deriv(z)
+        }
+        Prior::TruncatedNormal { mean, sd, lower, upper } => {
+            if theta < *lower || theta > *upper { return (lp, 0.0); }
+            // The normalizer Z is constant in θ, so only the Gaussian kernel
+            // contributes: d/dθ[−0.5((θ−μ)/σ)²] = −(θ−μ)/σ².
+            let dlp_dtheta = -(theta - mean) / (sd * sd);
+            dlp_dtheta * param.transform_deriv(z)
+        }
         // Hierarchical priors need an env-aware density AND gradient to
         // drive NUTS correctly. PGAS+NUTS with hierarchical leaves is
         // tracked as Gate 3b — needs env threaded through this function
@@ -2744,5 +2759,35 @@ mod prior_grad_tests {
         assert_grad_matches_fd(&Prior::Exponential { rate: 0.7 }, &lp, &[-1.0, 0.0, 1.0]);
         let ip = identity_param(-5.0, 5.0);
         assert_grad_matches_fd(&Prior::Normal { mean: 0.3, sd: 0.8 }, &ip, &[-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn log_uniform_grad_matches_fd() {
+        // On the Log transform the z-scale density is flat → gradient 0.
+        let p = log_param(1e-5, 1e-2);
+        let zs = [(1e-4_f64).ln(), (1e-3_f64).ln(), (5e-3_f64).ln()];
+        assert_grad_matches_fd(&Prior::LogUniform { lower: 1e-5, upper: 1e-2 }, &p, &zs);
+        // And it really is flat (gradient ≈ 0 everywhere interior).
+        for &z in &zs {
+            assert!(target_grad(&Prior::LogUniform { lower: 1e-5, upper: 1e-2 }, &p, z).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn truncated_normal_grad_matches_fd() {
+        // Identity transform, bounds = truncation support.
+        let ip = identity_param(0.3, 1.0);
+        assert_grad_matches_fd(
+            &Prior::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 },
+            &ip, &[0.4, 0.7, 0.95]);
+        // Logit transform onto [0.3, 1.0] — bounds equal truncation support.
+        let lp = EstimatedParam {
+            name: "p".into(), index: 0, initial: 0.7, rw_sd: 0.1,
+            transform: Transform::Logit { lo: 0.3, hi: 1.0 },
+            lower: 0.3, upper: 1.0, rw_sd_auto: false, ivp: false,
+        };
+        assert_grad_matches_fd(
+            &Prior::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 },
+            &lp, &[-1.0, 0.0, 1.0]);
     }
 }

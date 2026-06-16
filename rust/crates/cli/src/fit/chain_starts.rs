@@ -489,6 +489,19 @@ fn sample_prior_natural(prior: &Prior, rng: &mut StatefulRng, base: Option<f64>)
             // Inverse-CDF: -ln(U) / rate.
             -(1.0 - rng.uniform()).ln() / rate
         }
+        Prior::LogUniform { lower, upper } => {
+            // Uniform on the log scale, exponentiated.
+            let (ll, lu) = (lower.ln(), upper.ln());
+            (ll + rng.uniform() * (lu - ll)).exp()
+        }
+        Prior::TruncatedNormal { mean, sd, lower, upper } => {
+            // Exact inverse-CDF draw inside [lower, upper] — no rejection.
+            use sim::inference::{normal_cdf, normal_quantile};
+            let a = normal_cdf((lower - mean) / sd);
+            let b = normal_cdf((upper - mean) / sd);
+            let q = a + rng.uniform() * (b - a);
+            (mean + sd * normal_quantile(q)).clamp(*lower, *upper)
+        }
         Prior::Hierarchical(_) => {
             // Hierarchical priors are evaluated against a ParamEnv that
             // we don't have here. Fall back to the base value with a

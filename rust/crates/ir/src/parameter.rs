@@ -16,6 +16,16 @@ pub struct BetaPrior      { pub alpha: f64, pub beta: f64 }
 pub struct GammaPrior     { pub shape: f64, pub rate: f64 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExponentialPrior { pub rate: f64 }
+/// Uniform on the log scale: `log(X) ~ Uniform(log lower, log upper)`.
+/// `lower, upper > 0`. The honest weakly-informative choice for a scale
+/// parameter uncertain across orders of magnitude.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogUniformPrior { pub lower: f64, pub upper: f64 }
+/// Normal(mean, sd) truncated to `[lower, upper]`. The truncation bounds
+/// are the parameter's declared `in [lo, hi]` range (baked in by the
+/// compiler so the IR stays self-contained).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TruncatedNormalPrior { pub mean: f64, pub sd: f64, pub lower: f64, pub upper: f64 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +37,8 @@ pub enum PriorDist {
     Beta(BetaPrior),
     Gamma(GammaPrior),
     Exponential(ExponentialPrior),
+    LogUniform(LogUniformPrior),
+    TruncatedNormal(TruncatedNormalPrior),
     Fixed(f64),
 }
 

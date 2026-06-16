@@ -802,6 +802,14 @@ let prior_dist_to_json (p : prior_dist) : Yojson.Safe.t =
     obj [("gamma", obj [("shape", flt g.shape); ("rate", flt g.rate)])]
   | Exponential e ->
     obj [("exponential", obj [("rate", flt e.rate)])]
+  | LogUniform lu ->
+    obj [("log_uniform", obj [("lower", flt lu.lu_lower); ("upper", flt lu.lu_upper)])]
+  | TruncatedNormal tn ->
+    obj [("truncated_normal", obj [
+      ("mean",  flt tn.tn_mean);
+      ("sd",    flt tn.tn_sd);
+      ("lower", flt tn.tn_lower);
+      ("upper", flt tn.tn_upper)])]
   | Fixed v ->
     obj [("fixed", flt v)]
 
@@ -816,6 +824,12 @@ let prior_dist_of_json j =
     | "beta"        -> Beta        { alpha = as_float (member "alpha" v); beta  = as_float (member "beta"  v) }
     | "gamma"       -> Gamma       { shape = as_float (member "shape" v); rate  = as_float (member "rate"  v) }
     | "exponential" -> Exponential { rate  = as_float (member "rate"  v) }
+    | "log_uniform" -> LogUniform { lu_lower = as_float (member "lower" v); lu_upper = as_float (member "upper" v) }
+    | "truncated_normal" -> TruncatedNormal {
+        tn_mean  = as_float (member "mean"  v);
+        tn_sd    = as_float (member "sd"    v);
+        tn_lower = as_float (member "lower" v);
+        tn_upper = as_float (member "upper" v) }
     | "fixed"       -> Fixed (as_float v)
     | k -> fail "unknown prior_dist '%s'" k
   )

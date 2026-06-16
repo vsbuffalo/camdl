@@ -2365,6 +2365,20 @@ fn sample_from_prior_raw(
             let u = rng.uniform().max(1e-300);
             -u.ln() / p.rate
         }
+        PriorDist::LogUniform(p) => {
+            // Uniform on the log scale, then exponentiate — always in [lower, upper].
+            let (ll, lu) = (p.lower.ln(), p.upper.ln());
+            (ll + rng.uniform() * (lu - ll)).exp()
+        }
+        PriorDist::TruncatedNormal(p) => {
+            // Exact inverse-CDF draw inside [lower, upper] (no rejection):
+            //   θ = μ + σ·Φ⁻¹(Φ(α) + U·(Φ(β) − Φ(α))),  α,β = standardized bounds.
+            use sim::inference::{normal_cdf, normal_quantile};
+            let a = normal_cdf((p.lower - p.mean) / p.sd);
+            let b = normal_cdf((p.upper - p.mean) / p.sd);
+            let q = a + rng.uniform() * (b - a);
+            (p.mean + p.sd * normal_quantile(q)).clamp(p.lower, p.upper)
+        }
         PriorDist::Fixed(v) => *v,
     }
 }
@@ -2837,9 +2851,14 @@ mod tests {
     /// Lets tests exercise the prior-draws code paths without spinning up
     /// the compiler or committing hand-crafted fixtures.
     fn write_ir_fixture(json: &str) -> (tempfile::TempDir, String) {
+        // Fixtures carry the `__IR_VERSION__` sentinel for the envelope version;
+        // rewrite it to the build's current IR_VERSION so a schema bump never
+        // staleness-breaks these in-code fixtures (they load via the
+        // envelope-checked `ir::from_str`).
+        let json = json.replace("__IR_VERSION__", ir::IR_VERSION.trim());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("model.ir.json");
-        std::fs::write(&path, json).unwrap();
+        std::fs::write(&path, &json).unwrap();
         (dir, path.to_string_lossy().into_owned())
     }
 
@@ -2849,7 +2868,7 @@ mod tests {
     /// in IR envelope so it parses through the new ir::from_str path.
     fn ir_with_prior(name: &str, bounds: &str, prior_json: &str, extras: &str) -> String {
         format!(r#"{{
-          "ir_version": "0.15",
+          "ir_version": "__IR_VERSION__",
           "validated_by": "test-fixture",
           "model": {{
             "name": "t", "version": "0.3", "time_unit": "days",
@@ -2928,7 +2947,7 @@ mod tests {
         // should succeed (sampled beta + fixed N0).
         // gh#audit-C8: wrap in IR envelope.
         let json = r#"{
-          "ir_version": "0.15",
+          "ir_version": "__IR_VERSION__",
           "validated_by": "test-fixture",
           "model": {
             "name": "t", "version": "0.3", "time_unit": "days",
@@ -3048,6 +3067,58 @@ mod tests {
         let (m, v) = moments(&PriorDist::Exponential(ExponentialPrior { rate: 0.5 }));
         assert!((m - 2.0).abs() < 0.05, "exponential mean {}", m);
         assert!((v - 4.0).abs() < 0.2, "exponential var {}", v);
+
+        // LogUniform(1e-2, 1e2): log θ ~ U(ln 1e-2, ln 1e2) = U(-ln100, ln100).
+        // E[θ] = (U - L)/(ln U - ln L) = (100 - 0.01)/(2·ln100) ≈ 10.857.
+        // Every draw must land strictly inside [1e-2, 1e2].
+        use ir::parameter::{LogUniformPrior, TruncatedNormalPrior};
+        let lu = PriorDist::LogUniform(LogUniformPrior { lower: 1e-2, upper: 1e2 });
+        let xs: Vec<f64> = (0..n).map(|_| sample_from_prior_raw(&lu, &mut rng)).collect();
+        assert!(xs.iter().all(|&x| (1e-2..=1e2).contains(&x)), "log_uniform draw out of support");
+        let lu_mean = xs.iter().sum::<f64>() / n as f64;
+        let exp_lu_mean = (1e2 - 1e-2) / (2.0 * (100.0_f64).ln());
+        assert!((lu_mean - exp_lu_mean).abs() / exp_lu_mean < 0.05,
+            "log_uniform mean {} (exp {})", lu_mean, exp_lu_mean);
+
+        // TruncatedNormal(0.7, 0.2) on [0.3, 1.0]: every draw inside bounds;
+        // mean shifts below 0.7 because the upper tail is clipped harder.
+        let tn = PriorDist::TruncatedNormal(TruncatedNormalPrior { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 });
+        let xs: Vec<f64> = (0..n).map(|_| sample_from_prior_raw(&tn, &mut rng)).collect();
+        assert!(xs.iter().all(|&x| (0.3..=1.0).contains(&x)), "truncated_normal draw out of support");
+        let tn_mean = xs.iter().sum::<f64>() / n as f64;
+        // Analytic truncated-normal mean μ + σ(φ(α)−φ(β))/(Φ(β)−Φ(α)),
+        // α=(0.3−0.7)/0.2=−2, β=(1.0−0.7)/0.2=1.5 ⇒ ≈ 0.6834.
+        assert!((tn_mean - 0.6834).abs() < 0.01, "truncated_normal mean {} (≈0.6834 expected)", tn_mean);
+    }
+
+    /// gh#155: log_uniform and truncated_normal draw exactly inside their
+    /// support via inverse-CDF — `sample_with_bounds` never rejects, so the
+    /// "X% mass outside declared bounds (N rejected)" warning never fires.
+    /// This is the issue's headline efficiency claim. Contrast: a plain
+    /// normal(2.0, 0.5) on [0.3, 1.0] would reject ~98% and hit the cap.
+    #[test]
+    fn new_priors_sample_without_rejection() {
+        use ir::parameter::{PriorDist, LogUniformPrior, TruncatedNormalPrior};
+        let mut rng = sim::rng::StatefulRng::new(99);
+
+        // log_uniform: bounds == support → every draw in range, 0 rejections.
+        let lu = PriorDist::LogUniform(LogUniformPrior { lower: 1e-5, upper: 1e-2 });
+        for _ in 0..5000 {
+            let (v, rej) = sample_with_bounds(&lu, Some((1e-5, 1e-2)), &mut rng, "kappa").unwrap();
+            assert_eq!(rej, 0, "log_uniform must never reject");
+            assert!((1e-5..=1e-2).contains(&v), "log_uniform draw {} out of support", v);
+        }
+
+        // truncated_normal with MOST mass outside the bounds (mean 2.0 well
+        // above the [0.3, 1.0] support): inverse-CDF still lands in-support
+        // with zero rejections, where normal+rejection would fail.
+        let tn = PriorDist::TruncatedNormal(
+            TruncatedNormalPrior { mean: 2.0, sd: 0.5, lower: 0.3, upper: 1.0 });
+        for _ in 0..5000 {
+            let (v, rej) = sample_with_bounds(&tn, Some((0.3, 1.0)), &mut rng, "take").unwrap();
+            assert_eq!(rej, 0, "truncated_normal must never reject (inverse-CDF)");
+            assert!((0.3..=1.0).contains(&v), "truncated_normal draw {} out of support", v);
+        }
     }
 
     #[test]
@@ -3233,7 +3304,7 @@ I0    = { bounds = [1, 1000] }
     fn prior_draws_errors_only_when_neither_fit_toml_nor_ir_has_a_prior() {
         // Hand-rolled IR: `beta` has a log_normal prior, `gamma` has none.
         let ir_json = r#"{
-          "ir_version": "0.15",
+          "ir_version": "__IR_VERSION__",
           "validated_by": "test-fixture",
           "model": {
             "name": "t", "version": "0.3", "time_unit": "days",
@@ -3289,7 +3360,7 @@ gamma = { bounds = [0.05, 1.0] }
     fn prior_draws_fit_toml_prior_wins_over_ir_prior() {
         // beta declared with normal(0, 1) — very narrow around 0.
         let ir_json = r#"{
-          "ir_version": "0.15",
+          "ir_version": "__IR_VERSION__",
           "validated_by": "test-fixture",
           "model": {
             "name": "t", "version": "0.3", "time_unit": "days",

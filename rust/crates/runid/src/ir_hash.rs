@@ -298,6 +298,20 @@ impl ContentAddressed for PriorDist {
                 h.write_u32(7);
                 h.write_f64_bits(*v);
             }
+            // New variants take fresh discriminants (8, 9) so existing priors'
+            // content hashes are unchanged.
+            PriorDist::LogUniform(p) => {
+                h.write_u32(8);
+                h.write_f64_bits(p.lower);
+                h.write_f64_bits(p.upper);
+            }
+            PriorDist::TruncatedNormal(p) => {
+                h.write_u32(9);
+                h.write_f64_bits(p.mean);
+                h.write_f64_bits(p.sd);
+                h.write_f64_bits(p.lower);
+                h.write_f64_bits(p.upper);
+            }
         }
     }
 }

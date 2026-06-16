@@ -3395,6 +3395,83 @@ let test_prior_half_normal () =
     Alcotest.(check (float 1e-10)) "sigma" 0.5 sigma
   | _ -> Alcotest.fail "expected HalfNormal prior"
 
+let test_prior_log_uniform () =
+  let src = {|
+    time_unit = 'days
+    parameters {
+      kappa : rate in [1e-5, 1e-2] ~ log_uniform(lower = 1e-5, upper = 1e-2)
+    }
+    compartments { S }
+    init { S = 1 }
+    simulate { from = 0 'days  to = 1 'days }
+  |} in
+  let m = compile_expect_ok src in
+  let p = find_param m "kappa" in
+  match (Ir.param_prior_dist p) with
+  | Some (Ir.LogUniform { lu_lower; lu_upper }) ->
+    Alcotest.(check (float 1e-12)) "lower" 1e-5 lu_lower;
+    Alcotest.(check (float 1e-12)) "upper" 1e-2 lu_upper
+  | _ -> Alcotest.fail "expected LogUniform prior"
+
+let test_prior_log_uniform_nonpositive_errors () =
+  (* log_uniform is uniform on the log scale → bounds must be > 0. *)
+  compile_expect_error_code ~code:"E235" ~contains:"lower > 0" {|
+    time_unit = 'days
+    parameters {
+      x : rate in [0.0, 1.0] ~ log_uniform(lower = 0.0, upper = 1.0)
+    }
+    compartments { S }
+    init { S = 1 }
+    simulate { from = 0 'days  to = 1 'days }
+  |}
+
+let test_prior_truncated_normal_bounds_from_decl () =
+  (* truncated_normal reads its truncation bounds from the param's `in [..]`. *)
+  let src = {|
+    time_unit = 'days
+    parameters {
+      take : probability in [0.3, 1.0] ~ truncated_normal(mean = 0.7, sd = 0.2)
+    }
+    compartments { S }
+    init { S = 1 }
+    simulate { from = 0 'days  to = 1 'days }
+  |} in
+  let m = compile_expect_ok src in
+  let p = find_param m "take" in
+  match (Ir.param_prior_dist p) with
+  | Some (Ir.TruncatedNormal { tn_mean; tn_sd; tn_lower; tn_upper }) ->
+    Alcotest.(check (float 1e-12)) "mean"  0.7 tn_mean;
+    Alcotest.(check (float 1e-12)) "sd"    0.2 tn_sd;
+    Alcotest.(check (float 1e-12)) "lower" 0.3 tn_lower;
+    Alcotest.(check (float 1e-12)) "upper" 1.0 tn_upper
+  | _ -> Alcotest.fail "expected TruncatedNormal prior"
+
+let test_prior_truncated_normal_requires_bounds () =
+  (* No `in [..]` → truncated_normal has nothing to truncate to → E236. *)
+  compile_expect_error_code ~code:"E285" ~contains:"requires explicit bounds" {|
+    time_unit = 'days
+    parameters {
+      take : probability ~ truncated_normal(mean = 0.7, sd = 0.2)
+    }
+    compartments { S }
+    init { S = 1 }
+    simulate { from = 0 'days  to = 1 'days }
+  |}
+
+let test_prior_log_uniform_not_poolable () =
+  (* A param-reference arg makes a prior hierarchical; log_uniform can't be,
+     so it must report E237 (a diagnostic), not ICE in hierarchical_kind_of_name. *)
+  compile_expect_error_code ~code:"E286" ~contains:"cannot be hierarchical" {|
+    time_unit = 'days
+    parameters {
+      hi    : positive in [1e-3, 1.0] ~ half_normal(sigma = 0.1)
+      kappa : rate in [1e-5, 1e-2] ~ log_uniform(lower = 1e-5, upper = hi)
+    }
+    compartments { S }
+    init { S = 1 }
+    simulate { from = 0 'days  to = 1 'days }
+  |}
+
 let test_no_prior_is_none () =
   let src = {|
     time_unit = 'days
@@ -7228,6 +7305,11 @@ let () =
       Alcotest.test_case "~ uniform(lower, upper) parses + round-trips"  `Quick test_prior_uniform;
       Alcotest.test_case "~ normal(mu, sigma) parses + round-trips"      `Quick test_prior_normal;
       Alcotest.test_case "~ exponential(rate) parses + round-trips"      `Quick test_prior_exponential;
+      Alcotest.test_case "~ log_uniform(lower, upper) parses"            `Quick test_prior_log_uniform;
+      Alcotest.test_case "E235 log_uniform requires positive bounds"     `Quick test_prior_log_uniform_nonpositive_errors;
+      Alcotest.test_case "~ truncated_normal bounds from `in [..]`"      `Quick test_prior_truncated_normal_bounds_from_decl;
+      Alcotest.test_case "E285 truncated_normal requires `in [..]`"      `Quick test_prior_truncated_normal_requires_bounds;
+      Alcotest.test_case "E286 log_uniform not poolable (no ICE)"        `Quick test_prior_log_uniform_not_poolable;
     ];
     "prior_const_args", [
       Alcotest.test_case "arithmetic of literals evaluates correctly"    `Quick test_prior_arg_arithmetic;

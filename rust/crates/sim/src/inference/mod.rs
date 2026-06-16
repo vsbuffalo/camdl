@@ -38,7 +38,7 @@ pub mod deterministic;
 
 // Re-exports
 pub use types::{ParticleState, ParticleSwarm};
-pub use obs_loglik::{negbin_logpmf, normal_logpdf, discretized_normal_logpmf, normal_cdf};
+pub use obs_loglik::{negbin_logpmf, normal_logpdf, discretized_normal_logpmf, normal_cdf, normal_quantile};
 pub use particle_filter::bootstrap_filter;
 pub use traits::{ProcessModel, DensityProcess, ObservationModel, Resettable, SMCConfig, InferenceConfig};
 pub use chain_binomial_process::ChainBinomialProcess;

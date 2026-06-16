@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.15",
+  "ir_version": "0.16",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "cholera_siwr",

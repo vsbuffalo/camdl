@@ -2791,6 +2791,8 @@ pub fn validate_prior_transform_compat(
             Prior::Exponential { .. }       => "exponential",
             Prior::Normal { .. }            => "normal",
             Prior::Uniform { .. }           => "uniform",
+            Prior::LogUniform { .. }        => "log_uniform",
+            Prior::TruncatedNormal { .. }   => "truncated_normal",
             Prior::Flat                     => "flat",
             Prior::Hierarchical(h)          => h.kind.as_str(),
         };
@@ -2816,7 +2818,10 @@ pub fn validate_prior_transform_compat(
             Prior::TransformedNormal { .. }
             | Prior::HalfNormal { .. }
             | Prior::Gamma { .. }
-            | Prior::Exponential { .. } => {
+            | Prior::Exponential { .. }
+            // log_uniform is uniform on the log scale: it needs the Log
+            // transform, like log_normal.
+            | Prior::LogUniform { .. } => {
                 if !is_log { return err("Log"); }
             }
             Prior::Beta { .. } => {
@@ -2832,6 +2837,39 @@ pub fn validate_prior_transform_compat(
             }
             Prior::Uniform { .. } | Prior::Normal { .. } | Prior::Flat => {
                 // Compatible with any transform.
+            }
+            // truncated_normal is a natural-scale Gaussian truncated to the
+            // parameter's bounds; the bounds equal the transform's [lo, hi]
+            // by construction, so any transform is fine (Log/Logit keep θ in
+            // range automatically; None relies on the −inf-outside density).
+            // INVARIANT: the truncation support must equal the parameter's
+            // resolved inference bounds, else the prior truncates to one
+            // interval while the search box / transform clamp uses another (a
+            // silent disagreement). The DSL bakes them equal from `in [lo,hi]`;
+            // this guards the fit.toml path (explicit 4-field) and the case
+            // where fit.toml overrides `bounds` away from a model-declared
+            // truncated_normal's support.
+            Prior::TruncatedNormal { lower, upper, .. } => {
+                let resolved = estimate.get(name)
+                    .and_then(|e| e.bounds)
+                    .or_else(|| ir_param.bounds());
+                match resolved {
+                    None => return Err(format!(
+                        "parameter '{}': truncated_normal prior requires bounds, but none \
+                         are declared (model `in [lo, hi]` or fit.toml `bounds`).", name)),
+                    Some((lo, hi)) => {
+                        if (lower - lo).abs() > 1e-9 || (upper - hi).abs() > 1e-9 {
+                            return Err(format!(
+                                "parameter '{}': truncated_normal truncation [{}, {}] must \
+                                 equal the parameter's inference bounds [{}, {}] — the \
+                                 prior's support and the search box must be the same \
+                                 interval. The model `~ truncated_normal(mean, sd)` form \
+                                 reads the bounds from `in [lo, hi]` automatically; in \
+                                 fit.toml set the prior's lower/upper to match `bounds`.",
+                                name, lower, upper, lo, hi));
+                        }
+                    }
+                }
             }
             // Hierarchical priors carry the same kind as their plain
             // counterpart. Reuse the same transform compatibility rules.
@@ -3430,6 +3468,106 @@ mod tests {
         let (p, src) = resolve_prior("gamma", &estimate_empty, &model);
         assert_eq!(src, "flat (default)");
         assert!(matches!(p, Prior::Flat));
+    }
+
+    /// Minimal single-parameter model for transform-compat tests.
+    #[cfg(test)]
+    fn model_with_param(p: ir::parameter::Parameter) -> ir::Model {
+        ir::Model {
+            name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
+            description: None, origin: None, origin_rata_die: None,
+            compartments: vec![], transitions: vec![], ode_equations: vec![],
+            time_functions: vec![], tables: vec![], interventions: vec![], observations: vec![],
+            bindings: vec![], parameters: vec![p],
+            initial_conditions: ir::model::InitialConditions::Explicit(HashMap::new()),
+            output: ir::model::OutputConfig {
+                times: ir::model::OutputSchedule::AtTimes(vec![]),
+                format: "tsv".into(), trajectory: true, observations: false,
+            },
+            simulation: ir::model::SimulationConfig {
+                t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
+                dt: None, rng_seed: None, integrator: Default::default(),
+            },
+            presets: vec![], model_structure: None, balance: None,
+            identity_tracked_compartments: vec![],
+        }
+    }
+
+    /// log_uniform is uniform on the log scale → it requires the Log transform,
+    /// like log_normal. A non-Log transform would silently realize a different
+    /// prior, so the compat validator must reject it. (gh#155)
+    #[test]
+    fn log_uniform_requires_log_transform() {
+        use ir::parameter::{Parameter, ParamValue, PriorSpec, PriorDist, LogUniformPrior,
+            ParamKind, Transform as IrTransform};
+        use crate::fit::config_v2::EstimateSpecV2;
+        use indexmap::IndexMap;
+
+        let p = Parameter {
+            name: "kappa".into(),
+            value: ParamValue::Estimated {
+                init: None, bounds: Some((1e-5, 1e-2)),
+                prior: PriorSpec::Dist(PriorDist::LogUniform(
+                    LogUniformPrior { lower: 1e-5, upper: 1e-2 })),
+                transform: IrTransform::Identity,
+            },
+            param_kind: Some(ParamKind::Rate), param_dim: None,
+        };
+        let model = model_with_param(p);
+        let mut est: IndexMap<String, EstimateSpecV2> = IndexMap::new();
+        est.insert("kappa".into(), EstimateSpecV2 {
+            bounds: Some((1e-5, 1e-2)), transform: None, prior: None,
+            ivp: false, rw_sd: None, start: None });
+
+        // rate param_kind → Log transform → ok.
+        assert!(validate_prior_transform_compat(&est, &model).is_ok(),
+            "log_uniform on a rate param (→Log) must validate");
+
+        // Force a non-Log transform → must be rejected, naming the fix.
+        // (EstimateSpecV2.transform is the fit-config Transform, distinct from
+        // the IR's Transform on the parameter value.)
+        est.get_mut("kappa").unwrap().transform =
+            Some(crate::fit::config_v2::Transform::Identity);
+        let err = validate_prior_transform_compat(&est, &model).unwrap_err();
+        assert!(err.contains("log_uniform") && err.contains("Log"),
+            "error must name log_uniform + the required Log transform: {}", err);
+    }
+
+    /// truncated_normal's truncation support must equal the parameter's
+    /// inference bounds (the prior support and the search box are the same
+    /// interval). The fit.toml 4-field form can disagree; the guard catches it.
+    #[test]
+    fn truncated_normal_bounds_must_match_inference_bounds() {
+        use ir::parameter::{Parameter, ParamValue, PriorSpec, ParamKind, Transform as IrTransform};
+        use crate::fit::config_v2::{EstimateSpecV2, EstimatePriorSpec};
+        use ir::parameter::{PriorDist, TruncatedNormalPrior};
+        use indexmap::IndexMap;
+
+        let p = Parameter {
+            name: "take".into(),
+            value: ParamValue::Estimated {
+                init: None, bounds: Some((0.3, 1.0)),
+                prior: PriorSpec::Flat, transform: IrTransform::Identity },
+            param_kind: Some(ParamKind::Probability), param_dim: None,
+        };
+        let model = model_with_param(p);
+        let est_tn = |lo: f64, hi: f64, blo: f64, bhi: f64| {
+            let mut m: IndexMap<String, EstimateSpecV2> = IndexMap::new();
+            m.insert("take".into(), EstimateSpecV2 {
+                bounds: Some((blo, bhi)), transform: None,
+                prior: Some(EstimatePriorSpec::Dist(PriorDist::TruncatedNormal(
+                    TruncatedNormalPrior { mean: 0.7, sd: 0.2, lower: lo, upper: hi }))),
+                ivp: false, rw_sd: None, start: None });
+            m
+        };
+
+        // Truncation == bounds → ok.
+        assert!(validate_prior_transform_compat(&est_tn(0.3, 1.0, 0.3, 1.0), &model).is_ok(),
+            "matching truncation and bounds must validate");
+        // Truncation ≠ bounds → rejected.
+        let err = validate_prior_transform_compat(&est_tn(0.3, 0.9, 0.3, 1.0), &model).unwrap_err();
+        assert!(err.contains("truncated_normal") && err.contains("must equal"),
+            "error must explain the truncation/bounds disagreement: {}", err);
     }
 
     /// Cover every distribution supported in fit.toml `prior = ...` strings.

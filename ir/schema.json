@@ -813,6 +813,36 @@
           "additionalProperties": false
         },
         {
+          "required": ["log_uniform"],
+          "properties": {
+            "log_uniform": {
+              "type": "object",
+              "required": ["lower", "upper"],
+              "properties": {
+                "lower": { "type": "number" },
+                "upper": { "type": "number" }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["truncated_normal"],
+          "properties": {
+            "truncated_normal": {
+              "type": "object",
+              "required": ["mean", "sd", "lower", "upper"],
+              "properties": {
+                "mean": { "type": "number" },
+                "sd": { "type": "number" },
+                "lower": { "type": "number" },
+                "upper": { "type": "number" }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "required": ["fixed"],
           "properties": {
             "fixed": { "type": "number" }

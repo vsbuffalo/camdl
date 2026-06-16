@@ -3207,6 +3207,10 @@ let prior_arg_signature = function
   | "beta"        -> Some ["alpha"; "beta"]
   | "gamma"       -> Some ["shape"; "rate"]
   | "exponential" -> Some ["rate"]
+  | "log_uniform" -> Some ["lower"; "upper"]
+  (* truncated_normal takes only mean/sd; its truncation bounds are read
+     from the parameter's `in [lo, hi]` declaration (one source of truth). *)
+  | "truncated_normal" -> Some ["mean"; "sd"]
   | _             -> None
 
 (** Per-distribution value validation. Returns [Some msg] if the
@@ -3232,13 +3236,25 @@ let validate_prior_values dist_name vals =
   | "gamma" ->
     (match pos_check "shape" with Some _ as e -> e | None -> pos_check "rate")
   | "exponential" -> pos_check "rate"
+  | "log_uniform" ->
+    (match find "lower", find "upper" with
+     | Some lo, _ when lo <= 0.0 ->
+       Some (Printf.sprintf "log_uniform requires lower > 0 (got lower=%g); \
+                             it is uniform on the log scale" lo)
+     | _, Some hi when hi <= 0.0 ->
+       Some (Printf.sprintf "log_uniform requires upper > 0 (got upper=%g); \
+                             it is uniform on the log scale" hi)
+     | Some lo, Some hi when lo >= hi ->
+       Some (Printf.sprintf "log_uniform requires lower < upper (got lower=%g, upper=%g)" lo hi)
+     | _ -> None)
+  | "truncated_normal" -> pos_check "sd"
   | _ -> None
 
 type prior_classification =
   [ `Plain        of Ir.prior_dist
   | `Hierarchical of Ir.hierarchical_prior ]
 
-let resolve_prior_spec ?(loc = Diagnostics.no_loc) ctx ~pname (ps : prior_spec) : Ir.prior_dist =
+let resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None) ctx ~pname (ps : prior_spec) : Ir.prior_dist =
   (* Prefix every diagnostic message with the parameter name so users
      can locate bad priors in models with many parameters. *)
   let qualify msg = Printf.sprintf "parameter '%s': %s" pname msg in
@@ -3251,7 +3267,7 @@ let resolve_prior_spec ?(loc = Diagnostics.no_loc) ctx ~pname (ps : prior_spec) 
       Diagnostics.error ctx.diags
         ~code:"E232" ~loc
         ~message:(qualify (Printf.sprintf "unknown prior distribution '%s'" ps.ps_name))
-        ~detail:"Valid distributions: uniform, normal, log_normal, half_normal, beta, gamma, exponential."
+        ~detail:"Valid distributions: uniform, normal, log_normal, half_normal, beta, gamma, exponential, log_uniform, truncated_normal."
         ~hint:"Check the spelling and available distributions."
         ();
       []
@@ -3348,6 +3364,22 @@ let resolve_prior_spec ?(loc = Diagnostics.no_loc) ctx ~pname (ps : prior_spec) 
     | "beta"        -> Ir.Beta { Ir.alpha = v "alpha"; Ir.beta = v "beta" }
     | "gamma"       -> Ir.Gamma { Ir.shape = v "shape"; Ir.rate = v "rate" }
     | "exponential" -> Ir.Exponential { Ir.rate = v "rate" }
+    | "log_uniform" -> Ir.LogUniform { Ir.lu_lower = v "lower"; Ir.lu_upper = v "upper" }
+    | "truncated_normal" ->
+      (* Truncation bounds come from the parameter's `in [lo, hi]`. *)
+      (match bounds with
+       | Some (lo, hi) ->
+         Ir.TruncatedNormal { Ir.tn_mean = v "mean"; Ir.tn_sd = v "sd";
+                              Ir.tn_lower = lo; Ir.tn_upper = hi }
+       | None ->
+         Diagnostics.error ctx.diags
+           ~code:"E285" ~loc
+           ~message:(qualify "truncated_normal requires explicit bounds")
+           ~detail:"A truncated_normal prior is truncated to the parameter's \
+                    declared range, but this parameter has no `in [lo, hi]` bounds."
+           ~hint:"Add bounds, e.g. `take : probability in [0.3, 1.0] ~ truncated_normal(mean = 0.7, sd = 0.2)`."
+           ();
+         err_invalid_placeholder)
     | _ -> err_invalid_placeholder (* unreachable — name was validated above *)
   end
 
@@ -3360,14 +3392,31 @@ let resolve_prior_spec ?(loc = Diagnostics.no_loc) ctx ~pname (ps : prior_spec) 
       reference) — this allows flat-scalar leaves with hyperparent
       references, without forcing a pooling dimension.
     Wave 2 / malaria #3. *)
-let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ctx ~pname
+let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None) ctx ~pname
       (ps : prior_spec) : prior_classification =
   let has_non_const_arg =
     List.exists (fun (_, e) -> not (is_const_expr e)) ps.ps_args
   in
   let is_hierarchical = ps.ps_pool_over <> None || has_non_const_arg in
   if not is_hierarchical then
-    `Plain (resolve_prior_spec ~loc ctx ~pname ps)
+    `Plain (resolve_prior_spec ~loc ~bounds ctx ~pname ps)
+  (* log_uniform and truncated_normal are constant-only distributions: they
+     cannot reference hyperparameters or carry a `| dim` pooling clause.
+     Without this guard they would reach [hierarchical_kind_of_name], which
+     [failwith]s — an ICE instead of a diagnostic. *)
+  else if ps.ps_name = "log_uniform" || ps.ps_name = "truncated_normal" then begin
+    Diagnostics.error ctx.diags
+      ~code:"E286" ~loc
+      ~message:(Printf.sprintf
+        "parameter '%s': prior '%s' cannot be hierarchical or pooled" pname ps.ps_name)
+      ~detail:(Printf.sprintf
+        "'%s' takes only constant arguments — it cannot reference \
+         hyperparameters or use a `| dim` pooling clause." ps.ps_name)
+      ~hint:"Use constant arguments, or choose a poolable distribution \
+             (normal, log_normal, half_normal, beta, gamma, exponential)."
+      ();
+    `Plain (Ir.Uniform { Ir.lower = 0.0; Ir.upper = 1.0 })
+  end
   else begin
     (* Validate distribution name but allow parameter references in args. *)
     let qualify msg = Printf.sprintf "parameter '%s': %s" pname msg in
@@ -3377,7 +3426,7 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ctx ~pname
        Diagnostics.error ctx.diags
          ~code:"E232" ~loc
          ~message:(qualify (Printf.sprintf "unknown prior distribution '%s'" ps.ps_name))
-         ~detail:"Valid distributions: uniform, normal, log_normal, half_normal, beta, gamma, exponential."
+         ~detail:"Valid distributions: uniform, normal, log_normal, half_normal, beta, gamma, exponential, log_uniform, truncated_normal."
          ~hint:"Check the spelling and available distributions."
          ());
     let resolved_args = List.map (fun (k, e) ->
@@ -3448,7 +3497,7 @@ let expand_parameters ctx =
       let dim = resolve_param_dim ctx ~loc ~pname pkind pdim punit in
       let (prior, hierarchical) = match pprior with
         | None -> (None, None)
-        | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~pname ps with
+        | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with
                       | `Plain p        -> (Some p, None)
                       | `Hierarchical h -> (None, Some h))
       in
@@ -3465,7 +3514,7 @@ let expand_parameters ctx =
       let resolved_dim = resolve_param_dim ctx ~loc ~pname pkind pdim_ann punit in
       let (prior, hierarchical) = match pprior with
         | None -> (None, None)
-        | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~pname ps with
+        | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with
                       | `Plain p        -> (Some p, None)
                       | `Hierarchical h -> (None, Some h))
       in

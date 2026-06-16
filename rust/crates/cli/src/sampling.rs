@@ -34,6 +34,9 @@ pub fn describe_prior(p: &PriorDist) -> String {
         PriorDist::HalfNormal(q) => format!("HalfNormal(sigma={})", q.sigma),
         PriorDist::Gamma(q) => format!("Gamma(shape={}, rate={})", q.shape, q.rate),
         PriorDist::Exponential(q) => format!("Exponential(rate={})", q.rate),
+        PriorDist::LogUniform(q) => format!("LogUniform(lower={}, upper={})", q.lower, q.upper),
+        PriorDist::TruncatedNormal(q) =>
+            format!("TruncatedNormal(mean={}, sd={}, lower={}, upper={})", q.mean, q.sd, q.lower, q.upper),
         PriorDist::Fixed(v) => format!("Fixed({})", v),
     }
 }

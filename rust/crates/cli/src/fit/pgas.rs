@@ -243,6 +243,13 @@ pub fn run_stage(
                 Prior::Exponential { rate } => {
                     eprintln!("    {:12} Exponential(rate={:.4})", spec.name, rate);
                 }
+                Prior::LogUniform { lower, upper } => {
+                    eprintln!("    {:12} LogUniform({:.4e}, {:.4e})", spec.name, lower, upper);
+                }
+                Prior::TruncatedNormal { mean, sd, lower, upper } => {
+                    eprintln!("    {:12} TruncatedNormal(mean={:.4}, sd={:.4}) on [{:.4}, {:.4}]",
+                        spec.name, mean, sd, lower, upper);
+                }
                 Prior::Hierarchical(h) => {
                     let parents: Vec<String> = h.args.values()
                         .filter_map(|e| if let ir::expr::Expr::Param(p) = e { Some(p.param.clone()) } else { None })

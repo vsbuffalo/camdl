@@ -12,6 +12,10 @@ parameters {
   rho   : probability in [0.001, 1.0]  ~ beta(alpha = 2.0, beta = 5.0)
   N0    : count       in [100, 1000000] ~ log_normal(mu = 7.0, sigma = 0.2)
   I0    : count       in [1, 1000]      ~ exponential(rate = 0.01)
+  # log_uniform: order-of-magnitude scale param, deliberately vague within range.
+  kappa : rate        in [1e-5, 1e-2]  ~ log_uniform(lower = 1e-5, upper = 1e-2)
+  # truncated_normal: Gaussian belief on a bounded quantity; bounds come from `in [...]`.
+  take  : probability in [0.3, 1.0]    ~ truncated_normal(mean = 0.7, sd = 0.2)
 }
 
 transitions {
@@ -38,6 +42,8 @@ scenarios {
       rho   = 0.4
       N0    = 1000
       I0    = 10
+      kappa = 1e-3
+      take  = 0.7
     }
   }
 }

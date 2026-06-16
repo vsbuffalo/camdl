@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.15",
-  "validated_by": "ocaml-compiler-v0.15",
+  "ir_version": "0.16",
+  "validated_by": "ocaml-compiler-v0.16",
   "model": {
     "name": "seir_spatial_5_inference",
     "version": "0.3",

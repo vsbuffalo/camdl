@@ -346,6 +346,9 @@ type half_normal_prior = { sigma: float }
 type beta_prior       = { alpha: float; beta: float }
 type gamma_prior      = { shape: float; rate: float }
 type exponential_prior = { rate: float }
+type log_uniform_prior = { lu_lower: float; lu_upper: float }
+type truncated_normal_prior =
+  { tn_mean: float; tn_sd: float; tn_lower: float; tn_upper: float }
 
 type prior_dist =
   | Uniform     of uniform_prior
@@ -355,6 +358,8 @@ type prior_dist =
   | Beta        of beta_prior
   | Gamma       of gamma_prior
   | Exponential of exponential_prior
+  | LogUniform      of log_uniform_prior
+  | TruncatedNormal of truncated_normal_prior
   | Fixed       of float
 
 type transform = Log | Logit | Identity
