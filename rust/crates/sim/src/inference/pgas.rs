@@ -1559,7 +1559,14 @@ fn prior_log_density_and_grad_z(
             dlp_dtheta * param.transform_deriv(z)
         }
         Prior::TransformedNormal { mean, sd } => {
-            -(z - mean) / (sd * sd)
+            // d/dz of the NATURAL-scale log-normal density log p(θ(z)).
+            // log_density returns log N(z; μ, σ) − z (it pre-subtracts the
+            // Log Jacobian z), so its z-derivative is −(z−μ)/σ² − 1. The
+            // caller adds jacobian_grad = +1, recovering d/dz log N(z) =
+            // −(z−μ)/σ². Omitting the −1 here left the NUTS gradient for
+            // log_normal priors off by +1 (uncovered: the only FD gradient
+            // test used Prior::Flat).
+            -(z - mean) / (sd * sd) - 1.0
         }
         Prior::HalfNormal { sigma } => {
             if theta < 0.0 { return (lp, 0.0); }
@@ -2659,5 +2666,83 @@ mod grid_tests {
         let map = build_obs_at_substep(&observations, 0.0, 1.0)
             .expect("non-colliding obs must build fine");
         assert_eq!(map.len(), 2, "both observations must be present");
+    }
+}
+
+#[cfg(test)]
+mod prior_grad_tests {
+    //! Finite-difference check of the per-parameter NUTS *target* gradient
+    //! assembled exactly as `run_pgas`'s `log_prob_and_grad` closure does it:
+    //!   value(z)    = prior.log_density(θ, z) + param.log_jacobian(z)
+    //!   gradient(z) = prior_grad_z + param.jacobian_grad(z)
+    //! where `(_, prior_grad_z) = prior_log_density_and_grad_z(...)`.
+    //!
+    //! The only existing FD gradient test (`tests/gradient_check.rs`) uses
+    //! `Prior::Flat`, so the prior-gradient arms here had no coverage — this
+    //! is the gate for them.
+    use super::*;
+    use crate::inference::types::Transform;
+
+    fn log_param(lo: f64, hi: f64) -> EstimatedParam {
+        EstimatedParam {
+            name: "p".into(), index: 0, initial: 1.0, rw_sd: 0.1,
+            transform: Transform::Log { lo, hi },
+            lower: lo, upper: hi, rw_sd_auto: false, ivp: false,
+        }
+    }
+
+    fn identity_param(lo: f64, hi: f64) -> EstimatedParam {
+        EstimatedParam {
+            name: "p".into(), index: 0, initial: 0.0, rw_sd: 0.1,
+            transform: Transform::None,
+            lower: lo, upper: hi, rw_sd_auto: false, ivp: false,
+        }
+    }
+
+    /// Assemble the per-parameter z-scale target value the NUTS closure sees.
+    fn target_value(prior: &Prior, param: &EstimatedParam, z: f64) -> f64 {
+        let theta = param.from_transformed(z);
+        prior.log_density(theta, z) + param.log_jacobian(z)
+    }
+
+    /// Assemble the analytic z-scale gradient the NUTS closure uses.
+    fn target_grad(prior: &Prior, param: &EstimatedParam, z: f64) -> f64 {
+        let theta = param.from_transformed(z);
+        let (_, prior_grad_z) = prior_log_density_and_grad_z(prior, param, theta, z);
+        prior_grad_z + param.jacobian_grad(z)
+    }
+
+    fn assert_grad_matches_fd(prior: &Prior, param: &EstimatedParam, zs: &[f64]) {
+        let eps = 1e-6;
+        for &z in zs {
+            let fd = (target_value(prior, param, z + eps)
+                - target_value(prior, param, z - eps)) / (2.0 * eps);
+            let an = target_grad(prior, param, z);
+            let rel = if fd.abs() > 1e-6 { (an - fd).abs() / fd.abs() } else { (an - fd).abs() };
+            assert!(rel < 1e-4,
+                "{:?} @ z={}: analytic grad {} != fd {} (rel {:.2e})",
+                prior, z, an, fd, rel);
+        }
+    }
+
+    #[test]
+    fn log_normal_grad_matches_fd() {
+        // Regression: the TransformedNormal arm returned -(z-μ)/σ² but the
+        // caller adds jacobian_grad = +1 unconditionally and log_density
+        // pre-subtracts the -z Jacobian — leaving the gradient off by +1.
+        let p = log_param(1e-4, 1e2);
+        assert_grad_matches_fd(&Prior::TransformedNormal { mean: 1.0, sd: 0.5 },
+            &p, &[-1.0, 0.0, 0.7, 1.5]);
+    }
+
+    #[test]
+    fn natural_scale_priors_grad_matches_fd() {
+        // These arms already follow the natural-density convention; lock them.
+        let lp = log_param(1e-4, 1e2);
+        assert_grad_matches_fd(&Prior::HalfNormal { sigma: 1.0 }, &lp, &[-1.0, 0.0, 1.0]);
+        assert_grad_matches_fd(&Prior::Gamma { shape: 2.0, rate: 1.5 }, &lp, &[-1.0, 0.0, 1.0]);
+        assert_grad_matches_fd(&Prior::Exponential { rate: 0.7 }, &lp, &[-1.0, 0.0, 1.0]);
+        let ip = identity_param(-5.0, 5.0);
+        assert_grad_matches_fd(&Prior::Normal { mean: 0.3, sd: 0.8 }, &ip, &[-1.0, 0.0, 1.0]);
     }
 }
