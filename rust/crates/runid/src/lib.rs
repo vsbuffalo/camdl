@@ -18,6 +18,41 @@
 //! the foreign IR hashable under the structural-float policy; the
 //! `#[derive(RunInput)]` macro (crate `runid-derive`) generates the same
 //! encoding for run-input types and is validated against the hand impls.
+//!
+//! ## Two hashing paths (read before adding an identity input)
+//!
+//! A leaf's identity is computed one of two ways, and they behave differently
+//! — know which one your change touches:
+//!
+//! 1. **Structural `#[derive(RunInput)]`** (this crate). [`inputs::SimConfig`],
+//!    [`inputs::TrajectoryInput`], [`inputs::FitDigest`], … hash field by field
+//!    in declaration order. The derive folds **every** non-provenance field,
+//!    *include by default* — there is no skip-if-default. Mark a field
+//!    `#[run_input(provenance)]` to exclude it entirely (display only). The
+//!    `simulate` / `batch` `config` level uses this path.
+//! 2. **Hash of canonical JSON** (CLI `fit/cas.rs`). `FitConfigV2` is serde
+//!    only; it enters identity as the digest of its key-sorted JSON (the
+//!    `FitDigest::fit_toml` field), so `#[serde(skip_serializing_if = …)]`
+//!    controls hash *membership* — a default-skipped field stays out of the
+//!    hash and does not re-key. The `fit` level uses this path.
+//!
+//! ## Adding a field to identity
+//!
+//! - **Classify it.** A change to *which values are computed or stored* (a new
+//!   semantic input, or an output subset that changes the leaf's bytes) belongs
+//!   in identity: a content-addressed leaf cannot share a `run_id` with one
+//!   whose bytes differ. A pure *re-encoding* of the same values (format, time
+//!   rendering) is presentation — strip it in `resolve::normalize_for_hash` so
+//!   it stays inert (see `output.format`).
+//! - **Expect turnover.** Adding a field to a `RunInput` struct re-keys *every*
+//!   existing leaf of that kind, even at its default value (the field always
+//!   contributes bytes). That is intentional, versioned turnover — not a bug to
+//!   engineer around. To scope it, bump the version that matches: a single
+//!   struct's `#[run_input(schema_version = N)]`, the crate-wide
+//!   [`HASH_VERSION`] (re-keys *everything*), or `ir/VERSION` (re-keys all
+//!   model-bearing leaves).
+//! - **Gate it.** Any re-key is a reviewed change pinned by a `run_id`-stability
+//!   test, never collateral.
 
 // The `#[derive(RunInput)]` macro emits `runid::ContentAddressed` /
 // `runid::CanonicalHasher` paths so the same expansion compiles in consumer

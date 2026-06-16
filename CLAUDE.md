@@ -139,6 +139,15 @@ Per area:
   `docs/dev/proposals/`), the relevant module in
   `rust/crates/sim/src/inference/`, and any related incident reports in
   `docs/dev/incidents/`.
+- **CAS / run-identity changes** (anything that feeds a `run_id`: a new
+  `SimConfig` / `FitConfigV2` field, a new identity level, an output-affecting
+  CLI flag): read the `runid` crate doc (`rust/crates/runid/src/lib.rs` — the
+  two hashing paths and the version stack), `rust/crates/cli/src/resolve.rs`
+  (`normalize_for_hash` + the factored model/config/params/scenario/seed
+  levels), and `rust/crates/cli/src/fit/cas.rs` (the fit canonical-JSON hash).
+  The rule: a field that changes stored bytes is identity (it must re-key); a
+  re-encoding of the same values is presentation (strip it). Re-keys are
+  deliberate and version-bumped, never collateral.
 
 When a proposal is the _first_ thing you'd read about a topic, that proposal
 needs to either be self-contained (cites all the existing surface relevant to
