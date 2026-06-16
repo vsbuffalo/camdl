@@ -144,6 +144,17 @@ pub struct SimConfig {
     /// (hard-error → silent-zero), which changes trajectory values. A
     /// control-looking flag that is genuinely semantic.
     pub allow_degenerate_rates: bool,
+    /// Output view (gh#156): which trajectory columns are written to the leaf.
+    /// `--no-flows` / `--columns` change the leaf's *bytes* (a column subset),
+    /// so a content-addressed leaf cannot share a `run_id` with the full one —
+    /// these are identity, not presentation. `--output-every` is NOT here: it
+    /// lowers into the model's output schedule (`output` above + the model
+    /// digest). Default (full output) keeps the historical bytes; a non-default
+    /// view is a distinct, reproducible artifact.
+    pub no_flows: bool,
+    /// `--columns` allow-list of output column names, normalized to a set
+    /// (order-invariant — emitted order follows the model). Empty = all.
+    pub columns: BTreeSet<String>,
 }
 
 /// The model-level digest. **M2 interim:** the whole canonical IR. M2.5

@@ -2578,60 +2578,227 @@ pub fn run_simulation_event_log(
     Ok((traj, model, event_log, exact))
 }
 
+/// Which trajectory *data* columns to emit (compartments + flows), derived
+/// from the model and an optional output-view filter. Excludes the leading
+/// `t` / `date` / replicate-scenario-draw columns — each writer frames those
+/// itself. Both the CAS leaf renderer ([`write_traj_to`]) and the wide-format
+/// `--output` mirror (`StreamSink` in `main.rs`) build trajectory rows through
+/// this one type, so a column filter can never be honored by one writer and
+/// silently ignored by the other.
+pub struct TrajColumns {
+    /// (header, index into `Snapshot::int_state.counts`)
+    int: Vec<(String, usize)>,
+    /// (header, index into `Snapshot::real_state.values`)
+    real: Vec<(String, usize)>,
+    /// (`flow_<name>` header, index into the snapshot flow vector)
+    flows: Vec<(String, usize)>,
+}
+
+impl TrajColumns {
+    /// Every compartment + every flow, in model order — the default output.
+    pub fn all(model: &ir::Model) -> Self {
+        Self::select(model, false, &std::collections::BTreeSet::new())
+    }
+
+    /// Apply an output-view filter. `no_flows` drops every `flow_*` column;
+    /// `allow` (when non-empty) is an allow-list matched against the output
+    /// header names (`S`, `I_c`, `flow_infection`, …). Emitted order always
+    /// follows the model, never the allow-list. Callers are responsible for
+    /// validating that every name in `allow` matches a real column
+    /// (see [`TrajColumns::all_column_names`]).
+    pub fn select(
+        model: &ir::Model,
+        no_flows: bool,
+        allow: &std::collections::BTreeSet<String>,
+    ) -> Self {
+        let want = |name: &str| allow.is_empty() || allow.contains(name);
+        let (mut int, mut real) = (Vec::new(), Vec::new());
+        let (mut ii, mut ri) = (0usize, 0usize);
+        for c in &model.compartments {
+            match c.kind {
+                ir::model::CompartmentKind::Integer => {
+                    if want(&c.name) { int.push((c.name.clone(), ii)); }
+                    ii += 1;
+                }
+                ir::model::CompartmentKind::Real => {
+                    if want(&c.name) { real.push((c.name.clone(), ri)); }
+                    ri += 1;
+                }
+            }
+        }
+        let mut flows = Vec::new();
+        if !no_flows {
+            for (ti, tr) in model.transitions.iter().enumerate() {
+                let header = format!("flow_{}", tr.name);
+                if want(&header) { flows.push((header, ti)); }
+            }
+        }
+        Self { int, real, flows }
+    }
+
+    /// Every selectable output-column name (compartments + `flow_<name>`), in
+    /// model order — for validating an allow-list and for the "valid names
+    /// are …" hint when one does not match.
+    pub fn all_column_names(model: &ir::Model) -> Vec<String> {
+        let mut names: Vec<String> =
+            model.compartments.iter().map(|c| c.name.clone()).collect();
+        names.extend(model.transitions.iter().map(|t| format!("flow_{}", t.name)));
+        names
+    }
+
+    /// Tab-prefixed data-column headers (no leading `t`).
+    pub fn write_header(&self, w: &mut impl std::io::Write) -> std::io::Result<()> {
+        for (n, _) in &self.int   { write!(w, "\t{}", n)?; }
+        for (n, _) in &self.real  { write!(w, "\t{}", n)?; }
+        for (n, _) in &self.flows { write!(w, "\t{}", n)?; }
+        Ok(())
+    }
+
+    /// Tab-prefixed data values for one snapshot (no leading `t`).
+    pub fn write_row(
+        &self,
+        w: &mut impl std::io::Write,
+        snap: &sim::Snapshot,
+    ) -> std::io::Result<()> {
+        for (_, i) in &self.int  { write!(w, "\t{}", snap.int_state.counts[*i])?; }
+        for (_, i) in &self.real { write!(w, "\t{:.4}", snap.real_state.values[*i])?; }
+        for (_, i) in &self.flows {
+            match &snap.flows {
+                sim::Flows::Int(fs)  => write!(w, "\t{}", fs[*i])?,
+                sim::Flows::Real(fs) => write!(w, "\t{:.4}", fs[*i])?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The resolved trajectory column filter (`--no-flows` / `--columns`), shared
+/// by the writers and folded into `SimConfig` identity. `--output-every` is
+/// NOT here — it is lowered into the model's output schedule upstream.
+#[derive(Clone, Debug, Default)]
+pub struct OutputColumns {
+    pub no_flows: bool,
+    pub allow: std::collections::BTreeSet<String>,
+}
+
+impl OutputColumns {
+    /// Resolve + validate `OutputView`'s column knobs against a model. Every
+    /// name in `--columns` must match a real output column (a compartment or
+    /// `flow_<name>`); an unknown name is a hard error listing the valid names.
+    pub fn resolve(
+        view: &crate::args::OutputView,
+        model: &ir::Model,
+    ) -> Result<Self, String> {
+        let valid: std::collections::BTreeSet<String> =
+            TrajColumns::all_column_names(model).into_iter().collect();
+        for name in &view.columns {
+            if !valid.contains(name) {
+                return Err(format!(
+                    "--columns: unknown column `{}`. Valid columns are: {}",
+                    name,
+                    valid.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+        Ok(OutputColumns {
+            no_flows: view.no_flows,
+            allow: view.columns.iter().cloned().collect(),
+        })
+    }
+
+    /// Build the [`TrajColumns`] for a model under this filter.
+    pub fn cols(&self, model: &ir::Model) -> TrajColumns {
+        TrajColumns::select(model, self.no_flows, &self.allow)
+    }
+}
+
+/// Override a model's trajectory output cadence (`--output-every`), preserving
+/// the existing schedule window. Caller validates `step > 0`.
+fn apply_output_every(model: &mut ir::Model, step: f64) {
+    let (start, end) = match &model.output.times {
+        ir::model::OutputSchedule::Regular(r) => (r.start, r.end),
+        ir::model::OutputSchedule::AtTimes(ts) => (
+            ts.first().copied().unwrap_or(0.0).min(0.0),
+            ts.last().copied().unwrap_or(model.simulation.t_end),
+        ),
+    };
+    model.output.times = ir::model::OutputSchedule::Regular(
+        ir::model::RegularOutputSchedule { start, step, end },
+    );
+}
+
+/// Lower `--output-every` into the model. When set, load the compiled IR at
+/// `ir_path`, override its output cadence, and write it to a fresh temp
+/// `.ir.json` — returning the new path (+ temp guard). Both the engine and the
+/// CAS identity load `base_model` from this path, so the override reaches
+/// simulation and the `run_id` together (it rides the model digest, re-keying
+/// only runs that use it). When `every` is `None`, the path is unchanged.
+pub fn rematerialize_with_output_every(
+    ir_path: &str,
+    every: Option<f64>,
+) -> Result<(String, Option<tempfile::NamedTempFile>), String> {
+    let step = match every {
+        Some(s) => s,
+        None => return Ok((ir_path.to_string(), None)),
+    };
+    if !(step > 0.0) {
+        return Err(format!(
+            "--output-every must be a positive number, got {}", step
+        ));
+    }
+    let src = std::fs::read_to_string(ir_path)
+        .map_err(|e| format!("cannot read {}: {}", ir_path, e))?;
+    let mut model = ir::from_str(&src)
+        .map_err(|e| format!("IR load error from {}: {}", ir_path, e))?;
+    apply_output_every(&mut model, step);
+    let json = ir::to_string_pretty(&model)
+        .map_err(|e| format!("cannot serialize IR with --output-every: {}", e))?;
+    let tmp = tempfile::Builder::new()
+        .prefix("camdl-every-")
+        .suffix(".ir.json")
+        .tempfile()
+        .map_err(|e| format!("cannot create temp IR: {}", e))?;
+    std::fs::write(tmp.path(), json)
+        .map_err(|e| format!("cannot write temp IR: {}", e))?;
+    let new_path = tmp.path().to_string_lossy().into_owned();
+    Ok((new_path, Some(tmp)))
+}
+
 /// Write a trajectory to a TSV file (same format as `camdl simulate` stdout).
-pub fn write_traj_tsv(path: &str, model: &ir::Model, traj: &Trajectory, emit_flows: bool) -> Result<(), String> {
+pub fn write_traj_tsv(
+    path: &str,
+    traj: &Trajectory,
+    cols: &TrajColumns,
+) -> Result<(), String> {
     use std::fs::File;
     let mut f = File::create(path)
         .map_err(|e| format!("cannot create {}: {}", path, e))?;
-    write_traj_to(&mut f, model, traj, emit_flows).map_err(|e| e.to_string())
+    write_traj_to(&mut f, traj, cols).map_err(|e| e.to_string())
 }
 
 /// Render a trajectory TSV into an in-memory buffer — the form the CAS
 /// commit hands to the store as the leaf's `traj.tsv` artifact. Byte-
-/// identical to [`write_traj_tsv`] (same `write_traj_to` core).
-pub fn traj_tsv_bytes(model: &ir::Model, traj: &Trajectory, emit_flows: bool) -> Vec<u8> {
+/// identical to [`write_traj_tsv`] (same [`write_traj_to`] core).
+pub fn traj_tsv_bytes(traj: &Trajectory, cols: &TrajColumns) -> Vec<u8> {
     let mut buf = Vec::new();
     // Writing to a `Vec` is infallible.
-    let _ = write_traj_to(&mut buf, model, traj, emit_flows);
+    let _ = write_traj_to(&mut buf, traj, cols);
     buf
 }
 
-/// The shared trajectory-TSV renderer: header + one row per snapshot.
+/// The shared trajectory-TSV renderer: header + one row per snapshot. The
+/// column set (and thus any output-view filter) lives entirely in `cols`.
 fn write_traj_to(
     w: &mut impl std::io::Write,
-    model: &ir::Model,
     traj: &Trajectory,
-    emit_flows: bool,
+    cols: &TrajColumns,
 ) -> std::io::Result<()> {
-    let int_names: Vec<&str> = model.compartments.iter()
-        .filter(|c| c.kind == ir::model::CompartmentKind::Integer)
-        .map(|c| c.name.as_str()).collect();
-    let real_names: Vec<&str> = model.compartments.iter()
-        .filter(|c| c.kind == ir::model::CompartmentKind::Real)
-        .map(|c| c.name.as_str()).collect();
-    let tr_names: Vec<&str> = model.transitions.iter()
-        .map(|t| t.name.as_str()).collect();
-
-    // Header
     write!(w, "t")?;
-    for n in &int_names  { write!(w, "\t{}", n)?; }
-    for n in &real_names { write!(w, "\t{}", n)?; }
-    if emit_flows {
-        for n in &tr_names { write!(w, "\tflow_{}", n)?; }
-    }
+    cols.write_header(w)?;
     writeln!(w)?;
-
-    // Rows
     for snap in &traj.snapshots {
         write!(w, "{}", snap.t)?;
-        for &c in &snap.int_state.counts  { write!(w, "\t{}", c)?; }
-        for &v in &snap.real_state.values { write!(w, "\t{:.4}", v)?; }
-        if emit_flows {
-            match &snap.flows {
-                sim::Flows::Int(fs)  => for &fl in fs { write!(w, "\t{}", fl)?; },
-                sim::Flows::Real(fs) => for &fl in fs { write!(w, "\t{:.4}", fl)?; },
-            }
-        }
+        cols.write_row(w, snap)?;
         writeln!(w)?;
     }
     Ok(())

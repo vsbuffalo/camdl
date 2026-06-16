@@ -51,6 +51,11 @@ pub struct TrajectoryCtx<'a> {
     pub t_end: f64,
     pub output: &'a ir::model::OutputSchedule,
     pub allow_degenerate_rates: bool,
+    /// Output view (gh#156): the trajectory column filter, folded into the
+    /// `config` level so a column-subset leaf re-keys. `--output-every` is NOT
+    /// here — it is lowered into `output` (the schedule) upstream.
+    pub no_flows: bool,
+    pub columns: &'a std::collections::BTreeSet<String>,
     /// Resolved base parameter values (name → value) + table-file digests.
     pub base_params: &'a HashMap<String, f64>,
     pub table_digests: Vec<DataDigest>,
@@ -170,6 +175,8 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
         // produces a concrete mode (M2 decision: minimal, provisional).
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: ctx.allow_degenerate_rates,
+        no_flows: ctx.no_flows,
+        columns: ctx.columns.clone(),
     };
     let params = resolve_params(ctx.base_params, ctx.table_digests.clone())?;
     let scenario = resolve_scenario(ctx.enable, ctx.disable, ctx.scen_params)?;

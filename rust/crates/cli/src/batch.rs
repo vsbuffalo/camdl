@@ -78,6 +78,11 @@ struct ExperimentToml {
     design: HashMap<String, DesignBlock>,
     #[serde(default)]
     obs: ObsSection,
+    /// gh#156: trajectory output view (`--output-every` / `--no-flows` /
+    /// `--columns`) applied to every cell — the same shared clap+serde struct
+    /// the `simulate` CLI flattens.
+    #[serde(default)]
+    output: crate::args::OutputView,
 }
 
 /// `[obs]` section — synthetic observation output for the batch ensemble.
@@ -506,6 +511,15 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
+    // gh#156: `[output] every` rewrites the compiled IR's output schedule once,
+    // so both the engine and the CAS identity (loaded from this path) see the
+    // overridden cadence.
+    let (ir_path_resolved, _every_tmp) =
+        crate::util::rematerialize_with_output_every(&ir_path_resolved, exp.output.every)
+            .unwrap_or_else(|e| {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            });
     let ir_json = std::fs::read_to_string(&ir_path_resolved).unwrap_or_else(|e| {
         eprintln!("error: cannot read {}: {}", ir_path_resolved, e);
         std::process::exit(1);
@@ -555,6 +569,19 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
 
     let params_file_opt = exp.config.params.clone();
 
+    // gh#156: the [design.*] path writes trajectories through its own (legacy)
+    // per-run writer, which does not yet thread the column view. `every` IS
+    // honored (the compiled IR's schedule was rewritten upstream), but
+    // no_flows / columns are not — reject them loudly rather than silently
+    // emitting the full column set.
+    if !exp.design.is_empty() && (exp.output.no_flows || !exp.output.columns.is_empty()) {
+        eprintln!("error: [output] `no_flows` / `columns` are not yet supported with \
+                   [design.*] experiments (only `every` is).");
+        eprintln!("  Drop them, or use a [sweep] / plain `batch run`, which honor the \
+                   full output view.");
+        std::process::exit(1);
+    }
+
     // Expand [design.*] blocks into parameter points (writes parameter_points.tsv per design).
     if !exp.design.is_empty() {
         // Resolve scenarios before consuming exp
@@ -587,6 +614,14 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         eprintln!("error: cannot parse model IR for scenario resolution: {}", e);
         std::process::exit(1);
     });
+
+    // gh#156: resolve + validate the `[output]` column view against the model,
+    // once. Folded into each cell's CAS identity and used by the leaf writer.
+    let output_cols = crate::util::OutputColumns::resolve(&exp.output, &batch_model)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
     let resolved_scenarios = resolve_batch_scenarios(&raw_scenarios, &batch_model)
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
@@ -735,6 +770,7 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         backend,
         dt,
         allow_degenerate_rates: a.allow_degenerate_rates,
+        output_cols: output_cols.clone(),
         runs_dir: runs_dir.clone(),
         obs_enabled,
         force: a.force,
@@ -798,6 +834,11 @@ pub(crate) struct CasSink {
     pub(crate) backend: crate::args::types::Backend,
     pub(crate) dt: f64,
     pub(crate) allow_degenerate_rates: bool,
+    /// Output view (gh#156): the resolved `--no-flows` / `--columns` filter,
+    /// applied to both this cell's leaf `traj.tsv` (writer) and its `config`
+    /// identity (`cell_resolve`). Default = full output. `--output-every` is
+    /// not here — it is lowered into the model schedule upstream.
+    pub(crate) output_cols: crate::util::OutputColumns,
     /// Absolute `<output>/sims` subtree.
     pub(crate) runs_dir: String,
     pub(crate) obs_enabled: bool,
@@ -918,6 +959,8 @@ impl CasSink {
             t_end: self.base_model.simulation.t_end,
             output: &self.base_model.output.times,
             allow_degenerate_rates: self.allow_degenerate_rates,
+            no_flows: self.output_cols.no_flows,
+            columns: &self.output_cols.allow,
             base_params: &params,
             table_digests: self.table_digests()?,
             enable: &resolved.enable,
@@ -1063,7 +1106,8 @@ impl crate::engine::RunSink for CasSink {
             }
         };
 
-        let traj_bytes = crate::util::traj_tsv_bytes(&cell.model, &cell.traj, true);
+        let cols = self.output_cols.cols(&cell.model);
+        let traj_bytes = crate::util::traj_tsv_bytes(&cell.traj, &cols);
         let traj_digest = runid::ContentHash::digest_bytes(&traj_bytes);
 
         // Declare the obs ensemble as a child sub-artifact so the leaf's
@@ -1357,7 +1401,8 @@ fn run_design_experiment(
                         // commit, as the sim/ensemble path at ~L890 uses) closes
                         // this; see docs/dev/proposals/2026-05-31-content-
                         // addressed-run-identity.md.
-                        if let Err(e) = write_traj_tsv(&format!("{}/traj.tsv", plan.run_dir), &model, &traj, true) {
+                        let cols = crate::util::TrajColumns::all(&model);
+                        if let Err(e) = write_traj_tsv(&format!("{}/traj.tsv", plan.run_dir), &traj, &cols) {
                             eprintln!("error: cannot write traj.tsv in {}: {}", plan.run_dir, e);
                             return;
                         }
@@ -2058,6 +2103,7 @@ mod tests {
             backend: crate::args::types::Backend::ChainBinomial,
             dt: 1.0,
             allow_degenerate_rates: false,
+            output_cols: crate::util::OutputColumns::default(),
             runs_dir: runs_dir.to_string(),
             obs_enabled: false,
             force: false,

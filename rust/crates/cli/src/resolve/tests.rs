@@ -70,6 +70,8 @@ fn ctx<'a>(
         t_end,
         output,
         allow_degenerate_rates: false,
+        no_flows: false,
+        columns: columns_empty(),
         base_params: params,
         table_digests: vec![],
         enable: &[],
@@ -86,6 +88,12 @@ fn params_empty() -> &'static HashMap<String, f64> {
     use std::sync::OnceLock;
     static EMPTY: OnceLock<HashMap<String, f64>> = OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
+}
+
+fn columns_empty() -> &'static std::collections::BTreeSet<String> {
+    use std::sync::OnceLock;
+    static EMPTY: OnceLock<std::collections::BTreeSet<String>> = OnceLock::new();
+    EMPTY.get_or_init(std::collections::BTreeSet::new)
 }
 
 #[test]

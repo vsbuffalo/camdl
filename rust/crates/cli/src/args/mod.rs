@@ -341,6 +341,44 @@ pub struct SimBackend {
     pub integrator: Option<crate::args::types::IntegratorArg>,
 }
 
+fn is_false(b: &bool) -> bool { !*b }
+
+/// `--output-every` / `--no-flows` / `--columns` — the trajectory output view
+/// (cadence + which columns are written). One struct backs both the `simulate`
+/// CLI flags (flattened into `SimulateArgs`) and the `[output]` section of
+/// fit.toml / batch.toml (deserialized) — a single definition, both front
+/// doors (the shared clap+serde pattern; see gh#241).
+///
+/// `every` overrides the model's `output { every }` schedule, so it rides the
+/// model digest and re-keys only runs that use it. `no_flows` / `columns`
+/// change which columns are written to the content-addressed leaf, so they ride
+/// the `config`-level identity (`runid::inputs::SimConfig`): a non-default view
+/// is a distinct, reproducible artifact. `skip_serializing_if` keeps defaults
+/// out of the fit-identity (canonical-JSON) hash so existing fits don't re-key.
+#[derive(Args, Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OutputView {
+    /// Emit one trajectory row every N time-units, overriding the model's
+    /// `output { every }`. A plain number in the model's `time_unit` (like
+    /// `--dt`); e.g. `--output-every 7` on a daily model writes weekly rows.
+    #[arg(long = "output-every", value_name = "N")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every: Option<f64>,
+
+    /// Drop every `flow_*` column from the trajectory output — most useful for
+    /// stratified/spatial models where inter-stratum flow columns dominate.
+    #[arg(long = "no-flows", default_value_t = false)]
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_flows: bool,
+
+    /// Restrict trajectory columns to this comma-separated allow-list of output
+    /// column names (compartments and/or `flow_<name>`). Empty = all columns;
+    /// emitted order follows the model, not this list.
+    #[arg(long = "columns", value_delimiter = ',', value_name = "COL,...")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+}
+
 /// Core inference knobs shared by pfilter / if2 / profile
 #[derive(Args, Clone)]
 pub struct InferenceCore {
@@ -472,6 +510,10 @@ pub struct SimulateArgs {
 
     #[command(flatten)]
     pub backend: SimBackend,
+
+    /// Trajectory output view: --output-every / --no-flows / --columns.
+    #[command(flatten)]
+    pub output_view: OutputView,
 
     /// RNG seed for a single run (conflicts with --seeds)
     #[arg(long, default_value_t = 1, conflicts_with = "seeds",

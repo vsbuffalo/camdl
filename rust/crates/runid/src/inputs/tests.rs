@@ -153,6 +153,8 @@ fn trajectory_input_display_is_provenance() {
         output: ResolvedOutputSchedule::Regular { start: fid(0), step: fid(1), end: fid(100) },
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: false,
+        no_flows: false,
+        columns: BTreeSet::new(),
     };
     let params = ResolvedParams { values: BTreeMap::new(), tables: vec![] };
     let scenario = ResolvedScenario {
@@ -191,4 +193,39 @@ fn trajectory_input_display_is_provenance() {
     let mut flipped = base.clone();
     flipped.config.allow_degenerate_rates = true;
     assert_ne!(base.content_hash(), flipped.content_hash());
+}
+
+#[test]
+fn output_view_is_keyed_into_config() {
+    // gh#156: `--no-flows` / `--columns` change the leaf's *bytes* (a column
+    // subset), so a content-addressed leaf cannot share a `run_id` with the
+    // full one — the view rides the config-level identity.
+    let base = SimConfig {
+        backend: Backend::ChainBinomial,
+        dt: fid(1),
+        t_start: fid(0),
+        t_end: fid(100),
+        output: ResolvedOutputSchedule::Regular { start: fid(0), step: fid(1), end: fid(100) },
+        calendar: CalendarMode::Numeric,
+        allow_degenerate_rates: false,
+        no_flows: false,
+        columns: BTreeSet::new(),
+    };
+
+    let mut no_flows = base.clone();
+    no_flows.no_flows = true;
+    assert_ne!(base.content_hash(), no_flows.content_hash(),
+        "--no-flows must re-key the config level");
+
+    let mut cols = base.clone();
+    cols.columns = ["S".to_string(), "I".to_string()].into_iter().collect();
+    assert_ne!(base.content_hash(), cols.content_hash(),
+        "--columns must re-key the config level");
+
+    // The allow-list is a set: insertion order is identity-inert (emitted
+    // column order follows the model, not the list).
+    let mut cols_rev = base.clone();
+    cols_rev.columns = ["I".to_string(), "S".to_string()].into_iter().collect();
+    assert_eq!(cols.content_hash(), cols_rev.content_hash(),
+        "the --columns allow-list is order-invariant");
 }

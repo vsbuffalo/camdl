@@ -603,6 +603,30 @@ fn run_simulate(a: &args::SimulateArgs) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
+    // gh#156: `--output-every` rewrites the compiled IR's output schedule once,
+    // so BOTH the engine (loads by path) and the CAS identity (`base_model`,
+    // also loaded from this path) see the overridden cadence. `_every_tmp`
+    // holds the rewritten temp alive for the function scope.
+    let (ir_path_compiled, _every_tmp) =
+        util::rematerialize_with_output_every(&ir_path_compiled, a.output_view.every)
+            .unwrap_or_else(|e| {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            });
+    // gh#156: resolve + validate the trajectory output view (`--no-flows` /
+    // `--columns`) against the compiled model, once. Folded into the CAS
+    // identity (`config` level) and used by both trajectory writers.
+    let output_cols = match std::fs::read_to_string(&ir_path_compiled)
+        .map_err(|e| format!("cannot read {}: {}", ir_path_compiled, e))
+        .and_then(|s| ir::from_str(&s).map_err(|e| format!("IR load error: {}", e)))
+        .and_then(|m| util::OutputColumns::resolve(&a.output_view, &m))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
     // Track explicit vs default flags for the backend-provenance guardrail.
     // Option<_> fields mean None ↔ not explicitly passed.
     let backend_explicit = a.backend.backend.is_some();
@@ -1061,6 +1085,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         label_arg.clone(),
         fit_dep,
         a.allow_degenerate_rates,
+        output_cols.clone(),
         total_runs,
     ) {
         Ok(s) => s,
@@ -1087,6 +1112,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     let stream = StreamSink {
         traj_out,
         traj_header_written: false,
+        output_cols: output_cols.clone(),
         dates: a.dates,
         dates_render: None,
         obs_path: job.obs.file_path().map(|p| p.to_string_lossy().into_owned()),
@@ -1285,6 +1311,7 @@ fn build_simulate_cas_sink(
     label: Option<String>,
     fit_dep: Vec<runid::inputs::ArtifactRef>,
     allow_degenerate_rates: bool,
+    output_cols: crate::util::OutputColumns,
     total_runs: usize,
 ) -> Result<crate::batch::CasSink, String> {
     // Parse the raw IR (envelope-aware) — params NOT applied (batch parity).
@@ -1362,6 +1389,7 @@ fn build_simulate_cas_sink(
         backend: run.backend,
         dt: run.dt,
         allow_degenerate_rates,
+        output_cols,
         runs_dir,
         obs_enabled,
         force,
@@ -1530,6 +1558,9 @@ struct StreamSink {
     /// CAS leaf/ensemble are the system of record).
     traj_out: Option<Vec<u8>>,
     traj_header_written: bool,
+    /// gh#156: the resolved `--no-flows` / `--columns` filter for this mirror's
+    /// trajectory columns — the same selection the CAS leaf renderer uses.
+    output_cols: crate::util::OutputColumns,
     dates: bool,
     dates_render: Option<(String, String)>,
     obs_path: Option<String>,
@@ -1574,13 +1605,10 @@ impl engine::RunSink for StreamSink {
 
         // ── Trajectory output ───────────────────────────────────────────────
         if let Some(ref mut out) = self.traj_out {
-            let int_names: Vec<&str> = model.compartments.iter()
-                .filter(|c| c.kind == ir::model::CompartmentKind::Integer)
-                .map(|c| c.name.as_str()).collect();
-            let real_names: Vec<&str> = model.compartments.iter()
-                .filter(|c| c.kind == ir::model::CompartmentKind::Real)
-                .map(|c| c.name.as_str()).collect();
-            let tr_names: Vec<&str> = model.transitions.iter().map(|t| t.name.as_str()).collect();
+            // One column selection drives both this mirror and the CAS leaf
+            // renderer (`util::write_traj_to`) — see `TrajColumns`, so an
+            // output-view filter can never apply to one writer and not the other.
+            let cols = self.output_cols.cols(model);
 
             let date_origin: Option<&str> = if self.dates {
                 match model.origin.as_deref() {
@@ -1605,9 +1633,7 @@ impl engine::RunSink for StreamSink {
                 if n_draws > 1 { write!(out, "draw\t").map_err(|e| e.to_string())?; }
                 write!(out, "t").map_err(|e| e.to_string())?;
                 if date_origin.is_some() { write!(out, "\tdate").map_err(|e| e.to_string())?; }
-                for n in &int_names  { write!(out, "\t{}", n).map_err(|e| e.to_string())?; }
-                for n in &real_names { write!(out, "\t{}", n).map_err(|e| e.to_string())?; }
-                for n in &tr_names   { write!(out, "\tflow_{}", n).map_err(|e| e.to_string())?; }
+                cols.write_header(out).map_err(|e| e.to_string())?;
                 writeln!(out).map_err(|e| e.to_string())?;
                 self.traj_header_written = true;
             }
@@ -1622,12 +1648,7 @@ impl engine::RunSink for StreamSink {
                         .map_err(|e| format!("error rendering date: {}", e))?;
                     write!(out, "\t{}", d).map_err(|e| e.to_string())?;
                 }
-                for &c in &snap.int_state.counts  { write!(out, "\t{}", c).map_err(|e| e.to_string())?; }
-                for &v in &snap.real_state.values { write!(out, "\t{:.4}", v).map_err(|e| e.to_string())?; }
-                match &snap.flows {
-                    sim::Flows::Int(fs)  => for &f in fs { write!(out, "\t{}", f).map_err(|e| e.to_string())?; },
-                    sim::Flows::Real(fs) => for &f in fs { write!(out, "\t{:.4}", f).map_err(|e| e.to_string())?; },
-                }
+                cols.write_row(out, snap).map_err(|e| e.to_string())?;
                 writeln!(out).map_err(|e| e.to_string())?;
             }
         }
