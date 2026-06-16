@@ -245,6 +245,7 @@ pub fn format_prior(spec: &crate::fit::config_v2::EstimatePriorSpec) -> String {
     use crate::fit::config_v2::EstimatePriorSpec;
     match spec {
         EstimatePriorSpec::Flat { .. } => "flat()".to_string(),
+        EstimatePriorSpec::UniformOverBounds { .. } => "uniform(over bounds)".to_string(),
         EstimatePriorSpec::Dist(p) => match p {
             PriorDist::LogNormal(q) =>
                 format!("log_normal(mu={}, sigma={})", q.mu, q.sigma),

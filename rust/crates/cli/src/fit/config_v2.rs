@@ -710,13 +710,15 @@ pub struct FlatMarker {}
 /// -----------
 ///
 ///   prior = { log_normal = { mu = -0.3, sigma = 0.5 } }   # → Dist(...)
+///   prior = { uniform = {} }                              # → UniformOverBounds
 ///   prior = { flat = {} }                                 # → Flat
 ///
-/// Deserialization is `untagged`: serde tries `Dist(PriorDist)`
-/// first (matches every `{ uniform / normal / ... = { ... } }`
-/// shape) then falls through to the explicit-flat struct variant.
-/// Because `PriorDist` has no `Flat` variant, the two wire shapes
-/// never collide.
+/// Deserialization is `untagged`: serde tries `Dist(PriorDist)` first
+/// (matches every `{ uniform / normal / ... = { ... } }` shape with all
+/// fields present), then `UniformOverBounds` (the empty `{ uniform = {} }`,
+/// which `Dist` rejects for missing lower/upper), then the explicit-flat
+/// struct variant. The distinct keys (`uniform` vs `flat`) and the
+/// all-fields-present rule keep the shapes from colliding.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum EstimatePriorSpec {
@@ -724,6 +726,15 @@ pub enum EstimatePriorSpec {
     /// format. Matches everything `~ <dist>(...)` syntax in `.camdl`
     /// can emit.
     Dist(PriorDist),
+    /// `prior = { uniform = {} }` — uniform over the parameter's bounds
+    /// (the fit's `bounds`, falling back to the model's `in [lo, hi]`).
+    /// Resolved to a concrete `Uniform { lower, upper }` against those
+    /// bounds; errors at validation if neither source supplies them. The
+    /// empty table is what distinguishes it from the explicit
+    /// `{ uniform = { lower, upper } }` form (which matches `Dist` first).
+    UniformOverBounds {
+        uniform: UniformOverBoundsMarker,
+    },
     /// Explicit flat-prior opt-in. Matches the wire form
     /// `prior = { flat = {} }`. The struct variant's `flat` field
     /// is the empty marker; the field name itself is the tag.
@@ -731,6 +742,14 @@ pub enum EstimatePriorSpec {
         flat: FlatMarker,
     },
 }
+
+/// Empty marker for `prior = { uniform = {} }`. `deny_unknown_fields` so a
+/// half-specified `{ uniform = { lower = .. } }` does NOT silently match the
+/// bounds-derived form — it falls through (and `Dist` rejects it for the
+/// missing field, surfacing the mistake).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct UniformOverBoundsMarker {}
 
 // (Previously: `impl EstimatePriorSpec { pub fn is_flat(&self) }` —
 // removed in gh#86 when `--draws prior` switched to the unified
@@ -3033,6 +3052,47 @@ sweeps = 5000
                 assert!((p.sigma - 0.5).abs() < 1e-9);
             }
             other => panic!("expected Dist(LogNormal), got {:?}", other),
+        }
+    }
+
+    /// gh#155: `prior = { uniform = {} }` (empty) deserializes to
+    /// `UniformOverBounds` (uniform over the param's bounds), while
+    /// `prior = { uniform = { lower, upper } }` (all fields) stays
+    /// `Dist(Uniform)`. The untagged enum disambiguates by field-presence.
+    #[test]
+    fn estimate_prior_spec_disambiguates_uniform_over_bounds_from_explicit() {
+        let config = parse(r#"
+[model]
+camdl = "models/sir.camdl"
+
+[data.observations]
+weekly_cases = "data/cases.tsv"
+
+[estimate]
+a = { bounds = [0.01, 2.0], prior = { uniform = {} } }
+b = { bounds = [0.01, 2.0], prior = { uniform = { lower = 0.1, upper = 0.9 } } }
+
+[fixed]
+N0 = 1000000
+
+[stages.posterior]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 4
+particles = 50
+sweeps = 100
+        "#).unwrap();
+
+        let a = config.estimate.get("a").unwrap().prior.as_ref().unwrap();
+        assert!(matches!(a, EstimatePriorSpec::UniformOverBounds { .. }),
+            "`uniform = {{}}` should be UniformOverBounds, got {:?}", a);
+        let b = config.estimate.get("b").unwrap().prior.as_ref().unwrap();
+        match b {
+            EstimatePriorSpec::Dist(PriorDist::Uniform(p)) => {
+                assert!((p.lower - 0.1).abs() < 1e-9);
+                assert!((p.upper - 0.9).abs() < 1e-9);
+            }
+            other => panic!("`uniform = {{ lower, upper }}` should be Dist(Uniform), got {:?}", other),
         }
     }
 

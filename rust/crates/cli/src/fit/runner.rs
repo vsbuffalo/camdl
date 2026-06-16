@@ -2725,6 +2725,18 @@ pub fn resolve_prior(
                 EstimatePriorSpec::Dist(pd) => {
                     return (Prior::from_ir(pd), "fit.toml");
                 }
+                EstimatePriorSpec::UniformOverBounds { .. } => {
+                    // Uniform over the parameter's bounds (fit.toml `bounds`,
+                    // else the model's `in [lo, hi]`). If neither supplies
+                    // bounds, fall through to the default — the fit-path
+                    // validator (validate_prior_transform_compat) reports the
+                    // missing bounds precisely.
+                    let resolved = est.bounds.or_else(|| model.parameters.iter()
+                        .find(|p| p.name == name).and_then(|p| p.bounds()));
+                    if let Some((lower, upper)) = resolved {
+                        return (Prior::Uniform { lower, upper }, "fit.toml");
+                    }
+                }
                 EstimatePriorSpec::Flat { .. } => {
                     return (Prior::Flat, "flat (explicit)");
                 }
@@ -2774,6 +2786,20 @@ pub fn validate_prior_transform_compat(
             Some(p) => p,
             None => continue, // validate_partition catches unknown params.
         };
+        // `prior = { uniform = {} }` is uniform over the parameter's bounds;
+        // it needs bounds from *some* source. Catch the missing-bounds case
+        // here (resolve_prior can only fall back to flat — it has no Result).
+        if matches!(estimate.get(name).and_then(|e| e.prior.as_ref()),
+                    Some(super::config_v2::EstimatePriorSpec::UniformOverBounds { .. }))
+            && estimate.get(name).and_then(|e| e.bounds).is_none()
+            && ir_param.bounds().is_none()
+        {
+            return Err(format!(
+                "parameter '{}': prior = {{ uniform = {{}} }} is uniform over the \
+                 parameter's bounds, but none are declared — add `in [lo, hi]` in the \
+                 model or `bounds = [lo, hi]` to `[estimate.{}]`.", name, name));
+        }
+
         let transform_override = estimate.get(name)
             .and_then(|e| e.transform.as_ref())
             .map(|t| t.as_str());
@@ -3491,6 +3517,51 @@ mod tests {
             presets: vec![], model_structure: None, balance: None,
             identity_tracked_compartments: vec![],
         }
+    }
+
+    /// gh#155: `prior = { uniform = {} }` resolves to a concrete
+    /// Uniform over the parameter's bounds (fit.toml `bounds`, else model
+    /// `in [lo,hi]`), tagged as a fit.toml source; with no bounds anywhere
+    /// the compat validator reports it precisely.
+    #[test]
+    fn uniform_over_bounds_resolves_to_uniform() {
+        use ir::parameter::{Parameter, ParamValue, PriorSpec, ParamKind, Transform as IrTransform};
+        use crate::fit::config_v2::{EstimateSpecV2, EstimatePriorSpec, UniformOverBoundsMarker};
+        use indexmap::IndexMap;
+
+        // Param with no model bounds — bounds come from fit.toml.
+        let p = Parameter {
+            name: "beta".into(),
+            value: ParamValue::Estimated {
+                init: None, bounds: None, prior: PriorSpec::Flat,
+                transform: IrTransform::Identity },
+            param_kind: Some(ParamKind::Rate), param_dim: None,
+        };
+        let model = model_with_param(p);
+        let mut est: IndexMap<String, EstimateSpecV2> = IndexMap::new();
+        est.insert("beta".into(), EstimateSpecV2 {
+            bounds: Some((0.05, 1.0)), transform: None,
+            prior: Some(EstimatePriorSpec::UniformOverBounds {
+                uniform: UniformOverBoundsMarker {} }),
+            ivp: false, rw_sd: None, start: None });
+
+        let (prior, src) = resolve_prior("beta", &est, &model);
+        match prior {
+            Prior::Uniform { lower, upper } => {
+                assert_eq!(lower, 0.05);
+                assert_eq!(upper, 1.0);
+            }
+            other => panic!("uniform = {{}} should resolve to Uniform over bounds, got {:?}", other),
+        }
+        assert_eq!(src, "fit.toml", "uniform-over-bounds is a fit.toml-sourced prior");
+        // With bounds present the compat check passes.
+        assert!(validate_prior_transform_compat(&est, &model).is_ok());
+
+        // Strip the bounds → the validator must reject (nothing to be uniform over).
+        est.get_mut("beta").unwrap().bounds = None;
+        let err = validate_prior_transform_compat(&est, &model).unwrap_err();
+        assert!(err.contains("uniform") && err.contains("bounds"),
+            "missing-bounds uniform = {{}} must be rejected with a bounds hint: {}", err);
     }
 
     /// log_uniform is uniform on the log scale → it requires the Log transform,

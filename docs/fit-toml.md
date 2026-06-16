@@ -166,10 +166,19 @@ Externally-tagged inline tables (the wire format matches the IR emission):
 prior = { log_normal = { mu = 0.0, sigma = 1.0 } }
 prior = { normal = { mean = 0.0, sd = 1.0 } }
 prior = { beta = { alpha = 2.0, beta = 5.0 } }
-prior = { uniform = {} } # uniform over bounds
+prior = { log_uniform = { lower = 1e-5, upper = 1e-2 } } # uniform on the log scale
+prior = { truncated_normal = { mean = 0.7, sd = 0.2, lower = 0.3, upper = 1.0 } }
+prior = { uniform = { lower = 0.0, upper = 1.0 } } # explicit bounds
+prior = { uniform = {} } # uniform over the param's `bounds`
 prior = { half_normal = { sigma = 1.0 } }
 prior = { flat = {} } # explicit "flat on purpose" — only valid in fit.toml
 ```
+
+The empty `uniform = {}` form is uniform over the parameter's `bounds` (the
+`[estimate.<name>].bounds`, falling back to the model's `in [lo, hi]`) — a
+convenience so you don't repeat the interval. It requires bounds from one of
+those sources. `truncated_normal`'s `lower`/`upper` must equal the parameter's
+bounds (the prior's support and the search box are the same interval).
 
 **Precedence:** a `fit.toml` `[estimate].prior` overrides the model's `~`
 declaration; if neither is present, a Bayesian stage falls back to flat **with a

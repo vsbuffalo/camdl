@@ -2137,8 +2137,26 @@ fn generate_prior_draws(
         for (name, spec) in &config.estimate {
             // Mirror `resolve_priors_with_precedence` to pick the PriorDist.
             // The unusable check above guarantees we find a non-flat one.
-            let pd = match spec.prior.as_ref() {
+            // `synthesized` holds an owned PriorDist for the uniform-over-bounds
+            // form (which carries no lower/upper of its own — they come from
+            // `bounds`); the deferred binding keeps it alive for the `&` below.
+            let synthesized;
+            let pd: &ir::parameter::PriorDist = match spec.prior.as_ref() {
                 Some(EstimatePriorSpec::Dist(pd)) => pd,
+                Some(EstimatePriorSpec::UniformOverBounds { .. }) => {
+                    // Same resolution as resolve_prior: fit.toml bounds, else
+                    // the model's `in [lo, hi]`.
+                    let (lo, hi) = spec.bounds
+                        .or_else(|| model.parameters.iter()
+                            .find(|p| &p.name == name).and_then(|p| p.bounds()))
+                        .ok_or_else(|| format!(
+                            "parameter '{}': prior = {{ uniform = {{}} }} requires bounds — \
+                             add `in [lo, hi]` in the model or `bounds = [lo, hi]` to \
+                             [estimate.{}].", name, name))?;
+                    synthesized = ir::parameter::PriorDist::Uniform(
+                        ir::parameter::UniformPrior { lower: lo, upper: hi });
+                    &synthesized
+                }
                 Some(EstimatePriorSpec::Flat { .. }) => unreachable!(
                     "explicit flat priors rejected by the unusable check above"),
                 None => {
