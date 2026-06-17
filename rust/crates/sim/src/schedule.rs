@@ -457,21 +457,23 @@ impl Schedule {
     }
 
     /// The inner substep walk a fixed-step inference filter performs within ONE
-    /// observation window: starting from `t_start`, yield `(t_local, step_dt)` for
-    /// each substep up to the boundary `cursor` points at (its current obs). The
-    /// step size is [`Schedule::substep`]; `t_local` ACCUMULATES (`t += step_dt`)
-    /// — the EXACT-stepper convention the bootstrap PF / IF2 / correlated PF share
-    /// (the drift-free `substep_time` variant for these is task #14).
+    /// observation window: starting from `t_start`, yield `(t0, step_dt,
+    /// fired_effect)` for each substep up to the boundary `cursor` points at (its
+    /// current obs). The step size is [`Schedule::substep`]; `t0` is **drift-free**
+    /// (`substep_time(window_start, s)`, re-anchored at each effect landing) — the
+    /// canonical substep-time convention the bootstrap PF / IF2 / correlated PF and
+    /// PGAS now share (gh#233 finished the deferred task #14 here).
     ///
-    /// This is the single shared primitive behind those three inner loops (the
-    /// proposal's consolidation seam). Each driver keeps its OWN body over the
-    /// iterator — death-on-recoverable-error, pre-drawn-noise injection, the IF2
-    /// θ-perturbation — because those genuinely differ; only the walk is shared.
-    /// `cursor` is taken by value (`Copy`): the iterator walks within the window
-    /// the caller positioned it at and never mutates the caller's cursor, so the
-    /// CRN invariant (N particles, identical boundary sequence) is preserved.
+    /// This is the single shared primitive behind those inner loops AND the PGAS
+    /// grid (the consolidation seam — one walk, two consumers). Each driver keeps
+    /// its OWN body over the iterator — death-on-recoverable-error, pre-drawn-noise
+    /// injection, the IF2 θ-perturbation, the PGAS grid materialization — because
+    /// those genuinely differ; only the walk is shared. `cursor` is taken by value
+    /// (`Copy`): the iterator walks within the window the caller positioned it at
+    /// and never mutates the caller's cursor, so the CRN invariant (N particles,
+    /// identical boundary sequence) is preserved.
     pub fn substeps(&self, cursor: Cursor, t_start: f64) -> Substeps<'_> {
-        Substeps { schedule: self, cursor, t: t_start }
+        Substeps { schedule: self, cursor, window_start: t_start, s: 0 }
     }
 
     /// The time the observation window ending at `cursor`'s current obs reaches
@@ -567,41 +569,62 @@ impl Schedule {
 }
 
 /// Iterator over one observation window's substeps; see [`Schedule::substeps`].
-/// Yields `(t_local, step_dt, fired_effect)`, terminating at the cursor's current
-/// observation boundary (`obs_time(cursor) - EFFECT_EPS`), reproducing the
-/// `while t_local < obs_time - 1e-10 { … }` loops it replaces. `fired_effect` is
-/// `Some(effect_idx)` when this substep LANDS on a scheduled-effect boundary —
-/// the caller reads the due batch (e.g. [`crate::intervention::TimelineEffects`]
-/// `.batches[effect_idx]`) and fires it CURSOR-keyed (gh#216), instead of the
-/// `round(t/dt)` key inside `step_one`.
+/// Yields `(t0, step_dt, fired_effect)`, terminating at the cursor's current
+/// observation boundary (where the clipped step shrinks to [`MIN_STEP_EPS`]).
+/// `fired_effect` is `Some(effect_idx)` when this substep LANDS on a
+/// scheduled-effect boundary — the caller reads the due batch (e.g.
+/// [`crate::intervention::TimelineEffects`] `.batches[effect_idx]`) and fires it
+/// CURSOR-keyed (gh#216), instead of the `round(t/dt)` key inside `step_one`.
+///
+/// **Drift-free** (gh#233 finishing the substep-time convention, task #14): `t0 =
+/// substep_time(window_start, s)` (one multiply, O(1) rounding), NOT accumulation
+/// (`t += step_dt`, O(s) drift). `window_start` re-anchors to each EXACT
+/// effect-boundary time the walk lands on (and to the window's `t_start` at
+/// construction); `s` is the within-anchor index. This is the SAME walk PGAS
+/// materializes ([`crate::inference::pgas`]), so the bootstrap PF / IF2 /
+/// correlated-PF proposal and the PGAS transition density sample
+/// time-inhomogeneous forcing at identical times — there is one walk, not two.
+/// See docs/dev/proposals/2026-06-05-substep-time-sdt-convention.md.
 pub struct Substeps<'a> {
     schedule: &'a Schedule,
     cursor: Cursor,
-    t: f64,
+    window_start: f64,
+    s: u64,
 }
 
 impl Iterator for Substeps<'_> {
     type Item = (f64, f64, Option<usize>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let obs_time = self.schedule.obs_time(&self.cursor)?;
-        if self.t >= obs_time - EFFECT_EPS {
-            return None;
-        }
-        let step_dt = self.schedule.substep(&self.cursor, self.t)?;
-        let t0 = self.t;
-        self.t += step_dt;
+        let t0 = self.schedule.substep_time(self.window_start, self.s);
+        // The window terminates when the clipped step shrinks to the negligible
+        // floor — i.e. `t0` has reached the obs boundary the cursor points at,
+        // which `substep` clips to. MIN_STEP_EPS is the SINGLE negligible-step
+        // floor (gh#233 unified pgas::GRID_STEP_EPS = 1e-12 down to it), so the
+        // PF walk and the PGAS grid terminate identically.
+        let step_dt = match self.schedule.substep(&self.cursor, t0) {
+            Some(d) if d > MIN_STEP_EPS => d,
+            _ => return None,
+        };
+        let t_next = t0 + step_dt;
         // Did this substep land on a scheduled-effect boundary? Surface its
-        // effect_idx (so the caller fires the due batch) and ADVANCE the effect
-        // cursor (`pass_effect`) so the NEXT substep clips past it. Without the
-        // advance, once `effect_times` is populated `substep()` would clip every
-        // later step to this same boundary and the walk would stall on a run of
-        // zero-length substeps (proposal §3.3).
-        let fired = if self.schedule.effect_due_at(&self.cursor, self.t) {
+        // effect_idx (so the caller fires the due batch), ADVANCE the effect
+        // cursor (`pass_effect`) so the NEXT substep clips past it, and RE-ANCHOR
+        // the drift-free clock at the schedule's EXACT effect time (not `t_next`,
+        // which may be 1 ULP off). Without the advance + re-anchor, once
+        // `effect_times` is populated the walk would clip every later step to this
+        // same boundary and stall on a run of zero-length substeps (proposal
+        // §3.3); re-anchoring at the exact effect time is also what keeps this
+        // walk bit-identical to the PGAS grid.
+        let fired = if self.schedule.effect_due_at(&self.cursor, t_next) {
+            let eff_t = self.schedule.effect_time(&self.cursor).expect("effect due ⇒ present");
             let idx = self.cursor.effect_idx;
             self.cursor.pass_effect();
+            self.window_start = eff_t;
+            self.s = 0;
             Some(idx)
         } else {
+            self.s += 1;
             None
         };
         Some((t0, step_dt, fired))
@@ -1109,23 +1132,32 @@ mod tests {
     }
 
     #[test]
-    fn substeps_iterator_matches_the_manual_filter_walk() {
-        // The filters' inner loop is `while t_local < obs_time - 1e-10 { step_dt =
-        // substep(cur, t_local); …; t_local += step_dt }`. The iterator must yield
-        // the byte-identical (t_local, step_dt) sequence, per obs window.
+    fn substeps_iterator_matches_the_drift_free_manual_walk() {
+        // The shared inner walk is drift-free (gh#233 task #14): t0 =
+        // substep_time(window_start, s), step_dt = substep(cur, t0), terminating
+        // when the clipped step shrinks to MIN_STEP_EPS. With no effects there is
+        // no re-anchor, so the reference is a pure s*dt grid per window. The
+        // iterator must yield the byte-identical (t0, step_dt) sequence. Window 2
+        // ([7.3, 12.0]) is the one that pins drift-free vs accumulation: its s*dt
+        // grid (7.3 + s) differs from `t += step_dt` at the ULP these tests guard.
         let s = Schedule::new(1.0, 12.0, 1.0, StepPolicy::Exact, vec![], vec![])
             .with_obs(vec![3.0, 7.3, 12.0]);
         let mut window_start = 0.0;
         for obs_idx in 0..3 {
             let cur = Cursor { obs_idx, ..Default::default() };
             let obs_time = s.obs_time(&cur).unwrap();
-            // Manual walk (the loop being replaced).
+            // Manual drift-free walk (the loop the iterator replaces).
             let mut manual = Vec::new();
-            let mut t = window_start;
-            while t < obs_time - 1e-10 {
-                let dt = s.substep(&cur, t).unwrap();
-                manual.push((t.to_bits(), dt.to_bits()));
-                t += dt;
+            let mut step = 0u64;
+            loop {
+                let t0 = s.substep_time(window_start, step);
+                match s.substep(&cur, t0) {
+                    Some(d) if d > MIN_STEP_EPS => {
+                        manual.push((t0.to_bits(), d.to_bits()));
+                        step += 1;
+                    }
+                    _ => break,
+                }
             }
             // Iterator walk (no effect_times here ⇒ fired is always None).
             let iter: Vec<(u64, u64)> = s
@@ -1135,13 +1167,14 @@ mod tests {
                     (t0.to_bits(), dt.to_bits())
                 })
                 .collect();
-            assert_eq!(iter, manual, "iterator must reproduce the manual walk for window {obs_idx}");
+            assert_eq!(iter, manual, "iterator must reproduce the drift-free manual walk for window {obs_idx}");
             assert!(!manual.is_empty());
             // window_end is the catch-up advance: byte-identical to the manual
-            // walk's final t (the divergence the 3 filters' re-walk risked).
-            let manual_end = t;
+            // walk's last t0 + step_dt (the divergence the 3 filters' re-walk risked).
+            let &(lt0, ld) = manual.last().unwrap();
+            let manual_end = f64::from_bits(lt0) + f64::from_bits(ld);
             assert_eq!(s.window_end(cur, window_start).to_bits(), manual_end.to_bits(),
-                "window_end must equal the manual walk's final t for window {obs_idx}");
+                "window_end must equal the manual walk's final t0+step_dt for window {obs_idx}");
             window_start = obs_time;
         }
     }
