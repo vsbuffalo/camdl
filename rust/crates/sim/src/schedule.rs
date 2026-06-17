@@ -46,6 +46,7 @@
 //! shared-mutable cursor would corrupt it without failing any all-on-grid golden.
 //! Pinned by [`tests::n_cursors_identical_sequence`].
 
+use crate::error::SimError;
 use smallvec::SmallVec;
 
 /// Why a [`TimelineStop`] matters — one stop can carry several reasons (an
@@ -462,6 +463,58 @@ impl Schedule {
             cursor.pass_output();
         }
     }
+
+    /// The ONE shared boundary-dispatch seam (gh#233 Layer 2). Apply everything
+    /// due at a [`TimelineStop`] landed at time `t`, in the canonical order, and
+    /// advance the cursor past every consumed boundary. This is the logic that
+    /// diverged per-backend in gh#70 (a stranded output cursor → time ran
+    /// backward); routing every exact backend through it makes the divergence
+    /// unrepresentable.
+    ///
+    /// Order and batching are fixed HERE, not by the caller and not by the
+    /// `stop.reasons` vector order:
+    ///
+    /// 1. **Effects before output** — a snapshot recorded at this boundary must
+    ///    reflect the post-effect state (the cross-backend lifecycle invariant).
+    /// 2. **All coincident effects** — `while effect_due_at` drains the whole
+    ///    batch (two interventions at one `t`), not just the first.
+    /// 3. **All coincident outputs** — `drain_outputs` records every output due
+    ///    at `t`, including one coincident with `t_end`. The caller checks
+    ///    [`TimelineStop::is_end`] AFTER `arrive` returns, so the terminal output
+    ///    is always recorded before the loop breaks.
+    ///
+    /// The two genuinely per-backend operations are injected as closures over the
+    /// caller's `state`, so the backend dynamics stay outside this seam. `state`
+    /// is passed THROUGH (not captured), because both closures mutate it and two
+    /// closures cannot each capture `&mut state` — `arrive` owns the single `&mut`
+    /// and hands it to each in turn:
+    /// - `apply_effects(state, t)` — fire the due effect batch (discrete counts vs
+    ///   the ODE's continuous f64 state); may fail (e.g. a negative count).
+    /// - `record(state, ot)` — build and push the snapshot at output time `ot`
+    ///   (i64 `Flows::Int` vs the ODE's `Flows::Real`).
+    ///
+    /// PURE in its boundary reads (`effect_due_at`, `output_time` are pure in
+    /// `(self, cursor, t)`); the only schedule-side mutation is the cursor advance,
+    /// so the CRN invariant is preserved (N particles passing the same reasons
+    /// advance identically).
+    pub fn arrive<S>(
+        &self,
+        cursor: &mut Cursor,
+        stop: &TimelineStop,
+        t: f64,
+        state: &mut S,
+        mut apply_effects: impl FnMut(&mut S, f64) -> Result<(), SimError>,
+        mut record: impl FnMut(&mut S, f64),
+    ) -> Result<(), SimError> {
+        if stop.has(StopReason::ScheduledEffect) {
+            apply_effects(state, t)?;
+            while self.effect_due_at(cursor, t) {
+                cursor.pass_effect();
+            }
+        }
+        self.drain_outputs(cursor, t, |ot| record(state, ot));
+        Ok(())
+    }
 }
 
 /// Iterator over one observation window's substeps; see [`Schedule::substeps`].
@@ -865,6 +918,98 @@ mod tests {
         assert_eq!(stop.t, 5.0);
         assert!(stop.is_end(), "t_end boundary carries End");
         assert!(stop.has(StopReason::Output), "coincident terminal output is reported");
+    }
+
+    // ───────────── gh#233 Layer 2: the `arrive` dispatch seam ─────────────
+    // The shared boundary dispatch (where gh#70 lived): effects before output,
+    // the full coincident-effect cursor batch, all coincident outputs drained,
+    // terminal output recorded before the caller breaks on End, and errors
+    // short-circuiting.
+
+    #[test]
+    fn arrive_applies_effects_before_output() {
+        // The cross-backend lifecycle invariant: a snapshot at a boundary reflects
+        // the POST-effect state, so `arrive` must fire effects before recording.
+        // `state` is the threaded log both closures mutate.
+        let s = exact(1.0, 12.0, vec![5.0], vec![5.0]); // output AND effect at t=5
+        let mut cur = Cursor::default();
+        let stop = s.next_stop(&cur, 4.0).unwrap();
+        let mut log: Vec<String> = Vec::new();
+        s.arrive(
+            &mut cur,
+            &stop,
+            5.0,
+            &mut log,
+            |log, _t| { log.push("effect".into()); Ok(()) },
+            |log, ot| log.push(format!("output@{ot}")),
+        )
+        .unwrap();
+        assert_eq!(log, vec!["effect".to_string(), "output@5".to_string()]);
+        assert_eq!(cur.effect_idx, 1, "effect cursor advanced");
+        assert_eq!(cur.output_idx, 1, "output cursor advanced");
+    }
+
+    #[test]
+    fn arrive_advances_past_the_whole_coincident_effect_batch() {
+        // Two interventions at the SAME t=5: `apply_effects` fires the batch in ONE
+        // call (the backend's `due_effects` collects it), and `arrive` advances the
+        // cursor past BOTH coincident effect boundaries — not just the first.
+        let s = exact(1.0, 12.0, vec![], vec![5.0, 5.0]);
+        let mut cur = Cursor::default();
+        let stop = s.next_stop(&cur, 4.0).unwrap();
+        assert!(stop.has(StopReason::ScheduledEffect));
+        let mut calls = 0u32;
+        s.arrive(&mut cur, &stop, 5.0, &mut calls, |c, _| { *c += 1; Ok(()) }, |_, _| {})
+            .unwrap();
+        assert_eq!(calls, 1, "the batch is applied in a single call");
+        assert_eq!(cur.effect_idx, 2, "cursor advances past BOTH coincident effects");
+    }
+
+    #[test]
+    fn arrive_without_effect_reason_skips_apply_effects() {
+        // A pure output boundary: apply_effects must not be called, output drained.
+        let s = exact(1.0, 12.0, vec![5.0], vec![]);
+        let mut cur = Cursor::default();
+        let stop = s.next_stop(&cur, 4.0).unwrap();
+        assert!(!stop.has(StopReason::ScheduledEffect));
+        let mut log: Vec<&str> = Vec::new();
+        s.arrive(&mut cur, &stop, 5.0, &mut log, |log, _| { log.push("E"); Ok(()) }, |log, _| log.push("O"))
+            .unwrap();
+        assert_eq!(log, vec!["O"], "no ScheduledEffect reason → apply_effects skipped, output drained");
+    }
+
+    #[test]
+    fn arrive_records_terminal_output_at_t_end() {
+        // End + coincident Output: arrive records the terminal row; the caller's
+        // is_end() break happens AFTER, so the terminal output is never dropped.
+        let s = exact(1.0, 5.0, vec![5.0], vec![]);
+        let mut cur = Cursor::default();
+        let stop = s.next_stop(&cur, 4.0).unwrap();
+        let mut recorded: Vec<f64> = Vec::new();
+        s.arrive(&mut cur, &stop, 5.0, &mut recorded, |_, _| Ok(()), |r, ot| r.push(ot)).unwrap();
+        assert_eq!(recorded, vec![5.0], "terminal output recorded before End break");
+    }
+
+    #[test]
+    fn arrive_propagates_apply_effects_error_before_recording() {
+        // If effect application fails (e.g. a negative count), arrive returns the
+        // error WITHOUT recording output or advancing the cursor (the `?` short-
+        // circuits) — the failing particle's boundary is not half-applied.
+        let s = exact(1.0, 12.0, vec![5.0], vec![5.0]);
+        let mut cur = Cursor::default();
+        let stop = s.next_stop(&cur, 4.0).unwrap();
+        let mut recorded = false;
+        let r = s.arrive(
+            &mut cur,
+            &stop,
+            5.0,
+            &mut recorded,
+            |_, t| Err(SimError::NumericalCollapse { kind: crate::error::CollapseKind::DivByZero, t }),
+            |rec, _| *rec = true,
+        );
+        assert!(r.is_err(), "effect-application error propagates");
+        assert!(!recorded, "output not drained when effect application fails");
+        assert_eq!(cur.effect_idx, 0, "cursor not advanced on failure");
     }
 
     #[test]
