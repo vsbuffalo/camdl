@@ -3,13 +3,12 @@ use crate::{
     config::{ChainBinomialConfig, SimConfig},
     rng::StatefulRng,
     error::SimError,
-    intervention::all_intervention_times,
+    boundary_times::{EffectTimes, OutputTimes},
     lineage::TransitionObserver,
     ode_integrator::rk4_step,
-    output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
-    schedule::{Cursor, Schedule, StepPolicy, MIN_STEP_EPS},
+    schedule::{Cursor, Schedule, MIN_STEP_EPS},
     simulate::Simulate,
     state::{Flows, FlowVec, IntState, RealState, Snapshot, Trajectory},
 };
@@ -181,13 +180,11 @@ pub fn run_chain_binomial_with_observer(
     // times; interventions fire inside step_one (keyed on fire_steps), so the
     // schedule reports only output boundaries and the effect cursor advances with
     // chain_binomial's own cfg.dt*0.5 snap tolerance, not the schedule's.
-    let schedule = Schedule::new(
+    let schedule = Schedule::snap_forward(
         cfg.dt,
         cfg.t_end,
-        cfg.dt,
-        StepPolicy::Snap,
-        get_output_times(&model.model.output.times),
-        all_intervention_times(model, params),
+        OutputTimes::from_model(model)?,
+        EffectTimes::from_model(model, params)?,
     );
     let mut cursor = Cursor::default();
 

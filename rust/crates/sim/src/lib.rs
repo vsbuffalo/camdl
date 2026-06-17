@@ -8,6 +8,7 @@ pub mod propensity;
 pub mod resolved_expr;
 pub mod flat_eval;
 pub mod eval_stats;
+pub mod boundary_times;
 pub mod output;
 pub mod rng;
 pub mod schedule;

@@ -3,13 +3,13 @@ use crate::{
     config::{GillespieConfig, SimConfig},
     rng::StatefulRng,
     error::SimError,
-    intervention::{all_intervention_times, apply_events_at},
+    boundary_times::{EffectTimes, OutputTimes},
+    intervention::apply_events_at,
     lineage::TransitionObserver,
     ode_integrator::rk4_step,
-    output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
-    schedule::{Cursor, Schedule, StepPolicy, StopReason, MIN_STEP_EPS},
+    schedule::{Cursor, Schedule, StopReason, MIN_STEP_EPS},
     simulate::Simulate,
     state::{Flows, FlowVec, IntState, RealState, Snapshot, Trajectory},
     transition_diagnostics::TransitionDiagnostics,
@@ -166,13 +166,11 @@ pub fn run_gillespie_with_observer(
     // (Schedule::clip). The grid is iv_resolution_dt (no integrator dt of its
     // own); StepPolicy is irrelevant to clip. The schedule owns the sorted
     // output/effect times; `cursor` walks them. Firing stays inline.
-    let schedule = Schedule::new(
+    let schedule = Schedule::ssa_forward(
         iv_resolution_dt,
         cfg.t_end,
-        iv_resolution_dt,
-        StepPolicy::Exact,
-        get_output_times(&model.model.output.times),
-        all_intervention_times(model, params),
+        OutputTimes::from_model(model)?,
+        EffectTimes::from_model(model, params)?,
     );
     let mut cursor = Cursor::default();
 

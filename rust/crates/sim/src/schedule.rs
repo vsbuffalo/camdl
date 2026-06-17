@@ -46,6 +46,7 @@
 //! shared-mutable cursor would corrupt it without failing any all-on-grid golden.
 //! Pinned by [`tests::n_cursors_identical_sequence`].
 
+use crate::boundary_times::{EffectTimes, OutputTimes};
 use crate::error::SimError;
 use smallvec::SmallVec;
 
@@ -219,6 +220,35 @@ impl Schedule {
         debug_assert!(obs_times.windows(2).all(|w| w[0] <= w[1]), "obs_times not sorted");
         self.obs_times = obs_times;
         self
+    }
+
+    /// Forward EXACT schedule (ODE): the integrator `dt`; the stepper lands on
+    /// each output/effect boundary. Mode-named so the caller never selects a
+    /// `StepPolicy` by hand, and role-typed so the two boundary lists cannot be
+    /// swapped (gh#233 Layer 2.5). The role wrappers are unwrapped here — the hot
+    /// loop sees only `Vec<f64>`.
+    pub fn exact_forward(dt: f64, t_end: f64, output: OutputTimes, effects: EffectTimes) -> Self {
+        Self::new(dt, t_end, dt, StepPolicy::Exact, output.into_vec(), effects.into_vec())
+    }
+
+    /// Forward SNAP schedule (chain_binomial): a full `dt` per substep; effects
+    /// fire in the kernel keyed on `round(t/dt)`, not on boundary landings.
+    pub fn snap_forward(dt: f64, t_end: f64, output: OutputTimes, effects: EffectTimes) -> Self {
+        Self::new(dt, t_end, dt, StepPolicy::Snap, output.into_vec(), effects.into_vec())
+    }
+
+    /// Forward SSA schedule (gillespie): `iv_resolution_dt` is the intervention
+    /// snap grid (gillespie has no integrator step of its own); boundaries are
+    /// clipped exactly, so the policy is `Exact`.
+    pub fn ssa_forward(iv_resolution_dt: f64, t_end: f64, output: OutputTimes, effects: EffectTimes) -> Self {
+        Self::new(
+            iv_resolution_dt,
+            t_end,
+            iv_resolution_dt,
+            StepPolicy::Exact,
+            output.into_vec(),
+            effects.into_vec(),
+        )
     }
 
     fn next_output(&self, cursor: &Cursor) -> f64 {

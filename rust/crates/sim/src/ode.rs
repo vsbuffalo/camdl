@@ -1,12 +1,11 @@
 use crate::{
+    boundary_times::{EffectTimes, OutputTimes},
     compiled_model::CompiledModel,
     config::{OdeConfig, SimConfig},
     error::SimError,
-    intervention::all_intervention_times,
-    output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
-    schedule::{Cursor, Schedule, StepPolicy, MIN_STEP_EPS},
+    schedule::{Cursor, Schedule, MIN_STEP_EPS},
     simulate::Simulate,
     state::{Flows, IntState, RealState, Snapshot, Trajectory},
 };
@@ -528,13 +527,11 @@ pub fn run_ode(
     // Merged timeline spine. ODE is dt-independent, so EXACT and snap coincide;
     // it uses the EXACT policy (land on each output/effect boundary). Firing stays
     // inline; the schedule owns the sorted times and `cursor` walks them.
-    let schedule = Schedule::new(
+    let schedule = Schedule::exact_forward(
         cfg.dt,
         cfg.t_end,
-        cfg.dt,
-        StepPolicy::Exact,
-        get_output_times(&model.model.output.times),
-        all_intervention_times(model, params),
+        OutputTimes::from_model(model)?,
+        EffectTimes::from_model(model, params)?,
     );
     let mut cursor = Cursor::default();
 
