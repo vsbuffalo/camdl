@@ -221,7 +221,7 @@ fn compare_filters(compiled: CompiledModel, params: &[f64], inf_idx: usize, n_pa
     let config = SMCConfig {
         n_particles, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false, record_prequential: false, pf_wallclock_disabled: false,
+        record_ancestry: false, record_prequential: false, max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     let obs_model = NegBinIncidenceObs {
         observations: observations.clone(), obs_times: obs_times.clone(),
@@ -288,7 +288,7 @@ fn correlated_pf_finite_on_t0_starting_grid() {
     let config = SMCConfig {
         n_particles: 200, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false, record_prequential: false, pf_wallclock_disabled: false,
+        record_ancestry: false, record_prequential: false, max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     let obs_model = NegBinIncidenceObs {
         observations: obs.clone(), obs_times: times.clone(),
@@ -346,7 +346,7 @@ fn correlated_pf_finite_where_plain_pf_is() {
         skip_first_obs_from_loglik: false,
         record_ancestry: false,
         record_prequential: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let obs_model = NegBinIncidenceObs {

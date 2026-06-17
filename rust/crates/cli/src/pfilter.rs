@@ -25,7 +25,6 @@ use std::collections::HashMap;
 pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
     sim::eval_stats::set_allow_degenerate_rates(a.inference.allow_degenerate_rates);  // gh#audit-C6
-    crate::args::apply_pf_wallclock_env(&a.inference);  // gh#133
     let ir_path = a.model.to_string_lossy().into_owned();
     let n_particles = a.inference.particles;
     let dt = a.inference.dt;
@@ -432,13 +431,11 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         skip_first_obs_from_loglik: false,
         record_ancestry: need_ancestry,
         record_prequential: save_prequential.is_some(),
-        // gh#241 (G2): pfilter writes a content-addressed `pfilters/` leaf
-        // (`write_cas_leaf` below), so the wall-clock watchdog is OFF for
-        // determinism parity with `fit` — whether the leaf is produced must not
-        // depend on machine speed / `CAMDL_PF_WALLCLOCK_TIMEOUT_S`. The
-        // deterministic ESS-collapse / all-dead detectors and the per-step
-        // substep cap remain the compute-blowup safety.
-        pf_wallclock_disabled: true,
+        // gh#241: deterministic compute budget (the engine default unless the
+        // user passes `--pf-max-substeps`). Reproducible across machines — there
+        // is no wall-clock watchdog, so a content-addressed `pfilters/` leaf is
+        // produced identically regardless of hardware.
+        max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET),
     };
 
     // --save-filtering caveat log. Fires unconditionally (not quietable)

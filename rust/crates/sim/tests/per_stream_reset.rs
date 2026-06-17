@@ -339,7 +339,7 @@ fn bootstrap_filter_runs_multi_cadence() {
         n_particles: 8, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
-        pf_wallclock_disabled: true,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     let params = compiled.default_params.clone();
     let res = bootstrap_filter(&process, &obs, &params, &cfg, 7)

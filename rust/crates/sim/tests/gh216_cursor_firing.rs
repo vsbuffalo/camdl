@@ -201,7 +201,7 @@ fn smc_config() -> SMCConfig {
     SMCConfig {
         n_particles: 64, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false, record_ancestry: false,
-        record_prequential: false, pf_wallclock_disabled: false,
+        record_prequential: false, max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     }
 }
 
@@ -310,7 +310,7 @@ fn if2_firing_invariant_to_offgrid_obs_stream() {
         n_particles: 64, n_iterations: 1, cooling_fraction: 0.5,
         cooling_target_iters: 50, dt: 1.0, t_start: 0.0,
         simplex_groups: vec![], skip_first_obs_from_loglik: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     let res = run_if2(&process, &obs, &params, &if2_params, &config, 42)
         .expect("off-grid obs + on-grid intervention must now FIT under IF2 (gh#216 fix)");
@@ -382,7 +382,7 @@ fn if2_event_firing_invariant_to_offgrid_obs_stream() {
         n_particles: 64, n_iterations: 1, cooling_fraction: 0.5,
         cooling_target_iters: 50, dt: 1.0, t_start: 0.0,
         simplex_groups: vec![], skip_first_obs_from_loglik: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     let res = run_if2(&process, &obs, &params, &if2_params, &config, 42)
         .expect("off-grid obs + always-active event must fit under IF2 (gh#216 events arm)");
@@ -569,7 +569,7 @@ fn if2_rejects_at_times_expr_under_exact() {
         n_particles: 16, n_iterations: 1, cooling_fraction: 0.5,
         cooling_target_iters: 50, dt: 1.0, t_start: 0.0,
         simplex_groups: vec![], skip_first_obs_from_loglik: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     let msg = expect_err(
         run_if2(&process, &obs, &params, &if2_params, &config, 42),

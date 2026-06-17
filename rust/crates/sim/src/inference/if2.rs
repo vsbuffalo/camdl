@@ -20,7 +20,7 @@ use rayon::prelude::*;
 use crate::rng::StatefulRng;
 use crate::error::SimError;
 use crate::schedule::{Cursor, Schedule, StepPolicy};
-use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, pf_wallclock_budget, ITER_BUDGET};
+use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error};
 use super::traits::{ProcessModel, ObservationModel};
 use super::types::{ParticleState, log_sum_exp, normalize_log_weights, LOG_PROB_FLOOR, init_particle_rngs};
 use super::resampling::systematic_resample;
@@ -112,10 +112,11 @@ pub struct IF2Config {
     /// parameter. See docs/dev/proposals/2026-04-18-ic-free-inference.md.
     pub skip_first_obs_from_loglik: bool,
 
-    /// gh#147 (M3.2). Disable the machine-speed-dependent wall-clock
-    /// watchdog (CAS fits set `true` for deterministic theta-hat; the
-    /// deterministic substep cap remains the compute-blowup safety).
-    pub pf_wallclock_disabled: bool,
+    /// gh#241. Deterministic per-call compute budget (max cumulative
+    /// particle-substeps before bailing with `PFIterationBudget`). Default
+    /// `degeneracy::ITER_BUDGET`. Reproducible across machines — it replaced
+    /// a machine-speed-dependent wall-clock timeout. Not part of run identity.
+    pub max_substeps: u64,
 }
 
 impl super::traits::InferenceConfig for IF2Config {
@@ -304,17 +305,16 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     let mut iterations = Vec::with_capacity(config.n_iterations);
     let mut global_step: u64 = 0; // total filtering steps across all iterations
 
-    // gh#110. Wall-clock timer + ESS history for the degeneracy
-    // watchdog. The watchdog spans the entire IF2 run, not a single
-    // iteration: a pathological init that walks the cooling
-    // trajectory through degeneracy region produces an ESS history
-    // that crosses iteration boundaries. We push every obs window's
-    // ESS into one trace (across all iterations) so the K-window
-    // detector can fire as soon as the cumulative pattern is bad.
+    // gh#110. ESS history for the (deterministic) degeneracy watchdog. The
+    // watchdog spans the entire IF2 run, not a single iteration: a
+    // pathological init that walks the cooling trajectory through a
+    // degeneracy region produces an ESS history that crosses iteration
+    // boundaries. We push every obs window's ESS into one trace (across all
+    // iterations) so the K-window detector can fire as soon as the cumulative
+    // pattern is bad. `t0_if2` is a display-only diagnostic (how long a doomed
+    // run took); it never gates the bail — gh#241 removed the machine-dependent
+    // wall-clock watchdog in favor of the deterministic substep budget.
     let t0_if2 = Instant::now();
-    // gh#147 (M3.2). Wall-clock budget resolved once from config; CAS fits
-    // disable it (`None`) for deterministic theta-hat.
-    let pf_wc = pf_wallclock_budget(config.pf_wallclock_disabled, n);
     let mut ess_history: Vec<f64> = Vec::with_capacity(config.n_iterations * n_obs);
 
     // Pre-allocate particle state, params, RNGs, and scratch buffers once.
@@ -435,7 +435,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             // (same closed-form scalar cost + placement as bootstrap_filter):
             // a pathological dt aborts before the substep loop runs.
             let cost = window_substep_cost(n, t, obs_time, dt);
-            if let Some(kind) = check_iteration_budget(iters, cost, ITER_BUDGET) {
+            if let Some(kind) = check_iteration_budget(iters, cost, config.max_substeps) {
                 return Err(pf_bail_error(kind, obs_idx, t0_if2.elapsed().as_secs_f64()));
             }
             iters = iters.saturating_add(cost);
@@ -577,14 +577,11 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 }
             };
             ess_history.push(ess_now);
-            let elapsed = t0_if2.elapsed();
-            if let Some(kind) = check_pf_degeneracy(
-                &ess_history, elapsed, pf_wc, obs_idx, 0, n,
-            ) {
-                // gh#133: WallClockExceeded → PFWallclockTimeout (resource
-                // limit), the rest → PFDegenerate (statistical pathology).
+            if let Some(kind) = check_pf_degeneracy(&ess_history, 0, n) {
+                // Statistical pathology (ESS collapse / all dead) → PFDegenerate.
+                // elapsed is a display-only diagnostic, never the bail trigger.
                 return Err(super::degeneracy::pf_bail_error(
-                    kind, obs_idx, elapsed.as_secs_f64(),
+                    kind, obs_idx, t0_if2.elapsed().as_secs_f64(),
                 ));
             }
 

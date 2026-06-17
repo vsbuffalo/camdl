@@ -640,11 +640,10 @@ impl FitRunConfig {
             dt,
             t_start: compiled.model.simulation.t_start,
             skip_first_obs_from_loglik: ic_free,
-            // gh#147 (M3.2): fits are content-addressed, so the wall-clock
-            // watchdog is OFF for determinism (theta-hat must be a pure
-            // function of inputs); M3.1's deterministic substep cap is the
-            // compute-blowup safety.
-            pf_wallclock_disabled: true,
+            // gh#241: deterministic compute budget (engine default). Fits are
+            // content-addressed; with no wall-clock watchdog, theta-hat is a
+            // pure function of inputs (reproducible across machines).
+            max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         };
         // IC-free precondition (data): y₁ must actually be observed. ic_free
         // conditions the initial state on the first observation (it still
@@ -745,9 +744,9 @@ impl FitRunConfig {
             skip_first_obs_from_loglik: self.ic_free,
             record_ancestry: false,
             record_prequential: false,
-            // gh#147 (M3.2): CAS fits run watchdog-None (deterministic θ̂);
-            // the substep cap is the safety. See the IF2Config above.
-            pf_wallclock_disabled: true,
+            // gh#241: deterministic compute budget (engine default); no
+            // wall-clock watchdog. See the IF2Config above.
+            max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         }
     }
 }
@@ -1819,20 +1818,17 @@ pub fn run_chains_with_per_chain_params(
                 // skip-and-continue (`pmmh.rs`) so one bad chain can't kill an
                 // otherwise-healthy multi-chain fit. The loud diagnostic
                 // (collector + stderr) keeps the skip visible — never silent.
-                Err(e @ (sim::error::SimError::PFDegenerate { .. }
-                       | sim::error::SimError::PFWallclockTimeout { .. })) => {
-                    // gh#133: a wall-clock timeout is a resource limit, not
-                    // statistical degeneracy — same skip-and-continue, accurate
-                    // reason.
+                Err(e @ sim::error::SimError::PFDegenerate { .. }) => {
+                    // A statistically-degenerate chain (ESS collapse / all
+                    // particles dead) is skipped with a BadInit diagnostic; the
+                    // surviving chains continue. (A deterministic compute-budget
+                    // bail, PFIterationBudget, is fatal — it falls through to the
+                    // structural `Err(other)` arm below, since it trips
+                    // identically for every chain.)
                     let (reason, label) = match &e {
                         sim::error::SimError::PFDegenerate { kind, obs_window, elapsed_s } =>
                             (format!("{:?} at obs_window={} after {:.2}s", kind, obs_window, elapsed_s),
                              "PF degenerate"),
-                        sim::error::SimError::PFWallclockTimeout { obs_window, elapsed_s } =>
-                            (format!("WallClockExceeded (timeout, gh#133) at obs_window={} after \
-                                {:.2}s — slow not stuck; reduce --particles or raise the budget \
-                                (CAMDL_PF_WALLCLOCK_TIMEOUT_S)", obs_window, elapsed_s),
-                             "PF wall-clock timeout"),
                         _ => unreachable!(),
                     };
                     let params: std::collections::BTreeMap<String, f64> =
@@ -1872,13 +1868,10 @@ pub fn run_chains_with_per_chain_params(
     // letting a later stage trip over an empty result set.
     if results.is_empty() {
         eprintln!(
-            "error: all {} IF2 chain(s) bailed via the PF watchdog — no usable chain.\n  \
-             The remedy depends on which trigger fired (see the per-chain errors above):\n  \
-             - EssCollapsed (R0 at its bound, σ too large, or too few particles): \
-             raise --particles or tighten parameter bounds.\n  \
-             - WallClockExceeded (gh#133 — a healthy filter that was merely slow, e.g. \
-             uniform cross-chain progress): REDUCE --particles, or raise/disable the \
-             wall-clock budget via CAMDL_PF_WALLCLOCK_TIMEOUT_S=<secs|0>.",
+            "error: all {} IF2 chain(s) bailed via the PF degeneracy watchdog — no usable \
+             chain. This is sustained ESS collapse (R0 at its bound, σ too large, or too few \
+             particles): raise --particles or tighten parameter bounds (see the per-chain \
+             errors above).",
             config.n_chains);
         std::process::exit(1);
     }

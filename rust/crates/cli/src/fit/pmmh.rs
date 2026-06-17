@@ -608,19 +608,16 @@ pub fn run_stage(
                     &config, &chain_starts[chain_id],
                     n_particles, None, chain_seed,
                 ) {
-                    Err(e @ (sim::error::SimError::PFDegenerate { .. }
-                           | sim::error::SimError::PFWallclockTimeout { .. })) => {
-                        // gh#133: a wall-clock timeout is a resource limit, not
-                        // statistical degeneracy — same skip-and-continue, but an
-                        // accurate reason.
+                    Err(e @ sim::error::SimError::PFDegenerate { .. }) => {
+                        // A statistically-degenerate init (ESS collapse / all
+                        // particles dead) is skipped with a BadInit diagnostic;
+                        // the surviving chains continue. (PFIterationBudget is a
+                        // deterministic compute-budget bail → structural/fatal,
+                        // handled by the structural arm.)
                         let reason = match &e {
                             sim::error::SimError::PFDegenerate { kind, obs_window, elapsed_s } =>
                                 format!("{:?} at obs_window={} after {:.2}s",
                                     kind, obs_window, elapsed_s),
-                            sim::error::SimError::PFWallclockTimeout { obs_window, elapsed_s } =>
-                                format!("WallClockExceeded (timeout, gh#133) at obs_window={} after \
-                                    {:.2}s — slow not stuck; reduce --particles or raise the budget \
-                                    (CAMDL_PF_WALLCLOCK_TIMEOUT_S)", obs_window, elapsed_s),
                             _ => unreachable!(),
                         };
                         let params: std::collections::BTreeMap<String, f64> =

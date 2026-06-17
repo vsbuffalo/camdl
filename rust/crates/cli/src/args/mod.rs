@@ -417,25 +417,14 @@ pub struct InferenceCore {
     #[arg(long, default_value = "auto")]
     pub time_format: crate::caltime_load::TimeFormat,
 
-    /// gh#133. Wall-clock budget (whole seconds) for one particle-filter
-    /// call before the degeneracy watchdog bails it as a *timeout*. `0`
-    /// disables the wall-clock check. Overrides `CAMDL_PF_WALLCLOCK_TIMEOUT_S`;
-    /// when unset, the budget scales with particle count above a 120 s floor
-    /// (so a slow-but-healthy big filter is not false-flagged as degenerate).
-    #[arg(long, value_name = "SECS")]
-    pub pf_wallclock_timeout: Option<u64>,
-}
-
-/// gh#133. If `--pf-wallclock-timeout` was given, export it as the env var
-/// the PF watchdog reads, so the CLI flag overrides any pre-existing env.
-/// When absent, leave the env untouched (the watchdog keeps its existing
-/// precedence: env > workload-scaled default). Call at command dispatch,
-/// before any rayon parallelism — the later env *reads* in the parallel
-/// filter loops are then safe (no concurrent write).
-pub fn apply_pf_wallclock_env(core: &InferenceCore) {
-    if let Some(secs) = core.pf_wallclock_timeout {
-        std::env::set_var(sim::inference::degeneracy::WALLCLOCK_ENV, secs.to_string());
-    }
+    /// gh#241. Deterministic per-call compute budget: the maximum cumulative
+    /// particle-substep count one filter evaluation may execute before bailing
+    /// (`PFIterationBudget`). Unset ⇒ the engine default (1e10), which never
+    /// false-trips a legitimate fit. A reproducible, machine-independent
+    /// budget — it replaced `--pf-wallclock-timeout`, a wall-clock timeout that
+    /// set a process env var and made a fit's log-likelihood depend on hardware.
+    #[arg(long, value_name = "N")]
+    pub pf_max_substeps: Option<u64>,
 }
 
 /// `--obs NAME` + `--flow NAME`

@@ -254,14 +254,17 @@ pub struct SMCConfig {
     /// `docs/dev/proposals/2026-04-20-prequential-evaluation.md`.
     pub record_prequential: bool,
 
-    /// gh#147 (M3.2). Disable the machine-speed-dependent wall-clock
-    /// degeneracy watchdog for this filter call. Content-addressed (CAS)
-    /// fits set this `true` so their log-likelihood is a pure function of
-    /// inputs; the deterministic substep cap (`ITER_BUDGET`) remains the
-    /// compute-blowup safety. `false` keeps the env-resolved budget for
-    /// non-CAS callers. Config-threaded (not a process-global env toggle)
-    /// so a CAS and a non-CAS filter never race on a shared global.
-    pub pf_wallclock_disabled: bool,
+    /// gh#241. The deterministic per-call compute budget: the maximum
+    /// cumulative particle-substep count one filter evaluation may execute
+    /// before bailing with `PFIterationBudget`. Default
+    /// [`degeneracy::ITER_BUDGET`](crate::inference::degeneracy::ITER_BUDGET).
+    /// A typed input (`--pf-max-substeps`), reproducible across machines —
+    /// it replaced a machine-speed-dependent wall-clock timeout (which made a
+    /// fit's log-likelihood depend on hardware and was an un-typed env-var
+    /// channel). Bigger ⇒ more headroom before a misconfiguration aborts; it
+    /// never changes a *completing* filter's result, so it is not part of run
+    /// identity.
+    pub max_substeps: u64,
 }
 
 /// Shared interface for algorithm config structs that drive a particle filter.

@@ -181,7 +181,7 @@ fn bootstrap_filter_bails_on_ess_collapse() {
         n_particles: 200, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let t0 = Instant::now();
@@ -195,11 +195,9 @@ fn bootstrap_filter_bails_on_ess_collapse() {
     match res {
         Err(SimError::PFDegenerate { kind, obs_window, elapsed_s: _ }) => {
             // The specific kind we expect on this pathology is
-            // EssCollapsed. AllParticlesDead is also acceptable
-            // (limit case of the same collapse), but WallClockExceeded
-            // would mean the watchdog didn't see ESS collapse and we
-            // saved the user only by the wall-clock fallback —
-            // surface that as a failure of the K-window detector.
+            // EssCollapsed. AllParticlesDead is also acceptable (limit case of
+            // the same collapse). (gh#241 removed the wall-clock fallback; the
+            // ESS detector is now the only statistical bail.)
             match kind {
                 PFDegenerateKind::EssCollapsed { last_ess } => {
                     assert!(last_ess.iter().all(|&e| e <= sim::inference::degeneracy::ESS_FLOOR),
@@ -207,11 +205,6 @@ fn bootstrap_filter_bails_on_ess_collapse() {
                 }
                 PFDegenerateKind::AllParticlesDead => {
                     // Limit case of ESS collapse — acceptable.
-                }
-                PFDegenerateKind::WallClockExceeded => {
-                    panic!("expected EssCollapsed (or AllParticlesDead); \
-                            watchdog fell through to wall-clock, which means \
-                            the ESS detector didn't fire. obs_window={}", obs_window);
                 }
                 PFDegenerateKind::IterationBudgetExceeded { .. } => {
                     panic!("expected EssCollapsed (or AllParticlesDead); the \
@@ -272,7 +265,7 @@ fn if2_bails_on_ess_collapse() {
         t_start: 0.0,
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let t0 = Instant::now();
@@ -284,9 +277,8 @@ fn if2_bails_on_ess_collapse() {
 
     match res {
         Err(SimError::PFDegenerate { kind, .. }) => {
-            // EssCollapsed or AllParticlesDead is acceptable; falling
-            // through to WallClockExceeded would mean the ESS detector
-            // isn't running in IF2's loop.
+            // EssCollapsed or AllParticlesDead is acceptable — the
+            // deterministic ESS detector must fire in IF2's inner loop.
             assert!(
                 matches!(kind, PFDegenerateKind::EssCollapsed { .. }
                               | PFDegenerateKind::AllParticlesDead),
@@ -437,7 +429,7 @@ fn if2_theta_hat_is_identical_across_thread_counts() {
         t_start: 0.0,
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     // Run the identical fit under two different rayon pool sizes. `install`
@@ -589,7 +581,7 @@ fn bootstrap_filter_iteration_budget_aborts_pre_window() {
         n_particles, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let t0 = Instant::now();
@@ -646,7 +638,7 @@ fn if2_iteration_budget_aborts_pre_window() {
         t_start: 0.0,
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let t0 = Instant::now();

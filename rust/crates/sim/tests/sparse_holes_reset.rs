@@ -153,7 +153,7 @@ fn hole_does_not_suppress_incidence_reset() {
         skip_first_obs_from_loglik: false,
         record_ancestry: false,
         record_prequential: false,
-        pf_wallclock_disabled: true,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let m_holed = obs_model(compiled.clone(), holed_cells, times.clone());
@@ -222,7 +222,7 @@ fn conditioning_boundary_resets_leading_incidence() {
         n_particles: 4, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
-        pf_wallclock_disabled: true,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let m = obs_model(compiled.clone(), cells, times.clone());
@@ -272,7 +272,7 @@ fn dense_baseline_matches_predictions_at_non_hole_indices() {
         n_particles: 4, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
-        pf_wallclock_disabled: true,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let dense = obs_model(

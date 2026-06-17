@@ -136,7 +136,7 @@ fn make_eval_loglik(
     move |params: &[f64], pf_seed: u64| -> Result<f64, SimError> {
         let process = ChainBinomialProcess::new(compiled.clone());
         let obs_model = pure_death_observations();
-        let config = SMCConfig { n_particles, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false, pf_wallclock_disabled: false };
+        let config = SMCConfig { n_particles, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false, max_substeps: sim::inference::degeneracy::ITER_BUDGET };
 
         // gh#224 classification: a per-θ excursion or a degenerate filter
         // is a legitimate "θ ruled out" (-∞); only a structural error
@@ -424,7 +424,7 @@ fn run_cpm(obs_times: Vec<f64>, dt: f64) -> Result<f64, sim::error::SimError> {
         skip_first_obs_from_loglik: false,
         record_ancestry: false,
         record_prequential: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     // Size the noise arrays the way bootstrap_filter_correlated computes
     // steps_per_obs internally, so the harness matches the filter's own block

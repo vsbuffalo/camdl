@@ -71,14 +71,6 @@ pub enum SimError {
     ///   `ESS_FLOOR` (= 2.0) for `ESS_COLLAPSE_WINDOWS` (= 3)
     ///   consecutive observation windows. Sustained collapse — not a
     ///   single-window dip during epidemic peaks.
-    /// - `WallClockExceeded`: per-call elapsed time exceeded the
-    ///   wall-clock budget — `max(WALLCLOCK_FLOOR_S = 120, n_particles ·
-    ///   per-particle)`, overridable via `CAMDL_PF_WALLCLOCK_TIMEOUT_S`
-    ///   (`0` disables it). gh#133: this is a *resource/timeout* limit, not
-    ///   a statistical pathology — a slow-but-healthy big filter trips it,
-    ///   so the remedy is fewer particles or a larger/disabled budget, NOT
-    ///   more particles. (A future split would surface this as a distinct
-    ///   non-degenerate error; for now it rides `PFDegenerate`.)
     /// - `AllParticlesDead`: every particle hit a per-particle-recoverable
     ///   error (NumericalCollapse / NegativeCount{BinomialOvershoot}) —
     ///   the limit case of ESS collapse, but cheap to detect and
@@ -97,18 +89,6 @@ pub enum SimError {
         elapsed_s: f64,
     },
 
-    /// gh#133. The particle filter's per-call wall-clock budget was
-    /// exceeded — a *resource/timeout* limit, surfaced distinctly from the
-    /// statistical `PFDegenerate` pathologies (EssCollapsed/AllParticlesDead).
-    /// A slow-but-healthy big filter trips this; the remedy is fewer
-    /// particles or a larger/disabled budget, NOT more particles. Like
-    /// `PFDegenerate` it is a whole-call bail (not per-particle-recoverable).
-    #[error("particle filter wall-clock budget exceeded at obs_window {obs_window}, elapsed {elapsed_s:.2}s (gh#133: a slow-but-healthy filter — reduce --particles, or raise/disable the budget via --pf-wallclock-timeout / CAMDL_PF_WALLCLOCK_TIMEOUT_S=<secs|0>)")]
-    PFWallclockTimeout {
-        obs_window: usize,
-        elapsed_s: f64,
-    },
-
     /// gh#147 (M3.1). The particle filter's *deterministic* compute budget
     /// was exceeded: propagating an observation window would push the
     /// cumulative particle-substep count past the fixed engine budget
@@ -119,8 +99,7 @@ pub enum SimError {
     /// or thread count and never makes a fit's log-likelihood depend on
     /// wall-clock.
     ///
-    /// Unlike `PFWallclockTimeout` (per-chain, machine-dependent) this is a
-    /// *configuration*-level limit: the per-window cost depends only on
+    /// This is a *configuration*-level limit: the per-window cost depends only on
     /// `n_particles`, `dt`, and the observation schedule — none of which
     /// vary across chains or iterations of a fit — so if it trips, it trips
     /// identically for every chain. It therefore propagates as a fatal
@@ -219,8 +198,6 @@ pub enum PFDegenerateKind {
     /// windows. `last_ess` carries the K-window history (most
     /// recent last) so the diagnostic message can show the trend.
     EssCollapsed { last_ess: Vec<f64> },
-    /// Per-call wall-clock has exceeded the timeout.
-    WallClockExceeded,
     /// gh#147 (M3.1). The deterministic cumulative-substep budget would
     /// be exceeded by propagating the next observation window. Carries
     /// the projected cumulative substep count and the budget so the
@@ -304,9 +281,9 @@ impl SimError {
     ///
     /// `false` (reject as −∞): per-particle excursions, θ-dependent
     /// runtime conditions (`DivisionByZero`, `NegativePropensity`,
-    /// `AbsorbingState`), and the whole-call PF bails (`PFDegenerate`,
-    /// `PFWallclockTimeout`). Init-eval callers treat the PF bails
-    /// specially — a `BadInit` skip — via the CLI init guard.
+    /// `AbsorbingState`), and the whole-call PF bail (`PFDegenerate`).
+    /// Init-eval callers treat the PF bail specially — a `BadInit` skip —
+    /// via the CLI init guard.
     pub fn is_structural(&self) -> bool {
         use NegativeCountCause::*;
         match self {
@@ -330,16 +307,15 @@ impl SimError {
                 matches!(cause, InterventionAddNegative | InterventionNegative)
             }
 
-            // Per-θ excursions, θ-dependent runtime conditions, and
-            // whole-call PF degeneracy/timeout bails — reject this θ as −∞.
+            // Per-θ excursions, θ-dependent runtime conditions, and the
+            // whole-call PF degeneracy bail — reject this θ as −∞.
             SimError::TableLookup(_)
             | SimError::DivisionByZero(_)
             | SimError::NegativePropensity { .. }
             | SimError::AbsorbingState(_)
             | SimError::NumericalCollapse { .. }
             | SimError::NonFiniteParameter { .. }
-            | SimError::PFDegenerate { .. }
-            | SimError::PFWallclockTimeout { .. } => false,
+            | SimError::PFDegenerate { .. } => false,
         }
     }
 }
@@ -356,7 +332,7 @@ mod tests {
     #[test]
     fn pf_degenerate_is_not_per_particle_recoverable() {
         let err = SimError::PFDegenerate {
-            kind: PFDegenerateKind::WallClockExceeded,
+            kind: PFDegenerateKind::AllParticlesDead,
             obs_window: 42,
             elapsed_s: 121.0,
         };
@@ -451,7 +427,6 @@ mod tests {
             kind: PFDegenerateKind::EssCollapsed { last_ess: vec![1.0, 1.0, 1.0] },
             obs_window: 6, elapsed_s: 0.01,
         }.is_structural());
-        assert!(!SimError::PFWallclockTimeout { obs_window: 6, elapsed_s: 120.0 }.is_structural());
         assert!(!SimError::NumericalCollapse { kind: CollapseKind::DivByZero, t: 1.0 }.is_structural());
         assert!(!SimError::NonFiniteParameter { name: "beta".into(), value: f64::NAN, t: 1.0 }.is_structural());
         assert!(!SimError::NegativeCount {

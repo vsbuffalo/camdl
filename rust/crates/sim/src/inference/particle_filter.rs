@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use crate::rng::StatefulRng;
 use crate::error::SimError;
 use crate::schedule::{Cursor, Schedule, StepPolicy};
-use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, pf_wallclock_budget, ITER_BUDGET};
+use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error};
 use super::traits::{ProcessModel, ObservationModel, SMCConfig};
 use super::types::{ParticleState, ParticleSwarm, log_sum_exp, logw_variance, normalize_log_weights, RESAMPLE_RNG_STREAM, init_particle_rngs};
 use super::resampling::systematic_resample;
@@ -192,18 +192,16 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // pathological dt aborts before the substep loop runs (and hangs).
     let mut iters: u64 = 0;
 
-    // gh#110. Wall-clock timer for the degeneracy watchdog. Started
-    // here, checked after each observation window via
-    // `check_pf_degeneracy`. The watchdog returns `Err(PFDegenerate)`
-    // which propagates through the existing `Err → NEG_INFINITY`
-    // collapse in `run_quick_pfilter_with_dt`; PMMH already rejects
-    // -∞ proposals, so no caller-side change is needed for the
-    // common path. Init-eval callers detect the bail explicitly.
+    // gh#110. The (deterministic) degeneracy watchdog reads the K-window ESS
+    // history after each observation window via `check_pf_degeneracy` and
+    // returns `Err(PFDegenerate)`, which propagates through the existing
+    // `Err → NEG_INFINITY` collapse in `run_quick_pfilter_with_dt`; PMMH
+    // already rejects -∞ proposals, so no caller-side change is needed for the
+    // common path. Init-eval callers detect the bail explicitly. `t0_call` is
+    // a display-only diagnostic (how long a doomed call ran) — it never gates
+    // the bail; gh#241 removed the machine-dependent wall-clock watchdog in
+    // favor of the deterministic substep budget below.
     let t0_call = Instant::now();
-    // gh#147 (M3.2). Resolve the wall-clock budget once from config: a CAS
-    // fit disables it (`None`) for deterministic loglik; the deterministic
-    // substep cap remains the compute-blowup guard.
-    let pf_wc = pf_wallclock_budget(config.pf_wallclock_disabled, n_particles);
 
     // Resampling RNG — reserved stream index, never collides with particle streams.
     let mut resample_rng = StatefulRng::new_stream(seed, RESAMPLE_RNG_STREAM);
@@ -261,7 +259,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // watchdog's compute-blowup role; the wall-clock check (below,
         // post-window) remains for genuinely-slow-but-bounded filters.
         let cost = window_substep_cost(n_particles, t, obs_time, dt);
-        if let Some(kind) = check_iteration_budget(iters, cost, ITER_BUDGET) {
+        if let Some(kind) = check_iteration_budget(iters, cost, config.max_substeps) {
             return Err(pf_bail_error(kind, obs_idx, t0_call.elapsed().as_secs_f64()));
         }
         iters = iters.saturating_add(cost);
@@ -440,19 +438,14 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
 
         // gh#110. Degeneracy watchdog. Check AFTER pushing the current
         // ESS — `check_pf_degeneracy` reads the K-window history off
-        // `ess_trace`. Fires on ESS collapse, wall-clock timeout, or
-        // every particle dead. The `obs_idx` and elapsed are
-        // captured into the error variant so the diagnostic can
-        // surface where the bail happened.
+        // `ess_trace`. Fires on ESS collapse or every particle dead (both
+        // deterministic). `obs_idx` + a display-only elapsed are captured
+        // into the error so the diagnostic can surface where the bail
+        // happened — elapsed never gates the bail.
         let dead_count = particle_dead.iter().filter(|&&d| d).count();
-        let elapsed = t0_call.elapsed();
-        if let Some(kind) = check_pf_degeneracy(
-            &ess_trace, elapsed, pf_wc, obs_idx, dead_count, n_particles,
-        ) {
-            // gh#133: WallClockExceeded → PFWallclockTimeout (resource limit),
-            // the rest → PFDegenerate (statistical). Single mapping helper.
+        if let Some(kind) = check_pf_degeneracy(&ess_trace, dead_count, n_particles) {
             return Err(super::degeneracy::pf_bail_error(
-                kind, obs_idx, elapsed.as_secs_f64(),
+                kind, obs_idx, t0_call.elapsed().as_secs_f64(),
             ));
         }
 

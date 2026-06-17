@@ -203,7 +203,7 @@ fn test_if2_converges_from_dispersed_start() {
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let result = run_if2(
@@ -275,7 +275,7 @@ fn test_if2_respects_bounds() {
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let result = run_if2(
@@ -322,7 +322,7 @@ fn test_if2_no_cooling_explores() {
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        pf_wallclock_disabled: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
     let result = run_if2(
