@@ -436,16 +436,16 @@ pub fn plan_runs(
                     model_stem, shash, &sc.name, &sc_hash, seed,
                 );
                 let run_dir  = format!("{}/{}", runs_dir, run_path);
-                // gh#147 (deferred follow-up — CasSink migration): the cache key
-                // is now sound (model_hash folds in t_end/output cadence/origin/
-                // time_unit; see hashing::model_hash), but this hit test is still
-                // bare `traj.tsv` existence. A partial/aborted write (the design
-                // path writes traj.tsv non-atomically at ~L1246, with no
-                // Completed `run.json` checksum) can be read back as a valid hit.
-                // The full fix routes this through runid's atomic, checksummed
-                // CasStore commit + lookup (as the sim/ensemble path at ~L890
-                // already does) per docs/dev/proposals/2026-05-31-content-
-                // addressed-run-identity.md. Until then `--force` is the escape.
+                // gh#241 (C0.1): `traj_exists` is a NECESSARY but not SUFFICIENT
+                // hit condition. The design path — the only authoritative
+                // consumer of this decision — re-validates a `CacheHit` against a
+                // parseable `run.json` completion marker (`design_cell_complete`)
+                // and writes traj.tsv + the marker atomically, so a partial/
+                // aborted write is never read back as a valid hit. The plain
+                // batch path commits through runid's atomic CasStore, so this
+                // count is advisory there. (The full design→runid store migration
+                // is PR-D-era; see docs/dev/proposals/2026-06-17-cas-runinput-
+                // type-consolidation.md.)
                 let traj_exists = std::path::Path::new(&format!("{}/traj.tsv", run_dir)).exists();
                 let decision = if !force && traj_exists {
                     RunDecision::CacheHit
@@ -465,6 +465,30 @@ pub fn plan_runs(
         }
     }
     plans
+}
+
+/// gh#241 (C0.1). A design cell counts as a genuine cache hit only when its
+/// `run.json` completion marker is present and parses — never on bare
+/// `traj.tsv` existence. The marker is written LAST and atomically (see
+/// `run_design_experiment`), so its presence implies a complete `traj.tsv`; a
+/// crash mid-`traj.tsv` (or mid-marker) leaves no valid marker, so the cell
+/// re-runs instead of serving a truncated trajectory as a hit.
+fn design_cell_complete(run_dir: &str) -> bool {
+    std::fs::read_to_string(format!("{}/run.json", run_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|v| v.get("design_point_index").is_some())
+        .unwrap_or(false)
+}
+
+/// Write `bytes` to `path` atomically: write a sibling temp file, then rename
+/// into place. A crash leaves either the old file or nothing — never a
+/// truncated `path`. (Same-directory rename is atomic on the filesystems camdl
+/// targets.) The pid suffix keeps concurrent writers from sharing a temp path.
+fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = format!("{}.tmp.{}", path, std::process::id());
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
 }
 
 // ─── Run metadata ─────────────────────────────────────────────────────────────
@@ -1369,7 +1393,11 @@ fn run_design_experiment(
 
         run_pooled(&pool, || {
             plans.par_iter().for_each(|plan| {
-                if plan.decision == RunDecision::CacheHit {
+                // gh#241 (C0.1): honor a CacheHit only with a valid completion
+                // marker — never bare traj.tsv existence. A partial/aborted cell
+                // (truncated traj.tsv, no parseable run.json) falls through and
+                // re-runs rather than serving a truncated trajectory.
+                if plan.decision == RunDecision::CacheHit && design_cell_complete(&plan.run_dir) {
                     counter.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
@@ -1401,28 +1429,38 @@ fn run_design_experiment(
                             eprintln!("error: cannot create {}: {}", plan.run_dir, e);
                             return;
                         }
-                        // gh#147 (deferred follow-up — CasSink migration): this
-                        // write is non-atomic and the `run.json` below carries no
-                        // checksum/Completed marker, so an aborted run can leave a
-                        // truncated traj.tsv that `plan_runs` (~L390) reads back as
-                        // a cache hit. The CasSink migration (atomic checksummed
-                        // commit, as the sim/ensemble path at ~L890 uses) closes
-                        // this; see docs/dev/proposals/2026-05-31-content-
-                        // addressed-run-identity.md.
+                        // gh#241 (C0.1): write traj.tsv atomically (temp +
+                        // rename), so the final path is always complete-or-absent
+                        // — a crash never leaves a truncated traj.tsv that the
+                        // next run reads back as a hit. The run.json marker below
+                        // is written LAST and atomically, so its presence implies
+                        // a complete traj.tsv (`design_cell_complete` is the hit
+                        // authority, not file existence). gh#156: write_traj_tsv
+                        // takes the resolved TrajColumns view.
                         let cols = crate::util::TrajColumns::all(&model);
-                        if let Err(e) = write_traj_tsv(&format!("{}/traj.tsv", plan.run_dir), &traj, &cols) {
+                        let traj_path = format!("{}/traj.tsv", plan.run_dir);
+                        let traj_tmp = format!("{}.tmp.{}", traj_path, std::process::id());
+                        if let Err(e) = write_traj_tsv(&traj_tmp, &traj, &cols) {
                             eprintln!("error: cannot write traj.tsv in {}: {}", plan.run_dir, e);
                             return;
                         }
-                        // Write run.json so summarize can recover (point_id, scenario, seed)
-                        // without parsing directory names.
+                        if let Err(e) = std::fs::rename(&traj_tmp, &traj_path) {
+                            eprintln!("error: cannot finalize traj.tsv in {}: {}", plan.run_dir, e);
+                            return;
+                        }
+                        // run.json completion marker, written LAST + atomically:
+                        // it lets summarize recover (point_id, scenario, seed) AND
+                        // is the cache-hit authority (`design_cell_complete`).
                         let run_json = format!(
                             "{{\"design_point_index\":{},\"scenario\":{},\"seed\":{}}}\n",
                             plan.point_idx,
                             serde_json::to_string(&plan.scenario).unwrap_or_default(),
                             plan.seed,
                         );
-                        let _ = std::fs::write(format!("{}/run.json", plan.run_dir), run_json);
+                        if let Err(e) = write_atomic(&format!("{}/run.json", plan.run_dir), run_json.as_bytes()) {
+                            eprintln!("error: cannot write run.json in {}: {}", plan.run_dir, e);
+                            return;
+                        }
                         let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
                         eprintln!("[{}/{}] design={} scenario={} seed={}", n, total, design_name, plan.scenario, plan.seed);
                     }
@@ -1843,6 +1881,42 @@ mod tests {
 
     fn sweep1(kv: &[(&str, f64)]) -> Vec<HashMap<String, f64>> {
         vec![kv.iter().map(|(k, v)| (k.to_string(), *v)).collect()]
+    }
+
+    /// gh#241 (C0.1): a design cell is a cache hit only with a parseable
+    /// run.json completion marker — never bare traj.tsv (which a crash can
+    /// leave truncated). This is the authority `run_design_experiment` gates on
+    /// instead of `RunDecision::CacheHit` (which is bare traj.tsv existence).
+    #[test]
+    fn design_cache_hit_requires_completion_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("cell").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        // traj.tsv only (crashed before the marker, or mid-traj.tsv): NOT a hit.
+        std::fs::write(format!("{}/traj.tsv", run_dir), "time\tI\n0\t1\n").unwrap();
+        assert!(
+            !design_cell_complete(&run_dir),
+            "a traj.tsv-only cell (no completion marker) must not be a cache hit"
+        );
+
+        // A truncated / unparseable run.json marker: NOT a hit.
+        std::fs::write(format!("{}/run.json", run_dir), "{\"design_point_index\":0,").unwrap();
+        assert!(
+            !design_cell_complete(&run_dir),
+            "an unparseable run.json marker must not be a cache hit"
+        );
+
+        // A valid completion marker: a hit.
+        std::fs::write(
+            format!("{}/run.json", run_dir),
+            "{\"design_point_index\":0,\"scenario\":\"baseline\",\"seed\":1}",
+        )
+        .unwrap();
+        assert!(
+            design_cell_complete(&run_dir),
+            "a valid run.json completion marker is a cache hit"
+        );
     }
 
     /// gh#241 G3: `deny_unknown_fields` — a typo'd batch.toml key must ERROR,
