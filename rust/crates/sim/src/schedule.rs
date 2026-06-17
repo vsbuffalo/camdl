@@ -316,12 +316,11 @@ impl Schedule {
     /// (effects fire off-grid via the backend's `resolve_fire_steps`). `None`
     /// once `t >= t_end` (the cursor has walked past the window).
     ///
-    /// [`Schedule::substep`] is exactly `dt.min(next_boundary - t)`. The adaptive
-    /// ODE stepper ([`crate::ode`]) instead consumes this RAW distance as its
-    /// `h_max` and chooses its own internal sub-step ≤ it (clipping its
-    /// controller's natural step to land exactly on the boundary), re-entered
-    /// until the boundary is reached. PURE in `(self, cursor, t)`.
-    pub fn next_boundary(&self, cursor: &Cursor, t: f64) -> Option<f64> {
+    /// Internal helper for [`Schedule::substep`] (= `dt.min(next_boundary - t)`);
+    /// gh#233 Layer 4. The forward backends reach the same boundary min through
+    /// [`Schedule::next_stop`] (with reasons) and read `stop.t`; the adaptive ODE
+    /// stepper takes `h_max = stop.t - t`. PURE in `(self, cursor, t)`.
+    fn next_boundary(&self, cursor: &Cursor, t: f64) -> Option<f64> {
         if t >= self.t_end {
             return None;
         }
@@ -406,20 +405,22 @@ impl Schedule {
     }
 
     /// Whether an effect is due at `t` for `cursor` (the `<= t + EFFECT_EPS` test).
-    pub fn effect_due_at(&self, cursor: &Cursor, t: f64) -> bool {
+    /// Internal to the boundary primitives (`arrive`, `substeps`); not a brick
+    /// callers hand-assemble a boundary loop from (gh#233 Layer 4).
+    fn effect_due_at(&self, cursor: &Cursor, t: f64) -> bool {
         self.next_effect(cursor) <= t + EFFECT_EPS
     }
 
     /// The current (next un-emitted) output time for `cursor`, or `None` past the
-    /// end. The backend records its snapshot AT this time.
-    pub fn output_time(&self, cursor: &Cursor) -> Option<f64> {
+    /// end. Internal to `drain_outputs` (gh#233 Layer 4).
+    fn output_time(&self, cursor: &Cursor) -> Option<f64> {
         self.output_times.get(cursor.output_idx).copied()
     }
 
     /// The current (next un-applied) effect time for `cursor`, or `None` past the
-    /// end. The backend keeps its own firing-tolerance check against this time
-    /// (e.g. the clipped-boundary `(iv - t).abs() < 1e-10` check).
-    pub fn effect_time(&self, cursor: &Cursor) -> Option<f64> {
+    /// end. Internal to `clip` / `substeps` (the exact effect re-anchor); gh#233
+    /// Layer 4.
+    fn effect_time(&self, cursor: &Cursor) -> Option<f64> {
         self.effect_times.get(cursor.effect_idx).copied()
     }
 
@@ -427,12 +428,6 @@ impl Schedule {
     /// the end. The inference driver steps exactly to this and scores there.
     pub fn obs_time(&self, cursor: &Cursor) -> Option<f64> {
         self.obs_times.get(cursor.obs_idx).copied()
-    }
-
-    /// Whether an observation is due at `t` for `cursor` (`<= t + EFFECT_EPS`,
-    /// matching the bootstrap PF's `obs_time - t < 1e-10` step-termination test).
-    pub fn obs_due_at(&self, cursor: &Cursor, t: f64) -> bool {
-        self.next_obs(cursor) <= t + EFFECT_EPS
     }
 
     pub fn t_end(&self) -> f64 {
@@ -637,8 +632,10 @@ impl Cursor {
         self.output_idx += 1;
     }
 
-    /// Advance past the current effect (after the backend has applied it).
-    pub fn pass_effect(&mut self) {
+    /// Advance past the current effect. Internal: the effect cursor is advanced
+    /// only inside `arrive` / the `Substeps` walk, which own effect application
+    /// (gh#233 Layer 4) — a backend never advances it by hand.
+    fn pass_effect(&mut self) {
         self.effect_idx += 1;
     }
 
@@ -819,7 +816,10 @@ mod tests {
         let cur = Cursor::default();
         assert_eq!(s.substep(&cur, 0.0).unwrap(), 1.0, "full dt before the obs");
         assert_eq!(s.substep(&cur, 7.0).unwrap(), 7.3 - 7.0, "clips exactly to the obs at 7.3");
-        assert!(s.obs_due_at(&cur, 7.3));
+        // AT the obs, the clipped step is zero — the boundary is reached (this is
+        // how the Substeps walk terminates the window; obs_due_at was deleted with
+        // PGAS's hand-rolled loop, its only caller).
+        assert_eq!(s.substep(&cur, 7.3).unwrap(), 0.0, "at the obs, the step clips to zero");
         // Forward (no obs): byte-identical — next_obs is ∞, boundary unchanged.
         let f = exact(1.0, 5.0, vec![], vec![2.5]);
         let fo = exact(1.0, 5.0, vec![], vec![2.5]).with_obs(vec![]);

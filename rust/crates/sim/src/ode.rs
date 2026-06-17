@@ -210,7 +210,8 @@ struct OdeState {
 
 /// Advance the integrated state across ONE `[t, t + h_max]` boundary interval.
 /// `h_max` is the RAW distance to the next output / intervention / `t_end`
-/// boundary (from [`Schedule::next_boundary`]); the stepper MUST NOT cross it.
+/// boundary (`stop.t - t`, from [`Schedule::next_stop`]); the stepper MUST NOT
+/// cross it.
 /// Returns the step actually taken: `Rk4Fixed` takes `min(dt, h_max)` and the
 /// driver re-enters until the boundary is reached; an adaptive stepper (Phase C
 /// `Dopri5`) takes `≤ h_max` and is likewise re-entered. This seam is the single
