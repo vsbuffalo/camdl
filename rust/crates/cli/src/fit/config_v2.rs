@@ -1892,6 +1892,53 @@ fn detect_legacy_init_keys(contents: &str) -> Result<(), String> {
     Err(msg)
 }
 
+/// gh#241 (C3): reject unknown keys inside a `[stages.*]` block.
+///
+/// `Stage` is internally tagged (`#[serde(tag = "algorithm")]`), and serde
+/// cannot apply `deny_unknown_fields` to such an enum — so a typo on an
+/// *optional* stage key (a required-field typo is already caught as "missing
+/// field") is silently dropped: neither applied nor reaching the stage identity
+/// hash. This post-parse pass compares each stage block's raw keys against the
+/// set serde actually recognized — which, because `Stage` carries no
+/// `skip_serializing_if`, is exactly the key set the parsed `Stage` serializes
+/// back to (renames `init_mle`/`init` and the `algorithm` tag included). Nested
+/// sub-tables (`loglik_eval`/`gate`/`dt_check`) are ordinary structs that carry
+/// their own `deny_unknown_fields`, so only the top-level stage keys need this.
+fn validate_stage_keys(contents: &str, config: &FitConfigV2) -> Result<(), String> {
+    let raw: toml::Value = match toml::from_str(contents) {
+        Ok(v) => v,
+        // A genuine parse error already surfaced from the typed parse upstream.
+        Err(_) => return Ok(()),
+    };
+    let Some(stages) = raw.get("stages").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    for (name, stage) in &config.stages {
+        let Some(raw_stage) = stages.get(name).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        let known: BTreeSet<String> = serde_json::to_value(stage)
+            .ok()
+            .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()))
+            .unwrap_or_default();
+        for key in raw_stage.keys() {
+            if !known.contains(key) {
+                let mut allowed: Vec<&String> = known.iter().collect();
+                allowed.sort();
+                return Err(format!(
+                    "unknown key `{key}` in [stages.{name}] (algorithm = \"{}\").\n  \
+                     allowed keys: {}\n  \
+                     A typo on an optional stage key is otherwise silently ignored \
+                     (serde cannot deny unknown fields on the tagged `Stage` enum) — gh#241.",
+                    stage.method_name(),
+                    allowed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl FitConfigV2 {
     /// Parse a fit.toml string. Performs the Step-12 legacy-key
     /// detection pass (turning the old `init_method` / `starts_from`
@@ -1899,8 +1946,11 @@ impl FitConfigV2 {
     /// strongly-typed deserializer.
     pub fn from_toml_str(contents: &str) -> Result<Self, String> {
         detect_legacy_init_keys(contents)?;
-        toml::from_str(contents)
-            .map_err(|e| format!("parse error: {}", e))
+        let config: Self = toml::from_str(contents)
+            .map_err(|e| format!("parse error: {}", e))?;
+        // gh#241 (C3): catch typo'd stage keys serde silently drops.
+        validate_stage_keys(contents, &config)?;
+        Ok(config)
     }
 
     pub fn load(path: &str) -> Result<Self, String> {
@@ -2578,6 +2628,47 @@ cooling = 0.70
             }
             _ => panic!("expected IF2 stage"),
         }
+    }
+
+    /// gh#241 C3: serde cannot apply `deny_unknown_fields` to the
+    /// internally-tagged `Stage` enum, so a typo'd stage key was silently
+    /// dropped (neither applied nor reaching the stage identity hash). A
+    /// post-parse pass must reject it with a located error naming the stage
+    /// and key; a valid stage (including optional keys) still parses.
+    #[test]
+    fn stage_rejects_unknown_keys() {
+        let base = "[model]\ncamdl = \"models/sir.camdl\"\n\
+                    [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
+                    [estimate]\nbeta = { bounds = [0.01, 2.0] }\n\
+                    [fixed]\nN0 = 1000000\n";
+
+        let ok = format!(
+            "{base}[stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             chains = 8\nparticles = 1000\niterations = 80\ncooling = 0.70\n"
+        );
+        assert!(parse(&ok).is_ok(), "a valid IF2 stage must parse");
+
+        // A PGAS optional key (tempering) must be accepted, not falsely flagged.
+        let ok_pgas = format!(
+            "{base}[stages.post]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
+             chains = 2\nparticles = 100\nsweeps = 10\ntempering = [1.0, 0.5]\n"
+        );
+        assert!(parse(&ok_pgas).is_ok(), "a valid PGAS stage with optional keys must parse");
+
+        // A typo on an OPTIONAL key is the real footgun: every required field
+        // is present, so serde parses fine and *silently drops* the typo
+        // (using the default), unlike a required-field typo which serde already
+        // catches as "missing field". `cooling_target_iters` has a default.
+        let bad = format!(
+            "{base}[stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             chains = 8\nparticles = 1000\niterations = 80\ncooling = 0.70\n\
+             cooling_target_iterss = 40\n" // typo: cooling_target_iters
+        );
+        let err = parse(&bad).expect_err("a typo'd optional stage key must be rejected");
+        assert!(
+            err.contains("cooling_target_iterss") && err.contains("mle"),
+            "error must name the unknown key and the stage; got: {err}"
+        );
     }
 
     #[test]
