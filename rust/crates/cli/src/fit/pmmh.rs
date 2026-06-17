@@ -581,8 +581,8 @@ pub fn run_stage(
             // a degenerate region during sampling) spuriously
             // mark a working chain as bad.
             if resume_states[chain_id].is_none() && is_ode_mh {
-                // ODE-MH init-eval guard: no PF, so the PFDegenerate /
-                // PFWallclockTimeout skip arms do not apply. Evaluate the
+                // ODE-MH init-eval guard: no PF, so the PFDegenerate skip arm
+                // does not apply. Evaluate the
                 // deterministic loglik once at the chain's start; a structural
                 // error aborts the whole fit (gh#224, same hard path as PMMH's
                 // structural arm), and any other outcome (Ok, including −∞)

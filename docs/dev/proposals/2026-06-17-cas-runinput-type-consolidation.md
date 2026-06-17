@@ -7,11 +7,14 @@
 - Scope: input identity, CAS write path, batch/design migration, backend/method
   typing
 - Non-goal: timeline/schedule runtime refactor (`gh#233`)
-- Already landed in PR #244 (do not re-do): Layer 0 except C0.1 — the wall-clock
-  watchdog is removed for a deterministic `pf_max_substeps` budget (C0.2);
-  batch/ compare `deny_unknown_fields` + `[stages.*]` typo rejection; the
-  anti-drift pinned-encoding golden. The next step is **C0.1** (batch
-  `[design.*]` atomic cache-hit/write).
+- Already landed in PR #244 (do not re-do): all of Layer 0 — the wall-clock
+  watchdog removed for a deterministic `pf_max_substeps` budget (C0.2);
+  batch/compare `deny_unknown_fields` + `[stages.*]` typo rejection; the
+  anti-drift pinned-encoding golden; AND **C0.1a** (batch `[design.*]` atomic
+  writes + a `run.json` completion-marker hit authority — closes the
+  partial-write-as-hit hole, no re-key). The remaining design work is **C0.1b**
+  (route the design store through `runid`'s CasStore), folded into PR D. The
+  next _new_ PR is **PR B** (backend domain types).
 
 ## Summary
 
@@ -39,8 +42,10 @@ resolver boundary, not serde/clap itself.
 
 The highest priority fixes are:
 
-1. Route `batch [design.*]` through the `runid` CAS store; no
-   `traj.tsv.exists()` cache-hit authority.
+1. Batch `[design.*]`: stop trusting `traj.tsv.exists()` as a cache-hit
+   authority. SHIPPED as C0.1a (atomic write + `run.json` completion marker, no
+   re-key); the full route-through-`runid`-`CasStore` migration (C0.1b) is
+   deferred to PR D.
 2. Quarantine legacy `hashing.rs`; no new run identity construction outside
    `RunInput`/`ContentAddressed`.
 3. Introduce one resolver per artifact kind, returning a common
@@ -188,29 +193,44 @@ as valid. This violates the CAS invariant.
 Rule:
 
 ```text
-Any path that writes a CAS-addressed artifact must use CasStore lookup/commit.
-File existence is only a mirror/UI convenience, never identity or hit
-authority.
+File existence is never a cache-hit authority. A hit requires a completed,
+parseable record; writes are atomic (a crash leaves the old state or nothing,
+never a truncated artifact read back as valid).
 ```
 
-Implementation target:
+This splits into a shipped correctness fix and a deferred full migration.
 
-- route design cells through the existing `CasSink`/`runid` path or a small
-  sibling sink that produces the same `TrajectoryInput` identity and calls the
-  same store commit;
-- write `parameter_points.tsv` / `priors.txt` as design-level metadata, not as
-  per-leaf validity authority;
-- a hit requires a completed `run.json` with matching `run_id`, status, schema,
-  and manifest.
+**C0.1a — shipped in PR #244 (correctness fix, no re-key).** Closes the
+partial-write-as-hit silent-wrong-answer within the existing legacy design-store
+layout:
 
-Acceptance:
+- `traj.tsv` and the `run.json` marker are written atomically (temp + rename),
+  marker LAST — the final `traj.tsv` is always complete-or-absent;
+- a design hit requires a parseable `run.json` completion marker
+  (`design_cell_complete`), never bare `traj.tsv` existence; a partial cell
+  re-runs. `plan_runs`' `traj_exists` stays as a necessary-but-not-sufficient
+  prefilter the design path re-validates against the marker;
+- old complete caches still hit (their marker parses); only partial ones re-run.
+
+Acceptance (shipped): a `traj.tsv`-only cell and a truncated/unparseable marker
+are NOT hits; a valid marker is (`design_cache_hit_requires_completion_marker`).
+
+**C0.1b — deferred to PR D (full migration, re-keys the design store).** The
+stronger end state: route design cells through `runid`'s `CasStore` so they are
+first-class `runid` leaves (same `ResolvedArtifact`/`TrajectoryInput` identity,
+atomic checksummed commit + `lookup`), retiring the legacy `designs/.../sims/…`
+layout and the `traj.tsv`-existence planner entirely. This lands with the
+resolver/store choke point (PR D); it changes the design-store _layout_ (a
+deliberate, documented turnover — NOT a `runid` identity re-key), and only then
+does the static gate below apply:
 
 ```text
 $ rg -n "traj.tsv.*exists|exists\\(\\).*traj.tsv|metadata\\(.*traj" rust/crates/cli/src/batch.rs
 ```
 
-must not find a design cache-hit decision. Tests must simulate a partial design
-cell and assert it is not treated as a hit.
+must find no design cache-hit decision (the `plan_runs` prefilter is gone once
+design routes through `CasStore::lookup`). Until C0.1b lands, C0.1a's
+marker-authority is the correctness guarantee.
 
 #### C0.2 Delete or demote wall-clock output influence
 
@@ -599,14 +619,15 @@ occur.
 
 ## Sequencing
 
-### PR A: cheap correctness completion, no re-key where possible
+### PR A: cheap correctness completion, no re-key where possible — SHIPPED (PR #244)
 
-1. Batch `[design.*]` atomic CAS hit/write fix.
-2. Wall-clock output influence removal/demotion.
-3. Keep the anti-drift encoding golden.
-4. Keep unknown-key rejection and stage-key typo rejection.
+1. Batch `[design.*]` **C0.1a** atomic write + completion-marker hit authority
+   (the full C0.1b runid routing is deferred to PR D).
+2. Wall-clock output influence removed (C0.2).
+3. Anti-drift encoding golden.
+4. Unknown-key rejection + stage-key typo rejection.
 
-This can build on PR #244.
+All landed in PR #244.
 
 ### PR B: backend/domain type cleanup
 
@@ -673,7 +694,12 @@ identity type was touched; back it out or escalate it to an explicit, documented
 rg -n "traj.tsv.*exists|exists\\(\\).*traj.tsv|metadata\\(.*traj" rust/crates/cli/src/batch.rs
 ```
 
-No CAS hit decision.
+This gate applies to **C0.1b** (PR D): once the design store routes through
+`CasStore::lookup`, no design cache-hit decision reads file existence. It does
+NOT apply to the shipped C0.1a, which deliberately keeps `plan_runs`'
+`traj_exists` as a necessary-but-not-sufficient prefilter re-validated against a
+`run.json` completion marker; C0.1a's gate is the behavioral one below ("A
+partial `batch [design.*]` output file is not a cache hit").
 
 ```text
 rg -n "model_hash\\(|sim_hash\\(|scen_hash\\(|canonical_params\\(|fit_content_hash\\(" \
