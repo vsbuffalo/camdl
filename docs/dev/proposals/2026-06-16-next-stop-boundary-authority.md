@@ -932,37 +932,46 @@ movement plus maintainer sign-off before any re-bless. `GRID_STEP_EPS`
 unification, if taken, is its own behaviour-moving change with its own red→green
 — **not** folded into Layer 0.
 
-1. Adversarial review of the existing spine + this contract.
-2. Layer 0 — name the time tolerances (`OUTPUT_EPS` / `EFFECT_EPS` /
+1. ✅ Adversarial review of the existing spine + this contract.
+2. ✅ Layer 0 — name the time tolerances (`OUTPUT_EPS` / `EFFECT_EPS` /
    `MIN_STEP_EPS`); byte-identical. `GRID_STEP_EPS` left **untouched** (its
    1e-12-vs-1e-15 unification is a later behaviour decision, not Layer 0). Lands
    first.
-3. Layer 3 battery harness (the net).
-4. Layer 1 `next_stop` raw contract + the raw-vs-filter red→green + the three
+3. ✅ Layer 3 battery harness (the net).
+4. ✅ Layer 1 `next_stop` raw contract + the raw-vs-filter red→green + the three
    contract tests + `TimelineStop` helpers.
-5. `apply_stop` seam.
-6. Layer 2.5 typed construction (private `Schedule::new` + mode constructors +
-   role wrappers + `ExactInferenceTimeline::build`); byte-identical; behind the
-   net.
-7. ODE → gillespie-absorbing → gillespie-non-absorbing dispatch, each behind its
-   baseline.
-8. chain tolerance (independent).
-9. PGAS one-walk dedup (last; inference-loglik risk; maintainer signs the
-   re-bless).
-10. Layer 4 capstone — `Walk` handle + raw-accessor privatization; raw accessors
-    become private.
+5. ✅ `apply_stop` seam (`Schedule::arrive`).
+6. ✅ Layer 2.5 typed construction (`pub(crate)` `Schedule::new` + mode
+   constructors + role wrappers + `ExactInferenceTimeline::build`, wiring
+   PF/IF2/correlated); byte-identical; behind the net.
+7. ✅ ODE → gillespie-absorbing → gillespie-non-absorbing dispatch, each behind
+   its baseline.
+8. ✅ chain tolerance (independent).
+9. ✅ PGAS one-walk dedup. Realized as **Design B** (the shared inner `Substeps`
+   iterator made drift-free; PF/IF2/correlated driver code untouched; PGAS loops
+   windows over it — not the whole-run-iterator restructure). `GRID_STEP_EPS`
+   unified to `MIN_STEP_EPS`. **Measured movement: zero** —
+   `inference_loglik_baselines_hold` and `pgas_density_baselines_hold` both hold
+   against committed values (the time-homogeneous corpus is byte-identical, as
+   the substep-time convention proposal predicted). **No re-bless was needed.**
+10. ⬜ Layer 4 capstone — `Walk` handle + raw-accessor privatization; raw
+    accessors become private (now unblocked: PGAS no longer touches them
+    directly).
 
 ## Open decisions
 
-**Need the maintainer's eyes (move inference numbers / set direction):**
+**Resolved (maintainer, 2026-06-16 — were "move inference numbers"):**
 
-- **PGAS time convention** — unify the PF/IF2/correlated walk onto drift-free
-  `substep_time` and re-bless their baselines? (Recommended; aligns with the
-  already-canonical convention. Moves loglik by a claimed ≤1 ULP/window — verify
-  before re-blessing.)
-- **`GRID_STEP_EPS` 1e-12 vs `MIN_STEP_EPS` 1e-15** — is PGAS's coarser
-  negligible-step floor intentional or an accident? (Likely accident → unify to
-  `MIN_STEP_EPS`, a behaviour change with its own red→green.)
+- **PGAS time convention — DONE.** PF/IF2/correlated unified onto drift-free
+  `substep_time` (Design B: the shared inner `Substeps` iterator, not a driver
+  restructure). Measured movement on the corpus: **zero** — both
+  `inference_loglik_baselines_hold` and `pgas_density_baselines_hold` hold
+  against committed values. The byte-identical prediction of the substep-time
+  convention proposal (time-homogeneous likelihoods on integer projections don't
+  move) held; no re-bless was needed.
+- **`GRID_STEP_EPS` vs `MIN_STEP_EPS` — DONE.** Unified to `MIN_STEP_EPS`
+  (1e-15); `pgas::GRID_STEP_EPS` deleted. Byte-identical (the corpus has no
+  substep in the 1e-12…1e-15 band).
 
 **Resolved by the review (no longer open):**
 
