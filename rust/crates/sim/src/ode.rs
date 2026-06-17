@@ -6,7 +6,7 @@ use crate::{
     output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
-    schedule::{Cursor, Schedule, StepPolicy, EFFECT_EPS, MIN_STEP_EPS},
+    schedule::{Cursor, Schedule, StepPolicy, MIN_STEP_EPS},
     simulate::Simulate,
     state::{Flows, IntState, RealState, Snapshot, Trajectory},
 };
@@ -594,85 +594,60 @@ pub fn run_ode(
         cursor.pass_output();
     }
 
-    while t < cfg.t_end {
-        // Progress tick: report current time before this step. RNG-free (ODE
-        // has no RNG at all).
+    // gh#233 Layer 7: drive the merged timeline through the single boundary
+    // authority. `next_stop` reports the next boundary + every reason it matters;
+    // the ODE dynamics (stepper.advance + the h_max re-entry) stay HERE, and the
+    // boundary dispatch (effects → output, in canonical order, with the
+    // coincident batch and terminal output) goes through the shared `arrive` seam
+    // — the logic that diverged per-backend in gh#70. Byte-identical to the old
+    // next_boundary + two-dispatch-block + final-flush form (gate_corner_case_baseline).
+    while let Some(stop) = schedule.next_stop(&cursor, t) {
+        // Progress tick: report current time. RNG-free (ODE has no RNG at all).
         if let Some(cb) = tick.as_deref_mut() { cb(t); }
 
-        // Raw distance to the next boundary (output/effect/t_end), NOT clipped to
-        // `cfg.dt`. The stepper chooses its own internal step ≤ this; fixed RK4
-        // takes `min(dt, h_max)`, bit-identical to the old `schedule.substep`.
-        let boundary = schedule.next_boundary(&cursor, t).expect("t < t_end inside loop");
-        let h_max = boundary - t;
+        // Integrate toward the boundary. The stepper takes ≤ h_max and is
+        // re-entered until it arrives (fixed RK4 takes min(dt, h_max); adaptive
+        // rk45 takes several internal steps). `h_max <= MIN_STEP_EPS` ⇔ arrived.
+        let h_max = stop.t - t;
+        if h_max > MIN_STEP_EPS {
+            t += stepper.advance(model, params, t, h_max, &mut state)?;
+            continue;
+        }
 
-        if h_max <= MIN_STEP_EPS {
-            // At a boundary — apply effects or record output. Same threshold as
-            // the old `substep <= 1e-15`: for `cfg.dt > 1e-15`,
-            // `dt.min(h_max) <= 1e-15  ⇔  h_max <= 1e-15`.
-            if schedule.effect_time(&cursor).is_some_and(|iv| (iv - t).abs() < EFFECT_EPS) {
-                // Continuous lifecycle: events (frozen snapshot) fire before
-                // interventions (sequential, post-event). Applied EXACTLY to the
-                // f64 vectors — no `to_states` round-trip — so the fractional
-                // integrator state survives the boundary (the de-quantization the
-                // ODE backend exists to provide). The due batch is derived once
-                // at the boundary `t` (grid = cfg.dt).
+        // Arrived: dispatch effects-then-output via the shared seam. Effects apply
+        // EXACTLY to the f64 vectors (no to_states round-trip) so the fractional
+        // integrator state survives the boundary (the de-quantization the ODE
+        // backend exists to provide); the due batch is derived at the boundary `t`
+        // (grid = cfg.dt). Output records the post-effect state.
+        schedule.arrive(
+            &mut cursor,
+            &stop,
+            t,
+            &mut state,
+            |st, bt| {
                 let mut batch = crate::schedule::EffectBatch::default();
-                crate::effects::due_effects(model, &fire_steps, t, cfg.dt, &mut batch);
+                crate::effects::due_effects(model, &fire_steps, bt, cfg.dt, &mut batch);
                 crate::effects::apply_boundary_batch_continuous(
-                    model, &batch, &mut state.int, &mut state.real, params, t, cfg.dt,
-                )?;
-                while schedule.effect_due_at(&cursor, t) { cursor.pass_effect(); }
-            }
-            while schedule.output_due_at(&cursor, t) {
-                let ot = schedule.output_time(&cursor).expect("due implies present");
-                let (is, rs) = to_states(&state.int, &state.real);
+                    model, &batch, &mut st.int, &mut st.real, params, bt, cfg.dt,
+                )
+            },
+            |st, ot| {
+                let (is, rs) = to_states(&st.int, &st.real);
                 traj.push(Snapshot {
                     t: ot,
                     int_state: is,
                     real_state: rs,
-                    flows: snapshot_flows(&state.flow),
+                    flows: snapshot_flows(&st.flow),
                 });
-                for v in state.flow.iter_mut() { *v = 0.0; }
-                cursor.pass_output();
-            }
-            if t >= cfg.t_end { break; }
-            continue;
-        }
+                for v in st.flow.iter_mut() { *v = 0.0; }
+            },
+        )?;
 
-        // Advance one integrator step toward the boundary (fixed RK4: exactly one
-        // `min(dt, h_max)` step, accumulating the Euler flow; re-entered by the
-        // loop until the boundary). `t` advances by exactly the step taken.
-        let h_taken = stepper.advance(model, params, t, h_max, &mut state)?;
-        t += h_taken;
-
-        // Apply effects if we just landed on a boundary. Canonical lifecycle:
-        // events (reading the start-of-step snapshot, pre-intervention) fire
-        // BEFORE interventions, which read the post-event state; applied EXACTLY
-        // to the f64 vectors so the fractional integrator state survives. A no-op
-        // on intermediate substeps (no effect time within 1e-10 of `t`).
-        if schedule.effect_time(&cursor).is_some_and(|iv| (iv - t).abs() < EFFECT_EPS) {
-            let mut batch = crate::schedule::EffectBatch::default();
-            crate::effects::due_effects(model, &fire_steps, t, cfg.dt, &mut batch);
-            crate::effects::apply_boundary_batch_continuous(
-                model, &batch, &mut state.int, &mut state.real, params, t, cfg.dt,
-            )?;
-            while schedule.effect_due_at(&cursor, t) { cursor.pass_effect(); }
-        }
-
-        // Record outputs due at or before t (a no-op on intermediate substeps).
-        schedule.drain_outputs(&mut cursor, t, |ot| {
-            let (is, rs) = to_states(&state.int, &state.real);
-            traj.push(Snapshot {
-                t: ot,
-                int_state: is,
-                real_state: rs,
-                flows: snapshot_flows(&state.flow),
-            });
-            for v in state.flow.iter_mut() { *v = 0.0; }
-        });
+        if stop.is_end() { break; }
     }
 
-    // Flush any remaining output times
+    // Flush any output times beyond t_end (none under the standard schedule;
+    // kept for parity with the old final drain — byte-identical).
     schedule.drain_outputs(&mut cursor, f64::INFINITY, |ot| {
         let (is, rs) = to_states(&state.int, &state.real);
         traj.push(Snapshot {
