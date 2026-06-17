@@ -208,3 +208,152 @@ fn full_trajectory_no_pre_event_leak_or_time_reversal() {
 // read-source (start-of-step snapshot vs post-drain) lived here; with tau-leap
 // dropped (scheduling-spine-v2 §D) the property is covered by pgas_event_density
 // + the lifecycle audit, which exercise the same chain-side fusion.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYER 3 (gh#233): the standing cross-backend battery — the net that must hold
+// BEFORE the boundary-dispatch rewiring, so any future backend that bypasses the
+// spine and re-derives boundaries by hand is caught. Two tiers:
+//
+//   Tier A (every fixture × 3 backends × multi-seed): per-backend trajectory
+//   integrity — time strictly non-decreasing (the gh#70 catch: time ran
+//   backward), no snapshot past t_end, non-negative counts, non-empty. These
+//   hold regardless of stochastic flow, so the whole battery runs here.
+//
+//   Tier B (integer-exact fixtures only): the three backends must agree on the
+//   final compartment counts. Zero-rate models have no stochastic flow, so the
+//   post-lifecycle state is hand-checkable and identical across backends. (The
+//   gh#70-class weakness of final-state-ONLY comparison is covered by Tier A's
+//   per-backend full-trajectory monotonicity; Tier B complements it.)
+//
+// Cases map to the gh#233 task-6 list: coincident event+intervention + output-at-
+// t_end (event_intervention_agree), absorbing-then-importation (gh70), multi-
+// effect same time (multi_effect_same_time), off-grid effect (off_grid_
+// intervention), fractional t_end (fractional_output_end).
+
+/// `≥ 8` seeds: stochastic fixtures must satisfy Tier A on every one (gh#208 was
+/// seed-dependent; a single-seed gate can land on a seed that doesn't bite).
+const SEEDS: &[u64] = &[1, 2, 3, 5, 8, 13, 21, 42];
+
+/// `(ir stem, integer_exact)`. `integer_exact` ⇒ rate ≡ 0, so no stochastic flow
+/// and Tier B (cross-backend final-state agreement) applies.
+const BATTERY: &[(&str, bool)] = &[
+    ("event_intervention_agree", true),
+    ("gh70_absorbing_importation", true),
+    ("multi_effect_same_time", true),
+    ("off_grid_intervention", false),
+    ("fractional_output_end", false),
+];
+
+fn load_named(stem: &str) -> CompiledModel {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../../tests/fixtures/corner_cases/ir/{stem}.ir.json"));
+    let contents = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {:?}: {}", path, e));
+    let model: ir::Model =
+        ir::from_str(&contents).unwrap_or_else(|e| panic!("parse {stem}: {}", e));
+    CompiledModel::new(model).unwrap_or_else(|e| panic!("compile {stem}: {:?}", e))
+}
+
+/// The three forward backends with their per-backend config, at the model's window.
+fn battery_backends(t_start: f64, t_end: f64) -> Vec<(&'static str, Box<dyn Simulate>, SimConfig)> {
+    vec![
+        (
+            "chain_binomial",
+            Box::new(ChainBinomialSim),
+            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0 }),
+        ),
+        ("ode", Box::new(OdeSim), SimConfig::Ode(OdeConfig { t_start, t_end, dt: 1.0 })),
+        (
+            "gillespie",
+            Box::new(GillespieSim),
+            SimConfig::Gillespie(GillespieConfig { t_start, t_end, output_dt: None }),
+        ),
+    ]
+}
+
+#[test]
+fn battery_per_backend_trajectory_invariants() {
+    for &(stem, _) in BATTERY {
+        let compiled = load_named(stem);
+        let t_start = compiled.model.simulation.t_start;
+        let t_end = compiled.model.simulation.t_end;
+        let params = compiled.default_params.clone();
+
+        for (name, sim, cfg) in battery_backends(t_start, t_end) {
+            for &seed in SEEDS {
+                let traj = sim.run(&compiled, &params, seed, &cfg).unwrap_or_else(|e| {
+                    panic!("{stem}/{name} seed={seed}: forward sim must succeed: {e:?}")
+                });
+                assert!(!traj.snapshots.is_empty(), "{stem}/{name} seed={seed}: empty trajectory");
+
+                // (1) time strictly non-decreasing — the gh#70 backward-jump catch.
+                for w in traj.snapshots.windows(2) {
+                    assert!(
+                        w[1].t >= w[0].t,
+                        "{stem}/{name} seed={seed}: trajectory time ran backward — \
+                         snapshot t={} followed by t={} (gh#70: absorbing-state boundary \
+                         clip jumped t into the past).",
+                        w[0].t, w[1].t
+                    );
+                }
+
+                for snap in &traj.snapshots {
+                    // (2) no snapshot recorded past the run end.
+                    assert!(
+                        snap.t <= t_end + 1e-9,
+                        "{stem}/{name} seed={seed}: snapshot at t={} is past t_end={t_end}",
+                        snap.t
+                    );
+                    // (3) non-negative integer counts.
+                    for (i, &c) in snap.int_state.counts.iter().enumerate() {
+                        assert!(
+                            c >= 0,
+                            "{stem}/{name} seed={seed}: negative count {c} (compartment local \
+                             idx {i}) at t={}",
+                            snap.t
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn battery_integer_exact_cross_backend_final_agreement() {
+    for &(stem, integer_exact) in BATTERY {
+        if !integer_exact {
+            continue;
+        }
+        let compiled = load_named(stem);
+        let t_start = compiled.model.simulation.t_start;
+        let t_end = compiled.model.simulation.t_end;
+        let params = compiled.default_params.clone();
+
+        // Final compartment-count vector per backend; all three must match.
+        let mut reference: Option<(&str, Vec<i64>)> = None;
+        for (name, sim, cfg) in battery_backends(t_start, t_end) {
+            let traj = sim
+                .run(&compiled, &params, SEEDS[0], &cfg)
+                .unwrap_or_else(|e| panic!("{stem}/{name}: forward sim must succeed: {e:?}"));
+            // An integer-exact fixture lands its final snapshot exactly on t_end
+            // (the End+Output coincidence; integer t_end on the dt=1 grid).
+            let last = traj.snapshots.last().expect("at least one snapshot");
+            assert!(
+                (last.t - t_end).abs() < 1e-9,
+                "{stem}/{name}: final snapshot at t={}, expected t_end={t_end} \
+                 (output-at-end coincidence)",
+                last.t
+            );
+            let counts = last.int_state.counts.clone();
+            match &reference {
+                None => reference = Some((name, counts)),
+                Some((ref_name, ref_counts)) => assert!(
+                    &counts == ref_counts,
+                    "{stem}: cross-backend final-state DIVERGENCE — {ref_name}={ref_counts:?} \
+                     vs {name}={counts:?} (zero-rate model: every backend must agree).",
+                ),
+            }
+        }
+    }
+}

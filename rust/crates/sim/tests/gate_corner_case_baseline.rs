@@ -120,6 +120,19 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("event_intervention_agree", "gillespie", 0x17be41f06b7e1f78),
     ("event_intervention_agree", "chain_binomial", 0x17be41f06b7e1f78),
     ("event_intervention_agree", "ode", 0x17be41f06b7e1f78),
+    // gh70_absorbing_importation + multi_effect_same_time: zero-rate (k=0) Layer-3
+    // battery fixtures (gh#233 task 6). Like event_intervention_agree, no stochastic
+    // flow occurs, so all three backends produce the SAME full-trajectory hash —
+    // captured identical here, and the cross-backend agreement + per-backend
+    // time-monotonicity are asserted directly in cross_backend_lifecycle_agreement.rs.
+    // gh70 is the absorbing-state + importation gh#70 regression net; multi_effect
+    // pins the coincident-effect cursor batch (both interventions fire at t=5).
+    ("gh70_absorbing_importation", "gillespie", 0x31a0f555f2012da1),
+    ("gh70_absorbing_importation", "chain_binomial", 0x31a0f555f2012da1),
+    ("gh70_absorbing_importation", "ode", 0x31a0f555f2012da1),
+    ("multi_effect_same_time", "gillespie", 0x2ddfc017e0862658),
+    ("multi_effect_same_time", "chain_binomial", 0x2ddfc017e0862658),
+    ("multi_effect_same_time", "ode", 0x2ddfc017e0862658),
     ("fractional_output_end", "gillespie", 0x12ea70a5ebfd6189),
     ("fractional_output_end", "chain_binomial", 0x28067d22b8adc1b3),
     ("fractional_output_end", "ode", 0x55b55839abd925b5),

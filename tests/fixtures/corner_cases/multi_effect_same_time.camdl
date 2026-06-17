@@ -1,0 +1,35 @@
+# Corner case: MULTIPLE SCHEDULED EFFECTS AT THE SAME BOUNDARY.
+#
+# Two scheduled interventions fire at the SAME time t=5. The boundary handler
+# must advance the effect cursor past BOTH coincident effects (the
+# `while effect_due_at { pass_effect }` batch) and apply both -- dropping either
+# the cursor-advance or one effect is the failure this pins. The two adds target
+# different compartments, so the outcome is order-independent and integer-exact
+# (the drain rate is identically zero, k=0): every backend must agree row-for-row.
+time_unit = 'days
+
+compartments { A, B, C }
+
+parameters {
+  k : rate in [0.0, 1.0]
+}
+
+transitions {
+  drain : A --> B  @ k * A
+}
+
+interventions {
+  bump_b : add(B, 20) at [5]
+  bump_c : add(C, 30) at [5]
+}
+
+init {
+  A = 50
+  B = 0
+  C = 0
+}
+
+simulate {
+  from = 0 'days
+  to   = 10 'days
+}

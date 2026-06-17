@@ -1,0 +1,12 @@
+{"ir_version":"0.16","validated_by":"ocaml-compiler-v0.16","model":{"name":"multi_effect_same_time","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"name":"A","kind":"integer"},
+{"name":"B","kind":"integer"},
+{"name":"C","kind":"integer"}
+],"transitions":[
+{"name":"drain","stoichiometry":[["A",-1],["B",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"A"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"A","dest_compartment":"B"},"rate_grad":{"k":{"pop":"A"}}}
+],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[
+{"name":"bump_b","schedule":{"at_times":[5.0]},"actions":[{"add":{"compartment":"B","count":{"const":20.0}}}]},
+{"name":"bump_c","schedule":{"at_times":[5.0]},"actions":[{"add":{"compartment":"C","count":{"const":30.0}}}]}
+],"observations":[],"parameters":[
+{"name":"k","value":{"mode":"fixed","value":0.0},"param_kind":"rate","param_dim":null}
+],"initial_conditions":{"explicit":{"A":50.0,"B":0.0,"C":0.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":10.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":10.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"A":[],"B":[],"C":[]},"base_compartments":["A","B","C"],"transmission_transitions":[],"infectious_compartments":[]}}}

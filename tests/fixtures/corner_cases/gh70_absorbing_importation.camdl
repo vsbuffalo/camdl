@@ -1,0 +1,37 @@
+# Corner case: ABSORBING INITIAL STATE + SCHEDULED IMPORTATION (gh#70 regression).
+#
+# I starts at 0, so the propensity sum is identically 0 and gillespie runs its
+# absorbing-state branch for the whole run. An importation event add(I, 5) fires
+# at t=10. The recovery rate is identically zero (k=0), so no stochastic flow
+# ever occurs: counts are integer-exact and every backend must agree row-for-row,
+# AND trajectory time must stay strictly non-decreasing.
+#
+# gh#70 was a BACKWARD time jump (t: 10 -> 2) in gillespie's absorbing-state
+# output flush, which also back-filled the post-importation state (I=5) into
+# pre-importation output rows. This fixture is the cross-backend / monotonic-time
+# net that pins the fixed behaviour before the boundary-dispatch rewiring.
+time_unit = 'days
+
+compartments { I, R }
+
+parameters {
+  k : rate in [0.0, 1.0]
+}
+
+transitions {
+  recovery : I --> R  @ k * I
+}
+
+events {
+  importation : add(I, 5) at [10]
+}
+
+init {
+  I = 0
+  R = 0
+}
+
+simulate {
+  from = 0 'days
+  to   = 20 'days
+}

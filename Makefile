@@ -205,6 +205,8 @@ update-corner-golden: build-ocaml
 	@$(CAMDLC) $(CORNER_DIR)/all_lifecycle.camdl               --set beta=1.0 --set gamma=0.2 --set cull=0.5 --set N0=1000 -o $(CORNER_DIR)/ir/all_lifecycle.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/seasonal_drift.camdl              --set beta=0.6 --set gamma=0.4 --set alpha=0.4 -o $(CORNER_DIR)/ir/seasonal_drift.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/event_intervention_agree.camdl    --set k=0.0 --set keep=0.5 -o $(CORNER_DIR)/ir/event_intervention_agree.ir.json
+	@$(CAMDLC) $(CORNER_DIR)/gh70_absorbing_importation.camdl  --set k=0.0 -o $(CORNER_DIR)/ir/gh70_absorbing_importation.ir.json
+	@$(CAMDLC) $(CORNER_DIR)/multi_effect_same_time.camdl      --set k=0.0 -o $(CORNER_DIR)/ir/multi_effect_same_time.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/event_drain_fusion.camdl          --set k=0.3 --set f=0.2 -o $(CORNER_DIR)/ir/event_drain_fusion.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/dt_rate.camdl                     --set beta=1.0 --set gamma=0.2 --set tau=1.0 -o $(CORNER_DIR)/ir/dt_rate.ir.json
 
