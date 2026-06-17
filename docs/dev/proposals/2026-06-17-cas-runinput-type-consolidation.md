@@ -29,7 +29,7 @@ user surface(s)
     -> one resolved artifact input
     -> one typed RunInput value / factored levels
     -> one run_id
-    -> one atomic CasStore commit
+    -> one resolved CAS write (atomic commit OR streaming claim/finalize)
 ```
 
 This proposal does **not** collapse every input shape into one struct. That was
@@ -146,10 +146,11 @@ pub enum InferenceBackend {
 }
 ```
 
-Use `ForwardBackend` for forward trajectory/simulation identity. Use
-`InferenceBackend` for fit-stage, pfilter, survey, and profile inference
-identity. Conversions from `ForwardBackend` to `InferenceBackend` are explicit
-and fallible.
+Use `ForwardBackend` on the CLI/config forward-simulation surfaces; the resolver
+maps it into the existing `runid::inputs::Backend` _identity_ type (which is
+**not** renamed — see Layer 3). Use `InferenceBackend` on the fit-stage,
+pfilter, survey, and profile surfaces. Conversions from `ForwardBackend` to
+`InferenceBackend` are explicit and fallible (`Gillespie` -> error).
 
 ### Current capability smell
 
@@ -285,9 +286,9 @@ fn begin_resolved_write(store, resolved: &ResolvedArtifact, mode: WriteMode)
 The load-bearing invariant is **"all writes are resolved first"** — every write
 goes through `ResolvedArtifact`, so identity is computed once (by the resolver)
 before any bytes land — NOT "all writes use one atomic artifact list." A
-`commit_resolved(...)` convenience may wrap the `Atomic` mode, but it must not
-be the _only_ door, or it excludes `fit`'s streaming path (the failure mode of
-the earlier single-driver sketch).
+`commit_resolved_atomic(store, &resolved, artifacts)` convenience may wrap the
+`Atomic` mode, but it must not be the _only_ door, or it excludes `fit`'s
+streaming path (the failure mode of the earlier single-driver sketch).
 
 This does not require CLI and TOML to share one parse type. It requires every
 surface to converge through the same resolver before writing.
@@ -685,8 +686,9 @@ Only legacy allowlist/test call-sites.
 rg -n "pub enum Backend|struct Backend|type Backend" rust/crates
 ```
 
-No ambiguous production `Backend` type remains. Names are
-`ForwardBackend`/`InferenceBackend` or a more specific domain name.
+No ambiguous `Backend` type remains **outside `runid::inputs::Backend`** (the
+identity/hash-schema type, deliberately kept — Layer 3). Every other occurrence
+is `ForwardBackend`/`InferenceBackend` or a more specific domain name.
 
 ```text
 rg -n "algorithm ==|backend ==|match \\(algorithm, backend\\)|backend: \"|algorithm: \"" \
@@ -770,19 +772,26 @@ value is architectural, not algorithmic.
 
 ## Final target
 
-After this work, the common path for stored artifacts is:
+After this work, the common path for stored artifacts is — **resolve first, then
+write in whichever mode the artifact needs** (`commit_resolved_atomic` is the
+convenience wrapper for the atomic mode; runners that stream use the
+`begin_resolved_write(..., WriteMode::Streaming)` claim/finalize path):
 
 ```rust
+// Atomic: a fully-computed artifact set (e.g. a forward trajectory).
 let resolved = resolve_trajectory(surface, context)?;
-let staged = run_engine(...)?;
-commit_resolved(&store, resolved, staged)?;
-```
+let staged   = run_engine(...)?;
+commit_resolved_atomic(&store, &resolved, staged)?;
 
-or for child artifacts:
+// Streaming: a runner that writes into the claimed leaf as it goes (e.g. fit).
+let resolved = resolve_fit_stage(surface, context)?;
+let write    = begin_resolved_write(&store, &resolved, WriteMode::Streaming)?;
+run_fit_into(write.dir(), ...)?;
+write.finalize()?;
 
-```rust
+// Child artifact (keyed on parent run_id + its own inputs), atomic:
 let resolved = resolve_event_log_child(parent_ref, event_log_surface)?;
-commit_resolved(&store, resolved, staged)?;
+commit_resolved_atomic(&store, &resolved, staged)?;
 ```
 
 No command computes identity ad hoc. No CAS path trusts file existence. No
