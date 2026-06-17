@@ -9,11 +9,21 @@ use crate::{
     output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
-    schedule::{Cursor, Schedule, StepPolicy, EFFECT_EPS, MIN_STEP_EPS},
+    schedule::{Cursor, Schedule, StepPolicy, StopReason, MIN_STEP_EPS},
     simulate::Simulate,
-    state::{Flows, FlowVec, Snapshot, Trajectory},
+    state::{Flows, FlowVec, IntState, RealState, Snapshot, Trajectory},
     transition_diagnostics::TransitionDiagnostics,
 };
+
+/// The mutable boundary state gillespie threads through the shared
+/// [`Schedule::arrive`] seam (gh#233): `apply_effects` mutates the integer/real
+/// compartments, `record` reads them and resets the flow tally. A borrow-struct
+/// over the loop's loose locals so a single `&mut` can pass to both closures.
+struct GillespieBoundary<'a> {
+    int_s: &'a mut IntState,
+    real_s: &'a mut RealState,
+    flows: &'a mut FlowVec,
+}
 
 /// Full recompute every N events to prevent floating-point drift in lambda_total.
 const FULL_RECOMPUTE_INTERVAL: usize = 10_000;
@@ -202,66 +212,61 @@ pub fn run_gillespie_with_observer(
 
         if lambda_total <= 0.0 {
             // Absorbing state: no integer reaction will fire. Advance to the next
-            // timeline boundary and handle it with the SAME effect-then-output
-            // logic the non-absorbing boundary path below uses — driven through
-            // the shared `Schedule::clip` (with no proposed reaction time, i.e.
-            // `t_proposed = +∞`) rather than a hand-rolled boundary `min` + partial
-            // flush. Advancing ONE boundary at a time keeps the output cursor in
-            // lockstep with `t`, so a later boundary can never be pulled behind the
-            // clock.
+            // timeline boundary via the single authority (`next_stop`) and dispatch
+            // through the shared `arrive` seam (gh#233) — the same seam every exact
+            // backend uses, so the effect→output order, the coincident batch, and
+            // the terminal output cannot diverge per-backend (gh#70).
             //
-            // gh#70: the old hand-rolled flush stopped at
-            // `min(next_output, next_effect)` and then jumped `t` straight to the
-            // event time, stranding the output cursor *behind* `t`; the next
-            // boundary clip then faithfully clipped to that stale cursor, dragging
-            // `t` backward and recording post-event state at pre-event output rows.
-            //
-            // `clip` `> t`-filters the effect candidate (an effect exactly at `t`
-            // has already been handled), which is why it is used here instead of
-            // `Schedule::next_stop`: next_stop takes the effect raw, so an effect
-            // landing on `t` (e.g. at `t_start`) would leave `boundary == t` with
-            // nothing to advance the clock — a non-terminating loop. Adopting
-            // next_stop as the single boundary authority requires giving it that
-            // `> t` filter first (spine-consolidation work).
-            let next_eff_after_t = schedule.effect_time(&cursor).filter(|&iv| iv > t);
-            t = schedule.clip(&cursor, t, f64::INFINITY).t;
-
-            // INTERVENE at the boundary if a scheduled effect lands here. Canonical
-            // lifecycle (matches chain_binomial): always-active events fire FIRST
-            // (reading the start-of-step snapshot — gillespie has no transition
-            // step at a boundary), then interventions on the post-event state.
-            let at_iv = next_eff_after_t.is_some_and(|iv_t| (iv_t - t).abs() < EFFECT_EPS);
-            if at_iv {
-                apply_events_at(t, model, &fire_steps, iv_resolution_dt, &mut int_s, &mut real_s, params)?;
-                // INTERVENE (stage 3) via the shared seam (byte-identical):
-                // `t - iv_resolution_dt` lands the seam's `t_end` on `t`. The due
-                // batch is derived once at the boundary `t` (grid = iv_resolution_dt).
-                let mut batch = crate::schedule::EffectBatch::default();
-                crate::effects::due_effects(model, &fire_steps, t, iv_resolution_dt, &mut batch);
-                crate::lifecycle::apply_post_advance(
-                    model, &batch.intervention_idx, &mut int_s, &mut real_s, params,
-                    t - iv_resolution_dt, iv_resolution_dt, None,
+            // RAW `next_stop` is safe here precisely because `arrive` couples
+            // apply-and-pass: a scheduled effect at `t` is applied AND its cursor
+            // advanced in one place, so the next iteration's `next_stop` sees the
+            // following boundary and the clock advances — no non-terminating loop
+            // (the reason the old hand-rolled flush needed `clip`'s `> t` filter).
+            // One boundary at a time keeps the output cursor in lockstep with `t`.
+            let Some(stop) = schedule.next_stop(&cursor, t) else { break };
+            t = stop.t;
+            {
+                // Canonical lifecycle: always-active events fire FIRST (reading the
+                // start-of-step snapshot — gillespie has no transition step at a
+                // boundary), then interventions on the post-event state.
+                let mut bs = GillespieBoundary {
+                    int_s: &mut int_s,
+                    real_s: &mut real_s,
+                    flows: &mut current_flows,
+                };
+                schedule.arrive(
+                    &mut cursor,
+                    &stop,
+                    t,
+                    &mut bs,
+                    |bs, bt| {
+                        apply_events_at(bt, model, &fire_steps, iv_resolution_dt, bs.int_s, bs.real_s, params)?;
+                        let mut batch = crate::schedule::EffectBatch::default();
+                        crate::effects::due_effects(model, &fire_steps, bt, iv_resolution_dt, &mut batch);
+                        crate::lifecycle::apply_post_advance(
+                            model, &batch.intervention_idx, bs.int_s, bs.real_s, params,
+                            bt - iv_resolution_dt, iv_resolution_dt, None,
+                        )
+                    },
+                    |bs, ot| {
+                        traj.push(Snapshot {
+                            t: ot,
+                            int_state: bs.int_s.clone(),
+                            real_state: bs.real_s.clone(),
+                            flows: Flows::Int(bs.flows.counts.clone()),
+                        });
+                        bs.flows.reset();
+                    },
                 )?;
-                while schedule.effect_due_at(&cursor, t) { cursor.pass_effect(); }
-                // State changed — recompute; the model may leave the absorbing state.
+            }
+            // If a scheduled effect fired the state changed — recompute; the model
+            // may leave the absorbing state.
+            if stop.has(StopReason::ScheduledEffect) {
                 eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), &mut propensities)?;
                 lambda_total = propensities.iter().sum();
             }
 
-            // Record every output due at this boundary, in the POST-effect state.
-            while schedule.output_due_at(&cursor, t) {
-                let ot = schedule.output_time(&cursor).expect("due implies present");
-                traj.push(Snapshot {
-                    t: ot,
-                    int_state: int_s.clone(),
-                    real_state: real_s.clone(),
-                    flows: Flows::Int(current_flows.counts.clone()),
-                });
-                current_flows.reset();
-                cursor.pass_output();
-            }
-
-            if t >= cfg.t_end { break; }
+            if stop.is_end() { break; }
             continue;
         }
 
@@ -271,46 +276,65 @@ pub fn run_gillespie_with_observer(
         let dt = -(1.0 / lambda_total) * u1.ln();
         let t_next = t + dt;
 
-        // Clip the proposed reaction time to the next boundary in (t, t_next).
-        // next_eff_after_t mirrors the retired next_iv (> t guard) and is reused
-        // for the at_iv decision below, computed against the OLD t.
-        let next_eff_after_t = schedule.effect_time(&cursor).filter(|&iv| iv > t);
+        // `clip` is the SSA reaction-vs-boundary predicate: does the proposed
+        // reaction at `t_next` fire before the next boundary? On a boundary win we
+        // share the SAME `arrive` dispatch as the absorbing branch and ODE (gh#233).
         let clipped = schedule.clip(&cursor, t, t_next);
 
         if clipped.hit_boundary {
             let boundary = clipped.t;
-            // Advance to boundary without firing an event
-            // TODO(v0.2): replace with PDMP thinning for real compartments
-            // For v0.1: advance real state to boundary using RK4
+            // Advance real state to the boundary without firing an event.
+            // TODO(v0.2): replace with PDMP thinning for real compartments.
             if n_real > 0 && (boundary - t) > MIN_STEP_EPS {
                 rk4_step(model, &int_s, &mut real_s, params, t, boundary - t)?;
                 real_s.clamp_nonneg();
             }
             t = boundary;
 
-            // Apply intervention if at intervention boundary
-            let at_iv = next_eff_after_t.is_some_and(|iv_t| (iv_t - t).abs() < EFFECT_EPS);
-            if at_iv {
-                // Canonical lifecycle (matches chain_binomial): events fire FIRST
-                // (reading the start-of-step snapshot = current `int_s`/`real_s`
-                // at this boundary, since gillespie has no transition step here),
-                // then interventions on the post-event state.
-                apply_events_at(t, model, &fire_steps, iv_resolution_dt, &mut int_s, &mut real_s, params)?;
-                // INTERVENE (stage 3) via the shared seam (byte-identical). The
-                // due batch is derived once at the boundary `t` (grid =
-                // iv_resolution_dt).
-                let mut batch = crate::schedule::EffectBatch::default();
-                crate::effects::due_effects(model, &fire_steps, t, iv_resolution_dt, &mut batch);
-                crate::lifecycle::apply_post_advance(
-                    model, &batch.intervention_idx, &mut int_s, &mut real_s, params,
-                    t - iv_resolution_dt, iv_resolution_dt, None,
+            // `clip` and `next_stop` share the boundary min, and the cursor still
+            // points at this boundary's unconsumed reasons, so `next_stop` reports
+            // them. Dispatch via the shared seam: events FIRST (start-of-step
+            // snapshot — gillespie has no transition step here), then interventions
+            // on the post-event state, then output.
+            let stop = schedule.next_stop(&cursor, t).expect("clip hit a boundary <= t_end");
+            {
+                let mut bs = GillespieBoundary {
+                    int_s: &mut int_s,
+                    real_s: &mut real_s,
+                    flows: &mut current_flows,
+                };
+                schedule.arrive(
+                    &mut cursor,
+                    &stop,
+                    t,
+                    &mut bs,
+                    |bs, bt| {
+                        apply_events_at(bt, model, &fire_steps, iv_resolution_dt, bs.int_s, bs.real_s, params)?;
+                        let mut batch = crate::schedule::EffectBatch::default();
+                        crate::effects::due_effects(model, &fire_steps, bt, iv_resolution_dt, &mut batch);
+                        crate::lifecycle::apply_post_advance(
+                            model, &batch.intervention_idx, bs.int_s, bs.real_s, params,
+                            bt - iv_resolution_dt, iv_resolution_dt, None,
+                        )
+                    },
+                    |bs, ot| {
+                        traj.push(Snapshot {
+                            t: ot,
+                            int_state: bs.int_s.clone(),
+                            real_state: bs.real_s.clone(),
+                            flows: Flows::Int(bs.flows.counts.clone()),
+                        });
+                        bs.flows.reset();
+                    },
                 )?;
-                while schedule.effect_due_at(&cursor, t) { cursor.pass_effect(); }
-                // Full recompute after intervention (integer state changed)
+            }
+
+            if stop.has(StopReason::ScheduledEffect) {
+                // Full recompute after intervention (integer state changed).
                 eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), &mut propensities)?;
                 lambda_total = propensities.iter().sum();
             } else {
-                // Time advanced but no state change: re-evaluate time-dependent transitions
+                // Time advanced but no state change: re-evaluate time-dependent transitions.
                 let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, aux: None, int_float_override: None };
                 for &tr_idx in &model.time_dep_transitions {
                     let old = propensities[tr_idx];
@@ -321,20 +345,7 @@ pub fn run_gillespie_with_observer(
                 lambda_total = lambda_total.max(0.0);
             }
 
-            // Record output if at output boundary
-            while schedule.output_due_at(&cursor, t) {
-                let ot = schedule.output_time(&cursor).expect("due implies present");
-                traj.push(Snapshot {
-                    t: ot,
-                    int_state: int_s.clone(),
-                    real_state: real_s.clone(),
-                    flows: Flows::Int(current_flows.counts.clone()),
-                });
-                current_flows.reset();
-                cursor.pass_output();
-            }
-
-            if t >= cfg.t_end { break; }
+            if stop.is_end() { break; }
             continue;
         }
 
