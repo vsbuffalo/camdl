@@ -423,30 +423,59 @@ This is the important type-system property: a fit-stage identity cannot contain
 a new process interface; it cannot arrive by accident because someone reused the
 forward enum.
 
-#### Global fit `[config].backend`
+#### Global fit `[config].backend` — resolved
 
-The current global fit config uses the 3-variant forward backend. That is a
-domain leak unless the field is strictly a forward-simulation default for
-synthetic/initialization paths.
+Verified against the code: the global `[config].backend` is read at exactly two
+fit-path sites — `fit/mod.rs:527` (passed to
+`synthetic::generate_synthetic_datasets`, a forward simulation; fires only when
+`[synthetic]` is present) and `fit/mod.rs:1256` (written into
+`MleMetadata.backend`, the `mle_params.toml` provenance record). It is **never**
+fed to a method/stage dispatch, and every `Stage` carries its own non-`Option`
+`backend`, so a stage cannot fall back to the global. It is therefore a
+**forward-simulation backend** for `[synthetic]` data generation, not an
+inference default. It becomes `ForwardBackend`, and `gillespie` stays valid
+there.
 
-Choose one of these end states:
+Two defects fall out of this:
 
-1. If it is an inference default, change it to `InferenceBackend`.
-2. If it is only a forward-simulation default, rename it to make that explicit.
-3. If stage backends are authoritative, remove/deprecate the global backend and
-   require each stage to declare its backend.
+- **Provenance bug (`fit/mod.rs:1256`).** `mle_params.toml` records the global
+  forward backend as "the backend," but the MLE stage ran on its own stage
+  backend. Fix: `MleMetadata.backend` records the stage `InferenceBackend`. This
+  changes an _output_ artifact only — no input re-key.
+- **Over-keying.** `[config].backend` has `#[serde(default)]` but **no**
+  `skip_serializing_if` — unlike its siblings `obs_alignment` /
+  `allow_degenerate_rates`, which skip precisely to stay out of the identity
+  hash. It is in the include-by-default fit blob, so it is _always_ hashed —
+  even for a real-data fit where it does nothing. Two otherwise-identical
+  real-data fits that differ only here get different `run_id`s and miss cache.
 
-Do not keep a field named simply `backend` in fit config if it can parse
-`gillespie` but is later interpreted as an inference backend.
+**Re-key boundary.** The type swap `args::types::Backend → ForwardBackend` with
+serde spelling preserved is **zero re-key** (the serialized value bytes are
+identical). But _renaming or relocating the field_ (`synthetic_backend`, or
+moving it into `[synthetic]`) changes the serialized `FitConfigV2` structure and
+**re-keys every fit `run_id`**. So the cleanup splits across the re-key
+boundary:
 
-Acceptance:
+1. **PR B (zero re-key):** type the field `ForwardBackend` (serde preserved) +
+   the provenance fix (output-only). This fixes the domain leak at the type
+   level — `gillespie` is correctly allowed and the field is typed as forward.
+2. **Re-key lane (PR D, or a dedicated announced re-key):** relocate the field
+   into the `[synthetic]` block (`[synthetic].backend`), making "backend set
+   without `[synthetic]`" structurally unrepresentable (illegal-states-
+   unrepresentable) and removing the over-keying. This re-keys the fit store, so
+   it rides the PR that owns re-keys — never PR B. The clean break is a hard
+   error on the old `[config].backend` key naming the replacement + a
+   `docs/language-changes.md` entry; no serde `alias`.
+
+Acceptance (PR B):
 
 ```text
 $ rg -n "pub backend: .*args::types::Backend|pub backend: .*ForwardBackend" \
     rust/crates/cli/src/fit
 ```
 
-must have only intentionally forward-simulation fields, each documented as such.
+must have only intentionally forward-simulation fields, each documented as such;
+the anti-drift run-id golden must not move (zero re-key).
 
 ### Layer 4: typed fit method registry
 
@@ -639,8 +668,13 @@ All landed in PR #244.
    `type_tag` or a deliberate `HASH_VERSION` migration — never this PR.
 3. Rename `run_meta::Backend` -> `InferenceBackend`, **preserving its snake_case
    serde spelling** (the fit blob stays byte-identical — no re-key).
-4. Fix the fit global `[config].backend` domain leak by one of the Layer-3
-   choices.
+4. Type the fit global `[config].backend` as `ForwardBackend` (serde spelling
+   preserved → zero re-key); document it as the forward-sim backend for
+   `[synthetic]` generation. Fix the `MleMetadata.backend` provenance bug
+   (`fit/mod.rs:1256`) to record the stage `InferenceBackend` (output-only, no
+   re-key). The field _relocation_ into `[synthetic]` — which removes the
+   over-keying but re-keys the fit store — is deferred to the re-key lane (PR
+   D), per the Layer-3 re-key boundary.
 5. Add the explicit `TryFrom<ForwardBackend> for InferenceBackend` (fallible:
    `Gillespie` -> `BackendDomainError`).
 6. Preserve all serde wire spelling.
