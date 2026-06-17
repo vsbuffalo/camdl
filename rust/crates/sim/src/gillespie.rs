@@ -9,7 +9,7 @@ use crate::{
     output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
-    schedule::{Cursor, Schedule, StepPolicy},
+    schedule::{Cursor, Schedule, StepPolicy, EFFECT_EPS, MIN_STEP_EPS},
     simulate::Simulate,
     state::{Flows, FlowVec, Snapshot, Trajectory},
     transition_diagnostics::TransitionDiagnostics,
@@ -230,7 +230,7 @@ pub fn run_gillespie_with_observer(
             // lifecycle (matches chain_binomial): always-active events fire FIRST
             // (reading the start-of-step snapshot — gillespie has no transition
             // step at a boundary), then interventions on the post-event state.
-            let at_iv = next_eff_after_t.is_some_and(|iv_t| (iv_t - t).abs() < 1e-10);
+            let at_iv = next_eff_after_t.is_some_and(|iv_t| (iv_t - t).abs() < EFFECT_EPS);
             if at_iv {
                 apply_events_at(t, model, &fire_steps, iv_resolution_dt, &mut int_s, &mut real_s, params)?;
                 // INTERVENE (stage 3) via the shared seam (byte-identical):
@@ -282,14 +282,14 @@ pub fn run_gillespie_with_observer(
             // Advance to boundary without firing an event
             // TODO(v0.2): replace with PDMP thinning for real compartments
             // For v0.1: advance real state to boundary using RK4
-            if n_real > 0 && (boundary - t) > 1e-15 {
+            if n_real > 0 && (boundary - t) > MIN_STEP_EPS {
                 rk4_step(model, &int_s, &mut real_s, params, t, boundary - t)?;
                 real_s.clamp_nonneg();
             }
             t = boundary;
 
             // Apply intervention if at intervention boundary
-            let at_iv = next_eff_after_t.is_some_and(|iv_t| (iv_t - t).abs() < 1e-10);
+            let at_iv = next_eff_after_t.is_some_and(|iv_t| (iv_t - t).abs() < EFFECT_EPS);
             if at_iv {
                 // Canonical lifecycle (matches chain_binomial): events fire FIRST
                 // (reading the start-of-step snapshot = current `int_s`/`real_s`
@@ -353,7 +353,7 @@ pub fn run_gillespie_with_observer(
 
         // Advance real state to event time
         // TODO(v0.2): replace with PDMP thinning
-        if n_real > 0 && dt > 1e-15 {
+        if n_real > 0 && dt > MIN_STEP_EPS {
             rk4_step(model, &int_s, &mut real_s, params, t, dt)?;
             real_s.clamp_nonneg();
         }

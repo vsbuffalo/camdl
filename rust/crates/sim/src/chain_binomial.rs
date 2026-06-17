@@ -9,7 +9,7 @@ use crate::{
     output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
-    schedule::{Cursor, Schedule, StepPolicy},
+    schedule::{Cursor, Schedule, StepPolicy, MIN_STEP_EPS},
     simulate::Simulate,
     state::{Flows, FlowVec, IntState, RealState, Snapshot, Trajectory},
 };
@@ -216,7 +216,7 @@ pub fn run_chain_binomial_with_observer(
 
         // Snap step: dt = cfg.dt.min(t_end - t), the original formula (bit-exact).
         let dt = schedule.substep(&cursor, t).expect("t < t_end inside loop");
-        if dt <= 1e-15 { break; }
+        if dt <= MIN_STEP_EPS { break; }
         // Robust grid time for rate/forcing evaluation (drift-free vs `t`).
         let t_grid = schedule.substep_time(cfg.t_start, s);
 

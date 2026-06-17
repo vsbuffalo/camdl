@@ -132,12 +132,23 @@ pub struct Cursor {
     pub obs_idx: usize,
 }
 
-/// Tolerance for "an output time has been reached" — matches the
-/// `<= t + 1e-12` test the backends use at output emission.
-const OUTPUT_EPS: f64 = 1e-12;
-/// Tolerance for "an effect time has been reached" — the `1e-10` window the
-/// exact backends use to decide an effect boundary has been hit.
-const EFFECT_EPS: f64 = 1e-10;
+/// The three time tolerances, defined ONCE here (the spine owns time) and reused
+/// everywhere — distinguished by MEANING, not just value. Replacing the bare
+/// literals the backends used to spell by hand (gh#233). NOTE three same-valued
+/// constants that are deliberately NOT these (different axes, do not merge):
+/// `chain_binomial::RATE_EPSILON` (a *rate* floor), the `clamp(1e-15, 1-1e-15)`
+/// *probability* guard, and `pgas::GRID_STEP_EPS` (a 1e-12 negligible-step floor
+/// whose discrepancy with `MIN_STEP_EPS` is a separate, deliberate decision).
+///
+/// "An output time has been reached" / due: `next_output <= t + OUTPUT_EPS`.
+pub const OUTPUT_EPS: f64 = 1e-12;
+/// "An effect / observation time has been reached" / due: `next_effect <= t + EFFECT_EPS`.
+pub const EFFECT_EPS: f64 = 1e-10;
+/// Step FLOOR: a remaining gap this small means the integrator has ARRIVED at the
+/// boundary — dispatch, don't step. Distinct in meaning from the two *due* tests
+/// above even though numerically smaller. (ode `h_max` arrival, chain loop-break,
+/// gillespie RK4-skip guard.)
+pub const MIN_STEP_EPS: f64 = 1e-15;
 
 /// Immutable, `Sync`, shared by every particle. Construction sorts the boundary
 /// times once; [`Cursor`] walks them. See the module header for the invariant.

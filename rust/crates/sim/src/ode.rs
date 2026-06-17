@@ -6,7 +6,7 @@ use crate::{
     output::output_times as get_output_times,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
-    schedule::{Cursor, Schedule, StepPolicy},
+    schedule::{Cursor, Schedule, StepPolicy, EFFECT_EPS, MIN_STEP_EPS},
     simulate::Simulate,
     state::{Flows, IntState, RealState, Snapshot, Trajectory},
 };
@@ -605,11 +605,11 @@ pub fn run_ode(
         let boundary = schedule.next_boundary(&cursor, t).expect("t < t_end inside loop");
         let h_max = boundary - t;
 
-        if h_max <= 1e-15 {
+        if h_max <= MIN_STEP_EPS {
             // At a boundary — apply effects or record output. Same threshold as
             // the old `substep <= 1e-15`: for `cfg.dt > 1e-15`,
             // `dt.min(h_max) <= 1e-15  ⇔  h_max <= 1e-15`.
-            if schedule.effect_time(&cursor).is_some_and(|iv| (iv - t).abs() < 1e-10) {
+            if schedule.effect_time(&cursor).is_some_and(|iv| (iv - t).abs() < EFFECT_EPS) {
                 // Continuous lifecycle: events (frozen snapshot) fire before
                 // interventions (sequential, post-event). Applied EXACTLY to the
                 // f64 vectors — no `to_states` round-trip — so the fractional
@@ -650,7 +650,7 @@ pub fn run_ode(
         // BEFORE interventions, which read the post-event state; applied EXACTLY
         // to the f64 vectors so the fractional integrator state survives. A no-op
         // on intermediate substeps (no effect time within 1e-10 of `t`).
-        if schedule.effect_time(&cursor).is_some_and(|iv| (iv - t).abs() < 1e-10) {
+        if schedule.effect_time(&cursor).is_some_and(|iv| (iv - t).abs() < EFFECT_EPS) {
             let mut batch = crate::schedule::EffectBatch::default();
             crate::effects::due_effects(model, &fire_steps, t, cfg.dt, &mut batch);
             crate::effects::apply_boundary_batch_continuous(
