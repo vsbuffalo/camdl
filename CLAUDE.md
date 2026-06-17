@@ -623,3 +623,95 @@ stage, no contract to honour. Code that comes back can come back from
 When you encounter dead code while doing other work, delete it in a separate
 commit before the substantive change — review is easier when each commit is one
 thing.
+
+### Reach for the existing seam before adding a parallel one
+
+Before adding a primitive, helper, method, or constant, search for one that
+already answers the question and extend it. A second function that answers the
+same question a hair differently is not a convenience — it is a fork the two
+sides drift across, the exact mechanism behind the silent-wrong matrix bugs
+above. The boundary loop is the cautionary tale: "where does the integrator stop
+next" is now answered **four** incompatible ways — `Schedule::substep`,
+`Schedule::clip`, `Schedule::next_boundary`, and the unused
+`Schedule::next_stop` — because successive changes each reached for a fresh
+accessor instead of the one-carrying-the-reasons that already existed (gh#233).
+Before you add `foo_v2` / `next_thing` / a sibling accessor: `rg` the type for
+its existing methods, read them, and either call one or extend one. If you
+genuinely need a new one, the commit must say _why the existing seam could not
+serve_ — that one sentence is the review gate, and its absence is the smell.
+
+### A shared primitive ships wired into its consumers, not as a stub
+
+"Delete dead code on sight" has a mirror image: do not _create_ dead code by
+landing a primitive that nothing calls. A unit-tested function with zero
+production callers is not "ready for adoption" — it is unexercised on every path
+that matters, and its tests are thin evidence (they were written to the same
+mental model the code was, so they confirm the author's intent, not the system's
+behaviour). `Schedule::next_stop` shipped exactly this way — advertised as the
+"single boundary authority," unit-tested, never called — so the centralization
+it was meant to finish stayed half-done, which is the soil the gh#70 / gh#208
+silent-wrong bugs grew from (gh#233). Rule: the change that introduces a shared
+primitive wires at least one real consumer through it, in the same PR. If you
+cannot wire it yet, do not land it yet — an "API for later" with no caller rots
+and misleads the next reader into thinking the consolidation already happened.
+
+### Name tolerances and magic numbers once; never inline a bare epsilon
+
+A bare numeric literal in control flow (`if dt <= 1e-15`,
+`(iv - t).abs() < 1e-10`) is unreadable and un-greppable: the next reader cannot
+tell a step floor from a due-tolerance from a rate floor, and the same concept
+silently drifts in value across call sites. Define each threshold **once**, as a
+named `const` at the module that owns the concept (time tolerances belong in
+`schedule.rs`), with a doc comment saying what the check _means_, and reference
+it everywhere. Distinct concepts that share a value keep **distinct names** — a
+time `MIN_STEP_EPS` and a `RATE_EPSILON` are not the same thing even at `1e-15`.
+The cost of inlining is concrete: the "effectively-zero step" threshold was
+spelled `1e-15` at four sites while PGAS's equivalent floor `GRID_STEP_EPS`
+silently used `1e-12` — a three-orders-of-magnitude disagreement that surfaced
+only when someone tried to give it a name (gh#233).
+
+### Parse at the boundary; don't pass raw and validate
+
+We want **illegal states unrepresentable** — ideally a wrong wiring won't
+compile, rather than being caught by a comment, a `debug_assert!`, or a test.
+Hold this in a **careful, pragmatic balance**: the aim is to delete a class of
+silent-wrong bug, not to turn the code into a type exercise. Add structure where
+it removes a real, plausible mistake; stop before it becomes ceremony.
+
+The high-leverage move: at a trust boundary — where raw/loosely-typed data
+enters the typed core (`Vec<f64>`, `String`, `&CompiledModel`, CLI args, JSON) —
+_parse_ it once into a type whose constructor is the only way to make it and
+whose existence proves the invariant ("parse, don't validate", Alexis King 2019;
+the operational form of "make illegal states unrepresentable" from the global
+Design Philosophy). Downstream receives the parsed type and never re-checks.
+Prefer a fallible smart constructor that folds _produce + validate + role-tag_
+into one seam: `OutputTimes::from_model(model)?` is the producer, the
+sort/finite check, and the "this is the output axis, not the effect axis" tag,
+all in one place.
+
+Tells you're validating instead of parsing — each is a cue to promote to a
+parsed type:
+
+- a `debug_assert!` of an invariant on a _public_ constructor (checked only in
+  debug; the type still permits the illegal value — e.g. `Schedule::new`'s
+  `debug_assert!(sorted)`);
+- a comment carrying an invariant ("must be sorted", "caller guarantees finite")
+  instead of a type;
+- the same check repeated at several call sites;
+- a primitive-heavy signature where the primitives have distinct semantics and
+  the same underlying type (`fn(…, Vec<f64>, Vec<f64>)` — adjacent, swappable, a
+  swap compiles → silent-wrong).
+
+**The pragmatic line (this is where the balance lives).** Wrap a value when its
+instances are genuinely different _and_ swappable into the same slot — different
+semantics, same underlying type, so a swap type-checks and silently corrupts. Do
+**not** wrap values that are usually the same number or already validated
+elsewhere — that is the over-engineering the global "don't over-engineer" warns
+against, and it is a real cost (noisier signatures and tests, tiny types the
+maintainer must mentally unwrap). gh#233 shows both sides: `OutputTimes` /
+`EffectTimes` / `ObsTimes` over a checked `SortedFiniteTimes` earn their keep
+(three `Vec<f64>` axes with distinct meaning — record / fire / score+reset — so
+a swap is silent-wrong), while `NominalStep` / `SnapGrid` scalar newtypes were
+dropped (`dt == grid` at six of seven sites — ceremony). Keep wrappers at the
+construction boundary and unwrap to the primitive for the hot path so nothing
+threads through the inner loop.
