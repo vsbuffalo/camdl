@@ -432,8 +432,13 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         skip_first_obs_from_loglik: false,
         record_ancestry: need_ancestry,
         record_prequential: save_prequential.is_some(),
-        // Non-CAS legacy path keeps the env-resolved wall-clock budget.
-        pf_wallclock_disabled: false,
+        // gh#241 (G2): pfilter writes a content-addressed `pfilters/` leaf
+        // (`write_cas_leaf` below), so the wall-clock watchdog is OFF for
+        // determinism parity with `fit` — whether the leaf is produced must not
+        // depend on machine speed / `CAMDL_PF_WALLCLOCK_TIMEOUT_S`. The
+        // deterministic ESS-collapse / all-dead detectors and the per-step
+        // substep cap remain the compute-blowup safety.
+        pf_wallclock_disabled: true,
     };
 
     // --save-filtering caveat log. Fires unconditionally (not quietable)

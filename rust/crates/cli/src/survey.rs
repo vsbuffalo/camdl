@@ -991,8 +991,12 @@ fn eval_point_pfilter(
             skip_first_obs_from_loglik: false,
             record_ancestry: false,
             record_prequential: false,
-            // Keep the env-resolved wall-clock budget for the PF.
-            pf_wallclock_disabled: false,
+            // gh#241 (G2): survey writes a content-addressed `surveys/` leaf,
+            // so the wall-clock watchdog is OFF for determinism parity with
+            // `fit` (the landscape must not depend on machine speed /
+            // `CAMDL_PF_WALLCLOCK_TIMEOUT_S`); the deterministic degeneracy
+            // detectors + substep cap remain the safety.
+            pf_wallclock_disabled: true,
         };
         match bootstrap_filter(process, obs_model, params, &cfg, seed) {
             Ok(PFilterResult { log_likelihood, ess_trace, .. }) => {
