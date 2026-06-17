@@ -77,6 +77,23 @@ pub struct TimelineStop {
     pub reasons: SmallVec<[StopReason; 4]>,
 }
 
+impl TimelineStop {
+    /// Whether `reason` is one of the reasons this stop matters. The driver's
+    /// dispatch (`apply_stop`/`Walk::arrive`) reads reasons via `has`/`is_end`
+    /// rather than indexing the vector, so the vector's order stays a listing
+    /// detail and the application order (effects before output) is fixed by the
+    /// dispatch, not by the vector (gh#233).
+    pub fn has(&self, reason: StopReason) -> bool {
+        self.reasons.contains(&reason)
+    }
+
+    /// Whether this stop is the run-end boundary (`t == t_end`). The driver
+    /// records any coincident output first, then breaks on `End`.
+    pub fn is_end(&self) -> bool {
+        self.has(StopReason::End)
+    }
+}
+
 /// The interventions/events due to fire at one substep, pre-split by lifecycle
 /// stage so application carries a known list instead of re-deriving due-ness.
 /// Indices are into `model.model.interventions`, in DECLARATION ORDER (the
@@ -790,6 +807,64 @@ mod tests {
         let stop = s.next_stop(&cur, 1.0).unwrap();
         assert_eq!(stop.t, 2.5, "nearest of {{12, 4, 2.5, 7.3}} is the effect at 2.5");
         assert_eq!(stop.reasons.as_slice(), &[StopReason::ScheduledEffect]);
+    }
+
+    // ───────────── gh#233 Layer 1: the raw `next_stop` contract ─────────────
+    // These pin the contract the backend rewiring (Layers 2/7) will depend on:
+    // `next_stop` is RAW (no `> t` filter), reports a coincident reason batch,
+    // and the `has`/`is_end` helpers read it. The application order (effects
+    // before output) is a dispatch property pinned in Layer 2 (`apply_stop`),
+    // not here — `next_stop` only reports WHAT is due, not how it is applied.
+
+    #[test]
+    fn next_stop_is_raw_effect_at_t_is_reported_not_filtered() {
+        // THE load-bearing contract (gate angle 1): an effect due exactly at the
+        // query `t`, with the cursor still pointing at it, is REPORTED (raw),
+        // not skipped. This is what makes the arrive-and-consume backends correct:
+        // when the integrator arrives on an effect boundary the cursor has not
+        // yet passed, `next_stop` must surface it so dispatch applies it.
+        //
+        // A `> t` filter (like `clip`'s) would instead drop the effect at `t` and
+        // return the NEXT boundary — stepping past the effect unapplied (silent
+        // wrong). `clip` needs that filter only because it is peek-without-consume;
+        // `next_stop`'s consumer couples apply+pass, so raw is correct. This test
+        // fails the instant a `> t` filter is added to the effect candidate.
+        let s = exact(1.0, 100.0, vec![5.0], vec![3.0]);
+        let cur = Cursor::default(); // effect_idx 0 → effect_times[0] == 3.0, unconsumed
+        let stop = s.next_stop(&cur, 3.0).expect("a stop is due at t == effect time");
+        assert_eq!(stop.t, 3.0, "raw: the boundary is the effect at t=3.0, not the output at 5.0");
+        assert!(
+            stop.has(StopReason::ScheduledEffect),
+            "the effect due exactly at t must be reported (raw), not `> t`-filtered away"
+        );
+        assert!(!stop.has(StopReason::Output), "output at 5.0 is not yet due at t=3.0");
+    }
+
+    #[test]
+    fn next_stop_helpers_read_the_reason_batch() {
+        // `has`/`is_end` read a coincident reason batch (output + effect + obs all
+        // at t=5), and `is_end` is false away from t_end.
+        let s = Schedule::new(1.0, 12.0, 1.0, StepPolicy::Exact, vec![5.0], vec![5.0])
+            .with_obs(vec![5.0]);
+        let cur = Cursor::default();
+        let stop = s.next_stop(&cur, 4.0).unwrap();
+        assert_eq!(stop.t, 5.0);
+        assert!(stop.has(StopReason::Output));
+        assert!(stop.has(StopReason::ScheduledEffect));
+        assert!(stop.has(StopReason::Observation));
+        assert!(!stop.is_end(), "t=5 is not t_end=12");
+    }
+
+    #[test]
+    fn next_stop_is_end_at_t_end_with_coincident_output() {
+        // Terminal contract: at t_end the stop carries End; a coincident output
+        // is also reported so the driver records the terminal row before breaking.
+        let s = exact(1.0, 5.0, vec![5.0], vec![]);
+        let cur = Cursor::default();
+        let stop = s.next_stop(&cur, 4.0).unwrap();
+        assert_eq!(stop.t, 5.0);
+        assert!(stop.is_end(), "t_end boundary carries End");
+        assert!(stop.has(StopReason::Output), "coincident terminal output is reported");
     }
 
     #[test]
