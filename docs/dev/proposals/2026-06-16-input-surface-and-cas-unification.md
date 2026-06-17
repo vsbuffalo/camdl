@@ -1,15 +1,19 @@
 # Input surface mapping and input-addressed identity unification
 
-Date: 2026-06-16 Status: Draft — REVISED after a 2026-06-16 adversarial review
-(§11). Diagnosis (§1–§3) stands; the prescription is narrowed: D1's
-"structural-on-the-surface-struct, zero transcription" is **infeasible** (the
-identity layer deliberately excludes `f64`/`IndexMap` from `ContentAddressed`)
-and is corrected to "dedup the surface, keep the transcribing resolve"; D3 (one
-`build` driver) is demoted to the existing shared substrate; the cheap path
-(C2/C3/C4 + the differential test, zero re-key) is the first PR. Builds on:
-`2026-05-31-content-addressed-run-identity.md` (the foundational CAS design)
-Issues: gh#241 (CLI↔TOML struct duplication), gh#156 (OutputView, the first
-shared struct), gh#147 (legacy-store migration)
+Date: 2026-06-16 Status: **Diagnosis/map/guarantees RETAINED as the reference;
+design & sequencing SUPERSEDED by
+`2026-06-17-cas-runinput-type-consolidation.md`** (the active implementation
+RFC). This doc remains the input-surface map (§2), the guarantees ledger (§1.1),
+and the adversarial-review record (§11). Prior note: REVISED after a 2026-06-16
+adversarial review (§11). Diagnosis (§1–§3) stands; the prescription is
+narrowed: D1's "structural-on-the-surface-struct, zero transcription" is
+**infeasible** (the identity layer deliberately excludes `f64`/`IndexMap` from
+`ContentAddressed`) and is corrected to "dedup the surface, keep the
+transcribing resolve"; D3 (one `build` driver) is demoted to the existing shared
+substrate; the cheap path (C2/C3/C4 + the differential test, zero re-key) is the
+first PR. Builds on: `2026-05-31-content-addressed-run-identity.md` (the
+foundational CAS design) Issues: gh#241 (CLI↔TOML struct duplication), gh#156
+(OutputView, the first shared struct), gh#147 (legacy-store migration)
 
 ## Why this document exists
 
