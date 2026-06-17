@@ -164,17 +164,34 @@ pub fn finish_event_log(a: &SimulateArgs, event_log: &EventLog, exact: bool, lea
             path.display(), fmt_ext,
         );
     } else {
-        eprintln!(
-            "event log: {} events ({} lineage) stored as event_log.tsv in the run leaf; {}",
-            event_log.events.len(), n_lineage, exactness,
-        );
         match leaf_event_log {
-            Some(path) => eprintln!(
-                "  next: camdl lineage realize {} --identity-seed <N> -o line_list.tsv", path
-            ),
-            None => eprintln!(
-                "  next: camdl lineage realize <event_log> --identity-seed <N> -o line_list.tsv"
-            ),
+            // Fresh run: the event log was stored in the leaf alongside traj.tsv.
+            Some(path) => {
+                eprintln!(
+                    "event log: {} events ({} lineage) stored as event_log.tsv in the run leaf; {}",
+                    event_log.events.len(), n_lineage, exactness,
+                );
+                eprintln!(
+                    "  next: camdl lineage realize {} --identity-seed <N> -o line_list.tsv", path
+                );
+            }
+            // Cache HIT (gh#241): the trajectory leaf already existed, so
+            // commit_atomic discarded our freshly-staged event_log.tsv — the
+            // leaf does NOT contain it. Be honest and actionable instead of
+            // claiming it was stored and pointing at a missing file. (Proper
+            // fix — event log as a child sub-artifact like obs, or
+            // augment-on-recommit — is a store-protocol follow-up.)
+            None => {
+                eprintln!(
+                    "event log: {} events ({} lineage) recorded, but the trajectory was already \
+                     cached so it was not stored in the leaf; {}",
+                    event_log.events.len(), n_lineage, exactness,
+                );
+                eprintln!(
+                    "  to capture it: re-run with `--event-log <PATH>` (writes the log to PATH), \
+                     or `--force` to recompute and store it in the leaf"
+                );
+            }
         }
     }
 }
