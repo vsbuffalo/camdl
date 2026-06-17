@@ -10,7 +10,7 @@ pub mod types;
 use std::path::PathBuf;
 use clap::{Args, ArgGroup};
 use crate::colored_help;
-use types::{Backend, DataSpec, ListDuration, ParamOverride, ParamVecSpec, RwSd, SeedSpec, SweepSpec, TableSpec};
+use types::{ForwardBackend, DataSpec, ListDuration, ParamOverride, ParamVecSpec, RwSd, SeedSpec, SweepSpec, TableSpec};
 
 // ─── Shared help-text constants ───────────────────────────────────────────────
 //
@@ -328,7 +328,7 @@ pub struct ScenarioArgs {
 pub struct SimBackend {
     /// Simulation backend (default: chain_binomial)
     #[arg(long)]
-    pub backend: Option<Backend>,
+    pub backend: Option<ForwardBackend>,
 
     /// Step size for discrete-time backends (default: 1.0)
     #[arg(long)]
@@ -2567,8 +2567,8 @@ mod tests {
 
     /// Regression (gh#183): the `simulate --backend` help text must name
     /// the *resolved* default. `camdl simulate` resolves an omitted
-    /// `--backend` to `Backend::ChainBinomial` (main.rs:
-    /// `a.backend.backend.unwrap_or(Backend::ChainBinomial)`), so the help
+    /// `--backend` to `ForwardBackend::ChainBinomial` (main.rs:
+    /// `a.backend.backend.unwrap_or(ForwardBackend::ChainBinomial)`), so the help
     /// string claiming `gillespie` was stale doc-vs-code drift dating to
     /// before the 2026-04-19 backend-default-mismatch fix moved the
     /// simulate default to chain_binomial. Pin the help to the code-true
@@ -2576,7 +2576,7 @@ mod tests {
     #[test]
     fn simulate_backend_help_names_resolved_default() {
         // The resolved default, straight from the enum the resolver uses.
-        let resolved_default = Backend::ChainBinomial.as_str(); // "chain_binomial"
+        let resolved_default = ForwardBackend::ChainBinomial.as_str(); // "chain_binomial"
 
         let mut cmd = Cli::command();
         let simulate = cmd

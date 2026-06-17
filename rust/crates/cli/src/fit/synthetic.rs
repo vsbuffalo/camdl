@@ -49,7 +49,7 @@ pub fn generate_synthetic_datasets(
     spec: &SyntheticSpec,
     model_path: &str,
     fit_dir: &Path,
-    backend: crate::args::types::Backend,
+    backend: crate::args::types::ForwardBackend,
     dt: f64,
 ) -> Result<Vec<SyntheticDataset>, String> {
     let data_dir = fit_dir.join("synthetic").join("data");
@@ -89,7 +89,7 @@ fn generate_one_dataset(
     model_path: &str,
     sim_seed: u64,
     out_path: &Path,
-    backend: crate::args::types::Backend,
+    backend: crate::args::types::ForwardBackend,
     dt: f64,
 ) -> Result<String, String> {
     // Build a SimRun matching `simulate --obs` semantics — load the
@@ -334,7 +334,7 @@ simulate { from = 0 'days  to = 10 'days }
         };
         let datasets = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(), &fit_dir,
-            crate::args::types::Backend::ChainBinomial, 1.0,
+            crate::args::types::ForwardBackend::ChainBinomial, 1.0,
         ).expect("generation must succeed on minimal SIR");
 
         assert_eq!(datasets.len(), 3);
@@ -367,11 +367,11 @@ simulate { from = 0 'days  to = 10 'days }
         };
         let a = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("run_a"), crate::args::types::Backend::ChainBinomial, 1.0,
+            &tmp.path().join("run_a"), crate::args::types::ForwardBackend::ChainBinomial, 1.0,
         ).unwrap();
         let b = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("run_b"), crate::args::types::Backend::ChainBinomial, 1.0,
+            &tmp.path().join("run_b"), crate::args::types::ForwardBackend::ChainBinomial, 1.0,
         ).unwrap();
 
         assert_eq!(std::fs::read(&a[0].path).unwrap(),
@@ -392,7 +392,7 @@ simulate { from = 0 'days  to = 10 'days }
         };
         let ds = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("fit"), crate::args::types::Backend::ChainBinomial, 1.0,
+            &tmp.path().join("fit"), crate::args::types::ForwardBackend::ChainBinomial, 1.0,
         ).unwrap();
         assert_ne!(std::fs::read(&ds[0].path).unwrap(),
                    std::fs::read(&ds[1].path).unwrap(),

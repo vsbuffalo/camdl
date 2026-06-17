@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use runid::{ArtifactKind, RunRecord};
 
 use crate::fit::fit_tree::{derive_axes, StageAxes};
-use crate::run_meta::{Backend, MethodKind, ParameterProvenance, ResolvedPriorEntry};
+use crate::run_meta::{InferenceBackend, MethodKind, ParameterProvenance, ResolvedPriorEntry};
 
 /// One fit-stage leaf, projected to the headline numbers the fit consumers
 /// read directly from the leaf's `RunRecord` (`inputs` + path-derived `axes`).
@@ -37,7 +37,7 @@ pub struct FitStageView {
     pub method: MethodKind,
     /// Simulation backend the stage ran on. Defaults to `ChainBinomial` when
     /// absent.
-    pub backend: Backend,
+    pub backend: InferenceBackend,
     pub seed: u64,
     pub n_chains: usize,
     pub best_loglik: Option<f64>,
@@ -115,10 +115,10 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Option<Fit
     let method: MethodKind = inputs
         .get("method")
         .and_then(|v| serde_json::from_value(v.clone()).ok())?;
-    let backend: Backend = inputs
+    let backend: InferenceBackend = inputs
         .get("backend")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or(Backend::ChainBinomial);
+        .unwrap_or(InferenceBackend::ChainBinomial);
     Some(FitStageView {
         stage_dir: dir.to_path_buf(),
         stage: inputs
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(view.stages.len(), 2, "two stage leaves");
         let scout = view.stages.iter().find(|s| s.stage == "scout").unwrap();
         assert_eq!(scout.method, MethodKind::If2, "scout method");
-        assert_eq!(scout.backend, Backend::ChainBinomial, "scout backend");
+        assert_eq!(scout.backend, InferenceBackend::ChainBinomial, "scout backend");
         assert_eq!(scout.seed, 1, "scout seed");
         assert_eq!(scout.n_chains, 4, "scout n_chains");
         assert_eq!(scout.best_loglik, Some(-120.5), "scout best_loglik");

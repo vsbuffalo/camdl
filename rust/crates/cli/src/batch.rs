@@ -233,7 +233,7 @@ struct ConfigSection {
     #[serde(default)]
     geo: Option<String>,
     #[serde(default = "default_backend")]
-    backend: crate::args::types::Backend,
+    backend: crate::args::types::ForwardBackend,
     #[serde(default = "default_dt")]
     dt: f64,
     #[serde(default = "default_output_dir")]
@@ -244,8 +244,8 @@ struct ConfigSection {
     seeds: SeedsSection,
 }
 
-fn default_backend() -> crate::args::types::Backend {
-    crate::args::types::Backend::ChainBinomial
+fn default_backend() -> crate::args::types::ForwardBackend {
+    crate::args::types::ForwardBackend::ChainBinomial
 }
 fn default_dt() -> f64 { 1.0 }
 fn default_output_dir() -> String { crate::run_paths::DEFAULT_OUTPUT_ROOT.to_string() }
@@ -863,7 +863,7 @@ pub(crate) struct CasSink {
     /// `simulate --table`. An edit to a `--table` file re-keys the run, so a
     /// changed `matrix.tsv` cannot serve a stale cached trajectory.
     pub(crate) table_files: HashMap<String, String>,
-    pub(crate) backend: crate::args::types::Backend,
+    pub(crate) backend: crate::args::types::ForwardBackend,
     pub(crate) dt: f64,
     pub(crate) allow_degenerate_rates: bool,
     /// Output view (gh#156): the resolved `--no-flows` / `--columns` filter,
@@ -1302,7 +1302,7 @@ fn run_design_experiment(
     ir_path: &str,
     output_dir: &str,
     shash: &str,
-    backend: crate::args::types::Backend,
+    backend: crate::args::types::ForwardBackend,
     dt: f64,
     force: bool,
     parallel: usize,
@@ -1687,7 +1687,7 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
 #[allow(clippy::too_many_arguments)]
 fn print_batch_dry_run(
     model_path: &str,
-    backend: crate::args::types::Backend,
+    backend: crate::args::types::ForwardBackend,
     dt: f64,
     output_dir: &str,
     parallel: usize,
@@ -2214,7 +2214,7 @@ mod tests {
             base_model: tiny_model(),
             base_params: HashMap::new(),
             table_files,
-            backend: crate::args::types::Backend::ChainBinomial,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             allow_degenerate_rates: false,
             output_cols: crate::util::OutputColumns::default(),

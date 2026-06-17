@@ -47,7 +47,7 @@ pub struct MleProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fit_hash: Option<String>,
     /// Dynamics fields — load-bearing for the backend-guardrail.
-    pub backend: crate::args::types::Backend,
+    pub backend: crate::args::types::ForwardBackend,
     pub dt: f64,
     pub model: String,
     pub model_hash: String,
@@ -194,7 +194,7 @@ pub struct MleMetadata {
     /// Simulation backend the fit used. Load-bearing for the
     /// backend-provenance guardrail in `camdl simulate --params`
     /// — downstream can only auto-match if we record this.
-    pub backend: crate::args::types::Backend,
+    pub backend: crate::args::types::ForwardBackend,
     /// Timestep used by the fit. Paired with `backend`.
     pub dt: f64,
     pub loglik: f64,
@@ -413,7 +413,7 @@ mod tests {
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
         let stage = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 1000, iterations: 50,
             cooling: 0.7,
             cooling_target_iters: 50,
@@ -438,7 +438,7 @@ mod tests {
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
         let stage = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 1000, iterations: 50,
             cooling: 0.7,
             cooling_target_iters: 50,
@@ -462,7 +462,7 @@ mod tests {
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
         let stage = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 1000, iterations: 50,
             cooling: 0.7,
             cooling_target_iters: 50,
@@ -486,7 +486,7 @@ mod tests {
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
         let stage1 = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 1000, iterations: 50,
             cooling: 0.7,
             cooling_target_iters: 50,
@@ -499,7 +499,7 @@ mod tests {
             dt_check: Default::default(),
         };
         let stage2 = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 8, particles: 1000, iterations: 50,
             cooling: 0.7,
             cooling_target_iters: 50,
@@ -528,7 +528,7 @@ mod tests {
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
         let stage = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 1000, iterations: 50,
             cooling: 0.7,
             cooling_target_iters: 50,

@@ -2219,7 +2219,7 @@ pub struct SimRun {
     pub scenario_name: Option<String>,
     pub adhoc_enable: Vec<String>,
     pub adhoc_disable: Vec<String>,
-    pub backend: crate::args::types::Backend,
+    pub backend: crate::args::types::ForwardBackend,
     pub dt: f64,
     pub seed: u64,
     /// gh#166: optional CLI override of the ODE integrator method (rk4/rk45),
@@ -2263,7 +2263,7 @@ impl Default for SimRun {
             scenario_name: None,
             adhoc_enable: Vec::new(),
             adhoc_disable: Vec::new(),
-            backend: crate::args::types::Backend::ChainBinomial,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             seed: 1,
             integrator: None,
@@ -2424,14 +2424,14 @@ pub fn simulate_compiled(
     let t_start = model.simulation.t_start;
     let t_end   = model.simulation.t_end;
 
-    use crate::args::types::Backend;
+    use crate::args::types::ForwardBackend;
 
     // Check backend compatibility before running (same gate as the
     // trait-dispatch path; kept so the error wording is unchanged).
     let backend: &dyn Simulate = match run.backend {
-        Backend::Gillespie     => &GillespieSim,
-        Backend::ChainBinomial => &ChainBinomialSim,
-        Backend::Ode           => &OdeSim,
+        ForwardBackend::Gillespie     => &GillespieSim,
+        ForwardBackend::ChainBinomial => &ChainBinomialSim,
+        ForwardBackend::Ode           => &OdeSim,
     };
     let caps = backend.capabilities();
     let required = compiled.required_capabilities();
@@ -2444,7 +2444,7 @@ pub fn simulate_compiled(
     }
     // gh#166 B2: warn (once) if a `dt`-in-rate model runs on ODE with first-order
     // Euler incidence — every other model gets high-order augmented flow.
-    if matches!(run.backend, Backend::Ode) {
+    if matches!(run.backend, ForwardBackend::Ode) {
         crate::fit::methods::warn_if_ode_euler_flow(compiled);
     }
 
@@ -2463,19 +2463,19 @@ pub fn simulate_compiled(
         if progress.is_some() { Some(&mut tick) } else { None };
 
     let traj = match run.backend {
-        Backend::Gillespie => {
+        ForwardBackend::Gillespie => {
             let cfg = GillespieConfig { t_start, t_end, output_dt: None };
             sim::gillespie::run_gillespie_with_observer(
                 compiled, &params, run.seed, &cfg, None, tick_opt.as_deref_mut(),
             )
         }
-        Backend::ChainBinomial => {
+        ForwardBackend::ChainBinomial => {
             let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 compiled, &params, run.seed, &cfg, None, tick_opt.as_deref_mut(),
             )
         }
-        Backend::Ode => {
+        ForwardBackend::Ode => {
             let cfg = OdeConfig { t_start, t_end, dt: run.dt };
             sim::ode::run_ode(compiled, &params, &cfg, tick_opt.as_deref_mut())
         }
@@ -2504,16 +2504,16 @@ pub fn simulate_compiled(
 pub fn run_simulation_event_log(
     run: &SimRun,
 ) -> Result<(Trajectory, ir::Model, sim::lineage::EventLog, bool), String> {
-    use crate::args::types::Backend;
+    use crate::args::types::ForwardBackend;
     use sim::lineage::EventRecorder;
 
     // Event-log recording is meaningful only for backends with the LINEAGES
     // capability. ODE is the lone incompatible backend (continuous densities,
     // no individuals).
     let backend: &dyn Simulate = match run.backend {
-        Backend::Gillespie => &GillespieSim,
-        Backend::ChainBinomial => &ChainBinomialSim,
-        Backend::Ode => {
+        ForwardBackend::Gillespie => &GillespieSim,
+        ForwardBackend::ChainBinomial => &ChainBinomialSim,
+        ForwardBackend::Ode => {
             return Err(
                 "the event log is incompatible with the ODE backend: ODE \
                  tracks continuous densities, not individuals. Use \
@@ -2557,23 +2557,23 @@ pub fn run_simulation_event_log(
         .map_err(|e| format!("event recorder init error: {:?}", e))?;
 
     let traj = match run.backend {
-        Backend::Gillespie => {
+        ForwardBackend::Gillespie => {
             let cfg = GillespieConfig { t_start, t_end, output_dt: None };
             sim::gillespie::run_gillespie_with_observer(
                 &compiled, &params, run.seed, &cfg, Some(&mut recorder), None,
             )
         }
-        Backend::ChainBinomial => {
+        ForwardBackend::ChainBinomial => {
             let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 &compiled, &params, run.seed, &cfg, Some(&mut recorder), None,
             )
         }
-        Backend::Ode => unreachable!("ODE rejected above"),
+        ForwardBackend::Ode => unreachable!("ODE rejected above"),
     }
     .map_err(|e| format!("simulation error: {:?}", e))?;
 
-    let exact = matches!(run.backend, Backend::Gillespie);
+    let exact = matches!(run.backend, ForwardBackend::Gillespie);
     let event_log = recorder.into_event_log();
     Ok((traj, model, event_log, exact))
 }
@@ -3011,7 +3011,7 @@ mod tests {
     fn base_sim_run(ir_path: &str) -> SimRun {
         SimRun {
             ir_path: ir_path.to_string(),
-            backend: crate::args::types::Backend::ChainBinomial,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             seed: 1,
             ..Default::default()

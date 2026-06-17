@@ -69,7 +69,7 @@ pub struct EnsembleCtx<'a> {
     pub engine_version: &'a str,
     /// Provenance label for the `model` path segment (the model stem).
     pub stem: &'a str,
-    pub backend: crate::args::types::Backend,
+    pub backend: crate::args::types::ForwardBackend,
     pub dt: f64,
     /// Resolved base parameter map (name → value), shared across cells.
     pub base_params: &'a std::collections::HashMap<String, f64>,

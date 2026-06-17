@@ -24,7 +24,7 @@ use crate::fit::loglik_eval::combine_with_se;
 use crate::fit::runner::{
     compute_ode_loglik, run_quick_pfilter_with_dt, ruled_out_or_surface, FitRunConfig,
 };
-use crate::run_meta::Backend;
+use crate::run_meta::InferenceBackend;
 use serde::{Deserialize, Serialize};
 
 /// One rung of the Richardson halving ladder: `loglik(θ̂; dt)` with its
@@ -92,10 +92,10 @@ pub struct DtCheckResult {
     pub notes: String,
 }
 
-/// Backend-specific default thresholds. See proposal §"Backend-specific
+/// InferenceBackend-specific default thresholds. See proposal §"InferenceBackend-specific
 /// τ defaults" for the convergence-order rationale.
 ///
-/// All fit-stage backends have a dt parameter — the fit-stage `Backend`
+/// All fit-stage backends have a dt parameter — the fit-stage `InferenceBackend`
 /// enum only carries `ChainBinomial` and `Ode` (Gillespie is a
 /// forward-sim backend, not a fit-stage backend). The threshold differs
 /// by convergence order:
@@ -111,10 +111,10 @@ pub struct DtCheckResult {
 ///
 /// `--strict` halves both defaults (chain-binomial → 0.5; ode → 0.1)
 /// for research-quality fits where sub-nat differences matter.
-pub fn default_threshold_for_backend(backend: Backend, strict: bool) -> f64 {
+pub fn default_threshold_for_backend(backend: InferenceBackend, strict: bool) -> f64 {
     match backend {
-        Backend::ChainBinomial => if strict { 0.5 } else { 2.0 },
-        Backend::Ode           => if strict { 0.1 } else { 0.5 },
+        InferenceBackend::ChainBinomial => if strict { 0.5 } else { 2.0 },
+        InferenceBackend::Ode           => if strict { 0.1 } else { 0.5 },
     }
 }
 
@@ -287,7 +287,7 @@ pub fn run_richardson_ladder(
     run_config: &FitRunConfig,
     theta_hat: &[f64],
     config: &DtCheckConfig,
-    backend: Backend,
+    backend: InferenceBackend,
     strict: bool,
     inherits: &DtCheckInherits,
     seed: u64,
@@ -347,7 +347,7 @@ pub fn run_richardson_ladder(
 /// Convergence-order note: since the augmented-flow unification (gh#166 Q1B),
 /// BOTH prevalence (RK4 state, O(dt⁴)) and incidence (augmented flow, `dc/dt =
 /// rate` through the same RK4 stages, also O(dt⁴)) converge at the same high
-/// order, so the `Backend::Ode` τ calibrated to the prevalence case applies to
+/// order, so the `InferenceBackend::Ode` τ calibrated to the prevalence case applies to
 /// incidence too. The one exception is a model that references `dt` in a rate
 /// (`Expr::Dt` / RUNTIME_DT), which keeps the first-order Euler flow (O(dt), the
 /// augmented derivative is undefined when the rate depends on the step size) —
@@ -365,7 +365,7 @@ pub fn run_richardson_ladder_ode(
     strict: bool,
 ) -> Result<DtCheckResult, String> {
     let threshold_floor = config.threshold_nats
-        .unwrap_or_else(|| default_threshold_for_backend(Backend::Ode, strict));
+        .unwrap_or_else(|| default_threshold_for_backend(InferenceBackend::Ode, strict));
     if !config.enabled {
         return Ok(skipped_result(threshold_floor, "skipped: dt_check.enabled = false."));
     }
@@ -535,14 +535,14 @@ mod tests {
     #[test]
     fn default_threshold_chain_binomial_is_2_nats() {
         assert_eq!(
-            default_threshold_for_backend(Backend::ChainBinomial, false),
+            default_threshold_for_backend(InferenceBackend::ChainBinomial, false),
             2.0);
     }
 
     #[test]
     fn default_threshold_chain_binomial_strict_is_half_nat() {
         assert_eq!(
-            default_threshold_for_backend(Backend::ChainBinomial, true),
+            default_threshold_for_backend(InferenceBackend::ChainBinomial, true),
             0.5);
     }
 
@@ -550,13 +550,13 @@ mod tests {
     fn default_threshold_ode_rk4_is_half_nat() {
         // ODE backend: O(dt⁴) convergence earns a tighter default.
         assert_eq!(
-            default_threshold_for_backend(Backend::Ode, false), 0.5);
+            default_threshold_for_backend(InferenceBackend::Ode, false), 0.5);
     }
 
     #[test]
     fn default_threshold_ode_strict_is_tenth_nat() {
         assert_eq!(
-            default_threshold_for_backend(Backend::Ode, true), 0.1);
+            default_threshold_for_backend(InferenceBackend::Ode, true), 0.1);
     }
 
     // ── se_aware_threshold ──────────────────────────────────────────

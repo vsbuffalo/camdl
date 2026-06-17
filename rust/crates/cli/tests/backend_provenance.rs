@@ -355,6 +355,93 @@ fn explicit_dt_overrides_provenance_in_run_json() {
     assert_eq!(backend, "chain_binomial");
 }
 
+// ── Producer side (gh#241 C3): `camdl fit` must record the STAGE's backend
+//    in mle_params.toml, not the global `[config].backend`. The tests above
+//    check the consumer (simulate reading a hand-written mle); this checks the
+//    fit WRITES the right backend, so a `simulate --params` replay matches the
+//    dynamics that produced θ̂.
+
+fn seed_timing_model() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../sim/tests/fixtures/seed_timing_dated.ir.json")
+}
+
+#[test]
+fn fit_records_stage_backend_in_mle_not_global_config_backend() {
+    let bin = skip_if_missing();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    let data = tmp.path().join("cases.tsv");
+    std::fs::write(&data, "time\tcases\n\
+        2020-03-15\t3\n2020-03-16\t6\n2020-03-17\t11\n2020-03-18\t18\n\
+        2020-03-19\t27\n2020-03-20\t31\n2020-03-21\t28\n2020-03-22\t20\n\
+        2020-03-23\t13\n2020-03-24\t8\n").unwrap();
+
+    // `[config].backend = ode` (a forward-sim default) DELIBERATELY differs
+    // from the stage backend (chain_binomial). Pre-fix the producer copied
+    // `config.backend` into mle_params (the bug); post-fix it records the
+    // stage's actual backend.
+    let fit_toml = tmp.path().join("fit.toml");
+    let body = format!(
+        r#"output_dir = "{out}"
+condition_from = "first_obs - 1 day"
+
+[config]
+backend = "ode"
+
+[model]
+camdl = "{ir}"
+
+[data.observations]
+cases = "{data}"
+
+[estimate]
+beta = {{ bounds = [0.1, 2.0], start = 0.6 }}
+tau  = {{ bounds = [0.0, 60.0], start = 20.0 }}
+
+[fixed]
+gamma = 0.2
+lambda = 2.0
+w = 3.0
+N0 = 1000
+rho = 0.6
+k = 10.0
+
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 200
+iterations = 3
+cooling = 0.7
+"#,
+        out = out.display(), ir = seed_timing_model().display(), data = data.display(),
+    );
+    std::fs::write(&fit_toml, body).unwrap();
+
+    let output = Command::new(&bin)
+        .arg("fit").arg("run").arg(&fit_toml)
+        .arg("--allow-nonconverged-scout")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().expect("spawn camdl fit run");
+    assert!(output.status.success(),
+        "fit run should succeed; stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let mle = walkdir(&out).into_iter()
+        .find(|p| p.file_name().map(|s| s == "mle_params.toml").unwrap_or(false))
+        .expect("fit must write an mle_params.toml");
+    let contents = std::fs::read_to_string(&mle).unwrap();
+    // The only `backend =` line in mle_params.toml is the [provenance] one.
+    let line = contents.lines()
+        .find(|l| l.trim_start().starts_with("backend ="))
+        .unwrap_or_else(|| panic!("no [provenance].backend line in:\n{contents}"));
+    assert!(line.contains("\"chain_binomial\""),
+        "mle_params must record the STAGE backend (chain_binomial), not the global \
+         [config].backend (ode); got: {line}");
+    assert!(!line.contains("\"ode\""),
+        "mle_params must NOT record the global [config].backend (ode); got: {line}");
+}
+
 fn walkdir(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];

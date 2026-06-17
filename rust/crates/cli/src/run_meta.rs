@@ -62,23 +62,69 @@ impl std::fmt::Display for MethodKind {
 /// `chain_binomial`, deterministic-likelihood algorithms require `ode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Backend {
+pub enum InferenceBackend {
     ChainBinomial,
     Ode,
 }
 
-impl Backend {
+impl InferenceBackend {
     pub fn as_str(self) -> &'static str {
         match self {
-            Backend::ChainBinomial => "chain_binomial",
-            Backend::Ode           => "ode",
+            InferenceBackend::ChainBinomial => "chain_binomial",
+            InferenceBackend::Ode           => "ode",
         }
     }
 }
 
-impl std::fmt::Display for Backend {
+impl std::fmt::Display for InferenceBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Conversion failure from a [`ForwardBackend`](crate::args::types::ForwardBackend)
+/// into an [`InferenceBackend`]: `gillespie` is a valid forward-simulation
+/// backend but has no fit/inference interface, so it cannot back a fit stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendDomainError {
+    NotInferenceBackend,
+}
+
+impl std::fmt::Display for BackendDomainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackendDomainError::NotInferenceBackend => f.write_str(
+                "gillespie is a forward-simulation backend, not an inference backend; \
+                 fit stages support only chain_binomial or ode",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BackendDomainError {}
+
+impl TryFrom<crate::args::types::ForwardBackend> for InferenceBackend {
+    type Error = BackendDomainError;
+
+    fn try_from(b: crate::args::types::ForwardBackend) -> Result<Self, Self::Error> {
+        use crate::args::types::ForwardBackend as F;
+        match b {
+            F::ChainBinomial => Ok(Self::ChainBinomial),
+            F::Ode => Ok(Self::Ode),
+            F::Gillespie => Err(BackendDomainError::NotInferenceBackend),
+        }
+    }
+}
+
+/// Every inference backend is also a valid forward-simulation backend (the fit
+/// dynamics are a forward model). Total — used to record the stage's actual
+/// backend into forward-facing provenance (`MleMetadata.backend`).
+impl From<InferenceBackend> for crate::args::types::ForwardBackend {
+    fn from(b: InferenceBackend) -> Self {
+        match b {
+            InferenceBackend::ChainBinomial => Self::ChainBinomial,
+            InferenceBackend::Ode => Self::Ode,
+        }
     }
 }
 
@@ -372,6 +418,56 @@ mod tests {
         assert_eq!(serde_json::to_string(&p).unwrap(), r#""pfilter""#);
         let s = SurveyEvalMethod::Simulate;
         assert_eq!(serde_json::to_string(&s).unwrap(), r#""simulate""#);
+    }
+
+    // ─── gh#241: backend domain types (ForwardBackend / InferenceBackend) ──
+
+    /// Zero-re-key guarantee: `InferenceBackend` (renamed from
+    /// `run_meta::Backend`) serializes to the same snake_case string it always
+    /// has, so the fit blob is byte-identical and no `run_id` moves.
+    #[test]
+    fn inference_backend_serde_spelling_is_snake_case() {
+        assert_eq!(serde_json::to_string(&InferenceBackend::ChainBinomial).unwrap(),
+                   r#""chain_binomial""#);
+        assert_eq!(serde_json::to_string(&InferenceBackend::Ode).unwrap(),
+                   r#""ode""#);
+    }
+
+    /// `ForwardBackend` (renamed from `args::types::Backend`) keeps its wire
+    /// spelling too — the sim/config identity surfaces are unchanged.
+    #[test]
+    fn forward_backend_serde_spelling_unchanged() {
+        use crate::args::types::ForwardBackend;
+        assert_eq!(serde_json::to_string(&ForwardBackend::Gillespie).unwrap(),
+                   r#""gillespie""#);
+        assert_eq!(serde_json::to_string(&ForwardBackend::ChainBinomial).unwrap(),
+                   r#""chain_binomial""#);
+        assert_eq!(serde_json::to_string(&ForwardBackend::Ode).unwrap(),
+                   r#""ode""#);
+    }
+
+    /// The load-bearing type-boundary property: a forward `Gillespie` cannot
+    /// become a fit/inference backend.
+    #[test]
+    fn gillespie_is_not_an_inference_backend() {
+        use crate::args::types::ForwardBackend;
+        assert_eq!(InferenceBackend::try_from(ForwardBackend::ChainBinomial),
+                   Ok(InferenceBackend::ChainBinomial));
+        assert_eq!(InferenceBackend::try_from(ForwardBackend::Ode),
+                   Ok(InferenceBackend::Ode));
+        assert_eq!(InferenceBackend::try_from(ForwardBackend::Gillespie),
+                   Err(BackendDomainError::NotInferenceBackend));
+    }
+
+    /// The reverse is total: every inference backend is a valid forward
+    /// backend (used to record stage provenance into `MleMetadata.backend`).
+    #[test]
+    fn inference_backend_is_always_a_forward_backend() {
+        use crate::args::types::ForwardBackend;
+        assert_eq!(ForwardBackend::from(InferenceBackend::ChainBinomial),
+                   ForwardBackend::ChainBinomial);
+        assert_eq!(ForwardBackend::from(InferenceBackend::Ode),
+                   ForwardBackend::Ode);
     }
 
     // ─── gh#83/gh#85 step 9: parameter / init provenance round-trip ──

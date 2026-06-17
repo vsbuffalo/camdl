@@ -1253,7 +1253,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     seed,
                     stage: stage_name.to_string(),
                     best_chain: chain_results.best_chain,
-                    backend: sweep_config.config.backend,
+                    // Record the backend the STAGE actually fit on (gh#241),
+                    // not the global `[config].backend` — a forward-sim default
+                    // for `[synthetic]` generation that need not match the stage.
+                    // The `simulate --params` guardrail replays θ̂ with this, so
+                    // it must be the stage's backend. `InferenceBackend` is a
+                    // valid `ForwardBackend` (total `From`).
+                    backend: stage.backend().into(),
                     dt: sweep_config.config.dt,
                     loglik: chain_results.best_loglik,
                     loglik_sd: 0.0,
@@ -2302,7 +2308,7 @@ mod tests {
     /// real reservoir state (gh#191).
     fn chain_binomial_if2_stage() -> config_v2::Stage {
         config_v2::Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 1,
             particles: 10,
             iterations: 1,

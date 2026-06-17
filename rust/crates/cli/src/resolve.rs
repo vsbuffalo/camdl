@@ -45,7 +45,7 @@ pub struct TrajectoryCtx<'a> {
     pub ir_version: &'a str,
     pub engine_version: &'a str,
     /// Resolved config.
-    pub backend: crate::args::types::Backend,
+    pub backend: crate::args::types::ForwardBackend,
     pub dt: f64,
     pub t_start: f64,
     pub t_end: f64,
@@ -73,8 +73,8 @@ pub struct TrajectoryCtx<'a> {
 }
 
 /// Map a CLI backend to the resolved `runid` backend.
-fn backend(b: crate::args::types::Backend) -> Backend {
-    use crate::args::types::Backend as B;
+fn backend(b: crate::args::types::ForwardBackend) -> Backend {
+    use crate::args::types::ForwardBackend as B;
     match b {
         B::Gillespie => Backend::Gillespie,
         B::ChainBinomial => Backend::ChainBinomial,
@@ -151,7 +151,7 @@ fn resolve_scenario(
 }
 
 /// The readable config label: `{backend}-dt{dt}` (e.g. `chain_binomial-dt1`).
-fn config_label(b: crate::args::types::Backend, dt: f64) -> String {
+fn config_label(b: crate::args::types::ForwardBackend, dt: f64) -> String {
     format!("{}-dt{}", b.as_str(), dt)
 }
 

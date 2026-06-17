@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::args::types::Backend;
+use crate::args::types::ForwardBackend;
 
 // ─── SimulateJob (run-spec §3.1) ──────────────────────────────────────────────
 
@@ -61,7 +61,7 @@ pub struct SimulateJob {
     pub model: String,
     /// `--params` / `[config].params` files, applied in order.
     pub params_files: Vec<String>,
-    pub backend: Backend,
+    pub backend: ForwardBackend,
     pub dt: f64,
     /// gh#166: optional CLI `--integrator` override (method only); `None` → the
     /// model's declared integrator.

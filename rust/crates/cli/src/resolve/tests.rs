@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::args::types::Backend;
+use crate::args::types::ForwardBackend;
 use ir::model::{
     InitialConditions, Model, OutputConfig, OutputSchedule, RegularOutputSchedule, SimulationConfig,
 };
@@ -64,7 +64,7 @@ fn ctx<'a>(
         model_stem: "sir",
         ir_version: "0.7",
         engine_version: "0.3.0+test",
-        backend: Backend::ChainBinomial,
+        backend: ForwardBackend::ChainBinomial,
         dt: 1.0,
         t_start: 0.0,
         t_end,

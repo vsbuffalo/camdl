@@ -293,7 +293,7 @@ pub struct ModelRef {
 #[serde(deny_unknown_fields)]
 pub struct FitBackendConfig {
     #[serde(default = "default_backend")]
-    pub backend: crate::args::types::Backend,
+    pub backend: crate::args::types::ForwardBackend,
     #[serde(default = "default_dt")]
     pub dt: f64,
     /// How observation times relate to the `dt` grid. `None` = "exact where the
@@ -315,8 +315,8 @@ pub struct FitBackendConfig {
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_degenerate_rates: bool,
 }
-fn default_backend() -> crate::args::types::Backend {
-    crate::args::types::Backend::ChainBinomial
+fn default_backend() -> crate::args::types::ForwardBackend {
+    crate::args::types::ForwardBackend::ChainBinomial
 }
 fn default_dt() -> f64 { 1.0 }
 fn is_false(b: &bool) -> bool { !*b }
@@ -982,7 +982,7 @@ impl FixedParams {
 pub enum Stage {
     #[serde(rename = "if2")]
     IF2 {
-        backend: crate::run_meta::Backend,
+        backend: crate::run_meta::InferenceBackend,
         chains: usize,
         particles: usize,
         iterations: usize,
@@ -1050,7 +1050,7 @@ pub enum Stage {
 
     #[serde(rename = "pgas")]
     PGAS {
-        backend: crate::run_meta::Backend,
+        backend: crate::run_meta::InferenceBackend,
         chains: usize,
         particles: usize,
         sweeps: usize,
@@ -1126,7 +1126,7 @@ pub enum Stage {
 
     #[serde(rename = "pmmh")]
     PMMH {
-        backend: crate::run_meta::Backend,
+        backend: crate::run_meta::InferenceBackend,
         chains: usize,
         particles: usize,
         iterations: usize,
@@ -1182,7 +1182,7 @@ pub enum Stage {
     /// equilibrium models without gradients.
     #[serde(rename = "mh")]
     Mh {
-        backend: crate::run_meta::Backend,
+        backend: crate::run_meta::InferenceBackend,
         chains: usize,
         iterations: usize,
         /// Toml-side spelling renamed from `starts_from` to `init_mle`
@@ -1224,7 +1224,7 @@ pub enum Stage {
 
     #[serde(rename = "pfilter")]
     PFilter {
-        backend: crate::run_meta::Backend,
+        backend: crate::run_meta::InferenceBackend,
         particles: usize,
         #[serde(default)]
         replicates: Option<usize>,
@@ -1268,7 +1268,7 @@ pub enum Stage {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NloptStageConfig {
-    pub backend: crate::run_meta::Backend,
+    pub backend: crate::run_meta::InferenceBackend,
     /// Number of LHS-spread starting points. Each runs an independent
     /// NLopt optimization to convergence; best-loglik chain wins.
     pub chains: usize,
@@ -1359,7 +1359,7 @@ impl Stage {
     /// pair is set by the user in fit.toml and validated against
     /// `methods::METHODS`; this accessor returns whichever backend was
     /// declared so dispatch and provenance can branch on it.
-    pub fn backend(&self) -> crate::run_meta::Backend {
+    pub fn backend(&self) -> crate::run_meta::InferenceBackend {
         match self {
             Stage::IF2      { backend, .. }
             | Stage::PGAS    { backend, .. }
@@ -4352,7 +4352,7 @@ iterations = 50
 cooling = 0.70
         "#).unwrap();
 
-        assert_eq!(config.config.backend, crate::args::types::Backend::ChainBinomial);
+        assert_eq!(config.config.backend, crate::args::types::ForwardBackend::ChainBinomial);
         assert_eq!(config.config.dt, 1.0);
     }
 
@@ -5241,7 +5241,7 @@ decibans_thresh = 100.0
     /// keeps the test fixtures terse as Stage::PGAS grows fields.
     fn make_pgas_stage(sweeps: usize) -> Stage {
         Stage::PGAS {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 100, sweeps,
             starts_from: StartsFrom::default(),
             init_method: Default::default(),
@@ -5261,7 +5261,7 @@ decibans_thresh = 100.0
     /// Default-equipped PMMH stage for identity tests.
     fn make_pmmh_stage(iterations: usize) -> Stage {
         Stage::PMMH {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 100, iterations,
             starts_from: StartsFrom::default(),
             init_method: Default::default(),
@@ -5515,7 +5515,7 @@ decibans_thresh = 100.0
         // resume). This guards against a future refactor accidentally
         // moving `iterations` out of identity.
         let s50 = Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 100, iterations: 50, cooling: 0.95,
             cooling_target_iters: 50,
             starts_from: StartsFrom::default(),
@@ -5527,7 +5527,7 @@ decibans_thresh = 100.0
             dt_check: DtCheckConfig::default(),
         };
         let s100 = Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 100, iterations: 100, cooling: 0.95,
             cooling_target_iters: 50,
             starts_from: StartsFrom::default(),
@@ -5541,7 +5541,7 @@ decibans_thresh = 100.0
         assert_ne!(s50.identity_payload(), s100.identity_payload());
 
         let s_diff_cooling = Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 100, iterations: 50, cooling: 0.70,
             cooling_target_iters: 50,
             starts_from: StartsFrom::default(),
@@ -5557,7 +5557,7 @@ decibans_thresh = 100.0
         // cooling_target_iters is identity-defining (different schedule
         // → different chain dynamics).
         let s_diff_target = Stage::IF2 {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 4, particles: 100, iterations: 50, cooling: 0.95,
             cooling_target_iters: 100,
             starts_from: StartsFrom::default(),

@@ -325,8 +325,9 @@ pub fn run_stage(
         stage: stage_name.to_string(),
         best_chain: winner_idx,
         // NLopt stages always run on the ODE backend (validated by
-        // methods::validate_combo); use Backend::Ode for provenance.
-        backend: crate::args::types::Backend::Ode,
+        // methods::validate_combo); record it from the inference domain
+        // (total `From<InferenceBackend>` into the forward provenance field).
+        backend: crate::run_meta::InferenceBackend::Ode.into(),
         dt: ode_step_dt(&arc_config),
         loglik: winner.loglik,
         loglik_sd: 0.0,
@@ -662,12 +663,12 @@ mod tests {
         GateConfig, NloptStageConfig, Stage, StartsFrom,
     };
     use crate::fit::init::InitMethod;
-    use crate::run_meta::Backend;
+    use crate::run_meta::InferenceBackend;
     use sim::inference::deterministic::SuccessState;
 
     fn nlopt_config() -> NloptStageConfig {
         NloptStageConfig {
-            backend: Backend::Ode,
+            backend: InferenceBackend::Ode,
             chains: 4,
             tolerance: 1e-6,
             max_evals: 5000,
@@ -710,7 +711,7 @@ mod tests {
     fn extract_nlopt_config_rejects_non_nlopt_stage() {
         // PFilter is the simplest non-nlopt variant to construct.
         let stage = Stage::PFilter {
-            backend: Backend::ChainBinomial,
+            backend: InferenceBackend::ChainBinomial,
             particles: 100,
             replicates: None,
             starts_from: StartsFrom::default(),

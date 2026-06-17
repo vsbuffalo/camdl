@@ -1011,7 +1011,7 @@ mod tests {
 
     fn pgas_stage_with_tempering(tempering: Vec<f64>) -> Stage {
         Stage::PGAS {
-            backend: crate::run_meta::Backend::ChainBinomial,
+            backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 1, particles: 10, sweeps: 10,
             starts_from: StartsFrom::default(),
             init_method: Default::default(),

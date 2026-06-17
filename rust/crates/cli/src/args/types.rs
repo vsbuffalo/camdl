@@ -99,7 +99,7 @@ impl FromStr for DataSpec {
 /// changing the wire format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum,
          serde::Serialize, serde::Deserialize)]
-pub enum Backend {
+pub enum ForwardBackend {
     #[value(name = "gillespie")]
     #[serde(rename = "gillespie")]
     Gillespie,
@@ -111,7 +111,7 @@ pub enum Backend {
     Ode,
 }
 
-impl Backend {
+impl ForwardBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gillespie     => "gillespie",
@@ -134,7 +134,7 @@ pub enum IntegratorArg {
     Rk45,
 }
 
-impl std::fmt::Display for Backend {
+impl std::fmt::Display for ForwardBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }

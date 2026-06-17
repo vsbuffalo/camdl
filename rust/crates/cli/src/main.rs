@@ -633,7 +633,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     let dt_explicit      = a.backend.dt.is_some();
     // Default is chain_binomial so `simulate` and `fit` agree at the
     // same MLE params (see docs/dev/incidents/2026-04-19-backend-default-mismatch.md).
-    let mut backend      = a.backend.backend.unwrap_or(args::types::Backend::ChainBinomial);
+    let mut backend      = a.backend.backend.unwrap_or(args::types::ForwardBackend::ChainBinomial);
     // dt precedence (gh#161): an explicit `--dt` always wins. Otherwise the
     // model's own `simulate { dt = … }` is the default (dt is a model knob).
     // If neither is set, fall back to 1.0. A fit-provenance `dt` (below) can
@@ -2551,7 +2551,7 @@ fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, String> {
 fn print_dry_run(
     ir_path: &str,
     ir_path_compiled: &str,
-    backend: args::types::Backend,
+    backend: args::types::ForwardBackend,
     dt: f64,
     seed: u64,
     params_files: &[String],

@@ -266,7 +266,7 @@ fn run_one_cell(spec: CellSpec) -> Result<CellResult, String> {
 ///   - None: nothing — falls straight through to the byte-identical
 ///     `run_one_cell` (no bar, no line).
 fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
-    use crate::args::types::Backend;
+    use crate::args::types::ForwardBackend;
 
     if crate::progress::is_none() {
         return run_one_cell(spec);
@@ -283,9 +283,9 @@ fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
     let (compiled, model) = util::resolve_run_model(&spec.sim_run)?;
 
     let backend = match spec.sim_run.backend {
-        Backend::Gillespie => "gillespie",
-        Backend::ChainBinomial => "chain_binomial",
-        Backend::Ode => "ode",
+        ForwardBackend::Gillespie => "gillespie",
+        ForwardBackend::ChainBinomial => "chain_binomial",
+        ForwardBackend::Ode => "ode",
     };
 
     // Length 1000 matches the tick's `frac * 1000` scale in
