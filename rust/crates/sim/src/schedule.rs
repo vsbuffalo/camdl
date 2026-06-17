@@ -46,7 +46,7 @@
 //! shared-mutable cursor would corrupt it without failing any all-on-grid golden.
 //! Pinned by [`tests::n_cursors_identical_sequence`].
 
-use crate::boundary_times::{EffectTimes, OutputTimes};
+use crate::boundary_times::{EffectTimes, ObsTimes, OutputTimes};
 use crate::error::SimError;
 use smallvec::SmallVec;
 
@@ -249,6 +249,16 @@ impl Schedule {
             output.into_vec(),
             effects.into_vec(),
         )
+    }
+
+    /// EXACT inference schedule (bootstrap PF / IF2 / correlated-PF): no output
+    /// snapshots (inference scores observations, it does not record a trajectory),
+    /// scheduled-effect boundaries from `effects`, observation boundaries from
+    /// `obs`. Built via [`crate::intervention::ExactInferenceTimeline::build`],
+    /// which runs the exact-inference guards first.
+    pub fn exact_inference(dt: f64, t_end: f64, effects: EffectTimes, obs: ObsTimes) -> Self {
+        Self::new(dt, t_end, dt, StepPolicy::Exact, Vec::new(), effects.into_vec())
+            .with_obs(obs.into_vec())
     }
 
     fn next_output(&self, cursor: &Cursor) -> f64 {

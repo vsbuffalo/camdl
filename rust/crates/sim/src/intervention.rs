@@ -5,7 +5,8 @@ use crate::{
     resolved_expr::{eval_resolved, ResolvedExpr},
     state::{IntState, RealState},
 };
-use crate::schedule::StepPolicy;
+use crate::boundary_times::{EffectTimes, ObsTimes};
+use crate::schedule::{Schedule, StepPolicy};
 use ir::intervention::{Action, InterventionSchedule};
 
 /// Short human label for an action, for diagnostics (`"set V"`,
@@ -374,11 +375,73 @@ pub fn guard_attimesexpr_exact(
     Ok(())
 }
 
+/// A validated EXACT-inference timeline (gh#233 Layer 2.5): the [`Schedule`] the
+/// bootstrap PF / IF2 / correlated-PF step, plus the [`TimelineEffects`] batches
+/// the producer fires cursor-keyed. Built ONLY via [`ExactInferenceTimeline::build`],
+/// which runs the exact-inference guards FIRST — so no inference path can
+/// construct a timeline that skipped a guard (the gh#187 class: a forgotten guard
+/// is a latent silent-wrong). PGAS builds its substep grid differently
+/// (`build_substep_grid`) and is not a consumer.
+pub struct ExactInferenceTimeline {
+    pub schedule: Schedule,
+    pub effects: TimelineEffects,
+}
+
+impl ExactInferenceTimeline {
+    /// Run the exact-inference guards, gather the scheduled-effect timeline, and
+    /// build the Exact `Schedule`. `model = None` (a process with no compiled
+    /// model) means no scheduled effects. The guards cannot be skipped — a valid
+    /// `ExactInferenceTimeline` exists only if they passed.
+    pub fn build(
+        model: Option<&CompiledModel>,
+        params: &[f64],
+        t_start: f64,
+        dt: f64,
+        obs: ObsTimes,
+    ) -> Result<Self, SimError> {
+        let effects = if let Some(model) = model {
+            guard_attimesexpr_exact(model, StepPolicy::Exact)?;
+            guard_exact_offgrid_effect_time(model, params, t_start, dt, StepPolicy::Exact)?;
+            timeline_effects(model, params)
+        } else {
+            TimelineEffects::default()
+        };
+        // `obs` is already validated (constructed via `ObsTimes::new`); reuse it
+        // directly rather than unwrap-and-revalidate. The effect timeline is
+        // index-aligned with `effects.batches`, so it is validated order-PRESERVING
+        // (`from_timeline`), never sorted.
+        let t_end = obs.last().unwrap_or(t_start);
+        let schedule =
+            Schedule::exact_inference(dt, t_end, EffectTimes::from_timeline(&effects)?, obs);
+        Ok(ExactInferenceTimeline { schedule, effects })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ir::intervention::SetAction;
     use ir::expr::Expr;
+
+    #[test]
+    fn exact_inference_timeline_no_model_has_no_effects_and_carries_obs() {
+        // The None-model path (a process without a compiled model): no scheduled
+        // effects, and the schedule carries the observation boundaries (no output
+        // snapshots). The guards are skipped only because there is no model to
+        // guard — with a model they run, and a valid timeline cannot exist without
+        // them passing.
+        let timeline = ExactInferenceTimeline::build(
+            None,
+            &[],
+            0.0,
+            1.0,
+            ObsTimes::new(vec![1.0, 2.0, 3.0]).unwrap(),
+        )
+        .unwrap();
+        assert!(timeline.effects.times.is_empty(), "no model ⇒ no scheduled effects");
+        let cur = crate::schedule::Cursor::default();
+        assert_eq!(timeline.schedule.obs_time(&cur), Some(1.0), "obs boundaries carried");
+    }
 
     fn set_v() -> Action {
         Action::Set(SetAction { compartment: "V".into(), value: Expr::const_(0.0) })
