@@ -20,10 +20,7 @@
 //!   - **seed** — the resolved LHS / PF base seed.
 
 use runid::inputs::{DataDigest, EngineVersion, ModelDigest, Seed};
-use runid::{
-    run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, Provenance, RunRecord,
-    RunStatus, FORMAT_VERSION, HASH_VERSION,
-};
+use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
 
 use crate::fit::cas::{digest_value, ensure_finite};
 
@@ -127,39 +124,6 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::Survey, &level_hashes);
     Ok(ResolvedSurvey { levels, run_id: rid })
-}
-
-/// Build the `RunRecord` for a survey leaf. `inputs` carries the
-/// (recorded-not-hashed) display payload — eval config, bounds, n_points,
-/// best-loglik summary; identity is `levels`.
-pub fn build_survey_record(
-    resolved: &ResolvedSurvey,
-    ir_version: &str,
-    status: RunStatus,
-    inputs: serde_json::Value,
-    model_path: &str,
-) -> RunRecord {
-    RunRecord {
-        format_version: FORMAT_VERSION,
-        kind: ArtifactKind::Survey,
-        run_id: resolved.run_id,
-        hash_version: HASH_VERSION,
-        ir_version: ir_version.to_string(),
-        engine_version: crate::version::VERSION_SHORT.to_string(),
-        levels: resolved.levels.clone(),
-        deps: Vec::new(),
-        status,
-        artifacts: Default::default(),
-        children: Default::default(),
-        inputs,
-        provenance: Provenance {
-            argv: std::env::args().collect(),
-            created_at: Some(crate::cas::iso8601_utc(std::time::SystemTime::now())),
-            camdl_version: Some(crate::version::VERSION_SHORT.to_string()),
-            source_paths: vec![model_path.to_string()],
-            ..Default::default()
-        },
-    }
 }
 
 #[cfg(test)]

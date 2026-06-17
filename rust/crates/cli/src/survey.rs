@@ -336,21 +336,34 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         }
     }
 
-    // Claim a streaming leaf: artifacts go into the staging dir, finalized
-    // atomically at the end (a crash leaves no finalized landscape.tsv).
+    // Claim a streaming leaf through the one resolved-writer seam (gh#241
+    // PR D): artifacts go into the staging dir, finalized atomically at the
+    // end (a crash leaves no finalized landscape.tsv). The running record
+    // carries Null inputs (the landscape summary is a post-run result); the
+    // final inputs are supplied to `finalize`.
     let store = runid::FsCasStore::new(&output_root);
-    let mut running = crate::survey_cas::build_survey_record(
-        &resolved_id, &ir_version_str, runid::RunStatus::Running,
-        serde_json::Value::Null, &model_path_str);
-    running.provenance.label = label_arg.clone();
-    let claim = match store.claim_streaming(&run_dir, running) {
-        Ok(c) => c,
+    let resolved_artifact = crate::resolve::ResolvedArtifact {
+        kind: runid::ArtifactKind::Survey,
+        levels: resolved_id.levels.clone(),
+        run_id: resolved_id.run_id,
+        display_inputs: serde_json::Value::Null,
+    };
+    let meta = crate::resolve::RecordMeta::new(
+        &ir_version_str, &model_path_str, label_arg.clone());
+    let write = match crate::resolve::begin_resolved_write(
+        &store, &output_root, &resolved_artifact, &meta,
+        crate::resolve::WriteMode::Streaming,
+    ) {
+        Ok(crate::resolve::ResolvedWrite::Streaming(c)) => c,
+        Ok(crate::resolve::ResolvedWrite::Committed(_)) => {
+            unreachable!("Streaming write mode never returns a committed path")
+        }
         Err(e) => {
             eprintln!("error: claim survey leaf {}: {}", run_dir.display(), e);
             std::process::exit(1);
         }
     };
-    let staging = claim.dir().to_path_buf();
+    let staging = write.dir().to_path_buf();
     let landscape_path = staging.join("landscape.tsv");
     let summary_path = staging.join("summary.json");
     let html_path = staging.join("landscape.html");
@@ -560,11 +573,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         "data_hashes":     resolved.data_hashes,
         "fixed":           resolved.fixed,
     });
-    let mut completed = crate::survey_cas::build_survey_record(
-        &resolved_id, &ir_version_str, runid::RunStatus::Completed,
-        inputs_json, &model_path_str);
-    completed.provenance.label = label_arg;
-    if let Err(e) = claim.finalize(completed) {
+    if let Err(e) = write.finalize(inputs_json) {
         eprintln!("warning: finalize survey leaf {}: {}", run_dir.display(), e);
     }
 }

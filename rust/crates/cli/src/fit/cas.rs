@@ -31,10 +31,7 @@ use runid::inputs::{
     ArtifactRef, DataDigest, Deps, EngineVersion, FitDigest, ResolvedObsAlignment, Seed,
     StageConfig, StageLevel,
 };
-use runid::{
-    run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, Provenance, RunRecord, RunStatus,
-    FORMAT_VERSION, HASH_VERSION,
-};
+use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, RunRecord};
 
 use super::config_v2::{FitConfigV2, Stage};
 
@@ -427,45 +424,6 @@ pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> 
     let rid = run_id(ArtifactKind::FitStage, &level_hashes);
 
     Ok(ResolvedFitStage { levels, run_id: rid })
-}
-
-/// Build the `RunRecord` for a fit-stage leaf. `inputs` carries the
-/// recorded-not-hashed display fields (method / backend / n_chains /
-/// best_chain / best_loglik) for `show`/`status`; identity is the `levels` +
-/// `deps`. `artifacts` is filled by the store at `finalize` (the recursive
-/// exact-set of everything the runners streamed).
-pub fn build_fit_stage_record(
-    resolved: &ResolvedFitStage,
-    deps: &[ArtifactRef],
-    ir_version: &str,
-    status: RunStatus,
-    inputs: serde_json::Value,
-    model_path: &str,
-) -> RunRecord {
-    RunRecord {
-        format_version: FORMAT_VERSION,
-        kind: ArtifactKind::FitStage,
-        run_id: resolved.run_id,
-        hash_version: HASH_VERSION,
-        ir_version: ir_version.to_string(),
-        engine_version: crate::version::VERSION_SHORT.to_string(),
-        levels: resolved.levels.clone(),
-        deps: deps.to_vec(),
-        status,
-        artifacts: Default::default(),
-        children: Default::default(),
-        inputs,
-        provenance: Provenance {
-            argv: std::env::args().collect(),
-            created_at: Some(crate::cas::iso8601_utc(std::time::SystemTime::now())),
-            camdl_version: Some(crate::version::VERSION_SHORT.to_string()),
-            // The model source path (provenance) so `fit summary`/`table` can
-            // recover the model for calendar/instant rendering without a
-            // fit-wide record (the fit level is a path segment now).
-            source_paths: vec![model_path.to_string()],
-            ..Default::default()
-        },
-    }
 }
 
 /// The lineage dep for consuming an upstream stage's `fit_state.toml`: the

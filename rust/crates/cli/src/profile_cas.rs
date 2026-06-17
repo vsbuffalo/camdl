@@ -20,10 +20,7 @@ use runid::inputs::{
     ArtifactRef, DataDigest, Deps, EngineVersion, ModelDigest, ParamId, ProfileBase,
     ProfilePointConfig, ProfileStage, Seed, StartLevel,
 };
-use runid::{
-    run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, Provenance, RunRecord, RunStatus,
-    FORMAT_VERSION, HASH_VERSION,
-};
+use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
 
 use crate::fit::cas::{digest_value, ensure_finite};
 
@@ -128,40 +125,6 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::ProfilePoint, &level_hashes);
     Ok(ResolvedProfilePoint { levels, run_id: rid })
-}
-
-/// Build the `RunRecord` for a profile-point leaf. `inputs` carries the
-/// (recorded-not-hashed) display payload; identity is `levels` + `deps`.
-/// `artifacts` is filled by the store at `finalize`.
-pub fn build_profile_point_record(
-    resolved: &ResolvedProfilePoint,
-    deps: &[ArtifactRef],
-    ir_version: &str,
-    status: RunStatus,
-    inputs: serde_json::Value,
-    model_path: &str,
-) -> RunRecord {
-    RunRecord {
-        format_version: FORMAT_VERSION,
-        kind: ArtifactKind::ProfilePoint,
-        run_id: resolved.run_id,
-        hash_version: HASH_VERSION,
-        ir_version: ir_version.to_string(),
-        engine_version: crate::version::VERSION_SHORT.to_string(),
-        levels: resolved.levels.clone(),
-        deps: deps.to_vec(),
-        status,
-        artifacts: Default::default(),
-        children: Default::default(),
-        inputs,
-        provenance: Provenance {
-            argv: std::env::args().collect(),
-            created_at: Some(crate::cas::iso8601_utc(std::time::SystemTime::now())),
-            camdl_version: Some(crate::version::VERSION_SHORT.to_string()),
-            source_paths: vec![model_path.to_string()],
-            ..Default::default()
-        },
-    }
 }
 
 #[cfg(test)]

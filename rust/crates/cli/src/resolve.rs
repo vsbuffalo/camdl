@@ -263,6 +263,11 @@ impl RecordMeta {
         self.deps = deps;
         self
     }
+
+    pub fn with_children(mut self, children: BTreeMap<String, Vec<ContentHash>>) -> Self {
+        self.children = children;
+        self
+    }
 }
 
 /// Which store door to use — mirrors the store's two write modes.

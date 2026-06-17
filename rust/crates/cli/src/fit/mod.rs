@@ -828,14 +828,33 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 continue;
             }
         }
-        let running = cas::build_fit_stage_record(
-            &resolved, &deps, &ir_version_str, runid::RunStatus::Running,
-            serde_json::Value::Null, &sweep_config.model.camdl);
-        let claim = store.claim_streaming(&cas_path, running).unwrap_or_else(|e| {
-            eprintln!("error: claim fit stage {}: {}", cas_path.display(), e);
-            std::process::exit(1);
-        });
-        let stage_dir = claim.dir().to_path_buf();
+        // Streaming write through the one resolved-writer seam (gh#241 PR D).
+        // The running record carries Null inputs (the stage's loglik summary is
+        // a post-run result); the final inputs are supplied to `finalize`. The
+        // upstream lineage deps ride in `RecordMeta`.
+        let resolved_artifact = crate::resolve::ResolvedArtifact {
+            kind: runid::ArtifactKind::FitStage,
+            levels: resolved.levels.clone(),
+            run_id: resolved.run_id,
+            display_inputs: serde_json::Value::Null,
+        };
+        let meta = crate::resolve::RecordMeta::new(
+            &ir_version_str, &sweep_config.model.camdl, None)
+            .with_deps(deps.clone());
+        let write = match crate::resolve::begin_resolved_write(
+            &store, &cas_root, &resolved_artifact, &meta,
+            crate::resolve::WriteMode::Streaming,
+        ) {
+            Ok(crate::resolve::ResolvedWrite::Streaming(c)) => c,
+            Ok(crate::resolve::ResolvedWrite::Committed(_)) => {
+                unreachable!("Streaming write mode never returns a committed path")
+            }
+            Err(e) => {
+                eprintln!("error: claim fit stage {}: {}", cas_path.display(), e);
+                std::process::exit(1);
+            }
+        };
+        let stage_dir = write.dir().to_path_buf();
 
         // gh#147 (M3.2): seed the resumed leaf with the base chain's state
         // (resume_state.bin + parameter_traces.tsv per chain), copied from the
@@ -1648,10 +1667,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
             "wall_time_seconds": stage_elapsed.as_secs_f64(),
         });
-        let completed = cas::build_fit_stage_record(
-            &resolved, &deps, &ir_version_str, runid::RunStatus::Completed,
-            inputs_json, &sweep_config.model.camdl);
-        let dest = match claim.finalize(completed) {
+        let dest = match write.finalize(inputs_json) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("error: could not finalize fit stage {}: {}", cas_path.display(), e);

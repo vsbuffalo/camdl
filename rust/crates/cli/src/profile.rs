@@ -1635,27 +1635,38 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             "wall_time_seconds": elapsed,
             "provenance": run_provenance_json.clone(),
         });
-        let running = crate::profile_cas::build_profile_point_record(
-            resolved_pt_id, &profile_deps, &ir_version_str,
-            runid::RunStatus::Running, serde_json::Value::Null, &ir_path);
-        let claim = match store.claim_streaming(cas_path, running) {
-            Ok(c) => c,
+        // Streaming write through the one resolved-writer seam (gh#241 PR D).
+        // The running record carries Null inputs (the cell's loglik summary is
+        // a post-run result); the final inputs are supplied to `finalize`.
+        let resolved_artifact = crate::resolve::ResolvedArtifact {
+            kind: runid::ArtifactKind::ProfilePoint,
+            levels: resolved_pt_id.levels.clone(),
+            run_id: resolved_pt_id.run_id,
+            display_inputs: serde_json::Value::Null,
+        };
+        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None)
+            .with_deps(profile_deps.clone());
+        let write = match crate::resolve::begin_resolved_write(
+            &store, &root, &resolved_artifact, &meta,
+            crate::resolve::WriteMode::Streaming,
+        ) {
+            Ok(crate::resolve::ResolvedWrite::Streaming(c)) => c,
+            Ok(crate::resolve::ResolvedWrite::Committed(_)) => {
+                unreachable!("Streaming write mode never returns a committed path")
+            }
             Err(e) => {
                 eprintln!("warning: claim profile point {}: {}", cas_path.display(), e);
                 return;
             }
         };
-        let start_dir = claim.dir().to_path_buf();
+        let start_dir = write.dir().to_path_buf();
 
         let mle_toml = render_mle_toml(&if2_params, &focal_values,
             &focal_grids.iter().map(|fg| fg.name.as_str()).collect::<Vec<_>>(),
             &mle_params, final_loglik, final_log_posterior, &diag);
         let _ = std::fs::write(start_dir.join("mle.toml"), mle_toml);
 
-        let completed = crate::profile_cas::build_profile_point_record(
-            resolved_pt_id, &profile_deps, &ir_version_str,
-            runid::RunStatus::Completed, inputs_json, &ir_path);
-        if let Err(e) = claim.finalize(completed) {
+        if let Err(e) = write.finalize(inputs_json) {
             eprintln!("warning: finalize profile point {}: {}", cas_path.display(), e);
         }
 

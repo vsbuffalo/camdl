@@ -26,7 +26,6 @@ use crate::util::{run_simulation, write_traj_tsv, load_params_toml, resolve_ir_p
 use crate::hashing::{model_hash, sim_hash, scen_hash, canonical_params};
 use crate::sampling::{generate_design, describe_prior, DesignParam};
 use ir::parameter::PriorDist;
-use crate::cas;
 use crate::version;
 
 // gh#audit-H13: build a SCOPED local rayon pool from `--parallel` and run the
@@ -1129,7 +1128,7 @@ impl crate::engine::RunSink for CasSink {
         let spec = &cell.spec;
         let name = spec.scenario.name().to_string();
 
-        let (rt, dir, rel) = match self.cell_resolve(spec) {
+        let (rt, _dir, rel) = match self.cell_resolve(spec) {
             Ok(x) => x,
             Err(e) => {
                 self.counter += 1;
@@ -1160,28 +1159,19 @@ impl crate::engine::RunSink for CasSink {
             children.insert("obs".to_string(), vec![obs_id]);
         }
 
-        let record = runid::RunRecord {
-            format_version: runid::FORMAT_VERSION,
+        // Atomic write through the one resolved-writer seam (gh#241 PR D).
+        // Identity (`Sim` / `levels` / `run_id`) is copied verbatim from the
+        // resolved trajectory; the obs child + the fit dep ride in the record.
+        let resolved_artifact = crate::resolve::ResolvedArtifact {
             kind: runid::ArtifactKind::Sim,
+            levels: rt.levels.clone(),
             run_id: rt.run_id,
-            hash_version: runid::HASH_VERSION,
-            ir_version: ir::IR_VERSION.trim().to_string(),
-            engine_version: version::VERSION_SHORT.to_string(),
-            levels: rt.levels,
-            deps: self.fit_dep.clone(),
-            status: runid::RunStatus::Running,
-            artifacts: Default::default(),
-            children,
-            inputs: serde_json::Value::Null,
-            provenance: runid::Provenance {
-                argv: std::env::args().collect(),
-                label: self.label.clone(),
-                created_at: Some(cas::iso8601_utc(std::time::SystemTime::now())),
-                source_paths: vec![self.model_path.clone()],
-                camdl_version: Some(version::VERSION_SHORT.to_string()),
-                ..Default::default()
-            },
+            display_inputs: serde_json::Value::Null,
         };
+        let meta = crate::resolve::RecordMeta::new(
+            ir::IR_VERSION.trim(), self.model_path.clone(), self.label.clone())
+            .with_deps(self.fit_dep.clone())
+            .with_children(children);
 
         let mut artifacts = runid::Artifacts::new();
         artifacts.insert("traj.tsv", traj_bytes);
@@ -1205,9 +1195,16 @@ impl crate::engine::RunSink for CasSink {
                 }
             }
         }
-        let store = runid::FsCasStore::new(self.root());
-        let dest = match store.commit_atomic(&dir, record, artifacts) {
-            Ok(d) => d,
+        let root = self.root();
+        let store = runid::FsCasStore::new(&root);
+        let dest = match crate::resolve::begin_resolved_write(
+            &store, &root, &resolved_artifact, &meta,
+            crate::resolve::WriteMode::Atomic(artifacts),
+        ) {
+            Ok(crate::resolve::ResolvedWrite::Committed(d)) => d,
+            Ok(crate::resolve::ResolvedWrite::Streaming(_)) => {
+                unreachable!("Atomic write mode never returns a streaming claim")
+            }
             Err(e) => {
                 self.counter += 1;
                 self.errors.push(format!("scenario={} seed={}: commit failed: {}",
