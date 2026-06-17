@@ -128,7 +128,6 @@ camdl = "{ir}"
 [data.observations]
 cases = "{data}"
 [config]
-backend = "chain_binomial"
 dt = 1.0
 [estimate]
 beta  = {{ bounds = [0.01, 5.0], start = 0.4 }}
@@ -162,7 +161,6 @@ camdl = "{ir}"
 [data.observations]
 cases = "{data}"
 [config]
-backend = "chain_binomial"
 dt = 1.0
 [estimate]
 beta  = {{ bounds = [0.01, 5.0], start = 0.3 }}

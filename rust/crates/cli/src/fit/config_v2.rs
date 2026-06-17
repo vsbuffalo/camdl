@@ -292,8 +292,6 @@ pub struct ModelRef {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FitBackendConfig {
-    #[serde(default = "default_backend")]
-    pub backend: crate::args::types::ForwardBackend,
     #[serde(default = "default_dt")]
     pub dt: f64,
     /// How observation times relate to the `dt` grid. `None` = "exact where the
@@ -323,7 +321,6 @@ fn is_false(b: &bool) -> bool { !*b }
 impl Default for FitBackendConfig {
     fn default() -> Self {
         FitBackendConfig {
-            backend: default_backend(),
             dt: default_dt(),
             obs_alignment: None,
             allow_degenerate_rates: false,
@@ -474,6 +471,14 @@ pub struct SyntheticSpec {
     /// set, in which case that applies at fit time).
     #[serde(default)]
     pub scenario: Option<String>,
+
+    /// Forward-simulation backend used to GENERATE the synthetic datasets
+    /// (`chain_binomial` | `gillespie` | `ode`). This is a property of data
+    /// generation, not of fitting — fit stages declare their own backends.
+    /// Relocated from `[config].backend` (gh#241): the backend only ever fed
+    /// synthetic generation, so it belongs in the block that owns generation.
+    #[serde(default = "default_backend")]
+    pub backend: crate::args::types::ForwardBackend,
 }
 
 impl SyntheticSpec {
@@ -1820,6 +1825,29 @@ pub struct FitProvenance {
 /// Multiple offending stages are bundled into a single error message
 /// rather than failing on the first hit, so the user can fix all of
 /// them in one pass.
+/// gh#241: `[config].backend` was relocated to `[synthetic].backend` (it only
+/// ever fed synthetic-data generation). Catch the old key BEFORE the strict
+/// `deny_unknown_fields` parse, so the user gets a migration message naming the
+/// replacement instead of a bare "unknown field `backend`" serde error.
+fn detect_relocated_config_backend(contents: &str) -> Result<(), String> {
+    let value: toml::Value = match toml::from_str(contents) {
+        Ok(v) => v,
+        // Malformed TOML surfaces from the strict parse with its own message.
+        Err(_) => return Ok(()),
+    };
+    if value.get("config").and_then(|c| c.get("backend")).is_some() {
+        return Err(
+            "`[config].backend` has moved to `[synthetic].backend` (gh#241).\n  \
+             The backend is a forward-simulation setting for synthetic-data \
+             generation, not a fit-wide config — fit stages declare their own \
+             `backend`. Move it under your `[synthetic]` block, or remove it for \
+             a real-data fit.\n  See `camdl docs fit-toml`."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn detect_legacy_init_keys(contents: &str) -> Result<(), String> {
     // Parse as a generic toml::Value so the walker doesn't depend on the
     // `FitConfigV2` schema (which has already renamed the fields).
@@ -1946,6 +1974,7 @@ impl FitConfigV2 {
     /// strongly-typed deserializer.
     pub fn from_toml_str(contents: &str) -> Result<Self, String> {
         detect_legacy_init_keys(contents)?;
+        detect_relocated_config_backend(contents)?;
         let config: Self = toml::from_str(contents)
             .map_err(|e| format!("parse error: {}", e))?;
         // gh#241 (C3): catch typo'd stage keys serde silently drops.
@@ -2594,7 +2623,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -2687,7 +2715,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -2761,7 +2788,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -2797,7 +2823,6 @@ holdout_after = 5474.0
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -2830,7 +2855,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -2868,7 +2892,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -2906,7 +2929,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -2941,7 +2963,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -2981,7 +3002,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -3030,7 +3050,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -3067,7 +3086,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -3112,7 +3130,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -3199,7 +3216,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -3241,7 +3257,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -3275,7 +3290,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -3301,10 +3315,10 @@ cooling = 0.70
 
     #[test]
     fn validate_bad_backend() {
-        // After backend was typed as `Backend` enum, unknown strings
-        // are rejected at TOML parse time (not at config.validate).
-        // This is strictly better — surfaces the error sooner with a
-        // toml/serde location.
+        // A typo'd `[synthetic].backend` (the relocated forward backend,
+        // gh#241) is a typed `ForwardBackend`, so an unknown string is
+        // rejected at TOML parse time (not at config.validate) — surfacing
+        // the error sooner, with a toml/serde location.
         let err = parse(r#"
 [model]
 camdl = "models/sir.camdl"
@@ -3313,8 +3327,12 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "gilelspie"
 dt = 1.0
+
+[synthetic]
+true_params = "truth.toml"
+sim_seeds = "1:3"
+backend = "gilelspie"
 
 [estimate]
 beta = { bounds = [0.01, 2.0] }
@@ -3343,7 +3361,6 @@ camdl = "models/sir.camdl"
 [data.observations]
 weekly_cases = "data/cases.tsv"
 [config]
-backend = "chain_binomial"
 dt = 1.0
 [estimate]
 S0_y = { bounds = [0, 1] }
@@ -3373,7 +3390,6 @@ camdl = "models/sir.camdl"
 [data.observations]
 weekly_cases = "data/cases.tsv"
 [config]
-backend = "chain_binomial"
 dt = 1.0
 [estimate]
 S0_y = { bounds = [0, 1] }
@@ -3408,7 +3424,6 @@ camdl = "models/sir.camdl"
 [data.observations]
 weekly_cases = "data/cases.tsv"
 [config]
-backend = "chain_binomial"
 dt = 1.0
 [estimate]
 S0_y = { bounds = [0, 1] }
@@ -3444,7 +3459,6 @@ camdl = "models/sir.camdl"
 [data.observations]
 weekly_cases = "data/cases.tsv"
 [config]
-backend = "chain_binomial"
 dt = 1.0
 [estimate]
 S0_y = { bounds = [0, 1], ivp = true }
@@ -3478,7 +3492,6 @@ camdl = "models/sir.camdl"
 [data.observations]
 weekly_cases = "data/cases.tsv"
 [config]
-backend = "chain_binomial"
 dt = 1.0
 [estimate]
 S0_y = { bounds = [-0.5, 1] }
@@ -3511,7 +3524,6 @@ camdl = "models/sir.camdl"
 [data.observations]
 weekly_cases = "data/cases.tsv"
 [config]
-backend = "chain_binomial"
 dt = 1.0
 [estimate]
 S0_y = { bounds = [0, 1] }
@@ -3550,7 +3562,6 @@ true_params = "true.toml"
 sim_seeds = [1, 2, 3]
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -4121,7 +4132,6 @@ cooling = 0.70
 camdl = "models/sir.camdl"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -4158,7 +4168,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -4195,7 +4204,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -4230,7 +4238,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -4265,7 +4272,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -4306,7 +4312,6 @@ weekly_cases = "data/cases.tsv"
 weekly_cases = "data/holdout.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -4354,8 +4359,82 @@ iterations = 50
 cooling = 0.70
         "#).unwrap();
 
-        assert_eq!(config.config.backend, crate::args::types::ForwardBackend::ChainBinomial);
         assert_eq!(config.config.dt, 1.0);
+    }
+
+    #[test]
+    fn legacy_config_backend_is_rejected_with_migration_message() {
+        // gh#241: `[config].backend` relocated to `[synthetic].backend`. The old
+        // key must fail with a migration message naming the replacement, not a
+        // bare serde "unknown field" error.
+        let err = parse(r#"
+[model]
+camdl = "m.camdl"
+[data.observations]
+cases = "d.tsv"
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+[config]
+backend = "ode"
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 100
+iterations = 5
+cooling = 0.7
+        "#).unwrap_err();
+        assert!(err.contains("[synthetic].backend"), "names the new location: {err}");
+        assert!(err.contains("gh#241"), "cites the change: {err}");
+        assert!(!err.contains("unknown field"), "not a bare serde error: {err}");
+    }
+
+    #[test]
+    fn synthetic_backend_parses_and_defaults() {
+        use crate::args::types::ForwardBackend;
+        // `[synthetic].backend` parses to the typed forward backend (gillespie is
+        // valid here — synthetic generation is forward simulation).
+        let cfg = parse(r#"
+[model]
+camdl = "m.camdl"
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+[fixed]
+gamma = 0.2
+[synthetic]
+true_params = "truth.toml"
+sim_seeds = "1:3"
+backend = "gillespie"
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 100
+iterations = 5
+cooling = 0.7
+        "#).unwrap();
+        assert_eq!(cfg.synthetic.as_ref().unwrap().backend, ForwardBackend::Gillespie);
+
+        // Omitted → default chain_binomial (matching the old `[config].backend` default).
+        let cfg2 = parse(r#"
+[model]
+camdl = "m.camdl"
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+[fixed]
+gamma = 0.2
+[synthetic]
+true_params = "truth.toml"
+sim_seeds = "1:3"
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 100
+iterations = 5
+cooling = 0.7
+        "#).unwrap();
+        assert_eq!(cfg2.synthetic.as_ref().unwrap().backend, ForwardBackend::ChainBinomial);
     }
 
     #[test]
@@ -5058,6 +5137,7 @@ cooling = 0.7
             sim_seeds: SeedsSpec::Range("1:3".into()),
             datasets: None,
             scenario: None,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
         });
         assert_eq!(cfg.per_fit_prefix(101, Some(2)),
                    std::path::PathBuf::from("synthetic").join("ds_02").join("fit_101"));
@@ -5952,7 +6032,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -6016,7 +6095,6 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]

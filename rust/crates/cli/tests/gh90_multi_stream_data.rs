@@ -276,7 +276,6 @@ fn pfilter_cli_data_overrides_fit_toml_when_both_supplied() {
 camdl = "{model}"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]
@@ -336,7 +335,6 @@ fn pfilter_fit_toml_fallback_when_no_cli_data() {
 camdl = "{model}"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 
 [estimate]

@@ -71,8 +71,9 @@ weekly_cases = "data/london_cases.tsv"
 # weekly_cases = "data/london_cases_holdout.tsv"
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
+# The forward backend for [synthetic] data generation is [synthetic].backend
+# (gh#241); fit stages declare their own `backend`.
 
 # ── Estimated parameters ──────────────────────────────
 # Every parameter here will be perturbed during IF2.

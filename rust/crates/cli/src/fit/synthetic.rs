@@ -49,7 +49,6 @@ pub fn generate_synthetic_datasets(
     spec: &SyntheticSpec,
     model_path: &str,
     fit_dir: &Path,
-    backend: crate::args::types::ForwardBackend,
     dt: f64,
 ) -> Result<Vec<SyntheticDataset>, String> {
     let data_dir = fit_dir.join("synthetic").join("data");
@@ -75,7 +74,7 @@ pub fn generate_synthetic_datasets(
         // it — the per-cell content_hash flow lived in the v1 grid summary
         // path, which has been deleted).
         let _ = generate_one_dataset(
-            spec, model_path, sim_seed, &path, backend, dt,
+            spec, model_path, sim_seed, &path, dt,
         )?;
         out.push(SyntheticDataset { idx, path });
     }
@@ -89,7 +88,6 @@ fn generate_one_dataset(
     model_path: &str,
     sim_seed: u64,
     out_path: &Path,
-    backend: crate::args::types::ForwardBackend,
     dt: f64,
 ) -> Result<String, String> {
     // Build a SimRun matching `simulate --obs` semantics — load the
@@ -106,7 +104,7 @@ fn generate_one_dataset(
         scenario_name: spec.scenario.clone(),
         adhoc_enable: vec![],
         adhoc_disable: vec![],
-        backend,
+        backend: spec.backend,
         dt,
         seed: sim_seed,
         integrator: None, // synthetic data-gen uses the model's declared integrator
@@ -331,10 +329,11 @@ simulate { from = 0 'days  to = 10 'days }
             sim_seeds: SeedsSpec::List(vec![1, 2, 3]),
             datasets: None,
             scenario: None,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
         };
         let datasets = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(), &fit_dir,
-            crate::args::types::ForwardBackend::ChainBinomial, 1.0,
+            1.0,
         ).expect("generation must succeed on minimal SIR");
 
         assert_eq!(datasets.len(), 3);
@@ -364,14 +363,15 @@ simulate { from = 0 'days  to = 10 'days }
             sim_seeds: SeedsSpec::List(vec![42]),
             datasets: None,
             scenario: None,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
         };
         let a = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("run_a"), crate::args::types::ForwardBackend::ChainBinomial, 1.0,
+            &tmp.path().join("run_a"), 1.0,
         ).unwrap();
         let b = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("run_b"), crate::args::types::ForwardBackend::ChainBinomial, 1.0,
+            &tmp.path().join("run_b"), 1.0,
         ).unwrap();
 
         assert_eq!(std::fs::read(&a[0].path).unwrap(),
@@ -389,10 +389,11 @@ simulate { from = 0 'days  to = 10 'days }
             sim_seeds: SeedsSpec::List(vec![1, 999]),
             datasets: None,
             scenario: None,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
         };
         let ds = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("fit"), crate::args::types::ForwardBackend::ChainBinomial, 1.0,
+            &tmp.path().join("fit"), 1.0,
         ).unwrap();
         assert_ne!(std::fs::read(&ds[0].path).unwrap(),
                    std::fs::read(&ds[1].path).unwrap(),

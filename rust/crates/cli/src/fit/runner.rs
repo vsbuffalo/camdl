@@ -3708,7 +3708,6 @@ iterations = 1
 cooling    = 0.5
 
 [config]
-backend = "gillespie"
 dt = 1.0
 "#, data_dir.display(), ir_path, data_path.display());
         std::fs::write(&fit_toml_path, &toml).unwrap();
@@ -3805,7 +3804,6 @@ iterations = 1
 cooling    = 0.5
 
 [config]
-backend = "gillespie"
 dt = 1.0
 "#, dir.display(), ic_free, ir_path, data_path.display(), ivp_line);
         std::fs::write(&fit_toml_path, toml_src).unwrap();
@@ -4087,7 +4085,6 @@ iterations = 1
 cooling    = 0.5
 
 [config]
-backend = "gillespie"
 dt = 1.0
 "#, data_dir.display(), ir_path, data_path.display());
         std::fs::write(&fit_toml_path, &toml).unwrap();
@@ -4992,7 +4989,6 @@ iterations = 1
 cooling    = 0.5
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 "#, dir.display(), data_path.display());
             std::fs::write(&fit_toml_path, toml_src).unwrap();
@@ -5250,7 +5246,6 @@ iterations = 1
 cooling    = 0.5
 
 [config]
-backend = "chain_binomial"
 dt = 1.0
 "#,
                 out = dir.display(),

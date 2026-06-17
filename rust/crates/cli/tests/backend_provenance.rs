@@ -367,7 +367,7 @@ fn seed_timing_model() -> PathBuf {
 }
 
 #[test]
-fn fit_records_stage_backend_in_mle_not_global_config_backend() {
+fn fit_records_stage_backend_in_mle() {
     let bin = skip_if_missing();
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("out");
@@ -377,17 +377,15 @@ fn fit_records_stage_backend_in_mle_not_global_config_backend() {
         2020-03-19\t27\n2020-03-20\t31\n2020-03-21\t28\n2020-03-22\t20\n\
         2020-03-23\t13\n2020-03-24\t8\n").unwrap();
 
-    // `[config].backend = ode` (a forward-sim default) DELIBERATELY differs
-    // from the stage backend (chain_binomial). Pre-fix the producer copied
-    // `config.backend` into mle_params (the bug); post-fix it records the
-    // stage's actual backend.
+    // The provenance must record the backend the STAGE actually fit on. (Before
+    // gh#241 the producer copied the global `[config].backend` instead — a bug;
+    // gh#241 PR E then relocated that field to `[synthetic].backend`, so a
+    // global forward backend no longer exists to mis-record. This pins that the
+    // recorded backend tracks the stage.)
     let fit_toml = tmp.path().join("fit.toml");
     let body = format!(
         r#"output_dir = "{out}"
 condition_from = "first_obs - 1 day"
-
-[config]
-backend = "ode"
 
 [model]
 camdl = "{ir}"
@@ -436,10 +434,7 @@ cooling = 0.7
         .find(|l| l.trim_start().starts_with("backend ="))
         .unwrap_or_else(|| panic!("no [provenance].backend line in:\n{contents}"));
     assert!(line.contains("\"chain_binomial\""),
-        "mle_params must record the STAGE backend (chain_binomial), not the global \
-         [config].backend (ode); got: {line}");
-    assert!(!line.contains("\"ode\""),
-        "mle_params must NOT record the global [config].backend (ode); got: {line}");
+        "mle_params must record the stage backend (chain_binomial); got: {line}");
 }
 
 fn walkdir(root: &Path) -> Vec<PathBuf> {

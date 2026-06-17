@@ -523,7 +523,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             // doesn't re-invoke camdlc; falls back to the source path.
             config.compiled_ir.as_deref().unwrap_or(&config.model.camdl),
             &fit_dir,
-            config.config.backend,
             config.config.dt,
         ).unwrap_or_else(|e| {
             eprintln!("error: synthetic-data generation failed: {}", e);

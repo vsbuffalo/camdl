@@ -202,7 +202,6 @@ camdl = "{ir}"
 [data.observations]
 cases = "{data}"
 [config]
-backend = "chain_binomial"
 dt = 1.0
 [estimate]
 beta  = {beta_field}

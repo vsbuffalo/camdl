@@ -76,10 +76,11 @@ simulator (`chain_binomial` for fits — needed for chain-binomial process noise
 and `balance`). A downstream stage warm-starts from an upstream one with
 `init_mle = "<stage-name>"`.
 
-**`[config]`** — fit-wide simulator settings: `backend` (default
-`chain_binomial`) and `dt` (the integrator step, default `1.0`). The `dt` you
-care about lives here; a `dt` written at the top level of the file is a typo,
-not a setting.
+**`[config]`** — fit-wide simulator settings: `dt` (the integrator step, default
+`1.0`). The `dt` you care about lives here; a `dt` written at the top level of
+the file is a typo, not a setting. (The forward backend for synthetic-data
+generation is `[synthetic].backend`, not a `[config]` setting — gh#241; the fit
+stages declare their own `backend`.)
 
 > **Unknown keys are rejected.** A misplaced or misspelled key is a hard error
 > naming the offending key — `fit.toml` is parsed strictly. A top-level `dt` (it
