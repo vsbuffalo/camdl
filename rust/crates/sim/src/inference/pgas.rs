@@ -341,30 +341,25 @@ pub struct SubstepGrid {
     pub effect_at_substep: ObsAtSubstep,
 }
 
-/// Smallest substep treated as nonzero when walking the schedule — guards the
-/// terminal `t0 == t_end` step. A genuine clipped remainder is always ≥ the
-/// schedule's obs tolerance (`1e-10`), so this never drops a real window landing.
-const GRID_STEP_EPS: f64 = 1e-12;
-
-/// Build the substep grid over `[t_start, last_obs]` under the alignment policy,
-/// consuming the shared [`Schedule`] primitives — `substep` for the step size and
-/// `substep_time` for the drift-free start time — exactly as the substep-time
-/// convention proposal prescribes for an EXACT stepper (re-anchor `(window_start,
-/// s)` at each clip). PGAS does NOT hand-roll its own tiling; the `Schedule` is
-/// the single source of truth for where boundaries fall.
+/// Build the substep grid over `[t_start, last_obs]` under the alignment policy.
+/// The Exact arm materializes the shared [`Schedule::substeps`] walk — the SAME
+/// drift-free inner walk the bootstrap PF / IF2 / correlated-PF iterate (gh#233:
+/// one walk, two consumers) — instead of hand-rolling a second tiling. The
+/// `Schedule` is the single source of truth for where boundaries fall; the
+/// negligible-step floor is the shared `schedule::MIN_STEP_EPS` (was PGAS's own
+/// `GRID_STEP_EPS = 1e-12`, unified down).
 ///
 /// * `Snap`: the uniform grid (`t_start + s·dt`, full `dt`) with the obs map from
 ///   [`build_obs_at_substep`] (obs rounded onto the grid) — the historical PGAS
 ///   behavior, byte-identical.
-/// * `Exact`: walk the schedule. `t0 = substep_time(window_start, s)` (drift-free,
-///   one multiply); `dt_substep = schedule.substep(cursor, t0)` (the bit-exact
-///   `dt.min(next_boundary − t0)`); re-anchor `window_start` to each obs the walk
-///   lands on. Full `dt` steps until the window's final clipped remainder lands
-///   exactly on the obs. At dt=1.0 (and any window that is an integer multiple of
-///   `dt`) this is bit-identical to `Snap`; at non-power-of-2 `dt` the final step
-///   of an on-grid window differs from `Snap` by ≤1 ULP — the sanctioned
-///   EXACT-stepper drift, bounded to one window (substep-time proposal), in
-///   exchange for landing *exactly* on every observation.
+/// * `Exact`: loop obs windows over `Schedule::substeps`. Each window yields
+///   drift-free `t0 = substep_time(window_start, s)` substeps clipped to its obs;
+///   the obs is scored on the window's final clipped substep, effects on the
+///   substep the iterator signals. At dt=1.0 (and any window that is an integer
+///   multiple of `dt`) this is bit-identical to `Snap`; at non-power-of-2 `dt` the
+///   final step of an on-grid window differs from `Snap` by ≤1 ULP — the
+///   sanctioned EXACT-stepper drift, bounded to one window (substep-time
+///   proposal), in exchange for landing *exactly* on every observation.
 pub fn build_substep_grid(
     t_start: f64,
     dt: f64,
@@ -389,67 +384,62 @@ pub fn build_substep_grid(
             // LANDS exactly on each (even an on-grid effect that off-grid obs would
             // otherwise step past), and record which substep fires it so the
             // producer fires CURSOR-keyed. Off-grid effect times are refused
-            // upstream (`guard_exact_offgrid_effect_time`), so every boundary here
-            // is either a full-`dt` landing (on-grid obs) or a clipped landing
-            // (off-grid obs) we re-anchor at — never a within-grid fractional point
-            // the drift-free walk couldn't represent.
+            // upstream (`guard_exact_offgrid_effect_time`).
             let schedule =
                 Schedule::new(dt, last_obs, dt, StepPolicy::Exact, Vec::new(), effect_times.to_vec())
                     .with_obs(obs_times);
+            // PGAS materializes the SAME inner walk the bootstrap PF / IF2 /
+            // correlated-PF iterate (`Schedule::substeps`), instead of hand-rolling
+            // a second copy (gh#233 — one walk, two consumers). We loop obs windows
+            // and collect each window's drift-free substeps into the flat grid; the
+            // obs lands on the window's last substep, effects on the substep the
+            // iterator signals via `fired`. The effect cursor carries monotonically
+            // across windows (PGAS's single-cursor convention: an effect fires
+            // exactly once, on the substep landing on its boundary).
             let mut steps: Vec<(f64, f64)> = Vec::new();
             let mut obs_at_substep = ObsAtSubstep::new();
             let mut effect_at_substep = ObsAtSubstep::new();
             let mut cur = Cursor::default();
-            // EXACT anchoring (substep-time proposal): (window_start, s) re-anchor
-            // at each obs OR scheduled-effect boundary the walk lands on; t0 =
-            // substep_time(window_start, s).
             let mut window_start = t_start;
-            let mut s_in_window = 0u64;
             let mut idx = 0usize;
-            loop {
-                let t0 = schedule.substep_time(window_start, s_in_window);
-                let step_dt = match schedule.substep(&cur, t0) {
-                    Some(d) if d > GRID_STEP_EPS => d,
-                    _ => break,
-                };
-                steps.push((t0, step_dt));
-                let t_next = t0 + step_dt;
-                // Re-anchor at the boundary time we land on (obs and/or effect).
-                // Coincident obs+effect resolve to the same time, so a single
-                // re-anchor is correct.
-                let mut reanchor: Option<f64> = None;
-                if schedule.effect_due_at(&cur, t_next) {
-                    let eff_t = schedule.effect_time(&cur).expect("effect due ⇒ present");
-                    let prev = effect_at_substep.insert(idx, cur.effect_idx);
-                    debug_assert!(
-                        prev.is_none(),
-                        "exact grid: substep {idx} claimed twice (effect collision)"
-                    );
-                    cur.pass_effect();
-                    reanchor = Some(eff_t);
-                }
-                if schedule.obs_due_at(&cur, t_next) {
-                    let obs_t = schedule.obs_time(&cur).expect("obs due ⇒ present");
-                    // Each obs gets its own window/substep idx under the Exact
-                    // walk, and coincident obs are rejected upstream
-                    // (validate_obs_times_increasing), so the key is always
-                    // fresh. Defensive: keep both arms uniformly collision-safe.
-                    let prev = obs_at_substep.insert(idx, cur.obs_idx);
-                    debug_assert!(
-                        prev.is_none(),
-                        "exact grid: substep {idx} claimed twice (obs collision)"
-                    );
-                    cur.pass_obs();
-                    reanchor = Some(obs_t); // re-anchor at the obs landed on
-                }
-                match reanchor {
-                    Some(anchor) => {
-                        window_start = anchor;
-                        s_in_window = 0;
+            while let Some(obs_t) = schedule.obs_time(&cur) {
+                let wcur =
+                    Cursor { obs_idx: cur.obs_idx, effect_idx: cur.effect_idx, ..Default::default() };
+                let mut last_idx = None;
+                let mut fired_in_window = 0usize;
+                for (t0, step_dt, fired) in schedule.substeps(wcur, window_start) {
+                    steps.push((t0, step_dt));
+                    if let Some(eff_idx) = fired {
+                        let prev = effect_at_substep.insert(idx, eff_idx);
+                        debug_assert!(
+                            prev.is_none(),
+                            "exact grid: substep {idx} claimed twice (effect collision)"
+                        );
+                        fired_in_window += 1;
                     }
-                    None => s_in_window += 1,
+                    last_idx = Some(idx);
+                    idx += 1;
                 }
-                idx += 1;
+                match last_idx {
+                    // The obs is scored on the window's last (boundary-clipped)
+                    // substep. Coincident obs are rejected upstream, so the key is
+                    // fresh; a coincident effect+obs lands on the same substep
+                    // (`fired` already recorded it there) — matching the old
+                    // single-loop walk.
+                    Some(li) => {
+                        let prev = obs_at_substep.insert(li, cur.obs_idx);
+                        debug_assert!(
+                            prev.is_none(),
+                            "exact grid: substep {li} claimed twice (obs collision)"
+                        );
+                    }
+                    // A leading window coincident with t_start (obs(0) == t_start)
+                    // yields no substep; the old whole-run walk broke here too.
+                    None => break,
+                }
+                window_start = obs_t; // re-anchor at the EXACT obs time
+                cur.effect_idx += fired_in_window;
+                cur.pass_obs();
             }
             Ok(SubstepGrid { steps, obs_at_substep, effect_at_substep })
         }
@@ -2563,6 +2553,29 @@ mod grid_tests {
         // 7.0 is on the GLOBAL grid but off the SHIFTED (anchored at 3.5) grid —
         // a window is tiled relative to its own start, so it lands via a remainder.
         assert!(g.steps.iter().any(|&(_, d)| d != 1.0), "off-grid windows must produce shortened substeps");
+    }
+
+    #[test]
+    fn exact_grid_with_on_grid_effect_and_off_grid_obs() {
+        // The effect-re-anchor path the off-grid-obs-only tests don't reach
+        // (gh#233: the shared Substeps walk re-anchors at the EXACT effect time).
+        // dt=1, obs at [3.0, 7.5], one on-grid effect at 2.0. The full expected
+        // grid is hand-computed and was verified bit-identical to the deleted
+        // hand-rolled whole-run walk: substeps 0,1,2 reach obs(0)=3.0 (the effect
+        // fires on the substep landing on t=2, idx 1); substeps 3..7 reach
+        // obs(1)=7.5 with a 0.5 remainder. gate_pgas_density_baseline +
+        // gh187_pgas_scheduled_intervention pin the same path end-to-end.
+        let observations = obs(&[3.0, 7.5]);
+        let g = build_substep_grid(0.0, 1.0, &observations, &[2.0], StepPolicy::Exact).unwrap();
+        let dts: Vec<f64> = g.steps.iter().map(|&(_, d)| d).collect();
+        assert_eq!(dts, vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5]);
+        let t0s: Vec<f64> = g.steps.iter().map(|&(t0, _)| t0).collect();
+        assert_eq!(t0s, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(sorted_map(&g), vec![(2, 0), (7, 1)], "obs land on each window's last substep");
+        let mut eff: Vec<(usize, usize)> =
+            g.effect_at_substep.iter().map(|(&k, &v)| (k, v)).collect();
+        eff.sort();
+        assert_eq!(eff, vec![(1, 0)], "effect 0 fires on the substep landing on t=2 (idx 1)");
     }
 
     #[test]
