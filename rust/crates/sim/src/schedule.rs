@@ -195,13 +195,20 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    /// Build from the same inputs the backends compute today: the integrator
-    /// `dt`, the run window `[t_start, t_end]`, the snap `grid`, the policy, and
-    /// the sorted output / effect time vectors (`get_output_times`,
-    /// `all_intervention_times`). Times are assumed already sorted ascending (the
+    /// The raw, untyped constructor: the integrator `dt`, the run window
+    /// `[t_start, t_end]`, the snap `grid`, the policy, and the sorted output /
+    /// effect time vectors. Times are assumed already sorted ascending (the
     /// producers guarantee it); debug-asserted. Observation boundaries default to
     /// empty — add them with [`Schedule::with_obs`] for the inference drivers.
-    pub fn new(
+    ///
+    /// Crate-internal (gh#233 Layer 2.5c): external callers select a `StepPolicy`
+    /// and order the boundary axes by hand here, which is the axis-swap /
+    /// skipped-policy footgun the typed mode constructors
+    /// ([`Schedule::exact_forward`] / [`snap_forward`](Schedule::snap_forward) /
+    /// [`ssa_forward`](Schedule::ssa_forward) /
+    /// [`exact_inference`](Schedule::exact_inference)) close. PGAS still builds
+    /// here directly until it gets its own typed constructor (the PGAS phase).
+    pub(crate) fn new(
         dt: f64,
         t_end: f64,
         grid: f64,
@@ -216,7 +223,9 @@ impl Schedule {
 
     /// Attach observation boundaries (sorted ascending). The inference drivers step
     /// EXACTLY to each (where they score); folded into the `substep` boundary min.
-    pub fn with_obs(mut self, obs_times: Vec<f64>) -> Self {
+    /// Crate-internal (gh#233 Layer 2.5c): inference paths reach it through
+    /// [`Schedule::exact_inference`].
+    pub(crate) fn with_obs(mut self, obs_times: Vec<f64>) -> Self {
         debug_assert!(obs_times.windows(2).all(|w| w[0] <= w[1]), "obs_times not sorted");
         self.obs_times = obs_times;
         self
