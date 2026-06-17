@@ -280,11 +280,20 @@ pub fn bootstrap_filter_correlated(
     // dt.min(obs_time - t) exactly, so the per-window substep COUNT is preserved
     // and the pre-drawn-noise indexing (noise_idx = i*steps_per_obs + substep)
     // is unaffected. Substep TIME stays accumulated (s*dt deferred, task #14).
+    // CPM keeps its guards + cpm_steps_per_obs + validate_cpm_obs_grid above
+    // (the noise-block grid check must run before the schedule), so it does NOT
+    // route through `ExactInferenceTimeline::build` (which would bundle the guards
+    // ahead of validate_cpm_obs_grid). It does adopt the typed constructor: the
+    // effect timeline is index-aligned with `scheduled.batches`, so it is
+    // validated order-PRESERVING (`from_timeline`), never sorted; obs are
+    // validated finite + strictly-increasing through `ObsTimes`.
     let sched_t_end = obs_times.last().copied().unwrap_or(config.t_start);
-    let schedule = Schedule::new(
-        dt, sched_t_end, dt, StepPolicy::Exact, Vec::new(), scheduled.times.clone(),
-    )
-    .with_obs(obs_times);
+    let schedule = Schedule::exact_inference(
+        dt,
+        sched_t_end,
+        crate::boundary_times::EffectTimes::from_timeline(&scheduled)?,
+        crate::boundary_times::ObsTimes::new(obs_times)?,
+    );
 
     // Gamma shape/scale for the overdispersed transition (precompute).
     //
