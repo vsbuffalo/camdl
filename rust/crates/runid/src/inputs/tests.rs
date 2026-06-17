@@ -13,6 +13,112 @@ fn fid(b: u8) -> FiniteF64 {
     FiniteF64::new(b as f64).unwrap()
 }
 
+// ── Anti-drift encoding golden (gh#241 §4.2 / review attack 5) ───────────────
+//
+// `macro_eq` pins derive≡hand (a *relative* check) — it cannot catch a change to
+// the canonical encoding itself (field order, framing, HASH_VERSION,
+// schema_version, the enum/FiniteF64/BTreeMap rules) mirrored into both sides.
+// These pin the *absolute* hex of representative leaf types + the composed
+// run_ids, so any such change fails loudly here. A move is a deliberate,
+// reviewed re-key (bump HASH_VERSION / a type's schema_version and re-pin),
+// never silent.
+
+#[cfg(test)]
+fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
+    let model = ModelDigest {
+        ir: ContentHash::from_bytes([5; 32]),
+        ir_version: "0.7".into(),
+        engine: EngineVersion("0.3.0".into()),
+    };
+    let config = SimConfig {
+        backend: Backend::ChainBinomial,
+        dt: fid(1),
+        t_start: fid(0),
+        t_end: fid(100),
+        output: ResolvedOutputSchedule::Regular { start: fid(0), step: fid(1), end: fid(100) },
+        calendar: CalendarMode::Numeric,
+        allow_degenerate_rates: false,
+    };
+    let mut values: BTreeMap<ParamId, FiniteF64> = BTreeMap::new();
+    values.insert(ParamId("beta".into()), fid(2));
+    let params = ResolvedParams { values, tables: vec![DataDigest(ContentHash::from_bytes([8; 32]))] };
+    let scenario = ResolvedScenario {
+        enabled: [InterventionId("vacc".into())].into_iter().collect(),
+        disabled: BTreeSet::new(),
+        patch: BTreeMap::new(),
+    };
+    let seed = Seed { process_seed: 42, base_seed: 7 };
+    let fit = FitDigest {
+        model: model.clone(),
+        data: vec![DataDigest(ContentHash::from_bytes([1; 32]))],
+        holdout_data: vec![DataDigest(ContentHash::from_bytes([2; 32]))],
+        fit_toml: ContentHash::from_bytes([3; 32]),
+        engine: EngineVersion("0.3.0".into()),
+    };
+    let stage = StageConfig {
+        config: ContentHash::from_bytes([7; 32]),
+        obs_block: String::new(),
+        flow_indices: vec![],
+        target_length: 50,
+        obs_alignment: ResolvedObsAlignment::Snap,
+    };
+    let sim_levels = vec![
+        model.content_hash(),
+        config.content_hash(),
+        params.content_hash(),
+        scenario.content_hash(),
+        seed.content_hash(),
+    ];
+    let fit_levels = vec![fit.content_hash(), stage.content_hash(), seed.content_hash()];
+    vec![
+        ("Backend::ChainBinomial", Backend::ChainBinomial.content_hash()),
+        ("CalendarMode::Numeric", CalendarMode::Numeric.content_hash()),
+        ("ResolvedObsAlignment::Snap", ResolvedObsAlignment::Snap.content_hash()),
+        ("Seed", seed.content_hash()),
+        ("ModelDigest", model.content_hash()),
+        ("SimConfig", config.content_hash()),
+        ("ResolvedParams", params.content_hash()),
+        ("ResolvedScenario", scenario.content_hash()),
+        ("FitDigest", fit.content_hash()),
+        ("StageConfig", stage.content_hash()),
+        ("run_id(Sim)", crate::run_id(ArtifactKind::Sim, &sim_levels)),
+        ("run_id(FitStage)", crate::run_id(ArtifactKind::FitStage, &fit_levels)),
+    ]
+}
+
+#[test]
+fn canonical_encoding_is_pinned() {
+    // Pinned literals. A change here is a deliberate, reviewed re-key: bump
+    // HASH_VERSION (whole store) or the relevant type's schema_version, then
+    // re-pin. It must never move silently.
+    let expected: &[(&str, &str)] = &[
+        ("Backend::ChainBinomial", "cf36b902f013ab2f0c2e5f074e66878a495990872c50bce0aa2683d1001e3d5c"),
+        ("CalendarMode::Numeric", "ababcfd6a697dafc2981da21816f0555f18d5633454985ab7ff76d970c00646a"),
+        ("ResolvedObsAlignment::Snap", "c8d06c17fd493405f2f220666705f80193775801258a0be28ae36fb8d475a809"),
+        ("Seed", "dd2fb5245233d07fc6a715d0e7683b52767252050a29e5dbbb9921e1ba61397d"),
+        ("ModelDigest", "50b2c476d23c4a7923f414bed47b0fc59757e17b18048ba82af36d89267e9447"),
+        ("SimConfig", "7a9eb1bd436e988214129b4752a3f4760d5584684d6a738ee0bb23e75c605034"),
+        ("ResolvedParams", "3cae27d97f964a1a6e654228dcf0ced7407f2937792ea7b2c20b724628d1ec10"),
+        ("ResolvedScenario", "bdc6a70dd99429b0adc3646f4f089279a69b6101ece3ab5bb3ebf31b7a32c0ca"),
+        ("FitDigest", "a87aad94ad68c799fd558a872ebeb7de8507c3da867c6553ad198af38882d7e7"),
+        ("StageConfig", "f6eb2654d2393f1365ba8610b3a80a5a5772e752b54179dc208f82b995f067df"),
+        ("run_id(Sim)", "8bc3f4a88413f4404994487077f4b1818465dbd72fb7b4a9b55190d38b000604"),
+        ("run_id(FitStage)", "882fceab6e6120667091cc2f4c02a8a035645e46f4d81b86643ea591ee101836"),
+    ];
+    let actual = golden_fixtures();
+    assert_eq!(actual.len(), expected.len(), "fixture/expected count drift");
+    for ((name, h), (ename, ehex)) in actual.iter().zip(expected) {
+        assert_eq!(name, ename, "fixture order drift");
+        assert_eq!(
+            &h.to_hex(),
+            ehex,
+            "canonical encoding of `{name}` changed — this RE-KEYS the store. If \
+             intentional, bump HASH_VERSION (or the type's schema_version) and re-pin; \
+             never let this move silently (gh#241 §4.2)."
+        );
+    }
+}
+
 #[test]
 fn seed_hashes_process_seed_not_base() {
     // The seed level hashes the resolved process_seed; the base seed is
