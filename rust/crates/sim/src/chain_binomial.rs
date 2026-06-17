@@ -269,12 +269,12 @@ pub fn run_chain_binomial_with_observer(
         t += dt;
         s += 1;
 
-        // Bookkeeping: advance the effect cursor past any intervention that fired
-        // in step_one this step. The firing itself happens in step_one; this snaps
-        // to the nearest step with cfg.dt*0.5 (NOT the schedule's exact tolerance).
-        while schedule.effect_time(&cursor).is_some_and(|iv| iv <= t + cfg.dt * 0.5) {
-            cursor.pass_effect();
-        }
+        // No effect-cursor advance here (gh#233 task 4). chain is Snap: it fires
+        // effects INSIDE step_one, keyed on round(t/dt) via the `due_effects`
+        // batch above — and nothing on the Snap path reads the schedule's effect
+        // cursor. The old `iv <= t + cfg.dt*0.5` half-step advance was dead
+        // bookkeeping (it wrote `cursor.effect_idx`, which is never read here) on a
+        // tolerance that did not even match the firing key; removed. Byte-identical.
 
         // Output
         schedule.drain_outputs(&mut cursor, t, |ot| {
