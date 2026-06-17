@@ -17,27 +17,24 @@
 //! a migration window, open an issue.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use serde::Deserialize;
-use rayon::prelude::*;
 
-use crate::util::{run_simulation, write_traj_tsv, load_params_toml, resolve_ir_path, SimRun};
+use crate::util::{load_params_toml, resolve_ir_path};
 use crate::hashing::{model_hash, sim_hash, scen_hash, canonical_params};
 use crate::sampling::{generate_design, describe_prior, DesignParam};
 use ir::parameter::PriorDist;
 use crate::version;
 
 // gh#audit-H13: build a SCOPED local rayon pool from `--parallel` and run the
-// engine / design sweep inside `pool.install(...)`. The earlier code used
+// engine (sweep or design) inside `pool.install(...)`. The earlier code used
 // `rayon::ThreadPoolBuilder::new().num_threads(parallel).build_global()`, but by
 // the time these commands run the global pool is already initialised, so
 // `build_global` returned AlreadyInitialized (swallowed by `let _ = …`) and the
 // default all-core pool ran regardless of `--parallel`. A scoped pool is
-// order-independent: nested rayon work (the engine's `into_par_iter`, the design
-// `plans.par_iter()`) inherits the surrounding pool. A value of 0 means "use
-// rayon's default" (all logical cores) — leave the pool unset and run on the
-// global pool. Same shape as pfilter.rs / profile.rs / survey.rs (f7bde701).
+// order-independent: nested rayon work (the engine's `into_par_iter`) inherits
+// the surrounding pool. A value of 0 means "use rayon's default" (all logical
+// cores) — leave the pool unset and run on the global pool. Same shape as
+// pfilter.rs / profile.rs / survey.rs (f7bde701).
 fn build_parallel_pool(parallel: usize) -> Option<rayon::ThreadPool> {
     if parallel > 0 {
         Some(
@@ -378,19 +375,20 @@ pub enum RunDecision {
 
 /// A fully-resolved description of one (sweep_point, scenario, seed) run,
 /// including its cache decision. Produced by `plan_runs` before any simulation
-/// is started.
+/// is started — an ADVISORY predictor for the normal-batch dry-run /
+/// `batch status` summary (the run path itself classifies hits through the
+/// real CAS `store.lookup`). Slated for removal in gh#241 PR F.
 #[derive(Debug)]
 pub struct RunPlan {
+    /// Scenario label (read by the `batch status` per-scenario hit count and
+    /// the plan-classification unit tests).
     pub scenario: String,
+    /// Resolved seed (read by the seed-extension unit tests).
     pub seed: u64,
-    /// Sweep parameter overrides for this run (empty if no sweep).
-    pub sweep_overrides: HashMap<String, f64>,
-    /// Index of the design/sweep point (0-based). Used by design experiments
-    /// to write run.json so analyze can recover point_id without hashing.
-    pub point_idx: usize,
-    /// Path relative to runs/: {sim_hash_8}/{scenario_slug}-{scen_hash_8}/seed_{seed}
+    /// Path relative to `sims/`: `{sim_hash_8}/{scenario_slug}-{scen_hash_8}/seed_{seed}`.
     pub run_path: String,
-    /// Absolute path to the run directory.
+    /// Absolute path to the run directory (read by the unit tests that seed a
+    /// `traj.tsv` to assert the advisory cache decision flips).
     pub run_dir: String,
     pub decision: RunDecision,
 }
@@ -419,7 +417,7 @@ pub fn plan_runs(
     };
 
     let mut plans = Vec::with_capacity(effective_points.len() * scenarios.len() * seeds.len());
-    for (pt_idx, sweep) in effective_points.iter().enumerate() {
+    for sweep in effective_points {
         for sc in scenarios {
             // Merge sweep overrides into scenario params for hashing
             let mut merged_params = sc.params.clone();
@@ -435,16 +433,12 @@ pub fn plan_runs(
                     model_stem, shash, &sc.name, &sc_hash, seed,
                 );
                 let run_dir  = format!("{}/{}", runs_dir, run_path);
-                // gh#241 (C0.1): `traj_exists` is a NECESSARY but not SUFFICIENT
-                // hit condition. The design path — the only authoritative
-                // consumer of this decision — re-validates a `CacheHit` against a
-                // parseable `run.json` completion marker (`design_cell_complete`)
-                // and writes traj.tsv + the marker atomically, so a partial/
-                // aborted write is never read back as a valid hit. The plain
-                // batch path commits through runid's atomic CasStore, so this
-                // count is advisory there. (The full design→runid store migration
-                // is PR-D-era; see docs/dev/proposals/2026-06-17-cas-runinput-
-                // type-consolidation.md.)
+                // `traj_exists` is an ADVISORY hit signal used only by the
+                // normal-batch dry-run / `batch status` summary. The actual run
+                // path classifies hits through `CasSink::should_run` (real CAS
+                // `store.lookup`, a `Completed`-leaf gate); the design path does
+                // the same at dry-run time (`print_design_dry_run`). This legacy
+                // hash/path prediction is slated for removal in gh#241 PR F.
                 let traj_exists = std::path::Path::new(&format!("{}/traj.tsv", run_dir)).exists();
                 let decision = if !force && traj_exists {
                     RunDecision::CacheHit
@@ -454,8 +448,6 @@ pub fn plan_runs(
                 plans.push(RunPlan {
                     scenario: sc.name.clone(),
                     seed,
-                    sweep_overrides: sweep.clone(),
-                    point_idx: pt_idx,
                     run_path,
                     run_dir,
                     decision,
@@ -464,30 +456,6 @@ pub fn plan_runs(
         }
     }
     plans
-}
-
-/// gh#241 (C0.1). A design cell counts as a genuine cache hit only when its
-/// `run.json` completion marker is present and parses — never on bare
-/// `traj.tsv` existence. The marker is written LAST and atomically (see
-/// `run_design_experiment`), so its presence implies a complete `traj.tsv`; a
-/// crash mid-`traj.tsv` (or mid-marker) leaves no valid marker, so the cell
-/// re-runs instead of serving a truncated trajectory as a hit.
-fn design_cell_complete(run_dir: &str) -> bool {
-    std::fs::read_to_string(format!("{}/run.json", run_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .map(|v| v.get("design_point_index").is_some())
-        .unwrap_or(false)
-}
-
-/// Write `bytes` to `path` atomically: write a sibling temp file, then rename
-/// into place. A crash leaves either the old file or nothing — never a
-/// truncated `path`. (Same-directory rename is atomic on the filesystems camdl
-/// targets.) The pid suffix keeps concurrent writers from sharing a temp path.
-fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = format!("{}.tmp.{}", path, std::process::id());
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
 }
 
 // ─── Run metadata ─────────────────────────────────────────────────────────────
@@ -600,41 +568,14 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
 
     let params_file_opt = exp.config.params.clone();
 
-    // gh#156: the [design.*] path writes trajectories through its own (legacy)
-    // per-run writer, which does not yet thread the column view. `every` IS
-    // honored (the compiled IR's schedule was rewritten upstream), but
-    // no_flows / columns are not — reject them loudly rather than silently
-    // emitting the full column set.
-    if !exp.design.is_empty() && (exp.output.no_flows || !exp.output.columns.is_empty()) {
-        eprintln!("error: [output] `no_flows` / `columns` are not yet supported with \
-                   [design.*] experiments (only `every` is).");
-        eprintln!("  Drop them, or use a [sweep] / plain `batch run`, which honor the \
-                   full output view.");
-        std::process::exit(1);
-    }
-
-    // Expand [design.*] blocks into parameter points (writes parameter_points.tsv per design).
-    if !exp.design.is_empty() {
-        // Resolve scenarios before consuming exp
-        let scenarios: Vec<ScenarioEntry> = if exp.scenario.is_empty() {
-            vec![ScenarioEntry { name: "baseline".to_string(), params: HashMap::new(), enable: vec![], disable: vec![] }]
-        } else {
-            exp.scenario.clone()
-        };
-        run_design_experiment(scenarios, exp.design, &ir_path_resolved, &output_dir, &shash,
-                              backend, dt, a.force, parallel, &params_file_opt, &seeds);
-        return;
-    }
-
-    // Expand [sweep] into parameter points (empty sweep → one null point).
-    let sweep_points = expand_sweep(&exp.sweep);
-    let has_sweep = !exp.sweep.is_empty();
-
-    let raw_scenarios: Vec<ScenarioEntry> = if exp.scenario.is_empty() {
-        vec![ScenarioEntry { name: "baseline".to_string(), params: HashMap::new(), enable: vec![], disable: vec![] }]
-    } else {
-        exp.scenario
-    };
+    // ── Shared setup (both the [sweep]/plain path and the [design.*] path) ──
+    //
+    // Parse the model, resolve the `[output]` column view, resolve every
+    // `[[scenario]]` against the model's presets, and validate `[obs]`. The
+    // design path routes through the SAME engine + `CasSink` machinery as the
+    // normal sweep flow (gh#241 PR E2), so it needs the identical resolved
+    // inputs — a design cell and a normal sim cell with the same
+    // params/scenario/seed must resolve to the same `Sim` identity and dedupe.
 
     // Resolve each [[scenario]] against the model's scenarios{} presets
     // (CLI review #3). A name matching a preset routes through the same
@@ -648,11 +589,20 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
 
     // gh#156: resolve + validate the `[output]` column view against the model,
     // once. Folded into each cell's CAS identity and used by the leaf writer.
+    // The design path now threads the same column view through `CasSink`, so
+    // `no_flows` / `columns` are honored for design experiments too (no special
+    // restriction — the normal flow's writer is the only writer now).
     let output_cols = crate::util::OutputColumns::resolve(&exp.output, &batch_model)
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
             std::process::exit(1);
         });
+
+    let raw_scenarios: Vec<ScenarioEntry> = if exp.scenario.is_empty() {
+        vec![ScenarioEntry { name: "baseline".to_string(), params: HashMap::new(), enable: vec![], disable: vec![] }]
+    } else {
+        exp.scenario.clone()
+    };
     let resolved_scenarios = resolve_batch_scenarios(&raw_scenarios, &batch_model)
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
@@ -679,9 +629,52 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         std::process::exit(1);
     }
 
+    let model_stem = crate::hashing::path_stem_slug(&ir_path_resolved);
+
+    // Validate [sweep] and [design.*] are mutually exclusive.
+    if !exp.sweep.is_empty() && !exp.design.is_empty() {
+        eprintln!("error: [sweep] and [design.*] are mutually exclusive.");
+        eprintln!("  [sweep] — deterministic grid for specific parameter values");
+        eprintln!("  [design.*] — space-filling for sensitivity/VOI analysis");
+        eprintln!("  Use one or the other in a single experiment file.");
+        std::process::exit(1);
+    }
+
+    // [design.*]: each block's generated points are routed through the SAME
+    // engine + `CasSink` flow as a [sweep] (the points ARE sweep points). The
+    // experiment-side metadata (`parameter_points.tsv`, `priors.txt`) is
+    // written per block; the sim leaves are canonical `ArtifactKind::Sim`
+    // leaves under `<output>/sims/`, deduping against identical normal sims.
+    if !exp.design.is_empty() {
+        run_design_experiment(
+            &exp.design,
+            &resolved_scenarios,
+            &batch_model,
+            &ir_path_resolved,
+            &model_path,
+            model_stem.as_deref(),
+            &output_dir,
+            &base_params,
+            &params_file_opt,
+            backend,
+            dt,
+            a.allow_degenerate_rates,
+            &output_cols,
+            obs_enabled,
+            a.force,
+            a.dry_run,
+            parallel,
+            &seeds,
+        );
+        return;
+    }
+
+    // Expand [sweep] into parameter points (empty sweep → one null point).
+    let sweep_points = expand_sweep(&exp.sweep);
+    let has_sweep = !exp.sweep.is_empty();
+
     let runs_dir = format!("{}/sims", output_dir);
 
-    let model_stem = crate::hashing::path_stem_slug(&ir_path_resolved);
     let plans = plan_runs(&scenarios, &sweep_points, &seeds, &shash,
         model_stem.as_deref(), &runs_dir, a.force);
     let total = plans.len();
@@ -1288,25 +1281,64 @@ fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -> Result<()
 /// Run a design-based experiment (VOI/sensitivity analysis).
 ///
 /// For each named design:
-///   1. Generate parameter points via the specified method (sobol/lhs/random)
-///   2. Write `{output_dir}/designs/{design}/parameter_points.tsv`
-///   3. Run all (point, scenario, seed) combinations
-///   4. Collect summary outputs → `outputs.tsv` (consumed downstream by `camdl voi`)
+///   1. Generate parameter points via the specified method (sobol/lhs/random).
+///   2. Write the experiment-side metadata —
+///      `{output_dir}/designs/{design}/parameter_points.tsv` (point_id → param
+///      values) and `priors.txt` — the bridge a downstream `camdl voi` uses to
+///      recover which point each leaf belongs to.
+///   3. Route the block's points through the SAME engine + `CasSink` flow the
+///      normal sweep uses (gh#241 PR E2): each (point, scenario, seed) cell
+///      becomes a canonical `ArtifactKind::Sim` leaf under `{output_dir}/sims/`,
+///      deduping against identical normal sims. A design point's values enter
+///      the `params` identity level (via `cell_resolve`); the design
+///      method/name/point_idx are NOT in the leaf identity — they live only in
+///      `parameter_points.tsv`.
+///
+/// Multiple design blocks → one engine pass per block (a fresh `CasSink` per
+/// block so hit-accounting and the progress bar are per-block correct).
 #[allow(clippy::too_many_arguments)]
 fn run_design_experiment(
-    scenarios: Vec<ScenarioEntry>,
-    designs: HashMap<String, DesignBlock>,
+    designs: &HashMap<String, DesignBlock>,
+    resolved_scenarios: &[ResolvedEntry],
+    batch_model: &ir::Model,
     ir_path: &str,
+    model_path: &str,
+    model_stem: Option<&str>,
     output_dir: &str,
-    shash: &str,
+    base_params: &HashMap<String, f64>,
+    params_file_opt: &Option<String>,
     backend: crate::args::types::ForwardBackend,
     dt: f64,
+    allow_degenerate_rates: bool,
+    output_cols: &crate::util::OutputColumns,
+    obs_enabled: bool,
     force: bool,
+    dry_run: bool,
     parallel: usize,
-    params_file_opt: &Option<String>,
     seeds: &[u64],
 ) {
-    // Sort design names for deterministic output
+    use crate::sim_job::{ParamSource, ScenarioRef, Seeds, SimulateJob};
+
+    // The CAS store root is the canonical output root: design sim leaves share
+    // the `<output>/sims/` tree with normal `batch`/`simulate` cells so an
+    // identical cell dedupes to the same leaf (same run_id, same path).
+    let runs_dir = format!("{}/sims", output_dir);
+
+    // Scenario routing for the engine job — identical to the normal flow: a
+    // resolved preset → `ScenarioRef::Named`; an ad-hoc patch → `Inline`.
+    let job_scenarios: Vec<ScenarioRef> = resolved_scenarios.iter().map(|r| {
+        match &r.route {
+            Some(preset_name) => ScenarioRef::Named(preset_name.clone()),
+            None => ScenarioRef::Inline {
+                name: r.name.clone(),
+                enable: r.enable.clone(),
+                disable: r.disable.clone(),
+                params: r.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            },
+        }
+    }).collect();
+
+    // Sort design names for deterministic output.
     let mut design_names: Vec<&String> = designs.keys().collect();
     design_names.sort();
 
@@ -1315,7 +1347,7 @@ fn run_design_experiment(
         eprintln!("Design '{}': method={} n={} parameters={}",
             design_name, block.method, block.n, block.parameters.len());
 
-        // Build sorted parameter list
+        // Build sorted parameter list.
         let mut param_names: Vec<&String> = block.parameters.keys().collect();
         param_names.sort();
         let params: Vec<(String, DesignParam)> = param_names.iter().map(|name| {
@@ -1328,12 +1360,12 @@ fn run_design_experiment(
             })
         }).collect();
 
-        // Generate design points
+        // Generate design points.
         let design_result = generate_design(&params, block.n, &block.method);
         let n_points = design_result.points.len();
         eprintln!("  Generated {} parameter points", n_points);
 
-        // Write parameter_points.tsv
+        // ── Experiment-side metadata (preserved exactly) ──────────────────
         let design_dir = format!("{}/designs/{}", output_dir, design_name);
         std::fs::create_dir_all(&design_dir).unwrap_or_else(|e| {
             eprintln!("error: cannot create design dir {}: {}", design_dir, e);
@@ -1362,109 +1394,197 @@ fn run_design_experiment(
         });
         eprintln!("  Wrote {}", pts_path);
 
-        // Write priors.txt if any parameter has a prior specification
+        // Write priors.txt if any parameter has a prior specification.
         let priors_txt = build_priors_txt(&params);
         if let Some(txt) = priors_txt {
             let priors_path = format!("{}/priors.txt", design_dir);
             let _ = std::fs::write(&priors_path, txt);
         }
 
-        // Run all (point, scenario, seed) combinations
-        let runs_dir = format!("{}/designs/{}/sims", output_dir, design_name);
+        // ── Run the block's points as a sweep over the unified engine ─────
+        //
+        // The design points ARE sweep points: each is a name→value override
+        // map of the same shape `expand_sweep` produces. Build a `ParamSource::
+        // Sweep` and the SAME `SimulateJob` + `CasSink` the normal flow uses.
+        let points: Vec<indexmap::IndexMap<String, f64>> = design_result.points.iter()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .collect();
+
+        let total = points.len() * resolved_scenarios.len() * seeds.len();
+
+        // Dry-run: resolve every cell's real CAS identity and count
+        // `store.lookup` hits (the same path `CasSink::should_run` takes) —
+        // never the legacy hash/marker check. No simulation, no files written.
+        if dry_run {
+            print_design_dry_run(
+                design_name, &points, resolved_scenarios, batch_model,
+                model_stem, base_params, backend, dt, allow_degenerate_rates,
+                output_cols, &runs_dir, seeds, force,
+            );
+            continue;
+        }
+
         std::fs::create_dir_all(&runs_dir).unwrap_or_else(|e| {
             eprintln!("error: cannot create runs dir {}: {}", runs_dir, e);
             std::process::exit(1);
         });
 
-        // Annotate each point with its index for run.json
-        let sweep_points = &design_result.points;
-        let design_stem = crate::hashing::path_stem_slug(ir_path);
-        let plans = plan_runs(&scenarios, sweep_points, seeds, shash,
-            design_stem.as_deref(), &runs_dir, force);
-        let total = plans.len();
-        let counter = Arc::new(AtomicUsize::new(0));
+        let job = SimulateJob {
+            model: ir_path.to_string(),
+            params_files: params_file_opt.as_ref().map(|p| vec![p.clone()]).unwrap_or_default(),
+            backend,
+            dt,
+            integrator: None,
+            source: ParamSource::Sweep { points, replicates: 1 },
+            scenarios: job_scenarios.clone(),
+            seeds: Seeds::Explicit(seeds.to_vec()),
+            cli_overrides: Vec::new(),
+            set_vec_entries: Vec::new(),
+            table_files: Vec::new(),
+            obs: crate::sim_job::ObsOutput::None,
+            parallel,
+        };
 
-        // gh#audit-H13: scope the design sweep to `--parallel` by running
-        // `plans.par_iter()` inside `pool.install(...)`. See `build_parallel_pool`.
+        let mut sink = CasSink {
+            resolved_scenarios: resolved_scenarios.to_vec(),
+            model_path: model_path.to_string(),
+            model_stem: model_stem.map(|s| s.to_string()),
+            base_model: batch_model.clone(),
+            base_params: base_params.clone(),
+            table_files: HashMap::new(),
+            backend,
+            dt,
+            allow_degenerate_rates,
+            output_cols: output_cols.clone(),
+            runs_dir: runs_dir.clone(),
+            obs_enabled,
+            force,
+            total,
+            counter: 0,
+            completed_runs: Vec::new(),
+            errors: Vec::new(),
+            label: None,
+            fit_dep: Vec::new(),
+            progress: cells_progress(total, format!("design '{}'", design_name)),
+        };
+
+        // gh#audit-H13: scope the engine's parallelism to `--parallel`.
         let pool = build_parallel_pool(parallel);
-
-        run_pooled(&pool, || {
-            plans.par_iter().for_each(|plan| {
-                // gh#241 (C0.1): honor a CacheHit only with a valid completion
-                // marker — never bare traj.tsv existence. A partial/aborted cell
-                // (truncated traj.tsv, no parseable run.json) falls through and
-                // re-runs rather than serving a truncated trajectory.
-                if plan.decision == RunDecision::CacheHit && design_cell_complete(&plan.run_dir) {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                let sc = scenarios.iter().find(|s| s.name == plan.scenario).unwrap();
-                let mut overrides_map: HashMap<String, f64> = plan.sweep_overrides.clone();
-                overrides_map.extend(sc.params.iter().map(|(k, v)| (k.clone(), *v)));
-
-                let sim_run = SimRun {
-                    ir_path: ir_path.to_string(),
-                    params_files: params_file_opt.as_ref().map(|p| vec![p.clone()]).unwrap_or_default(),
-                    overrides: overrides_map,
-                    scenario_name: None,
-                    adhoc_enable: sc.enable.clone(),
-                    adhoc_disable: sc.disable.clone(),
-                    backend,
-                    dt,
-                    seed: plan.seed,
-                    ..Default::default()
-                };
-
-                match run_simulation(&sim_run) {
-                    Err(e) => {
-                        let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        eprintln!("[{}/{}] design={} scenario={} seed={} ERROR: {}",
-                            n, total, design_name, plan.scenario, plan.seed, e);
-                    }
-                    Ok((traj, model)) => {
-                        if let Err(e) = std::fs::create_dir_all(&plan.run_dir) {
-                            eprintln!("error: cannot create {}: {}", plan.run_dir, e);
-                            return;
-                        }
-                        // gh#241 (C0.1): write traj.tsv atomically (temp +
-                        // rename), so the final path is always complete-or-absent
-                        // — a crash never leaves a truncated traj.tsv that the
-                        // next run reads back as a hit. The run.json marker below
-                        // is written LAST and atomically, so its presence implies
-                        // a complete traj.tsv (`design_cell_complete` is the hit
-                        // authority, not file existence). gh#156: write_traj_tsv
-                        // takes the resolved TrajColumns view.
-                        let cols = crate::util::TrajColumns::all(&model);
-                        let traj_path = format!("{}/traj.tsv", plan.run_dir);
-                        let traj_tmp = format!("{}.tmp.{}", traj_path, std::process::id());
-                        if let Err(e) = write_traj_tsv(&traj_tmp, &traj, &cols) {
-                            eprintln!("error: cannot write traj.tsv in {}: {}", plan.run_dir, e);
-                            return;
-                        }
-                        if let Err(e) = std::fs::rename(&traj_tmp, &traj_path) {
-                            eprintln!("error: cannot finalize traj.tsv in {}: {}", plan.run_dir, e);
-                            return;
-                        }
-                        // run.json completion marker, written LAST + atomically:
-                        // it lets summarize recover (point_id, scenario, seed) AND
-                        // is the cache-hit authority (`design_cell_complete`).
-                        let run_json = format!(
-                            "{{\"design_point_index\":{},\"scenario\":{},\"seed\":{}}}\n",
-                            plan.point_idx,
-                            serde_json::to_string(&plan.scenario).unwrap_or_default(),
-                            plan.seed,
-                        );
-                        if let Err(e) = write_atomic(&format!("{}/run.json", plan.run_dir), run_json.as_bytes()) {
-                            eprintln!("error: cannot write run.json in {}: {}", plan.run_dir, e);
-                            return;
-                        }
-                        let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        eprintln!("[{}/{}] design={} scenario={} seed={}", n, total, design_name, plan.scenario, plan.seed);
-                    }
-                }
-            });
+        run_pooled(&pool, || crate::engine::run_job(&job, &mut sink)).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
         });
-        eprintln!("Design '{}' complete.", design_name);
+
+        if !sink.errors.is_empty() {
+            eprintln!("Errors encountered in design '{}':", design_name);
+            for e in &sink.errors { eprintln!("  {}", e); }
+        }
+        eprintln!("Design '{}' complete: {}/{} cells. Leaves under {}/.",
+            design_name, sink.completed_runs.len(), total, runs_dir);
+    }
+}
+
+/// Dry-run summary for one design block: resolve every (point, scenario, seed)
+/// cell's real CAS identity (`Sim` run_id + path) and count `store.lookup`
+/// hits — the SAME identity/path `CasSink::should_run` uses, NOT the legacy
+/// `plan_runs` hash/marker. No simulation, no files written.
+#[allow(clippy::too_many_arguments)]
+fn print_design_dry_run(
+    design_name: &str,
+    points: &[indexmap::IndexMap<String, f64>],
+    resolved_scenarios: &[ResolvedEntry],
+    batch_model: &ir::Model,
+    model_stem: Option<&str>,
+    base_params: &HashMap<String, f64>,
+    backend: crate::args::types::ForwardBackend,
+    dt: f64,
+    allow_degenerate_rates: bool,
+    output_cols: &crate::util::OutputColumns,
+    runs_dir: &str,
+    seeds: &[u64],
+    force: bool,
+) {
+    // A throwaway `CasSink` reused only for its `cell_resolve` (the canonical
+    // identity/path resolver) and `root()` — identical inputs to the run path,
+    // so the dry-run reports exactly what `run` would resolve.
+    let probe = CasSink {
+        resolved_scenarios: resolved_scenarios.to_vec(),
+        model_path: String::new(),
+        model_stem: model_stem.map(|s| s.to_string()),
+        base_model: batch_model.clone(),
+        base_params: base_params.clone(),
+        table_files: HashMap::new(),
+        backend,
+        dt,
+        allow_degenerate_rates,
+        output_cols: output_cols.clone(),
+        runs_dir: runs_dir.to_string(),
+        obs_enabled: false,
+        force,
+        total: 0,
+        counter: 0,
+        completed_runs: Vec::new(),
+        errors: Vec::new(),
+        label: None,
+        fit_dep: Vec::new(),
+        progress: None,
+    };
+    let store = runid::FsCasStore::new(probe.root());
+
+    let mut hits = 0usize;
+    let mut misses = 0usize;
+    let mut shown: Vec<(String, String)> = Vec::new();
+    for (point_idx, point_overrides) in points.iter().enumerate() {
+        for sref in resolved_scenarios {
+            let scenario = match &sref.route {
+                Some(preset) => crate::sim_job::ScenarioRef::Named(preset.clone()),
+                None => crate::sim_job::ScenarioRef::Inline {
+                    name: sref.name.clone(),
+                    enable: sref.enable.clone(),
+                    disable: sref.disable.clone(),
+                    params: sref.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                },
+            };
+            for &seed in seeds {
+                let spec = crate::engine::CellSpec {
+                    run_idx: 0,
+                    point_idx,
+                    scenario: scenario.clone(),
+                    point_overrides: point_overrides.clone(),
+                    process_seed: seed,
+                    obs_seed: seed ^ crate::util::SEED_MIX_OBS,
+                    sim_run: crate::util::SimRun::default(),
+                };
+                match probe.cell_resolve(&spec) {
+                    Ok((rt, dir, rel)) => {
+                        let is_hit = !force && matches!(
+                            store.lookup(&dir, &runid::LeafIdentity::new(rt.run_id)),
+                            runid::Lookup::Hit(_)
+                        );
+                        if is_hit { hits += 1; } else { misses += 1; }
+                        if shown.len() < 6 {
+                            shown.push((if is_hit { "hit " } else { "miss" }.to_string(), rel));
+                        }
+                    }
+                    Err(_) => {
+                        misses += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!("  Design '{}' (dry run): {} points × {} scenarios × {} seeds = {} cells",
+        design_name, points.len(), resolved_scenarios.len(), seeds.len(),
+        points.len() * resolved_scenarios.len() * seeds.len());
+    eprintln!("    {} cache hits  → skipped", hits);
+    eprintln!("    {} cache misses → would simulate", misses);
+    eprintln!("  Output paths (sims/<run_path>):");
+    for (tag, rel) in &shown {
+        eprintln!("    [{}] {}", tag, rel);
+    }
+    if hits + misses > shown.len() {
+        eprintln!("    ... ({} more)", hits + misses - shown.len());
     }
 }
 
@@ -1671,6 +1791,21 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
         cache_stem.as_deref(), &runs_dir, false);
     let live_hits = plans.iter().filter(|p| p.decision == RunDecision::CacheHit).count();
     println!("  Completed:  {}/{} leaves present", live_hits, plans.len());
+
+    // List the first few cells still to run (scenario / seed / path), so a
+    // resumed `batch run` is predictable from `batch status`.
+    let remaining: Vec<&RunPlan> = plans.iter()
+        .filter(|p| p.decision == RunDecision::CacheMiss)
+        .collect();
+    if !remaining.is_empty() {
+        println!("  Remaining:  {} cell(s) to run:", remaining.len());
+        for p in remaining.iter().take(6) {
+            println!("    scenario={} seed={}  → {}", p.scenario, p.seed, p.run_dir);
+        }
+        if remaining.len() > 6 {
+            println!("    ... ({} more)", remaining.len() - 6);
+        }
+    }
     if live_hits == 0 {
         println!("  Run 'camdl batch run {}' to start.", toml_path);
     }
@@ -1878,42 +2013,6 @@ mod tests {
 
     fn sweep1(kv: &[(&str, f64)]) -> Vec<HashMap<String, f64>> {
         vec![kv.iter().map(|(k, v)| (k.to_string(), *v)).collect()]
-    }
-
-    /// gh#241 (C0.1): a design cell is a cache hit only with a parseable
-    /// run.json completion marker — never bare traj.tsv (which a crash can
-    /// leave truncated). This is the authority `run_design_experiment` gates on
-    /// instead of `RunDecision::CacheHit` (which is bare traj.tsv existence).
-    #[test]
-    fn design_cache_hit_requires_completion_marker() {
-        let dir = tempfile::tempdir().unwrap();
-        let run_dir = dir.path().join("cell").to_string_lossy().into_owned();
-        std::fs::create_dir_all(&run_dir).unwrap();
-
-        // traj.tsv only (crashed before the marker, or mid-traj.tsv): NOT a hit.
-        std::fs::write(format!("{}/traj.tsv", run_dir), "time\tI\n0\t1\n").unwrap();
-        assert!(
-            !design_cell_complete(&run_dir),
-            "a traj.tsv-only cell (no completion marker) must not be a cache hit"
-        );
-
-        // A truncated / unparseable run.json marker: NOT a hit.
-        std::fs::write(format!("{}/run.json", run_dir), "{\"design_point_index\":0,").unwrap();
-        assert!(
-            !design_cell_complete(&run_dir),
-            "an unparseable run.json marker must not be a cache hit"
-        );
-
-        // A valid completion marker: a hit.
-        std::fs::write(
-            format!("{}/run.json", run_dir),
-            "{\"design_point_index\":0,\"scenario\":\"baseline\",\"seed\":1}",
-        )
-        .unwrap();
-        assert!(
-            design_cell_complete(&run_dir),
-            "a valid run.json completion marker is a cache hit"
-        );
     }
 
     /// gh#241 G3: `deny_unknown_fields` — a typo'd batch.toml key must ERROR,
@@ -2304,5 +2403,76 @@ mod tests {
         assert_ne!(rt_a.levels[2].hash, rt_b.levels[2].hash, "params level (tables) must differ");
         assert_eq!(rt_a.levels[3].hash, rt_b.levels[3].hash, "scenario level unchanged");
         assert_eq!(rt_a.levels[4].hash, rt_b.levels[4].hash, "seed level unchanged");
+    }
+
+    /// A `CellSpec` carrying a single param-point override (a sweep point /
+    /// design point), at process seed 1, baseline scenario.
+    fn spec_with_override(k: &str, v: f64) -> crate::engine::CellSpec {
+        let mut overrides = indexmap::IndexMap::new();
+        overrides.insert(k.to_string(), v);
+        crate::engine::CellSpec {
+            run_idx: 0,
+            point_idx: 0,
+            scenario: crate::sim_job::ScenarioRef::Inline {
+                name: "baseline".to_string(),
+                enable: vec![],
+                disable: vec![],
+                params: indexmap::IndexMap::new(),
+            },
+            point_overrides: overrides,
+            process_seed: 1,
+            obs_seed: 1 ^ crate::util::SEED_MIX_OBS,
+            sim_run: crate::util::SimRun::default(),
+        }
+    }
+
+    /// gh#241 PR E2 — THE dedupe proof. A `[design.*]` cell and a normal
+    /// `[sweep]` / `simulate` sim cell with the SAME params/scenario/seed must
+    /// resolve to the SAME `Sim` `run_id` and the SAME store path. The design
+    /// path routes its generated points through the same `CasSink`/
+    /// `cell_resolve` as the normal sweep (the point value enters the `params`
+    /// identity level), so an identical cell collapses to one canonical leaf
+    /// rather than two parallel copies under `designs/` vs `sims/`.
+    ///
+    /// The design method/name/point_idx are NOT in the identity: this test
+    /// resolves a bare point override with no design label anywhere in the
+    /// resolved inputs, which is exactly what `cell_resolve` sees for both
+    /// entry points.
+    #[test]
+    fn design_cell_dedupes_with_normal_sim_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs_dir = dir.path().join("sims");
+        let runs_dir = runs_dir.to_str().unwrap();
+
+        // "Design" cell: point value 0.3 for `mu`, supplied as a design point.
+        let design_spec = spec_with_override("mu", 0.3);
+        // "Normal sweep" cell: the SAME point value 0.3 for `mu`.
+        let sweep_spec = spec_with_override("mu", 0.3);
+        // A DIFFERENT point value — must NOT dedupe.
+        let other_spec = spec_with_override("mu", 0.7);
+
+        // Both paths build the same `CasSink` shape (same base model, root,
+        // backend, dt, no tables) — only the spec's point override differs.
+        let (rt_design, dir_design, rel_design) =
+            sink_with_tables(runs_dir, HashMap::new()).cell_resolve(&design_spec).unwrap();
+        let (rt_sweep, dir_sweep, rel_sweep) =
+            sink_with_tables(runs_dir, HashMap::new()).cell_resolve(&sweep_spec).unwrap();
+        let (rt_other, _, _) =
+            sink_with_tables(runs_dir, HashMap::new()).cell_resolve(&other_spec).unwrap();
+
+        assert_eq!(
+            rt_design.run_id, rt_sweep.run_id,
+            "an identical design cell and normal sim cell MUST share one run_id (dedupe)"
+        );
+        assert_eq!(
+            dir_design, dir_sweep,
+            "the identical cell must resolve to the SAME store path (one leaf on disk)"
+        );
+        assert_eq!(rel_design, rel_sweep, "and the same store-relative path");
+
+        assert_ne!(
+            rt_design.run_id, rt_other.run_id,
+            "a different design-point value must resolve to a different run_id"
+        );
     }
 }

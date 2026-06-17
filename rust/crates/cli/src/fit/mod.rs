@@ -1270,12 +1270,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     seed,
                     stage: stage_name.to_string(),
                     best_chain: chain_results.best_chain,
-                    // Record the backend the STAGE actually fit on (gh#241),
-                    // not the global `[config].backend` — a forward-sim default
-                    // for `[synthetic]` generation that need not match the stage.
-                    // The `simulate --params` guardrail replays θ̂ with this, so
-                    // it must be the stage's backend. `InferenceBackend` is a
-                    // valid `ForwardBackend` (total `From`).
+                    // Record the backend the STAGE actually fit on (gh#241): the
+                    // `simulate --params` guardrail replays θ̂ with this, so it
+                    // must be the stage's backend. `InferenceBackend` is a valid
+                    // `ForwardBackend` (total `From`).
                     backend: stage.backend().into(),
                     dt: sweep_config.config.dt,
                     loglik: chain_results.best_loglik,

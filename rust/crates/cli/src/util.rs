@@ -2595,11 +2595,6 @@ pub struct TrajColumns {
 }
 
 impl TrajColumns {
-    /// Every compartment + every flow, in model order — the default output.
-    pub fn all(model: &ir::Model) -> Self {
-        Self::select(model, false, &std::collections::BTreeSet::new())
-    }
-
     /// Apply an output-view filter. `no_flows` drops every `flow_*` column;
     /// `allow` (when non-empty) is an allow-list matched against the output
     /// header names (`S`, `I_c`, `flow_infection`, …). Emitted order always
@@ -2764,21 +2759,9 @@ pub fn rematerialize_with_output_every(
     Ok((new_path, Some(tmp)))
 }
 
-/// Write a trajectory to a TSV file (same format as `camdl simulate` stdout).
-pub fn write_traj_tsv(
-    path: &str,
-    traj: &Trajectory,
-    cols: &TrajColumns,
-) -> Result<(), String> {
-    use std::fs::File;
-    let mut f = File::create(path)
-        .map_err(|e| format!("cannot create {}: {}", path, e))?;
-    write_traj_to(&mut f, traj, cols).map_err(|e| e.to_string())
-}
-
 /// Render a trajectory TSV into an in-memory buffer — the form the CAS
-/// commit hands to the store as the leaf's `traj.tsv` artifact. Byte-
-/// identical to [`write_traj_tsv`] (same [`write_traj_to`] core).
+/// commit hands to the store as the leaf's `traj.tsv` artifact (same
+/// [`write_traj_to`] core the `simulate` stdout path uses).
 pub fn traj_tsv_bytes(traj: &Trajectory, cols: &TrajColumns) -> Vec<u8> {
     let mut buf = Vec::new();
     // Writing to a `Vec` is infallible.
