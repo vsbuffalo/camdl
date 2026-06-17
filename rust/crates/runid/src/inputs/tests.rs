@@ -38,6 +38,8 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         output: ResolvedOutputSchedule::Regular { start: fid(0), step: fid(1), end: fid(100) },
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: false,
+        no_flows: false,
+        columns: BTreeSet::new(),
     };
     let mut values: BTreeMap<ParamId, FiniteF64> = BTreeMap::new();
     values.insert(ParamId("beta".into()), fid(2));
@@ -97,12 +99,12 @@ fn canonical_encoding_is_pinned() {
         ("ResolvedObsAlignment::Snap", "c8d06c17fd493405f2f220666705f80193775801258a0be28ae36fb8d475a809"),
         ("Seed", "dd2fb5245233d07fc6a715d0e7683b52767252050a29e5dbbb9921e1ba61397d"),
         ("ModelDigest", "50b2c476d23c4a7923f414bed47b0fc59757e17b18048ba82af36d89267e9447"),
-        ("SimConfig", "7a9eb1bd436e988214129b4752a3f4760d5584684d6a738ee0bb23e75c605034"),
+        ("SimConfig", "5eae6dc8fd5ff528ab2d3d4d8bbf7f10f8ba36f52b2aada662bfb7789bc5a454"),
         ("ResolvedParams", "3cae27d97f964a1a6e654228dcf0ced7407f2937792ea7b2c20b724628d1ec10"),
         ("ResolvedScenario", "bdc6a70dd99429b0adc3646f4f089279a69b6101ece3ab5bb3ebf31b7a32c0ca"),
         ("FitDigest", "a87aad94ad68c799fd558a872ebeb7de8507c3da867c6553ad198af38882d7e7"),
         ("StageConfig", "f6eb2654d2393f1365ba8610b3a80a5a5772e752b54179dc208f82b995f067df"),
-        ("run_id(Sim)", "8bc3f4a88413f4404994487077f4b1818465dbd72fb7b4a9b55190d38b000604"),
+        ("run_id(Sim)", "2fc1aec10646d57017ea14a62889783b8d012edb0c27e0e3610dbf15fa6498e6"),
         ("run_id(FitStage)", "882fceab6e6120667091cc2f4c02a8a035645e46f4d81b86643ea591ee101836"),
     ];
     let actual = golden_fixtures();
