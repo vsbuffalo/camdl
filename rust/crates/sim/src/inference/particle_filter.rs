@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use crate::rng::StatefulRng;
 use crate::error::SimError;
-use crate::schedule::{Cursor, Schedule, StepPolicy};
+use crate::schedule::Cursor;
 use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error};
 use super::traits::{ProcessModel, ObservationModel, SMCConfig};
 use super::types::{ParticleState, ParticleSwarm, log_sum_exp, logw_variance, normalize_log_weights, RESAMPLE_RNG_STREAM, init_particle_rngs};
@@ -163,28 +163,25 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     let obs_times: Vec<f64> = (0..n_obs).map(|i| obs_model.obs_time(i)).collect();
 
     // gh#216: scheduled interventions fire CURSOR-keyed off the timeline's effect
-    // boundaries (registered as `effect_times` below), NOT on the `round(t/dt)`
-    // key inside step_one — so an off-grid observation re-tiling the Exact substep
-    // grid no longer moves the firing instant. Two Exact cases stay unsupported
-    // and are refused loudly: a parametric `at [<param>]` schedule (one shared
-    // `effect_times` can't hold per-particle times), and a scheduled fire time off
-    // the dt grid (the drift-free PGAS walk would need to re-anchor there — a
+    // boundaries (NOT the `round(t/dt)` key inside step_one), so an off-grid
+    // observation re-tiling the Exact substep grid no longer moves the firing
+    // instant. `ExactInferenceTimeline::build` runs the two exact guards FIRST —
+    // so no inference path can construct a timeline that skipped a guard (the
+    // gh#187 class) — then gathers the cursor-keyed effect batches and builds the
+    // Exact schedule. The None-model process yields no effects. Two Exact cases
+    // are refused loudly inside the guards: a parametric `at [<param>]` schedule
+    // (one shared timeline can't hold per-particle times), and a scheduled fire
+    // time off the dt grid (the drift-free PGAS walk would need to re-anchor — a
     // deferred follow-up). Always-active events are out of scope (grid_dt-keyed).
-    let scheduled = if let Some(model) = process.try_compiled_model() {
-        crate::intervention::guard_attimesexpr_exact(model, StepPolicy::Exact)?;
-        crate::intervention::guard_exact_offgrid_effect_time(
-            model, params, config.t_start, dt, StepPolicy::Exact,
-        )?;
-        crate::intervention::timeline_effects(model, params)
-    } else {
-        crate::intervention::TimelineEffects::default()
-    };
-
-    let sched_t_end = obs_times.last().copied().unwrap_or(config.t_start);
-    let schedule = Schedule::new(
-        dt, sched_t_end, dt, StepPolicy::Exact, Vec::new(), scheduled.times.clone(),
-    )
-    .with_obs(obs_times);
+    let timeline = crate::intervention::ExactInferenceTimeline::build(
+        process.try_compiled_model(),
+        params,
+        config.t_start,
+        dt,
+        crate::boundary_times::ObsTimes::new(obs_times)?,
+    )?;
+    let schedule = timeline.schedule;
+    let scheduled = timeline.effects;
 
     // gh#147 (M3.1). Cumulative particle-substep count for the
     // deterministic compute-budget guard. Bounds a single PF evaluation;

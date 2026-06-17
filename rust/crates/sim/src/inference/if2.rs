@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use crate::rng::StatefulRng;
 use crate::error::SimError;
-use crate::schedule::{Cursor, Schedule, StepPolicy};
+use crate::schedule::Cursor;
 use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error};
 use super::traits::{ProcessModel, ObservationModel};
 use super::types::{ParticleState, log_sum_exp, normalize_log_weights, LOG_PROB_FLOOR, init_particle_rngs};
@@ -245,27 +245,24 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
 
     // gh#216: scheduled interventions fire CURSOR-keyed off the timeline's effect
     // boundaries, so an off-grid observation re-tiling the Exact substep grid no
-    // longer moves the firing instant. Built ONCE here (constant across IF2
-    // iterations: a parametric `at [<param>]` schedule — whose fire times would be
-    // per-particle and per-iteration — is refused by `guard_attimesexpr_exact`, so
-    // every scheduled fire time is `base_params`-independent). An off-grid
-    // scheduled fire time and always-active events are the other unsupported Exact
-    // cases (refused / out of scope). See particle_filter.rs for the same pattern.
-    let scheduled = if let Some(model) = process.try_compiled_model() {
-        crate::intervention::guard_attimesexpr_exact(model, StepPolicy::Exact)?;
-        crate::intervention::guard_exact_offgrid_effect_time(
-            model, base_params, config.t_start, config.dt, StepPolicy::Exact,
-        )?;
-        crate::intervention::timeline_effects(model, base_params)
-    } else {
-        crate::intervention::TimelineEffects::default()
-    };
-
-    let sched_t_end = obs_times.last().copied().unwrap_or(config.t_start);
-    let schedule = Schedule::new(
-        config.dt, sched_t_end, config.dt, StepPolicy::Exact, Vec::new(), scheduled.times.clone(),
-    )
-    .with_obs(obs_times);
+    // longer moves the firing instant. `ExactInferenceTimeline::build` runs the
+    // two exact guards FIRST (no inference path can skip a guard — the gh#187
+    // class), then gathers the cursor-keyed effect batches. Built ONCE here and
+    // constant across IF2 iterations: a parametric `at [<param>]` schedule — whose
+    // fire times would be per-particle and per-iteration — is refused by
+    // `guard_attimesexpr_exact`, so every scheduled fire time is
+    // `base_params`-independent. An off-grid scheduled fire time and always-active
+    // events are the other unsupported Exact cases (refused / out of scope). See
+    // particle_filter.rs for the same pattern.
+    let timeline = crate::intervention::ExactInferenceTimeline::build(
+        process.try_compiled_model(),
+        base_params,
+        config.t_start,
+        config.dt,
+        crate::boundary_times::ObsTimes::new(obs_times)?,
+    )?;
+    let schedule = timeline.schedule;
+    let scheduled = timeline.effects;
 
     // Mutable copy of params — updated each iteration with the filter mean.
     // Start from `base_params` for non-estimated slots, then overwrite each
