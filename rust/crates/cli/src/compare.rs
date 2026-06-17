@@ -21,6 +21,7 @@ use serde::Deserialize;
 use sim::inference::prequential::PrequentialTrace;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)] // gh#241 G3: reject typo'd compare.toml keys instead of silently dropping
 struct CompareToml {
     baseline: Option<String>,
     metrics: Option<Vec<String>>,
@@ -30,6 +31,7 @@ struct CompareToml {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CompareModelEntry {
     name: String,
     path: String,
@@ -466,5 +468,29 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) {
 
 fn option_finite(x: f64) -> serde_json::Value {
     if x.is_finite() { serde_json::json!(x) } else { serde_json::Value::Null }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// gh#241 G3: `deny_unknown_fields` — a typo'd compare.toml key must ERROR.
+    #[test]
+    fn compare_toml_rejects_unknown_keys() {
+        let ok = "baseline = \"a\"\n[[model]]\nname = \"a\"\npath = \"p\"\n";
+        assert!(toml::from_str::<CompareToml>(ok).is_ok(), "valid compare.toml must parse");
+
+        let bad_top = "baselne = \"a\"\n[[model]]\nname = \"a\"\npath = \"p\"\n"; // typo: baselne
+        assert!(
+            toml::from_str::<CompareToml>(bad_top).is_err(),
+            "a typo'd top-level key must be rejected"
+        );
+
+        let bad_model = "[[model]]\nname = \"a\"\npath = \"p\"\nlabel = \"x\"\n"; // unknown: label
+        assert!(
+            toml::from_str::<CompareToml>(bad_model).is_err(),
+            "an unknown [[model]] key must be rejected"
+        );
+    }
 }
 

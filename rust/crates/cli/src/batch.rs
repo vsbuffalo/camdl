@@ -68,6 +68,7 @@ fn run_pooled<R: Send>(pool: &Option<rayon::ThreadPool>, f: impl FnOnce() -> R +
 // ─── TOML schema (v1 — see module-level doc) ─────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)] // gh#241 G3: a typo'd batch.toml key must error, not silently drop
 struct ExperimentToml {
     config: ConfigSection,
     #[serde(default)]
@@ -90,6 +91,7 @@ struct ExperimentToml {
 /// into the CAS obs subtree (`seed_N/obs/{obs_hash}-{obs_seed}/<stream>.tsv`,
 /// the designed layout from `cas/mod.rs`). Resolves CLI review finding #4.
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct ObsSection {
     #[serde(default)]
     enabled: bool,
@@ -100,6 +102,7 @@ struct ObsSection {
 /// A named experimental design block (`[design.NAME]`).
 /// Represents a named belief state: parameter ranges + sampling method.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DesignBlock {
     method: String,   // "sobol" | "lhs" | "random"
     n: usize,
@@ -109,6 +112,7 @@ struct DesignBlock {
 
 /// Per-parameter specification within a design block.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DesignParamToml {
     range: RangeMinMax,
     #[serde(default)]
@@ -118,6 +122,7 @@ struct DesignParamToml {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RangeMinMax {
     min: f64,
     max: f64,
@@ -220,6 +225,7 @@ fn expand_sweep(sweep: &HashMap<String, SweepSpec>) -> Vec<HashMap<String, f64>>
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConfigSection {
     model: String,
     #[serde(default)]
@@ -246,6 +252,7 @@ fn default_output_dir() -> String { crate::run_paths::DEFAULT_OUTPUT_ROOT.to_str
 fn default_parallel() -> usize { 1 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct SeedsSection {
     from: Option<u64>,
     to:   Option<u64>,
@@ -272,6 +279,7 @@ impl SeedsSection {
 
 /// Per-scenario specification as parsed from the experiment TOML.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ScenarioEntry {
     pub name: String,
     #[serde(default)]
@@ -1835,6 +1843,38 @@ mod tests {
 
     fn sweep1(kv: &[(&str, f64)]) -> Vec<HashMap<String, f64>> {
         vec![kv.iter().map(|(k, v)| (k.to_string(), *v)).collect()]
+    }
+
+    /// gh#241 G3: `deny_unknown_fields` — a typo'd batch.toml key must ERROR,
+    /// not silently drop (and so neither apply nor reach the CAS hash).
+    #[test]
+    fn experiment_toml_rejects_unknown_keys() {
+        let ok = "[config]\nmodel = \"m.camdl\"\n";
+        assert!(toml::from_str::<ExperimentToml>(ok).is_ok(), "minimal valid config must parse");
+
+        let bad_top = "[config]\nmodel = \"m.camdl\"\n[bogus]\nx = 1\n";
+        assert!(
+            toml::from_str::<ExperimentToml>(bad_top).is_err(),
+            "an unknown top-level table must be rejected"
+        );
+
+        let bad_cfg = "[config]\nmodel = \"m.camdl\"\nparallell = 4\n"; // typo: parallell
+        assert!(
+            toml::from_str::<ExperimentToml>(bad_cfg).is_err(),
+            "a typo'd [config] key must be rejected"
+        );
+
+        let bad_seeds = "[config]\nmodel = \"m.camdl\"\n[config.seeds]\nfromm = 1\n"; // typo: fromm
+        assert!(
+            toml::from_str::<ExperimentToml>(bad_seeds).is_err(),
+            "a typo'd [config.seeds] key must be rejected"
+        );
+
+        let bad_scen = "[config]\nmodel = \"m.camdl\"\n[[scenario]]\nname = \"s\"\nenabel = []\n"; // typo: enabel
+        assert!(
+            toml::from_str::<ExperimentToml>(bad_scen).is_err(),
+            "a typo'd [[scenario]] key must be rejected"
+        );
     }
 
     // ── basic classification ─────────────────────────────────────────────────
