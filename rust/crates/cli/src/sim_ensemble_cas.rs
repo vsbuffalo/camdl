@@ -26,13 +26,8 @@
 //! Mirrors [`crate::survey_cas`] / [`crate::pfilter_cas`] for the level/digest
 //! conventions.
 
-use std::collections::BTreeMap;
-
 use runid::inputs::{EngineVersion, ModelDigest};
-use runid::{
-    run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, Provenance, RunRecord,
-    RunStatus, FORMAT_VERSION, HASH_VERSION,
-};
+use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
 
 use crate::fit::cas::{digest_value, ensure_finite};
 
@@ -162,43 +157,6 @@ pub fn ensemble_deps(cells: &[EnsembleCell]) -> Vec<runid::inputs::ArtifactRef> 
             digest: c.traj_digest,
         })
         .collect()
-}
-
-/// Build the `RunRecord` for an ensemble leaf. `inputs` carries the
-/// (recorded-not-hashed) display payload — n_cells, scenarios, replicate/seed
-/// info; identity is `levels`, lineage is `deps`.
-#[allow(clippy::too_many_arguments)]
-pub fn build_ensemble_record(
-    resolved: &ResolvedEnsemble,
-    ir_version: &str,
-    status: RunStatus,
-    deps: Vec<runid::inputs::ArtifactRef>,
-    inputs: serde_json::Value,
-    model_path: &str,
-    label: Option<String>,
-) -> RunRecord {
-    RunRecord {
-        format_version: FORMAT_VERSION,
-        kind: ArtifactKind::SimEnsemble,
-        run_id: resolved.run_id,
-        hash_version: HASH_VERSION,
-        ir_version: ir_version.to_string(),
-        engine_version: crate::version::VERSION_SHORT.to_string(),
-        levels: resolved.levels.clone(),
-        deps,
-        status,
-        artifacts: Default::default(),
-        children: BTreeMap::new(),
-        inputs,
-        provenance: Provenance {
-            argv: std::env::args().collect(),
-            label,
-            created_at: Some(crate::cas::iso8601_utc(std::time::SystemTime::now())),
-            camdl_version: Some(crate::version::VERSION_SHORT.to_string()),
-            source_paths: vec![model_path.to_string()],
-            ..Default::default()
-        },
-    }
 }
 
 #[cfg(test)]

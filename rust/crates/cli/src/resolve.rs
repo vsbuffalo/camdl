@@ -197,5 +197,162 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
     Ok(ResolvedTrajectory { levels, run_id: rid })
 }
 
+// ─── The resolved-writer seam (gh#241 PR D) ──────────────────────────────────
+//
+// One choke point for every CAS write. A command resolves its identity into a
+// `ResolvedArtifact`, supplies write-time provenance via `RecordMeta`, and calls
+// `begin_resolved_write`. The `RunRecord` is assembled in exactly ONE place
+// (`build_record`), so `run.json.inputs` always comes from
+// `ResolvedArtifact::display_inputs` and can never drift from identity, and a
+// new artifact kind cannot reach the store without a resolved shape first.
+//
+// Zero-re-key (gh#241 PR D): the path is `store_path(root, kind, levels)` and
+// the record is byte-for-byte what the per-kind builders produced — this seam
+// is a structural unification, not an identity change.
+
+use std::path::{Path, PathBuf};
+
+use runid::store::StreamClaim;
+use runid::{
+    store_path, Artifacts, CasError, FsCasStore, Provenance, RunRecord, RunStatus, FORMAT_VERSION,
+    HASH_VERSION,
+};
+
+/// The identity + display contract for one CAS leaf. Identity rides in
+/// `kind`/`levels`/`run_id`; `display_inputs` is the provenance summary written
+/// to `run.json.inputs` (NEVER hashed). For a streaming artifact whose summary
+/// is a post-run result (e.g. a pfilter's loglik), `display_inputs` is the
+/// at-claim value (often `Null`); the final value is supplied to
+/// [`ResolvedClaim::finalize`].
+pub struct ResolvedArtifact {
+    pub kind: ArtifactKind,
+    pub levels: Vec<LevelId>,
+    pub run_id: ContentHash,
+    pub display_inputs: serde_json::Value,
+}
+
+/// Write-time, non-identity record context: lineage + provenance the record
+/// schema needs but that never enters the `run_id`.
+pub struct RecordMeta {
+    pub ir_version: String,
+    pub engine_version: String,
+    pub deps: Vec<runid::inputs::ArtifactRef>,
+    pub children: BTreeMap<String, Vec<ContentHash>>,
+    pub source_paths: Vec<String>,
+    pub label: Option<String>,
+}
+
+impl RecordMeta {
+    /// The common case: engine = this binary, no deps/children, one source path.
+    pub fn new(
+        ir_version: impl Into<String>,
+        model_path: impl Into<String>,
+        label: Option<String>,
+    ) -> Self {
+        RecordMeta {
+            ir_version: ir_version.into(),
+            engine_version: crate::version::VERSION_SHORT.to_string(),
+            deps: Vec::new(),
+            children: BTreeMap::new(),
+            source_paths: vec![model_path.into()],
+            label,
+        }
+    }
+
+    pub fn with_deps(mut self, deps: Vec<runid::inputs::ArtifactRef>) -> Self {
+        self.deps = deps;
+        self
+    }
+}
+
+/// Which store door to use — mirrors the store's two write modes.
+pub enum WriteMode {
+    /// Hand over a finished artifact set; committed atomically in one call.
+    Atomic(Artifacts),
+    /// Claim the leaf, stream output into it, then finalize.
+    Streaming,
+}
+
+/// The outcome of [`begin_resolved_write`].
+pub enum ResolvedWrite {
+    /// Atomic: already committed; the destination path.
+    Committed(PathBuf),
+    /// Streaming: an open claim the caller writes into, then finalizes.
+    Streaming(ResolvedClaim),
+}
+
+/// An open streaming claim plus the record to finalize with. The caller streams
+/// output files (via [`dir`](Self::dir) / [`write`](Self::write)) then calls
+/// [`finalize`](Self::finalize) with the post-run display inputs.
+pub struct ResolvedClaim {
+    claim: StreamClaim,
+    record: RunRecord,
+}
+
+impl ResolvedClaim {
+    pub fn dir(&self) -> &Path {
+        self.claim.dir()
+    }
+
+    /// Commit Running → Completed, writing the post-run `display_inputs` into
+    /// `run.json.inputs`. (`StreamClaim::finalize` flips status and builds the
+    /// exact-set manifest from the streamed files.)
+    pub fn finalize(mut self, display_inputs: serde_json::Value) -> Result<PathBuf, CasError> {
+        self.record.inputs = display_inputs;
+        self.claim.finalize(self.record)
+    }
+}
+
+/// Assemble the `RunRecord` for `resolved` + `meta` at `status`. The single
+/// record-construction site — every CAS write routes through here.
+fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatus) -> RunRecord {
+    RunRecord {
+        format_version: FORMAT_VERSION,
+        kind: resolved.kind,
+        run_id: resolved.run_id,
+        hash_version: HASH_VERSION,
+        ir_version: meta.ir_version.clone(),
+        engine_version: meta.engine_version.clone(),
+        levels: resolved.levels.clone(),
+        deps: meta.deps.clone(),
+        status,
+        artifacts: Default::default(),
+        children: meta.children.clone(),
+        inputs: resolved.display_inputs.clone(),
+        provenance: Provenance {
+            argv: std::env::args().collect(),
+            label: meta.label.clone(),
+            created_at: Some(crate::cas::iso8601_utc(std::time::SystemTime::now())),
+            camdl_version: Some(meta.engine_version.clone()),
+            source_paths: meta.source_paths.clone(),
+            ..Default::default()
+        },
+    }
+}
+
+/// The one legal CAS writer. Derives the leaf path from `resolved`'s identity,
+/// builds the record in one place, and dispatches to the chosen store mode.
+pub fn begin_resolved_write(
+    store: &FsCasStore,
+    root: &Path,
+    resolved: &ResolvedArtifact,
+    meta: &RecordMeta,
+    mode: WriteMode,
+) -> Result<ResolvedWrite, CasError> {
+    let dir = store_path(root, resolved.kind, &resolved.levels);
+    match mode {
+        WriteMode::Atomic(artifacts) => {
+            let record = build_record(resolved, meta, RunStatus::Completed);
+            let dest = store.commit_atomic(&dir, record, artifacts)?;
+            Ok(ResolvedWrite::Committed(dest))
+        }
+        WriteMode::Streaming => {
+            let record = build_record(resolved, meta, RunStatus::Running);
+            let claim = store.claim_streaming(&dir, record.clone())?;
+            Ok(ResolvedWrite::Streaming(ResolvedClaim { claim, record }))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

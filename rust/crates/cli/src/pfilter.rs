@@ -502,21 +502,30 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             "params": scored.iter().map(|(n, v)| (n.as_str(), *v)).collect::<Vec<_>>(),
             "data_hashes": data_hashes.iter().map(|(n, h)| (n.as_str(), h.as_str())).collect::<Vec<_>>(),
         });
-        let running = crate::pfilter_cas::build_pfilter_record(
-            &resolved_id, &ir_version_str, runid::RunStatus::Running,
-            serde_json::Value::Null, &ir_path);
-        let claim = match store.claim_streaming(&cas_path, running) {
-            Ok(c) => c,
+        // Streaming write through the one resolved-writer seam (gh#241 PR D).
+        // The running record carries Null inputs (the loglik is a post-run
+        // result); the final inputs are supplied to `finalize`.
+        let resolved_artifact = crate::resolve::ResolvedArtifact {
+            kind: runid::ArtifactKind::Pfilter,
+            levels: resolved_id.levels.clone(),
+            run_id: resolved_id.run_id,
+            display_inputs: serde_json::Value::Null,
+        };
+        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None);
+        let write = match crate::resolve::begin_resolved_write(
+            &store, &root, &resolved_artifact, &meta, crate::resolve::WriteMode::Streaming,
+        ) {
+            Ok(crate::resolve::ResolvedWrite::Streaming(c)) => c,
+            Ok(crate::resolve::ResolvedWrite::Committed(_)) => {
+                unreachable!("Streaming write mode never returns a committed path")
+            }
             Err(e) => { eprintln!("warning: claim pfilter leaf {}: {}", cas_path.display(), e); return; }
         };
         let mut body = format!("loglik = {}\nn_replicates = {}\nn_particles = {}\n",
             mean_ll, n_reps, n_particles);
         if n_reps > 1 { body.push_str(&format!("loglik_sd = {}\n", sd_ll)); }
-        let _ = std::fs::write(claim.dir().join("loglik.toml"), body);
-        let completed = crate::pfilter_cas::build_pfilter_record(
-            &resolved_id, &ir_version_str, runid::RunStatus::Completed,
-            inputs_json, &ir_path);
-        if let Err(e) = claim.finalize(completed) {
+        let _ = std::fs::write(write.dir().join("loglik.toml"), body);
+        if let Err(e) = write.finalize(inputs_json) {
             eprintln!("warning: finalize pfilter leaf {}: {}", cas_path.display(), e);
         } else {
             crate::status::done("stored", cas_path.display());

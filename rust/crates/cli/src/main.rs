@@ -1472,7 +1472,6 @@ fn write_sim_ensemble(
     };
 
     let root = std::path::Path::new(cas_root);
-    let dir = runid::store_path(root, runid::ArtifactKind::SimEnsemble, &resolved.levels);
 
     // Distinct scenarios (sorted, deduped) for the display payload.
     let mut scenarios: Vec<String> = cells.iter().map(|c| c.scenario_label.clone()).collect();
@@ -1499,24 +1498,32 @@ fn write_sim_ensemble(
     });
 
     let deps = crate::sim_ensemble_cas::ensemble_deps(&cells);
-    let record = crate::sim_ensemble_cas::build_ensemble_record(
-        &resolved,
-        ir::IR_VERSION.trim(),
-        runid::RunStatus::Running,
-        deps,
-        inputs,
-        &cas.model_path,
-        label,
-    );
+    let resolved_artifact = crate::resolve::ResolvedArtifact {
+        kind: runid::ArtifactKind::SimEnsemble,
+        levels: resolved.levels.clone(),
+        run_id: resolved.run_id,
+        display_inputs: inputs,
+    };
+    let meta = crate::resolve::RecordMeta::new(ir::IR_VERSION.trim(), &cas.model_path, label)
+        .with_deps(deps);
 
     let mut artifacts = runid::Artifacts::new();
     artifacts.insert("ensemble.tsv", combined_bytes.to_vec());
     let store = runid::FsCasStore::new(root);
-    match store.commit_atomic(&dir, record, artifacts) {
-        Ok(dest) => {
+    match crate::resolve::begin_resolved_write(
+        &store,
+        root,
+        &resolved_artifact,
+        &meta,
+        crate::resolve::WriteMode::Atomic(artifacts),
+    ) {
+        Ok(crate::resolve::ResolvedWrite::Committed(dest)) => {
             // Full rooted path (e.g. `./results/ensembles/…`), matching the
             // `stored` banner — not the bare store-relative `ensembles/…`.
             crate::status::step("ensemble", dest.to_string_lossy());
+        }
+        Ok(crate::resolve::ResolvedWrite::Streaming(_)) => {
+            unreachable!("Atomic write mode never returns a streaming claim")
         }
         Err(e) => eprintln!("warning: ensemble commit failed: {}", e),
     }

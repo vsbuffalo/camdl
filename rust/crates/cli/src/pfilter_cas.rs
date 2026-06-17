@@ -14,8 +14,7 @@
 
 use runid::inputs::{DataDigest, EngineVersion, ModelDigest, Seed};
 use runid::{
-    run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, Provenance, RunRecord,
-    RunStatus, FORMAT_VERSION, HASH_VERSION,
+    run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId,
 };
 
 use crate::fit::cas::{digest_value, ensure_finite};
@@ -131,39 +130,6 @@ fn fmt_dt(dt: f64) -> String {
         format!("{}", dt.round() as i64)
     } else {
         format!("{}", dt)
-    }
-}
-
-/// Build the `RunRecord` for a pfilter-eval leaf. `inputs` carries the
-/// (recorded-not-hashed) display payload — the loglik result, n_particles,
-/// n_replicates, resolved params; identity is `levels`.
-pub fn build_pfilter_record(
-    resolved: &ResolvedPfilter,
-    ir_version: &str,
-    status: RunStatus,
-    inputs: serde_json::Value,
-    model_path: &str,
-) -> RunRecord {
-    RunRecord {
-        format_version: FORMAT_VERSION,
-        kind: ArtifactKind::Pfilter,
-        run_id: resolved.run_id,
-        hash_version: HASH_VERSION,
-        ir_version: ir_version.to_string(),
-        engine_version: crate::version::VERSION_SHORT.to_string(),
-        levels: resolved.levels.clone(),
-        deps: Vec::new(),
-        status,
-        artifacts: Default::default(),
-        children: Default::default(),
-        inputs,
-        provenance: Provenance {
-            argv: std::env::args().collect(),
-            created_at: Some(crate::cas::iso8601_utc(std::time::SystemTime::now())),
-            camdl_version: Some(crate::version::VERSION_SHORT.to_string()),
-            source_paths: vec![model_path.to_string()],
-            ..Default::default()
-        },
     }
 }
 
