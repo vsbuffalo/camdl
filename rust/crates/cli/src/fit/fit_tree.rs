@@ -210,7 +210,7 @@ fn parse_ds_idx(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run_meta::MethodKind;
+    use crate::run_meta::FitAlgorithm;
 
     /// Allocate a unique tempdir for one test. Cleaned up by `Drop`.
     struct TempDir(PathBuf);
@@ -443,11 +443,11 @@ mod tests {
         assert!(entries.is_empty());
     }
 
-    // Keep `MethodKind` exercised so the import isn't unused in the
+    // Keep `FitAlgorithm` exercised so the import isn't unused in the
     // method-agnostic test set above.
     #[test]
     fn method_kind_str_roundtrip() {
-        assert_eq!(MethodKind::If2.as_str(), "if2");
-        assert_eq!(MethodKind::Pgas.as_str(), "pgas");
+        assert_eq!(FitAlgorithm::If2.as_str(), "if2");
+        assert_eq!(FitAlgorithm::Pgas.as_str(), "pgas");
     }
 }

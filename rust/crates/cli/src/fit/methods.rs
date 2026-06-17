@@ -16,6 +16,8 @@
 
 use std::fmt::Write;
 
+use crate::run_meta::{FitAlgorithm, InferenceBackend};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodStatus {
     /// Validated against published / vignette use cases; production-ready.
@@ -50,8 +52,8 @@ pub enum MethodCategory {
 /// One supported `(algorithm, backend)` combination.
 #[derive(Debug, Clone, Copy)]
 pub struct InferenceMethod {
-    pub algorithm: &'static str,
-    pub backend: &'static str,
+    pub algorithm: FitAlgorithm,
+    pub backend: InferenceBackend,
     pub category: MethodCategory,
     pub status: MethodStatus,
     /// One-line summary surfaced in `camdl fit methods` and error messages.
@@ -67,8 +69,8 @@ pub struct InferenceMethod {
 pub const METHODS: &[InferenceMethod] = &[
     // ─── chain_binomial backend (stochastic process kernel) ───────────────
     InferenceMethod {
-        algorithm: "if2",
-        backend: "chain_binomial",
+        algorithm: FitAlgorithm::If2,
+        backend: InferenceBackend::ChainBinomial,
         category: MethodCategory::Inference,
         status: MethodStatus::Stable,
         one_liner: "Iterated filtering MLE — perturbation-and-filter loop.",
@@ -76,8 +78,8 @@ pub const METHODS: &[InferenceMethod] = &[
         status_note: "",
     },
     InferenceMethod {
-        algorithm: "pgas",
-        backend: "chain_binomial",
+        algorithm: FitAlgorithm::Pgas,
+        backend: InferenceBackend::ChainBinomial,
         category: MethodCategory::Inference,
         status: MethodStatus::Stable,
         one_liner: "Particle Gibbs + NUTS-on-θ; production Bayesian path.",
@@ -85,8 +87,8 @@ pub const METHODS: &[InferenceMethod] = &[
         status_note: "",
     },
     InferenceMethod {
-        algorithm: "pmmh",
-        backend: "chain_binomial",
+        algorithm: FitAlgorithm::Pmmh,
+        backend: InferenceBackend::ChainBinomial,
         category: MethodCategory::Inference,
         status: MethodStatus::Experimental,
         one_liner: "Pseudo-marginal MH; PF-inside-MH Bayesian sampler.",
@@ -97,8 +99,8 @@ pub const METHODS: &[InferenceMethod] = &[
              on discrete-state models. PGAS is the production Bayesian path.",
     },
     InferenceMethod {
-        algorithm: "pfilter",
-        backend: "chain_binomial",
+        algorithm: FitAlgorithm::Pfilter,
+        backend: InferenceBackend::ChainBinomial,
         category: MethodCategory::Diagnostic,
         status: MethodStatus::Stable,
         one_liner: "Bootstrap particle filter — likelihood evaluation only.",
@@ -108,8 +110,8 @@ pub const METHODS: &[InferenceMethod] = &[
     },
     // ─── ode backend (deterministic skeleton; new in Phase 1) ─────────────
     InferenceMethod {
-        algorithm: "nl-sbplx",
-        backend: "ode",
+        algorithm: FitAlgorithm::NlSbplx,
+        backend: InferenceBackend::Ode,
         category: MethodCategory::Inference,
         status: MethodStatus::Beta,
         one_liner: "Sbplx via NLopt — Nelder-Mead variant, robust to \
@@ -121,8 +123,8 @@ pub const METHODS: &[InferenceMethod] = &[
              gathering downstream feedback.",
     },
     InferenceMethod {
-        algorithm: "nl-bobyqa",
-        backend: "ode",
+        algorithm: FitAlgorithm::NlBobyqa,
+        backend: InferenceBackend::Ode,
         category: MethodCategory::Inference,
         status: MethodStatus::Beta,
         one_liner: "BOBYQA via NLopt — quadratic-trust-region.",
@@ -134,8 +136,8 @@ pub const METHODS: &[InferenceMethod] = &[
              nl-sbplx unless you've confirmed the boundary is interior.",
     },
     InferenceMethod {
-        algorithm: "mh",
-        backend: "ode",
+        algorithm: FitAlgorithm::Mh,
+        backend: InferenceBackend::Ode,
         category: MethodCategory::Inference,
         status: MethodStatus::Beta,
         one_liner: "Metropolis-Hastings on the deterministic ODE marginal likelihood.",
@@ -146,7 +148,10 @@ pub const METHODS: &[InferenceMethod] = &[
 
 /// Look up a method by (algorithm, backend). Returns `None` if the pair
 /// isn't in the registry — caller renders the structured error.
-pub fn lookup(algorithm: &str, backend: &str) -> Option<&'static InferenceMethod> {
+pub fn lookup(
+    algorithm: FitAlgorithm,
+    backend: InferenceBackend,
+) -> Option<&'static InferenceMethod> {
     METHODS
         .iter()
         .find(|m| m.algorithm == algorithm && m.backend == backend)
@@ -159,8 +164,8 @@ pub fn lookup(algorithm: &str, backend: &str) -> Option<&'static InferenceMethod
 /// is returned, but the runtime caveat banner is driven by `status_note` /
 /// `emit_status_banner` below rather than by callers inspecting the `Ok`.
 pub fn validate_combo(
-    algorithm: &str,
-    backend: &str,
+    algorithm: FitAlgorithm,
+    backend: InferenceBackend,
 ) -> Result<&'static InferenceMethod, String> {
     if let Some(m) = lookup(algorithm, backend) {
         return Ok(m);
@@ -168,11 +173,50 @@ pub fn validate_combo(
     Err(render_invalid_combo(algorithm, backend))
 }
 
+/// Parse a user-supplied `(algorithm, backend)` string pair (the CLI boundary
+/// for `camdl profile`/`fit`) into the typed registry entry. Strings enter the
+/// typed world *here*; on any failure the error names the problem and points at
+/// the matrix. `fit.toml` does not use this — its `Stage` is already typed, so
+/// it calls [`validate_combo`] with `stage.method_kind()` / `stage.backend()`.
+pub fn parse_combo(
+    algorithm: &str,
+    backend: &str,
+) -> Result<&'static InferenceMethod, String> {
+    match (parse_algorithm(algorithm), parse_backend(backend)) {
+        (Some(a), Some(b)) => validate_combo(a, b),
+        (a, b) => Err(render_unknown_combo(algorithm, backend, a, b)),
+    }
+}
+
+/// Wire-string → [`FitAlgorithm`]; `None` for any name not in the registry
+/// vocabulary (the inverse of [`FitAlgorithm::as_str`]).
+fn parse_algorithm(s: &str) -> Option<FitAlgorithm> {
+    Some(match s {
+        "if2" => FitAlgorithm::If2,
+        "pgas" => FitAlgorithm::Pgas,
+        "pmmh" => FitAlgorithm::Pmmh,
+        "mh" => FitAlgorithm::Mh,
+        "pfilter" => FitAlgorithm::Pfilter,
+        "nl-sbplx" => FitAlgorithm::NlSbplx,
+        "nl-bobyqa" => FitAlgorithm::NlBobyqa,
+        _ => return None,
+    })
+}
+
+/// Wire-string → [`InferenceBackend`]; `None` for any unknown backend name.
+fn parse_backend(s: &str) -> Option<InferenceBackend> {
+    Some(match s {
+        "chain_binomial" => InferenceBackend::ChainBinomial,
+        "ode" => InferenceBackend::Ode,
+        _ => return None,
+    })
+}
+
 /// The registry caveat for a `(algorithm, backend)` pair — its `status_note` if
 /// the pair is registered and carries a non-empty note, else `None`. Single
 /// source of truth for the runtime caveat banner (`emit_status_banner`); the
 /// same field drives `camdl fit methods`, so the two can never drift.
-pub fn status_note(algorithm: &str, backend: &str) -> Option<&'static str> {
+pub fn status_note(algorithm: FitAlgorithm, backend: InferenceBackend) -> Option<&'static str> {
     lookup(algorithm, backend)
         .map(|m| m.status_note)
         .filter(|s| !s.is_empty())
@@ -183,7 +227,7 @@ pub fn status_note(algorithm: &str, backend: &str) -> Option<&'static str> {
 /// for unregistered pairs (those fail earlier in `validate_combo`). Driven
 /// entirely by the registry so the banner text and `camdl fit methods` stay in
 /// lockstep — this replaces the previously hand-coded, PMMH-only banner.
-pub fn emit_status_banner(algorithm: &str, backend: &str) {
+pub fn emit_status_banner(algorithm: FitAlgorithm, backend: InferenceBackend) {
     use owo_colors::OwoColorize;
     if let Some(note) = status_note(algorithm, backend) {
         eprintln!("{}", format!("⚠ {note}").yellow());
@@ -194,9 +238,14 @@ pub fn emit_status_banner(algorithm: &str, backend: &str) {
 /// Per-pair structural reasons for known invalid combinations. Hand-crafted
 /// per the proposal's "error messages are a feature, not polish" principle —
 /// the message must point at the right alternative, not just say "no".
-fn rejection_reason(algorithm: &str, backend: &str) -> Option<&'static str> {
+fn rejection_reason(
+    algorithm: FitAlgorithm,
+    backend: InferenceBackend,
+) -> Option<&'static str> {
+    use FitAlgorithm as A;
+    use InferenceBackend as B;
     match (algorithm, backend) {
-        ("if2", "ode") => Some(
+        (A::If2, B::Ode) => Some(
             "IF2 (Iterated Filtering 2) is a particle-filter-based MLE \
              algorithm. It perturbs parameters across particles and uses \
              the between-particle trajectory variance to drive the \
@@ -212,7 +261,7 @@ fn rejection_reason(algorithm: &str, backend: &str) -> Option<&'static str> {
              algorithm = \"nl-bobyqa\"  faster than Sbplx on smooth \
                                           objectives",
         ),
-        ("pgas", "ode") => Some(
+        (A::Pgas, B::Ode) => Some(
             "PGAS (Particle Gibbs with Ancestor Sampling) is a particle-\
              filter-based Bayesian sampler — its CSMC step needs \
              stochastic process variance to refresh the trajectory \
@@ -224,7 +273,7 @@ fn rejection_reason(algorithm: &str, backend: &str) -> Option<&'static str> {
              algorithm = \"nuts\"   gradient-based NUTS via forward \
                                        sensitivity (Phase 3)",
         ),
-        ("pmmh", "ode") => Some(
+        (A::Pmmh, B::Ode) => Some(
             "PMMH (Pseudo-Marginal Metropolis-Hastings) wraps a particle \
              filter inside an MH acceptance step — the PF wrapping is \
              exactly what makes the sampler unbiased on a stochastic \
@@ -235,7 +284,7 @@ fn rejection_reason(algorithm: &str, backend: &str) -> Option<&'static str> {
              algorithm = \"mh\"     vanilla MH on the deterministic \
                                        likelihood directly (Phase 2)",
         ),
-        ("nl-sbplx", "chain_binomial") | ("nl-bobyqa", "chain_binomial") => Some(
+        (A::NlSbplx, B::ChainBinomial) | (A::NlBobyqa, B::ChainBinomial) => Some(
             "NLopt deterministic optimizers (Sbplx, BOBYQA) operate on a \
              smooth objective. Under the chain_binomial backend the \
              single-trajectory loglik is a noisy estimator of the true \
@@ -245,7 +294,7 @@ fn rejection_reason(algorithm: &str, backend: &str) -> Option<&'static str> {
              If you want MLE on the chain_binomial backend, use:\n    \
              algorithm = \"if2\"   Iterated filtering MLE",
         ),
-        ("mh", "chain_binomial") => Some(
+        (A::Mh, B::ChainBinomial) => Some(
             "Vanilla MH on a noisy single-trajectory loglik gives biased \
              posteriors — the PF wrapping is exactly what makes PMMH \
              unbiased on a stochastic likelihood. Use PMMH if you need a \
@@ -255,7 +304,17 @@ fn rejection_reason(algorithm: &str, backend: &str) -> Option<&'static str> {
              algorithm = \"pgas\"   Particle Gibbs (production Bayesian path)\n    \
              algorithm = \"pmmh\"   Pseudo-marginal MH (experimental)",
         ),
-        ("nuts", "chain_binomial") => Some(
+        _ => None,
+    }
+}
+
+/// Tailored hint for a *known-but-unsupported* algorithm name that has no
+/// registry entry or dispatcher (so it never parses to [`FitAlgorithm`]) — it
+/// is surfaced at the parse boundary ([`parse_combo`]) rather than in
+/// `validate_combo`. `nuts` (Phase 3, planned) is the only such name today.
+fn unsupported_algorithm_hint(algorithm: &str) -> Option<&'static str> {
+    match algorithm {
+        "nuts" => Some(
             "Vanilla NUTS on a stochastic likelihood is not a coherent \
              algorithm — gradients are noisy under PF wrapping. PGAS \
              handles this by integrating NUTS into a Gibbs sweep over \
@@ -268,7 +327,10 @@ fn rejection_reason(algorithm: &str, backend: &str) -> Option<&'static str> {
     }
 }
 
-fn render_invalid_combo(algorithm: &str, backend: &str) -> String {
+/// Render the structured error for a *valid-but-unsupported* typed pair — both
+/// the algorithm and backend are registry vocabulary, but the pair is not a
+/// supported method (e.g. `if2` + `ode`). Called by [`validate_combo`].
+fn render_invalid_combo(algorithm: FitAlgorithm, backend: InferenceBackend) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -278,41 +340,81 @@ fn render_invalid_combo(algorithm: &str, backend: &str) -> String {
     );
     out.push('\n');
     if let Some(reason) = rejection_reason(algorithm, backend) {
-        out.push_str("  ");
-        // Indent each line of the reason for readability under the header.
-        for (i, line) in reason.lines().enumerate() {
-            if i > 0 {
-                out.push_str("\n  ");
-            }
-            out.push_str(line);
-        }
-        out.push('\n');
+        append_indented(&mut out, reason);
     } else {
-        let known_alg = METHODS.iter().any(|m| m.algorithm == algorithm);
-        let known_be = METHODS.iter().any(|m| m.backend == backend);
-        if !known_alg && !known_be {
+        out.push_str(
+            "  This algorithm/backend combination is not in the supported \
+             matrix.\n",
+        );
+    }
+    append_matrix_footer(&mut out);
+    out
+}
+
+/// Render the structured error for an *unparsed* `(algorithm, backend)` string
+/// pair at the CLI boundary ([`parse_combo`]): an unknown algorithm and/or
+/// backend name. `parsed_*` carry the parse results so the message names which
+/// side failed. A known-but-unsupported algorithm name (`nuts`) gets its
+/// tailored hint here, since it never reaches the typed `validate_combo`.
+fn render_unknown_combo(
+    algorithm: &str,
+    backend: &str,
+    parsed_algo: Option<FitAlgorithm>,
+    parsed_be: Option<InferenceBackend>,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "stage has algorithm = \"{}\" with backend = \"{}\", which is not \
+         a supported inference method.",
+        algorithm, backend
+    );
+    out.push('\n');
+    match (parsed_algo.is_none(), parsed_be.is_none()) {
+        (true, true) => {
             let _ = writeln!(
                 out,
                 "  Unknown algorithm \"{}\" and unknown backend \"{}\".",
                 algorithm, backend
             );
-        } else if !known_alg {
+        }
+        (true, false) => {
             let _ = writeln!(out, "  Unknown algorithm \"{}\".", algorithm);
-        } else if !known_be {
+        }
+        (false, true) => {
             let _ = writeln!(
                 out,
                 "  Unknown backend \"{}\". Supported backends: \
                  chain_binomial, ode.",
                 backend
             );
-        } else {
-            let _ = writeln!(
-                out,
-                "  This algorithm/backend combination is not in the \
-                 supported matrix."
-            );
         }
+        // Both parsed → a valid-but-unsupported pair, handled by validate_combo.
+        (false, false) => {}
     }
+    if let Some(hint) = unsupported_algorithm_hint(algorithm) {
+        append_indented(&mut out, hint);
+    }
+    append_matrix_footer(&mut out);
+    out
+}
+
+/// Append a reason/hint block, indenting each line two spaces under the header.
+fn append_indented(out: &mut String, text: &str) {
+    out.push_str("  ");
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            out.push_str("\n  ");
+        }
+        out.push_str(line);
+    }
+    out.push('\n');
+}
+
+/// The shared footer: the supported-pairs listing and the per-backend
+/// statistical-object note. Identical across the invalid-pair and unknown-name
+/// renderers so the two can never drift.
+fn append_matrix_footer(out: &mut String) {
     out.push('\n');
     out.push_str("  Supported (algorithm, backend) pairs:\n");
     for m in METHODS {
@@ -334,7 +436,6 @@ fn render_invalid_combo(algorithm: &str, backend: &str) -> String {
          In low-noise\n  regimes these converge empirically. See \
          docs/inference.md for guidance.\n",
     );
-    out
 }
 
 /// Verify the compiled model's required capabilities are supported by
@@ -381,22 +482,23 @@ pub enum ObsAlignment {
 ///   on-grid obs.
 /// * `obs_on_grid` — every observation time is an integer multiple of `dt`.
 pub fn resolve_obs_alignment(
-    algorithm: &str,
+    algorithm: FitAlgorithm,
     correlated: bool,
     requested: Option<ObsAlignment>,
     obs_on_grid: bool,
 ) -> Result<ObsAlignment, String> {
+    use FitAlgorithm as A;
     use ObsAlignment::{Exact, Snap};
     match algorithm {
         // Exact-steppers: land exactly on any obs. No `snap` inference path exists.
-        "if2" | "pfilter" => match requested {
+        A::If2 | A::Pfilter => match requested {
             None | Some(Exact) => Ok(Exact),
             Some(Snap) => Err(format!(
                 "{algorithm}: obs_alignment = \"snap\" is not implemented — it steps \
                  exactly to observation times. Use \"exact\" (the default)."
             )),
         },
-        "pmmh" => match (requested, correlated, obs_on_grid) {
+        A::Pmmh => match (requested, correlated, obs_on_grid) {
             // Plain PMMH (no `rho`) is the bootstrap PF: exact on any obs.
             (None | Some(Exact), false, _) => Ok(Exact),
             // Correlated PMMH (CPM, `rho` set): exact only on-grid.
@@ -419,7 +521,7 @@ pub fn resolve_obs_alignment(
             }
         },
         // PGAS uses a uniform grid; exact-PGAS is planned but not yet built.
-        "pgas" => match requested {
+        A::Pgas => match requested {
             None | Some(Snap) => Ok(Snap),
             Some(Exact) => Err(
                 "pgas: obs_alignment = \"exact\" is not yet implemented (PGAS uses a \
@@ -428,7 +530,14 @@ pub fn resolve_obs_alignment(
                     .into(),
             ),
         },
-        other => Err(format!("resolve_obs_alignment: unknown algorithm '{other}'")),
+        // ODE-backend algorithms never reach here — both call sites gate on the
+        // PF algorithms (if2/pgas/pmmh/pfilter). The arm exists for exhaustiveness;
+        // obs alignment is a particle-filter concept (ODE scores on the integrator
+        // grid), so it is a clear error rather than a panic.
+        A::NlSbplx | A::NlBobyqa | A::Mh => Err(format!(
+            "obs_alignment does not apply to the ODE algorithm '{algorithm}' — \
+             observations are scored on the integrator grid."
+        )),
     }
 }
 
@@ -458,14 +567,15 @@ pub fn resolve_obs_alignment(
 /// For those, this hard-errors at config-load time, naming the limitation
 /// and the supported cells — converting a silent wrong answer into a loud
 /// failure. `correlated` is `true` for a PMMH stage with `rho` set.
-pub fn validate_ic_free(algorithm: &str, correlated: bool) -> Result<(), String> {
+pub fn validate_ic_free(algorithm: FitAlgorithm, correlated: bool) -> Result<(), String> {
+    use FitAlgorithm as A;
     match algorithm {
         // Honoring cells: the first increment is dropped from the loglik.
-        "if2" | "pfilter" => Ok(()),
+        A::If2 | A::Pfilter => Ok(()),
         // Plain PMMH wraps the bootstrap PF (honors it); correlated PMMH
         // routes to the correlated PF, which does not.
-        "pmmh" if !correlated => Ok(()),
-        "pmmh" => Err(
+        A::Pmmh if !correlated => Ok(()),
+        A::Pmmh => Err(
             "ic_free = true is not supported with correlated PMMH (a `pmmh` \
              stage with `rho` set). The correlated particle filter \
              (correlated_pf) accumulates every observation's log-likelihood \
@@ -477,7 +587,7 @@ pub fn validate_ic_free(algorithm: &str, correlated: bool) -> Result<(), String>
              remove `ic_free = true`."
                 .into(),
         ),
-        "pgas" => Err(
+        A::Pgas => Err(
             "ic_free = true is not supported with the `pgas` algorithm. PGAS \
              accumulates every observation's log-likelihood increment \
              unconditionally (no conditioning field exists in its CSMC / \
@@ -489,7 +599,7 @@ pub fn validate_ic_free(algorithm: &str, correlated: bool) -> Result<(), String>
              `ic_free = true` from the fit."
                 .into(),
         ),
-        "nl-sbplx" | "nl-bobyqa" | "mh" => Err(format!(
+        A::NlSbplx | A::NlBobyqa | A::Mh => Err(format!(
             "ic_free = true is not supported with the `{algorithm}` algorithm \
              (ODE backend). The deterministic likelihood (compute_ode_loglik) \
              sums over every observation time with no first-observation skip, so \
@@ -499,14 +609,11 @@ pub fn validate_ic_free(algorithm: &str, correlated: bool) -> Result<(), String>
              Use one of those for IC-free inference, or remove \
              `ic_free = true` from the fit."
         )),
-        other => Err(format!(
-            "validate_ic_free: unknown algorithm '{other}'"
-        )),
     }
 }
 
 pub fn check_model_capabilities(
-    backend: &str,
+    backend: InferenceBackend,
     compiled: &sim::CompiledModel,
 ) -> Result<(), String> {
     use sim::Capabilities;
@@ -526,13 +633,10 @@ pub fn check_model_capabilities(
         // (ode_dt_rate_flow.rs) — so a `dt`-in-rate model fits on either. The
         // requirement only excludes gillespie, which is not an inference
         // backend here.
-        "chain_binomial" => {
+        InferenceBackend::ChainBinomial => {
             Capabilities::OVERDISPERSION | Capabilities::BALANCE | Capabilities::RUNTIME_DT
         }
-        "ode"            => Capabilities::REAL_COMPARTMENTS | Capabilities::RUNTIME_DT,
-        other            => return Err(format!(
-            "check_model_capabilities: unknown backend '{}'", other
-        )),
+        InferenceBackend::Ode => Capabilities::REAL_COMPARTMENTS | Capabilities::RUNTIME_DT,
     };
     let required = compiled.required_capabilities();
     let unsupported = required - backend_caps;
@@ -641,7 +745,7 @@ pub fn render_matrix() -> String {
     for (be_name, header) in backends {
         let _ = writeln!(out, "{}\n", header);
         let methods_for_be: Vec<_> =
-            METHODS.iter().filter(|m| m.backend == be_name).collect();
+            METHODS.iter().filter(|m| m.backend.as_str() == be_name).collect();
         if methods_for_be.is_empty() {
             continue;
         }
@@ -689,12 +793,12 @@ mod tests {
     #[test]
     fn every_phase1_method_present() {
         for (a, b) in [
-            ("if2", "chain_binomial"),
-            ("pgas", "chain_binomial"),
-            ("pmmh", "chain_binomial"),
-            ("pfilter", "chain_binomial"),
-            ("nl-sbplx", "ode"),
-            ("nl-bobyqa", "ode"),
+            (FitAlgorithm::If2, InferenceBackend::ChainBinomial),
+            (FitAlgorithm::Pgas, InferenceBackend::ChainBinomial),
+            (FitAlgorithm::Pmmh, InferenceBackend::ChainBinomial),
+            (FitAlgorithm::Pfilter, InferenceBackend::ChainBinomial),
+            (FitAlgorithm::NlSbplx, InferenceBackend::Ode),
+            (FitAlgorithm::NlBobyqa, InferenceBackend::Ode),
         ] {
             assert!(
                 lookup(a, b).is_some(),
@@ -707,7 +811,7 @@ mod tests {
     fn obs_alignment_exact_steppers_any_obs() {
         use ObsAlignment::{Exact, Snap};
         // if2/pfilter are exact on any obs; default and explicit exact both ok.
-        for algo in ["if2", "pfilter"] {
+        for algo in [FitAlgorithm::If2, FitAlgorithm::Pfilter] {
             assert_eq!(resolve_obs_alignment(algo, false, None, true), Ok(Exact));
             assert_eq!(resolve_obs_alignment(algo, false, None, false), Ok(Exact));
             assert_eq!(resolve_obs_alignment(algo, false, Some(Exact), false), Ok(Exact));
@@ -720,23 +824,23 @@ mod tests {
     fn obs_alignment_pmmh_is_rho_dependent() {
         use ObsAlignment::Exact;
         // Plain PMMH (uncorrelated) = bootstrap PF: exact on any obs.
-        assert_eq!(resolve_obs_alignment("pmmh", false, None, false), Ok(Exact));
+        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pmmh, false, None, false), Ok(Exact));
         // Correlated PMMH (rho set): exact OK on-grid...
-        assert_eq!(resolve_obs_alignment("pmmh", true, None, true), Ok(Exact));
+        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pmmh, true, None, true), Ok(Exact));
         // ...but off-grid + correlated is a CLEAN ERROR (was silent fresh-RNG
         // decorrelation, #17), under both default and explicit exact.
-        assert!(resolve_obs_alignment("pmmh", true, None, false).is_err());
-        assert!(resolve_obs_alignment("pmmh", true, Some(Exact), false).is_err());
+        assert!(resolve_obs_alignment(FitAlgorithm::Pmmh, true, None, false).is_err());
+        assert!(resolve_obs_alignment(FitAlgorithm::Pmmh, true, Some(Exact), false).is_err());
     }
 
     #[test]
     fn obs_alignment_pgas_snap_only_exact_is_clean_error() {
         use ObsAlignment::{Exact, Snap};
         // PGAS defaults to snap (its only mode today)...
-        assert_eq!(resolve_obs_alignment("pgas", false, None, true), Ok(Snap));
-        assert_eq!(resolve_obs_alignment("pgas", false, Some(Snap), true), Ok(Snap));
+        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pgas, false, None, true), Ok(Snap));
+        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pgas, false, Some(Snap), true), Ok(Snap));
         // ...and exact is a CLEAN ERROR (was a silent snap), naming the fix.
-        let err = resolve_obs_alignment("pgas", false, Some(Exact), true).unwrap_err();
+        let err = resolve_obs_alignment(FitAlgorithm::Pgas, false, Some(Exact), true).unwrap_err();
         assert!(err.contains("not yet implemented"), "should name exact-PGAS as unimplemented: {err}");
         assert!(err.contains("if2") || err.contains("snap"), "should suggest a fix: {err}");
     }
@@ -756,15 +860,15 @@ mod tests {
     #[test]
     fn ic_free_honored_cells_succeed() {
         // IF2 and the bootstrap PF honor conditioning — must pass.
-        assert!(validate_ic_free("if2", false).is_ok());
-        assert!(validate_ic_free("pfilter", false).is_ok());
+        assert!(validate_ic_free(FitAlgorithm::If2, false).is_ok());
+        assert!(validate_ic_free(FitAlgorithm::Pfilter, false).is_ok());
         // Plain PMMH (no rho / uncorrelated) wraps the bootstrap PF — honors it.
-        assert!(validate_ic_free("pmmh", false).is_ok());
+        assert!(validate_ic_free(FitAlgorithm::Pmmh, false).is_ok());
     }
 
     #[test]
     fn ic_free_pgas_is_hard_error_naming_the_limitation() {
-        let err = validate_ic_free("pgas", false).unwrap_err();
+        let err = validate_ic_free(FitAlgorithm::Pgas, false).unwrap_err();
         assert!(err.contains("ic_free"), "must name ic_free: {err}");
         assert!(err.contains("pgas"), "must name the offending algorithm: {err}");
         // Points the user at a supported alternative.
@@ -778,10 +882,10 @@ mod tests {
     fn ic_free_ode_mle_is_hard_error() {
         // Both NLopt deterministic optimizers score every obs via
         // compute_ode_loglik — conditioning is silently ignored.
-        for algo in ["nl-sbplx", "nl-bobyqa"] {
+        for algo in [FitAlgorithm::NlSbplx, FitAlgorithm::NlBobyqa] {
             let err = validate_ic_free(algo, false).unwrap_err();
             assert!(err.contains("ic_free"), "{algo}: must name ic_free: {err}");
-            assert!(err.contains(algo), "{algo}: must name the algorithm: {err}");
+            assert!(err.contains(algo.as_str()), "{algo}: must name the algorithm: {err}");
         }
     }
 
@@ -789,47 +893,74 @@ mod tests {
     fn ic_free_correlated_pmmh_is_hard_error_but_plain_pmmh_is_ok() {
         // Correlated PMMH (rho set) routes to bootstrap_filter_correlated,
         // which adds every increment unconditionally → reject.
-        let err = validate_ic_free("pmmh", true).unwrap_err();
+        let err = validate_ic_free(FitAlgorithm::Pmmh, true).unwrap_err();
         assert!(err.contains("ic_free"), "must name ic_free: {err}");
         assert!(
             err.contains("correlated") || err.contains("rho"),
             "must name the correlated/rho condition: {err}"
         );
         // ...but plain PMMH (uncorrelated) honors conditioning.
-        assert!(validate_ic_free("pmmh", false).is_ok());
+        assert!(validate_ic_free(FitAlgorithm::Pmmh, false).is_ok());
     }
 
     #[test]
     fn invalid_pf_method_on_ode_names_nlopt_alternative() {
-        let err = validate_combo("if2", "ode").unwrap_err();
+        let err = validate_combo(FitAlgorithm::If2, InferenceBackend::Ode).unwrap_err();
         assert!(err.contains("nl-sbplx"), "message should suggest nl-sbplx; got:\n{err}");
         assert!(err.contains("MLE on the ODE backend"));
     }
 
     #[test]
     fn invalid_nlopt_on_chain_binomial_names_if2() {
-        let err = validate_combo("nl-sbplx", "chain_binomial").unwrap_err();
+        let err = validate_combo(FitAlgorithm::NlSbplx, InferenceBackend::ChainBinomial).unwrap_err();
         assert!(err.contains("if2"), "message should suggest if2; got:\n{err}");
     }
 
     #[test]
     fn unknown_algorithm_yields_clear_error() {
-        let err = validate_combo("not-a-method", "ode").unwrap_err();
+        let err = parse_combo("not-a-method", "ode").unwrap_err();
         assert!(err.contains("Unknown algorithm"), "got:\n{err}");
     }
 
     #[test]
     fn unknown_backend_yields_clear_error() {
-        let err = validate_combo("if2", "not-a-backend").unwrap_err();
+        let err = parse_combo("if2", "not-a-backend").unwrap_err();
         assert!(err.contains("Unknown backend"), "got:\n{err}");
     }
 
     #[test]
+    fn nuts_is_rejected_at_the_parse_boundary_with_a_tailored_hint() {
+        // `nuts` is a known-but-unimplemented algorithm: it has no registry
+        // entry and no dispatcher, so it never parses to `FitAlgorithm`. The
+        // tailored "use pgas instead" hint must survive at the parse boundary
+        // (`parse_combo`) rather than degrade to a bare unknown-algorithm error.
+        let err = parse_combo("nuts", "chain_binomial").unwrap_err();
+        assert!(
+            err.contains("Unknown algorithm \"nuts\""),
+            "names the unknown algorithm: {err}"
+        );
+        assert!(err.contains("NUTS"), "carries the tailored NUTS explanation: {err}");
+        assert!(err.contains("pgas"), "points the user at the supported alternative: {err}");
+    }
+
+    #[test]
+    fn parse_combo_round_trips_every_registry_pair() {
+        // The string boundary parses every canonical (algorithm, backend) wire
+        // spelling back to its typed registry entry — pins `parse ≡ as_str`.
+        for m in METHODS {
+            let parsed = parse_combo(m.algorithm.as_str(), m.backend.as_str())
+                .unwrap_or_else(|e| panic!("registry pair must parse: {e}"));
+            assert_eq!(parsed.algorithm, m.algorithm);
+            assert_eq!(parsed.backend, m.backend);
+        }
+    }
+
+    #[test]
     fn rejection_message_lists_full_matrix() {
-        let err = validate_combo("if2", "ode").unwrap_err();
+        let err = validate_combo(FitAlgorithm::If2, InferenceBackend::Ode).unwrap_err();
         for m in METHODS {
             assert!(
-                err.contains(m.algorithm),
+                err.contains(m.algorithm.as_str()),
                 "expected algorithm {} listed in error; got:\n{err}",
                 m.algorithm
             );
@@ -867,25 +998,25 @@ mod tests {
         // pins the contract — a hand-coded banner can no longer drift from the
         // registry text, and Beta methods can't silently lack a runtime caveat.
         assert!(
-            status_note("pmmh", "chain_binomial").is_some_and(|n| n.contains("T > 500")),
+            status_note(FitAlgorithm::Pmmh, InferenceBackend::ChainBinomial).is_some_and(|n| n.contains("T > 500")),
             "experimental PMMH must surface its caveat at runtime"
         );
         // The bug this closes: Beta NLopt caveats never reached runtime before
         // — only PMMH had a hand-coded banner.
         assert!(
-            status_note("nl-sbplx", "ode").is_some_and(|n| n.contains("Phase 1")),
+            status_note(FitAlgorithm::NlSbplx, InferenceBackend::Ode).is_some_and(|n| n.contains("Phase 1")),
             "Beta nl-sbplx caveat must surface at runtime, not just in `fit methods`"
         );
         assert!(
-            status_note("nl-bobyqa", "ode").is_some(),
+            status_note(FitAlgorithm::NlBobyqa, InferenceBackend::Ode).is_some(),
             "Beta nl-bobyqa carries a caveat"
         );
         // Stable methods: no banner.
-        assert_eq!(status_note("if2", "chain_binomial"), None);
-        assert_eq!(status_note("pgas", "chain_binomial"), None);
-        assert_eq!(status_note("pfilter", "chain_binomial"), None);
+        assert_eq!(status_note(FitAlgorithm::If2, InferenceBackend::ChainBinomial), None);
+        assert_eq!(status_note(FitAlgorithm::Pgas, InferenceBackend::ChainBinomial), None);
+        assert_eq!(status_note(FitAlgorithm::Pfilter, InferenceBackend::ChainBinomial), None);
         // Unregistered pair: no banner (validate_combo emits the hard error).
-        assert_eq!(status_note("pgas", "ode"), None);
+        assert_eq!(status_note(FitAlgorithm::Pgas, InferenceBackend::Ode), None);
     }
 
     #[test]
@@ -921,12 +1052,12 @@ mod tests {
                 .contains(sim::Capabilities::REAL_COMPARTMENTS),
             "fixture must actually have real compartments"
         );
-        let err = check_model_capabilities("chain_binomial", &compiled)
+        let err = check_model_capabilities(InferenceBackend::ChainBinomial, &compiled)
             .expect_err("chain_binomial inference must reject real-coupled models");
         assert!(err.contains("gh#191"), "should cite the tracking issue: {err}");
         assert!(err.contains("frozen"), "should explain the frozen-reservoir reason: {err}");
         // ode integrates real compartments — still accepted.
-        assert!(check_model_capabilities("ode", &compiled).is_ok());
+        assert!(check_model_capabilities(InferenceBackend::Ode, &compiled).is_ok());
     }
 
     /// Build a `CompiledModel` from the sir_basic golden with a `balance{}`
@@ -974,7 +1105,7 @@ mod tests {
                 .contains(sim::Capabilities::BALANCE),
             "fixture must actually require BALANCE"
         );
-        check_model_capabilities("chain_binomial", &compiled).unwrap_or_else(|e| {
+        check_model_capabilities(InferenceBackend::ChainBinomial, &compiled).unwrap_or_else(|e| {
             panic!("chain_binomial inference must ACCEPT balance{{}} models: {e}")
         });
     }
@@ -988,7 +1119,7 @@ mod tests {
         // the ode backend (ode grants only REAL_COMPARTMENTS) and assert the
         // message names the capability rather than printing an empty entry.
         let compiled = compiled_sir_with_balance();
-        let err = check_model_capabilities("ode", &compiled)
+        let err = check_model_capabilities(InferenceBackend::Ode, &compiled)
             .expect_err("balance{} on ode must be rejected");
         assert!(
             err.contains("BALANCE"),
@@ -1026,10 +1157,10 @@ mod tests {
                 .contains(sim::Capabilities::RUNTIME_DT),
             "fixture must actually require RUNTIME_DT"
         );
-        check_model_capabilities("chain_binomial", &compiled).unwrap_or_else(|e| {
+        check_model_capabilities(InferenceBackend::ChainBinomial, &compiled).unwrap_or_else(|e| {
             panic!("chain_binomial inference must ACCEPT dt-in-rate models: {e}")
         });
-        check_model_capabilities("ode", &compiled).unwrap_or_else(|e| {
+        check_model_capabilities(InferenceBackend::Ode, &compiled).unwrap_or_else(|e| {
             panic!("ode inference must ACCEPT dt-in-rate models: {e}")
         });
     }

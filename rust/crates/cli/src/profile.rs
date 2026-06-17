@@ -83,14 +83,14 @@ enum ProfileAlgo {
 }
 
 impl ProfileAlgo {
-    fn method_kind(self) -> crate::run_meta::MethodKind {
+    fn method_kind(self) -> crate::run_meta::FitAlgorithm {
         match self {
-            ProfileAlgo::If2  => crate::run_meta::MethodKind::If2,
-            ProfileAlgo::Pmmh => crate::run_meta::MethodKind::Pmmh,
+            ProfileAlgo::If2  => crate::run_meta::FitAlgorithm::If2,
+            ProfileAlgo::Pmmh => crate::run_meta::FitAlgorithm::Pmmh,
             ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx) =>
-                crate::run_meta::MethodKind::NlSbplx,
+                crate::run_meta::FitAlgorithm::NlSbplx,
             ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa) =>
-                crate::run_meta::MethodKind::NlBobyqa,
+                crate::run_meta::FitAlgorithm::NlBobyqa,
         }
     }
 }
@@ -103,20 +103,26 @@ impl ProfileAlgo {
 
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
-    // Validate (algorithm, backend) early, before any expensive setup.
+    // Parse the CLI strings into the typed registry entry (the string boundary);
+    // all downstream dispatch reads the typed FitAlgorithm / InferenceBackend.
     let algo_name = a.algorithm.as_deref().unwrap_or("if2");
     let backend_name = a.backend.as_deref().unwrap_or("chain_binomial");
-    if let Err(msg) = crate::fit::methods::validate_combo(algo_name, backend_name) {
-        eprintln!("error: {}", msg);
-        std::process::exit(1);
-    }
+    let method = match crate::fit::methods::parse_combo(algo_name, backend_name) {
+        Ok(m) => m,
+        Err(msg) => {
+            eprintln!("error: {}", msg);
+            std::process::exit(1);
+        }
+    };
     // Registry-driven caveat for Beta/Experimental methods (e.g. pmmh, nl-*).
-    crate::fit::methods::emit_status_banner(algo_name, backend_name);
-    let profile_algo = match algo_name {
-        "if2"       => ProfileAlgo::If2,
-        "pmmh"      => ProfileAlgo::Pmmh,
-        "nl-sbplx"  => ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx),
-        "nl-bobyqa" => ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa),
+    crate::fit::methods::emit_status_banner(method.algorithm, method.backend);
+    let profile_algo = match method.algorithm {
+        crate::run_meta::FitAlgorithm::If2      => ProfileAlgo::If2,
+        crate::run_meta::FitAlgorithm::Pmmh     => ProfileAlgo::Pmmh,
+        crate::run_meta::FitAlgorithm::NlSbplx  =>
+            ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx),
+        crate::run_meta::FitAlgorithm::NlBobyqa =>
+            ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa),
         other => {
             eprintln!(
                 "error: --algorithm = \"{}\" is not yet supported for `camdl profile`. \
@@ -129,7 +135,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     };
     // PMMH on profile defaults to chain_binomial (matches `fit run --algorithm pmmh`).
     // The `pmmh + ode` combination isn't supported on the profile path; reject early.
-    if matches!(profile_algo, ProfileAlgo::Pmmh) && backend_name == "ode" {
+    if matches!(profile_algo, ProfileAlgo::Pmmh)
+        && method.backend == crate::run_meta::InferenceBackend::Ode
+    {
         eprintln!(
             "error: --algorithm pmmh requires --backend chain_binomial. \
              PMMH wraps a particle filter inside an MH step; under the ODE \
@@ -357,7 +365,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // backend / model-capability mismatch). The `validate_combo` call
     // above is structural-only; this check sees the actual model.
     if let Err(msg) = crate::fit::methods::check_model_capabilities(
-        backend_name, &compiled,
+        method.backend, &compiled,
     ) {
         eprintln!("error: {}", msg);
         std::process::exit(1);

@@ -7,7 +7,7 @@ mod cas_read;       // generic RunRecord reader (new-format sims); transitional 
 mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)
 mod hashing;
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
-mod run_meta;       // cross-cutting run-metadata value types (MethodKind, Backend, provenance records, FitSidecar)
+mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod run_paths;      // canonical output-path helpers
 mod cas;
 mod browse;

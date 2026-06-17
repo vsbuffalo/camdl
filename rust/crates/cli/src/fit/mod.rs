@@ -53,15 +53,14 @@ fn gate_run_stages_against_model(
     compiled: &sim::CompiledModel,
 ) -> Result<(), String> {
     for (stage_name, stage) in stages {
-        let backend = stage.backend().as_str();
-        if let Err(msg) = methods::check_model_capabilities(backend, compiled) {
+        if let Err(msg) = methods::check_model_capabilities(stage.backend(), compiled) {
             return Err(format!("stage '{}': {}", stage_name, msg));
         }
     }
     // gh#166 B2: warn (once) if any ODE-backed stage will fit a `dt`-in-rate model
     // with first-order Euler incidence (the high-order augmented flow is undefined
     // when a rate depends on the step size).
-    if stages.iter().any(|(_, s)| s.backend().as_str() == "ode") {
+    if stages.iter().any(|(_, s)| s.backend() == crate::run_meta::InferenceBackend::Ode) {
         methods::warn_if_ode_euler_flow(compiled);
     }
     Ok(())
@@ -856,7 +855,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // Surface the registry caveat for Beta/Experimental methods, once per
         // executing stage (after the cache-hit skip above, so reused stages
         // stay silent). Registry-driven so it can't drift from `fit methods`.
-        methods::emit_status_banner(stage.method_name(), stage.backend().as_str());
+        methods::emit_status_banner(stage.method_kind(), stage.backend());
 
         match stage {
             Stage::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, init_method, survey_path, survey_top_k_n, loglik_eval, gate, dt_check, .. } => {

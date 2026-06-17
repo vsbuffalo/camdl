@@ -92,7 +92,7 @@ pub fn run_stage(
     // transitions whose σ² noise the deterministic skeleton ignores).
     // Without this, NLopt happily fits the wrong likelihood — the same
     // silent-fail `camdl simulate --backend ode` already gates against.
-    check_model_capabilities("ode", &run_config.compiled)?;
+    check_model_capabilities(crate::run_meta::InferenceBackend::Ode, &run_config.compiled)?;
 
     let bounds: Vec<(f64, f64)> = run_config
         .estimated_params

@@ -1342,16 +1342,16 @@ impl Stage {
         self.method_kind().as_str()
     }
 
-    pub fn method_kind(&self) -> crate::run_meta::MethodKind {
-        use crate::run_meta::MethodKind;
+    pub fn method_kind(&self) -> crate::run_meta::FitAlgorithm {
+        use crate::run_meta::FitAlgorithm;
         match self {
-            Stage::IF2      { .. } => MethodKind::If2,
-            Stage::PGAS     { .. } => MethodKind::Pgas,
-            Stage::PMMH     { .. } => MethodKind::Pmmh,
-            Stage::Mh       { .. } => MethodKind::Mh,
-            Stage::PFilter  { .. } => MethodKind::Pfilter,
-            Stage::NlSbplx  { .. } => MethodKind::NlSbplx,
-            Stage::NlBobyqa { .. } => MethodKind::NlBobyqa,
+            Stage::IF2      { .. } => FitAlgorithm::If2,
+            Stage::PGAS     { .. } => FitAlgorithm::Pgas,
+            Stage::PMMH     { .. } => FitAlgorithm::Pmmh,
+            Stage::Mh       { .. } => FitAlgorithm::Mh,
+            Stage::PFilter  { .. } => FitAlgorithm::Pfilter,
+            Stage::NlSbplx  { .. } => FitAlgorithm::NlSbplx,
+            Stage::NlBobyqa { .. } => FitAlgorithm::NlBobyqa,
         }
     }
 
@@ -2256,9 +2256,11 @@ impl FitConfigV2 {
         // is the single source of truth (see fit/methods.rs); errors name
         // the right alternative when the user picked an incoherent combo.
         for (stage_name, stage) in &self.stages {
-            let algo = stage.method_name();
-            let backend = stage.backend().as_str();
-            if let Err(msg) = super::methods::validate_combo(algo, backend) {
+            // Stage is already typed, so pass the domain values directly — no
+            // string round-trip. `validate_combo` is the typed registry gate.
+            if let Err(msg) =
+                super::methods::validate_combo(stage.method_kind(), stage.backend())
+            {
                 return Err(format!("stage '{}': {}", stage_name, msg));
             }
         }
@@ -2274,7 +2276,7 @@ impl FitConfigV2 {
                 let correlated =
                     matches!(stage, Stage::PMMH { rho: Some(_), .. });
                 if let Err(msg) =
-                    super::methods::validate_ic_free(stage.method_name(), correlated)
+                    super::methods::validate_ic_free(stage.method_kind(), correlated)
                 {
                     return Err(format!("stage '{}': {}", stage_name, msg));
                 }

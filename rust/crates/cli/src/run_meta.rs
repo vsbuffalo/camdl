@@ -4,8 +4,8 @@
 //! `cas_read`, `browse`, and `fit::fit_view`. This module keeps the small,
 //! cross-cutting value types those readers and writers share:
 //!
-//! - [`MethodKind`] / [`Backend`] — the (algorithm, backend) tags a fit stage
-//!   records and a reader projects.
+//! - [`FitAlgorithm`] / [`InferenceBackend`] — the (algorithm, backend) tags a
+//!   fit stage records and a reader projects.
 //! - [`SurveyEvalMethod`] — how `camdl survey` evaluates the marginal
 //!   log-likelihood at each point.
 //! - [`ResolvedPriorEntry`] / [`ParameterProvenance`] / [`InitProvenance`] —
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 /// the user writes in fit.toml (`algorithm = "if2"`, `algorithm =
 /// "nl-sbplx"`, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MethodKind {
+pub enum FitAlgorithm {
     #[serde(rename = "if2")]      If2,
     #[serde(rename = "pgas")]     Pgas,
     #[serde(rename = "pmmh")]     Pmmh,
@@ -35,23 +35,23 @@ pub enum MethodKind {
     #[serde(rename = "nl-bobyqa")] NlBobyqa,
 }
 
-impl MethodKind {
+impl FitAlgorithm {
     /// Wire-format string. Matches the `algorithm = "..."` value in fit.toml
     /// and the `inputs.method` serialized form on a fit-stage leaf.
     pub fn as_str(self) -> &'static str {
         match self {
-            MethodKind::If2      => "if2",
-            MethodKind::Pgas     => "pgas",
-            MethodKind::Pmmh     => "pmmh",
-            MethodKind::Mh       => "mh",
-            MethodKind::Pfilter  => "pfilter",
-            MethodKind::NlSbplx  => "nl-sbplx",
-            MethodKind::NlBobyqa => "nl-bobyqa",
+            FitAlgorithm::If2      => "if2",
+            FitAlgorithm::Pgas     => "pgas",
+            FitAlgorithm::Pmmh     => "pmmh",
+            FitAlgorithm::Mh       => "mh",
+            FitAlgorithm::Pfilter  => "pfilter",
+            FitAlgorithm::NlSbplx  => "nl-sbplx",
+            FitAlgorithm::NlBobyqa => "nl-bobyqa",
         }
     }
 }
 
-impl std::fmt::Display for MethodKind {
+impl std::fmt::Display for FitAlgorithm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -431,6 +431,31 @@ mod tests {
                    r#""chain_binomial""#);
         assert_eq!(serde_json::to_string(&InferenceBackend::Ode).unwrap(),
                    r#""ode""#);
+    }
+
+    /// Zero-re-key guarantee for gh#241 PR C: renaming `MethodKind` ->
+    /// `FitAlgorithm` must not change the serialized wire spelling — it is
+    /// stored in a fit-stage leaf's `inputs.method`, part of the factored
+    /// fit-stage identity. Pins serialize, deserialize, and `as_str` together.
+    #[test]
+    fn fit_algorithm_serde_spelling_is_pinned() {
+        let cases = [
+            (FitAlgorithm::If2, "if2"),
+            (FitAlgorithm::Pgas, "pgas"),
+            (FitAlgorithm::Pmmh, "pmmh"),
+            (FitAlgorithm::Mh, "mh"),
+            (FitAlgorithm::Pfilter, "pfilter"),
+            (FitAlgorithm::NlSbplx, "nl-sbplx"),
+            (FitAlgorithm::NlBobyqa, "nl-bobyqa"),
+        ];
+        for (algo, wire) in cases {
+            assert_eq!(serde_json::to_string(&algo).unwrap(), format!("\"{wire}\""));
+            assert_eq!(algo.as_str(), wire);
+            assert_eq!(
+                serde_json::from_str::<FitAlgorithm>(&format!("\"{wire}\"")).unwrap(),
+                algo
+            );
+        }
     }
 
     /// `ForwardBackend` (renamed from `args::types::Backend`) keeps its wire

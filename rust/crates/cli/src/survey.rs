@@ -194,7 +194,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // `methods::check_model_capabilities` produces elsewhere.
     if eval_method == SurveyEvalMethod::Simulate {
         if let Err(msg) = crate::fit::methods::check_model_capabilities(
-            "ode", &resolved.compiled,
+            crate::run_meta::InferenceBackend::Ode, &resolved.compiled,
         ) {
             eprintln!("error: {}", msg);
             eprintln!(

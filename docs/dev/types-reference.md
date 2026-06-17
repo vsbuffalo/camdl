@@ -60,8 +60,8 @@ content hashes type-distinct from arbitrary strings.
   projection that aggregates a fit segment's stage leaves into the headline
   numbers fit consumers read.
 - `cli/src/run_meta.rs` — the cross-cutting value types readers/writers share
-  (`MethodKind`, `Backend`, `SurveyEvalMethod`, the provenance records, and the
-  fit-level `FitSidecar` written as `fit.meta.json`).
+  (`FitAlgorithm`, `InferenceBackend`, `SurveyEvalMethod`, the provenance
+  records, and the fit-level `FitSidecar` written as `fit.meta.json`).
 
 ## Fit config schema
 

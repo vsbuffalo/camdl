@@ -1966,7 +1966,7 @@ mod tests {
         let stage_dir = dir.join("real").join("fit_1").join(stage);
         std::fs::create_dir_all(&stage_dir).unwrap();
         state.save(&stage_dir.to_string_lossy()).unwrap();
-        write_stage_run(&stage_dir, &parent_hash, stage, crate::run_meta::MethodKind::If2);
+        write_stage_run(&stage_dir, &parent_hash, stage, crate::run_meta::FitAlgorithm::If2);
 
         // final_params.toml + mle_params.toml carrying matching values
         // so the provenance cross-check passes.
@@ -1997,7 +1997,7 @@ mod tests {
     /// project. The `stage` LEVEL label gets an ordinal prefix (`01-scout`,
     /// `02-refine`, …) so `FitView::read` recovers execution order; `inputs.stage`
     /// keeps the bare name consumers read.
-    fn write_stage_run(stage_dir: &std::path::Path, parent_hash: &str, stage: &str, method: crate::run_meta::MethodKind) {
+    fn write_stage_run(stage_dir: &std::path::Path, parent_hash: &str, stage: &str, method: crate::run_meta::FitAlgorithm) {
         std::fs::create_dir_all(stage_dir).unwrap();
         // Fixed pipeline order for the test stage names → `NN-` ordinal.
         let ord = match stage {
@@ -2162,7 +2162,7 @@ mod tests {
         let refine_dir = dir.join("real").join("fit_1").join("refine");
         std::fs::create_dir_all(&refine_dir).unwrap();
         state.save(&refine_dir.to_string_lossy()).unwrap();
-        write_stage_run(&refine_dir, &parent_hash, "refine", crate::run_meta::MethodKind::If2);
+        write_stage_run(&refine_dir, &parent_hash, "refine", crate::run_meta::FitAlgorithm::If2);
         let mut body = String::new();
         for (k, v) in refine_params { body.push_str(&format!("{} = {}\n", k, v)); }
         std::fs::write(refine_dir.join("final_params.toml"), &body).unwrap();

@@ -368,16 +368,16 @@ pub fn fit_segment_dir(root: &Path, stem: &str, fit_hash: &ContentHash) -> std::
 /// any output is stored) is keyed as `Snap` — the historical uniform-grid
 /// default — so it never silently aliases an `Exact` run.
 fn resolved_obs_alignment(stage: &Stage, config: &FitConfigV2) -> ResolvedObsAlignment {
-    use crate::run_meta::MethodKind;
+    use crate::run_meta::FitAlgorithm;
     if !matches!(
         stage.method_kind(),
-        MethodKind::If2 | MethodKind::Pgas | MethodKind::Pmmh | MethodKind::Pfilter
+        FitAlgorithm::If2 | FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Pfilter
     ) {
         return ResolvedObsAlignment::Snap;
     }
     let correlated = matches!(stage, Stage::PMMH { rho: Some(_), .. });
     match crate::fit::methods::resolve_obs_alignment(
-        stage.method_name(),
+        stage.method_kind(),
         correlated,
         config.config.obs_alignment,
         /* obs_on_grid = */ true,

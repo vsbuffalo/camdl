@@ -588,7 +588,7 @@ impl FitRunConfig {
         // behaviour ("exact where supported"), so nothing changes; threading the
         // resolved policy into the filters is Stage 3. (Fires per build; cheap.)
         {
-            use crate::run_meta::MethodKind;
+            use crate::run_meta::FitAlgorithm;
             let t_start = compiled.model.simulation.t_start;
             let obs_on_grid = observations.iter().all(|o| {
                 let k = ((o.time - t_start) / dt).round();
@@ -597,14 +597,14 @@ impl FitRunConfig {
             for stage in fit.stages.values() {
                 if matches!(
                     stage.method_kind(),
-                    MethodKind::If2 | MethodKind::Pgas | MethodKind::Pmmh | MethodKind::Pfilter
+                    FitAlgorithm::If2 | FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Pfilter
                 ) {
                     let correlated = matches!(
                         stage,
                         crate::fit::config_v2::Stage::PMMH { rho: Some(_), .. }
                     );
                     crate::fit::methods::resolve_obs_alignment(
-                        stage.method_name(),
+                        stage.method_kind(),
                         correlated,
                         fit.config.obs_alignment,
                         obs_on_grid,
