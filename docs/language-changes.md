@@ -13,6 +13,47 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-06-18 — `reactive_interventions {}` block + new reserved words (gh#204)
+
+**What.** A new top-level block, `reactive_interventions {}`, declares
+state/observation-triggered policies whose timing the model discovers at run
+time (e.g. "run an SIA after AFP detections cross a threshold"):
+
+```
+reactive_interventions {
+  mop_up : when sum_observed(weekly_afp, window = 28 'days) >= threshold {
+    after    = 21 'days
+    action   = transfer(fraction = cov, from = S, to = V)
+    once     = false
+    cooldown = 180 'days
+    scope    = exogenous
+  }
+}
+```
+
+The `when` predicate is a boolean over the trigger inputs `observed(stream)` and
+`sum_observed(stream, window = D)`, combined with `and` / `or` / `not`. Reactive
+policies lower to the IR's new `fire = Reactive(..)` source — internally the
+intervention `schedule` field became `fire: Scheduled | Reactive`, an orthogonal
+axis from `kind` (a reactive policy is `kind = Scenario, fire = Reactive`). They
+are parsed, dimension-checked, and emitted to the IR, but no simulation backend
+executes the reactive agenda yet. (IR schema 0.16 → 0.17.)
+
+**Migration.** Three new reserved words — `reactive_interventions`, `when`,
+`action` — are added. A model that used one as a compartment / parameter /
+dimension name must rename it. `observed(...)` / `sum_observed(...)` are
+recognized only inside a `when` predicate. No other change to existing models
+(the `fire` IR reshape is internal; existing `.camdl` source is unaffected).
+
+**Diagnostic.** `when` / `action` / `reactive_interventions` as an identifier →
+**E001**. `observed()` / `sum_observed()` in a rate or other model expression →
+**E278** ("only valid inside a reactive trigger predicate"). Reactive
+validation: once+cooldown contradiction **E276**; negative `after` / `cooldown`
+**E274**; non-comparison `when` **E273**; threshold not a constant/parameter
+**E272**; stream-arg / window arity **E270** / **E271**; bad `scope` **E277**.
+Running a model with an _active_ reactive policy → a `REACTIVE_INTERVENTIONS`
+capability error (parsed but not yet executable).
+
 ## 2026-06-16 — `log_uniform` and `truncated_normal` prior distributions (gh#155)
 
 **What.** Two new priors for the `~ dist(...)` syntax:

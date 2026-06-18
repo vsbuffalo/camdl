@@ -281,6 +281,15 @@ before assuming the language doesn't do something — it usually does.
 
 ## Recent and incoming changes
 
+- **`reactive_interventions {}`** (gh#204) — state/observation-triggered policies:
+  `name : when sum_observed(stream, window = D) >= thr { action = transfer(..);
+  after = ..; once = ..; cooldown = ..; scope = exogenous }`. The `when` predicate
+  reads observed data via `observed(stream)` / `sum_observed(stream, window = ..)`
+  (never latent state — using `observed()` in a rate is **E278**). New reserved
+  words: `reactive_interventions`, `when`, `action`. Parsed + validated now;
+  executing the agenda is a later phase (a model with an active reactive policy
+  stops with a `REACTIVE_INTERVENTIONS` capability error). See spec §13.9.
+
 For things this cheatsheet may lag on, check:
 
 - `docs/dev/proposals/` for in-flight design.

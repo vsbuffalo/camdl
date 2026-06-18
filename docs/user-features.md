@@ -289,6 +289,42 @@ trajectories. Pre-intervention trajectories are byte-identical.
 
 ---
 
+## Reactive interventions (state-triggered policy)
+
+A fixed `at [...]` schedule says *when* a campaign happens. A **reactive
+intervention** says *what triggers it* — the campaign fires as a function of
+what surveillance has detected, which is how real outbreak response works ("run
+an SIA after AFP detections cross a threshold") and the only way native EVSI —
+the value of expanded surveillance — is meaningful, since under a fixed schedule
+extra surveillance changes nothing.
+
+```camdl
+reactive_interventions {
+  mop_up : when sum_observed(weekly_afp, window = 28 'days) >= afp_threshold {
+    after    = 21 'days       # respond 3 weeks after the trigger
+    action   = transfer(fraction = sia_coverage, from = S, to = V)
+    once     = false
+    cooldown = 180 'days      # don't re-fire for 6 months
+    scope    = exogenous
+  }
+}
+```
+
+The `when` predicate reads **observed data**, not latent truth: `observed(stream)`
+is the latest reported value and `sum_observed(stream, window = D)` the trailing
+sum — the distinction matters because a health ministry acts on reported cases,
+not on the model's hidden infection count. Like `interventions {}`, a reactive
+policy is scenario-toggleable, so a `with_response` scenario `enable`s it and a
+`baseline` omits it.
+
+Reactive interventions are parsed and validated today; executing the reactive
+agenda in a backend is a later phase (gh#204), so a model with an active
+reactive policy currently stops with a clear capability error rather than
+silently ignoring the policy. See the spec (`camdl docs language`, §13.9) for the
+full surface.
+
+---
+
 ## Inspect without simulating
 
 `camdl eval` evaluates time-dependent expressions at a grid without running a

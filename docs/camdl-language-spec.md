@@ -2719,6 +2719,97 @@ Events that inject people without a source (e.g., `add(S, 20000)`) will increase
 the compartment total. The balance compartment absorbs this by decreasing to
 maintain the constraint.
 
+### 13.9 Reactive Interventions
+
+A reactive intervention fires as a function of what *surveillance has detected*,
+not on a fixed calendar. It is a third fire source alongside scheduled
+interventions (`at [...]`) and events: a policy whose timing the model
+discovers at run time. The motivating case is outbreak response — "run an SIA
+after AFP/ES detection crosses a threshold" — where a fixed schedule cannot
+express the dependence on observed data.
+
+<!-- camdl-doctest-preamble: reactive-demo
+compartments { S, E, I, R, V }
+parameters {
+  beta                  : rate
+  sigma                 : rate
+  gamma                 : rate
+  rho                   : probability
+  afp_trigger_threshold : count
+  sia_coverage          : probability
+}
+let N = S + E + I + R + V
+transitions {
+  infection   : S --> E @ beta * S * I / N
+  progression : E --> I @ sigma * E
+  recovery    : I --> R @ gamma * I
+}
+observations {
+  weekly_afp {
+    columns       { time : time, weekly_afp : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_afp    ~ poisson(rate = rho * projected)
+  }
+}
+-->
+
+```camdl preamble=reactive-demo
+reactive_interventions {
+  # Fire an SIA 21 days after the trailing-28-day AFP count crosses the
+  # threshold, then rate-limit re-firing to once every 180 days.
+  mop_up
+    : when sum_observed(weekly_afp, window = 28 'days) >= afp_trigger_threshold {
+        after    = 21 'days
+        action   = transfer(fraction = sia_coverage, from = S, to = V)
+        once     = false
+        cooldown = 180 'days
+        scope    = exogenous
+      }
+}
+```
+
+The `when` predicate is a boolean over **trigger inputs** — data visible to
+policy, never latent model state:
+
+- `observed(stream)` — the most recent observed value of an observation stream.
+- `sum_observed(stream, window = D)` — the sum of `stream` over the trailing
+  window `D`.
+
+These are valid **only** inside a `when` predicate; using `observed(...)` in a
+transition rate or any other model expression is an error (it would read data
+the rate has no business reading). The predicate combines comparisons with
+`and` / `or` / `not`; each comparison has exactly one trigger input on one side
+and a constant or parameter threshold on the other.
+
+The policy body fields:
+
+| Field      | Meaning                                                            |
+| ---------- | ----------------------------------------------------------------- |
+| `action`   | The state change to apply — same `transfer` / `add` grammar as interventions. |
+| `after`    | Non-negative lag between the trigger firing and the effect (default `0`). |
+| `once`     | `true` (default) fires at most once; `false` allows repeats.      |
+| `cooldown` | Minimum time between firings when `once = false`. Mutually exclusive with `once = true`. |
+| `scope`    | `exogenous` (default) — the trigger reads shared surveillance data. `particle` (latent-state triggers) is reserved for a later phase. |
+
+A reactive intervention is a **policy** (like `interventions {}`, not `events {}`):
+it is scenario-toggleable, so a `baseline` scenario can omit it and a
+`with_response` scenario can `enable` it, which is exactly how prospective
+policy analysis compares responding vs non-responding worlds.
+
+**Reactive interventions are policy interventions and are inactive by default.**
+Enable them with scenarios or `--enable`, exactly like `interventions {}`. A
+reactive policy that is not enabled is dropped from the run (the same toggle
+semantics as a scheduled intervention), so a plain `simulate` with no scenario
+runs the baseline without it.
+
+> **Status (gh#204).** Reactive interventions are parsed, dimension-checked, and
+> represented in the IR, but no simulation backend executes the reactive agenda
+> yet — running a model with an **active** (enabled) reactive policy fails with a
+> clear `REACTIVE_INTERVENTIONS` capability error. A dormant (unenabled) reactive
+> policy is inert, so a run that does not enable it is accepted. The DSL and IR
+> surface are stable; the runtime agenda lands in a later phase.
+
 ---
 
 ## 14. Timepoints and Reserved Identifiers
@@ -2769,11 +2860,12 @@ e          # Euler's number
 identifier; using one as a name is a bare **E001** syntax error, not a
 reserved-id diagnostic. This set includes the block keywords (`compartments`,
 `parameters`, `tables`, `forcing`, `transitions`, `observations`,
-`interventions`, `ode`, `output`, `simulate`, `init`, `scenarios`, …), the type
-keywords (`rate`, `probability`, `positive`, `count`, `real`, `integer`,
-`instant`, `duration`), and operator/iteration keywords (`sum`, `consecutive`,
-`where`, `let`, `if`/`then`/`else`, `and`/`or`/`not`, `in`, `by`, `from`, `to`,
-`every`, `until`, `at`, `origin`, `columns`, `emit_schedule`, …).
+`interventions`, `events`, `reactive_interventions`, `ode`, `output`,
+`simulate`, `init`, `scenarios`, …), the type keywords (`rate`, `probability`,
+`positive`, `count`, `real`, `integer`, `instant`, `duration`), and
+operator/iteration keywords (`sum`, `consecutive`, `where`, `let`,
+`if`/`then`/`else`, `and`/`or`/`not`, `in`, `by`, `from`, `to`, `every`,
+`until`, `at`, `when`, `action`, `origin`, `columns`, `emit_schedule`, …).
 
 **3. Function and distribution names** — these are **not** reserved and **not**
 keywords. They are recognized only in call position; used as a parameter name

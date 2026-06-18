@@ -623,9 +623,10 @@ PGAS baseline without reactive policies remains byte-identical
 ## Sharp UX Points
 
 1. **Observed vs latent must be explicit.** Public-health users often mean
-   reported cases, not true infections.
+   reported cases, not true infections. We should warn a user if latent is used.
 2. **Lag defaults to zero but same-time semantics are post-observation.** An
    observation-triggered campaign at `t` does not affect scoring at `t`.
+   Zero lag settings also should get a user warning.
 3. **Cooldown is not once.** `once=true` disables forever; `cooldown` suppresses
    repeated firings temporarily.
 4. **Scope is not optional internally.** The compiler may default to
