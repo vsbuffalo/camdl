@@ -53,3 +53,37 @@ fn reactive_obs_draw_is_reproducible_and_interval_fed() {
     let yc = ro.draw(0, &int_s, &real_s, &params, &c, 14.0, &mut rng_c);
     assert_eq!(yc, 0.0, "no accumulated incidence ⇒ the report draw is 0");
 }
+
+#[test]
+fn reactive_agenda_enqueues_after_lag_and_fires_once() {
+    use sim::reactive::ReactiveAgenda;
+    let c = compiled_reactive_sir();
+    let mut params = c.default_params.clone();
+    // Force the trigger to fire: with threshold 0, `sum_observed(..) >= 0` always
+    // holds (obs draws are non-negative), so the fire decision is deterministic.
+    params[c.param_index["trigger_threshold"]] = 0.0;
+    let int_s = IntState::from_vec(vec![0; c.model.compartments.len()]);
+    let real_s = RealState::new(0);
+    let mut rng = StatefulRng::new(1);
+
+    let mut agenda = ReactiveAgenda::from_model(&c)
+        .expect("build agenda")
+        .expect("fixture has a reactive policy");
+
+    // First emit (t=7): trigger fires; after=21 → enqueue at fire_time 28.
+    agenda.accumulate(&[5, 0]);
+    agenda.on_boundary(7.0, &int_s, &real_s, &params, &c, &mut rng);
+    assert_eq!(agenda.firings().len(), 1, "fires at the first emit");
+    assert_eq!(agenda.firings()[0].fire_time, 28.0, "after=21 → fire at 7+21");
+    assert!(agenda.due_iv_idxs(21.0).is_empty(), "not due before the lag elapses");
+
+    // once=true: a later emit must NOT re-enqueue.
+    agenda.accumulate(&[5, 0]);
+    agenda.on_boundary(14.0, &int_s, &real_s, &params, &c, &mut rng);
+    assert_eq!(agenda.firings().len(), 1, "once=true fires exactly once");
+
+    // The pending effect becomes due at its fire time (28) and returns sia's
+    // intervention index (0) to merge into the scheduled due-batch — once.
+    assert_eq!(agenda.due_iv_idxs(28.0), vec![0], "due at fire_time → merged into the batch");
+    assert!(agenda.due_iv_idxs(28.0).is_empty(), "popped — not returned twice");
+}

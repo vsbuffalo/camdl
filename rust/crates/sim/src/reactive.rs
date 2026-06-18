@@ -275,6 +275,246 @@ impl ReactiveObs {
     pub fn stream_name(&self, idx: usize) -> &str {
         &self.streams[idx].name
     }
+
+    /// The index of the stream named `name`, if present.
+    pub fn stream_index(&self, name: &str) -> Option<usize> {
+        self.streams.iter().position(|s| s.name == name)
+    }
+
+    /// Number of streams.
+    pub fn len(&self) -> usize {
+        self.streams.len()
+    }
+
+    /// Whether there are no streams.
+    pub fn is_empty(&self) -> bool {
+        self.streams.is_empty()
+    }
+}
+
+/// Collect the observation-stream names a trigger predicate reads (deduplicated,
+/// declaration order). Mirrors the expander's `trigger_stream_refs`.
+pub fn trigger_stream_refs(expr: &TriggerExpr) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_refs(expr, &mut out);
+    out
+}
+
+fn collect_refs(expr: &TriggerExpr, out: &mut Vec<String>) {
+    match expr {
+        TriggerExpr::Cmp { lhs: TriggerQuantity::Observed { stream, .. }, .. } => {
+            if !out.iter().any(|s| s == stream) {
+                out.push(stream.clone());
+            }
+        }
+        TriggerExpr::And(a, b) | TriggerExpr::Or(a, b) => {
+            collect_refs(a, out);
+            collect_refs(b, out);
+        }
+        TriggerExpr::Not(a) => collect_refs(a, out),
+    }
+}
+
+// ── Slice 4: the reactive agenda ──────────────────────────────────────────────
+
+/// Per-reactive-policy runtime state for one forward run.
+struct PolicyRt {
+    /// Index into `model.interventions` — the action this policy fires (applied
+    /// through the SAME `apply_intervention_effects` due-batch as a scheduled
+    /// intervention).
+    iv_idx: usize,
+    when: TriggerExpr,
+    after: f64,
+    once: bool,
+    cooldown: Option<f64>,
+    last_fired: Option<f64>,
+    times_fired: u32,
+}
+
+/// A future effect discovered at an emit time, due at `fire_time = trigger + after`.
+struct Pending {
+    fire_time: f64,
+    seq: u64,
+    iv_idx: usize,
+}
+
+impl PartialEq for Pending {
+    fn eq(&self, o: &Self) -> bool {
+        self.fire_time == o.fire_time && self.seq == o.seq
+    }
+}
+impl Eq for Pending {}
+impl PartialOrd for Pending {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for Pending {
+    /// Order by fire time, then enqueue sequence (stable tie-break). Used under
+    /// `Reverse` so the `BinaryHeap` is a min-heap on `fire_time`.
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.fire_time.total_cmp(&o.fire_time).then(self.seq.cmp(&o.seq))
+    }
+}
+
+/// A reactive firing recorded for the `reactive_log.tsv` (slice 5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReactiveFiring {
+    pub trigger_time: f64,
+    pub policy: String,
+    pub fire_time: f64,
+}
+
+/// The forward-run reactive agenda: the per-stream observation evaluator
+/// ([`ReactiveObs`]), the per-stream realized-obs history (for the trigger
+/// reducers), per-policy state, and a min-heap of pending effects. Owned by the
+/// backend run state; never in the immutable shared `Schedule`.
+pub struct ReactiveAgenda {
+    obs: ReactiveObs,
+    obs_history: Vec<Vec<(f64, f64)>>,
+    policies: Vec<PolicyRt>,
+    pending: std::collections::BinaryHeap<std::cmp::Reverse<Pending>>,
+    seq: u64,
+    /// Firings recorded this run (for the reactive log).
+    log: Vec<ReactiveFiring>,
+}
+
+impl ReactiveAgenda {
+    /// Build the agenda for a model's reactive policies, or `None` if it has
+    /// none (so the forward backends pay nothing when no policy is present).
+    pub fn from_model(compiled: &CompiledModel) -> Result<Option<Self>, String> {
+        let mut policies = Vec::new();
+        let mut stream_names: Vec<String> = Vec::new();
+        for (iv_idx, iv) in compiled.model.interventions.iter().enumerate() {
+            if let ir::intervention::FireSource::Reactive(t) = &iv.fire {
+                for s in trigger_stream_refs(&t.when_) {
+                    if !stream_names.iter().any(|n| *n == s) {
+                        stream_names.push(s);
+                    }
+                }
+                policies.push(PolicyRt {
+                    iv_idx,
+                    when: t.when_.clone(),
+                    after: t.after,
+                    once: t.once,
+                    cooldown: t.cooldown,
+                    last_fired: None,
+                    times_fired: 0,
+                });
+            }
+        }
+        if policies.is_empty() {
+            return Ok(None);
+        }
+        let obs = ReactiveObs::from_model(compiled, &stream_names)?;
+        let n_streams = obs.len();
+        Ok(Some(ReactiveAgenda {
+            obs,
+            obs_history: vec![Vec::new(); n_streams],
+            policies,
+            pending: std::collections::BinaryHeap::new(),
+            seq: 0,
+            log: Vec::new(),
+        }))
+    }
+
+    /// Add one substep's per-transition flows to every Interval stream's
+    /// interval accumulator.
+    pub fn accumulate(&mut self, flows: &[u64]) {
+        self.obs.accumulate(flows);
+    }
+
+    /// At an observation boundary `t`: draw the realized obs for every stream
+    /// emitting at `t` (recording history + resetting that stream's interval),
+    /// then evaluate each policy's trigger and enqueue its effect at
+    /// `t + after`. Read-then-write split avoids aliasing the agenda's fields.
+    pub fn on_boundary(
+        &mut self,
+        t: f64,
+        int_s: &IntState,
+        real_s: &RealState,
+        params: &[f64],
+        compiled: &CompiledModel,
+        obs_rng: &mut StatefulRng,
+    ) {
+        // 1. realized draws for streams emitting at t.
+        for si in self.obs.due_at(t) {
+            let y = self.obs.draw(si, int_s, real_s, params, compiled, t, obs_rng);
+            self.obs_history[si].push((t, y));
+            self.obs.reset(si);
+        }
+        // 2. read phase: which policies fire now (gating: once + cooldown).
+        let obs = &self.obs;
+        let hist = &self.obs_history;
+        let quantity = |q: &TriggerQuantity| -> f64 {
+            let TriggerQuantity::Observed { stream, window, reducer } = q;
+            obs.stream_index(stream)
+                .map(|si| reduce_obs(&hist[si], *window, *reducer, t))
+                .unwrap_or(0.0)
+        };
+        let threshold = |th: &TriggerThreshold| -> f64 {
+            match th {
+                TriggerThreshold::Const(c) => *c,
+                TriggerThreshold::Param(p) => {
+                    compiled.param_index.get(p).map(|&i| params[i]).unwrap_or(0.0)
+                }
+            }
+        };
+        let fired: Vec<usize> = (0..self.policies.len())
+            .filter(|&pi| {
+                let p = &self.policies[pi];
+                if p.once && p.times_fired > 0 {
+                    return false;
+                }
+                if let (Some(cd), Some(lf)) = (p.cooldown, p.last_fired) {
+                    if t - lf < cd {
+                        return false;
+                    }
+                }
+                eval_trigger(&p.when, &quantity, &threshold)
+            })
+            .collect();
+        // 3. write phase: enqueue + record + update policy state.
+        for pi in fired {
+            let p = &mut self.policies[pi];
+            let fire_time = t + p.after;
+            p.last_fired = Some(t);
+            p.times_fired += 1;
+            let iv_idx = p.iv_idx;
+            self.pending
+                .push(std::cmp::Reverse(Pending { fire_time, seq: self.seq, iv_idx }));
+            self.seq += 1;
+            self.log.push(ReactiveFiring {
+                trigger_time: t,
+                policy: compiled.model.interventions[iv_idx].name.clone(),
+                fire_time,
+            });
+        }
+    }
+
+    /// Pop every pending effect due at or before `boundary` and return the
+    /// intervention indices to merge into the scheduled due-batch (so they fire
+    /// through the same `apply_intervention_effects` + post-advance + balance +
+    /// negative-count lifecycle). A `fire_time <= boundary` test (not step
+    /// equality) makes `after = 0` fire at the first boundary after the trigger
+    /// (post-observation, next interval).
+    pub fn due_iv_idxs(&mut self, boundary: f64) -> Vec<usize> {
+        let mut out = Vec::new();
+        while let Some(std::cmp::Reverse(p)) = self.pending.peek() {
+            if p.fire_time <= boundary + EMIT_EPS {
+                let std::cmp::Reverse(p) = self.pending.pop().unwrap();
+                out.push(p.iv_idx);
+            } else {
+                break;
+            }
+        }
+        out
+    }
+
+    /// The firings recorded this run (for `reactive_log.tsv`, slice 5).
+    pub fn firings(&self) -> &[ReactiveFiring] {
+        &self.log
+    }
 }
 
 #[cfg(test)]
