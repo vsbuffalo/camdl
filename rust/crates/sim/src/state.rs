@@ -169,6 +169,13 @@ pub struct Trajectory {
     pub snapshots: Vec<Snapshot>,
     /// Per-transition firing diagnostics (populated by Gillespie; empty for chain-binomial).
     pub transition_diagnostics: Vec<crate::transition_diagnostics::TransitionDiagnostics>,
+    /// Reactive-policy firings (gh#204) — the source of `reactive_log.tsv`.
+    /// `Some` exactly when the run had an active reactive agenda (so the log is
+    /// a declared artifact written even with zero firings); `None` when the
+    /// model has no active reactive policy (no log artifact). The `Option`
+    /// distinguishes "active, never crossed" from "no policy" — an empty `Vec`
+    /// alone could not.
+    pub reactive_log: Option<Vec<crate::reactive::ReactiveFiring>>,
 }
 
 impl Trajectory {
@@ -176,6 +183,7 @@ impl Trajectory {
         Trajectory {
             snapshots: Vec::new(),
             transition_diagnostics: Vec::new(),
+            reactive_log: None,
         }
     }
 

@@ -1257,6 +1257,30 @@ fn run_simulate(a: &args::SimulateArgs) {
             .filter(|p| std::path::Path::new(p).exists());
         lineage::finish_event_log(a, &event_log, exact, leaf_event_log.as_deref());
     }
+
+    // ── Reactive-log mirror (gh#204) ─────────────────────────────────────────
+    // The canonical reactive firing log is the `reactive_log.tsv` artifact in
+    // the leaf — always present (declared) when a reactive policy was active, so
+    // on a cache hit it is still there. `--reactive-log PATH` mirrors it to PATH
+    // (symmetric with `-o` for the trajectory); the leaf stays the system of
+    // record. A non-reactive model writes no leaf log, so there is nothing to
+    // mirror — say so rather than create an empty file.
+    if let Some(ref dest) = a.reactive_log {
+        let leaf_log = sink.cas.completed_runs.last()
+            .map(|e| format!("{}/{}/reactive_log.tsv", cas_root, e.run_path))
+            .filter(|p| std::path::Path::new(p).exists());
+        match leaf_log {
+            Some(src) => {
+                if let Err(e) = std::fs::copy(&src, dest) {
+                    eprintln!("warning: --reactive-log mirror to {}: {}", dest.display(), e);
+                }
+            }
+            None => eprintln!(
+                "warning: --reactive-log: this run has no active reactive policy \
+                 (enable one with a scenario or --enable); nothing to mirror"
+            ),
+        }
+    }
 }
 
 /// `RunSink` for `camdl simulate`: writes the per-cell content-addressed

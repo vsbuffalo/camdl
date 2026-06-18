@@ -2804,11 +2804,14 @@ semantics as a scheduled intervention), so a plain `simulate` with no scenario
 runs the baseline without it.
 
 > **Status (gh#204).** Reactive interventions are parsed, dimension-checked, and
-> represented in the IR, but no simulation backend executes the reactive agenda
-> yet — running a model with an **active** (enabled) reactive policy fails with a
-> clear `REACTIVE_INTERVENTIONS` capability error. A dormant (unenabled) reactive
-> policy is inert, so a run that does not enable it is accepted. The DSL and IR
-> surface are stable; the runtime agenda lands in a later phase.
+> represented in the IR. Forward simulation on the **chain-binomial** backend
+> executes the agenda: an enabled policy fires when its trigger crosses, after
+> the `after` lag, honouring `once`/`cooldown`; each firing is recorded in the
+> run's `reactive_log.tsv` artifact. Inference (IF2/PGAS/PMMH) and the
+> Gillespie/ODE forward backends do **not** yet run reactive policies — an active
+> reactive policy there fails with a clear `REACTIVE_INTERVENTIONS` capability
+> error. A dormant (unenabled) reactive policy is inert, so a run that does not
+> enable it is accepted on every backend. The DSL and IR surface are stable.
 
 ---
 

@@ -315,6 +315,50 @@ fn collect_refs(expr: &TriggerExpr, out: &mut Vec<String>) {
     }
 }
 
+/// The leftmost `Cmp` leaf of a trigger predicate — the comparison whose
+/// realized observed value and threshold the reactive log reports. Exact for a
+/// single-comparison trigger (the only kind any behavior golden uses); for a
+/// compound predicate it is the leftmost leaf, with the full predicate in the
+/// model.
+fn primary_comparison(expr: &TriggerExpr) -> Option<(&TriggerQuantity, &TriggerThreshold)> {
+    match expr {
+        TriggerExpr::Cmp { lhs, rhs, .. } => Some((lhs, rhs)),
+        TriggerExpr::And(a, b) | TriggerExpr::Or(a, b) => {
+            primary_comparison(a).or_else(|| primary_comparison(b))
+        }
+        TriggerExpr::Not(a) => primary_comparison(a),
+    }
+}
+
+/// The action verb(s) a policy fires, joined with `;` — the reactive log's
+/// `action` column (`transfer`/`set`/`add`).
+fn action_verbs(actions: &[ir::intervention::Action]) -> String {
+    use ir::intervention::Action;
+    actions
+        .iter()
+        .map(|a| match a {
+            Action::FractionTransfer(_) | Action::AbsoluteTransfer(_) => "transfer",
+            Action::Set(_) => "set",
+            Action::Add(_) => "add",
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Render the reactive firings as the `reactive_log.tsv` body: a header row plus
+/// one tab-separated row per firing. Numbers use the same `Display` formatting
+/// as `traj.tsv`, so a whole-valued time prints without a trailing `.0`.
+pub fn format_reactive_log(firings: &[ReactiveFiring]) -> String {
+    let mut s = String::from("trigger_time\tpolicy\ttrigger_value\tthreshold\tfire_time\taction\n");
+    for f in firings {
+        s.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            f.trigger_time, f.policy, f.trigger_value, f.threshold, f.fire_time, f.action
+        ));
+    }
+    s
+}
+
 // ── Slice 4: the reactive agenda ──────────────────────────────────────────────
 
 /// Per-reactive-policy runtime state for one forward run.
@@ -358,11 +402,20 @@ impl Ord for Pending {
 }
 
 /// A reactive firing recorded for the `reactive_log.tsv` (slice 5).
+///
+/// `trigger_value`/`threshold` report the policy's *primary* (leftmost)
+/// comparison — exact for a single-comparison trigger (what policies use in
+/// practice and what every behavior golden exercises). For a compound `&&`/`||`
+/// predicate they reflect the leftmost `Cmp` leaf; the full predicate stays in
+/// the model. `action` is the action verb(s) the policy fires.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReactiveFiring {
     pub trigger_time: f64,
     pub policy: String,
+    pub trigger_value: f64,
+    pub threshold: f64,
     pub fire_time: f64,
+    pub action: String,
 }
 
 /// The forward-run reactive agenda: the per-stream observation evaluator
@@ -476,6 +529,11 @@ impl ReactiveAgenda {
             .collect();
         // 3. write phase: enqueue + record + update policy state.
         for pi in fired {
+            // The realized observed value + resolved threshold of the policy's
+            // primary comparison — what the log reports for the crossing.
+            let (trigger_value, threshold_value) = primary_comparison(&self.policies[pi].when)
+                .map(|(q, th)| (quantity(q), threshold(th)))
+                .unwrap_or((f64::NAN, f64::NAN));
             let p = &mut self.policies[pi];
             let fire_time = t + p.after;
             p.last_fired = Some(t);
@@ -484,10 +542,14 @@ impl ReactiveAgenda {
             self.pending
                 .push(std::cmp::Reverse(Pending { fire_time, seq: self.seq, iv_idx }));
             self.seq += 1;
+            let iv = &compiled.model.interventions[iv_idx];
             self.log.push(ReactiveFiring {
                 trigger_time: t,
-                policy: compiled.model.interventions[iv_idx].name.clone(),
+                policy: iv.name.clone(),
+                trigger_value,
+                threshold: threshold_value,
                 fire_time,
+                action: action_verbs(&iv.actions),
             });
         }
     }
@@ -514,6 +576,12 @@ impl ReactiveAgenda {
     /// The firings recorded this run (for `reactive_log.tsv`, slice 5).
     pub fn firings(&self) -> &[ReactiveFiring] {
         &self.log
+    }
+
+    /// Consume the agenda, taking ownership of its recorded firings — used at
+    /// the end of a run to move the log into the [`Trajectory`].
+    pub fn into_firings(self) -> Vec<ReactiveFiring> {
+        self.log
     }
 }
 
@@ -670,5 +738,49 @@ mod tests {
             vec![0],
             "Instant (prevalence) streams read state at the emit, not accumulated flow"
         );
+    }
+
+    #[test]
+    fn format_reactive_log_matches_proposal_columns() {
+        // Pins the exact `reactive_log.tsv` schema from the proposal's lag
+        // fixture: `trigger_time policy trigger_value threshold fire_time
+        // action`, whole-valued times printed without a trailing `.0`.
+        let firings = vec![ReactiveFiring {
+            trigger_time: 28.0,
+            policy: "sia".into(),
+            trigger_value: 2.0,
+            threshold: 2.0,
+            fire_time: 49.0,
+            action: "transfer".into(),
+        }];
+        let tsv = format_reactive_log(&firings);
+        assert_eq!(
+            tsv,
+            "trigger_time\tpolicy\ttrigger_value\tthreshold\tfire_time\taction\n\
+             28\tsia\t2\t2\t49\ttransfer\n"
+        );
+        // No firings ⇒ header only (the declared-but-empty artifact a
+        // reactive-active run with no crossing writes).
+        assert_eq!(
+            format_reactive_log(&[]),
+            "trigger_time\tpolicy\ttrigger_value\tthreshold\tfire_time\taction\n"
+        );
+    }
+
+    #[test]
+    fn action_verbs_maps_each_variant() {
+        use ir::intervention::{
+            Action, AddAction, FractionTransfer, SetAction,
+        };
+        use ir::expr::Expr;
+        let frac = Action::FractionTransfer(FractionTransfer {
+            src: "S".into(), dst: "V".into(), fraction: Expr::const_(0.7),
+        });
+        let set = Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(0.0) });
+        let add = Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(1.0) });
+        assert_eq!(action_verbs(&[frac.clone()]), "transfer");
+        assert_eq!(action_verbs(&[set.clone()]), "set");
+        assert_eq!(action_verbs(&[add.clone()]), "add");
+        assert_eq!(action_verbs(&[frac, set, add]), "transfer;set;add");
     }
 }

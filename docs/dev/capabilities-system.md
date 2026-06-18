@@ -49,14 +49,14 @@ block, a real-valued compartment, `dt` in a rate expression — that survives
 compilation into the IR, where `required_capabilities` detects it. (`LINEAGES`
 is the exception: it is request-driven, not feature-derived — see its row.)
 
-| Flag                     | Model feature that requires it                                                                                                              | Backends that provide it                                          |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `OVERDISPERSION`         | a transition uses `overdispersed(...)` (NegBinomial draws)                                                                                  | chain-binomial only                                               |
-| `REAL_COMPARTMENTS`      | real-valued compartments with ODE equations (PDMP)                                                                                          | all three (simulate); see fork below                              |
-| `BALANCE`                | a `balance { ... }` block                                                                                                                   | chain-binomial only                                               |
-| `LINEAGES`               | the `#[lineage]` DSL annotation exists, but the requirement is **not derived from it** — raised only on explicit `--lineages`/`--event-log` | gillespie + chain-binomial (not ODE)                              |
-| `RUNTIME_DT`             | a rate **or its `rate_grad`** references `Expr::Dt`                                                                                         | ODE + chain-binomial (not gillespie)                              |
-| `REACTIVE_INTERVENTIONS` | an intervention has a reactive fire source (`fire = Reactive(..)`, gh#204)                                                                  | **none** (parsed + validated, no backend executes the agenda yet) |
+| Flag                     | Model feature that requires it                                                                                                              | Backends that provide it                                           |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `OVERDISPERSION`         | a transition uses `overdispersed(...)` (NegBinomial draws)                                                                                  | chain-binomial only                                                |
+| `REAL_COMPARTMENTS`      | real-valued compartments with ODE equations (PDMP)                                                                                          | all three (simulate); see fork below                               |
+| `BALANCE`                | a `balance { ... }` block                                                                                                                   | chain-binomial only                                                |
+| `LINEAGES`               | the `#[lineage]` DSL annotation exists, but the requirement is **not derived from it** — raised only on explicit `--lineages`/`--event-log` | gillespie + chain-binomial (not ODE)                               |
+| `RUNTIME_DT`             | a rate **or its `rate_grad`** references `Expr::Dt`                                                                                         | ODE + chain-binomial (not gillespie)                               |
+| `REACTIVE_INTERVENTIONS` | an intervention has a reactive fire source (`fire = Reactive(..)`, gh#204)                                                                  | chain-binomial forward only (not gillespie/ode; not inference yet) |
 
 **Derivation (model side).** `CompiledModel::required_capabilities`
 (`compiled_model.rs`) scans the IR and ORs in a flag per feature present. It is

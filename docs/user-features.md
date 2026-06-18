@@ -313,15 +313,22 @@ reactive_interventions {
 The `when` predicate reads **observed data**, not latent truth: `observed(stream)`
 is the latest reported value and `sum_observed(stream, window = D)` the trailing
 sum — the distinction matters because a health ministry acts on reported cases,
-not on the model's hidden infection count. Like `interventions {}`, a reactive
+not on the model's hidden infection count. The reported value is the *realized*
+random draw from the observation model (e.g. a Poisson report count), the same
+number a `--obs` file would contain — not its expectation — so the trigger
+behaves exactly as surveillance would. Like `interventions {}`, a reactive
 policy is scenario-toggleable, so a `with_response` scenario `enable`s it and a
 `baseline` omits it.
 
-Reactive interventions are parsed and validated today; executing the reactive
-agenda in a backend is a later phase (gh#204), so a model with an active
-reactive policy currently stops with a clear capability error rather than
-silently ignoring the policy. See the spec (`camdl docs language`, §13.9) for the
-full surface.
+Forward simulation on the **chain-binomial** backend executes the agenda: the
+policy fires when its trigger crosses, `after` the lag elapses, honouring
+`once`/`cooldown`. Every firing is recorded in the run's `reactive_log.tsv`
+artifact (`trigger_time`, `policy`, `trigger_value`, `threshold`, `fire_time`,
+`action`); `camdl cat <id> --stream reactive_log.tsv` reads it, and
+`--reactive-log PATH` mirrors it. Inference (IF2/PGAS/PMMH) and the Gillespie/ODE
+forward backends do not yet run reactive policies — an active reactive policy
+there stops with a clear capability error rather than silently ignoring the
+policy. See the spec (`camdl docs language`, §13.9) for the full surface.
 
 ---
 

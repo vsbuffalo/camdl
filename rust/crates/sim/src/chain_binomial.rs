@@ -334,6 +334,13 @@ pub fn run_chain_binomial_with_observer(
         current_flows.reset();
     });
 
+    // gh#204: carry the reactive firings out for `reactive_log.tsv`. `Some`
+    // (possibly empty) exactly when this run had an active reactive agenda, so
+    // the log is a declared artifact whenever reactive is active.
+    if let Some(a) = agenda {
+        traj.reactive_log = Some(a.into_firings());
+    }
+
     Ok(traj)
 }
 

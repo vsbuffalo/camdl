@@ -636,6 +636,15 @@ pub struct SimulateArgs {
     /// Shorthand for `--format tsv` (with --event-log).
     #[arg(long, requires = "event_log")]
     pub tsv: bool,
+
+    /// Mirror the reactive firing log to this file, IN ADDITION to the
+    /// canonical `reactive_log.tsv` artifact in the run's CAS leaf. The leaf
+    /// log is always present when a reactive policy was active (read it with
+    /// `camdl cat <id> --stream reactive_log.tsv`); this flag is a convenience
+    /// mirror, symmetric with `-o` for the trajectory — the leaf stays the
+    /// system of record. Single-run only.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["seeds", "replicates", "draws"])]
+    pub reactive_log: Option<PathBuf>,
 }
 
 // ─── batch ────────────────────────────────────────────────────────────────────

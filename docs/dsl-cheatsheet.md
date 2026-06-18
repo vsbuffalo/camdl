@@ -286,9 +286,10 @@ before assuming the language doesn't do something — it usually does.
   after = ..; once = ..; cooldown = ..; scope = exogenous }`. The `when` predicate
   reads observed data via `observed(stream)` / `sum_observed(stream, window = ..)`
   (never latent state — using `observed()` in a rate is **E278**). New reserved
-  words: `reactive_interventions`, `when`, `action`. Parsed + validated now;
-  executing the agenda is a later phase (a model with an active reactive policy
-  stops with a `REACTIVE_INTERVENTIONS` capability error). See spec §13.9.
+  words: `reactive_interventions`, `when`, `action`. Forward **chain-binomial**
+  runs the agenda (firings recorded in `reactive_log.tsv`); inference and
+  Gillespie/ODE stop an active policy with a `REACTIVE_INTERVENTIONS` capability
+  error. See spec §13.9.
 
 For things this cheatsheet may lag on, check:
 

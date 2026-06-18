@@ -1205,6 +1205,17 @@ impl crate::engine::RunSink for CasSink {
                 }
             }
         }
+        // gh#204: a run with an active reactive policy declares its firing log
+        // as a first-class artifact in THIS leaf alongside `traj.tsv` — present
+        // even with zero firings (`Some` carries that), absent when the model
+        // has no active reactive policy. The agenda's realized-obs draws run on
+        // a dedicated RNG salt off the run seed, so the trajectory bytes and the
+        // run_id are unchanged: a leaf a plain `simulate` would write simply
+        // gains one more declared artifact, never an optional-on-cache-hit one.
+        if let Some(ref firings) = cell.traj.reactive_log {
+            let bytes = sim::reactive::format_reactive_log(firings).into_bytes();
+            artifacts.insert("reactive_log.tsv", bytes);
+        }
         let root = self.root();
         let store = runid::FsCasStore::new(&root);
         let dest = match crate::resolve::begin_resolved_write(
