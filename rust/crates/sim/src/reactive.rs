@@ -481,6 +481,14 @@ impl ReactiveAgenda {
     /// emitting at `t` (recording history + resetting that stream's interval),
     /// then evaluate each policy's trigger and enqueue its effect at
     /// `t + after`. Read-then-write split avoids aliasing the agenda's fields.
+    ///
+    /// Triggers are evaluated ONLY when new surveillance arrives — i.e. when at
+    /// least one observed stream emits at `t`. Between emits the observed value
+    /// is unchanged, so re-deciding there would be meaningless: it would fire on
+    /// stale data at an arbitrary grid step (e.g. re-fire the instant a cooldown
+    /// elapses rather than at the next report), and a `>= 0` trigger would fire
+    /// at the first grid boundary before any report exists. So a non-emit
+    /// boundary is a no-op, and the cooldown re-fires at the next observation.
     pub fn on_boundary(
         &mut self,
         t: f64,
@@ -490,8 +498,13 @@ impl ReactiveAgenda {
         compiled: &CompiledModel,
         obs_rng: &mut StatefulRng,
     ) {
-        // 1. realized draws for streams emitting at t.
-        for si in self.obs.due_at(t) {
+        // 1. realized draws for streams emitting at t. No emit ⇒ no new
+        //    surveillance ⇒ no decision to make this boundary.
+        let due = self.obs.due_at(t);
+        if due.is_empty() {
+            return;
+        }
+        for si in due {
             let y = self.obs.draw(si, int_s, real_s, params, compiled, t, obs_rng);
             self.obs_history[si].push((t, y));
             self.obs.reset(si);
