@@ -159,8 +159,8 @@ fn survey_write_then_list_show_cat_roundtrip() {
         "inputs.n_points must round-trip");
     assert_eq!(inputs.get("eval_method").and_then(|v| v.as_str()), Some("simulate"),
         "inputs.eval_method must round-trip");
-    assert!(inputs.get("model_hash").and_then(|v| v.as_str()).is_some(),
-        "inputs.model_hash (cross-check provenance) must be present");
+    assert!(inputs.get("model_identity").and_then(|v| v.as_str()).is_some(),
+        "inputs.model_identity (cross-check provenance) must be present");
     assert!(inputs.get("data_hashes").and_then(|v| v.as_object()).is_some_and(|m| m.contains_key("cases")),
         "inputs.data_hashes must record the `cases` stream");
 

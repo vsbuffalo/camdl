@@ -6,7 +6,7 @@
 //! fit-level provenance sidecar (`fit.meta.json`). There is no fit-wide
 //! `run.json`: the fit-level identity is the `fit`-level hash shared by every
 //! leaf, and the fit-wide attributes the leaves don't carry (user `--label`,
-//! the gh#75 prior sources, `estimated`/`fixed`/`data_hashes`/`model_hash`)
+//! the gh#75 prior sources, `estimated`/`fixed`/`data_hashes`/`model_identity`)
 //! live once on the sidecar.
 //!
 //! [`FitView::read`] folds those leaves + sidecar into one fit-level view; each
@@ -68,7 +68,7 @@ pub struct FitView {
 
     // ── sidecar provenance (never defaulted on a well-formed segment) ──
     pub model: String,
-    pub model_hash: String,
+    pub model_identity: String,
     pub fit_toml_path: String,
     pub fit_toml_hash: String,
     pub data_hashes: HashMap<String, String>,
@@ -234,7 +234,7 @@ impl FitView {
             argv,
             label: side.label,
             model: side.model_path,
-            model_hash: side.model_hash,
+            model_identity: side.model_identity,
             fit_toml_path: side.fit_toml_path,
             fit_toml_hash: side.fit_toml_hash,
             data_hashes: side.data_hashes,
@@ -277,7 +277,7 @@ mod tests {
         let sidecar = FitSidecar {
             label: Some("a fit".into()),
             model_path: "sir.camdl".into(),
-            model_hash: "f00d".repeat(16),
+            model_identity: "f00d".repeat(16),
             fit_toml_path: "fit.toml".into(),
             fit_toml_hash: "cafe".repeat(16),
             data_hashes: HashMap::from([("cases".to_string(), "d4ta".repeat(2))]),
@@ -314,8 +314,8 @@ mod tests {
 
         // Sidecar provenance.
         assert_eq!(view.model, "sir.camdl", "model");
-        assert_eq!(view.model_hash, "f00d".repeat(16), "model_hash");
-        assert!(!view.model_hash.is_empty(), "model_hash must be non-empty");
+        assert_eq!(view.model_identity, "f00d".repeat(16), "model_identity");
+        assert!(!view.model_identity.is_empty(), "model_identity must be non-empty");
         assert_eq!(view.fit_toml_path, "fit.toml", "fit_toml_path");
         assert_eq!(view.fit_toml_hash, "cafe".repeat(16), "fit_toml_hash");
         assert_eq!(view.data_hashes.get("cases").map(String::as_str), Some("d4tad4ta"), "data_hashes");

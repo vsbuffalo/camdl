@@ -103,6 +103,44 @@ pub fn model_digest(model: &ir::Model, ir_version: &str, engine_version: &str) -
     )
 }
 
+/// The model's *structural* content identity, hex-encoded: the `runid` model
+/// content hash ([`ModelDigest::ir`] = `Model::content_hash`, presentation-
+/// normalized), rendered as hex. The single helper every recorded "model
+/// identity" string and the survey↔fit warm-start cross-check goes through, so
+/// the survey writer and the fit's recompute can never disagree.
+///
+/// Takes the **raw compiled IR JSON** (the `model_ir_json` both survey and fit
+/// already carry), NOT an in-memory `ir::Model`: survey and fit each seed
+/// `[estimate].start` into their working model (gh#92 / gh#34), so hashing the
+/// parsed model would make the cross-check spuriously sensitive to a start-value
+/// edit. Hashing the raw IR — the .camdl's compiled output — keeps the identity
+/// tracking the *model*, exactly as the retired `model_hash` did.
+///
+/// Deliberately **structural only** — it folds the model IR, not the engine
+/// version or IR schema string. This is `model_digest`'s `ir` component, *not*
+/// the full per-level [`ModelDigest`] (which also folds `engine` = the volatile
+/// `VERSION_SHORT` git hash). The cross-check asks "is this the same *model*?"
+/// (a model edit between survey and fit invalidates it), not "the same engine
+/// build?": folding the per-commit engine hash would refuse every warm-start
+/// from a survey built at a different commit, and engine/schema skew is already
+/// the camdlc↔camdl version guard's job. So this stays usable across rebuilds.
+///
+/// Returns an empty string when the IR can't be parsed (a partially-written or
+/// absent IR, as the fit sidecar tolerates) — at the cross-check sites the IR is
+/// always a freshly-compiled, valid envelope, so the value is never empty there.
+pub fn model_identity_from_ir(model_ir_json: &str) -> String {
+    match ir::from_str(model_ir_json) {
+        Ok(mut model) => {
+            // Mirror `normalize_for_hash`: strip the presentation-only fields so
+            // `--format` / time rendering stay inert.
+            model.output.format = String::new();
+            model.simulation.time_semantics = String::new();
+            model.content_hash().to_hex()
+        }
+        Err(_) => String::new(),
+    }
+}
+
 fn finite(x: f64) -> Result<FiniteF64, ResolveError> {
     FiniteF64::new(x).map_err(ResolveError::from)
 }

@@ -246,7 +246,7 @@ pub fn run_stage(
     } else if pmmh_opts.init_method == super::init::InitMethod::SurveyTopK {
         // Compute the fit-level cross-check context. Mirrors what the
         // IF2 dispatch site does; see gh#51 §"Validation".
-        let model_hash_str = crate::hashing::model_hash(&config.model_ir_json);
+        let model_identity_str = crate::resolve::model_identity_from_ir(&config.model_ir_json);
         let data_spec = fit.data_spec()?;
         let model_obs_names: Vec<String> = config.model.observations.iter()
             .map(|o| o.name.clone()).collect();
@@ -257,7 +257,7 @@ pub fn run_stage(
         let fixed_hashmap: std::collections::HashMap<String, f64> =
             fixed_for_ctx.iter().map(|(k, v)| (k.clone(), *v)).collect();
         let ctx = super::init::SurveyFitContext {
-            model_hash: &model_hash_str,
+            model_identity: &model_identity_str,
             data_hashes: &data_hashes,
             fixed: &fixed_hashmap,
             estimate_names: &estimate_names,

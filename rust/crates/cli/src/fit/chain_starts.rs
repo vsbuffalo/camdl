@@ -239,7 +239,7 @@ pub fn draw_chain_starts(
                 expected: "draw_chain_starts(SurveyTopK) — use \
                     init::resolve_per_chain_starts_from_method instead",
                 msg: "SurveyTopK needs a SurveyFitContext \
-                    (model_hash, data_hashes, [fixed], estimate_names) \
+                    (model_identity, data_hashes, [fixed], estimate_names) \
                     that draw_chain_starts has no access to".into(),
             });
         }

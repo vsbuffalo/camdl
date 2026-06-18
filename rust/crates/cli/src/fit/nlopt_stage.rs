@@ -40,7 +40,7 @@ pub fn run_stage(
     seed: u64,
     starts_from: Option<&str>,
     parent_fit_hash: &str,
-    model_hash: &str,
+    model_identity: &str,
     data_hashes: &[(String, String)],
     dt_check_cfg: &DtCheckConfig,
     dt_check_strict: bool,
@@ -319,7 +319,7 @@ pub fn run_stage(
     let mle_meta = provenance::MleMetadata {
         input_hash: parent_fit_hash.to_string(),
         model_path: fit.model.camdl.clone(),
-        model_hash: model_hash.to_string(),
+        model_identity: model_identity.to_string(),
         data_hashes: data_hashes.to_vec(),
         seed,
         stage: stage_name.to_string(),

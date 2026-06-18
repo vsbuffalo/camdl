@@ -361,7 +361,7 @@ well-calibrated.
 
 High-dimensional models (many spatial patches, fine age structure) can need far
 more particles than low-dimensional ones, because a particle filter degenerates
-as the *effective observation dimension* grows. `--pf-health` measures whether
+as the _effective observation dimension_ grows. `--pf-health` measures whether
 your particle count is adequate and estimates how many you would need.
 
 ```
@@ -383,16 +383,16 @@ particles are actually contributing. Persistently low fractions (a worst-step a
 few percent of N) mean the cloud is collapsing on the tightest observations.
 
 **tau2 (τ²)** is the variance of the per-particle log-weights at that
-observation — the *predictor* of how many particles you need. The ensemble size
+observation — the _predictor_ of how many particles you need. The ensemble size
 required to avoid weight collapse scales as **exp(τ²/2)** (Snyder, Bengtsson,
-Bickel & Anderson 2008, *Obstacles to High-Dimensional Particle Filtering*,
+Bickel & Anderson 2008, _Obstacles to High-Dimensional Particle Filtering_,
 Monthly Weather Review 136:4629–4640). The driver is the number of
-*independently observed* dimensions, not the raw state dimension: an aggregate
+_independently observed_ dimensions, not the raw state dimension: an aggregate
 observable keeps τ² small (a handful of particles suffice), while observing many
 strata independently makes τ² — and the required N — grow steeply.
 
 The **implied N** line is that estimate. Treat it as an order-of-magnitude
-*floor* measured at the current parameters and N — not a guarantee. (If the
+_floor_ measured at the current parameters and N — not a guarantee. (If the
 filter is already collapsed you under-see the tail, so the true requirement can
 be larger.) When the worst-step implied N exceeds what you can afford, more
 particles will not rescue a fine-resolution fit on their own; the problem is the
@@ -862,11 +862,12 @@ fit run only), and `"flat_fallback"` (profile only — the silent-fallback case)
 Reviewers reading a fit dir's `run.json` can audit at a glance whether the chain
 targeted a posterior with priors or the unconditioned likelihood.
 
-The CAS hash includes the model IR bytes (`fit_content_hash` in `FitConfigV2`),
-so re-running against the same fit toml after editing a `~` prior in the model
-file produces a different cache dir. For profile, the CAS hash additionally keys
-on `fit_toml_hash` + resolved per-parameter prior sources so re-running against
-the same model with a different `--fit` flag produces a different umbrella.
+The fit CAS identity includes the model IR (the model digest in `FitDigest`, via
+`cas::fit_level_hash`), so re-running against the same fit toml after editing a
+`~` prior in the model file produces a different cache dir. For profile, the CAS
+hash additionally keys on `fit_toml_hash` + resolved per-parameter prior sources
+so re-running against the same model with a different `--fit` flag produces a
+different umbrella.
 
 ### Per-cell diagnostics
 

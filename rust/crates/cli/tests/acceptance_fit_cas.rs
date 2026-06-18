@@ -315,9 +315,9 @@ fn fit_theta_hat_identical_across_parallel_flag() {
 /// `output:` line must be exactly that segment — i.e. the announced path
 /// EXISTS and is the parent of the `NN-stage-{h8}` leaf dirs.
 ///
-/// Pre-fix, the announcement used `config.fit_dir()` (a `fit_content_hash`-
-/// keyed dir) while the leaves landed under the divergent `FitDigest` dir, so
-/// the announced path was empty / nonexistent. This pins them to one basis.
+/// The announced path and the leaves now share one basis: the `FitDigest`
+/// fit-level hash via `fit_segment_dir` (real and synthetic alike), so the
+/// announced path always exists and parents the stage leaves.
 #[test]
 fn fit_run_announces_the_real_leaf_directory() {
     let bin = bin();
@@ -337,8 +337,8 @@ fn fit_run_announces_the_real_leaf_directory() {
         .map(|s| PathBuf::from(s.trim()))
         .unwrap_or_else(|| panic!("no `output:` line in fit run stderr:\n{stderr}"));
 
-    // The announced dir must exist (pre-fix it was an empty/absent
-    // fit_content_hash directory while the leaves went elsewhere).
+    // The announced dir must exist on disk (it is the fit segment the leaves
+    // land under, not a divergent directory).
     assert!(
         announced.is_dir(),
         "announced output dir must exist on disk: {}\nstderr:\n{stderr}",

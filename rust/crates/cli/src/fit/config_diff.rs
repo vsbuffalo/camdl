@@ -139,7 +139,7 @@ impl ConfigDiff {
     /// dispatches here.
     ///
     /// `model_changed` requires the caller to supply each fit's
-    /// `model_hash` from its [`FitView`] (the `FitConfigV2` itself only
+    /// `model_identity` from its [`FitView`] (the `FitConfigV2` itself only
     /// references the model file; the canonical hash lives on the fit-level
     /// view / sidecar).
     pub fn compare(
@@ -220,7 +220,7 @@ impl ConfigDiff {
 
         ConfigDiff {
             baseline_hash: Some(baseline_meta_hash(baseline_meta)),
-            model_changed: this_meta.model_hash != baseline_meta.model_hash,
+            model_changed: this_meta.model_identity != baseline_meta.model_identity,
             estimate_added,
             estimate_removed,
             fixed_added,
@@ -467,7 +467,7 @@ mod tests {
     use crate::fit::config_v2::FitConfigV2;
     use std::collections::HashMap;
 
-    fn fitmeta(model_hash: &str) -> FitView {
+    fn fitmeta(model_identity: &str) -> FitView {
         FitView {
             fit_hash: "f".repeat(64),
             engine_version: "0.1.0+test".into(),
@@ -475,7 +475,7 @@ mod tests {
             argv: Vec::new(),
             label: None,
             model: "sir.camdl".into(),
-            model_hash: model_hash.into(),
+            model_identity: model_identity.into(),
             fit_toml_path: "fit.toml".into(),
             fit_toml_hash: "h".repeat(64),
             data_hashes: HashMap::new(),
@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn model_changed_requires_distinct_model_hashes() {
+    fn model_changed_requires_distinct_model_identities() {
         let baseline = parse(BASELINE_TOML);
         let diff_same = ConfigDiff::compare(
             &baseline,

@@ -77,9 +77,9 @@ fn sim_path_has_the_factored_five_level_shape() {
 
 #[test]
 fn t_end_change_re_keys_the_config_segment() {
-    // gh#147: the model_hash allowlist omitted output cadence / t_end, so two
-    // models differing only there collided. Here the horizon lives in the
-    // config level; changing it must change the config segment (and the path).
+    // gh#147: the horizon lives in the config level (not the model level), so
+    // two models differing only in t_end must change the config segment (and
+    // the path), not collide.
     let root = Path::new("/results");
     let seed = Seed { process_seed: 1, base_seed: 1 };
     let a = sim_levels(stub(1), &config(100.0), stub(2), "baseline", stub(3), seed);

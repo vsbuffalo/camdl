@@ -56,10 +56,10 @@ use crate::run_meta::SurveyEvalMethod;
 struct ResolvedSurveyInputs {
     /// Compiled model (Arc to share across rayon threads).
     compiled: Arc<CompiledModel>,
-    /// Canonical IR envelope JSON. Used to compute the structural
-    /// `model_hash` recorded in the survey's `run.json` `inputs` — the
-    /// `init = survey_top_k` consumer (gh#51) cross-checks it against the
-    /// fit's `hashing::model_hash` before seeding chains.
+    /// Raw compiled IR envelope JSON. Source for the `runid` model identity
+    /// recorded in the survey's `run.json` `inputs` (the `init = survey_top_k`
+    /// cross-check, gh#51) — hashed raw (not the seeded in-memory model) so a
+    /// `[estimate].start` edit doesn't spuriously break the cross-check.
     model_ir_json: String,
     /// Default parameter vector (post-fixed/scenario apply).
     base_params: Vec<f64>,
@@ -555,12 +555,12 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let elapsed = t0.elapsed().as_secs_f64();
     let best_loglik = sorted.iter().map(|r| r.loglik).find(|l| l.is_finite());
     // Cross-check provenance for `init = survey_top_k` (gh#51): the
-    // structural model hash + per-stream data digests + the resolved
+    // `runid` model identity + per-stream data digests + the resolved
     // `[fixed]` block. `build_chain_starts_from_survey` validates these
     // against the fit before seeding chains. Recorded-not-hashed (the
     // identity is the `levels`); these are the human/consumer-readable
     // mirror the cross-check reads back.
-    let model_hash = crate::hashing::model_hash(&resolved.model_ir_json);
+    let model_identity = crate::resolve::model_identity_from_ir(&resolved.model_ir_json);
     let inputs_json = serde_json::json!({
         "eval_method":     eval_method.as_str(),
         "eval_particles":  a.eval_particles,
@@ -569,7 +569,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         "estimated":       estimated_names,
         "best_loglik":     best_loglik,
         "wall_time_seconds": elapsed,
-        "model_hash":      model_hash,
+        "model_identity":  model_identity,
         "data_hashes":     resolved.data_hashes,
         "fixed":           resolved.fixed,
     });

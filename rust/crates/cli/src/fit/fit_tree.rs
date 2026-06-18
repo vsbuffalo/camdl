@@ -10,7 +10,7 @@
 //! - [`walk_fits_root`] — given the top-level `results/fits/` returns one
 //!   [`FitDirEntry`] per fit segment, each carrying its already-parsed
 //!   [`FitView`] (fit-level identity + provenance + stage views) so callers
-//!   filter by model_hash / label / declared stages without a second read.
+//!   filter by model_identity / label / declared stages without a second read.
 //!
 //! `StageNode`/`FitStageView` are method-agnostic by construction: they carry
 //! no `fit_state_path` (an IF2-only artifact). Consumers that need the typed
@@ -57,7 +57,7 @@ pub enum DataKind {
 }
 
 /// One fit segment returned by [`walk_fits_root`]. The `view` field is
-/// pre-parsed so `fit table`'s outer loop can filter by model_hash / label /
+/// pre-parsed so `fit table`'s outer loop can filter by model_identity / label /
 /// declared stages without re-reading the leaves per row.
 #[derive(Debug, Clone)]
 pub struct FitDirEntry {
@@ -246,7 +246,7 @@ mod tests {
         std::fs::create_dir_all(seg).unwrap();
         std::fs::write(
             seg.join("fit.meta.json"),
-            r#"{"model_path":"sir.camdl","model_hash":"f00d","fit_toml_path":"fit.toml"}"#,
+            r#"{"model_path":"sir.camdl","model_identity":"f00d","fit_toml_path":"fit.toml"}"#,
         )
         .unwrap();
     }
@@ -278,7 +278,7 @@ mod tests {
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(
             seg.join("fit.meta.json"),
-            r#"{"model_hash":"f00d","model_path":"sir.camdl","fit_toml_path":"fit.toml"}"#,
+            r#"{"model_identity":"f00d","model_path":"sir.camdl","fit_toml_path":"fit.toml"}"#,
         )
         .unwrap();
     }

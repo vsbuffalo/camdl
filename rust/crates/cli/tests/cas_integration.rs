@@ -171,17 +171,15 @@ fn cas_different_seed_new_cache_entry() {
 }
 
 /// gh#135 regression. Two structurally different models under identical
-/// params/backend/dt/seed must NOT collide to one CAS entry. Pre-fix,
-/// `model_hash` scanned the envelope's top level (keys live under
-/// `model`), hashed nothing, and returned SHA256("") for every model, so
-/// `sim_hash` was blind to structure: the second model was silently
-/// served the first model's cached trajectory.
+/// params/backend/dt/seed must NOT collide to one CAS entry: the runid
+/// `model`-level digest (the whole-IR structural hash) has to separate them.
 ///
 /// The two models share a basename (`model.ir.json`) so the path's
 /// model-stem prefix is identical — the ONLY thing that can separate
-/// them is `model_hash`. They differ only in the `recovery` transition's
-/// rate (×2), a structural field hashed by `model_hash` but NOT a
-/// parameter value, so `base_params_canonical` is identical between them.
+/// them is the model-level hash. They differ only in the `recovery`
+/// transition's rate (×2), a structural field folded into the model
+/// digest but NOT a parameter value, so `base_params_canonical` is
+/// identical between them.
 #[test]
 fn cas_different_models_do_not_collide() {
     let bin = skip_if_missing_binary();
@@ -947,11 +945,11 @@ fn write_cas_fit_stage(output: &Path, run_id: &str, fit_label: &str) -> PathBuf 
 
 /// Write a content-addressed fit segment `fits/<label>-<fit_h8>/` with one
 /// `FitStage` leaf per stage (`<NN>-<stage>-<h8>/seed_1-<h8>/run.json`) plus the
-/// fit-level sidecar (`fit.meta.json` — the label + model-hash home). This is
+/// fit-level sidecar (`fit.meta.json` — the label + model-identity home). This is
 /// the shape `read_fit_segment` derives a single fit-level entry from, so
 /// `list` / `fit table` see one fit with `stages_declared` taken from the
 /// leaves. Returns the segment dir.
-fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], model_hash: &str) -> PathBuf {
+fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], model_identity: &str) -> PathBuf {
     let seg = output.join("fits").join(format!("{label}-{fit_h8}"));
     std::fs::create_dir_all(&seg).unwrap();
     let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
@@ -985,7 +983,7 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], mode
     }
     std::fs::write(
         seg.join("fit.meta.json"),
-        format!(r#"{{"model_hash":"{model_hash}","model_path":"demo.camdl","fit_toml_path":"demo.toml"}}"#),
+        format!(r#"{{"model_identity":"{model_identity}","model_path":"demo.camdl","fit_toml_path":"demo.toml"}}"#),
     )
     .unwrap();
     seg

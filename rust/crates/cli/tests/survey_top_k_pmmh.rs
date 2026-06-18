@@ -52,56 +52,19 @@ fn tempdir(tag: &str) -> Tmp {
     Tmp(base)
 }
 
-/// Replicate `crate::hashing::model_hash` for the integration test.
-/// The structural-hash algorithm hashes a fixed list of fields in
-/// order: each `key\x00<json-value>\x00`, plus the `version` field
-/// (without a trailing NUL) at the end.
-fn model_hash_for_test(ir_json: &str) -> String {
-    let v: serde_json::Value = serde_json::from_str(ir_json)
-        .expect("model_hash_for_test: invalid JSON");
-    let envelope = v.as_object().expect("model_hash_for_test: expected object");
-    // gh#135: descend into the `model` envelope key (mirror of the
-    // production fix in hashing.rs); tolerate a bare inner model.
-    let obj = envelope.get("model").and_then(|m| m.as_object()).unwrap_or(envelope);
-    let mut h = Sha256::new();
-    let structural_keys = [
-        "compartments", "transitions", "parameters", "tables",
-        "time_functions", "interventions", "observations",
-        "ode_equations", "initial_conditions",
-        // gh#147: calendar/time-axis context.
-        "origin", "origin_rata_die", "time_unit",
-    ];
-    for key in &structural_keys {
-        if let Some(val) = obj.get(*key) {
-            h.update(key.as_bytes());
-            h.update(b"\x00");
-            h.update(serde_json::to_string(val).unwrap().as_bytes());
-            h.update(b"\x00");
-        }
-    }
-    // gh#147: output cadence (`output.times` only — format/flags are presentation).
-    if let Some(times) = obj.get("output").and_then(|o| o.as_object()).and_then(|o| o.get("times")) {
-        h.update(b"output.times\x00");
-        h.update(serde_json::to_string(times).unwrap().as_bytes());
-        h.update(b"\x00");
-    }
-    // gh#147: simulation horizon (`t_start`/`t_end` only — dt/seed/time_semantics excluded).
-    if let Some(sim) = obj.get("simulation").and_then(|s| s.as_object()) {
-        for key in ["t_start", "t_end"] {
-            if let Some(val) = sim.get(key) {
-                h.update(b"simulation.");
-                h.update(key.as_bytes());
-                h.update(b"\x00");
-                h.update(serde_json::to_string(val).unwrap().as_bytes());
-                h.update(b"\x00");
-            }
-        }
-    }
-    if let Some(val) = obj.get("version") {
-        h.update(b"version\x00");
-        h.update(serde_json::to_string(val).unwrap().as_bytes());
-    }
-    hex::encode(h.finalize())
+/// Replicate `crate::resolve::model_identity_from_ir` for the integration test:
+/// the structural `runid` model content hash (presentation-normalized),
+/// hex-encoded. Kept inline because the test binary can't reach the cli crate's
+/// private modules; it uses the same `ir` + `runid` crates the production helper
+/// does, so the forged survey `run.json` carries an identity the fit accepts.
+fn model_identity_for_test(ir_json: &str) -> String {
+    use runid::ContentAddressed;
+    let mut model: ir::Model =
+        ir::from_str(ir_json).expect("model_identity_for_test: invalid IR");
+    // Mirror `resolve::normalize_for_hash` — strip presentation-only fields.
+    model.output.format = String::new();
+    model.simulation.time_semantics = String::new();
+    model.content_hash().to_hex()
 }
 
 fn sha256_hex_of_file(path: &Path) -> String {
@@ -156,27 +119,27 @@ simulate { from = 0 'days  to = 6 'days }
 }
 
 /// Write a 4-row landscape.tsv + a matching run.json into `survey_dir`.
-/// `model_hash`, `data_hashes`, `fixed` and `estimated` must match what
+/// `model_identity`, `data_hashes`, `fixed` and `estimated` must match what
 /// the fit will compute when it cross-checks the survey. Returns the
 /// full content hash embedded into run.json (the value PMMH will
 /// surface as `chain_init_source` and as the `source` column of
 /// `chain_starts.tsv`).
 fn write_survey_artifact(
     survey_dir: &Path,
-    model_hash: &str,
+    model_identity: &str,
     data_hash_cases: &str,
 ) -> String {
     std::fs::create_dir_all(survey_dir).unwrap();
 
     // The full content hash is arbitrary as far as the cross-check is
-    // concerned — only model_hash / data_hashes / fixed / estimated
+    // concerned — only model_identity / data_hashes / fixed / estimated
     // get verified against the fit. Use a fully synthetic 64-char hex
     // string so the assertion on the `source` column has a stable
     // expected value.
     let survey_hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
     // New-format survey leaf (`runid::RunRecord`). The cross-check provenance
-    // (model_hash / data_hashes / fixed / estimated) lives in `inputs`;
+    // (model_identity / data_hashes / fixed / estimated) lives in `inputs`;
     // identity is `run_id`. The fit pins N0 at 1000, so the survey [fixed]
     // must be a superset per the gh#51 cross-check.
     let record = runid::RunRecord {
@@ -192,7 +155,7 @@ fn write_survey_artifact(
         artifacts: Default::default(),
         children: Default::default(),
         inputs: serde_json::json!({
-            "model_hash": model_hash,
+            "model_identity": model_identity,
             "data_hashes": { "cases": data_hash_cases },
             "fixed": { "N0": 1000.0 },
             "estimated": ["beta", "gamma"],
@@ -319,11 +282,11 @@ fn pmmh_survey_top_k_writes_chain_starts_with_survey_ranks() {
     let tmp = tempdir("pmmh");
     let (ir, data) = write_fixture(tmp.path());
 
-    // Compute the model_hash + data_hashes the *fit* will see when it
+    // Compute the model_identity + data_hashes the *fit* will see when it
     // cross-checks the survey. Both sides must agree byte-for-byte
     // (gh#51 §"Validation: the run.json cross-check").
     let ir_json = std::fs::read_to_string(&ir).unwrap();
-    let mh = model_hash_for_test(&ir_json);
+    let mh = model_identity_for_test(&ir_json);
     let dh = sha256_hex_of_file(&data);
 
     // Write the synthetic survey CAS dir.

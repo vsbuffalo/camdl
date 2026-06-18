@@ -840,7 +840,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // by `profile_cas::resolve_profile_point`; the values gathered here
     // (model + data hashes, base params, fixed list, priors, fit.toml,
     // method config) are its content-bearing inputs.
-    let model_hash = crate::hashing::model_hash(&model_json);
+    let model_identity = crate::resolve::model_identity_from_ir(&model_json);
     let base_params_hash = {
         let mut lines: Vec<String> = model.parameters.iter()
             .map(|p| format!("{}={}", p.name,
@@ -1133,7 +1133,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let sidecar = crate::run_meta::FitSidecar {
             label: label_arg.clone(),
             model_path: ir_path.clone(),
-            model_hash: model_hash.clone(),
+            model_identity: model_identity.clone(),
             fit_toml_path: a.fit.as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),

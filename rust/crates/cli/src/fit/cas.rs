@@ -612,6 +612,55 @@ mod tests {
         );
     }
 
+    /// gh#241: synthetic fits key their content-addressed directory off the
+    /// SAME `runid` fit-level digest as real fits — `fit_segment_dir` over
+    /// `fit_level_hash` computed with an EMPTY data map (a synthetic fit has no
+    /// input data; the data is generated, and each generated cell keys its own
+    /// leaf). With the model held fixed and data empty, the synthetic dir
+    /// changes iff the fit-wide blob changes, so this pins the blob's behavior:
+    ///   - a semantic `[synthetic]` change (different ground truth / sim seeds →
+    ///     different generated data) re-keys the dir;
+    ///   - a seed-only `fit_seeds` change does NOT (the fit RNG seed is a lower
+    ///     CAS level under the segment, not part of the segment name).
+    /// The legacy `fit_content_hash` hashed the whole fit.toml bytes, so it
+    /// over-keyed on `fit_seeds`/`output_dir`/stage edits; routing synthetic
+    /// through the runid blob fixes that, matching real fits.
+    #[test]
+    fn synthetic_fit_dir_is_seed_stable_and_semantic_sensitive() {
+        // A complete synthetic fit config; `top` is spliced at the very top so a
+        // top-level key (`fit_seeds`) isn't absorbed into a `[table]` above it.
+        let syn = |top: &str, sim_seeds: &str| -> FitConfigV2 {
+            toml::from_str(&format!(
+                "{top}\
+                 [model]\ncamdl = \"models/sir.camdl\"\n\
+                 [synthetic]\ntrue_params = \"truth.toml\"\nsim_seeds = \"{sim_seeds}\"\n\
+                 [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n[fixed]\nN0 = 1000000\n\
+                 [stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+                 chains = 4\nparticles = 1000\niterations = 50\ncooling = 0.70\n"
+            ))
+            .expect("synthetic fit config must parse")
+        };
+
+        let base = fit_config_blob_hash(&syn("", "1:5")).unwrap();
+
+        // Seed-only: `fit_seeds` is normalized out of the blob (the seed CAS
+        // level owns it), so the synthetic dir is stable across seed changes.
+        let seed_only = fit_config_blob_hash(&syn("fit_seeds = [1, 2, 3]\n", "1:5")).unwrap();
+        assert_eq!(
+            base, seed_only,
+            "a seed-only fit_seeds change must NOT re-key the synthetic fit dir (gh#241)"
+        );
+
+        // Semantic: different `[synthetic].sim_seeds` → different generated data
+        // → must re-key the synthetic fit dir.
+        let resim = fit_config_blob_hash(&syn("", "1:9")).unwrap();
+        assert_ne!(
+            base, resim,
+            "a [synthetic].sim_seeds change generates different data and must \
+             re-key the synthetic fit dir (gh#241)"
+        );
+    }
+
     /// gh#134: `condition_from` is part of the fit IDENTITY — a different
     /// conditioning window is a different fit / estimand. So a SET value must
     /// fold into the fit-level blob hash and re-key the fit; an UNSET value

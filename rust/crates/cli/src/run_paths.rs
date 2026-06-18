@@ -9,7 +9,7 @@
 //! Introduced in commit 3/6 of the output-tree unification
 //! (docs/dev/proposals/2026-04-19-unified-output-tree.md).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Default output root: `./output`. Overridden by explicit CLI
 /// `--output-dir`, fit.toml `output_dir`, or batch.toml `output_dir`
@@ -47,24 +47,6 @@ pub fn output_root(cli: Option<&str>, config: Option<&str>) -> PathBuf {
         .or_else(|| config.map(PathBuf::from))
         .or_else(|| std::env::var("CAMDL_OUTPUT_DIR").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_ROOT))
-}
-
-/// Top-level directory for a fit.
-///
-/// With `fit_toml_stem = None`:       `<root>/fits/<fit_hash[:8]>/`
-/// With `fit_toml_stem = Some("01")`: `<root>/fits/01-<fit_hash[:8]>/`
-///
-/// The stem (basename of fit.toml, slugified) is what users see in
-/// `ls output/fits/`. The content hash follows as a suffix so two
-/// configs that share a name but differ in content get distinct dirs
-/// — the hash is the authoritative key.
-pub fn fit_run_dir(root: &Path, fit_toml_stem: Option<&str>, fit_hash: &str) -> PathBuf {
-    let hash_prefix = &fit_hash[..8.min(fit_hash.len())];
-    let dirname = match fit_toml_stem {
-        Some(s) if !s.is_empty() => format!("{}-{}", s, hash_prefix),
-        _ => hash_prefix.to_string(),
-    };
-    root.join("fits").join(dirname)
 }
 
 #[cfg(test)]
@@ -159,39 +141,6 @@ mod tests {
         assert_eq!(output_root(Some("/cli/dir"), None), PathBuf::from("/cli/dir"));
         assert_eq!(output_root(Some("/cli/dir"), Some("/config")),
             PathBuf::from("/cli/dir"));
-    }
-
-    #[test]
-    fn fit_run_dir_hash_only() {
-        let p = fit_run_dir(Path::new("/out"), None, "deadbeef00000000");
-        assert_eq!(p, Path::new("/out/fits/deadbeef"));
-    }
-
-    #[test]
-    fn fit_run_dir_with_stem() {
-        let p = fit_run_dir(Path::new("/out"), Some("01"), "deadbeef00000000");
-        assert_eq!(p, Path::new("/out/fits/01-deadbeef"));
-    }
-
-    #[test]
-    fn fit_run_dir_same_stem_different_hash_diverges() {
-        // The whole point of the <stem>-<hash[:8]> scheme: two fits
-        // with the same human-readable name but different content
-        // must land in different directories. Hash is the key, stem
-        // is cosmetic.
-        let a = fit_run_dir(Path::new("/out"), Some("01"), "aaaaaaaa1111111111");
-        let b = fit_run_dir(Path::new("/out"), Some("01"), "bbbbbbbb2222222222");
-        assert_ne!(a, b, "same stem, different hash must produce different dirs");
-    }
-
-    #[test]
-    fn hash_prefix_tolerates_short_hashes() {
-        // Defensive: helpers slice [..8] on the hash. If a caller
-        // accidentally passes a short hash, the slice should still
-        // work (not panic) so we don't turn a hash-bug into a
-        // crash-bug.
-        let p = fit_run_dir(Path::new("/out"), None, "abc");
-        assert_eq!(p, Path::new("/out/fits/abc"));
     }
 
 }

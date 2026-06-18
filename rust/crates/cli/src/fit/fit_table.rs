@@ -184,7 +184,7 @@ fn matches_outer_filters(entry: &FitDirEntry, args: &FitTableArgs, now_unix: i64
     let view: &FitView = &entry.view;
 
     if let Some(model) = &args.model {
-        if !view.model_hash.starts_with(model.as_str()) {
+        if !view.model_identity.starts_with(model.as_str()) {
             return false;
         }
     }
@@ -372,7 +372,7 @@ fn render_md(rows: &[TableRow]) -> String {
 
 fn render_csv(rows: &[TableRow]) -> String {
     let mut s = String::new();
-    s.push_str("fit_id,fit_hash,label,stem,model_hash,method,stages,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale\n");
+    s.push_str("fit_id,fit_hash,label,stem,model_identity,method,stages,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale\n");
     for r in rows {
         let label = csv_field(r.label.as_deref().unwrap_or(""));
         let stages = r.stages.join("+");
@@ -392,7 +392,7 @@ fn render_csv(rows: &[TableRow]) -> String {
             r.fit_hash,
             label,
             csv_field(&r.stem),
-            r.model_hash,
+            r.model_identity,
             r.method,
             stages,
             r.converged,
@@ -515,7 +515,7 @@ mod tests {
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(
             seg.join("fit.meta.json"),
-            r#"{"model_hash":"f00d","model_path":"sir.camdl","fit_toml_path":"fit.toml"}"#,
+            r#"{"model_identity":"f00d","model_path":"sir.camdl","fit_toml_path":"fit.toml"}"#,
         )
         .unwrap();
     }

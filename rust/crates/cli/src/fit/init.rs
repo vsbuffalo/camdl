@@ -74,7 +74,7 @@ pub enum InitMethod {
     /// landscape. Requires sibling fields `survey_path` (CAS dir) and
     /// `survey_top_k_n` (defaults to `chains`) on the same stage. The
     /// reader cross-checks the survey's `run.json` against the fit's
-    /// resolved inputs (model_hash, data_hashes, [fixed] superset,
+    /// resolved inputs (model_identity, data_hashes, [fixed] superset,
     /// estimate-set subset) and filters the landscape rows to fit's
     /// bounds before ranking. See gh#51 +
     /// `docs/dev/proposals/2026-05-07-survey-top-k-init.md`.
@@ -617,9 +617,10 @@ pub fn draw_start_in_bounds(
 /// The borrows are short-lived — this struct exists only for the
 /// duration of a single chain-init resolution.
 pub struct SurveyFitContext<'a> {
-    /// Full SHA-256 of the fit's resolved IR JSON. Must match the
-    /// survey's `model_hash` exactly.
-    pub model_hash: &'a str,
+    /// The fit's `runid` model identity (hex, from
+    /// [`crate::resolve::model_identity_hex`]). Must match the survey's
+    /// recorded `model_identity` exactly.
+    pub model_identity: &'a str,
     /// Per-stream content hashes of the fit's data files. Each stream
     /// the fit consumes must appear with a matching hash in the
     /// survey's `data_hashes`. Survey may reference *more* streams
@@ -679,9 +680,9 @@ pub struct SurveyTopKResult {
 /// Steps:
 /// 1. Load `<survey_path>/run.json` as a `runid::RunRecord`; refuse
 ///    unless `kind == ArtifactKind::Survey`. The cross-check provenance
-///    (`model_hash` / `data_hashes` / `fixed` / `estimated`) is read from
+///    (`model_identity` / `data_hashes` / `fixed` / `estimated`) is read from
 ///    the record's `inputs` payload.
-/// 2. Cross-check `model_hash`, `data_hashes`, `[fixed]` superset,
+/// 2. Cross-check `model_identity`, `data_hashes`, `[fixed]` superset,
 ///    estimate-set subset against `ctx`. Refuse on any mismatch with
 ///    a diagnostic naming the offending field.
 /// 3. Read `<survey_path>/landscape.tsv` (skipping `#` comment lines).
@@ -820,12 +821,12 @@ pub fn build_chain_starts_from_survey(
 }
 
 /// Cross-check provenance read back from a survey `run.json`'s `inputs`
-/// payload (gh#51). The survey writer records the structural `model_hash`,
+/// payload (gh#51). The survey writer records the `runid` `model_identity`,
 /// per-stream `data_hashes`, the resolved `[fixed]` block, and the
 /// `estimated`-param column names; this is the consumer's view of them.
 #[derive(serde::Deserialize)]
 struct SurveyCrossCheck {
-    model_hash: String,
+    model_identity: String,
     #[serde(default)]
     data_hashes: std::collections::HashMap<String, String>,
     #[serde(default)]
@@ -905,13 +906,13 @@ fn cross_check_survey(
     meta: &SurveyCrossCheck,
     ctx: &SurveyFitContext<'_>,
 ) -> Result<(), String> {
-    if meta.model_hash != ctx.model_hash {
+    if meta.model_identity != ctx.model_identity {
         return Err(format!(
-            "init = \"survey_top_k\": model_hash mismatch.\n  \
+            "init = \"survey_top_k\": model_identity mismatch.\n  \
              survey: {}\n     fit: {}\nA model edit between survey and \
              fit invalidates the cross-check; re-run the survey on the \
              current model.",
-            meta.model_hash, ctx.model_hash));
+            meta.model_identity, ctx.model_identity));
     }
     for (stream, fit_hash) in ctx.data_hashes {
         match meta.data_hashes.get(stream) {
@@ -1468,13 +1469,13 @@ beta\tgamma\tn_replicates\tpoint_id\n\
     // ── cross_check_survey (gh#51) ───────────────────────────────────
 
     fn make_survey_meta(
-        model_hash: &str,
+        model_identity: &str,
         data_hashes: &[(&str, &str)],
         fixed: &[(&str, f64)],
         estimated: &[&str],
     ) -> SurveyCrossCheck {
         SurveyCrossCheck {
-            model_hash: model_hash.into(),
+            model_identity: model_identity.into(),
             data_hashes: data_hashes.iter()
                 .map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             fixed: fixed.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
@@ -1487,7 +1488,7 @@ beta\tgamma\tn_replicates\tpoint_id\n\
     fn write_survey_record(
         dir: &std::path::Path,
         run_id_hex: &str,
-        model_hash: &str,
+        model_identity: &str,
         data_hashes: &[(&str, &str)],
         fixed: &[(&str, f64)],
         estimated: &[&str],
@@ -1510,7 +1511,7 @@ beta\tgamma\tn_replicates\tpoint_id\n\
             artifacts: Default::default(),
             children: Default::default(),
             inputs: serde_json::json!({
-                "model_hash": model_hash,
+                "model_identity": model_identity,
                 "data_hashes": dh,
                 "fixed": fx,
                 "estimated": est,
@@ -1522,20 +1523,20 @@ beta\tgamma\tn_replicates\tpoint_id\n\
     }
 
     #[test]
-    fn cross_check_refuses_model_hash_mismatch() {
+    fn cross_check_refuses_model_identity_mismatch() {
         let meta = make_survey_meta("aaa", &[("cases", "h1")], &[], &["beta"]);
         let dh: std::collections::HashMap<String, String> =
             [("cases".to_string(), "h1".to_string())].into_iter().collect();
         let fx: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         let names = vec!["beta".to_string()];
         let ctx = SurveyFitContext {
-            model_hash: "bbb",  // ← mismatch
+            model_identity: "bbb",  // ← mismatch
             data_hashes: &dh,
             fixed: &fx,
             estimate_names: &names,
         };
         let err = cross_check_survey(&meta, &ctx).unwrap_err();
-        assert!(err.contains("model_hash"));
+        assert!(err.contains("model_identity"));
         assert!(err.contains("aaa") && err.contains("bbb"),
             "diagnostic should print both hashes: {}", err);
     }
@@ -1548,7 +1549,7 @@ beta\tgamma\tn_replicates\tpoint_id\n\
         let fx: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         let names = vec!["beta".to_string()];
         let ctx = SurveyFitContext {
-            model_hash: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
+            model_identity: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
         };
         let err = cross_check_survey(&meta, &ctx).unwrap_err();
         assert!(err.contains("data_hashes"));
@@ -1564,7 +1565,7 @@ beta\tgamma\tn_replicates\tpoint_id\n\
         let fx: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         let names = vec!["beta".to_string()];
         let ctx = SurveyFitContext {
-            model_hash: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
+            model_identity: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
         };
         let err = cross_check_survey(&meta, &ctx).unwrap_err();
         assert!(err.contains("deaths"));
@@ -1578,7 +1579,7 @@ beta\tgamma\tn_replicates\tpoint_id\n\
             [("rho".to_string(), 0.7)].into_iter().collect();   // ← differs
         let names = vec!["beta".to_string()];
         let ctx = SurveyFitContext {
-            model_hash: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
+            model_identity: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
         };
         let err = cross_check_survey(&meta, &ctx).unwrap_err();
         assert!(err.contains("rho"));
@@ -1594,7 +1595,7 @@ beta\tgamma\tn_replicates\tpoint_id\n\
             [("rho".to_string(), 0.5)].into_iter().collect();
         let names = vec!["beta".to_string()];
         let ctx = SurveyFitContext {
-            model_hash: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
+            model_identity: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
         };
         let err = cross_check_survey(&meta, &ctx).unwrap_err();
         assert!(err.contains("rho"));
@@ -1616,7 +1617,7 @@ beta\tgamma\tn_replicates\tpoint_id\n\
             [("rho".to_string(), 0.5)].into_iter().collect();
         let names = vec!["beta".to_string()];
         let ctx = SurveyFitContext {
-            model_hash: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
+            model_identity: "aaa", data_hashes: &dh, fixed: &fx, estimate_names: &names,
         };
         cross_check_survey(&meta, &ctx).expect("survey-pins-more should pass");
     }
@@ -1668,13 +1669,13 @@ beta\tgamma\tn_replicates\tpoint_id\n\
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let model_hash = "model-hash-aaa";
+        let model_identity = "model-hash-aaa";
         let mut data_hashes = HashMap::new();
         data_hashes.insert("cases".to_string(), "data-hash-bbb".to_string());
 
         let run_id_hex = "cafef00d".repeat(8);   // 64-hex
         write_survey_record(
-            &dir, &run_id_hex, model_hash,
+            &dir, &run_id_hex, model_identity,
             &[("cases", "data-hash-bbb")], &[], &["beta", "gamma"]);
 
         // Landscape: 5 rows, loglik increasing from -100 to -90 in the
@@ -1693,7 +1694,7 @@ beta\tgamma\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
 
         let names = vec!["beta".to_string(), "gamma".to_string()];
         let ctx = SurveyFitContext {
-            model_hash, data_hashes: &data_hashes,
+            model_identity, data_hashes: &data_hashes,
             fixed: &HashMap::new(),
             estimate_names: &names,
         };
@@ -1750,7 +1751,7 @@ beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
 
         let names = vec!["beta".to_string()];
         let ctx = SurveyFitContext {
-            model_hash: "h", data_hashes: &HashMap::new(),
+            model_identity: "h", data_hashes: &HashMap::new(),
             fixed: &HashMap::new(), estimate_names: &names,
         };
         // Tight fit bounds: only row beta=0.70 survives.
@@ -1791,7 +1792,7 @@ beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
 
         let names = vec!["beta".to_string()];
         let ctx = SurveyFitContext {
-            model_hash: "h", data_hashes: &HashMap::new(),
+            model_identity: "h", data_hashes: &HashMap::new(),
             fixed: &HashMap::new(), estimate_names: &names,
         };
         let base = vec![ep("beta", 0.0, 1.0, Transform::None, 0.5)];
@@ -1819,7 +1820,7 @@ beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
         let fx: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         let names: Vec<String> = vec![];
         let ctx = SurveyFitContext {
-            model_hash: "h", data_hashes: &dh, fixed: &fx,
+            model_identity: "h", data_hashes: &dh, fixed: &fx,
             estimate_names: &names,
         };
         let (per_chain, survey) = resolve_per_chain_starts_from_method(
@@ -1839,7 +1840,7 @@ beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
         let fx: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         let names: Vec<String> = vec![];
         let ctx = SurveyFitContext {
-            model_hash: "h", data_hashes: &dh, fixed: &fx,
+            model_identity: "h", data_hashes: &dh, fixed: &fx,
             estimate_names: &names,
         };
         let (per_chain, survey) = resolve_per_chain_starts_from_method(
@@ -1858,7 +1859,7 @@ beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
         let fx: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         let names = vec!["a".to_string()];
         let ctx = SurveyFitContext {
-            model_hash: "h", data_hashes: &dh, fixed: &fx,
+            model_identity: "h", data_hashes: &dh, fixed: &fx,
             estimate_names: &names,
         };
         let err = resolve_per_chain_starts_from_method(
@@ -1887,14 +1888,14 @@ beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let model_hash = "model-hash-aaa";
+        let model_identity = "model-hash-aaa";
         let mut data_hashes = HashMap::new();
         data_hashes.insert("cases".to_string(), "data-hash-bbb".to_string());
 
         let run_id_hex =
             "deadbeefcafe1234deadbeefcafe1234deadbeefcafe1234deadbeefcafe1234";
         write_survey_record(
-            &dir, run_id_hex, model_hash,
+            &dir, run_id_hex, model_identity,
             &[("cases", "data-hash-bbb")], &[], &["beta"]);
         std::fs::write(dir.join("landscape.tsv"),
             "beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
@@ -1903,7 +1904,7 @@ beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
 
         let names = vec!["beta".to_string()];
         let ctx = SurveyFitContext {
-            model_hash, data_hashes: &data_hashes,
+            model_identity, data_hashes: &data_hashes,
             fixed: &HashMap::new(), estimate_names: &names,
         };
         let base = vec![ep("beta", 0.1, 1.0, Transform::Log { lo: 0.1, hi: 1.0 }, 0.5)];

@@ -98,8 +98,8 @@ fn columns_empty() -> &'static std::collections::BTreeSet<String> {
 
 #[test]
 fn horizon_change_re_keys_the_run_id() {
-    // gh#147: the old model_hash omitted output cadence / t_end. Here the
-    // horizon lives in the config level; a t_end change must change the
+    // gh#147: the horizon lives in the config level (not the model level); a
+    // t_end change must change the
     // config level hash and the run_id (but not the model level).
     let model = tiny_model();
     let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 });

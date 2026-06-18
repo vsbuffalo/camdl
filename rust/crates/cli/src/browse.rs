@@ -1421,7 +1421,7 @@ fn print_fits_json(fits: &[FitEntry]) {
             "hash": v.fit_hash,
             "label": v.label,
             "model": v.model,
-            "model_hash": v.model_hash,
+            "model_identity": v.model_identity,
             "fit_toml_path": v.fit_toml_path,
             "fit_toml_hash": v.fit_toml_hash,
             "data_hashes": v.data_hashes,

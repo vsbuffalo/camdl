@@ -1208,7 +1208,7 @@ fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
                 fit_hash: String::new(),
                 label: None,
                 stem: String::new(),
-                model_hash: String::new(),
+                model_identity: String::new(),
                 stages: Vec::new(),
                 method: String::new(),
                 config_diff_from_baseline: ConfigDiff::identity(""),
@@ -1986,7 +1986,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("fit.meta.json"),
-            r#"{"model_path":"sir.camdl","model_hash":"f00d","fit_toml_path":"fit.toml","estimated":["R0","sigma","gamma"]}"#,
+            r#"{"model_path":"sir.camdl","model_identity":"f00d","fit_toml_path":"fit.toml","estimated":["R0","sigma","gamma"]}"#,
         )
         .unwrap();
     }

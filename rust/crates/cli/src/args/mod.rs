@@ -1133,7 +1133,7 @@ pub struct FitTableArgs {
           value_parser = clap::builder::PossibleValuesParser::new(["if2", "pgas", "pmmh"]))]
     pub with_method: Option<String>,
 
-    /// Filter to fits with this model_hash (prefix match).
+    /// Filter to fits with this model_identity (prefix match).
     #[arg(long, value_name = "HASH_PREFIX")]
     pub model: Option<String>,
 

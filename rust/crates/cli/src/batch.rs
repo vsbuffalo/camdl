@@ -1,8 +1,8 @@
 //! `batch run FILE` subcommand — the multi-scenario / sweep runner
-//! behind `camdl batch run`. Writes content-addressed output to
-//! `<output_dir>/sims/{sim_hash}/{scen_slug}-{scen_hash}/seed_{n}/` in the
-//! same layout `--cas` uses for single runs, so `camdl list/show/cat`
-//! browse both uniformly.
+//! behind `camdl batch run`. Writes content-addressed output under
+//! `<output_dir>/sims/…` in the same factored `runid` layout `--cas` uses
+//! for single runs (model / config / params / scenario / seed levels), so
+//! `camdl list/show/cat` browse both uniformly.
 //!
 //! ## Schema note: batch TOML is v1
 //!

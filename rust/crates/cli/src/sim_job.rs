@@ -327,8 +327,9 @@ pub fn resolve_scenario_ref(
         // sentinel (run-spec §3.6: "a single implicit baseline — the
         // absence of any scenario patch"). It is always valid even when
         // the model declares no preset by that name: it means "the model
-        // as written, no modifications." Resolves to an empty ad-hoc patch
-        // (scen_hash = sha256("") → 00000000, the canonical baseline dir).
+        // as written, no modifications." Resolves to an empty ad-hoc patch;
+        // the empty scenario delta hashes to its real scenario-level digest
+        // (the canonical baseline dir — `baseline` is the display label only).
         (false, false) if name == "baseline" => Ok(ResolvedScenario::Adhoc {
             name: name.to_string(),
             enable: Vec::new(),

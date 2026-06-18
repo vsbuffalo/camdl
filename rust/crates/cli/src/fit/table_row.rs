@@ -66,7 +66,7 @@ pub struct TableRow {
     /// fit.toml stem — the basename of `FitView.fit_toml_path` minus
     /// trailing `.fit.toml` / `.toml` extension.
     pub stem: String,
-    pub model_hash: String,
+    pub model_identity: String,
     /// Stage names that completed under this fit, in declaration order
     /// (filtered by `FitView.stages_declared`). A multi-stage IF2 fit
     /// reads `["scout", "refine", "validate"]`; a PGAS-only fit reads
@@ -201,7 +201,7 @@ pub fn build_row(
         fit_hash: view.fit_hash.clone(),
         label: view.label.clone(),
         stem,
-        model_hash: view.model_hash.clone(),
+        model_identity: view.model_identity.clone(),
         stages: completed_stages,
         method,
         config_diff_from_baseline: config_diff,

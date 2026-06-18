@@ -194,7 +194,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     config.compiled_ir = Some(compiled_ir.clone());
 
     // Load model and validate completeness (from the pre-compiled IR).
-    let (model, model_json) = crate::util::load_model(&compiled_ir).unwrap_or_else(|e| {
+    let (model, _) = crate::util::load_model(&compiled_ir).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
@@ -377,11 +377,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
     }
 
-    let fit_dir = config.fit_dir(&fit_path).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
-
     // ── Compute the fit-wide identity + sidecar (no fit-root run.json) ──
     //
     // Per-stage run.json records live inside each stage dir; the fit as a
@@ -403,62 +398,54 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         },
         None => None,
     };
-    // gh#147 (M3.2): the fit identity is now a CAS *path segment*
-    // (`fits/{fit}-{h8}/`), not a separate fit-wide `run.json`, so the
-    // legacy fit-wide record + `fit.toml.original` archive are no longer
-    // written — they created a stray `fit_dir` under `fits/` alongside the
-    // CAS stage tree. `build_fit_run` is kept only for `parent_fit_hash`
-    // (consumed by the match-arm provenance below). The fit-level outputs
-    // (grid summary, sweep_failures) still use `fit_dir` for swept/synthetic
-    // multi-cell fits — their CAS-segment relocation is M3.3.
+    // gh#147 (M3.2): the fit identity is a CAS *path segment*
+    // (`fits/{fit}-{h8}/`), not a separate fit-wide `run.json` — so there is no
+    // fit-wide record; the segment is the fit-level home. Fit-level outputs
+    // (grid summary, sweep_failures, synthetic data) live directly under it.
     // The fit-level identity (the `fit` CAS level) and the directory its
     // stage leaves actually land in. `parent_fit_hash` is the fit-level
     // `ContentHash` (the same hash `resolve_fit_stage` puts on the `fit`
     // level, and the same one `FitView.fit_hash` reads back from `run.json`),
     // and `announced_fit_dir` is `fits/{stem}-{h8}/` built from it — so the
     // path `fit run` announces is exactly where the `NN-stage-{h8}` leaves
-    // are written, not the divergent legacy `fit_content_hash` directory.
+    // are written.
     //
-    // Computable only for real-data fits (the base `[data]` streams); a
-    // synthetic fit generates its data per-cell under `fit_dir`, so its
-    // FitDigest isn't known until generation. For synthetic we fall back to
-    // the legacy `fit_dir` for the announcement (also where the synthetic
-    // data is written), and per-cell leaves still resolve their own segment.
+    // Real and synthetic share this one `runid` fit-level digest. A real fit
+    // folds its base `[data]` stream digests; a synthetic fit has no input
+    // data (it generates data per-cell from the model + `[synthetic]`, both
+    // already in the digest), so it hashes with an EMPTY data map. Either way
+    // the container is keyed on model + config + engine, and the per-cell
+    // stage leaves resolve their own segment (folding the generated data).
     let announce_cas_root = crate::run_paths::output_root(None, config.output_dir.as_deref());
     let announce_stem = crate::hashing::path_stem_slug(&fit_path)
         .unwrap_or_else(|| "fit".to_string());
     let announce_ir_version = ir::IR_VERSION.trim().to_string();
-    let base_data_paths: Option<indexmap::IndexMap<String, String>> = config.data_spec().ok().and_then(|ds| {
-        let model_obs_names: Vec<String> =
-            model.observations.iter().map(|o| o.name.clone()).collect();
-        ds.effective_observations(&model_obs_names).ok()
+    // Real fits resolve their base `[data]` streams; synthetic fits have none
+    // (empty map → no data digests folded).
+    let fit_data_paths: indexmap::IndexMap<String, String> = config.data_spec().ok()
+        .and_then(|ds| {
+            let model_obs_names: Vec<String> =
+                model.observations.iter().map(|o| o.name.clone()).collect();
+            ds.effective_observations(&model_obs_names).ok()
+        })
+        .unwrap_or_default();
+    let parent_fit_hash_ch = cas::fit_level_hash(
+        &model,
+        &announce_ir_version,
+        crate::version::VERSION_SHORT,
+        &config,
+        &fit_data_paths,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("error: fit-level identity: {}", e);
+        std::process::exit(1);
     });
-    let (parent_fit_hash, announced_fit_dir) = match &base_data_paths {
-        Some(data_paths) => {
-            let h = cas::fit_level_hash(
-                &model,
-                &announce_ir_version,
-                crate::version::VERSION_SHORT,
-                &config,
-                data_paths,
-            )
-            .unwrap_or_else(|e| {
-                eprintln!("error: fit-level identity: {}", e);
-                std::process::exit(1);
-            });
-            let dir = cas::fit_segment_dir(&announce_cas_root, &announce_stem, &h);
-            (h.to_hex(), dir)
-        }
-        // Synthetic: keep the legacy fit-content hash + fit_dir for the
-        // announcement; per-cell stage leaves resolve their own segment.
-        None => (
-            config.fit_content_hash(&fit_path).unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }),
-            fit_dir.clone(),
-        ),
-    };
+    let announced_fit_dir = cas::fit_segment_dir(
+        &announce_cas_root, &announce_stem, &parent_fit_hash_ch);
+    let parent_fit_hash = parent_fit_hash_ch.to_hex();
+    // Synthetic-data generation + fit-level outputs (grid summary,
+    // sweep_failures) write under the same content-addressed segment.
+    let fit_dir = announced_fit_dir.clone();
 
     let fit_sidecar = build_fit_sidecar(&config, &fit_path, validated_label, Some(&model));
 
@@ -804,7 +791,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // gh#147 (M3.2): the fit-level provenance sidecar — a faithful
                 // readable projection of the fit-wide provenance `build_fit_run`
                 // computed (resolved_priors with gh#75 sources,
-                // estimated/fixed/data_hashes/model_hash). Derived provenance,
+                // estimated/fixed/data_hashes/model_identity). Derived provenance,
                 // never identity-bearing (the priors are already hashed into the
                 // FitDigest); written once per segment, even on a cached rerun.
                 if let Err(e) = crate::run_meta::write_fit_sidecar(
@@ -1022,7 +1009,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     if effective_starts.is_some() {
                         (None, None)
                     } else {
-                        let model_hash_str = crate::hashing::model_hash(&model_json);
+                        let model_identity_str =
+                            crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
                         let data_hashes = init::compute_data_hashes(&effective_obs)
                             .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
                         let estimate_names: Vec<String> =
@@ -1030,7 +1018,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         let fixed_hashmap: std::collections::HashMap<String, f64> =
                             fixed_resolved.iter().map(|(k, v)| (k.clone(), *v)).collect();
                         let ctx = init::SurveyFitContext {
-                            model_hash: &model_hash_str,
+                            model_identity: &model_identity_str,
                             data_hashes: &data_hashes,
                             fixed: &fixed_hashmap,
                             estimate_names: &estimate_names,
@@ -1242,7 +1230,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &run_config.base_params, &run_config.compiled,
                 );
                 let mle_path = format!("{}/mle_params.toml", stage_dir.display());
-                let model_hash = crate::hashing::model_hash(&run_config.model_ir_json);
+                let model_identity =
+                    crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
                 let data_hashes: Vec<(String, String)> = sweep_config.data_spec()
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
                     .observations.iter()
@@ -1257,15 +1246,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     })
                     .collect();
                 let metadata = provenance::MleMetadata {
-                    // Full fit content hash — lets a reader locate
-                    // the originating fit dir from just the
-                    // mle_params.toml. Pre-hardening this was
-                    // model_hash[..8], which only collided when data
-                    // and params happened to match across fits of the
-                    // same model. Hardening ship-now #2.
+                    // Full fit-level hash — lets a reader locate the
+                    // originating fit dir from just the mle_params.toml.
+                    // The fit hash (not a model-only digest) so it pins
+                    // the model+data+config triple, not just the model.
                     input_hash: parent_fit_hash.clone(),
                     model_path: sweep_config.model.camdl.clone(),
-                    model_hash: model_hash.clone(),
+                    model_identity: model_identity.clone(),
                     data_hashes: data_hashes.clone(),
                     seed,
                     stage: stage_name.to_string(),
@@ -1440,19 +1427,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             Stage::NlSbplx(_) | Stage::NlBobyqa(_) => {
                 #[cfg(feature = "ode")]
                 {
-                    // Hash data + model for the mle_params.toml provenance
-                    // block (same shape as the IF2 path uses below). Load the
-                    // canonical IR JSON from the pre-compiled IR (set at the
-                    // top of the fit) so this provenance read doesn't re-invoke
-                    // camdlc per PFilter stage. The IR JSON — and thus
-                    // `model_hash` — is byte-identical to compiling `.camdl`.
+                    // Model identity + data digests for the mle_params.toml
+                    // provenance block (same shape as the IF2 path uses below).
+                    // Load the canonical IR JSON from the pre-compiled IR so this
+                    // provenance read doesn't re-invoke camdlc per PFilter stage.
                     let model_src = sweep_config.compiled_ir.as_deref()
                         .unwrap_or(&sweep_config.model.camdl);
                     let model_ir_json = crate::util::load_model(model_src)
                         .ok()
                         .map(|(_, ir_json)| ir_json)
                         .unwrap_or_default();
-                    let model_hash_for_prov = crate::hashing::model_hash(&model_ir_json);
+                    let model_identity_for_prov =
+                        crate::resolve::model_identity_from_ir(&model_ir_json);
                     let data_hashes_for_prov: Vec<(String, String)> = sweep_config
                         .data_spec()
                         .map(|d| d.observations.iter()
@@ -1482,7 +1468,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         seed,
                         effective_starts.as_deref(),
                         &parent_fit_hash,
-                        &model_hash_for_prov,
+                        &model_identity_for_prov,
                         &data_hashes_for_prov,
                         &nl_dt_check,
                         a.dt_check_strict,
@@ -1739,19 +1725,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let _ = fit_start;
 }
 
-/// Read an IR JSON string from a model path, compiling .camdl → IR on
-/// the fly. Returns "" on any read/compile failure (callers then skip
-/// hashing, matching the pre-existing `unwrap_or_default` semantics).
-/// Fixes the gh #3 panic where a .camdl source was handed straight to
-/// model_hash, which parses with serde_json and panicked on the source.
-fn read_ir_json_or_empty(model_path: &str) -> String {
-    if model_path.ends_with(".camdl") {
-        crate::util::run_camdlc(model_path).unwrap_or_default()
-    } else {
-        std::fs::read_to_string(model_path).unwrap_or_default()
-    }
-}
-
 /// Resolve a `--resume <base ref>` to a base stage-leaf dir: an existing path,
 /// else a `run_id` hex prefix matched under `<cas_root>/fits/`. `None` when no
 /// unique match (caller errors).
@@ -1796,15 +1769,11 @@ fn copy_resume_carryover(base: &std::path::Path, new_leaf: &std::path::Path) -> 
 // fit-level config archive for `fit table` config_diff is reworked in M3.3
 // alongside the fit-level outputs' CAS relocation.
 
-/// Build the fit-level provenance sidecar + the fit-content hash for a
-/// fit.toml. Fields that require I/O (model IR, data files, fit.toml bytes) are
-/// read here and hashed. Silent fallbacks (empty strings / empty maps) cover
-/// the read-error case so a partially-written fit still produces a sidecar
-/// `camdl list` can display.
-///
-/// Returns `(fit_content_hash, sidecar)`: the hash is the fit-level
-/// (seed-free) identity shared by every stage leaf (`parent_fit_hash`); the
-/// sidecar is the readable provenance projection written once per fit segment.
+/// Build the fit-level provenance sidecar for a fit.toml. Fields that require
+/// I/O (model IR, data files, fit.toml bytes) are read here and digested.
+/// Silent fallbacks (empty strings / empty maps) cover the read-error case so a
+/// partially-written fit still produces a sidecar `camdl list` can display.
+/// The readable provenance projection is written once per fit segment.
 ///
 /// `model_for_priors` is the compiled IR model used to resolve
 /// per-parameter prior provenance (`fit_toml / model_ir /
@@ -1817,16 +1786,14 @@ fn build_fit_sidecar(
     label: Option<String>,
     model_for_priors: Option<&ir::Model>,
 ) -> crate::run_meta::FitSidecar {
-    // Prefer the pre-compiled IR (set by `cmd_fit_run_v2`); `read_ir_json_or_empty`
-    // re-invokes camdlc when handed a raw `.camdl`. The IR JSON — and `model_hash`
-    // — is byte-identical either way.
+    // Prefer the pre-compiled IR (set by `cmd_fit_run_v2`); `load_model`
+    // re-invokes camdlc when handed a raw `.camdl`. The resolved model identity
+    // is byte-identical either way; empty string if the IR can't be loaded.
     let model_src = config.compiled_ir.as_deref().unwrap_or(&config.model.camdl);
-    let model_ir_json = read_ir_json_or_empty(model_src);
-    let model_hash = if model_ir_json.is_empty() {
-        String::new()
-    } else {
-        crate::hashing::model_hash(&model_ir_json)
-    };
+    let model_identity = crate::util::load_model(model_src)
+        .ok()
+        .map(|(_, ir_json)| crate::resolve::model_identity_from_ir(&ir_json))
+        .unwrap_or_default();
     let fit_toml_bytes = std::fs::read(fit_path).unwrap_or_default();
     let fit_toml_hash = crate::hashing::sha256_hex(&fit_toml_bytes);
     let data_hashes: std::collections::HashMap<String, String> = config
@@ -1880,7 +1847,7 @@ fn build_fit_sidecar(
     crate::run_meta::FitSidecar {
         label,
         model_path: config.model.camdl.clone(),
-        model_hash,
+        model_identity,
         fit_toml_path: fit_path.to_string(),
         fit_toml_hash,
         data_hashes,
@@ -2064,23 +2031,35 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
         eprintln!("note: {} already has [provenance]. Update derived_from manually.", to);
     }
 
-    // Find the first stage and update starts_from to point to source's results
-    let source_config = config_v2::FitConfigV2::load(&from).ok();
-    if let Some(ref cfg) = source_config {
-        let source_fit_dir = match cfg.fit_dir(&from) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("warning: could not compute source fit dir: {}", e);
-                return;
-            }
-        };
-        if let Some(last_stage) = cfg.stages.keys().last() {
-            let starts_path = source_fit_dir.join(last_stage);
-            if starts_path.exists() {
-                eprintln!("  [provenance] derived_from = \"{}\"", from);
-                eprintln!("  hint: set starts_from = \"{}\" on your first stage",
-                    starts_path.display());
-            }
+    // Best-effort: point the user at the source fit's content-addressed
+    // segment so they can set `starts_from` on the derived fit's first stage.
+    // The exact stage-leaf path (`{NN-stage}-{h8}/seed_N-{h8}`) needs the
+    // stage + seed hashes, so we name the segment and defer the leaf to
+    // `camdl list`.
+    if let Some(cfg) = config_v2::FitConfigV2::load(&from).ok() {
+        let seg = crate::util::load_model(&cfg.model.camdl).ok().and_then(|(m, _)| {
+            let ir_version = ir::IR_VERSION.trim().to_string();
+            let data_paths = cfg.data_spec().ok()
+                .and_then(|ds| {
+                    let names: Vec<String> =
+                        m.observations.iter().map(|o| o.name.clone()).collect();
+                    ds.effective_observations(&names).ok()
+                })
+                .unwrap_or_default();
+            cas::fit_level_hash(&m, &ir_version, crate::version::VERSION_SHORT, &cfg, &data_paths)
+                .ok()
+                .map(|h| {
+                    let root = crate::run_paths::output_root(None, cfg.output_dir.as_deref());
+                    let stem = crate::hashing::path_stem_slug(&from)
+                        .unwrap_or_else(|| "fit".to_string());
+                    cas::fit_segment_dir(&root, &stem, &h)
+                })
+        });
+        if let Some(seg) = seg {
+            eprintln!("  [provenance] derived_from = \"{}\"", from);
+            eprintln!("  hint: set starts_from on your first stage to the last stage \
+                       leaf under {}", seg.display());
+            eprintln!("        (run `camdl list` to find the exact stage-leaf path)");
         }
     }
 

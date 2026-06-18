@@ -89,7 +89,7 @@ fn write_fixture(dir: &Path, kind: TildeMode) -> (PathBuf, PathBuf) {
         ),
         TildeMode::Variant => (
             // Same shape, different params → IR JSON differs →
-            // model_hash differs → fit_content_hash differs.
+            // model identity differs → fit-level digest differs.
             "~ log_normal(mu = -1.0, sigma = 0.3)".to_string(),
             "~ log_normal(mu = -1.5, sigma = 0.3)".to_string(),
         ),
@@ -463,8 +463,8 @@ fn fit_run_with_explicit_flat_prior_succeeds_without_warning() {
 }
 
 /// CAS-hash invalidation: changing the model IR's `~` prior must
-/// produce a different fit dir. Pre-gh#75 the fit content hash
-/// already keyed on model_ir_bytes (per `FitConfigV2::fit_content_hash`);
+/// produce a different fit dir. The fit-level digest keys on the model
+/// content (via `FitDigest.model`), so an IR-prior edit re-keys the fit;
 /// this test pins that the same chain continues to hold once the
 /// resolver wires the IR-prior into the fit cache key path.
 #[test]

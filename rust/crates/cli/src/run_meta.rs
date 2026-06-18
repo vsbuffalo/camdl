@@ -345,7 +345,7 @@ impl std::fmt::Display for SurveyEvalMethod {
 /// single authoritative home for the fit-wide attributes that are NOT carried
 /// on the stage leaves — the user `--label` and the fit-wide provenance
 /// (`resolved_priors` = gh#75 per-parameter prior source,
-/// `estimated`/`fixed`/`data_hashes`, `model_hash`, paths).
+/// `estimated`/`fixed`/`data_hashes`, `model_identity`, paths).
 ///
 /// It is **derived provenance, not a source of truth**: a faithful readable
 /// projection of inputs already hashed into the leaf identity (the `FitDigest`
@@ -365,7 +365,7 @@ pub struct FitSidecar {
     #[serde(default)]
     pub model_path: String,
     #[serde(default)]
-    pub model_hash: String,
+    pub model_identity: String,
     #[serde(default)]
     pub fit_toml_path: String,
     #[serde(default)]

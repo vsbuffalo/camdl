@@ -50,7 +50,7 @@ pub struct MleProvenance {
     pub backend: crate::args::types::ForwardBackend,
     pub dt: f64,
     pub model: String,
-    pub model_hash: String,
+    pub model_identity: String,
     /// Per-stream (path, hash). Serialized as a table under
     /// `[provenance.data]`.
     #[serde(default)]
@@ -122,7 +122,7 @@ pub fn write_mle_params(
         backend: metadata.backend.clone(),
         dt: metadata.dt,
         model: metadata.model_path.clone(),
-        model_hash: metadata.model_hash.clone(),
+        model_identity: metadata.model_identity.clone(),
         data: data_map,
         seed: metadata.seed,
         stage: metadata.stage.clone(),
@@ -186,7 +186,7 @@ pub fn read_mle_provenance(path: &str) -> Result<Option<MleProvenance>, String> 
 pub struct MleMetadata {
     pub input_hash: String,
     pub model_path: String,
-    pub model_hash: String,
+    pub model_identity: String,
     pub data_hashes: Vec<(String, String)>,
     pub seed: u64,
     pub stage: String,

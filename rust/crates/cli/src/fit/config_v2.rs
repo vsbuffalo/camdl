@@ -1993,7 +1993,7 @@ impl FitConfigV2 {
         // inside the toml were resolved against the user's CWD, which
         // broke any invocation pattern other than "always cd into the
         // toml's directory before camdl fit run". Post-fix, every
-        // downstream consumer (fit_content_hash, to_legacy_toml, the
+        // downstream consumer (the fit-level digest, to_legacy_toml, the
         // runner's data loaders) sees absolute paths regardless of
         // where the binary was invoked from. Absolute paths in the
         // toml pass through unchanged.
@@ -2031,51 +2031,7 @@ impl FitConfigV2 {
         self.fixed.expand_from_scenario(model, &self.estimate)
     }
 
-    /// Seed-independent content hash for the fit directory. Keyed on
-    /// (model IR, data files, fit.toml bytes, version). Any edit to
-    /// these produces a new hash → new directory, so previous fit
-    /// results are never silently overwritten when the config changes.
-    pub fn fit_content_hash(&self, config_path: &str) -> Result<String, String> {
-        let fit_bytes = std::fs::read(config_path)
-            .map_err(|e| format!("cannot read fit.toml at '{}': {}", config_path, e))?;
-        let model_ir_bytes = std::fs::read(&self.model.camdl)
-            .map_err(|e| format!("cannot read model at '{}': {}", self.model.camdl, e))?;
-        let mut data_files: Vec<(String, Vec<u8>)> = Vec::new();
-        if let Some(data) = &self.data {
-            // Single-file shorthand: hash the one file once. Per-stream
-            // form: hash each. The hash is keyed on (name, bytes); under
-            // shorthand the name is the file path itself so two fits
-            // pointing at the same file produce the same hash.
-            if let Some(path) = &data.file {
-                let bytes = std::fs::read(path)
-                    .map_err(|e| format!("cannot read data file '{}': {}", path, e))?;
-                data_files.push((path.clone(), bytes));
-            }
-            for (name, path) in &data.observations {
-                let bytes = std::fs::read(path)
-                    .map_err(|e| format!("cannot read data file '{}' ({}): {}", name, path, e))?;
-                data_files.push((name.clone(), bytes));
-            }
-        }
-        // Synthetic fits (no [data]) derive data deterministically
-        // from `true_params` + sim_seeds inside the fit.toml, so the
-        // fit hash captures them via the fit.toml bytes.
-        Ok(crate::hashing::fit_content_hash(&model_ir_bytes, &mut data_files, &fit_bytes))
-    }
-
-    /// Output directory for this fit: `<root>/fits/<stem>-<hash[:8]>/`.
-    /// Stem from the fit.toml basename; hash from
-    /// [`fit_content_hash`]. Recognisable directory names, content-
-    /// addressable cache keys, no silent overwrites.
-    pub fn fit_dir(&self, config_path: &str) -> Result<PathBuf, String> {
-        let stem = crate::hashing::path_stem_slug(config_path);
-        let hash = self.fit_content_hash(config_path)?;
-        let output_root = crate::run_paths::output_root(
-            None, self.output_dir.as_deref());
-        Ok(crate::run_paths::fit_run_dir(&output_root, stem.as_deref(), &hash))
-    }
-
-    /// The per-fit subdirectory under `fit_dir()` — always
+    /// The per-fit subdirectory under the fit segment — always
     /// `real/fit_<seed>/` for real-data fits, and
     /// `synthetic/ds_NN/fit_<seed>/` for synthetic-data fits. The
     /// resulting directory wraps all stage outputs for that fit.

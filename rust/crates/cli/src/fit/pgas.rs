@@ -346,7 +346,7 @@ pub fn run_stage(
         vec![config.base_params.clone(); n_chains]
     } else if pgas_opts.init_method == super::init::InitMethod::SurveyTopK {
         // Cross-check context. Same construction as IF2 / PMMH.
-        let model_hash_str = crate::hashing::model_hash(&config.model_ir_json);
+        let model_identity_str = crate::resolve::model_identity_from_ir(&config.model_ir_json);
         let model_obs_names: Vec<String> = config.model.observations.iter()
             .map(|o| o.name.clone()).collect();
         let effective_obs = data_spec.effective_observations(&model_obs_names)?;
@@ -355,7 +355,7 @@ pub fn run_stage(
         let fixed_hashmap: std::collections::HashMap<String, f64> =
             fixed_resolved.iter().map(|(k, v)| (k.clone(), *v)).collect();
         let ctx = super::init::SurveyFitContext {
-            model_hash: &model_hash_str,
+            model_identity: &model_identity_str,
             data_hashes: &data_hashes,
             fixed: &fixed_hashmap,
             estimate_names: &estimate_names,
