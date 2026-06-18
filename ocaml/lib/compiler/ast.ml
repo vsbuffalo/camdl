@@ -272,6 +272,32 @@ type intervention_decl = {
   ivloc     : loc;
 }
 
+(* gh#204 reactive trigger predicate (pre-expansion). A dedicated predicate type
+   (not the general expr) because the general expr grammar has comparisons but
+   not and/or/not. The leaf [TgAtom] carries a comparison expr (e.g.
+   `observed(weekly_afp) >= afp_trigger_threshold`); the expander destructures
+   it — recognising observed()/sum_observed() on one side, a static threshold on
+   the other — and lowers to Ir.trigger_expr. Keeping the leaf a plain expr
+   avoids a grammar conflict with the expr-level comparison productions. *)
+type trig_pred =
+  | TgAtom of expr
+  | TgAnd  of trig_pred * trig_pred
+  | TgOr   of trig_pred * trig_pred
+  | TgNot  of trig_pred
+
+type reactive_decl = {
+  rxname     : string;
+  rxindices  : index_binding list;   (* [] for non-indexed policies *)
+  rxwhen     : trig_pred;
+  rxafter    : expr option;          (* lag before the effect; default 0 *)
+  rxonce     : expr option;          (* fire-and-disable; default true *)
+  rxcooldown : expr option;          (* min time between firings *)
+  rxscope    : expr option;          (* exogenous (default) | particle *)
+  rxaction   : action_decl;
+  rxguard    : guard option;         (* where expr — compile-time filter *)
+  rxloc      : loc;
+}
+
 type ode_decl = { ocomp: string; oderiv: expr }
 
 type func_decl = {
@@ -359,6 +385,7 @@ type declaration =
   | DObservations of obs_decl list
   | DInterventions of intervention_decl list
   | DEvents        of intervention_decl list
+  | DReactiveInterventions of reactive_decl list   (* gh#204 *)
   | DODE          of ode_decl list
   | DOutput       of output_decl
   | DSimulate     of simulate_decl

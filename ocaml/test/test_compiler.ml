@@ -6986,6 +6986,127 @@ let test_w104_summed_no_warn () =
   (* the summed-rate `where` form (where_radius_src) must NOT trip W104 *)
   Alcotest.(check bool) "W104 silent on the summed-rate form" false (warns_w104 where_radius_src)
 
+(* ── gh#204 reactive interventions ──────────────────────────────────────── *)
+
+(* A full, valid model whose only variable is the reactive_interventions body. *)
+let reactive_model_with body = Printf.sprintf {|
+time_unit = 'days
+compartments { S, I, V }
+let N = S + I + V
+parameters { beta : rate  thr : count  cov : probability  N0 : count  I0 : count }
+transitions { infection : S --> I @ beta * S * I / N }
+observations {
+  weekly {
+    columns       { time : time, weekly : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly        ~ poisson(rate = projected)
+  }
+}
+reactive_interventions { %s }
+init { S = N0 - I0  I = I0 }
+simulate { from = 0 'days  to = 60 'days }
+|} body
+
+let test_reactive_compiles_and_lowers () =
+  let m = compile_expect_ok (reactive_model_with
+    "sia : when sum_observed(weekly, window = 28 'days) >= thr {\n\
+     \  after = 21 'days\n\
+     \  action = transfer(fraction = cov, from = S, to = V)\n\
+     \  once = false\n\
+     \  cooldown = 180 'days\n\
+     \  scope = exogenous\n\
+     }") in
+  let iv = List.find (fun (i : Ir.intervention) -> i.Ir.name = "sia")
+             m.Ir.interventions in
+  (* gh#204: a reactive policy is kind=Scenario (toggleable), fire=Reactive. *)
+  Alcotest.(check bool) "kind = Scenario" true (iv.Ir.kind = Ir.Scenario);
+  (match iv.Ir.fire with
+   | Ir.Reactive t ->
+     Alcotest.(check (float 1e-9)) "after" 21.0 t.Ir.after;
+     Alcotest.(check bool) "once" false t.Ir.once;
+     Alcotest.(check bool) "cooldown = 180" true (t.Ir.cooldown = Some 180.0);
+     Alcotest.(check bool) "scope = exogenous" true (t.Ir.scope = Ir.SharedExogenous);
+     (match t.Ir.when_ with
+      | Ir.TECmp (Ir.TQObserved { stream; window; reducer }, op, thr) ->
+        Alcotest.(check string) "stream" "weekly" stream;
+        Alcotest.(check bool) "window = 28" true (window = Some 28.0);
+        Alcotest.(check bool) "reducer = sum" true (reducer = Ir.RedSum);
+        Alcotest.(check bool) "op = ge" true (op = Ir.CmpGe);
+        Alcotest.(check bool) "threshold = param thr" true (thr = Ir.TTParam "thr")
+      | _ -> Alcotest.fail "expected a single observed >= threshold comparison")
+   | Ir.Scheduled _ -> Alcotest.fail "expected a reactive fire source");
+  Alcotest.(check int) "one transfer action" 1 (List.length iv.Ir.actions)
+
+let test_reactive_observed_is_latest () =
+  (* observed(stream) (no window) lowers to the Latest reducer. *)
+  let m = compile_expect_ok (reactive_model_with
+    "sia : when observed(weekly) >= thr {\n\
+     \  action = transfer(fraction = cov, from = S, to = V)\n\
+     }") in
+  let iv = List.find (fun (i : Ir.intervention) -> i.Ir.name = "sia")
+             m.Ir.interventions in
+  (match iv.Ir.fire with
+   | Ir.Reactive { Ir.when_ = Ir.TECmp (Ir.TQObserved { window; reducer; _ }, _, _); _ } ->
+     Alcotest.(check bool) "no window" true (window = None);
+     Alcotest.(check bool) "reducer = latest" true (reducer = Ir.RedLatest)
+   | _ -> Alcotest.fail "expected reactive observed() trigger");
+  (* defaults: once defaults to true, scope to exogenous. *)
+  (match iv.Ir.fire with
+   | Ir.Reactive t ->
+     Alcotest.(check bool) "once defaults true" true t.Ir.once;
+     Alcotest.(check bool) "scope defaults exogenous" true (t.Ir.scope = Ir.SharedExogenous)
+   | _ -> Alcotest.fail "expected reactive")
+
+let test_reactive_observed_in_rate_rejected () =
+  (* observed() in a transition rate (a model expression, not a trigger) must
+     be rejected with a targeted message, not silently lowered. *)
+  compile_expect_error_code ~code:"E278" ~contains:"observed"
+    {|
+time_unit = 'days
+compartments { S, I }
+let N = S + I
+parameters { beta : rate  N0 : count  I0 : count }
+observations {
+  weekly {
+    columns       { time : time, weekly : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly        ~ poisson(rate = projected)
+  }
+}
+transitions { infection : S --> I @ beta * observed(weekly) * S * I / N }
+init { S = N0 - I0  I = I0 }
+simulate { from = 0 'days  to = 10 'days }
+|}
+
+let test_reactive_once_with_cooldown_rejected () =
+  compile_expect_error_code ~code:"E276" ~contains:"cooldown"
+    (reactive_model_with
+      "sia : when observed(weekly) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       \  once = true\n\
+       \  cooldown = 30 'days\n\
+       }")
+
+let test_reactive_negative_after_rejected () =
+  compile_expect_error_code ~code:"E274" ~contains:"after"
+    (reactive_model_with
+      "sia : when observed(weekly) >= thr {\n\
+       \  after = -5 'days\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       \  once = true\n\
+       }")
+
+let test_reactive_non_comparison_when_rejected () =
+  (* A `when` that is not a comparison (here a bare observed()) is rejected:
+     the predicate must be boolean (a comparison). *)
+  compile_expect_error_code ~code:"E273" ~contains:"comparison"
+    (reactive_model_with
+      "sia : when observed(weekly) {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }")
+
 let () =
   Alcotest.run "compiler" [
     "quadratic_coupling_warning", [
@@ -7185,6 +7306,20 @@ let () =
         `Quick test_intervention_transfer_count_kwarg;
       Alcotest.test_case "transfer(count + fraction) rejected as mutually exclusive (gh#49)"
         `Quick test_intervention_transfer_count_and_fraction_rejected;
+    ];
+    "reactive_interventions", [
+      Alcotest.test_case "compiles + lowers to fire=Reactive trigger (gh#204)"
+        `Quick test_reactive_compiles_and_lowers;
+      Alcotest.test_case "observed() (no window) lowers to Latest + defaults"
+        `Quick test_reactive_observed_is_latest;
+      Alcotest.test_case "E278 observed() in a rate is rejected"
+        `Quick test_reactive_observed_in_rate_rejected;
+      Alcotest.test_case "E276 once=true + cooldown is rejected"
+        `Quick test_reactive_once_with_cooldown_rejected;
+      Alcotest.test_case "E274 negative after is rejected"
+        `Quick test_reactive_negative_after_rejected;
+      Alcotest.test_case "E273 non-comparison when is rejected"
+        `Quick test_reactive_non_comparison_when_rejected;
     ];
     "recurring_interventions", [
       Alcotest.test_case "transfer(...) { every, from, until }"     `Quick test_recurring_block_transfer;

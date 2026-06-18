@@ -110,6 +110,7 @@
 %token INSTANT DURATION
 %token AND OR NOT IF THEN ELSE EVERY UNTIL AT_KW FORMAT DESCRIPTION NULL TRANSFER LIKELIHOOD ORIGIN BALANCE EVENTS ADD AT_DAY
 %token COLUMNS EMIT_SCHEDULE
+%token REACTIVE_INTERVENTIONS WHEN ACTION   (* gh#204 *)
 %token PIPE
 
 %token EOF
@@ -164,6 +165,8 @@ declaration:
       { DInterventions ivs }
   | EVENTS LBRACE evs = intervention_list RBRACE
       { DEvents evs }
+  | REACTIVE_INTERVENTIONS LBRACE rxs = list(reactive_decl) RBRACE
+      { DReactiveInterventions rxs }
   | ODE LBRACE odes = ode_list RBRACE
       { DODE odes }
   | OUTPUT LBRACE od = output_body RBRACE
@@ -711,6 +714,76 @@ intervention_decl:
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN EVERY period = expr AT_DAY day = expr guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = AAdd (comp, [], count); ivschedule = SEveryAtDay (period, day); ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+
+(* ── Reactive interventions (gh#204) ─────────────────────────────────────────
+   `name[idx]? : when <predicate> { action = .., after = .., once = .., ... }`.
+   The predicate is a dedicated boolean grammar over comparison atoms; observed()
+   / sum_observed() are ordinary IDENT funcalls recognised only here (the expander
+   rejects them in rate expressions). *)
+reactive_decl:
+  | name = IDENT ibs = index_bindings_opt COLON WHEN pred = trig_pred LBRACE kvs = list(reactive_kv) RBRACE guard = where_clause_opt
+      { let action   = ref None in
+        let after    = ref None in
+        let once     = ref None in
+        let cooldown = ref None in
+        let scope    = ref None in
+        List.iter (function
+          | `Action a   -> action   := Some a
+          | `After e    -> after    := Some e
+          | `Once e     -> once     := Some e
+          | `Cooldown e -> cooldown := Some e
+          | `Scope e    -> scope    := Some e
+        ) kvs;
+        let act = match !action with
+          | Some a -> a
+          | None ->
+            Parser_errors.push_error ~sp:$startpos ~ep:$endpos
+              ~code:"E105"
+              ~msg:"reactive intervention missing required 'action = ...'";
+            ATransfer []
+        in
+        { rxname = name; rxindices = ibs; rxwhen = pred;
+          rxafter = !after; rxonce = !once; rxcooldown = !cooldown;
+          rxscope = !scope; rxaction = act; rxguard = guard;
+          rxloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+
+(* Boolean predicate. and/or/not over comparison atoms; the atom is a plain expr
+   (a comparison like `observed(a) >= k`) validated/destructured in the expander.
+   No `( predicate )` grouping in phase 1 — group inside the comparison via the
+   expr's own parens. *)
+trig_pred:
+  | p1 = trig_pred OR  p2 = trig_pred   { TgOr  (p1, p2) }
+  | p1 = trig_pred AND p2 = trig_pred   { TgAnd (p1, p2) }
+  | NOT a = trig_atom                    { TgNot a }
+  | a = trig_atom                        { a }
+
+trig_atom:
+  | e = expr   { TgAtom e }
+
+(* Reactive policy body kvs — newline-separated, any order (camdl block style).
+   `action = <action>` needs the ACTION token because its RHS is an action, not
+   an expr; the rest are `key = expr`. *)
+reactive_kv:
+  | ACTION   EQ a = reactive_action  { `Action a }
+  | k = IDENT EQ e = expr            { match k with
+                                       | "after"    -> `After e
+                                       | "once"     -> `Once e
+                                       | "cooldown" -> `Cooldown e
+                                       | "scope"    -> `Scope e
+                                       | other ->
+                                         Parser_errors.push_error ~sp:$startpos ~ep:$endpos
+                                           ~code:"E106"
+                                           ~msg:(Printf.sprintf
+                                             "unknown reactive intervention key '%s' (expected action/after/once/cooldown/scope)" other);
+                                         `After e }
+
+(* Reactive action RHS: the same action forms as scheduled interventions, minus
+   the schedule (which the trigger replaces). *)
+reactive_action:
+  | TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN
+      { ATransfer kwargs }
+  | ADD LPAREN comp = IDENT COMMA count = expr RPAREN
+      { AAdd (comp, [], count) }
 
 (* Recurring schedule body: kwargs in any order, newline-separated
    (matches the rest of camdl's block style — no commas required). *)

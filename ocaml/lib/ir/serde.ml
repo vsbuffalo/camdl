@@ -588,9 +588,86 @@ let agenda_scope_of_json j =
   | "particle_local"   -> ParticleLocal
   | s -> fail "unknown agenda_scope '%s'" s
 
+(* gh#204. Reactive trigger predicate. Wire shapes mirror the Rust serde:
+   CmpOp/ObsReducer are snake_case unit enums; TriggerQuantity / TriggerThreshold
+   / TriggerExpr are externally tagged; And/Or carry a 2-element array. *)
+let cmp_op_to_json = function
+  | CmpLt -> str "lt" | CmpLe -> str "le" | CmpGt -> str "gt"
+  | CmpGe -> str "ge" | CmpEq -> str "eq" | CmpNeq -> str "neq"
+
+let cmp_op_of_json j =
+  match as_string j with
+  | "lt" -> CmpLt | "le" -> CmpLe | "gt" -> CmpGt
+  | "ge" -> CmpGe | "eq" -> CmpEq | "neq" -> CmpNeq
+  | s -> fail "unknown cmp_op '%s'" s
+
+let obs_reducer_to_json = function
+  | RedLatest -> str "latest" | RedSum -> str "sum"
+  | RedMean -> str "mean" | RedMax -> str "max"
+
+let obs_reducer_of_json j =
+  match as_string j with
+  | "latest" -> RedLatest | "sum" -> RedSum
+  | "mean" -> RedMean | "max" -> RedMax
+  | s -> fail "unknown obs_reducer '%s'" s
+
+let trigger_quantity_to_json (q : trigger_quantity) : Yojson.Safe.t =
+  match q with
+  | TQObserved { stream; window; reducer } ->
+    obj [("observed", obj (
+      [("stream", str stream)]
+      @ (match window with None -> [] | Some w -> [("window", flt w)])
+      @ [("reducer", obs_reducer_to_json reducer)]
+    ))]
+
+let trigger_quantity_of_json j =
+  match j with
+  | `Assoc [("observed", v)] ->
+    TQObserved {
+      stream  = as_string (member "stream" v);
+      window  = (match member_opt "window" v with
+                 | Some n -> Some (as_float n) | None -> None);
+      reducer = obs_reducer_of_json (member "reducer" v);
+    }
+  | _ -> fail "trigger_quantity must be a single-key {\"observed\": ..} object"
+
+let trigger_threshold_to_json (t : trigger_threshold) : Yojson.Safe.t =
+  match t with
+  | TTConst v -> obj [("const", flt v)]
+  | TTParam s -> obj [("param", str s)]
+
+let trigger_threshold_of_json j =
+  match j with
+  | `Assoc [("const", v)] -> TTConst (as_float v)
+  | `Assoc [("param", v)] -> TTParam (as_string v)
+  | _ -> fail "trigger_threshold must be {\"const\": ..} or {\"param\": ..}"
+
+let rec trigger_expr_to_json (e : trigger_expr) : Yojson.Safe.t =
+  match e with
+  | TECmp (lhs, op, rhs) ->
+    obj [("cmp", obj [
+      ("lhs", trigger_quantity_to_json lhs);
+      ("op",  cmp_op_to_json op);
+      ("rhs", trigger_threshold_to_json rhs);
+    ])]
+  | TEAnd (a, b) -> obj [("and", arr [trigger_expr_to_json a; trigger_expr_to_json b])]
+  | TEOr  (a, b) -> obj [("or",  arr [trigger_expr_to_json a; trigger_expr_to_json b])]
+  | TENot a      -> obj [("not", trigger_expr_to_json a)]
+
+let rec trigger_expr_of_json j =
+  match j with
+  | `Assoc [("cmp", v)] ->
+    TECmp (trigger_quantity_of_json (member "lhs" v),
+           cmp_op_of_json            (member "op"  v),
+           trigger_threshold_of_json (member "rhs" v))
+  | `Assoc [("and", `List [a; b])] -> TEAnd (trigger_expr_of_json a, trigger_expr_of_json b)
+  | `Assoc [("or",  `List [a; b])] -> TEOr  (trigger_expr_of_json a, trigger_expr_of_json b)
+  | `Assoc [("not", a)]            -> TENot (trigger_expr_of_json a)
+  | _ -> fail "unknown trigger_expr (expected one of cmp/and/or/not)"
+
 let reactive_trigger_to_json (t : reactive_trigger) : Yojson.Safe.t =
   obj (
-    [ ("when",  expr_to_json t.when_);
+    [ ("when",  trigger_expr_to_json t.when_);
       ("after", flt t.after);
       ("once",  bool t.once) ]
     @ (match t.cooldown with None -> [] | Some c -> [("cooldown", flt c)])
@@ -598,7 +675,7 @@ let reactive_trigger_to_json (t : reactive_trigger) : Yojson.Safe.t =
   )
 
 let reactive_trigger_of_json j =
-  { when_    = expr_of_json (member "when" j);
+  { when_    = trigger_expr_of_json (member "when" j);
     after    = as_float (member "after" j);
     once     = as_bool (member "once" j);
     cooldown = (match member_opt "cooldown" j with

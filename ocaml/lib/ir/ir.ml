@@ -222,6 +222,27 @@ type intervention_kind =
   | Scenario   (* interventions {} — toggled by enable/disable/set/scale *)
   | Event      (* events {}        — fires unconditionally every substep   *)
 
+(* gh#204. Reactive trigger predicate — a dedicated ADT, NOT the shared [expr]:
+   boolean-valued by construction, and its observed() leaves cannot leak into
+   rate expressions. Wire strings mirror the Rust serde (snake_case). *)
+type cmp_op = CmpLt | CmpLe | CmpGt | CmpGe | CmpEq | CmpNeq
+
+type obs_reducer = RedLatest | RedSum | RedMean | RedMax
+  (* observed(s) -> RedLatest; sum_observed(s, window=..) -> RedSum *)
+
+type trigger_quantity =
+  | TQObserved of { stream : string; window : float option; reducer : obs_reducer }
+
+type trigger_threshold =
+  | TTConst of float
+  | TTParam of string
+
+type trigger_expr =
+  | TECmp of trigger_quantity * cmp_op * trigger_threshold
+  | TEAnd of trigger_expr * trigger_expr
+  | TEOr  of trigger_expr * trigger_expr
+  | TENot of trigger_expr
+
 (* gh#204. The scope a reactive policy's trigger reads from — the
    inference-safety axis. Phase 1 supports only [SharedExogenous]. *)
 type agenda_scope =
@@ -233,7 +254,7 @@ type agenda_scope =
    [cooldown]. The action grammar and effect resolution are shared with
    scheduled interventions — only the fire source differs. *)
 type reactive_trigger = {
-  when_:    expr;            (* boolean trigger predicate; wire key "when" *)
+  when_:    trigger_expr;    (* trigger predicate; wire key "when" *)
   after:    float;          (* non-negative lag before the effect fires    *)
   once:     bool;           (* fire-and-disable; mutually exclusive w/ cooldown *)
   cooldown: float option;   (* min time between firings when [once = false] *)

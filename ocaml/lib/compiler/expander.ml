@@ -24,6 +24,7 @@ type context = {
   mutable scenario_decls  : scenario_decl list;
   mutable balance_decl    : balance_decl option;
   mutable event_decls     : intervention_decl list;
+  mutable reactive_decls  : reactive_decl list;   (* gh#204 *)
   mutable diags           : Diagnostics.t;  (* collected errors/warnings *)
   mutable reads           : (string * string) list;
   (* (as-written, resolved) external data files opened during expansion, in
@@ -99,6 +100,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   scenario_decls       = [];
   balance_decl         = None;
   event_decls          = [];
+  reactive_decls       = [];
   diags                = Diagnostics.create ();
   reads                = [];
   source_dir;
@@ -745,6 +747,7 @@ let collect_declarations ctx decls =
     | DScenarios ss      -> ctx.scenario_decls <- List.rev_append ss ctx.scenario_decls
     | DBalance bd        -> ctx.balance_decl <- Some bd
     | DEvents evs        -> ctx.event_decls <- List.rev_append evs ctx.event_decls
+    | DReactiveInterventions rxs -> ctx.reactive_decls <- List.rev_append rxs ctx.reactive_decls
   ) decls;
   (* Reverse all accumulated lists to restore declaration order *)
   ctx.dim_decls      <- List.rev ctx.dim_decls;
@@ -2425,6 +2428,20 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       Ir.inner  = resolve_expr ctx env inner_expr;
       Ir.dim_p; Ir.dim_t; Ir.reason;
     }
+  | EFuncCall (("observed" | "sum_observed") as fname, _) ->
+    (* gh#204: observed()/sum_observed() read policy-visible surveillance
+       history and are valid ONLY inside a reactive trigger predicate (lowered
+       by `lower_obs_quantity`, never through `resolve_expr`). Reaching here
+       means one appeared in a rate / binding / other model expression — reject
+       with a targeted message rather than the generic unknown-function error. *)
+    Diagnostics.error ctx.diags ~code:"E278" ~loc:Diagnostics.no_loc
+      ~message:(Printf.sprintf
+        "'%s(...)' is only valid inside a reactive trigger predicate \
+         (reactive_interventions { ... when %s(...) ... })" fname fname)
+      ~hint:"trigger inputs read observed data, not latent model state — they \
+             cannot appear in a transition rate or other model expression"
+      ();
+    Ir.Const 0.0
   | EFuncCall (fname, args) ->
     (* Built-in math functions → Ir.UnOp *)
     let builtin_un_op = match fname with
@@ -4444,6 +4461,80 @@ let expand_time_functions ctx : Ir.time_function list =
     end
   ) ctx.func_decls
 
+(* gh#204: the shared action resolver — used by both scheduled
+   interventions/events and reactive policies, so the transfer-kwarg validation
+   (E261/E262) and the set target check (E265) live in ONE place rather than
+   forking across the two fire sources. [name] is the expanded instance name
+   (for diagnostics); [loc] its source location. *)
+let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.action list =
+  match action with
+  | ATransfer kwargs ->
+    let has_from     = List.mem_assoc "from"     kwargs in
+    let has_to       = List.mem_assoc "to"       kwargs in
+    let has_fraction = List.mem_assoc "fraction" kwargs in
+    let has_count    = List.mem_assoc "count"    kwargs in
+    let known = ["from"; "to"; "fraction"; "count"] in
+    let unknown = List.filter_map (fun (k, _) ->
+      if k = "" || List.mem k known then None else Some k) kwargs in
+    let err code msg hint =
+      Diagnostics.error ctx.diags ~code ~loc:Diagnostics.no_loc ~message:msg ~hint ()
+    in
+    if not has_from then
+      err "E261" (Printf.sprintf
+        "intervention '%s': transfer action missing `from =`" name)
+        "example: transfer(from = S, to = V, fraction = 0.8)";
+    if not has_to then
+      err "E261" (Printf.sprintf
+        "intervention '%s': transfer action missing `to =`" name)
+        "example: transfer(from = S, to = V, fraction = 0.8)";
+    if not (has_fraction || has_count) then
+      err "E261" (Printf.sprintf
+        "intervention '%s': transfer action needs either `fraction =` or \
+         `count =`" name)
+        "fraction = 0.0..1.0 (relative) OR count = N (absolute)";
+    if has_fraction && has_count then
+      err "E261" (Printf.sprintf
+        "intervention '%s': transfer action has both `fraction` and `count` \
+         — these are mutually exclusive" name)
+        "pick one: fraction for a proportion, count for an absolute number";
+    List.iter (fun k ->
+      err "E262" (Printf.sprintf
+        "intervention '%s': unknown transfer kwarg '%s'" name k)
+        "valid kwargs: from, to, fraction, count"
+    ) unknown;
+    let src = match List.assoc_opt "from" kwargs with
+      | Some e -> resolve_comp_name ctx env e | None -> "?" in
+    let dst = match List.assoc_opt "to" kwargs with
+      | Some e -> resolve_comp_name ctx env e | None -> "?" in
+    (match List.assoc_opt "fraction" kwargs with
+     | Some fe ->
+       [Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction = resolve_expr ctx env fe }]
+     | None ->
+       match List.assoc_opt "count" kwargs with
+       | Some ce ->
+         [Ir.AbsoluteTransfer { Ir.src; Ir.dst; Ir.count = resolve_expr ctx env ce }]
+       | None -> [])
+  | ASet (comp, idxs, expr) ->
+    let idx_vals = List.map (index_item_to_str env) idxs in
+    let concrete = if idx_vals = [] then comp
+      else String.concat "_" (comp :: idx_vals) in
+    if not (Hashtbl.mem ctx.expanded_comp_tbl concrete
+            || Hashtbl.mem ctx.comp_tbl comp) then
+      Diagnostics.error ctx.diags
+        ~code:"E265" ~loc
+        ~message:(Printf.sprintf
+          "intervention '%s' sets '%s' which is not a declared compartment"
+          name concrete)
+        ~hint:"check the compartments block, or fix the kwarg name \
+               (e.g. fraction, count, from, to)"
+        ();
+    [Ir.Set { Ir.compartment = concrete; Ir.value = resolve_expr ctx env expr }]
+  | AAdd (comp, idxs, expr) ->
+    let idx_vals = List.map (index_item_to_str env) idxs in
+    let concrete = if idx_vals = [] then comp
+      else String.concat "_" (comp :: idx_vals) in
+    [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }]
+
 let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
   let t_start = match ctx.simulate with
     | None    -> 0.0
@@ -4539,105 +4630,240 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
           let at_day = resolve_float_expr ctx day in
           Ir.Recurring { Ir.start = t_start; Ir.period; Ir.end_ = t_end; Ir.at_day = Some at_day }
       in
-      let actions = match iv.ivaction with
-        | ATransfer kwargs ->
-          (* Validate the kwarg shape first (C6 in the 2026-04-19
-             review). Before this, a missing/typoed `fraction` or
-             `count` silently produced `actions = []` — the
-             intervention fired on schedule and did nothing. A missing
-             `from`/`to` produced `src = "?"` / `dst = "?"` which the
-             emitted IR happily carried as a non-existent compartment
-             reference. All silent-wrong-answer class. *)
-          let has_from     = List.mem_assoc "from"     kwargs in
-          let has_to       = List.mem_assoc "to"       kwargs in
-          let has_fraction = List.mem_assoc "fraction" kwargs in
-          let has_count    = List.mem_assoc "count"    kwargs in
-          let known = ["from"; "to"; "fraction"; "count"] in
-          let unknown = List.filter_map (fun (k, _) ->
-            if k = "" || List.mem k known then None else Some k) kwargs in
-          let err code msg hint =
-            Diagnostics.error ctx.diags ~code ~loc:Diagnostics.no_loc
-              ~message:msg ~hint ()
-          in
-          if not has_from then
-            err "E261" (Printf.sprintf
-              "intervention '%s': transfer action missing `from =`" iv.ivname)
-              "example: transfer(from = S, to = V, fraction = 0.8)";
-          if not has_to then
-            err "E261" (Printf.sprintf
-              "intervention '%s': transfer action missing `to =`" iv.ivname)
-              "example: transfer(from = S, to = V, fraction = 0.8)";
-          if not (has_fraction || has_count) then
-            err "E261" (Printf.sprintf
-              "intervention '%s': transfer action needs either \
-               `fraction =` or `count =`" iv.ivname)
-              "fraction = 0.0..1.0 (relative) OR count = N (absolute)";
-          if has_fraction && has_count then
-            err "E261" (Printf.sprintf
-              "intervention '%s': transfer action has both `fraction` \
-               and `count` — these are mutually exclusive" iv.ivname)
-              "pick one: fraction for a proportion, count for an \
-               absolute number";
-          List.iter (fun k ->
-            err "E262" (Printf.sprintf
-              "intervention '%s': unknown transfer kwarg '%s'"
-              iv.ivname k)
-              "valid kwargs: from, to, fraction, count"
-          ) unknown;
-          let src = match List.assoc_opt "from" kwargs with
-            | Some e -> resolve_comp_name ctx env e
-            | None   -> "?"
-          in
-          let dst = match List.assoc_opt "to" kwargs with
-            | Some e -> resolve_comp_name ctx env e
-            | None   -> "?"
-          in
-          (match List.assoc_opt "fraction" kwargs with
-          | Some fe ->
-            [Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction = resolve_expr ctx env fe }]
-          | None ->
-            match List.assoc_opt "count" kwargs with
-            | Some ce ->
-              [Ir.AbsoluteTransfer { Ir.src; Ir.dst; Ir.count = resolve_expr ctx env ce }]
-            | None -> [])
-        | ASet (comp, idxs, expr) ->
-          let idx_vals = List.map (index_item_to_str env) idxs in
-          let concrete = if idx_vals = [] then comp
-            else String.concat "_" (comp :: idx_vals) in
-          (* m13 in 2026-04-19 review: the parser's iv_kv catch-all
-             produces `ASet(unknown_key, [], expr)` for any
-             `foo = expr` inside an intervention body, so a typo like
-             `fraction` vs `fracton` silently becomes an action on a
-             non-existent compartment. Flag here with a specific
-             E-code instead of letting it pass through and surface
-             downstream as a generic E503 unknown-compartment. *)
-          if not (Hashtbl.mem ctx.expanded_comp_tbl concrete
-                  || Hashtbl.mem ctx.comp_tbl comp) then
-            Diagnostics.error ctx.diags
-              ~code:"E265"
-              ~loc:iv_loc
-              ~message:(Printf.sprintf
-                "intervention '%s' sets '%s' which is not a declared \
-                 compartment"
-                iv_name concrete)
-              ~hint:"check the compartments block, or fix the kwarg name \
-                     (e.g. fraction, count, from, to)"
-              ();
-          [Ir.Set { Ir.compartment = concrete; Ir.value = resolve_expr ctx env expr }]
-        | AAdd (comp, idxs, expr) ->
-          let idx_vals = List.map (index_item_to_str env) idxs in
-          let concrete = if idx_vals = [] then comp
-            else String.concat "_" (comp :: idx_vals) in
-          [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }]
+      let actions =
+        resolve_intervention_action ctx env ~name:iv_name ~loc:iv_loc iv.ivaction
       in
       Some { Ir.name = iv_name; Ir.base_name; Ir.fire = Ir.Scheduled schedule;
              Ir.actions; Ir.kind }
     ) combos
   ) decls
 
+(* ── Reactive interventions (gh#204) ─────────────────────────────────────────
+   Lower a reactive policy to an `Ir.intervention` with `fire = Reactive`. The
+   trigger predicate is a dedicated ADT (not the shared expr): observed() /
+   sum_observed() are recognised ONLY here, never in a rate. *)
+
+let cmp_of_binop = function
+  | Lt -> Ir.CmpLt | Le -> Ir.CmpLe | Gt -> Ir.CmpGt
+  | Ge -> Ir.CmpGe | Eq -> Ir.CmpEq | Neq -> Ir.CmpNeq
+  | _  -> Ir.CmpEq   (* unreachable: caller checks the op is a comparison *)
+
+(* When the observed quantity is on the RIGHT (`2 <= observed(x)`), flip the
+   operator so the lowered form is always `quantity <op> threshold`. *)
+let flip_cmp = function
+  | Ir.CmpLt -> Ir.CmpGt | Ir.CmpGt -> Ir.CmpLt
+  | Ir.CmpLe -> Ir.CmpGe | Ir.CmpGe -> Ir.CmpLe
+  | Ir.CmpEq -> Ir.CmpEq | Ir.CmpNeq -> Ir.CmpNeq
+
+let is_comparison_binop = function
+  | Lt | Le | Gt | Ge | Eq | Neq -> true | _ -> false
+
+let is_observed_call = function
+  | EFuncCall (("observed" | "sum_observed"), _) -> true
+  | _ -> false
+
+let lower_obs_quantity ctx env ~name ~loc (e : expr) : Ir.trigger_quantity =
+  match e with
+  | EFuncCall (fn, args) ->
+    let stream_args = List.filter (fun (k, _) -> k = "") args in
+    let window_arg  = List.assoc_opt "window" args in
+    let stream = match stream_args with
+      | [ (_, se) ] ->
+        (match se with
+         | EIdent (s, _) | EFuncCall (s, []) -> s
+         | EIndex (base, items) ->
+           let parts = List.map (index_item_to_str env) items in
+           if parts = [] then base else String.concat "_" (base :: parts)
+         | _ ->
+           Diagnostics.error ctx.diags ~code:"E270" ~loc
+             ~message:(Printf.sprintf
+               "reactive intervention '%s': %s(...) argument must be an \
+                observation stream name" name fn)
+             ~hint:"e.g. observed(weekly_cases) or sum_observed(weekly_afp[p], window = 28 'days)"
+             ();
+           "?")
+      | _ ->
+        Diagnostics.error ctx.diags ~code:"E270" ~loc
+          ~message:(Printf.sprintf
+            "reactive intervention '%s': %s(...) needs exactly one stream \
+             argument" name fn)
+          ~hint:"observed(stream) or sum_observed(stream, window = ...)"
+          ();
+        "?"
+    in
+    (match fn with
+     | "observed" ->
+       (match window_arg with
+        | Some _ ->
+          Diagnostics.error ctx.diags ~code:"E271" ~loc
+            ~message:(Printf.sprintf
+              "reactive intervention '%s': observed(...) takes no `window`" name)
+            ~hint:"use sum_observed(stream, window = ...) for a windowed sum"
+            ()
+        | None -> ());
+       Ir.TQObserved { stream; window = None; reducer = Ir.RedLatest }
+     | "sum_observed" ->
+       let window = match window_arg with
+         | Some w -> Some (resolve_float_expr ctx w)
+         | None ->
+           Diagnostics.error ctx.diags ~code:"E271" ~loc
+             ~message:(Printf.sprintf
+               "reactive intervention '%s': sum_observed(...) requires a \
+                `window = ...`" name)
+             ~hint:"e.g. sum_observed(weekly_afp, window = 28 'days)"
+             ();
+           None
+       in
+       Ir.TQObserved { stream; window; reducer = Ir.RedSum }
+     | _ -> assert false (* guarded by is_observed_call *))
+  | _ -> assert false (* guarded by is_observed_call *)
+
+let lower_threshold ctx env ~name ~loc (e : expr) : Ir.trigger_threshold =
+  match resolve_expr ctx env e with
+  | Ir.Const f -> Ir.TTConst f
+  | Ir.Param p -> Ir.TTParam p
+  | _ ->
+    Diagnostics.error ctx.diags ~code:"E272" ~loc
+      ~message:(Printf.sprintf
+        "reactive intervention '%s': trigger threshold must be a constant or \
+         a parameter" name)
+      ~hint:"e.g. >= 2 or >= afp_trigger_threshold"
+      ();
+    Ir.TTConst 0.0
+
+let lower_trigger_atom ctx env ~name ~loc (e : expr) : Ir.trigger_expr =
+  match e with
+  | EBinOp (op, lhs, rhs) when is_comparison_binop op ->
+    let lobs = is_observed_call lhs and robs = is_observed_call rhs in
+    if lobs && not robs then
+      Ir.TECmp (lower_obs_quantity ctx env ~name ~loc lhs,
+                cmp_of_binop op,
+                lower_threshold ctx env ~name ~loc rhs)
+    else if robs && not lobs then
+      Ir.TECmp (lower_obs_quantity ctx env ~name ~loc rhs,
+                flip_cmp (cmp_of_binop op),
+                lower_threshold ctx env ~name ~loc lhs)
+    else begin
+      Diagnostics.error ctx.diags ~code:"E273" ~loc
+        ~message:(Printf.sprintf
+          "reactive intervention '%s': each trigger comparison must have \
+           exactly one observed()/sum_observed() side" name)
+        ~hint:"e.g. observed(weekly_cases) >= 10"
+        ();
+      Ir.TECmp (Ir.TQObserved { stream = "?"; window = None; reducer = Ir.RedLatest },
+                Ir.CmpGe, Ir.TTConst 0.0)
+    end
+  | _ ->
+    Diagnostics.error ctx.diags ~code:"E273" ~loc
+      ~message:(Printf.sprintf
+        "reactive intervention '%s': trigger predicate must be a comparison \
+         (optionally combined with and/or/not)" name)
+      ~hint:"e.g. when observed(weekly_cases) >= 10"
+      ();
+    Ir.TECmp (Ir.TQObserved { stream = "?"; window = None; reducer = Ir.RedLatest },
+              Ir.CmpGe, Ir.TTConst 0.0)
+
+let rec lower_trigger ctx env ~name ~loc (p : trig_pred) : Ir.trigger_expr =
+  match p with
+  | TgAnd (a, b) ->
+    Ir.TEAnd (lower_trigger ctx env ~name ~loc a, lower_trigger ctx env ~name ~loc b)
+  | TgOr (a, b) ->
+    Ir.TEOr (lower_trigger ctx env ~name ~loc a, lower_trigger ctx env ~name ~loc b)
+  | TgNot a -> Ir.TENot (lower_trigger ctx env ~name ~loc a)
+  | TgAtom e -> lower_trigger_atom ctx env ~name ~loc e
+
+let expand_reactive ctx decls =
+  List.concat_map (fun (rx : reactive_decl) ->
+    let rx_loc = diag_loc_of_ast_ctx ctx rx.rxloc in
+    let base_name = if rx.rxindices = [] then None else Some rx.rxname in
+    let combos = cartesian_product rx.rxindices ctx in
+    List.filter_map (fun env ->
+      let pass_guard = match rx.rxguard with
+        | None   -> true
+        | Some g -> eval_guard ctx env g
+      in
+      if not pass_guard then None
+      else
+      let parts = name_parts_from_bindings rx.rxindices env in
+      let rx_name =
+        if parts = [] then rx.rxname
+        else rx.rxname ^ "_" ^ String.concat "_" parts
+      in
+      let when_ = lower_trigger ctx env ~name:rx_name ~loc:rx_loc rx.rxwhen in
+      let after = match rx.rxafter with
+        | None -> 0.0
+        | Some e -> resolve_float_expr ctx e
+      in
+      if after < 0.0 then
+        Diagnostics.error ctx.diags ~code:"E274" ~loc:rx_loc
+          ~message:(Printf.sprintf
+            "reactive intervention '%s': `after` must be non-negative (got %g)"
+            rx_name after)
+          ~hint:"a lag is a forward delay; use after = 0 for immediate firing"
+          ();
+      let cooldown = match rx.rxcooldown with
+        | None -> None
+        | Some e ->
+          let c = resolve_float_expr ctx e in
+          if c < 0.0 then
+            Diagnostics.error ctx.diags ~code:"E274" ~loc:rx_loc
+              ~message:(Printf.sprintf
+                "reactive intervention '%s': `cooldown` must be non-negative \
+                 (got %g)" rx_name c)
+              ~hint:"cooldown is a minimum gap between firings"
+              ();
+          Some c
+      in
+      let once = match rx.rxonce with
+        | None -> true
+        | Some (EIdent ("true", _))  | Some (EFuncCall ("true", []))  -> true
+        | Some (EIdent ("false", _)) | Some (EFuncCall ("false", [])) -> false
+        | Some _ ->
+          Diagnostics.error ctx.diags ~code:"E275" ~loc:rx_loc
+            ~message:(Printf.sprintf
+              "reactive intervention '%s': `once` must be true or false" rx_name)
+            ~hint:"once = true fires at most once; once = false allows repeats"
+            ();
+          true
+      in
+      (* once = true disables forever; cooldown rate-limits a REPEATING policy.
+         The two are contradictory — reject rather than silently ignore one. *)
+      if once && cooldown <> None then
+        Diagnostics.error ctx.diags ~code:"E276" ~loc:rx_loc
+          ~message:(Printf.sprintf
+            "reactive intervention '%s': `once = true` and `cooldown` are \
+             mutually exclusive" rx_name)
+          ~hint:"once = true fires once and never again (drop cooldown); for a \
+                 repeating rate-limited policy set once = false"
+          ();
+      let scope = match rx.rxscope with
+        | None -> Ir.SharedExogenous
+        | Some (EIdent ("exogenous", _)) | Some (EFuncCall ("exogenous", [])) -> Ir.SharedExogenous
+        | Some (EIdent ("particle", _))  | Some (EFuncCall ("particle", []))  -> Ir.ParticleLocal
+        | Some _ ->
+          Diagnostics.error ctx.diags ~code:"E277" ~loc:rx_loc
+            ~message:(Printf.sprintf
+              "reactive intervention '%s': `scope` must be `exogenous` or \
+               `particle`" rx_name)
+            ~hint:"scope = exogenous (shared surveillance trigger) is the phase-1 default"
+            ();
+          Ir.SharedExogenous
+      in
+      let actions =
+        resolve_intervention_action ctx env ~name:rx_name ~loc:rx_loc rx.rxaction
+      in
+      let trigger : Ir.reactive_trigger =
+        { Ir.when_; Ir.after; Ir.once; Ir.cooldown; Ir.scope }
+      in
+      Some { Ir.name = rx_name; Ir.base_name; Ir.fire = Ir.Reactive trigger;
+             Ir.actions; Ir.kind = Ir.Scenario }
+    ) combos
+  ) decls
+
 let expand_interventions ctx =
   expand_scheduled_actions ctx ctx.interv_decls ~kind:Ir.Scenario
   @ expand_scheduled_actions ctx ctx.event_decls ~kind:Ir.Event
+  @ expand_reactive ctx ctx.reactive_decls
 
 (* ── Observation model expansion ─────────────────────────────────────────── *)
 

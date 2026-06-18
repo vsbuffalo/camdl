@@ -450,11 +450,97 @@
       "enum": ["shared_exogenous", "particle_local"]
     },
 
+    "obs_reducer": {
+      "type": "string",
+      "enum": ["latest", "sum", "mean", "max"]
+    },
+
+    "trigger_quantity": {
+      "type": "object",
+      "required": ["observed"],
+      "properties": {
+        "observed": {
+          "type": "object",
+          "required": ["stream", "reducer"],
+          "properties": {
+            "stream": { "type": "string" },
+            "window": { "type": "number" },
+            "reducer": { "$ref": "#/definitions/obs_reducer" }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "trigger_threshold": {
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["const"],
+          "properties": { "const": { "type": "number" } },
+          "additionalProperties": false
+        },
+        {
+          "required": ["param"],
+          "properties": { "param": { "type": "string" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "trigger_expr": {
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["cmp"],
+          "properties": {
+            "cmp": {
+              "type": "object",
+              "required": ["lhs", "op", "rhs"],
+              "properties": {
+                "lhs": { "$ref": "#/definitions/trigger_quantity" },
+                "op":  { "type": "string", "enum": ["lt", "le", "gt", "ge", "eq", "neq"] },
+                "rhs": { "$ref": "#/definitions/trigger_threshold" }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["and"],
+          "properties": {
+            "and": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/trigger_expr" },
+              "minItems": 2, "maxItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["or"],
+          "properties": {
+            "or": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/trigger_expr" },
+              "minItems": 2, "maxItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["not"],
+          "properties": { "not": { "$ref": "#/definitions/trigger_expr" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+
     "reactive_trigger": {
       "type": "object",
       "required": ["when", "after", "once", "scope"],
       "properties": {
-        "when": { "$ref": "#/definitions/expr" },
+        "when": { "$ref": "#/definitions/trigger_expr" },
         "after": { "type": "number" },
         "once": { "type": "boolean" },
         "cooldown": { "type": "number" },

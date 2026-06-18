@@ -69,6 +69,9 @@
       "transitions",   TRANSITIONS;
       "observations",  OBSERVATIONS;
       "interventions", INTERVENTIONS;
+      "reactive_interventions", REACTIVE_INTERVENTIONS;  (* gh#204 *)
+      "when",          WHEN;                             (* gh#204 trigger head *)
+      "action",        ACTION;                           (* gh#204 reactive action kv *)
       "ode",           ODE;
       "output",        OUTPUT;
       "simulate",      SIMULATE;

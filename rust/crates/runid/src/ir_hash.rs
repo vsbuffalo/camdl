@@ -26,8 +26,9 @@
 
 use ir::expr::{BinOp, Expr, UnOp};
 use ir::intervention::{
-    Action, AgendaScope, FireSource, Intervention, InterventionKind, InterventionSchedule,
-    ReactiveTrigger, RecurringSchedule,
+    Action, AgendaScope, CmpOp, FireSource, Intervention, InterventionKind,
+    InterventionSchedule, ObsReducer, ReactiveTrigger, RecurringSchedule, TriggerExpr,
+    TriggerQuantity, TriggerThreshold,
 };
 use ir::model::{
     BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitialConditions, Model,
@@ -736,6 +737,94 @@ impl ContentAddressed for AgendaScope {
             AgendaScope::ParticleLocal   => 1,
         };
         h.write_u32(idx);
+    }
+}
+
+impl ContentAddressed for CmpOp {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::intervention::CmpOp");
+        // Permanent variant indices (run-id stability) — new ops append.
+        let idx: u32 = match self {
+            CmpOp::Lt => 0,
+            CmpOp::Le => 1,
+            CmpOp::Gt => 2,
+            CmpOp::Ge => 3,
+            CmpOp::Eq => 4,
+            CmpOp::Neq => 5,
+        };
+        h.write_u32(idx);
+    }
+}
+
+impl ContentAddressed for ObsReducer {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::intervention::ObsReducer");
+        // Permanent variant indices (run-id stability) — new reducers append.
+        let idx: u32 = match self {
+            ObsReducer::Latest => 0,
+            ObsReducer::Sum => 1,
+            ObsReducer::Mean => 2,
+            ObsReducer::Max => 3,
+        };
+        h.write_u32(idx);
+    }
+}
+
+impl ContentAddressed for TriggerQuantity {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::intervention::TriggerQuantity");
+        match self {
+            TriggerQuantity::Observed { stream, window, reducer } => {
+                h.write_u32(0);
+                h.write_str(stream);
+                hash_opt_f64(h, window);
+                reducer.hash_into(h);
+            }
+        }
+    }
+}
+
+impl ContentAddressed for TriggerThreshold {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::intervention::TriggerThreshold");
+        match self {
+            TriggerThreshold::Const(v) => {
+                h.write_u32(0);
+                h.write_f64_bits(*v);
+            }
+            TriggerThreshold::Param(name) => {
+                h.write_u32(1);
+                h.write_str(name);
+            }
+        }
+    }
+}
+
+impl ContentAddressed for TriggerExpr {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::intervention::TriggerExpr");
+        match self {
+            TriggerExpr::Cmp { lhs, op, rhs } => {
+                h.write_u32(0);
+                lhs.hash_into(h);
+                op.hash_into(h);
+                rhs.hash_into(h);
+            }
+            TriggerExpr::And(a, b) => {
+                h.write_u32(1);
+                a.hash_into(h);
+                b.hash_into(h);
+            }
+            TriggerExpr::Or(a, b) => {
+                h.write_u32(2);
+                a.hash_into(h);
+                b.hash_into(h);
+            }
+            TriggerExpr::Not(a) => {
+                h.write_u32(3);
+                a.hash_into(h);
+            }
+        }
     }
 }
 

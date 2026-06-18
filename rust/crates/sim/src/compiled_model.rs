@@ -1413,8 +1413,9 @@ mod tests {
         use crate::Capabilities;
         use crate::{ChainBinomialSim, GillespieSim, OdeSim, Simulate};
         use ir::intervention::{
-            Action, AgendaScope, FireSource, FractionTransfer, Intervention,
-            InterventionKind, ReactiveTrigger,
+            Action, AgendaScope, CmpOp, FireSource, FractionTransfer, Intervention,
+            InterventionKind, ObsReducer, ReactiveTrigger, TriggerExpr, TriggerQuantity,
+            TriggerThreshold,
         };
 
         // Negative control: the stock fixture (no reactive policy) does not
@@ -1435,7 +1436,15 @@ mod tests {
             name: "sia_after_detection".into(),
             base_name: None,
             fire: FireSource::Reactive(ReactiveTrigger {
-                when_: Expr::const_(1.0),
+                when_: TriggerExpr::Cmp {
+                    lhs: TriggerQuantity::Observed {
+                        stream: "reported_cases".into(),
+                        window: None,
+                        reducer: ObsReducer::Latest,
+                    },
+                    op: CmpOp::Ge,
+                    rhs: TriggerThreshold::Const(2.0),
+                },
                 after: 21.0,
                 once: true,
                 cooldown: None,
