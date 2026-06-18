@@ -7,7 +7,11 @@
 //! observation draws (on a dedicated RNG stream) and enqueue the resulting
 //! effects through the scheduled-intervention due-batch.
 
+use crate::compiled_model::CompiledModel;
+use crate::inference::multi_stream_obs::{eval_stream_projection, StreamProjection};
+use crate::state::RealState;
 use ir::intervention::{CmpOp, ObsReducer, TriggerExpr, TriggerQuantity, TriggerThreshold};
+use ir::observation::{ObservationSchedule, TemporalKind};
 
 /// Inclusive upper-bound tolerance for the trailing window: an emit landing
 /// exactly at `now` is included. The window is `(now - window, now]`
@@ -91,6 +95,143 @@ fn apply_cmp(op: CmpOp, l: f64, r: f64) -> bool {
         CmpOp::Ge => l >= r,
         CmpOp::Eq => l == r,
         CmpOp::Neq => l != r,
+    }
+}
+
+// ── Slice 2: per-observation-stream interval evaluator ────────────────────────
+
+/// Tolerance for matching an emit time to the current substep boundary.
+const EMIT_EPS: f64 = 1e-9;
+
+/// Resolve an observation `emit_schedule` to concrete emit times. Mirrors the
+/// CLI's `obs_schedule_times` (kept here so the sim crate is self-contained).
+fn schedule_emit_times(s: &ObservationSchedule) -> Vec<f64> {
+    match s {
+        ObservationSchedule::AtTimes(ts) => ts.clone(),
+        ObservationSchedule::Regular(r) => {
+            let mut out = Vec::new();
+            let mut t = r.start;
+            while t <= r.end + EMIT_EPS {
+                out.push(t);
+                t += r.step;
+            }
+            out
+        }
+    }
+}
+
+/// Forward-sim observation evaluator for the streams a reactive trigger reads.
+/// Per stream it owns the resolved [`StreamProjection`] (reusing the inference
+/// projection machinery) and a **per-stream interval flow accumulator reset at
+/// that stream's own emit times** — NOT the output-tied `current_flows`, whose
+/// cadence can differ (constraint: read flow over the *observation* interval).
+///
+/// Slice 2 is the deterministic projection over the obs interval; the realized
+/// draw `Y` (the sampler on a dedicated obs RNG) is wired in slice 3.
+pub struct ReactiveObs {
+    streams: Vec<ReactiveStream>,
+}
+
+struct ReactiveStream {
+    name: String,
+    projection: StreamProjection,
+    kind: TemporalKind,
+    /// Per-transition flows accumulated since this stream's last emit (length =
+    /// n_transitions). Meaningful for `Interval` (incidence) streams, where
+    /// `eval_stream_projection`'s `FlowSum` sums the relevant indices; reset at
+    /// each emit. `Instant` (prevalence) streams ignore it (read state at emit).
+    interval_flows: Vec<u64>,
+    emit_times: Vec<f64>,
+}
+
+impl ReactiveObs {
+    /// Build the evaluator for the observation-stream names a reactive trigger
+    /// references. Each must be a declared observation carrying an
+    /// `emit_schedule`. (Stream existence is also enforced at compile time —
+    /// E279 — so the not-found arms here are defensive.)
+    pub fn from_model(compiled: &CompiledModel, stream_names: &[String]) -> Result<Self, String> {
+        let n_tr = compiled.model.transitions.len();
+        let mut streams = Vec::with_capacity(stream_names.len());
+        for name in stream_names {
+            let obs = compiled
+                .model
+                .observations
+                .iter()
+                .find(|o| o.name == *name)
+                .ok_or_else(|| {
+                    format!("reactive trigger references unknown observation stream '{name}'")
+                })?;
+            let projection = StreamProjection::from_ir(&obs.projection, compiled, name)?;
+            let kind = obs.projection.temporal_kind();
+            let emit_times = match &obs.emit_schedule {
+                Some(s) => schedule_emit_times(s),
+                None => {
+                    return Err(format!(
+                        "reactive trigger stream '{name}' has no emit_schedule — \
+                         it cannot produce the observations the trigger reads"
+                    ))
+                }
+            };
+            streams.push(ReactiveStream {
+                name: name.clone(),
+                projection,
+                kind,
+                interval_flows: vec![0; n_tr],
+                emit_times,
+            });
+        }
+        Ok(ReactiveObs { streams })
+    }
+
+    /// Add one substep's per-transition `flows` to every `Interval` stream's
+    /// interval accumulator.
+    pub fn accumulate(&mut self, flows: &[u64]) {
+        for s in &mut self.streams {
+            if s.kind == TemporalKind::Interval {
+                for (acc, &f) in s.interval_flows.iter_mut().zip(flows) {
+                    *acc += f;
+                }
+            }
+        }
+    }
+
+    /// Stream indices whose emit time matches `t` (within tolerance).
+    pub fn due_at(&self, t: f64) -> Vec<usize> {
+        self.streams
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.emit_times.iter().any(|&e| (e - t).abs() <= EMIT_EPS))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The projected value for stream `idx` at time `t`: interval incidence (for
+    /// `Interval` streams, from the accumulator) or instantaneous prevalence
+    /// (for `Instant` streams, from `counts`/state). Reuses the inference
+    /// projection evaluator so forward and inference agree.
+    pub fn projected(
+        &self,
+        idx: usize,
+        counts: &[i64],
+        real_s: &RealState,
+        params: &[f64],
+        compiled: &CompiledModel,
+        t: f64,
+    ) -> f64 {
+        let s = &self.streams[idx];
+        eval_stream_projection(&s.projection, &s.interval_flows, counts, params, compiled, real_s, t)
+    }
+
+    /// Reset stream `idx`'s interval accumulator (after its emit).
+    pub fn reset(&mut self, idx: usize) {
+        for a in &mut self.streams[idx].interval_flows {
+            *a = 0;
+        }
+    }
+
+    /// The stream name at `idx` (for the reactive log / diagnostics).
+    pub fn stream_name(&self, idx: usize) -> &str {
+        &self.streams[idx].name
     }
 }
 
@@ -187,5 +328,59 @@ mod tests {
         assert!(eval_trigger(&TriggerExpr::Or(Box::new(lt.clone()), Box::new(ge.clone())), &q, &t));
         // !(false) → true
         assert!(eval_trigger(&TriggerExpr::Not(Box::new(lt)), &q, &t));
+    }
+
+    // ── slice 2: interval accumulator + emit schedule ──
+
+    #[test]
+    fn emit_schedule_regular_and_at_times() {
+        use ir::observation::{ObservationSchedule, RegularSchedule};
+        let reg = ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 28.0 });
+        assert_eq!(schedule_emit_times(&reg), vec![0.0, 7.0, 14.0, 21.0, 28.0]);
+        let at = ObservationSchedule::AtTimes(vec![3.0, 9.0]);
+        assert_eq!(schedule_emit_times(&at), vec![3.0, 9.0]);
+    }
+
+    #[test]
+    fn interval_accumulator_accumulates_and_resets() {
+        // One-stream ReactiveObs (FlowSum over transition 0, Interval), built
+        // directly so the accumulator logic is tested without a CompiledModel.
+        let mut ro = ReactiveObs {
+            streams: vec![ReactiveStream {
+                name: "weekly".into(),
+                projection: StreamProjection::FlowSum(vec![0]),
+                kind: TemporalKind::Interval,
+                interval_flows: vec![0],
+                emit_times: vec![7.0, 14.0],
+            }],
+        };
+        ro.accumulate(&[3]);
+        ro.accumulate(&[2]);
+        assert_eq!(ro.streams[0].interval_flows, vec![5], "accumulates over the interval");
+        assert_eq!(ro.due_at(7.0), vec![0]);
+        assert!(ro.due_at(10.0).is_empty(), "no emit at 10");
+        ro.reset(0);
+        assert_eq!(ro.streams[0].interval_flows, vec![0], "reset zeros the interval");
+        ro.accumulate(&[4]);
+        assert_eq!(ro.streams[0].interval_flows, vec![4], "next interval starts fresh");
+    }
+
+    #[test]
+    fn instant_stream_ignores_flow_accumulation() {
+        let mut ro = ReactiveObs {
+            streams: vec![ReactiveStream {
+                name: "prev".into(),
+                projection: StreamProjection::IntCompSum(vec![0]),
+                kind: TemporalKind::Instant,
+                interval_flows: vec![0],
+                emit_times: vec![7.0],
+            }],
+        };
+        ro.accumulate(&[9]);
+        assert_eq!(
+            ro.streams[0].interval_flows,
+            vec![0],
+            "Instant (prevalence) streams read state at the emit, not accumulated flow"
+        );
     }
 }
