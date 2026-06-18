@@ -211,3 +211,135 @@ fn scenario_delta_re_keys_only_the_scenario_level() {
     assert_ne!(base.levels[3].hash, withvax.levels[3].hash, "scenario must differ");
     assert_ne!(base.run_id, withvax.run_id);
 }
+
+// ── gh#241 PR F: input-surface differential harness (sim/batch) ───────────────
+//
+// The identity guarantee made executable: a SEMANTIC input mutation MUST re-key
+// the `run_id`; a PRESENTATION / provenance mutation MUST NOT. This complements
+// the anti-drift golden (which pins absolute encodings) with parametric
+// sensitivity + inertness — so a future change that leaks a presentation field
+// into identity, or drops a semantic one, fails here, not silently in the field.
+
+/// All resolved trajectory inputs, owned, so each case clones the base and
+/// mutates exactly one field. `run_id()` resolves through the real
+/// `resolve_trajectory` path.
+#[derive(Clone)]
+struct SimInputs {
+    model: Model,
+    model_stem: String,
+    backend: ForwardBackend,
+    dt: f64,
+    t_start: f64,
+    t_end: f64,
+    output: OutputSchedule,
+    allow_degenerate_rates: bool,
+    no_flows: bool,
+    columns: std::collections::BTreeSet<String>,
+    base_params: HashMap<String, f64>,
+    enable: Vec<String>,
+    disable: Vec<String>,
+    scen_params: HashMap<String, f64>,
+    param_label: String,
+    scenario_label: String,
+    base_seed: u64,
+    process_seed: u64,
+}
+
+impl SimInputs {
+    fn base() -> Self {
+        SimInputs {
+            model: tiny_model(),
+            model_stem: "sir".into(),
+            backend: ForwardBackend::ChainBinomial,
+            dt: 1.0,
+            t_start: 0.0,
+            t_end: 100.0,
+            output: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 }),
+            allow_degenerate_rates: false,
+            no_flows: false,
+            columns: std::collections::BTreeSet::new(),
+            base_params: HashMap::new(),
+            enable: vec![],
+            disable: vec![],
+            scen_params: HashMap::new(),
+            param_label: "base".into(),
+            scenario_label: "baseline".into(),
+            base_seed: 1,
+            process_seed: 1,
+        }
+    }
+
+    fn run_id(&self) -> ContentHash {
+        resolve_trajectory(&TrajectoryCtx {
+            model: &self.model,
+            model_stem: &self.model_stem,
+            ir_version: "0.7",
+            engine_version: "0.3.0+test",
+            backend: self.backend,
+            dt: self.dt,
+            t_start: self.t_start,
+            t_end: self.t_end,
+            output: &self.output,
+            allow_degenerate_rates: self.allow_degenerate_rates,
+            no_flows: self.no_flows,
+            columns: &self.columns,
+            base_params: &self.base_params,
+            table_digests: vec![],
+            enable: &self.enable,
+            disable: &self.disable,
+            scen_params: &self.scen_params,
+            param_label: &self.param_label,
+            scenario_label: &self.scenario_label,
+            base_seed: self.base_seed,
+            process_seed: self.process_seed,
+        })
+        .expect("resolve")
+        .run_id
+    }
+}
+
+#[test]
+fn differential_semantic_inputs_rekey_the_run_id() {
+    let base_rid = SimInputs::base().run_id();
+    // Each closure mutates exactly one SEMANTIC field; the run_id MUST change.
+    let cases: Vec<(&str, Box<dyn Fn(&mut SimInputs)>)> = vec![
+        ("backend",          Box::new(|i: &mut SimInputs| i.backend = ForwardBackend::Gillespie)),
+        ("dt",               Box::new(|i| i.dt = 0.5)),
+        ("t_start",          Box::new(|i| i.t_start = 10.0)),
+        ("t_end",            Box::new(|i| i.t_end = 200.0)),
+        ("output_step",      Box::new(|i| i.output =
+            OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 2.0, end: 100.0 }))),
+        ("base_param",       Box::new(|i| { i.base_params.insert("beta".into(), 0.5); })),
+        ("scenario_enable",  Box::new(|i| i.enable = vec!["vacc".into()])),
+        ("scenario_disable", Box::new(|i| i.disable = vec!["aging".into()])),
+        ("scen_param",       Box::new(|i| { i.scen_params.insert("beta".into(), 0.7); })),
+        ("process_seed",     Box::new(|i| i.process_seed = 2)),
+        ("no_flows",         Box::new(|i| i.no_flows = true)),
+        ("columns",          Box::new(|i| { i.columns.insert("S".into()); })),
+        ("model_structure",  Box::new(|i| i.model.name = "different".into())),
+    ];
+    for (name, mutate) in cases {
+        let mut i = SimInputs::base();
+        mutate(&mut i);
+        assert_ne!(i.run_id(), base_rid, "semantic input `{name}` must re-key the run_id");
+    }
+}
+
+#[test]
+fn differential_presentation_inputs_are_inert() {
+    let base_rid = SimInputs::base().run_id();
+    // Each mutates exactly one PRESENTATION / provenance field; run_id MUST hold.
+    // (`base_seed` is `#[run_input(provenance)]`; the level *labels* never enter
+    // the hash — `run_id` is built from level hashes only.)
+    let cases: Vec<(&str, Box<dyn Fn(&mut SimInputs)>)> = vec![
+        ("model_stem",     Box::new(|i: &mut SimInputs| i.model_stem = "renamed".into())),
+        ("param_label",    Box::new(|i| i.param_label = "p1".into())),
+        ("scenario_label", Box::new(|i| i.scenario_label = "sc1".into())),
+        ("base_seed",      Box::new(|i| i.base_seed = 99)), // process_seed held fixed
+    ];
+    for (name, mutate) in cases {
+        let mut i = SimInputs::base();
+        mutate(&mut i);
+        assert_eq!(i.run_id(), base_rid, "presentation input `{name}` must NOT affect the run_id");
+    }
+}

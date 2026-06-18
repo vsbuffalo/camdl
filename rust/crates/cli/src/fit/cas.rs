@@ -582,6 +582,36 @@ mod tests {
             "explicit allow_degenerate_rates=false must match the default (no re-key)");
     }
 
+    /// gh#241 PR F: input-surface differential for the fit-stage identity path.
+    /// The identity guarantee made executable, complementing the per-field
+    /// sensitivity tests above with the PRESENTATION-inert half: a semantic
+    /// fit-config input re-keys the fit blob; a provenance field does not.
+    #[test]
+    fn differential_fit_config_semantic_vs_presentation() {
+        // SEMANTIC: a `[config].dt` change re-keys the fit-wide blob.
+        let base = fit_config_blob_hash(&minimal_config("")).unwrap();
+        let dt = fit_config_blob_hash(&minimal_config("[config]\ndt = 0.5\n")).unwrap();
+        assert_ne!(base, dt, "[config].dt is semantic — must re-key the fit blob");
+
+        // PRESENTATION: `output_dir` is normalized OUT of the fit identity (pure
+        // write-location provenance), so two configs differing only in it hash equal.
+        let cfg = |out: &str| {
+            toml::from_str::<FitConfigV2>(&format!(
+                "output_dir = \"{out}\"\n[model]\ncamdl = \"models/sir.camdl\"\n\
+                 [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
+                 [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n[fixed]\nN0 = 1000000\n\
+                 [stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+                 chains = 4\nparticles = 1000\niterations = 50\ncooling = 0.70\n"
+            ))
+            .expect("config must parse")
+        };
+        assert_eq!(
+            fit_config_blob_hash(&cfg("results/run_a")).unwrap(),
+            fit_config_blob_hash(&cfg("results/run_b")).unwrap(),
+            "output_dir is provenance — it is normalized out and must NOT affect the fit blob"
+        );
+    }
+
     /// gh#134: `condition_from` is part of the fit IDENTITY — a different
     /// conditioning window is a different fit / estimand. So a SET value must
     /// fold into the fit-level blob hash and re-key the fit; an UNSET value

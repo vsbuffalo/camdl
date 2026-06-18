@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use crate::util::{load_params_toml, resolve_ir_path};
-use crate::hashing::{model_hash, sim_hash, scen_hash, canonical_params};
 use crate::sampling::{generate_design, describe_prior, DesignParam};
 use ir::parameter::PriorDist;
 use crate::version;
@@ -362,102 +361,6 @@ fn resolve_batch_scenarios(
         .collect()
 }
 
-// ─── Run planning ─────────────────────────────────────────────────────────────
-
-/// Whether a planned run should be skipped (cache hit) or executed (cache miss).
-#[derive(Debug, PartialEq)]
-pub enum RunDecision {
-    /// traj.tsv already exists and --force was not set; cached result will be reused.
-    CacheHit,
-    /// traj.tsv is absent or --force was set; this run must be executed.
-    CacheMiss,
-}
-
-/// A fully-resolved description of one (sweep_point, scenario, seed) run,
-/// including its cache decision. Produced by `plan_runs` before any simulation
-/// is started — an ADVISORY predictor for the normal-batch dry-run /
-/// `batch status` summary (the run path itself classifies hits through the
-/// real CAS `store.lookup`). Slated for removal in gh#241 PR F.
-#[derive(Debug)]
-pub struct RunPlan {
-    /// Scenario label (read by the `batch status` per-scenario hit count and
-    /// the plan-classification unit tests).
-    pub scenario: String,
-    /// Resolved seed (read by the seed-extension unit tests).
-    pub seed: u64,
-    /// Path relative to `sims/`: `{sim_hash_8}/{scenario_slug}-{scen_hash_8}/seed_{seed}`.
-    pub run_path: String,
-    /// Absolute path to the run directory (read by the unit tests that seed a
-    /// `traj.tsv` to assert the advisory cache decision flips).
-    pub run_dir: String,
-    pub decision: RunDecision,
-}
-
-/// Classify every (sweep_point, scenario, seed) triple as CacheHit or CacheMiss
-/// by inspecting the filesystem. Does not simulate or write anything.
-///
-/// `sweep_points` is a list of parameter override maps from `[sweep]`. Pass
-/// `&[HashMap::new()]` (one empty map) when there is no sweep.
-///
-/// `shash` must be the full 64-char hex sim_hash; only the first 8 chars are
-/// used in paths. `runs_dir` is the absolute path to the runs/ subdirectory.
-pub fn plan_runs(
-    scenarios: &[ScenarioEntry],
-    sweep_points: &[HashMap<String, f64>],
-    seeds: &[u64],
-    shash: &str,
-    model_stem: Option<&str>,
-    runs_dir: &str,
-    force: bool,
-) -> Vec<RunPlan> {
-    let effective_points: &[HashMap<String, f64>] = if sweep_points.is_empty() {
-        &[HashMap::new()]
-    } else {
-        sweep_points
-    };
-
-    let mut plans = Vec::with_capacity(effective_points.len() * scenarios.len() * seeds.len());
-    for sweep in effective_points {
-        for sc in scenarios {
-            // Merge sweep overrides into scenario params for hashing
-            let mut merged_params = sc.params.clone();
-            merged_params.extend(sweep.iter().map(|(k, v)| (k.clone(), *v)));
-
-            let sc_hash = scen_hash(&sc.enable, &sc.disable, &merged_params);
-            for &seed in seeds {
-                // `runs_dir` is already the `<root>/sims` subtree; the
-                // `sim_run_rel` helper produces the trailing three-segment
-                // relative path (stem-<sim_hash>/slug-<scen_hash>/seed_N)
-                // and stays byte-identical to the single-run --cas path.
-                let run_path = crate::run_paths::sim_run_rel(
-                    model_stem, shash, &sc.name, &sc_hash, seed,
-                );
-                let run_dir  = format!("{}/{}", runs_dir, run_path);
-                // `traj_exists` is an ADVISORY hit signal used only by the
-                // normal-batch dry-run / `batch status` summary. The actual run
-                // path classifies hits through `CasSink::should_run` (real CAS
-                // `store.lookup`, a `Completed`-leaf gate); the design path does
-                // the same at dry-run time (`print_design_dry_run`). This legacy
-                // hash/path prediction is slated for removal in gh#241 PR F.
-                let traj_exists = std::path::Path::new(&format!("{}/traj.tsv", run_dir)).exists();
-                let decision = if !force && traj_exists {
-                    RunDecision::CacheHit
-                } else {
-                    RunDecision::CacheMiss
-                };
-                plans.push(RunPlan {
-                    scenario: sc.name.clone(),
-                    seed,
-                    run_path,
-                    run_dir,
-                    decision,
-                });
-            }
-        }
-    }
-    plans
-}
-
 // ─── Run metadata ─────────────────────────────────────────────────────────────
 
 /// Descriptor for one completed cell, accumulated on `CasSink.completed_runs`
@@ -523,7 +426,6 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         eprintln!("error: cannot read {}: {}", ir_path_resolved, e);
         std::process::exit(1);
     });
-    let mhash = model_hash(&ir_json);
 
     let base_params: HashMap<String, f64> = if let Some(ref pf) = exp.config.params {
         // Surface fit-provenance status for the params file: a verified MLE
@@ -550,7 +452,6 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
     } else {
         HashMap::new()
     };
-    let shash = sim_hash(&mhash, &canonical_params(&base_params), backend.as_str(), dt);
 
     let seeds = exp.config.seeds.resolve().unwrap_or_else(|e| {
         eprintln!("error resolving seeds: {}", e);
@@ -608,14 +509,6 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
             eprintln!("error: {}", e);
             std::process::exit(1);
         });
-    // Hash-only view: enable/disable/params are the resolved delta so the
-    // CAS path is byte-identical to single-run --cas for preset scenarios.
-    let scenarios: Vec<ScenarioEntry> = resolved_scenarios.iter().map(|r| ScenarioEntry {
-        name: r.name.clone(),
-        params: r.params.clone(),
-        enable: r.enable.clone(),
-        disable: r.disable.clone(),
-    }).collect();
 
     // [obs] enabled (CLI review #4). When set, each run's observation
     // streams are sampled and written into the CAS obs subtree. Validate
@@ -675,15 +568,18 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
 
     let runs_dir = format!("{}/sims", output_dir);
 
-    let plans = plan_runs(&scenarios, &sweep_points, &seeds, &shash,
-        model_stem.as_deref(), &runs_dir, a.force);
-    let total = plans.len();
+    // The cell grid the engine will run: |points| × |scenarios| × |seeds|.
+    // `expand_sweep` returns one null point for an empty sweep, so the count
+    // is exact for both the sweep and no-sweep cases.
+    let total = sweep_points.len() * resolved_scenarios.len() * seeds.len();
 
     if a.dry_run {
         print_batch_dry_run(
-            &model_path, backend, dt, &output_dir, parallel,
+            &model_path, &batch_model, model_stem.as_deref(),
+            backend, dt, &output_dir, parallel,
             &resolved_scenarios, &sweep_points, &seeds, &base_params,
-            exp.config.params.as_deref(), &plans,
+            exp.config.params.as_deref(), &runs_dir, a.allow_degenerate_rates,
+            &output_cols, a.force,
         );
         return;
     }
@@ -1001,6 +897,127 @@ impl CasSink {
         let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
         Ok((rt, dir, rel))
     }
+
+    /// A throwaway `CasSink` for dry-run / status prediction. It is used ONLY
+    /// for `cell_resolve` (the canonical identity/path resolver) and `root()`,
+    /// so the identity-relevant fields are populated from the same resolved
+    /// inputs the real run path uses; the run-only fields (`model_path`,
+    /// `total`/`counter`, `completed_runs`, `progress`, …) are inert.
+    fn probe(
+        resolved_scenarios: &[ResolvedEntry],
+        base_model: &ir::Model,
+        model_stem: Option<&str>,
+        base_params: &HashMap<String, f64>,
+        backend: crate::args::types::ForwardBackend,
+        dt: f64,
+        allow_degenerate_rates: bool,
+        output_cols: &crate::util::OutputColumns,
+        runs_dir: &str,
+        force: bool,
+    ) -> Self {
+        CasSink {
+            resolved_scenarios: resolved_scenarios.to_vec(),
+            model_path: String::new(),
+            model_stem: model_stem.map(|s| s.to_string()),
+            base_model: base_model.clone(),
+            base_params: base_params.clone(),
+            table_files: HashMap::new(),
+            backend,
+            dt,
+            allow_degenerate_rates,
+            output_cols: output_cols.clone(),
+            runs_dir: runs_dir.to_string(),
+            obs_enabled: false,
+            force,
+            total: 0,
+            counter: 0,
+            completed_runs: Vec::new(),
+            errors: Vec::new(),
+            label: None,
+            fit_dep: Vec::new(),
+            progress: None,
+        }
+    }
+
+    /// Resolve every (point, scenario, seed) cell's real `Sim` identity + path
+    /// and classify each as a CAS cache hit/miss via `store.lookup` — the SAME
+    /// `cell_resolve` + `LeafIdentity` gate `should_run` uses on the real run
+    /// path, so a dry-run / status prediction reports exactly what `run` would
+    /// resolve. No simulation, no files written.
+    ///
+    /// `points` is the expanded `[sweep]`/`[design]` grid (one null point for an
+    /// empty sweep). Scenario routing matches the engine job: a resolved preset
+    /// → `ScenarioRef::Named`, an ad-hoc patch → `Inline`; the sweep point is
+    /// the cell's `point_overrides`. A cell whose identity fails to resolve is
+    /// counted as a miss (it surfaces as an error on the real run path).
+    fn predict_cells(
+        &self,
+        points: &[indexmap::IndexMap<String, f64>],
+        seeds: &[u64],
+    ) -> Vec<CellPrediction> {
+        let store = runid::FsCasStore::new(self.root());
+        let mut out =
+            Vec::with_capacity(points.len() * self.resolved_scenarios.len() * seeds.len());
+        for (point_idx, point_overrides) in points.iter().enumerate() {
+            for sref in &self.resolved_scenarios {
+                let scenario = match &sref.route {
+                    Some(preset) => crate::sim_job::ScenarioRef::Named(preset.clone()),
+                    None => crate::sim_job::ScenarioRef::Inline {
+                        name: sref.name.clone(),
+                        enable: sref.enable.clone(),
+                        disable: sref.disable.clone(),
+                        params: sref.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                    },
+                };
+                for &seed in seeds {
+                    let spec = crate::engine::CellSpec {
+                        run_idx: 0,
+                        point_idx,
+                        scenario: scenario.clone(),
+                        point_overrides: point_overrides.clone(),
+                        process_seed: seed,
+                        obs_seed: seed ^ crate::util::SEED_MIX_OBS,
+                        sim_run: crate::util::SimRun::default(),
+                    };
+                    match self.cell_resolve(&spec) {
+                        Ok((rt, dir, rel)) => {
+                            let hit = !self.force
+                                && matches!(
+                                    store.lookup(&dir, &runid::LeafIdentity::new(rt.run_id)),
+                                    runid::Lookup::Hit(_)
+                                );
+                            out.push(CellPrediction {
+                                scenario: sref.name.clone(),
+                                seed,
+                                rel,
+                                hit,
+                            });
+                        }
+                        // No cache key without a resolve → treat as a miss; the
+                        // error surfaces in `merge_cell` on the real run path.
+                        Err(_) => out.push(CellPrediction {
+                            scenario: sref.name.clone(),
+                            seed,
+                            rel: String::new(),
+                            hit: false,
+                        }),
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// One cell's resolved CAS prediction for a dry-run / `batch status` summary:
+/// the cell coordinates (scenario, seed), its store-relative `Sim` path, and
+/// whether it is already a committed leaf (a `store.lookup` hit). Identity is
+/// resolved through `CasSink::cell_resolve` — the same path a real `run` takes.
+struct CellPrediction {
+    scenario: String,
+    seed: u64,
+    rel: String,
+    hit: bool,
 }
 
 /// Human-readable provenance label for the `params` path level.
@@ -1504,87 +1521,25 @@ fn print_design_dry_run(
     seeds: &[u64],
     force: bool,
 ) {
-    // A throwaway `CasSink` reused only for its `cell_resolve` (the canonical
-    // identity/path resolver) and `root()` — identical inputs to the run path,
-    // so the dry-run reports exactly what `run` would resolve.
-    let probe = CasSink {
-        resolved_scenarios: resolved_scenarios.to_vec(),
-        model_path: String::new(),
-        model_stem: model_stem.map(|s| s.to_string()),
-        base_model: batch_model.clone(),
-        base_params: base_params.clone(),
-        table_files: HashMap::new(),
-        backend,
-        dt,
-        allow_degenerate_rates,
-        output_cols: output_cols.clone(),
-        runs_dir: runs_dir.to_string(),
-        obs_enabled: false,
-        force,
-        total: 0,
-        counter: 0,
-        completed_runs: Vec::new(),
-        errors: Vec::new(),
-        label: None,
-        fit_dep: Vec::new(),
-        progress: None,
-    };
-    let store = runid::FsCasStore::new(probe.root());
-
-    let mut hits = 0usize;
-    let mut misses = 0usize;
-    let mut shown: Vec<(String, String)> = Vec::new();
-    for (point_idx, point_overrides) in points.iter().enumerate() {
-        for sref in resolved_scenarios {
-            let scenario = match &sref.route {
-                Some(preset) => crate::sim_job::ScenarioRef::Named(preset.clone()),
-                None => crate::sim_job::ScenarioRef::Inline {
-                    name: sref.name.clone(),
-                    enable: sref.enable.clone(),
-                    disable: sref.disable.clone(),
-                    params: sref.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                },
-            };
-            for &seed in seeds {
-                let spec = crate::engine::CellSpec {
-                    run_idx: 0,
-                    point_idx,
-                    scenario: scenario.clone(),
-                    point_overrides: point_overrides.clone(),
-                    process_seed: seed,
-                    obs_seed: seed ^ crate::util::SEED_MIX_OBS,
-                    sim_run: crate::util::SimRun::default(),
-                };
-                match probe.cell_resolve(&spec) {
-                    Ok((rt, dir, rel)) => {
-                        let is_hit = !force && matches!(
-                            store.lookup(&dir, &runid::LeafIdentity::new(rt.run_id)),
-                            runid::Lookup::Hit(_)
-                        );
-                        if is_hit { hits += 1; } else { misses += 1; }
-                        if shown.len() < 6 {
-                            shown.push((if is_hit { "hit " } else { "miss" }.to_string(), rel));
-                        }
-                    }
-                    Err(_) => {
-                        misses += 1;
-                    }
-                }
-            }
-        }
-    }
+    let probe = CasSink::probe(
+        resolved_scenarios, batch_model, model_stem, base_params,
+        backend, dt, allow_degenerate_rates, output_cols, runs_dir, force,
+    );
+    let predictions = probe.predict_cells(points, seeds);
+    let hits = predictions.iter().filter(|c| c.hit).count();
+    let misses = predictions.len() - hits;
 
     eprintln!("  Design '{}' (dry run): {} points × {} scenarios × {} seeds = {} cells",
         design_name, points.len(), resolved_scenarios.len(), seeds.len(),
-        points.len() * resolved_scenarios.len() * seeds.len());
+        predictions.len());
     eprintln!("    {} cache hits  → skipped", hits);
     eprintln!("    {} cache misses → would simulate", misses);
     eprintln!("  Output paths (sims/<run_path>):");
-    for (tag, rel) in &shown {
-        eprintln!("    [{}] {}", tag, rel);
+    for cell in predictions.iter().take(6) {
+        eprintln!("    [{}] {}", if cell.hit { "hit " } else { "miss" }, cell.rel);
     }
-    if hits + misses > shown.len() {
-        eprintln!("    ... ({} more)", hits + misses - shown.len());
+    if predictions.len() > 6 {
+        eprintln!("    ... ({} more)", predictions.len() - 6);
     }
 }
 
@@ -1734,9 +1689,10 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
     let output_dir = exp.config.output_dir.clone();
 
     // Status is derived live from (a) the batch.toml plan and (b) the
-    // on-disk leaf tree — there is no batch-level manifest. We re-plan the
-    // sweep exactly as `batch run` would and count which cells already have a
-    // committed leaf (`plan_runs` marks each a `CacheHit` when present).
+    // on-disk leaf tree — there is no batch-level manifest. We resolve every
+    // cell's real `Sim` identity exactly as `batch run` would (`cell_resolve`)
+    // and count which already have a committed leaf via `store.lookup` — the
+    // same CAS gate `should_run` uses, never a legacy hash/marker prediction.
     println!("Experiment status for: {}", toml_path);
     println!("  Model:      {}", exp.config.model);
     println!("  Output dir: {}", output_dir);
@@ -1752,55 +1708,75 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
         }
     };
 
-    let mhash = model_hash(&ir_json);
     let base_params: HashMap<String, f64> = exp.config.params.as_ref()
         .and_then(|p| load_params_toml(p).ok())
         .unwrap_or_default();
-    let shash = sim_hash(&mhash, &canonical_params(&base_params),
-        exp.config.backend.as_str(), exp.config.dt);
+
+    // Parse the model and resolve every `[[scenario]]` against its presets, so
+    // the prediction resolves each cell's identity exactly as the run path
+    // does (CLI review #3). A parse/resolution failure means the model itself
+    // is broken — report and bail rather than mis-predict from raw scenarios.
+    let batch_model: ir::Model = match ir::from_str(&ir_json) {
+        Ok(m) => m,
+        Err(e) => {
+            println!("  (cannot parse model {}: {})", exp.config.model, e);
+            println!("  Run 'camdl batch run {}' to start.", toml_path);
+            return;
+        }
+    };
     let raw_scenarios: Vec<ScenarioEntry> = if exp.scenario.is_empty() {
         vec![ScenarioEntry { name: "baseline".to_string(), params: HashMap::new(), enable: vec![], disable: vec![] }]
     } else {
         exp.scenario
     };
-    // Resolve presets so the cache-hit count uses the same scen_hash the run
-    // path was written under (CLI review #3).
-    let scenarios: Vec<ScenarioEntry> = match ir::from_str(&ir_json) {
-        Ok(model) => match resolve_batch_scenarios(&raw_scenarios, &model) {
-            Ok(resolved) => resolved.iter().map(|r| ScenarioEntry {
-                name: r.name.clone(),
-                params: r.params.clone(),
-                enable: r.enable.clone(),
-                disable: r.disable.clone(),
-            }).collect(),
-            Err(_) => raw_scenarios,
-        },
-        Err(_) => raw_scenarios,
+    let resolved_scenarios = match resolve_batch_scenarios(&raw_scenarios, &batch_model) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("  (cannot resolve scenarios: {})", e);
+            println!("  Run 'camdl batch run {}' to start.", toml_path);
+            return;
+        }
     };
-    let scenario_names: Vec<String> = scenarios.iter().map(|s| s.name.clone()).collect();
+    let scenario_names: Vec<String> = resolved_scenarios.iter().map(|s| s.name.clone()).collect();
     println!("  Scenarios:  {}", scenario_names.join(", "));
     println!("  Seeds:      {} total ({}..={})",
         seeds.len(),
         seeds.first().copied().unwrap_or(0),
         seeds.last().copied().unwrap_or(0));
 
-    let sweep_points = expand_sweep(&exp.sweep);
+    // Resolve the `[output]` column view (folded into each cell's `config`
+    // identity, so the prediction must use the same view the run path does).
+    let output_cols = match crate::util::OutputColumns::resolve(&exp.output, &batch_model) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("  (cannot resolve [output] view: {})", e);
+            println!("  Run 'camdl batch run {}' to start.", toml_path);
+            return;
+        }
+    };
+
+    let model_stem = crate::hashing::path_stem_slug(&exp.config.model);
     let runs_dir = format!("{}/sims", output_dir);
-    let cache_stem = crate::hashing::path_stem_slug(&exp.config.model);
-    let plans = plan_runs(&scenarios, &sweep_points, &seeds, &shash,
-        cache_stem.as_deref(), &runs_dir, false);
-    let live_hits = plans.iter().filter(|p| p.decision == RunDecision::CacheHit).count();
-    println!("  Completed:  {}/{} leaves present", live_hits, plans.len());
+    let points: Vec<indexmap::IndexMap<String, f64>> = expand_sweep(&exp.sweep)
+        .iter()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+        .collect();
+
+    let probe = CasSink::probe(
+        &resolved_scenarios, &batch_model, model_stem.as_deref(), &base_params,
+        exp.config.backend, exp.config.dt, false, &output_cols, &runs_dir, false,
+    );
+    let predictions = probe.predict_cells(&points, &seeds);
+    let live_hits = predictions.iter().filter(|c| c.hit).count();
+    println!("  Completed:  {}/{} leaves present", live_hits, predictions.len());
 
     // List the first few cells still to run (scenario / seed / path), so a
     // resumed `batch run` is predictable from `batch status`.
-    let remaining: Vec<&RunPlan> = plans.iter()
-        .filter(|p| p.decision == RunDecision::CacheMiss)
-        .collect();
+    let remaining: Vec<&CellPrediction> = predictions.iter().filter(|c| !c.hit).collect();
     if !remaining.is_empty() {
         println!("  Remaining:  {} cell(s) to run:", remaining.len());
-        for p in remaining.iter().take(6) {
-            println!("    scenario={} seed={}  → {}", p.scenario, p.seed, p.run_dir);
+        for c in remaining.iter().take(6) {
+            println!("    scenario={} seed={}  → {}/{}", c.scenario, c.seed, runs_dir, c.rel);
         }
         if remaining.len() > 6 {
             println!("    ... ({} more)", remaining.len() - 6);
@@ -1816,9 +1792,15 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
 /// Print the resolved sweep grid + cache summary for `batch run --dry-run`.
 /// Does not simulate. Format mirrors the single-run `--dry-run` idiom in
 /// main.rs: header block, per-item tables, totals.
+///
+/// The cache status + output paths are resolved through `CasSink::predict_cells`
+/// — the SAME `cell_resolve` + `store.lookup` gate the real run path uses — so a
+/// dry-run reports exactly what `run` would resolve.
 #[allow(clippy::too_many_arguments)]
 fn print_batch_dry_run(
     model_path: &str,
+    batch_model: &ir::Model,
+    model_stem: Option<&str>,
     backend: crate::args::types::ForwardBackend,
     dt: f64,
     output_dir: &str,
@@ -1828,8 +1810,27 @@ fn print_batch_dry_run(
     seeds: &[u64],
     base_params: &HashMap<String, f64>,
     params_file: Option<&str>,
-    plans: &[RunPlan],
+    runs_dir: &str,
+    allow_degenerate_rates: bool,
+    output_cols: &crate::util::OutputColumns,
+    force: bool,
 ) {
+    // Resolve every cell's real CAS identity + hit/miss exactly as the run path
+    // would (`CasSink::cell_resolve` + `store.lookup`). `expand_sweep` returns
+    // one null point for an empty sweep, so the grid count is exact either way.
+    let points: Vec<indexmap::IndexMap<String, f64>> = if sweep_points.is_empty() {
+        vec![indexmap::IndexMap::new()]
+    } else {
+        sweep_points.iter()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .collect()
+    };
+    let probe = CasSink::probe(
+        scenarios, batch_model, model_stem, base_params,
+        backend, dt, allow_degenerate_rates, output_cols, runs_dir, force,
+    );
+    let predictions = probe.predict_cells(&points, seeds);
+
     eprintln!("camdl batch run (dry run)");
     eprintln!();
     eprintln!("  model:       {}", model_path);
@@ -1867,7 +1868,7 @@ fn print_batch_dry_run(
     eprintln!();
 
     // Sweep grid with per-point provenance
-    let total_runs = plans.len();
+    let total_runs = predictions.len();
     let n_pts = sweep_points.len().max(1);
     eprintln!(
         "Sweep grid ({} points × {} scenarios × {} seeds = {} runs):",
@@ -1940,26 +1941,22 @@ fn print_batch_dry_run(
     }
 
     // Cache status
-    let hits    = plans.iter().filter(|p| p.decision == RunDecision::CacheHit).count();
-    let misses  = plans.iter().filter(|p| p.decision == RunDecision::CacheMiss).count();
+    let hits   = predictions.iter().filter(|c| c.hit).count();
+    let misses = predictions.len() - hits;
     eprintln!("Cache status:");
     eprintln!("  {} cache hits  → skipped", hits);
     eprintln!("  {} cache misses → would simulate", misses);
     eprintln!();
 
     // Output destinations — the content-addressed relative path each cell
-    // would land in (first few). Confirms the sim×scen×seed hashing the
-    // CasSink uses without running anything.
+    // would land in (first few), resolved via the same `cell_resolve` the run
+    // path uses (no simulation, no files written).
     eprintln!("Output paths (sims/<run_path>):");
-    for plan in plans.iter().take(6) {
-        let tag = match plan.decision {
-            RunDecision::CacheHit  => "hit ",
-            RunDecision::CacheMiss => "miss",
-        };
-        eprintln!("  [{}] {}", tag, plan.run_path);
+    for cell in predictions.iter().take(6) {
+        eprintln!("  [{}] {}", if cell.hit { "hit " } else { "miss" }, cell.rel);
     }
-    if plans.len() > 6 {
-        eprintln!("  ... ({} more)", plans.len() - 6);
+    if predictions.len() > 6 {
+        eprintln!("  ... ({} more)", predictions.len() - 6);
     }
     eprintln!();
     eprintln!("(dry run — no simulation, no files written.)");
@@ -1980,39 +1977,6 @@ mod tests {
     #[test]
     fn batch_default_output_dir_matches_canonical_root() {
         assert_eq!(default_output_dir(), crate::run_paths::DEFAULT_OUTPUT_ROOT);
-    }
-
-    fn sc(name: &str) -> ScenarioEntry {
-        ScenarioEntry { name: name.to_string(), params: HashMap::new(), enable: vec![], disable: vec![] }
-    }
-
-    fn sc_enable(name: &str, enables: &[&str]) -> ScenarioEntry {
-        ScenarioEntry {
-            name: name.to_string(),
-            params: HashMap::new(),
-            enable: enables.iter().map(|s| s.to_string()).collect(),
-            disable: vec![],
-        }
-    }
-
-    fn sc_params(name: &str, kv: &[(&str, f64)]) -> ScenarioEntry {
-        ScenarioEntry {
-            name: name.to_string(),
-            params: kv.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
-            enable: vec![],
-            disable: vec![],
-        }
-    }
-
-    fn seed_traj(run_dir: &str) {
-        std::fs::create_dir_all(run_dir).unwrap();
-        std::fs::write(format!("{}/traj.tsv", run_dir), "t\n").unwrap();
-    }
-
-    fn no_sweep() -> Vec<HashMap<String, f64>> { vec![HashMap::new()] }
-
-    fn sweep1(kv: &[(&str, f64)]) -> Vec<HashMap<String, f64>> {
-        vec![kv.iter().map(|(k, v)| (k.to_string(), *v)).collect()]
     }
 
     /// gh#241 G3: `deny_unknown_fields` — a typo'd batch.toml key must ERROR,
@@ -2045,137 +2009,6 @@ mod tests {
             toml::from_str::<ExperimentToml>(bad_scen).is_err(),
             "a typo'd [[scenario]] key must be rejected"
         );
-    }
-
-    // ── basic classification ─────────────────────────────────────────────────
-
-    #[test]
-    fn all_miss_on_empty_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let plans = plan_runs(&[sc("baseline"), sc("with_sia")], &no_sweep(), &[1, 2, 3],
-            "aaaa1111bbbb2222", None, dir.path().to_str().unwrap(), false);
-        assert_eq!(plans.len(), 6);
-        assert!(plans.iter().all(|p| p.decision == RunDecision::CacheMiss));
-    }
-
-    #[test]
-    fn hit_when_traj_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let runs_dir = dir.path().to_str().unwrap();
-        // First pass to learn the path
-        let plans = plan_runs(&[sc("baseline")], &no_sweep(), &[1, 2], "aaaa1111bbbb2222", None, runs_dir, false);
-        seed_traj(&plans[0].run_dir); // seed 1 only
-        // Re-classify
-        let plans = plan_runs(&[sc("baseline")], &no_sweep(), &[1, 2], "aaaa1111bbbb2222", None, runs_dir, false);
-        assert_eq!(plans[0].decision, RunDecision::CacheHit,  "seed 1 should be a hit");
-        assert_eq!(plans[1].decision, RunDecision::CacheMiss, "seed 2 should be a miss");
-    }
-
-    #[test]
-    fn force_ignores_existing_traj() {
-        let dir = tempfile::tempdir().unwrap();
-        let runs_dir = dir.path().to_str().unwrap();
-        let plans = plan_runs(&[sc("baseline")], &no_sweep(), &[1], "aaaa1111bbbb2222", None, runs_dir, false);
-        seed_traj(&plans[0].run_dir);
-        let plans = plan_runs(&[sc("baseline")], &no_sweep(), &[1], "aaaa1111bbbb2222", None, runs_dir, true);
-        assert_eq!(plans[0].decision, RunDecision::CacheMiss);
-    }
-
-    // ── sim_hash invalidation ────────────────────────────────────────────────
-
-    #[test]
-    fn sim_hash_change_invalidates_all() {
-        let dir = tempfile::tempdir().unwrap();
-        let runs_dir = dir.path().to_str().unwrap();
-        // Populate under old sim_hash
-        let old = plan_runs(&[sc("baseline")], &no_sweep(), &[1, 2], "aaaa1111bbbb2222", None, runs_dir, false);
-        for p in &old { seed_traj(&p.run_dir); }
-        // New sim_hash → different tier, all miss
-        let new = plan_runs(&[sc("baseline")], &no_sweep(), &[1, 2], "cccc3333dddd4444", None, runs_dir, false);
-        assert!(new.iter().all(|p| p.decision == RunDecision::CacheMiss));
-        // Old paths unchanged
-        for p in &old {
-            assert!(std::path::Path::new(&format!("{}/traj.tsv", p.run_dir)).exists());
-        }
-    }
-
-    // ── scen_hash invalidation ───────────────────────────────────────────────
-
-    #[test]
-    fn scen_change_invalidates_only_that_scenario() {
-        let dir = tempfile::tempdir().unwrap();
-        let runs_dir = dir.path().to_str().unwrap();
-        let scenarios = vec![sc("baseline"), sc_enable("with_sia", &["sia_r1"])];
-        // Populate all runs
-        let plans = plan_runs(&scenarios, &no_sweep(), &[1], "aaaa1111bbbb2222", None, runs_dir, false);
-        for p in &plans { seed_traj(&p.run_dir); }
-        // Change only with_sia's enable list
-        let new_scenarios = vec![sc("baseline"), sc_enable("with_sia", &["sia_r1", "sia_r2"])];
-        let new = plan_runs(&new_scenarios, &no_sweep(), &[1], "aaaa1111bbbb2222", None, runs_dir, false);
-        let baseline = new.iter().find(|p| p.scenario == "baseline").unwrap();
-        let with_sia = new.iter().find(|p| p.scenario == "with_sia").unwrap();
-        assert_eq!(baseline.decision, RunDecision::CacheHit,  "baseline must be reused");
-        assert_eq!(with_sia.decision, RunDecision::CacheMiss, "with_sia must be invalidated");
-    }
-
-    #[test]
-    fn scen_param_change_invalidates_only_that_scenario() {
-        let dir = tempfile::tempdir().unwrap();
-        let runs_dir = dir.path().to_str().unwrap();
-        let scenarios = vec![sc("baseline"), sc_params("variant", &[("vacc_frac", 0.7)])];
-        let plans = plan_runs(&scenarios, &no_sweep(), &[1], "aaaa1111bbbb2222", None, runs_dir, false);
-        for p in &plans { seed_traj(&p.run_dir); }
-        let new_scenarios = vec![sc("baseline"), sc_params("variant", &[("vacc_frac", 0.9)])];
-        let new = plan_runs(&new_scenarios, &no_sweep(), &[1], "aaaa1111bbbb2222", None, runs_dir, false);
-        assert_eq!(new.iter().find(|p| p.scenario == "baseline").unwrap().decision, RunDecision::CacheHit);
-        assert_eq!(new.iter().find(|p| p.scenario == "variant").unwrap().decision, RunDecision::CacheMiss);
-    }
-
-    // ── seed extension ───────────────────────────────────────────────────────
-
-    #[test]
-    fn adding_seeds_reuses_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let runs_dir = dir.path().to_str().unwrap();
-        // Populate seeds 1-3
-        let plans = plan_runs(&[sc("baseline")], &no_sweep(), &[1, 2, 3], "aaaa1111bbbb2222", None, runs_dir, false);
-        for p in &plans { seed_traj(&p.run_dir); }
-        // Extend to seeds 1-5
-        let plans = plan_runs(&[sc("baseline")], &no_sweep(), &[1, 2, 3, 4, 5], "aaaa1111bbbb2222", None, runs_dir, false);
-        let (hits, misses): (Vec<_>, Vec<_>) = plans.iter()
-            .partition(|p| p.decision == RunDecision::CacheHit);
-        assert_eq!(hits.len(), 3,   "seeds 1-3 must be reused");
-        assert_eq!(misses.len(), 2, "seeds 4-5 must be new");
-        let miss_seeds: Vec<u64> = misses.iter().map(|p| p.seed).collect();
-        assert!(miss_seeds.contains(&4) && miss_seeds.contains(&5));
-    }
-
-    // ── run_path structure ───────────────────────────────────────────────────
-
-    #[test]
-    fn run_path_format() {
-        let dir = tempfile::tempdir().unwrap();
-        let plans = plan_runs(&[sc("with sia!")], &no_sweep(), &[42], "aaaa1111bbbb2222", None, dir.path().to_str().unwrap(), false);
-        // sim_hash_8 / slug-scen_hash_8 / seed_N
-        let parts: Vec<&str> = plans[0].run_path.splitn(3, '/').collect();
-        assert_eq!(parts[0], "aaaa1111",            "sim_hash_8");
-        assert!(parts[1].starts_with("with_sia_"),  "slug must sanitize spaces and '!'");
-        assert_eq!(parts[2], "seed_42",             "seed component");
-    }
-
-    #[test]
-    fn rename_scenario_same_semantics_same_scen_hash() {
-        // Two scenarios with identical overrides but different names share the same
-        // scen_hash suffix — demonstrating that renaming doesn't create a new cache entry
-        // for semantically identical runs.
-        let dir = tempfile::tempdir().unwrap();
-        let runs_dir = dir.path().to_str().unwrap();
-        let p1 = plan_runs(&[sc_enable("old_name", &["sia"])], &no_sweep(), &[1], "aaaa1111bbbb2222", None, runs_dir, false);
-        let p2 = plan_runs(&[sc_enable("new_name", &["sia"])], &no_sweep(), &[1], "aaaa1111bbbb2222", None, runs_dir, false);
-        // Slugs differ but scen_hash_8 (embedded in dir name) is identical
-        let hash1: &str = p1[0].run_path.split('/').nth(1).unwrap().split_once('-').unwrap().1;
-        let hash2: &str = p2[0].run_path.split('/').nth(1).unwrap().split_once('-').unwrap().1;
-        assert_eq!(hash1, hash2, "same enables/params → same scen_hash_8");
     }
 
     // ── sweep expansion ──────────────────────────────────────────────────────
@@ -2219,32 +2052,6 @@ mod tests {
         let points = expand_sweep(&sweep);
         assert_eq!(points.len(), 1);
         assert!(points[0].is_empty());
-    }
-
-    #[test]
-    fn sweep_changes_scen_hash() {
-        let dir = tempfile::tempdir().unwrap();
-        let runs_dir = dir.path().to_str().unwrap();
-        let pt1 = sweep1(&[("vacc_eff", 0.3)]);
-        let pt2 = sweep1(&[("vacc_eff", 0.7)]);
-        let p1 = plan_runs(&[sc("baseline")], &pt1, &[1], "aaaa1111bbbb2222", None, runs_dir, false);
-        let p2 = plan_runs(&[sc("baseline")], &pt2, &[1], "aaaa1111bbbb2222", None, runs_dir, false);
-        // Different sweep values → different scen_hash → different directories
-        assert_ne!(p1[0].run_path, p2[0].run_path, "distinct sweep points must produce distinct paths");
-    }
-
-    #[test]
-    fn sweep_count_correct() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut sweep = HashMap::new();
-        sweep.insert("x".to_string(), SweepSpec::Linspace {
-            linspace: LinspaceSpec { min: 0.0, max: 1.0, n: 5 }
-        });
-        let points = expand_sweep(&sweep);
-        // 5 sweep × 2 scenarios × 3 seeds = 30
-        let plans = plan_runs(&[sc("baseline"), sc("with_sia")], &points, &[1, 2, 3],
-            "aaaa1111bbbb2222", None, dir.path().to_str().unwrap(), false);
-        assert_eq!(plans.len(), 30);
     }
 
     // ── --table content folds into the run identity (Q1) ─────────────────────

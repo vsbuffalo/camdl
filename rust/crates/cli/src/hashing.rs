@@ -1,12 +1,47 @@
+//! Byte-digest, path-label, and provenance helpers shared across the CLI.
+//!
+//! # Not run identity (gh#241)
+//!
+//! Artifact run identity is built exclusively by the `runid`/`resolve` paths
+//! (`resolve::resolve_trajectory`, `cas::fit_level_hash`, the `runid` factored
+//! levels). NOTHING in this module participates in a `run_id`. The functions
+//! here are one of three kinds:
+//!
+//! - **byte digests**: [`sha256_hex`], [`file_hash`] — hash some bytes.
+//! - **path labels**: [`path_stem_slug`], [`slug`] — make a directory name
+//!   human-readable; the content hash that follows is the authoritative key.
+//! - **legacy cross-check / layout digests**: [`model_hash`],
+//!   [`fit_content_hash`] — NOT artifact run identity, and NOT casual display
+//!   strings either. `model_hash` is byte-compared by the `init = survey_top_k`
+//!   warm-start cross-check ([`crate::fit::init::build_chain_starts_from_survey`]),
+//!   and `fit_content_hash` backs the synthetic-fit `fit_dir()` on-disk path
+//!   layout. Because the cross-check's two sides must agree byte-for-byte and
+//!   the directory layout is persisted, these cannot be retargeted onto `runid`
+//!   in isolation — migrating the coupled set is a separate future task (a
+//!   gh#241 follow-up), not this module's to drop. Treat them as legacy
+//!   cross-check/layout digests, never as harmless display strings.
+//!
+//! **DO NOT** introduce a new run-identity construction here. A field that
+//! changes stored bytes is identity and must re-key through `runid`; a
+//! re-encoding of the same values is presentation. The `legacy_identity_*`
+//! allowlist test below pins the exact set of display call sites — a new
+//! call site to [`model_hash`] / [`fit_content_hash`] fails it.
+
 use sha2::{Sha256, Digest};
-use std::collections::HashMap;
 
 use crate::version;
 
 /// Structural hash of the IR: every field that affects the computed trajectory.
+///
+/// Legacy cross-check digest (gh#241) — NOT artifact run identity, and not a
+/// casual display string: it is recorded in `survey`/`fit` `run.json` `inputs`
+/// and read back + byte-compared by the `init = "survey_top_k"` warm-start
+/// cross-check ([`crate::fit::init`]). Both sides must produce the same string,
+/// so it is not migrated to `runid` piecemeal — that's a separate future task.
+///
 /// Presentation-only fields (`output.format`, `simulation.time_semantics`) are
-/// excluded so `--format` / date rendering stay inert; the seed and `dt` ride in
-/// [`sim_hash`], not here. serde_json's Map is backed by BTreeMap (sorted keys),
+/// excluded so `--format` / date rendering stay inert; `dt`/seed are not part
+/// of the model hash. serde_json's Map is backed by BTreeMap (sorted keys),
 /// so serialization is deterministic.
 ///
 /// The on-disk IR is an *envelope* — `{ ir_version, validated_by, model: {…} }`
@@ -23,10 +58,10 @@ use crate::version;
 /// gh#147: the allowlist previously omitted the trajectory-determining
 /// non-structural fields — output cadence (`output.times`), the horizon
 /// (`simulation.t_start`/`t_end`), the calendar `origin`/`origin_rata_die`, and
-/// `time_unit`. Two models differing only in one of those hashed *equal*, so
-/// the `[design.*]` batch path (model_hash → sim_hash → run dir) served the
-/// first run's cached trajectory for the second. They are now folded in. We
-/// hash the trajectory-determining *sub-fields* of `output`/`simulation` rather
+/// `time_unit`. Two models differing only in one of those hashed *equal*. They
+/// are now folded in so the structural digest tracks the full trajectory-
+/// determining surface. We hash the trajectory-determining *sub-fields* of
+/// `output`/`simulation` rather
 /// than the whole blocks, so the presentation fields stay inert — mirroring the
 /// runid path's `resolve::normalize_for_hash` invariant.
 pub fn model_hash(ir_json: &str) -> String {
@@ -98,82 +133,6 @@ pub fn model_hash(ir_json: &str) -> String {
     digest
 }
 
-/// Hash of the shared simulation configuration: model + base params + backend + dt + tool version.
-/// dt is always included even for backends that ignore it (gillespie) — keeps the logic
-/// unconditional and avoids stale cache hits if someone switches backend while keeping dt.
-pub fn sim_hash(model_hash: &str, params_canonical: &str, backend: &str, dt: f64) -> String {
-    let mut h = Sha256::new();
-    h.update(model_hash.as_bytes());
-    h.update(b"\x00");
-    h.update(params_canonical.as_bytes());
-    h.update(b"\x00");
-    h.update(backend.as_bytes());
-    h.update(b"\x00");
-    h.update(dt.to_bits().to_le_bytes());
-    h.update(b"\x00");
-    h.update(version::VERSION_SHORT.as_bytes());
-    hex::encode(h.finalize())
-}
-
-/// Hash of a scenario's per-scenario delta: enable/disable lists and param overrides.
-/// Does NOT include the scenario name — the name appears in the directory slug for navigation,
-/// but two identically-specified scenarios (same enables/disables/params, different names)
-/// correctly share a cache entry.
-///
-/// TODO(compose): when `compose = ["A", "B"]` is implemented (spec v0.4 §8.3),
-/// this function must recursively incorporate each composed scenario's definition hash,
-/// not just hash the compose list by name. Hashing names would break cache correctness
-/// if a composed scenario's params change without the parent scenario changing.
-pub fn scen_hash(enable: &[String], disable: &[String], params: &HashMap<String, f64>) -> String {
-    scen_hash_with_version(enable, disable, params, version::VERSION_SHORT)
-}
-
-/// Test-visible variant that allows injecting a synthetic version string.
-/// Production code should go through [`scen_hash`], which pins the version
-/// to `version::VERSION_SHORT` (semver + git hash). The runtime-version
-/// component is load-bearing: without it, a code change that alters
-/// scenario resolution (e.g. family-name expansion in
-/// `resolve_enable_list`) would silently return stale cached results
-/// under identical hashes.
-pub(crate) fn scen_hash_with_version(
-    enable: &[String], disable: &[String], params: &HashMap<String, f64>,
-    version_short: &str,
-) -> String {
-    let mut h = Sha256::new();
-
-    // Sort enables/disables so order in TOML doesn't matter
-    let mut enables = enable.to_vec();
-    enables.sort();
-    let mut disables = disable.to_vec();
-    disables.sort();
-
-    h.update(b"enable\x00");
-    for e in &enables {
-        h.update(e.as_bytes());
-        h.update(b"\x00");
-    }
-    h.update(b"disable\x00");
-    for d in &disables {
-        h.update(d.as_bytes());
-        h.update(b"\x00");
-    }
-    h.update(b"params\x00");
-    h.update(canonical_params(params).as_bytes());
-    h.update(b"\x00");
-    h.update(version_short.as_bytes());
-    hex::encode(h.finalize())
-}
-
-/// Serialize a params map to a canonical string (sorted keys).
-pub fn canonical_params(params: &HashMap<String, f64>) -> String {
-    let mut pairs: Vec<(&String, &f64)> = params.iter().collect();
-    pairs.sort_by_key(|(k, _)| k.as_str());
-    pairs.iter()
-        .map(|(k, v)| format!("{}={}", k, v))
-        .collect::<Vec<_>>()
-        .join(";")
-}
-
 /// Full 64-char SHA-256 of a byte slice, hex-encoded. Used where the
 /// caller wants a full content hash (e.g. fit_toml_hash in the top-level
 /// fit run record); the 8-char truncated form is only appropriate when
@@ -222,6 +181,12 @@ fn canonicalise_toml(raw: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Legacy LAYOUT digest (gh#241) — NOT artifact run identity. It backs the
+/// synthetic-fit `FitConfigV2::fit_dir()` on-disk path, so retargeting it onto
+/// `runid` would change the directory layout; that migration is a separate
+/// future task, not a free rename. (Real-data fits identify via the `runid`
+/// `cas::fit_level_hash` path; only the synthetic fit *dir* keys off this.)
+///
 /// Content hash for a fit's *directory* (seed-independent). Keyed on
 /// `(model IR, data files, canonicalised fit.toml, version)` — deliberately
 /// omits seed so re-running the same fit config with different seeds lands
@@ -286,44 +251,15 @@ pub fn slug(name: &str) -> String {
 mod tests {
     use super::*;
 
-    // ── sim_hash ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn sim_hash_stable() {
-        assert_eq!(sim_hash("m", "p=1", "gillespie", 1.0), sim_hash("m", "p=1", "gillespie", 1.0));
-    }
-
-    #[test]
-    fn sim_hash_dt_invalidates() {
-        assert_ne!(sim_hash("m", "", "chain_binomial", 1.0), sim_hash("m", "", "chain_binomial", 0.5));
-    }
-
-    #[test]
-    fn sim_hash_backend_invalidates() {
-        assert_ne!(sim_hash("m", "", "gillespie", 1.0), sim_hash("m", "", "chain_binomial", 1.0));
-    }
-
-    #[test]
-    fn sim_hash_model_invalidates() {
-        assert_ne!(sim_hash("model_a", "", "gillespie", 1.0), sim_hash("model_b", "", "gillespie", 1.0));
-    }
-
-    #[test]
-    fn sim_hash_params_invalidates() {
-        assert_ne!(sim_hash("m", "r0=2", "gillespie", 1.0), sim_hash("m", "r0=3", "gillespie", 1.0));
-    }
-
     // ── Frozen golden hashes (regression guard) ──────────────────────────────
     //
-    // These assertions lock each primary hash helper to a known byte-
+    // These assertions lock each retained hash helper to a known byte-
     // for-byte output for a fixed input. If someone refactors the
     // hashing code and the bytes move, CI fails with a crisp diff —
     // forcing the refactor to either justify the break (and update
-    // this test as a conscious decision) or preserve the hash.
-    //
-    // The inputs are chosen to be minimal-but-not-trivial so they
-    // exercise the main codepaths (params canonicalisation, enable/
-    // disable sort, version injection via scen_hash_with_version).
+    // this test as a conscious decision) or preserve the hash. The
+    // `model_hash` golden is doubly load-bearing: the `survey`↔`fit`
+    // cross-check (gh#51) depends on both sides producing this string.
 
     #[test]
     fn golden_hash_model_hash() {
@@ -354,9 +290,9 @@ mod tests {
     #[test]
     fn model_hash_senses_structural_difference() {
         // gh#135 regression: two structurally different models must
-        // produce different model_hash (→ different sim_hash → distinct
-        // CAS dirs). Pre-fix both collapsed to SHA256("") and collided,
-        // so run 2 was silently served run 1's trajectory.
+        // produce different model_hash. Pre-fix both collapsed to
+        // SHA256("") and collided, so the cross-check could not tell
+        // them apart.
         let v1 = r#"{"ir_version":"3","validated_by":"camdlc","model":{"compartments":["S","I","R"],"transitions":[{"name":"inf","rate":"beta*S*I"}],"parameters":[{"name":"beta","value":15.0}]}}"#;
         let v2 = r#"{"ir_version":"3","validated_by":"camdlc","model":{"compartments":["S","I","R"],"transitions":[{"name":"inf","rate":"beta*S*I"}],"parameters":[{"name":"beta","value":30.0}]}}"#;
         assert_ne!(model_hash(v1), model_hash(v2),
@@ -367,9 +303,7 @@ mod tests {
 
     // gh#147: model_hash's allowlist previously omitted trajectory-determining
     // fields (`output` cadence, `simulation.t_end`, calendar `origin`,
-    // `time_unit`). Two models differing only in one of those hashed EQUAL, so
-    // the `[design.*]` batch path (model_hash → sim_hash → run dir) served the
-    // first run's cached trajectory for the second — a silent wrong answer.
+    // `time_unit`). Two models differing only in one of those hashed EQUAL.
     // These pin that each trajectory-determining field re-keys the hash, while
     // presentation-only fields (`output.format`, `simulation.time_semantics`)
     // stay inert.
@@ -467,18 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn golden_hash_sim_hash() {
-        // scen_hash_with_version's test-friendly form is used by the
-        // scen_hash tests; here sim_hash folds in VERSION_SHORT which
-        // bumps every commit — so we hash it with a synthetic model
-        // hash that stays fixed. We pin the model side only.
-        let mh = "abc".repeat(16); // 48 chars, stable across commits
-        // Two calls in the same process must equal.
-        assert_eq!(sim_hash(&mh, "beta=0.3", "gillespie", 1.0),
-                   sim_hash(&mh, "beta=0.3", "gillespie", 1.0));
-    }
-
-    #[test]
     fn fit_content_hash_ignores_comments_and_whitespace() {
         // Two fit.tomls that differ only in comments and whitespace
         // must produce the same fit_content_hash after canonicalisation.
@@ -541,90 +463,129 @@ mod tests {
         assert_eq!(h, h2);
     }
 
-    #[test]
-    fn golden_hash_scen_hash_with_version() {
-        // scen_hash_with_version pins the version so the golden bytes
-        // remain stable across commits. This guards the sort-enables,
-        // param-canonicalisation, and domain-separator logic.
-        let mut params = HashMap::new();
-        params.insert("rho".to_string(), 0.5);
-        let h = scen_hash_with_version(
-            &["sia".to_string(), "school_close".to_string()],
-            &[],
-            &params,
-            "0.0.0+frozen",
-        );
-        assert_eq!(h, "3d19534d546efd26118d6983fcd8a58a559c9791477db4316d3edfc357dadc78");
-    }
-
     // There is no single `run_hash(sim, scen, seed)` content hash: a run's
     // identity is the factored `runid` identity (`runid::run_id` over the
     // per-level hashes; see `crate::resolve::resolve_trajectory`).
 
-    // ── scen_hash ────────────────────────────────────────────────────────────
+    // ── legacy-identity call-site allowlist (gh#241) ──────────────────────────
 
-    #[test]
-    fn scen_hash_stable() {
-        let p: HashMap<String, f64> = HashMap::new();
-        assert_eq!(scen_hash(&["sia".to_string()], &[], &p), scen_hash(&["sia".to_string()], &[], &p));
-    }
+    /// The exact set of production call sites permitted to call the retained
+    /// "display / provenance / cross-check" hashers ([`model_hash`],
+    /// [`fit_content_hash`]). Each entry is a `(file, hasher)` pair where
+    /// `file` is relative to the cli crate's `src/`. These are the only places
+    /// allowed to use these functions, and EVERY use here is display /
+    /// provenance / a `survey`↔`fit` cross-check ([`crate::fit::init`]) /
+    /// synthetic-fit directory keying — NOT a `runid` artifact identity.
+    ///
+    /// If you add a new call site, first confirm it is display/provenance (not
+    /// identity — identity is built via `runid`/`resolve`), then add it here.
+    /// A new use that is not listed fails this test. The intent is that
+    /// `model_hash`/`fit_content_hash` cannot quietly grow a run-identity
+    /// consumer: the north star is that identity is `runid`-only.
+    const LEGACY_IDENTITY_ALLOWLIST: &[(&str, &str)] = &[
+        // model_hash — recorded-not-keyed structural digest.
+        ("survey.rs", "model_hash"),       // run.json inputs (gh#51 cross-check)
+        ("profile.rs", "model_hash"),      // profile leaf content-bearing input
+        ("fit/pgas.rs", "model_hash"),     // SurveyFitContext cross-check
+        ("fit/pmmh.rs", "model_hash"),     // SurveyFitContext cross-check
+        ("fit/mod.rs", "model_hash"),      // SurveyFitContext + mle/provenance/sidecar
+        // fit_content_hash — synthetic-fit directory keying + announcement.
+        ("fit/config_v2.rs", "fit_content_hash"), // fit_dir() + the method itself
+        ("fit/mod.rs", "fit_content_hash"),        // synthetic-fit announcement
+    ];
 
+    /// gh#241 — pin the legacy-identity call sites to the known display set.
+    ///
+    /// Scans every `.rs` under the cli crate's `src/` (except this module and
+    /// `args/`) for production call forms of the retained hashers, and asserts
+    /// the set of `(file, hasher)` pairs equals [`LEGACY_IDENTITY_ALLOWLIST`].
+    /// Test code (`#[cfg(test)]` / `#[test]`) and the definitions in this
+    /// module are excluded — only real call sites count.
     #[test]
-    fn scen_hash_enable_order_invariant() {
-        let p: HashMap<String, f64> = HashMap::new();
-        let ab = scen_hash(&["a".to_string(), "b".to_string()], &[], &p);
-        let ba = scen_hash(&["b".to_string(), "a".to_string()], &[], &p);
-        assert_eq!(ab, ba);
-    }
+    fn legacy_identity_call_sites_match_allowlist() {
+        use std::collections::BTreeSet;
 
-    #[test]
-    fn scen_hash_disable_order_invariant() {
-        let p: HashMap<String, f64> = HashMap::new();
-        let ab = scen_hash(&[], &["a".to_string(), "b".to_string()], &p);
-        let ba = scen_hash(&[], &["b".to_string(), "a".to_string()], &p);
-        assert_eq!(ab, ba);
-    }
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // The retained hashers and the call-text fragments that denote a
+        // production call to each. `sim_hash`/`scen_hash`/`canonical_params`
+        // are deleted; if any reappears it is dead-code-eliminated or this
+        // test (and the acceptance grep) catches the stray reference.
+        let hashers = ["model_hash", "fit_content_hash"];
 
-    #[test]
-    fn scen_hash_enable_change_invalidates() {
-        let p: HashMap<String, f64> = HashMap::new();
-        assert_ne!(scen_hash(&["sia_r1".to_string()], &[], &p),
-                   scen_hash(&["sia_r2".to_string()], &[], &p));
-    }
+        let mut found: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut stack = vec![src_root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path.strip_prefix(&src_root).unwrap()
+                    .to_string_lossy().replace('\\', "/");
+                // Skip this module (defs + this test's own references) and
+                // `args/` (clap structs never hash).
+                if rel == "hashing.rs" || rel.starts_with("args/") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let mut in_test = false;
+                for line in text.lines() {
+                    let trimmed = line.trim_start();
+                    // Coarse but sufficient: once a `#[cfg(test)]` / `#[test]`
+                    // attribute or a `mod tests` is seen, treat the rest of the
+                    // file as test code (test modules live at the file tail by
+                    // convention in this crate).
+                    if trimmed.starts_with("#[cfg(test)]")
+                        || trimmed.starts_with("#[test]")
+                        || trimmed.starts_with("mod tests")
+                    {
+                        in_test = true;
+                    }
+                    if in_test {
+                        continue;
+                    }
+                    for h in &hashers {
+                        // Production call forms: `crate::hashing::<h>(` or a
+                        // method call `.<h>(` / `self.<h>(`. Doc/comment lines
+                        // (`//`) are not calls.
+                        if trimmed.starts_with("//") {
+                            continue;
+                        }
+                        let call = format!("{}(", h);
+                        if line.contains(&call) {
+                            found.insert((rel.clone(), (*h).to_string()));
+                        }
+                    }
+                }
+            }
+        }
 
-    #[test]
-    fn scen_hash_params_change_invalidates() {
-        let mut p1: HashMap<String, f64> = HashMap::new(); p1.insert("vacc_frac".into(), 0.7);
-        let mut p2: HashMap<String, f64> = HashMap::new(); p2.insert("vacc_frac".into(), 0.9);
-        assert_ne!(scen_hash(&[], &[], &p1), scen_hash(&[], &[], &p2));
-    }
+        let allowed: BTreeSet<(String, String)> = LEGACY_IDENTITY_ALLOWLIST
+            .iter()
+            .map(|(f, h)| ((*f).to_string(), (*h).to_string()))
+            .collect();
 
-    #[test]
-    fn scen_hash_name_independent() {
-        // Same enables/params, different name → same hash (name is navigation only)
-        let p: HashMap<String, f64> = HashMap::new();
-        // scen_hash doesn't take a name argument, so this is enforced by the API
-        let h1 = scen_hash(&["sia".to_string()], &[], &p);
-        let h2 = scen_hash(&["sia".to_string()], &[], &p);
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn scen_hash_returns_64_hex_chars() {
-        let p: HashMap<String, f64> = HashMap::new();
-        assert_eq!(scen_hash(&[], &[], &p).len(), 64);
-    }
-
-    #[test]
-    fn scen_hash_version_invalidates() {
-        // Regression guard: a code change that alters scenario semantics
-        // (e.g. resolve_enable_list family expansion) must invalidate the
-        // cache. Version is pinned into scen_hash so two differing
-        // versions produce different digests even with identical inputs.
-        let p: HashMap<String, f64> = HashMap::new();
-        let h_v1 = scen_hash_with_version(&["sia".into()], &[], &p, "0.1.0+aaaaaaa");
-        let h_v2 = scen_hash_with_version(&["sia".into()], &[], &p, "0.1.0+bbbbbbb");
-        assert_ne!(h_v1, h_v2, "scen_hash must invalidate on version change");
+        let unexpected: Vec<_> = found.difference(&allowed).collect();
+        assert!(
+            unexpected.is_empty(),
+            "new legacy-identity call site(s) not in the allowlist (gh#241): {:?}\n\
+             These hashers are display/provenance only — use runid/resolve for \
+             run identity, or add the site to LEGACY_IDENTITY_ALLOWLIST if it is \
+             genuinely display/provenance.",
+            unexpected
+        );
+        // Also flag a stale allowlist entry whose call site was removed, so the
+        // list stays honest as files are refactored.
+        let missing: Vec<_> = allowed.difference(&found).collect();
+        assert!(
+            missing.is_empty(),
+            "allowlist entry no longer present in the source (remove it): {:?}",
+            missing
+        );
     }
 
     // ── slug ─────────────────────────────────────────────────────────────────
@@ -644,22 +605,6 @@ mod tests {
     fn slug_replaces_spaces_and_specials() {
         assert_eq!(slug("with sia!"), "with_sia_");
         assert_eq!(slug("r0=3.0"), "r0_3_0");
-    }
-
-    // ── canonical_params ─────────────────────────────────────────────────────
-
-    #[test]
-    fn canonical_params_sorted_keys() {
-        let mut p: HashMap<String, f64> = HashMap::new();
-        p.insert("z".into(), 1.0);
-        p.insert("a".into(), 2.0);
-        // Regardless of insertion order, output is sorted
-        assert_eq!(canonical_params(&p), "a=2;z=1");
-    }
-
-    #[test]
-    fn canonical_params_empty() {
-        assert_eq!(canonical_params(&HashMap::new()), "");
     }
 
     // ── file_hash / fit_input_hash (relocated from fit::provenance) ─────────

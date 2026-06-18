@@ -11,8 +11,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::hashing::slug;
-
 /// Default output root: `./output`. Overridden by explicit CLI
 /// `--output-dir`, fit.toml `output_dir`, or batch.toml `output_dir`
 /// — in that precedence order. Callers should resolve via
@@ -49,28 +47,6 @@ pub fn output_root(cli: Option<&str>, config: Option<&str>) -> PathBuf {
         .or_else(|| config.map(PathBuf::from))
         .or_else(|| std::env::var("CAMDL_OUTPUT_DIR").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_ROOT))
-}
-
-/// Relative path under `<root>/sims/` for a legacy simulate run path
-/// (`<stem>-<sim_hash[:8]>/<scenario-slug>-<scen_hash[:8]>/seed_<N>`).
-///
-/// M3-DELETION-BOUND (gh#147): the new CAS path is the factored
-/// `runid::store_path` (5 levels, `{label}-{hash8}` each). This legacy
-/// helper survives only for `batch status`/`batch design` (not yet
-/// migrated); delete it when those paths move to `runid::store_path`.
-pub fn sim_run_rel(
-    model_stem: Option<&str>,
-    sim_hash: &str,
-    scenario: &str,
-    scen_hash: &str,
-    seed: u64,
-) -> String {
-    let hash_prefix = &sim_hash[..8.min(sim_hash.len())];
-    let head = match model_stem {
-        Some(s) if !s.is_empty() => format!("{}-{}", s, hash_prefix),
-        _ => hash_prefix.to_string(),
-    };
-    format!("{}/{}-{}/seed_{}", head, slug(scenario), &scen_hash[..8.min(scen_hash.len())], seed)
 }
 
 /// Top-level directory for a fit.
@@ -206,13 +182,6 @@ mod tests {
         let a = fit_run_dir(Path::new("/out"), Some("01"), "aaaaaaaa1111111111");
         let b = fit_run_dir(Path::new("/out"), Some("01"), "bbbbbbbb2222222222");
         assert_ne!(a, b, "same stem, different hash must produce different dirs");
-    }
-
-    #[test]
-    fn sim_run_rel_same_stem_different_hash_diverges() {
-        let a = sim_run_rel(Some("sir"), "aaaaaaaa0000", "baseline", "cccc", 1);
-        let b = sim_run_rel(Some("sir"), "bbbbbbbb0000", "baseline", "cccc", 1);
-        assert_ne!(a, b);
     }
 
     #[test]
