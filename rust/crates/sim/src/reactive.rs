@@ -9,7 +9,10 @@
 
 use crate::compiled_model::CompiledModel;
 use crate::inference::multi_stream_obs::{eval_stream_projection, StreamProjection};
-use crate::state::RealState;
+use crate::inference::obs_model::{resolve_likelihood_from_model, sample_obs_resolved};
+use crate::resolved_expr::ResolvedLikelihood;
+use crate::rng::StatefulRng;
+use crate::state::{IntState, RealState};
 use ir::intervention::{CmpOp, ObsReducer, TriggerExpr, TriggerQuantity, TriggerThreshold};
 use ir::observation::{ObservationSchedule, TemporalKind};
 
@@ -136,6 +139,9 @@ struct ReactiveStream {
     name: String,
     projection: StreamProjection,
     kind: TemporalKind,
+    /// The stream's resolved measurement model — used to draw the realized
+    /// observation `Y` (slice 3) via [`sample_obs_resolved`].
+    resolved: ResolvedLikelihood,
     /// Per-transition flows accumulated since this stream's last emit (length =
     /// n_transitions). Meaningful for `Interval` (incidence) streams, where
     /// `eval_stream_projection`'s `FlowSum` sums the relevant indices; reset at
@@ -163,6 +169,10 @@ impl ReactiveObs {
                 })?;
             let projection = StreamProjection::from_ir(&obs.projection, compiled, name)?;
             let kind = obs.projection.temporal_kind();
+            let resolved = resolve_likelihood_from_model(&obs.likelihood, compiled)
+                .map_err(|e| {
+                    format!("reactive trigger stream '{name}': likelihood resolution failed: {e:?}")
+                })?;
             let emit_times = match &obs.emit_schedule {
                 Some(s) => schedule_emit_times(s),
                 None => {
@@ -176,6 +186,7 @@ impl ReactiveObs {
                 name: name.clone(),
                 projection,
                 kind,
+                resolved,
                 interval_flows: vec![0; n_tr],
                 emit_times,
             });
@@ -220,6 +231,37 @@ impl ReactiveObs {
     ) -> f64 {
         let s = &self.streams[idx];
         eval_stream_projection(&s.projection, &s.interval_flows, counts, params, compiled, real_s, t)
+    }
+
+    /// Draw the realized observation `Y` for stream `idx` at time `t`: compute
+    /// the interval projection (slice 2), then sample from the stream's
+    /// measurement model on the supplied obs RNG. `rng` is a stream dedicated to
+    /// observation draws (kept separate from the dynamics RNG by the caller, so
+    /// paired-seed / CRN coupling holds). `aux` is empty — forward reactive
+    /// triggers read projection-based likelihoods (poisson / normal /
+    /// neg_binomial); aux-data-column likelihoods are not a PR2 trigger surface.
+    pub fn draw(
+        &self,
+        idx: usize,
+        int_s: &IntState,
+        real_s: &RealState,
+        params: &[f64],
+        compiled: &CompiledModel,
+        t: f64,
+        rng: &mut StatefulRng,
+    ) -> f64 {
+        let projected = self.projected(idx, &int_s.counts, real_s, params, compiled, t);
+        sample_obs_resolved(
+            &self.streams[idx].resolved,
+            t,
+            projected,
+            &[],
+            params,
+            compiled,
+            int_s,
+            real_s,
+            rng,
+        )
     }
 
     /// Reset stream `idx`'s interval accumulator (after its emit).
@@ -350,6 +392,9 @@ mod tests {
                 name: "weekly".into(),
                 projection: StreamProjection::FlowSum(vec![0]),
                 kind: TemporalKind::Interval,
+                resolved: ResolvedLikelihood::Poisson {
+                    rate: crate::resolved_expr::ResolvedExpr::Const(1.0),
+                },
                 interval_flows: vec![0],
                 emit_times: vec![7.0, 14.0],
             }],
@@ -372,6 +417,9 @@ mod tests {
                 name: "prev".into(),
                 projection: StreamProjection::IntCompSum(vec![0]),
                 kind: TemporalKind::Instant,
+                resolved: ResolvedLikelihood::Poisson {
+                    rate: crate::resolved_expr::ResolvedExpr::Const(1.0),
+                },
                 interval_flows: vec![0],
                 emit_times: vec![7.0],
             }],
