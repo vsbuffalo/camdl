@@ -1,0 +1,53 @@
+# gh#204 PR1 compiler/IR golden: a minimal SIR with one observation stream and a
+# single reactive policy. Pins FireSource::Reactive, the TriggerExpr shape, and
+# the `after` / `once` / `scope` fields. Compile-only — the runtime rejects an
+# active reactive policy until the agenda backend lands (REACTIVE_INTERVENTIONS).
+
+time_unit = 'days
+
+compartments { S, I, R, V }
+
+let N = S + I + R + V
+
+parameters {
+  beta              : rate        in [0.001, 2.0]
+  gamma             : rate        in [0.01, 1.0]
+  rho               : probability in [0.0, 1.0]
+  trigger_threshold : count       in [1, 100]
+  sia_cov           : probability in [0.0, 1.0]
+  N0                : count       in [1000, 1000000]
+  I0                : count       in [1, 1000]
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ poisson(rate = rho * projected)
+  }
+}
+
+reactive_interventions {
+  sia : when sum_observed(weekly_cases, window = 28 'days) >= trigger_threshold {
+    after  = 21 'days
+    action = transfer(fraction = sia_cov, from = S, to = V)
+    once   = true
+    scope  = exogenous
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 365 'days
+}

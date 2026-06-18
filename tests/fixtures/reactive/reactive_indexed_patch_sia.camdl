@@ -1,0 +1,54 @@
+# gh#204 PR1 compiler/IR golden: an INDEXED reactive policy. Pins stratification
+# expansion (sia -> sia_north / sia_south), base_name, indexed observation-stream
+# references (weekly_cases[p] -> weekly_cases_north / _south), and indexed action
+# targets (S[p] -> V[p]). Compile-only — runtime rejects an active reactive policy.
+
+time_unit = 'days
+
+dimensions { patch = [north, south] }
+
+compartments { S, I, V }
+
+stratify(by = patch)
+
+parameters {
+  beta : rate        in [0.001, 0.5]
+  cov  : probability in [0.0, 1.0]
+}
+
+let N[p in patch] = S[p] + I[p] + V[p]
+
+transitions {
+  infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p]
+}
+
+observations {
+  weekly_cases[p in patch] {
+    columns       { time : time, patch : dim, weekly_cases : count }
+    projected     = incidence(infection[p])
+    emit_schedule = every 7 'days
+    weekly_cases  ~ poisson(rate = projected)
+  }
+}
+
+reactive_interventions {
+  sia[p in patch] : when sum_observed(weekly_cases[p], window = 28 'days) >= 2 {
+    after    = 14 'days
+    action   = transfer(fraction = cov, from = S[p], to = V[p])
+    cooldown = 180 'days
+    once     = false
+    scope    = exogenous
+  }
+}
+
+init {
+  S[north] = 990
+  I[north] = 10
+  S[south] = 999
+  I[south] = 1
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

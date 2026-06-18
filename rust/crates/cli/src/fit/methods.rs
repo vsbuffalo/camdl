@@ -1067,6 +1067,42 @@ mod tests {
         assert!(check_model_capabilities(InferenceBackend::Ode, &compiled).is_ok());
     }
 
+    /// gh#204: the inference capability gate rejects an active reactive policy on
+    /// EVERY inference backend (no backend executes the reactive agenda yet), so
+    /// fit / pfilter never silently drops the policy. Uses the committed reactive
+    /// golden as the model under test.
+    #[test]
+    fn reactive_policy_rejected_on_inference_backends() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/reactive/ir/reactive_sir_observed_threshold.ir.json"
+        );
+        let json = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let env: serde_json::Value = serde_json::from_str(&json).expect("parse reactive envelope");
+        let mut model: ir::Model =
+            serde_json::from_value(env["model"].clone()).expect("deserialize reactive model");
+        for p in &mut model.parameters {
+            if p.value.resolved_value().is_none() {
+                p.value = p.value.with_value(0.5);
+            }
+        }
+        let compiled = sim::CompiledModel::new(model).expect("compile reactive golden");
+        assert!(
+            compiled
+                .required_capabilities()
+                .contains(sim::Capabilities::REACTIVE_INTERVENTIONS),
+            "fixture must carry a reactive fire source"
+        );
+        for backend in [InferenceBackend::ChainBinomial, InferenceBackend::Ode] {
+            let err = check_model_capabilities(backend, &compiled)
+                .expect_err("inference must reject an active reactive policy");
+            assert!(
+                err.contains("REACTIVE_INTERVENTIONS"),
+                "{backend:?} rejection must name the capability: {err}"
+            );
+        }
+    }
+
     /// Build a `CompiledModel` from the sir_basic golden with a `balance{}`
     /// block injected (target = integer compartment `R`, expr = a resolvable
     /// param). The chain-binomial inference path applies balance via

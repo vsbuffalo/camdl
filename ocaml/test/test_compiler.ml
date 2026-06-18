@@ -7008,35 +7008,13 @@ init { S = N0 - I0  I = I0 }
 simulate { from = 0 'days  to = 60 'days }
 |} body
 
-let test_reactive_compiles_and_lowers () =
-  let m = compile_expect_ok (reactive_model_with
-    "sia : when sum_observed(weekly, window = 28 'days) >= thr {\n\
-     \  after = 21 'days\n\
-     \  action = transfer(fraction = cov, from = S, to = V)\n\
-     \  once = false\n\
-     \  cooldown = 180 'days\n\
-     \  scope = exogenous\n\
-     }") in
-  let iv = List.find (fun (i : Ir.intervention) -> i.Ir.name = "sia")
-             m.Ir.interventions in
-  (* gh#204: a reactive policy is kind=Scenario (toggleable), fire=Reactive. *)
-  Alcotest.(check bool) "kind = Scenario" true (iv.Ir.kind = Ir.Scenario);
-  (match iv.Ir.fire with
-   | Ir.Reactive t ->
-     Alcotest.(check (float 1e-9)) "after" 21.0 t.Ir.after;
-     Alcotest.(check bool) "once" false t.Ir.once;
-     Alcotest.(check bool) "cooldown = 180" true (t.Ir.cooldown = Some 180.0);
-     Alcotest.(check bool) "scope = exogenous" true (t.Ir.scope = Ir.SharedExogenous);
-     (match t.Ir.when_ with
-      | Ir.TECmp (Ir.TQObserved { stream; window; reducer }, op, thr) ->
-        Alcotest.(check string) "stream" "weekly" stream;
-        Alcotest.(check bool) "window = 28" true (window = Some 28.0);
-        Alcotest.(check bool) "reducer = sum" true (reducer = Ir.RedSum);
-        Alcotest.(check bool) "op = ge" true (op = Ir.CmpGe);
-        Alcotest.(check bool) "threshold = param thr" true (thr = Ir.TTParam "thr")
-      | _ -> Alcotest.fail "expected a single observed >= threshold comparison")
-   | Ir.Scheduled _ -> Alcotest.fail "expected a reactive fire source");
-  Alcotest.(check int) "one transfer action" 1 (List.length iv.Ir.actions)
+(* Positive lowering + the indexed-expansion shape are pinned by the committed
+   goldens, not by duplicated inline model strings: `make check-reactive-golden`
+   asserts tests/fixtures/reactive/*.camdl compiles byte-for-byte to the
+   committed *.ir.json, and rust/crates/ir reactive_golden deserialises those
+   and asserts the fields (FireSource::Reactive, TriggerExpr, after/once/scope,
+   stratified expansion, indexed stream/targets). The inline OCaml tests below
+   stay focused on the default-shape and the negative diagnostics. *)
 
 let test_reactive_observed_is_latest () =
   (* observed(stream) (no window) lowers to the Latest reducer. *)
@@ -7105,6 +7083,40 @@ let test_reactive_non_comparison_when_rejected () =
     (reactive_model_with
       "sia : when observed(weekly) {\n\
        \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }")
+
+let test_reactive_unknown_stream_rejected () =
+  (* A trigger referencing an observation stream no `observations {}` declares. *)
+  compile_expect_error_code ~code:"E279" ~contains:"nope"
+    (reactive_model_with
+      "sia : when observed(nope) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }")
+
+let test_reactive_negative_window_rejected () =
+  compile_expect_error_code ~code:"E274" ~contains:"window"
+    (reactive_model_with
+      "sia : when sum_observed(weekly, window = -5 'days) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }")
+
+let test_reactive_rolling_method_unsupported () =
+  (* `.rolling(...)` method syntax does not exist in the DSL — a bare syntax
+     error (E001), i.e. unsupported, not a reactive-specific diagnostic. *)
+  compile_expect_error_code ~code:"E001" ~contains:""
+    (reactive_model_with
+      "sia : when weekly.rolling(14 'days) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }")
+
+let test_reactive_unknown_action_target_rejected () =
+  (* The action target is validated by the SAME resolver as scheduled
+     interventions — a transfer to an undeclared compartment is rejected
+     (E264 from `resolve_comp_name`), not a reactive-specific path. *)
+  compile_expect_error_code ~code:"E264" ~contains:""
+    (reactive_model_with
+      "sia : when observed(weekly) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = Nowhere)\n\
        }")
 
 let () =
@@ -7308,18 +7320,24 @@ let () =
         `Quick test_intervention_transfer_count_and_fraction_rejected;
     ];
     "reactive_interventions", [
-      Alcotest.test_case "compiles + lowers to fire=Reactive trigger (gh#204)"
-        `Quick test_reactive_compiles_and_lowers;
       Alcotest.test_case "observed() (no window) lowers to Latest + defaults"
         `Quick test_reactive_observed_is_latest;
       Alcotest.test_case "E278 observed() in a rate is rejected"
         `Quick test_reactive_observed_in_rate_rejected;
+      Alcotest.test_case "E279 unknown observation stream is rejected"
+        `Quick test_reactive_unknown_stream_rejected;
       Alcotest.test_case "E276 once=true + cooldown is rejected"
         `Quick test_reactive_once_with_cooldown_rejected;
       Alcotest.test_case "E274 negative after is rejected"
         `Quick test_reactive_negative_after_rejected;
+      Alcotest.test_case "E274 negative window is rejected"
+        `Quick test_reactive_negative_window_rejected;
       Alcotest.test_case "E273 non-comparison when is rejected"
         `Quick test_reactive_non_comparison_when_rejected;
+      Alcotest.test_case "E001 .rolling() method syntax is unsupported"
+        `Quick test_reactive_rolling_method_unsupported;
+      Alcotest.test_case "E264 unknown action target is rejected (shared resolver)"
+        `Quick test_reactive_unknown_action_target_rejected;
     ];
     "recurring_interventions", [
       Alcotest.test_case "transfer(...) { every, from, until }"     `Quick test_recurring_block_transfer;

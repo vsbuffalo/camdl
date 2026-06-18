@@ -4704,7 +4704,16 @@ let lower_obs_quantity ctx env ~name ~loc (e : expr) : Ir.trigger_quantity =
        Ir.TQObserved { stream; window = None; reducer = Ir.RedLatest }
      | "sum_observed" ->
        let window = match window_arg with
-         | Some w -> Some (resolve_float_expr ctx w)
+         | Some w ->
+           let wv = resolve_float_expr ctx w in
+           if wv < 0.0 || not (Float.is_finite wv) then
+             Diagnostics.error ctx.diags ~code:"E274" ~loc
+               ~message:(Printf.sprintf
+                 "reactive intervention '%s': `window` must be a non-negative \
+                  finite duration (got %g)" name wv)
+               ~hint:"e.g. window = 28 'days"
+               ();
+           Some wv
          | None ->
            Diagnostics.error ctx.diags ~code:"E271" ~loc
              ~message:(Printf.sprintf
@@ -4790,29 +4799,25 @@ let expand_reactive ctx decls =
         else rx.rxname ^ "_" ^ String.concat "_" parts
       in
       let when_ = lower_trigger ctx env ~name:rx_name ~loc:rx_loc rx.rxwhen in
+      (* `after`, `cooldown`, and the `window` (below) are forward durations:
+         a NaN/inf or negative value is a broken model, not a degenerate-but-
+         valid one. Reject all three the same way (E274). *)
+      let check_duration field v =
+        if v < 0.0 || not (Float.is_finite v) then
+          Diagnostics.error ctx.diags ~code:"E274" ~loc:rx_loc
+            ~message:(Printf.sprintf
+              "reactive intervention '%s': `%s` must be a non-negative finite \
+               duration (got %g)" rx_name field v)
+            ~hint:"durations are forward spans, e.g. after = 21 'days"
+            ()
+      in
       let after = match rx.rxafter with
         | None -> 0.0
-        | Some e -> resolve_float_expr ctx e
+        | Some e -> let a = resolve_float_expr ctx e in check_duration "after" a; a
       in
-      if after < 0.0 then
-        Diagnostics.error ctx.diags ~code:"E274" ~loc:rx_loc
-          ~message:(Printf.sprintf
-            "reactive intervention '%s': `after` must be non-negative (got %g)"
-            rx_name after)
-          ~hint:"a lag is a forward delay; use after = 0 for immediate firing"
-          ();
       let cooldown = match rx.rxcooldown with
         | None -> None
-        | Some e ->
-          let c = resolve_float_expr ctx e in
-          if c < 0.0 then
-            Diagnostics.error ctx.diags ~code:"E274" ~loc:rx_loc
-              ~message:(Printf.sprintf
-                "reactive intervention '%s': `cooldown` must be non-negative \
-                 (got %g)" rx_name c)
-              ~hint:"cooldown is a minimum gap between firings"
-              ();
-          Some c
+        | Some e -> let c = resolve_float_expr ctx e in check_duration "cooldown" c; Some c
       in
       let once = match rx.rxonce with
         | None -> true
@@ -4864,6 +4869,34 @@ let expand_interventions ctx =
   expand_scheduled_actions ctx ctx.interv_decls ~kind:Ir.Scenario
   @ expand_scheduled_actions ctx ctx.event_decls ~kind:Ir.Event
   @ expand_reactive ctx ctx.reactive_decls
+
+(* gh#204: every observation stream a reactive trigger reads must be a declared
+   observation. Run as a post-pass once both interventions and observations are
+   expanded (the expanded stream names — incl. stratified `weekly_cases_north` —
+   are the source of truth), so an indexed trigger that resolves to a name no
+   observation produces is caught. *)
+let rec trigger_stream_refs (t : Ir.trigger_expr) : string list =
+  match t with
+  | Ir.TECmp (Ir.TQObserved { stream; _ }, _, _) -> [stream]
+  | Ir.TEAnd (a, b) | Ir.TEOr (a, b) -> trigger_stream_refs a @ trigger_stream_refs b
+  | Ir.TENot a -> trigger_stream_refs a
+
+let validate_reactive_streams ctx (model : Ir.model) =
+  let obs_names = List.map (fun (o : Ir.observation_model) -> o.Ir.name) model.Ir.observations in
+  List.iter (fun (iv : Ir.intervention) ->
+    match iv.Ir.fire with
+    | Ir.Reactive t ->
+      List.iter (fun stream ->
+        if not (List.mem stream obs_names) then
+          Diagnostics.error ctx.diags ~code:"E279" ~loc:Diagnostics.no_loc
+            ~message:(Printf.sprintf
+              "reactive intervention '%s': trigger references observation \
+               stream '%s', which is not a declared observation" iv.Ir.name stream)
+            ~hint:"declare it in observations { ... }, or fix the stream name"
+            ()
+      ) (trigger_stream_refs t.Ir.when_)
+    | Ir.Scheduled _ -> ()
+  ) model.Ir.interventions
 
 (* ── Observation model expansion ─────────────────────────────────────────── *)
 
@@ -6584,6 +6617,9 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
      (transitions, ode, observations, balance) has run and ctx.hoisted_rev
      holds all extracted bindings in reverse-topological order. *)
   let model = { model with Ir.bindings = collect_hoisted_bindings ctx } in
+  (* gh#204: reject reactive triggers that read an undeclared observation stream
+     (post-pass: both interventions and observations are now expanded). *)
+  validate_reactive_streams ctx model;
   let summary = {
     base_compartment_count     = List.length ctx.comp_decls;
     expanded_compartment_count = List.length expanded_comps;

@@ -102,7 +102,7 @@ dev-camdlc: build-ocaml
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: test-ocaml test-rust test-inference test-integration test-docs test-cli-docs
+test: test-ocaml check-reactive-golden test-rust test-inference test-integration test-docs test-cli-docs
 
 # build-ocaml regenerates the gitignored ir_version_generated.ml from
 # ir/VERSION; without this dep, `dune runtest` runs against a stale version
@@ -177,7 +177,7 @@ test-cli-docs: build-rust
 
 # ── Golden file management ────────────────────────────────────────────────────
 
-.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden
+.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden
 
 # Recompile all DSL fixtures → ocaml/golden/*.ir.json
 update-ocaml-golden: build-ocaml
@@ -188,7 +188,7 @@ update-ocaml-golden: build-ocaml
 		$(CAMDLC) "$$src" > "$$out"; \
 	done
 
-update-golden: update-ocaml-golden update-corner-golden update-regression-golden
+update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden
 
 # Recompile the corner-case fixtures (params baked via --set) →
 # tests/fixtures/corner_cases/ir/*.ir.json. These pin the off-grid /
@@ -219,6 +219,38 @@ REGRESSION_DIR := tests/fixtures/regression
 update-regression-golden: build-ocaml
 	@echo "Recompiling regression fixtures..."
 	@$(CAMDLC) $(REGRESSION_DIR)/gh208_sparse_negative_rate.camdl --set beta=2.0 --set gamma=0.2 --set omega=1.0 --set cap=9 -o $(REGRESSION_DIR)/ir/gh208_sparse_negative_rate.ir.json
+
+# Recompile the reactive (gh#204) compiler/IR goldens →
+# tests/fixtures/reactive/ir/*.ir.json. Compile-only: the runtime rejects an
+# active reactive policy, so these pin the IR SHAPE (FireSource::Reactive,
+# TriggerExpr, stratified expansion), deserialised cross-language by
+# rust/crates/ir reactive_golden tests. No --set (params stay estimated; the IR
+# emits without values). Re-run after a schema bump.
+REACTIVE_DIR := tests/fixtures/reactive
+update-reactive-golden: build-ocaml
+	@echo "Recompiling reactive fixtures..."
+	@mkdir -p $(REACTIVE_DIR)/ir
+	@$(CAMDLC) $(REACTIVE_DIR)/reactive_sir_observed_threshold.camdl -o $(REACTIVE_DIR)/ir/reactive_sir_observed_threshold.ir.json
+	@$(CAMDLC) $(REACTIVE_DIR)/reactive_indexed_patch_sia.camdl      -o $(REACTIVE_DIR)/ir/reactive_indexed_patch_sia.ir.json
+
+# Drift gate (gh#204): each reactive .camdl must still compile BYTE-FOR-BYTE to
+# its committed .ir.json. `update-reactive-golden` regenerates; this FAILS if
+# source and golden have diverged (a grammar/expander change that moved the IR
+# without re-running update). Runs in `make test`.
+.PHONY: check-reactive-golden
+check-reactive-golden: build-ocaml
+	@echo "Checking reactive goldens match their .camdl..."
+	@fail=0; for src in reactive_sir_observed_threshold reactive_indexed_patch_sia; do \
+	  $(CAMDLC) $(REACTIVE_DIR)/$$src.camdl -o $(REACTIVE_DIR)/ir/$$src.ir.json.tmp; \
+	  if ! diff -q $(REACTIVE_DIR)/ir/$$src.ir.json $(REACTIVE_DIR)/ir/$$src.ir.json.tmp >/dev/null 2>&1; then \
+	    echo "  DRIFT: $$src.camdl no longer compiles to the committed .ir.json — run: make update-reactive-golden"; \
+	    fail=1; \
+	  fi; \
+	  rm -f $(REACTIVE_DIR)/ir/$$src.ir.json.tmp; \
+	done; \
+	if [ $$fail -ne 0 ]; then exit 1; fi; \
+	echo "  reactive goldens in sync"
+
 # ── Release / changelog ───────────────────────────────────────────────────────
 
 .PHONY: changelog version-bump release-suggest release-prep release-publish
