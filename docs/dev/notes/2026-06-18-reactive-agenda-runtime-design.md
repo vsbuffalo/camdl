@@ -267,6 +267,11 @@ expected `reactive_log.tsv`.
 
 ## Next
 
+> **Landed.** All six slices below shipped in PR2
+> ([#255](https://github.com/vsbuffalo/camdl/pull/255), merged 2026-06-18):
+> forward chain-binomial runs the reactive agenda. The sequencing note is the
+> original plan, kept for the record. See [Demonstration](#demonstration) below.
+
 Sequencing (locked): **hold all runtime slices until #252 merges**, then branch
 PR2 fresh off `main` (not stacked on the unmerged schema/golden break) and
 implement in small gated commits:
@@ -287,3 +292,42 @@ implement in small gated commits:
 5. **`reactive_log.tsv`** as a declared CAS artifact + `--reactive-log` mirror.
 6. The **six behavior goldens** — equivalence oracle and `rho ≠ 1`
    reporting-scale as the gates.
+
+## Demonstration
+
+A reactive SIA (vaccinate `S → V` when reported weekly cases cross a threshold,
+`after` days later) on a textbook SIR (`R0 = 3`, `N = 1000`), run as a scenario
+**off** (baseline) vs **on** at three response lags. Every run uses the same
+seed, and the realized-obs draws live on a separate RNG, so the trajectories are
+byte-identical until each campaign fires — the curves diverge only at the fire
+time.
+
+![reactive SIA: scenario off vs on, varying response lag](assets/2026-06-18-reactive-demo/reactive_demo.png)
+
+The trigger crosses once (`t = 7`, reported ≥ 2) in every run; the lag alone
+sets the fire time (`t = 7 / 28 / 49`), read straight from each run's
+`reactive_log.tsv`. Earlier response protects more susceptibles, so the final
+attack rate falls monotonically with a shorter lag:
+
+| scenario        | fire | peak `I` | final attack rate |
+| --------------- | ---- | -------- | ----------------- |
+| off (no policy) | —    | 317      | 96 %              |
+| on · wait 0 d   | 7    | 32       | 10 %              |
+| on · wait 21 d  | 28   | 261      | 61 %              |
+| on · wait 42 d  | 49   | 317      | 93 %              |
+
+The `wait 42 d` campaign fires _after_ the day-33 peak, so it nearly overlaps
+the baseline — the "too late to matter" case, and a good check that a late
+trigger does not spuriously bend the epidemic.
+
+Regenerate (needs a release `camdl` build):
+
+```sh
+make build-rust
+bash docs/dev/notes/assets/2026-06-18-reactive-demo/run.sh
+```
+
+`run.sh` drives off the committed golden
+(`tests/fixtures/reactive/ir/reactive_sir_observed_threshold.ir.json`), builds
+the three `after`-lag IR variants, runs the four sims, and renders the figure
+via `plot.py` (uv + polars + matplotlib).
