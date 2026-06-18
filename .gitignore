@@ -7,6 +7,10 @@
 # Rust
 rust/target/
 
+# tree-sitter grammar build artifacts (not part of the tracked grammar source)
+tree-sitter/target/
+tree-sitter/Cargo.lock
+
 # OCaml / Dune
 ocaml/_build/
 *.install
