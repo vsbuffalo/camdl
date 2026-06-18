@@ -26,7 +26,8 @@
 
 use ir::expr::{BinOp, Expr, UnOp};
 use ir::intervention::{
-    Action, Intervention, InterventionKind, InterventionSchedule, RecurringSchedule,
+    Action, AgendaScope, FireSource, Intervention, InterventionKind, InterventionSchedule,
+    ReactiveTrigger, RecurringSchedule,
 };
 use ir::model::{
     BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitialConditions, Model,
@@ -726,6 +727,45 @@ impl ContentAddressed for InterventionSchedule {
     }
 }
 
+impl ContentAddressed for AgendaScope {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::intervention::AgendaScope");
+        // Permanent variant indices (run-id stability) — new scopes append.
+        let idx: u32 = match self {
+            AgendaScope::SharedExogenous => 0,
+            AgendaScope::ParticleLocal   => 1,
+        };
+        h.write_u32(idx);
+    }
+}
+
+impl ContentAddressed for ReactiveTrigger {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::intervention::ReactiveTrigger");
+        self.when_.hash_into(h);
+        h.write_f64_bits(self.after);
+        self.once.hash_into(h);
+        hash_opt_f64(h, &self.cooldown);
+        self.scope.hash_into(h);
+    }
+}
+
+impl ContentAddressed for FireSource {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::intervention::FireSource");
+        match self {
+            FireSource::Scheduled(s) => {
+                h.write_u32(0);
+                s.hash_into(h);
+            }
+            FireSource::Reactive(t) => {
+                h.write_u32(1);
+                t.hash_into(h);
+            }
+        }
+    }
+}
+
 impl ContentAddressed for Action {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::intervention::Action");
@@ -761,7 +801,7 @@ impl ContentAddressed for Intervention {
         header(h, "ir::intervention::Intervention");
         h.write_str(&self.name);
         self.base_name.hash_into(h);
-        self.schedule.hash_into(h);
+        self.fire.hash_into(h);
         self.actions.hash_into(h);
         self.kind.hash_into(h);
     }

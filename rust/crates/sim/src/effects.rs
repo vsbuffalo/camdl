@@ -728,7 +728,7 @@ mod tests {
             interventions: vec![Intervention {
                 name: "iv".into(),
                 base_name: None,
-                schedule: InterventionSchedule::AtTimes(vec![1.0]),
+                fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![1.0])),
                 actions,
                 kind: ir::intervention::InterventionKind::Scenario,
             }],
@@ -1081,7 +1081,7 @@ mod tests {
             interventions: vec![Intervention {
                 name: "iv".into(),
                 base_name: None,
-                schedule: InterventionSchedule::AtTimes(vec![1.0]),
+                fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![1.0])),
                 actions,
                 kind: ir::intervention::InterventionKind::Scenario,
             }],
@@ -1180,7 +1180,7 @@ mod tests {
         let mk = |name: &str, always: bool| Intervention {
             name: name.into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![1.0]),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![1.0])),
             actions: vec![Action::Set(SetAction {
                 compartment: "I".into(),
                 value: Expr::const_(1.0),
@@ -1297,7 +1297,7 @@ mod tests {
         let mk = |name: &str, always: bool| Intervention {
             name: name.into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![1.0]),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![1.0])),
             actions: vec![Action::Set(SetAction {
                 compartment: "I".into(),
                 value: Expr::const_(1.0),

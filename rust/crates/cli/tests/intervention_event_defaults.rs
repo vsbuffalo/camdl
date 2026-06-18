@@ -65,13 +65,13 @@ fn mixed_model_ir() -> String {
         "interventions": [
           {
             "name": "bump",
-            "schedule": { "at_times": [5.0] },
+            "fire": { "scheduled": { "at_times": [5.0] } },
             "actions": [ { "add": { "compartment": "S", "count": { "const": 100.0 } } } ],
             "kind": "event"
           },
           {
             "name": "sia",
-            "schedule": { "at_times": [10.0] },
+            "fire": { "scheduled": { "at_times": [10.0] } },
             "actions": [ { "fraction_transfer": {
               "src": "S", "dst": "V", "fraction": { "const": 0.5 }
             } } ],

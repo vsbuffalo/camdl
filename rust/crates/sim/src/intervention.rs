@@ -209,9 +209,13 @@ pub fn apply_events_at(
 pub fn all_intervention_times(model: &CompiledModel, params: &[f64]) -> Vec<f64> {
     let mut times: Vec<f64> = model.model.interventions.iter()
         .enumerate()
-        .flat_map(|(iv_idx, iv)| {
-            let resolved = model.resolved.intervention_at_time_exprs[iv_idx].as_deref();
-            intervention_fire_times(&iv.schedule, resolved, model, params)
+        .flat_map(|(iv_idx, iv)| match iv.fire.schedule() {
+            Some(sched) => {
+                let resolved = model.resolved.intervention_at_time_exprs[iv_idx].as_deref();
+                intervention_fire_times(sched, resolved, model, params)
+            }
+            // Reactive fire sources contribute no static times.
+            None => Vec::new(),
         })
         .collect();
     times.sort_by(|a, b| a.total_cmp(b));
@@ -360,7 +364,7 @@ pub fn guard_attimesexpr_exact(
         if iv.kind.is_event() {
             continue;
         }
-        if matches!(iv.schedule, InterventionSchedule::AtTimesExpr(_)) {
+        if matches!(iv.fire.schedule(), Some(InterventionSchedule::AtTimesExpr(_))) {
             return Err(SimError::Validation(format!(
                 "exact obs-alignment does not support a parametric `at [<param>]` \
                  schedule on scheduled intervention '{}': the cursor-keyed effect \

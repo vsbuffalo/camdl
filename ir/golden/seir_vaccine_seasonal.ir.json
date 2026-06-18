@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.16",
-  "validated_by": "ocaml-compiler-v0.16",
+  "ir_version": "0.17",
+  "validated_by": "ocaml-compiler-v0.17",
   "model": {
     "name": "seir_vaccine_seasonal",
     "version": "0.3",
@@ -186,7 +186,7 @@
     "interventions": [
       {
         "name": "sia_round_1",
-        "schedule": { "at_times": [180.0, 545.0, 910.0] },
+        "fire": { "scheduled": { "at_times": [180.0, 545.0, 910.0] } },
         "actions": [
           {
             "fraction_transfer": {

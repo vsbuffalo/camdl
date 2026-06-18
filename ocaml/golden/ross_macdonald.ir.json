@@ -1,4 +1,4 @@
-{"ir_version":"0.16","validated_by":"ocaml-compiler-v0.16","model":{"name":"ross_macdonald","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.17","validated_by":"ocaml-compiler-v0.17","model":{"name":"ross_macdonald","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_h","kind":"integer"},
 {"name":"I_h","kind":"integer"},
 {"name":"S_v","kind":"integer"},

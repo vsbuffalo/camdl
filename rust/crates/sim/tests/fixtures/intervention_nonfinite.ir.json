@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.16",
+  "ir_version": "0.17",
   "validated_by": "hand-curated-guard-fixture",
   "model": {
     "name": "intervention_nonfinite",
@@ -35,7 +35,7 @@
     "interventions": [
       {
         "name": "bad_set",
-        "schedule": { "at_times": [2.0] },
+        "fire": { "scheduled": { "at_times": [2.0] } },
         "actions": [
           {
             "set": {

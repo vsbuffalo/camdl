@@ -1523,8 +1523,8 @@ let test_intervention_expansion () =
     Alcotest.(check int) "one intervention" 1 (List.length m.Ir.interventions);
     let iv = List.hd m.Ir.interventions in
     Alcotest.(check string) "intervention name" "sia" iv.Ir.name;
-    (match iv.Ir.schedule with
-     | Ir.AtTimes ts ->
+    (match iv.Ir.fire with
+     | Ir.Scheduled (Ir.AtTimes ts) ->
        Alcotest.(check int) "two fire times" 2 (List.length ts)
      | _ -> Alcotest.fail "expected AtTimes schedule");
     Alcotest.(check int) "one action" 1 (List.length iv.Ir.actions);
@@ -1625,8 +1625,8 @@ let test_recurring_block_transfer () =
   | Error e -> Alcotest.failf "compile failed: %s" e
   | Ok m ->
     let iv = List.hd m.Ir.interventions in
-    (match iv.Ir.schedule with
-     | Ir.Recurring { start; period; end_; at_day = None } ->
+    (match iv.Ir.fire with
+     | Ir.Scheduled (Ir.Recurring { start; period; end_; at_day = None }) ->
        Alcotest.(check (float 1e-9)) "start" 0.0 start;
        Alcotest.(check (float 1e-9)) "period = 30 days" 30.0 period;
        Alcotest.(check (float 1e-9)) "end" 365.0 end_
@@ -1652,8 +1652,8 @@ let test_recurring_kwargs_any_order () =
   | Error e -> Alcotest.failf "compile failed: %s" e
   | Ok m ->
     let iv = List.hd m.Ir.interventions in
-    (match iv.Ir.schedule with
-     | Ir.Recurring { start; period; end_; _ } ->
+    (match iv.Ir.fire with
+     | Ir.Scheduled (Ir.Recurring { start; period; end_; _ }) ->
        Alcotest.(check (float 1e-9)) "start" 14.0 start;
        Alcotest.(check (float 1e-9)) "period" 7.0 period;
        Alcotest.(check (float 1e-9)) "end" 100.0 end_
@@ -1679,8 +1679,8 @@ let test_recurring_unit_conversion () =
   | Error e -> Alcotest.failf "compile failed: %s" e
   | Ok m ->
     let iv = List.hd m.Ir.interventions in
-    (match iv.Ir.schedule with
-     | Ir.Recurring { period; end_; _ } ->
+    (match iv.Ir.fire with
+     | Ir.Scheduled (Ir.Recurring { period; end_; _ }) ->
        (* 30 days / 7 days/week = 30/7 weeks *)
        Alcotest.(check (float 1e-9)) "period in weeks" (30.0 /. 7.0) period;
        (* 1 year = 365.2425 days = 365.2425/7 weeks *)
@@ -1707,8 +1707,8 @@ let test_recurring_add_action () =
   | Error e -> Alcotest.failf "compile failed: %s" e
   | Ok m ->
     let iv = List.hd m.Ir.interventions in
-    (match iv.Ir.schedule with
-     | Ir.Recurring { period; _ } ->
+    (match iv.Ir.fire with
+     | Ir.Scheduled (Ir.Recurring { period; _ }) ->
        Alcotest.(check (float 1e-9)) "period" 10.0 period
      | _ -> Alcotest.fail "expected Recurring");
     (match List.hd iv.Ir.actions with
@@ -1734,8 +1734,8 @@ let test_recurring_default_from_until () =
   | Error e -> Alcotest.failf "compile failed: %s" e
   | Ok m ->
     let iv = List.hd m.Ir.interventions in
-    (match iv.Ir.schedule with
-     | Ir.Recurring { start; period; end_; _ } ->
+    (match iv.Ir.fire with
+     | Ir.Scheduled (Ir.Recurring { start; period; end_; _ }) ->
        Alcotest.(check (float 1e-9)) "start defaults to t_start" 0.0 start;
        Alcotest.(check (float 1e-9)) "period"                     10.0 period;
        Alcotest.(check (float 1e-9)) "end defaults to t_end"     100.0 end_
@@ -1756,8 +1756,8 @@ let test_recurring_at_times_still_works () =
   match Compiler.compile ~name:"regression" src with
   | Error e -> Alcotest.failf "compile failed: %s" e
   | Ok m ->
-    match (List.hd m.Ir.interventions).schedule with
-    | Ir.AtTimes ts ->
+    match (List.hd m.Ir.interventions).fire with
+    | Ir.Scheduled (Ir.AtTimes ts) ->
       Alcotest.(check int) "three pulses" 3 (List.length ts)
     | _ -> Alcotest.fail "expected AtTimes"
 
@@ -5948,8 +5948,8 @@ let at_times_of_first_intervention src =
   Alcotest.(check int) "exactly one intervention" 1
     (List.length m.Ir.interventions);
   let iv = List.hd m.Ir.interventions in
-  match iv.Ir.schedule with
-  | Ir.AtTimes ts -> ts
+  match iv.Ir.fire with
+  | Ir.Scheduled (Ir.AtTimes ts) -> ts
   | _ -> Alcotest.failf "expected AtTimes schedule"
 
 (* Helper: build a one-intervention `at` model that fires at one
@@ -6085,8 +6085,8 @@ let test_phase2_date_range_affine_start_end () =
   in
   let m = compile_expect_ok src in
   let iv = List.hd m.Ir.interventions in
-  match iv.Ir.schedule with
-  | Ir.AtTimes ts ->
+  match iv.Ir.fire with
+  | Ir.Scheduled (Ir.AtTimes ts) ->
     Alcotest.(check int) "53 weekly entries" 53 (List.length ts);
     Alcotest.(check (float 1e-9)) "first entry = 0" 0.0 (List.hd ts);
     Alcotest.(check (float 1e-9)) "last entry = 364 (Dec 30)"
@@ -6100,8 +6100,8 @@ let test_phase2_date_range_affine_count () =
   in
   let m = compile_expect_ok src in
   let iv = List.hd m.Ir.interventions in
-  match iv.Ir.schedule with
-  | Ir.AtTimes ts ->
+  match iv.Ir.fire with
+  | Ir.Scheduled (Ir.AtTimes ts) ->
     Alcotest.(check int) "25 weekly entries (start + 24 steps)" 25
       (List.length ts);
     Alcotest.(check (float 1e-9)) "last entry = 24 * 7 = 168"
@@ -6137,8 +6137,8 @@ let test_phase2_date_range_calendar_months_start_end () =
   |} in
   let m = compile_expect_ok src in
   let iv = List.hd m.Ir.interventions in
-  match iv.Ir.schedule with
-  | Ir.AtTimes ts ->
+  match iv.Ir.fire with
+  | Ir.Scheduled (Ir.AtTimes ts) ->
     Alcotest.(check int) "20 quarterly entries" 20 (List.length ts);
     Alcotest.(check (float 1e-9)) "first entry = 0" 0.0 (List.hd ts)
   | _ -> Alcotest.fail "expected AtTimes"
@@ -6162,8 +6162,8 @@ let test_phase2_date_range_calendar_years_count () =
   |} in
   let m = compile_expect_ok src in
   let iv = List.hd m.Ir.interventions in
-  match iv.Ir.schedule with
-  | Ir.AtTimes ts ->
+  match iv.Ir.fire with
+  | Ir.Scheduled (Ir.AtTimes ts) ->
     Alcotest.(check int) "6 annual entries (start + 5 steps)" 6
       (List.length ts);
     Alcotest.(check (float 1e-9)) "first entry = 0 (Jan 1, 2020)"

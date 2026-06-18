@@ -88,7 +88,7 @@ fn test_fraction_transfer_uses_floor_not_round() {
     let intervention = Intervention {
         name: "test_iv".into(),
         base_name: None,
-        schedule: InterventionSchedule::AtTimes(vec![30.0]),
+        fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![30.0])),
         kind: ir::intervention::InterventionKind::Scenario, actions: vec![
             Action::FractionTransfer(FractionTransfer {
                 src: "S".into(),
@@ -121,7 +121,7 @@ fn test_fraction_transfer_floor_larger() {
     let intervention = Intervention {
         name: "test_iv".into(),
         base_name: None,
-        schedule: InterventionSchedule::AtTimes(vec![30.0]),
+        fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![30.0])),
         kind: ir::intervention::InterventionKind::Scenario, actions: vec![
             Action::FractionTransfer(FractionTransfer {
                 src: "S".into(),
@@ -165,7 +165,7 @@ fn chain_binomial_fires_scheduled_intervention_exactly_once() {
     let intervention = Intervention {
         name: "sia".into(),
         base_name: None,
-        schedule: InterventionSchedule::AtTimes(vec![10.0]),
+        fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![10.0])),
         kind: ir::intervention::InterventionKind::Scenario,
         actions: vec![Action::FractionTransfer(FractionTransfer {
             src: "S".into(),

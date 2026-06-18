@@ -1,4 +1,4 @@
-{"ir_version":"0.16","validated_by":"ocaml-compiler-v0.16","model":{"name":"seir_vaccine_seasonal","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.17","validated_by":"ocaml-compiler-v0.17","model":{"name":"seir_vaccine_seasonal","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"E","kind":"integer"},
 {"name":"I","kind":"integer"},
@@ -14,7 +14,7 @@
 ],"ode_equations":[],"time_functions":[
 {"name":"seasonal","kind":{"sinusoidal":{"amplitude":{"param":"alpha"},"period":{"const":365.25},"phase":{"param":"phi_season"},"baseline":{"const":1.0}}},"dim":[0,0]}
 ],"tables":[],"interventions":[
-{"name":"sia_round_1","schedule":{"at_times":[180.0,545.0,910.0]},"actions":[{"fraction_transfer":{"src":"S","dst":"V","fraction":{"param":"vacc_frac"}}}]}
+{"name":"sia_round_1","fire":{"scheduled":{"at_times":[180.0,545.0,910.0]}},"actions":[{"fraction_transfer":{"src":"S","dst":"V","fraction":{"param":"vacc_frac"}}}]}
 ],"observations":[],"parameters":[
 {"name":"beta","value":{"mode":"required"},"param_kind":"rate","param_dim":null},
 {"name":"sigma","value":{"mode":"required"},"param_kind":"rate","param_dim":null},

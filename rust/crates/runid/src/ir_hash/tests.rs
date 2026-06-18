@@ -105,12 +105,12 @@ fn representative_model() -> Model {
         interventions: vec![Intervention {
             name: "pulse_vax".into(),
             base_name: None,
-            schedule: InterventionSchedule::Recurring(RecurringSchedule {
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::Recurring(RecurringSchedule {
                 start: 100.0,
                 period: 365.0,
                 end: 1000.0,
                 at_day: Some(50.0),
-            }),
+            })),
             actions: vec![Action::Set(SetAction {
                 compartment: "I".into(),
                 value: Expr::const_(0.0),
@@ -194,13 +194,15 @@ fn representative_model() -> Model {
 /// this value; an unintended change to any hand impl trips it.
 #[test]
 fn model_golden_hash() {
-    // Updated for IR 0.12 (observation data-entry, 2026-06-10): the
-    // `ObservationModel` gained `source`/`columns`/`scored` and renamed
-    // `schedule` -> optional `emit_schedule`. All hash into the content
-    // address, so every run_id moves; the version handshake (ir/VERSION ->
-    // 0.12) signposts it. (Earlier moves: gh#191 ParamValue ADT at 0.11;
+    // Updated for IR 0.17 (gh#204 reactive interventions, 2026-06-18): the
+    // intervention `schedule: InterventionSchedule` field became
+    // `fire: FireSource`, so the `Intervention` content address now hashes the
+    // `FireSource` enum layer (variant tag + inner schedule) instead of the
+    // bare schedule. All hash into the content address, so every run_id moves;
+    // the version handshake (ir/VERSION -> 0.17) signposts it. (Earlier moves:
+    // observation data-entry at 0.12; gh#191 ParamValue ADT at 0.11;
     // param_kind/kind enum-ification at 0.10; table OOB Clamp/Wrap -> Error.)
-    const GOLDEN: &str = "4387f80bbbbd67410ae95abf13da602ff77030d04505600c65656bf915959baf";
+    const GOLDEN: &str = "934b33fa0576e38a2c421d226f3d0f13578e2740b0b990ecf2646765589d8467";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }

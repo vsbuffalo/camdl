@@ -33,7 +33,7 @@ fn intervention_set_on_real_compartment_is_exact() {
     model.interventions.push(Intervention {
         name: "set_w".into(),
         base_name: None,
-        schedule: InterventionSchedule::AtTimes(vec![2.0]),
+        fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![2.0])),
         actions: vec![Action::Set(SetAction {
             compartment: "W".into(),
             value: Expr::const_(42.5),
@@ -79,7 +79,7 @@ fn intervention_set_negative_on_real_compartment_errors() {
     model.interventions.push(Intervention {
         name: "set_w_neg".into(),
         base_name: None,
-        schedule: InterventionSchedule::AtTimes(vec![2.0]),
+        fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![2.0])),
         actions: vec![Action::Set(SetAction {
             compartment: "W".into(),
             value: Expr::const_(-5.0),

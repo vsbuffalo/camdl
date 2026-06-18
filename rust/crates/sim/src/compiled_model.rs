@@ -650,12 +650,14 @@ impl CompiledModel {
         self.model.interventions.iter()
             .enumerate()
             .map(|(iv_idx, iv)| {
-                match &iv.schedule {
-                    ir::intervention::InterventionSchedule::AtTimesExpr(_) => {
+                match iv.fire.schedule() {
+                    Some(sched @ ir::intervention::InterventionSchedule::AtTimesExpr(_)) => {
                         let resolved = self.resolved.intervention_at_time_exprs[iv_idx]
                             .as_deref();
-                        intervention_fire_times(&iv.schedule, resolved, self, params)
+                        intervention_fire_times(sched, resolved, self, params)
                     }
+                    // Constant/recurring schedules use the baked times; reactive
+                    // fire sources have no static schedule (empty baked slot).
                     _ => self.fire_times[iv_idx].clone(),
                 }
             })
@@ -991,10 +993,14 @@ impl CompiledModel {
         // and the per-run resolver fills it from
         // `resolved.intervention_at_time_exprs`.
         let fire_times: Vec<Vec<f64>> = model.interventions.iter()
-            .map(|iv| match &iv.schedule {
-                ir::intervention::InterventionSchedule::AtTimes(ts) => ts.clone(),
-                ir::intervention::InterventionSchedule::AtTimesExpr(_) => Vec::new(),
-                ir::intervention::InterventionSchedule::Recurring(rs) => {
+            .map(|iv| match iv.fire.schedule() {
+                // Reactive fire sources have no static schedule — their fire
+                // times are discovered at runtime (and the capability gate
+                // rejects reactive models before any backend runs).
+                None => Vec::new(),
+                Some(ir::intervention::InterventionSchedule::AtTimes(ts)) => ts.clone(),
+                Some(ir::intervention::InterventionSchedule::AtTimesExpr(_)) => Vec::new(),
+                Some(ir::intervention::InterventionSchedule::Recurring(rs)) => {
                     let mut times = Vec::new();
                     if let Some(at_day) = rs.at_day {
                         let k0 = ((rs.start - at_day) / rs.period).ceil().max(0.0) as u64;
@@ -1166,8 +1172,8 @@ impl CompiledModel {
         // be supported without revisiting the validation.
         let intervention_at_time_exprs: Vec<Option<Vec<ResolvedExpr>>> = model.interventions.iter()
             .enumerate()
-            .map(|(idx, iv)| match &iv.schedule {
-                ir::intervention::InterventionSchedule::AtTimesExpr(exprs) => {
+            .map(|(idx, iv)| match iv.fire.schedule() {
+                Some(ir::intervention::InterventionSchedule::AtTimesExpr(exprs)) => {
                     let resolved: Vec<ResolvedExpr> = exprs.iter()
                         .map(|e| resolve_expr(e, &resolve_ctx))
                         .collect::<Result<_, _>>()?;
@@ -1263,6 +1269,13 @@ impl CompiledModel {
         });
         if uses_dt {
             caps |= crate::Capabilities::RUNTIME_DT;
+        }
+        // gh#204. A reactive fire source is parsed and represented in the IR
+        // but executed by no backend yet — raise the requirement so dispatch
+        // rejects it (no backend grants it) rather than silently dropping the
+        // policy.
+        if self.model.interventions.iter().any(|iv| iv.fire.is_reactive()) {
+            caps |= crate::Capabilities::REACTIVE_INTERVENTIONS;
         }
         caps
     }
@@ -1387,6 +1400,78 @@ mod tests {
             CompiledModel::new(model).is_ok(),
             "a model with only well-keyed rate_grad entries must compile"
         );
+    }
+
+    /// gh#204: a model carrying a reactive (state/observation-triggered) fire
+    /// source is parsed and compiles, but `required_capabilities()` raises
+    /// `REACTIVE_INTERVENTIONS`, and NO forward backend grants it — so the
+    /// dispatch gate (`!caps.contains(required)`) rejects it on every path
+    /// rather than silently dropping the policy. This pins the PR1 contract:
+    /// the IR can represent reactive, the runtime refuses to run it.
+    #[test]
+    fn reactive_fire_source_requires_unsupported_capability() {
+        use crate::Capabilities;
+        use crate::{ChainBinomialSim, GillespieSim, OdeSim, Simulate};
+        use ir::intervention::{
+            Action, AgendaScope, FireSource, FractionTransfer, Intervention,
+            InterventionKind, ReactiveTrigger,
+        };
+
+        // Negative control: the stock fixture (no reactive policy) does not
+        // raise the flag — proving the assertion below isn't vacuous.
+        let baseline = CompiledModel::new(load_with_params("sir_basic")).unwrap();
+        assert!(
+            !baseline
+                .required_capabilities()
+                .contains(Capabilities::REACTIVE_INTERVENTIONS),
+            "a model with no reactive policy must not require REACTIVE_INTERVENTIONS"
+        );
+
+        // Add a reactive policy: `kind = Scenario, fire = Reactive(..)` — the
+        // two-axis shape (reactive campaigns are policy interventions, not
+        // events; they differ only in how fire times are produced).
+        let mut model = load_with_params("sir_basic");
+        model.interventions.push(Intervention {
+            name: "sia_after_detection".into(),
+            base_name: None,
+            fire: FireSource::Reactive(ReactiveTrigger {
+                when_: Expr::const_(1.0),
+                after: 21.0,
+                once: true,
+                cooldown: None,
+                scope: AgendaScope::SharedExogenous,
+            }),
+            actions: vec![Action::FractionTransfer(FractionTransfer {
+                src: "S".into(),
+                dst: "R".into(),
+                fraction: Expr::const_(0.7),
+            })],
+            kind: InterventionKind::Scenario,
+        });
+
+        let compiled = CompiledModel::new(model)
+            .expect("a reactive model still compiles — it is rejected at dispatch, not compile");
+        let required = compiled.required_capabilities();
+        assert!(
+            required.contains(Capabilities::REACTIVE_INTERVENTIONS),
+            "a reactive fire source must raise REACTIVE_INTERVENTIONS"
+        );
+
+        // No forward backend declares it ⇒ every dispatch fails the gate.
+        for caps in [
+            ChainBinomialSim.capabilities(),
+            GillespieSim.capabilities(),
+            OdeSim.capabilities(),
+        ] {
+            assert!(
+                !caps.contains(Capabilities::REACTIVE_INTERVENTIONS),
+                "no backend may grant REACTIVE_INTERVENTIONS in PR1"
+            );
+            assert!(
+                !caps.contains(required),
+                "the dispatch gate (!caps.contains(required)) must reject a reactive model"
+            );
+        }
     }
 
     /// gh#128: a `rate_grad` entry keyed on a parameter that does not exist in

@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.16",
+  "ir_version": "0.17",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "sir_vaccination",
@@ -106,10 +106,12 @@
     "interventions": [
       {
         "name": "sia_campaign",
-        "schedule": {
-          "at_times": [
-            100.0
-          ]
+        "fire": {
+          "scheduled": {
+            "at_times": [
+              100.0
+            ]
+          }
         },
         "actions": [
           {

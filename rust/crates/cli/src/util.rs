@@ -2437,9 +2437,17 @@ pub fn simulate_compiled(
     let required = compiled.required_capabilities();
     if !caps.contains(required) {
         let missing = required.difference(caps);
+        // Render the rich per-flag hint (shared with the inference gate's
+        // `check_model_capabilities`) so every flag — REACTIVE_INTERVENTIONS
+        // included — explains itself instead of printing a bare bitflag name.
+        let features: Vec<String> = missing
+            .iter_names()
+            .map(|(name, flag)| crate::fit::methods::capability_hint(name, flag))
+            .collect();
         return Err(format!(
-            "backend {:?} does not support required capabilities: {:?}",
-            run.backend, missing
+            "backend {:?} does not support required capabilities:\n  - {}",
+            run.backend,
+            features.join("\n  - "),
         ));
     }
     // gh#166 B2: warn (once) if a `dt`-in-rate model runs on ODE with first-order
@@ -3246,7 +3254,7 @@ mod tests {
         Intervention {
             name: name.into(),
             base_name: base.map(str::to_owned),
-            schedule: InterventionSchedule::AtTimes(vec![10.0]),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![10.0])),
             actions: vec![],
             kind: if always_active { ir::intervention::InterventionKind::Event } else { ir::intervention::InterventionKind::Scenario },
         }

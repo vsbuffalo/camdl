@@ -53,7 +53,7 @@ fn trace_model_ir() -> String {
         "interventions": [
           {
             "name": "pin",
-            "schedule": { "at_times": [3.0] },
+            "fire": { "scheduled": { "at_times": [3.0] } },
             "actions": [ { "set": {
               "compartment": "S", "value": { "const": 900.0 }
             } } ],
@@ -61,7 +61,7 @@ fn trace_model_ir() -> String {
           },
           {
             "name": "sia",
-            "schedule": { "at_times": [10.0] },
+            "fire": { "scheduled": { "at_times": [10.0] } },
             "actions": [ { "fraction_transfer": {
               "src": "S", "dst": "V", "fraction": { "const": 0.5 }
             } } ],

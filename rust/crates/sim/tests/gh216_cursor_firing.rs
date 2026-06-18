@@ -94,7 +94,7 @@ fn firing_model(schedule: InterventionSchedule, kind: InterventionKind) -> Compi
     let intervention = Intervention {
         name: "campaign".into(),
         base_name: None,
-        schedule,
+        fire: ir::intervention::FireSource::Scheduled(schedule),
         actions: vec![Action::AbsoluteTransfer(AbsoluteTransfer {
             src: "N".into(),
             dst: "M".into(),

@@ -67,12 +67,12 @@ fn periodic_xfer_model(at_day: f64, period: f64, end: f64, model_dt: Option<f64>
     let intervention = Intervention {
         name: "periodic_xfer".into(),
         base_name: None,
-        schedule: InterventionSchedule::Recurring(RecurringSchedule {
+        fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::Recurring(RecurringSchedule {
             at_day: Some(at_day),
             start: 0.0,
             end,
             period,
-        }),
+        })),
         kind: ir::intervention::InterventionKind::Scenario,
         actions: vec![
             Action::AbsoluteTransfer(AbsoluteTransfer {
@@ -207,7 +207,7 @@ fn at_times_intervention_fire_count_dt_invariant() {
     let intervention = Intervention {
         name: "at_times_xfer".into(),
         base_name: None,
-        schedule: InterventionSchedule::AtTimes(vec![10.0, 20.0, 30.0, 40.0, 50.0]),
+        fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![10.0, 20.0, 30.0, 40.0, 50.0])),
         kind: ir::intervention::InterventionKind::Scenario,
         actions: vec![
             Action::AbsoluteTransfer(AbsoluteTransfer {

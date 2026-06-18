@@ -88,7 +88,7 @@ fn codrain_model() -> CompiledModel {
         interventions: vec![Intervention {
             name: "dump".into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![FIRE_TIME]),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![FIRE_TIME])),
             actions: vec![Action::FractionTransfer(FractionTransfer {
                 src: "A".into(),
                 dst: "B".into(),
@@ -306,7 +306,7 @@ fn inflow_model() -> CompiledModel {
         interventions: vec![Intervention {
             name: "topup".into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![FIRE_TIME]),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![FIRE_TIME])),
             actions: vec![Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(100.0) })],
             kind: InterventionKind::Event,
         }],

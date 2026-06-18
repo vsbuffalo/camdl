@@ -64,7 +64,7 @@ fn model_with_real_event() -> CompiledModel {
         interventions: vec![Intervention {
             name: "topup".into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![2.0, 4.0]),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![2.0, 4.0])),
             actions: vec![Action::Add(AddAction {
                 compartment: "W".into(),
                 count: Expr::const_(2.5),

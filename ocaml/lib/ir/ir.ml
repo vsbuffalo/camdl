@@ -222,10 +222,36 @@ type intervention_kind =
   | Scenario   (* interventions {} — toggled by enable/disable/set/scale *)
   | Event      (* events {}        — fires unconditionally every substep   *)
 
+(* gh#204. The scope a reactive policy's trigger reads from — the
+   inference-safety axis. Phase 1 supports only [SharedExogenous]. *)
+type agenda_scope =
+  | SharedExogenous   (* scope = exogenous : trigger reads external data, shared *)
+  | ParticleLocal     (* scope = particle  : trigger reads latent state          *)
+
+(* gh#204. A reactive (state/observation-triggered) fire source: fire when
+   [when_] holds, [after] a non-negative lag, optionally rate-limited by
+   [cooldown]. The action grammar and effect resolution are shared with
+   scheduled interventions — only the fire source differs. *)
+type reactive_trigger = {
+  when_:    expr;            (* boolean trigger predicate; wire key "when" *)
+  after:    float;          (* non-negative lag before the effect fires    *)
+  once:     bool;           (* fire-and-disable; mutually exclusive w/ cooldown *)
+  cooldown: float option;   (* min time between firings when [once = false] *)
+  scope:    agenda_scope;
+}
+
+(* gh#204. How an intervention's fire times are produced — orthogonal to
+   [intervention_kind] (the toggling/structural axis). A reactive policy is
+   [kind = Scenario, fire = Reactive ..]; splitting the fire source from the
+   kind makes the illegal pairings unrepresentable. *)
+type fire_source =
+  | Scheduled of intervention_schedule
+  | Reactive  of reactive_trigger
+
 type intervention = {
   name:          string;
   base_name:     string option;
-  schedule:      intervention_schedule;
+  fire:          fire_source;
   actions:       action list;
   kind:          intervention_kind;
 }

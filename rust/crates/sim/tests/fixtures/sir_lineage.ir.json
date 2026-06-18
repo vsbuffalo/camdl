@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.16",
-  "validated_by": "ocaml-compiler-v0.16",
+  "ir_version": "0.17",
+  "validated_by": "ocaml-compiler-v0.17",
   "model": {
     "name": "sir_lineage",
     "version": "0.3",

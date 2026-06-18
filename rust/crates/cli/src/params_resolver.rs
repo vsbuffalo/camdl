@@ -1672,7 +1672,7 @@ mod tests {
         ir::intervention::Intervention {
             name: name.into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![10.0]),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![10.0])),
             actions: vec![Action::Add(AddAction {
                 compartment: "S".into(),
                 count: ir::expr::Expr::Const(ir::expr::ConstExpr { value: 0.0 }),

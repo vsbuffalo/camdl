@@ -294,7 +294,7 @@ fn test_fraction_transfer_edge_cases() {
         let iv = Intervention {
             name: "vacc".into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![1.0]),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![1.0])),
             kind: ir::intervention::InterventionKind::Scenario, actions: vec![Action::FractionTransfer(FractionTransfer {
                 src: "S".into(), dst: "V".into(),
                 fraction: Expr::Const(ConstExpr { value: frac }),

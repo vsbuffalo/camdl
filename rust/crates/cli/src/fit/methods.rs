@@ -687,7 +687,7 @@ pub fn warn_if_ode_euler_flow(compiled: &sim::CompiledModel) {
 /// `Capabilities` flag; `name` is the bitflags constant name (used as the
 /// non-blank fallback for any flag without bespoke guidance, so the message
 /// can never be empty — gh#192).
-fn capability_hint(name: &str, flag: sim::Capabilities) -> String {
+pub(crate) fn capability_hint(name: &str, flag: sim::Capabilities) -> String {
     use sim::Capabilities;
     match flag {
         Capabilities::OVERDISPERSION =>
@@ -721,6 +721,13 @@ fn capability_hint(name: &str, flag: sim::Capabilities) -> String {
              the rate. Use backend = \"chain_binomial\" or \"ode\" (both \
              evaluate the rate at the realized substep length), or remove the \
              `dt` factor from the rate.".to_string(),
+        Capabilities::REACTIVE_INTERVENTIONS =>
+            "REACTIVE_INTERVENTIONS: the model has a `reactive_interventions{}` \
+             policy (a state/observation-triggered campaign). It is parsed and \
+             validated, but the reactive agenda is not yet executed by any \
+             backend (gh#204) — running it would silently drop the policy. \
+             Remove the reactive policy, or replace it with an equivalent fixed \
+             schedule (`interventions {}` with `at [...]`) for now.".to_string(),
         // Any other flag (e.g. LINEAGES) still gets a named, non-blank line.
         _ => format!(
             "{name}: required by the model but not supported by this backend."

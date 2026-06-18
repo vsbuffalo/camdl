@@ -573,12 +573,59 @@ let action_of_json j =
   )
   | _ -> fail "action must be a single-key object"
 
+(* gh#204. Reactive fire source. Wire shapes mirror the Rust serde derives:
+   AgendaScope is a snake_case unit enum (a bare string); ReactiveTrigger is a
+   struct (cooldown skipped when absent); FireSource is externally tagged
+   ({"scheduled": ..} / {"reactive": ..}). *)
+let agenda_scope_to_json (s : agenda_scope) : Yojson.Safe.t =
+  match s with
+  | SharedExogenous -> str "shared_exogenous"
+  | ParticleLocal   -> str "particle_local"
+
+let agenda_scope_of_json j =
+  match as_string j with
+  | "shared_exogenous" -> SharedExogenous
+  | "particle_local"   -> ParticleLocal
+  | s -> fail "unknown agenda_scope '%s'" s
+
+let reactive_trigger_to_json (t : reactive_trigger) : Yojson.Safe.t =
+  obj (
+    [ ("when",  expr_to_json t.when_);
+      ("after", flt t.after);
+      ("once",  bool t.once) ]
+    @ (match t.cooldown with None -> [] | Some c -> [("cooldown", flt c)])
+    @ [ ("scope", agenda_scope_to_json t.scope) ]
+  )
+
+let reactive_trigger_of_json j =
+  { when_    = expr_of_json (member "when" j);
+    after    = as_float (member "after" j);
+    once     = as_bool (member "once" j);
+    cooldown = (match member_opt "cooldown" j with
+                | Some n -> Some (as_float n) | None -> None);
+    scope    = agenda_scope_of_json (member "scope" j); }
+
+let fire_source_to_json (f : fire_source) : Yojson.Safe.t =
+  match f with
+  | Scheduled s -> obj [("scheduled", intervention_schedule_to_json s)]
+  | Reactive  t -> obj [("reactive",  reactive_trigger_to_json t)]
+
+let fire_source_of_json j =
+  match j with
+  | `Assoc [(key, v)] -> (
+    match key with
+    | "scheduled" -> Scheduled (intervention_schedule_of_json v)
+    | "reactive"  -> Reactive  (reactive_trigger_of_json v)
+    | k -> fail "unknown fire_source '%s'" k
+  )
+  | _ -> fail "fire_source must be a single-key object"
+
 let intervention_to_json (iv : intervention) : Yojson.Safe.t =
   obj (
     [("name", str iv.name)]
     @ (match iv.base_name with None -> [] | Some s -> [("base_name", str s)])
-    @ [ ("schedule", intervention_schedule_to_json iv.schedule);
-        ("actions",  arr (List.map action_to_json iv.actions)); ]
+    @ [ ("fire",    fire_source_to_json iv.fire);
+        ("actions", arr (List.map action_to_json iv.actions)); ]
     (* Skip-emit the default (Scenario), mirroring the former
        always_active skip-false discipline: scenario interventions carry no
        key, events carry `"kind": "event"`. *)
@@ -590,7 +637,7 @@ let intervention_of_json j =
     base_name = (match member_opt "base_name" j with
                  | Some (`String s) -> Some s
                  | _ -> None);
-    schedule  = intervention_schedule_of_json (member "schedule" j);
+    fire      = fire_source_of_json (member "fire" j);
     actions   = List.map action_of_json (as_list (member "actions" j));
     kind      = (match member_opt "kind" j with
                  | Some (`String "event")    -> Event

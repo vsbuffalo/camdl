@@ -85,7 +85,7 @@ fn flow_model() -> CompiledModel {
             Intervention {
                 name: "topup".into(),
                 base_name: None,
-                schedule: InterventionSchedule::AtTimes(vec![5.0]),
+                fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![5.0])),
                 actions: vec![Action::Add(AddAction {
                     compartment: "V".into(),
                     count: Expr::const_(100.0),
@@ -96,7 +96,7 @@ fn flow_model() -> CompiledModel {
             Intervention {
                 name: "pin".into(),
                 base_name: None,
-                schedule: InterventionSchedule::AtTimes(vec![8.0]),
+                fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![8.0])),
                 actions: vec![Action::Set(SetAction {
                     compartment: "V".into(),
                     value: Expr::const_(50.0),

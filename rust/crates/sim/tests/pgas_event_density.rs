@@ -108,7 +108,7 @@ fn sir_with_seed_event() -> Model {
     let seed_event = Intervention {
         name: "boom".into(),
         base_name: None,
-        schedule: InterventionSchedule::AtTimes(vec![5.0]),
+        fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![5.0])),
         actions: vec![Action::Add(AddAction {
             compartment: "I".into(),
             count: Expr::Const(ConstExpr { value: 5.0 }),
@@ -190,7 +190,7 @@ fn seir_with_seed_event(n_seed: i64, tau: f64) -> Model {
 
     let seed_event = Intervention {
         name: "founders_arrive".into(), base_name: None,
-        schedule: InterventionSchedule::AtTimes(vec![tau]),
+        fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![tau])),
         actions: vec![Action::Add(AddAction {
             compartment: "E".into(),
             count: Expr::Const(ConstExpr { value: n_seed as f64 }),

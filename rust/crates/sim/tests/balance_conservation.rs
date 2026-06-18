@@ -79,7 +79,7 @@ fn balance_model() -> CompiledModel {
         interventions: vec![Intervention {
             name: "cull".into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![5.0]),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![5.0])),
             actions: vec![Action::FractionTransfer(FractionTransfer {
                 src: "S".into(),
                 dst: "R".into(),

@@ -72,7 +72,7 @@ fn death_model(event_times: Option<Vec<f64>>) -> CompiledModel {
         Some(times) => vec![Intervention {
             name: "importation".into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(times),
+            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(times)),
             actions: vec![Action::Add(AddAction {
                 compartment: "N".into(),
                 count: Expr::const_(1.0),

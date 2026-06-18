@@ -581,7 +581,7 @@ mod tests {
         m.interventions.push(Intervention {
             name: "shock".into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![10.0]),
+            fire: crate::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![10.0])),
             actions: vec![Action::Set(SetAction {
                 compartment: "Q".into(), // not declared (model has S, I, R)
                 value: Expr::const_(0.0),
@@ -605,7 +605,7 @@ mod tests {
         m.interventions.push(Intervention {
             name: "import".into(),
             base_name: None,
-            schedule: InterventionSchedule::AtTimes(vec![1.0]),
+            fire: crate::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![1.0])),
             actions: vec![Action::FractionTransfer(FractionTransfer {
                 src: "S".into(),         // declared
                 dst: "Nowhere".into(),   // not declared

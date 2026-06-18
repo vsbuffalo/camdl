@@ -445,6 +445,43 @@
       ]
     },
 
+    "agenda_scope": {
+      "type": "string",
+      "enum": ["shared_exogenous", "particle_local"]
+    },
+
+    "reactive_trigger": {
+      "type": "object",
+      "required": ["when", "after", "once", "scope"],
+      "properties": {
+        "when": { "$ref": "#/definitions/expr" },
+        "after": { "type": "number" },
+        "once": { "type": "boolean" },
+        "cooldown": { "type": "number" },
+        "scope": { "$ref": "#/definitions/agenda_scope" }
+      }
+    },
+
+    "fire_source": {
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["scheduled"],
+          "properties": {
+            "scheduled": { "$ref": "#/definitions/intervention_schedule" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["reactive"],
+          "properties": {
+            "reactive": { "$ref": "#/definitions/reactive_trigger" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
     "action": {
       "type": "object",
       "oneOf": [
@@ -497,10 +534,11 @@
 
     "intervention": {
       "type": "object",
-      "required": ["name", "schedule", "actions"],
+      "required": ["name", "fire", "actions"],
       "properties": {
         "name": { "type": "string" },
-        "schedule": { "$ref": "#/definitions/intervention_schedule" },
+        "base_name": { "type": "string" },
+        "fire": { "$ref": "#/definitions/fire_source" },
         "actions": { "type": "array", "items": { "$ref": "#/definitions/action" } },
         "kind": { "type": "string", "enum": ["scenario", "event"] }
       }

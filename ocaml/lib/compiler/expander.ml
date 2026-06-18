@@ -4630,8 +4630,8 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
             else String.concat "_" (comp :: idx_vals) in
           [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }]
       in
-      Some { Ir.name = iv_name; Ir.base_name; Ir.schedule; Ir.actions;
-             Ir.kind }
+      Some { Ir.name = iv_name; Ir.base_name; Ir.fire = Ir.Scheduled schedule;
+             Ir.actions; Ir.kind }
     ) combos
   ) decls
 
