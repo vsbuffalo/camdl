@@ -954,9 +954,15 @@ unification, if taken, is its own behaviour-moving change with its own red→gre
    `inference_loglik_baselines_hold` and `pgas_density_baselines_hold` both hold
    against committed values (the time-homogeneous corpus is byte-identical, as
    the substep-time convention proposal predicted). **No re-bless was needed.**
-10. ⬜ Layer 4 capstone — `Walk` handle + raw-accessor privatization; raw
-    accessors become private (now unblocked: PGAS no longer touches them
-    directly).
+10. 🟡 Layer 4 capstone — partial. The six bricks already encapsulated
+    (`next_boundary`, `effect_due_at`, `effect_time`, `output_time`,
+    `pass_effect`; `obs_due_at` deleted as dead) are now **private** — the
+    enforcement half, byte-identical. The remaining `Walk`-handle migration (so
+    backends/drivers hold a handle instead of a raw `Cursor`, letting the rest —
+    `obs_time`, `substeps`, `window_end`, `effect_idx_at`, `next_stop`,
+    `arrive`, `clip`, `drain_outputs`, `substep`, `pass_output`, `pass_obs`,
+    `output_due_at` — go private too) is the one piece left, deferred as a
+    deliberate ~7-file API refactor.
 
 ## Open decisions
 
