@@ -620,6 +620,127 @@ gradient finite-difference check passes on a reactive model
 PGAS baseline without reactive policies remains byte-identical
 ```
 
+## Validation Fixtures
+
+The validation is phased to match the implementation: PR1 pins the **IR shape and
+the rejection**; PR2 pins **behavior** with `reactive_log.tsv` and deterministic
+trajectory expectations on tiny eyeball-able models. The single most important
+fixture is the **equivalence oracle** (PR2 #4): a reactive-derived fire time must
+produce the same trajectory as an ordinary scheduled intervention placed at that
+time.
+
+### PR1 — compiler / IR goldens (runtime still rejects)
+
+Compile-only goldens (the runtime cannot simulate an active reactive policy yet),
+asserted by compiling the `.camdl` and comparing the emitted IR.
+
+1. **`reactive_sir_observed_threshold.camdl`** — minimal SIR with an observation
+   stream and a single reactive policy:
+
+   ```camdl
+   reactive_interventions {
+     sia : when sum_observed(weekly_cases, window = 28 'days) >= trigger_threshold {
+       after  = 21 'days
+       action = transfer(fraction = sia_cov, from = S, to = V)
+       once   = true
+       scope  = exogenous
+     }
+   }
+   ```
+
+   Pins `FireSource::Reactive`, `TriggerExpr`, `after`, `once`, `scope`.
+
+2. **`reactive_indexed_patch_sia.camdl`** — an indexed policy:
+
+   ```camdl
+   reactive_interventions {
+     sia[p in patch] : when sum_observed(weekly_cases[p], window = 28 'days) >= 2 {
+       after    = 14 'days
+       action   = transfer(fraction = cov[p], from = S[p], to = V[p])
+       cooldown = 180 'days
+       once     = false
+       scope    = exogenous
+     }
+   }
+   ```
+
+   Pins stratification expansion, `base_name`, indexed stream references, and
+   indexed action targets.
+
+3. **Negative compiler fixtures** — each rejected with a located diagnostic:
+   - `observed()` in a transition rate (**E278**).
+   - `.rolling(...)` method syntax (unsupported — bare syntax error **E001**).
+   - non-boolean / non-comparison `when` (**E273**).
+   - unknown observation stream (**E279**).
+   - negative or non-finite `window` / `after` / `cooldown` (**E274**).
+   - `once = true` together with `cooldown` (**E276**).
+   - unknown action target — rejected through the shared intervention action
+     validation (E265 / `resolve_comp_name`), not a reactive-specific path.
+
+### PR1 — runtime (capability) tests
+
+- A reactive model with the policy **inactive/default** runs the baseline (the
+  dormant policy is inert).
+- The same model with `--enable sia` rejects with the `REACTIVE_INTERVENTIONS`
+  capability message.
+- A scenario that `enable`s the reactive policy also rejects.
+- The fit / pfilter path rejects an active reactive policy through the inference
+  method capability validation.
+
+### PR2 — runtime behavior goldens
+
+Tiny deterministic models whose expected values can be eyeballed. Commit the
+source TSV and the expected `reactive_log.tsv`.
+
+1. **Lag.** Observation crosses at `t = 28`, `after = 21` → the action fires at
+   `t = 49`. Expected `reactive_log.tsv`:
+
+   ```text
+   trigger_time  policy  trigger_value  threshold  fire_time  action
+   28            sia     2              2          49         transfer
+   ```
+
+   Expected trajectory: `S` drops and `V` rises at exactly `49`, not `28`.
+
+2. **Cooldown.** Observations exceed the threshold at `t = 14, 21, 28, 60`,
+   `cooldown = 30`: fires at the first eligible crossing, suppresses the middle
+   crossings, fires again after the cooldown elapses.
+
+3. **Once.** Multiple threshold crossings, `once = true` → exactly one firing.
+
+4. **Equivalence (the semantic oracle).** A reactive policy driven by a known
+   observed sequence produces the **same trajectory** as a precomputed scheduled
+   intervention placed at the resulting fire time.
+
+5. **Default-off.** The same model with and without `--enable sia`: the baseline
+   has no firing; the enabled run fires.
+
+### Figures (docs only — not the primary gate)
+
+Generated from committed TSVs; commit the script and the source/expected TSVs,
+the PNG optional unless docs need it. One figure suffices: observed weekly cases
+(bars), the threshold (horizontal line), the trigger time and the campaign fire
+time (two vertical lines), and the `S` / `V` trajectories showing the effect at
+the fire time, not the trigger time.
+
+## Phasing / what's next
+
+- **PR1 (this PR, gh#204):** IR `FireSource` ADT, `TriggerExpr`, the DSL surface,
+  compiler validation, and the capability rejection — plus the PR1 fixtures
+  above. Lands the schema/golden break (IR 0.16 → 0.17) in isolation.
+- **PR2 — forward chain-binomial agenda runtime:** `ReactiveAgenda`, the trigger
+  primitives (`observed` / `sum_observed`), evaluate-after-observation +
+  enqueue-after-the-boundary, apply through the existing `effects` resolver,
+  `reactive_log.tsv`, and the PR2 behavior goldens. Scope-limited to
+  `SharedExogenous`.
+- **PR3 — gillespie / ODE:** consume enqueued concrete effect times via the
+  schedule view; observed/exogenous agendas only, no continuous root triggers.
+- **PR4 — PF / IF2 shared-exogenous:** agenda update after scoring each
+  observation; the shared agenda preserves the CRN coupling; reject
+  particle-local triggers.
+- **PR5 — PGAS density:** a separate design + review surface (the complete-data
+  density term for a state-dependent policy); not bundled with runtime support.
+
 ## Sharp UX Points
 
 1. **Observed vs latent must be explicit.** Public-health users often mean
