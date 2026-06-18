@@ -1,0 +1,191 @@
+//! Reactive intervention runtime (gh#204, PR2) — forward chain-binomial.
+//!
+//! Slice 1: the **trigger-predicate evaluator**. Given a [`TriggerExpr`] and a
+//! way to resolve its observed quantities and thresholds, decide whether a
+//! policy fires. This is pure (no I/O, no RNG); the boolean structure and the
+//! windowed reducers are unit-tested here. Later slices feed it the realized
+//! observation draws (on a dedicated RNG stream) and enqueue the resulting
+//! effects through the scheduled-intervention due-batch.
+
+use ir::intervention::{CmpOp, ObsReducer, TriggerExpr, TriggerQuantity, TriggerThreshold};
+
+/// Inclusive upper-bound tolerance for the trailing window: an emit landing
+/// exactly at `now` is included. The window is `(now - window, now]`
+/// (open-left, closed-right).
+const WINDOW_EPS: f64 = 1e-9;
+
+/// Fold one stream's realized-observation history into a single trigger value.
+/// `history` is `(emit_time, realized_Y)` in ascending time; `now` is the
+/// current trigger-evaluation time. `Latest` ignores the window (the most recent
+/// draw); `Sum`/`Mean`/`Max` fold over the trailing window `(now - window, now]`.
+/// An empty selection reduces to `0.0` ("nothing detected").
+pub fn reduce_obs(
+    history: &[(f64, f64)],
+    window: Option<f64>,
+    reducer: ObsReducer,
+    now: f64,
+) -> f64 {
+    if let ObsReducer::Latest = reducer {
+        return history.last().map(|&(_, y)| y).unwrap_or(0.0);
+    }
+    let lo = window.map(|w| now - w).unwrap_or(f64::NEG_INFINITY);
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    let mut max = f64::NEG_INFINITY;
+    for &(t, y) in history {
+        if t > lo && t <= now + WINDOW_EPS {
+            sum += y;
+            count += 1;
+            if y > max {
+                max = y;
+            }
+        }
+    }
+    match reducer {
+        ObsReducer::Sum => sum,
+        ObsReducer::Mean => {
+            if count == 0 {
+                0.0
+            } else {
+                sum / count as f64
+            }
+        }
+        ObsReducer::Max => {
+            if count == 0 {
+                0.0
+            } else {
+                max
+            }
+        }
+        ObsReducer::Latest => unreachable!("Latest handled above"),
+    }
+}
+
+/// Evaluate a trigger predicate to a boolean. `quantity` resolves a
+/// [`TriggerQuantity`] to its realized value (typically via [`reduce_obs`] over
+/// the obs history); `threshold` resolves a [`TriggerThreshold`] (constant or
+/// parameter). Both are injected so this stays pure and unit-testable; the
+/// runtime supplies the obs-history- and params-backed closures.
+pub fn eval_trigger(
+    expr: &TriggerExpr,
+    quantity: &dyn Fn(&TriggerQuantity) -> f64,
+    threshold: &dyn Fn(&TriggerThreshold) -> f64,
+) -> bool {
+    match expr {
+        TriggerExpr::Cmp { lhs, op, rhs } => apply_cmp(*op, quantity(lhs), threshold(rhs)),
+        TriggerExpr::And(a, b) => {
+            eval_trigger(a, quantity, threshold) && eval_trigger(b, quantity, threshold)
+        }
+        TriggerExpr::Or(a, b) => {
+            eval_trigger(a, quantity, threshold) || eval_trigger(b, quantity, threshold)
+        }
+        TriggerExpr::Not(a) => !eval_trigger(a, quantity, threshold),
+    }
+}
+
+fn apply_cmp(op: CmpOp, l: f64, r: f64) -> bool {
+    match op {
+        CmpOp::Lt => l < r,
+        CmpOp::Le => l <= r,
+        CmpOp::Gt => l > r,
+        CmpOp::Ge => l >= r,
+        CmpOp::Eq => l == r,
+        CmpOp::Neq => l != r,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obs(stream: &str, window: Option<f64>, reducer: ObsReducer) -> TriggerQuantity {
+        TriggerQuantity::Observed { stream: stream.into(), window, reducer }
+    }
+
+    #[test]
+    fn latest_ignores_window_and_empty_is_zero() {
+        let h = [(7.0, 2.0), (14.0, 5.0), (21.0, 3.0)];
+        assert_eq!(reduce_obs(&h, None, ObsReducer::Latest, 21.0), 3.0);
+        assert_eq!(reduce_obs(&[], None, ObsReducer::Latest, 21.0), 0.0);
+    }
+
+    #[test]
+    fn sum_over_trailing_window_is_open_left_closed_right() {
+        // weekly emits; window 28 at now=28 covers (0, 28] = {7,14,21,28}.
+        // The boundary emit at now-window=0 is excluded; the current emit at
+        // now=28 is included.
+        let h = [(0.0, 100.0), (7.0, 2.0), (14.0, 5.0), (21.0, 3.0), (28.0, 4.0)];
+        assert_eq!(reduce_obs(&h, Some(28.0), ObsReducer::Sum, 28.0), 2.0 + 5.0 + 3.0 + 4.0);
+        // a tighter window keeps only the most recent emits
+        assert_eq!(reduce_obs(&h, Some(14.0), ObsReducer::Sum, 28.0), 3.0 + 4.0);
+    }
+
+    #[test]
+    fn mean_and_max_over_window_with_empty_floor() {
+        let h = [(7.0, 2.0), (14.0, 6.0), (21.0, 4.0)];
+        assert_eq!(reduce_obs(&h, Some(21.0), ObsReducer::Mean, 21.0), (2.0 + 6.0 + 4.0) / 3.0);
+        assert_eq!(reduce_obs(&h, Some(21.0), ObsReducer::Max, 21.0), 6.0);
+        assert_eq!(reduce_obs(&[], Some(21.0), ObsReducer::Sum, 21.0), 0.0);
+        assert_eq!(reduce_obs(&[], Some(21.0), ObsReducer::Mean, 21.0), 0.0);
+        assert_eq!(reduce_obs(&[], Some(21.0), ObsReducer::Max, 21.0), 0.0);
+    }
+
+    #[test]
+    fn every_comparison_operator() {
+        let q = |_: &TriggerQuantity| 5.0;
+        let t = |th: &TriggerThreshold| match th {
+            TriggerThreshold::Const(c) => *c,
+            TriggerThreshold::Param(_) => 0.0,
+        };
+        let cmp = |op| TriggerExpr::Cmp {
+            lhs: obs("x", None, ObsReducer::Latest),
+            op,
+            rhs: TriggerThreshold::Const(5.0),
+        };
+        assert!(eval_trigger(&cmp(CmpOp::Ge), &q, &t));
+        assert!(eval_trigger(&cmp(CmpOp::Le), &q, &t));
+        assert!(!eval_trigger(&cmp(CmpOp::Gt), &q, &t));
+        assert!(!eval_trigger(&cmp(CmpOp::Lt), &q, &t));
+        assert!(eval_trigger(&cmp(CmpOp::Eq), &q, &t));
+        assert!(!eval_trigger(&cmp(CmpOp::Neq), &q, &t));
+    }
+
+    #[test]
+    fn and_or_not_and_param_threshold() {
+        let q = |_: &TriggerQuantity| 5.0;
+        let t = |th: &TriggerThreshold| match th {
+            TriggerThreshold::Const(c) => *c,
+            TriggerThreshold::Param(p) => {
+                if p == "thr" {
+                    3.0
+                } else {
+                    0.0
+                }
+            }
+        };
+        // 5 >= thr(3) → true
+        let ge = TriggerExpr::Cmp {
+            lhs: obs("x", None, ObsReducer::Latest),
+            op: CmpOp::Ge,
+            rhs: TriggerThreshold::Param("thr".into()),
+        };
+        // 5 < 4 → false
+        let lt = TriggerExpr::Cmp {
+            lhs: obs("x", None, ObsReducer::Latest),
+            op: CmpOp::Lt,
+            rhs: TriggerThreshold::Const(4.0),
+        };
+        assert!(eval_trigger(&ge, &q, &t));
+        assert!(!eval_trigger(&lt, &q, &t));
+        // true && !false
+        assert!(eval_trigger(
+            &TriggerExpr::And(Box::new(ge.clone()), Box::new(TriggerExpr::Not(Box::new(lt.clone())))),
+            &q,
+            &t
+        ));
+        // false || true
+        assert!(eval_trigger(&TriggerExpr::Or(Box::new(lt.clone()), Box::new(ge.clone())), &q, &t));
+        // !(false) → true
+        assert!(eval_trigger(&TriggerExpr::Not(Box::new(lt)), &q, &t));
+    }
+}
