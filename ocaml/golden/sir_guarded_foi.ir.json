@@ -1,4 +1,4 @@
-{"ir_version":"0.17","validated_by":"ocaml-compiler-v0.17","model":{"name":"sir_guarded_foi","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.18","validated_by":"ocaml-compiler-v0.18","model":{"name":"sir_guarded_foi","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_urban","kind":"integer"},
 {"name":"S_rural","kind":"integer"},
 {"name":"S_outpost","kind":"integer"},

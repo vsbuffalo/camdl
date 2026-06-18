@@ -726,13 +726,11 @@ reactive_decl:
         let after    = ref None in
         let once     = ref None in
         let cooldown = ref None in
-        let scope    = ref None in
         List.iter (function
           | `Action a   -> action   := Some a
           | `After e    -> after    := Some e
           | `Once e     -> once     := Some e
           | `Cooldown e -> cooldown := Some e
-          | `Scope e    -> scope    := Some e
         ) kvs;
         let act = match !action with
           | Some a -> a
@@ -744,7 +742,7 @@ reactive_decl:
         in
         { rxname = name; rxindices = ibs; rxwhen = pred;
           rxafter = !after; rxonce = !once; rxcooldown = !cooldown;
-          rxscope = !scope; rxaction = act; rxguard = guard;
+          rxaction = act; rxguard = guard;
           rxloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* Boolean predicate. and/or/not over comparison atoms; the atom is a plain expr
@@ -769,12 +767,16 @@ reactive_kv:
                                        | "after"    -> `After e
                                        | "once"     -> `Once e
                                        | "cooldown" -> `Cooldown e
-                                       | "scope"    -> `Scope e
+                                       | "scope"    ->
+                                         Parser_errors.push_error ~sp:$startpos ~ep:$endpos
+                                           ~code:"E106"
+                                           ~msg:"the `scope` reactive key was removed: latent-scope (scope = particle) triggers are deferred — remove it, exogenous is implicit. See `camdl docs language-changes`";
+                                         `After e
                                        | other ->
                                          Parser_errors.push_error ~sp:$startpos ~ep:$endpos
                                            ~code:"E106"
                                            ~msg:(Printf.sprintf
-                                             "unknown reactive intervention key '%s' (expected action/after/once/cooldown/scope)" other);
+                                             "unknown reactive intervention key '%s' (expected action/after/once/cooldown)" other);
                                          `After e }
 
 (* Reactive action RHS: the same action forms as scheduled interventions, minus

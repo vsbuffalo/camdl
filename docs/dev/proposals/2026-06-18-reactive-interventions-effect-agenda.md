@@ -2,6 +2,14 @@
 
 - Date: 2026-06-18
 - Status: Draft implementation RFC
+- Amendment (2026-06-18): the `scope = exogenous | particle` key shown in the
+  examples below was **removed** from the shipped surface (IR 0.17 → 0.18).
+  Only the exogenous (reported-surveillance) behavior is implemented, so a
+  single-value key + an unwired `particle` arm were dead surface; triggers are
+  exogenous implicitly. The `scope` key and `AgendaScope` return when
+  latent-scope triggers are actually wired (PR4/PR5), at which point the key
+  carries the inference-safety seam that justifies it. The `scope = …` lines in
+  the examples are retained as the original design record.
 - Supersedes: `2026-05-14-reactive-interventions-and-evsi.md` for the
   reactive-intervention design. The older document remains useful as motivation
   for EVSI and public-health use cases.

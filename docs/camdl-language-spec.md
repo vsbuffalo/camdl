@@ -2764,7 +2764,6 @@ reactive_interventions {
         action   = transfer(fraction = sia_coverage, from = S, to = V)
         once     = false
         cooldown = 180 'days
-        scope    = exogenous
       }
 }
 ```
@@ -2790,7 +2789,11 @@ The policy body fields:
 | `after`    | Non-negative lag between the trigger firing and the effect (default `0`). |
 | `once`     | `true` (default) fires at most once; `false` allows repeats.      |
 | `cooldown` | Minimum time between firings when `once = false`. Mutually exclusive with `once = true`. |
-| `scope`    | `exogenous` (default) — the trigger reads shared surveillance data. `particle` (latent-state triggers) is reserved for a later phase. |
+
+The trigger always reads **reported surveillance** — the realized observation
+draw, shared across particles. Triggers that read latent model state (a
+particle-local scope) are deferred to a later phase; until then there is no
+`scope` key.
 
 A reactive intervention is a **policy** (like `interventions {}`, not `events {}`):
 it is scenario-toggleable, so a `baseline` scenario can omit it and a

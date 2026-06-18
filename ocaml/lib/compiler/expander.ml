@@ -4841,24 +4841,11 @@ let expand_reactive ctx decls =
           ~hint:"once = true fires once and never again (drop cooldown); for a \
                  repeating rate-limited policy set once = false"
           ();
-      let scope = match rx.rxscope with
-        | None -> Ir.SharedExogenous
-        | Some (EIdent ("exogenous", _)) | Some (EFuncCall ("exogenous", [])) -> Ir.SharedExogenous
-        | Some (EIdent ("particle", _))  | Some (EFuncCall ("particle", []))  -> Ir.ParticleLocal
-        | Some _ ->
-          Diagnostics.error ctx.diags ~code:"E277" ~loc:rx_loc
-            ~message:(Printf.sprintf
-              "reactive intervention '%s': `scope` must be `exogenous` or \
-               `particle`" rx_name)
-            ~hint:"scope = exogenous (shared surveillance trigger) is the phase-1 default"
-            ();
-          Ir.SharedExogenous
-      in
       let actions =
         resolve_intervention_action ctx env ~name:rx_name ~loc:rx_loc rx.rxaction
       in
       let trigger : Ir.reactive_trigger =
-        { Ir.when_; Ir.after; Ir.once; Ir.cooldown; Ir.scope }
+        { Ir.when_; Ir.after; Ir.once; Ir.cooldown }
       in
       Some { Ir.name = rx_name; Ir.base_name; Ir.fire = Ir.Reactive trigger;
              Ir.actions; Ir.kind = Ir.Scenario }

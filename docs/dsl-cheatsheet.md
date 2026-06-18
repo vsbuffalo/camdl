@@ -283,7 +283,7 @@ before assuming the language doesn't do something — it usually does.
 
 - **`reactive_interventions {}`** (gh#204) — state/observation-triggered policies:
   `name : when sum_observed(stream, window = D) >= thr { action = transfer(..);
-  after = ..; once = ..; cooldown = ..; scope = exogenous }`. The `when` predicate
+  after = ..; once = ..; cooldown = .. }`. The `when` predicate
   reads observed data via `observed(stream)` / `sum_observed(stream, window = ..)`
   (never latent state — using `observed()` in a rate is **E278**). New reserved
   words: `reactive_interventions`, `when`, `action`. Forward **chain-binomial**

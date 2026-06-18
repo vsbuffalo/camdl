@@ -305,7 +305,6 @@ reactive_interventions {
     action   = transfer(fraction = sia_coverage, from = S, to = V)
     once     = false
     cooldown = 180 'days      # don't re-fire for 6 months
-    scope    = exogenous
   }
 }
 ```

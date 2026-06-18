@@ -7012,7 +7012,7 @@ simulate { from = 0 'days  to = 60 'days }
    goldens, not by duplicated inline model strings: `make check-reactive-golden`
    asserts tests/fixtures/reactive/*.camdl compiles byte-for-byte to the
    committed *.ir.json, and rust/crates/ir reactive_golden deserialises those
-   and asserts the fields (FireSource::Reactive, TriggerExpr, after/once/scope,
+   and asserts the fields (FireSource::Reactive, TriggerExpr, after/once,
    stratified expansion, indexed stream/targets). The inline OCaml tests below
    stay focused on the default-shape and the negative diagnostics. *)
 
@@ -7029,12 +7029,23 @@ let test_reactive_observed_is_latest () =
      Alcotest.(check bool) "no window" true (window = None);
      Alcotest.(check bool) "reducer = latest" true (reducer = Ir.RedLatest)
    | _ -> Alcotest.fail "expected reactive observed() trigger");
-  (* defaults: once defaults to true, scope to exogenous. *)
+  (* defaults: once defaults to true. *)
   (match iv.Ir.fire with
    | Ir.Reactive t ->
-     Alcotest.(check bool) "once defaults true" true t.Ir.once;
-     Alcotest.(check bool) "scope defaults exogenous" true (t.Ir.scope = Ir.SharedExogenous)
+     Alcotest.(check bool) "once defaults true" true t.Ir.once
    | _ -> Alcotest.fail "expected reactive")
+
+let test_reactive_scope_key_removed () =
+  (* gh#204: the `scope` reactive key was removed — latent-scope (scope =
+     particle) triggers are deferred. Writing it must fail with the migration
+     diagnostic, not silently lower (it previously accepted `particle` and the
+     runtime ignored it). *)
+  compile_expect_error_code ~code:"E106" ~contains:"scope"
+    (reactive_model_with
+      "sia : when observed(weekly) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       \  scope  = exogenous\n\
+       }")
 
 let test_reactive_observed_in_rate_rejected () =
   (* observed() in a transition rate (a model expression, not a trigger) must
@@ -7322,6 +7333,8 @@ let () =
     "reactive_interventions", [
       Alcotest.test_case "observed() (no window) lowers to Latest + defaults"
         `Quick test_reactive_observed_is_latest;
+      Alcotest.test_case "E106 the removed `scope` key is rejected with a migration"
+        `Quick test_reactive_scope_key_removed;
       Alcotest.test_case "E278 observed() in a rate is rejected"
         `Quick test_reactive_observed_in_rate_rejected;
       Alcotest.test_case "E279 unknown observation stream is rejected"

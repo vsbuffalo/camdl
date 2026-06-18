@@ -7,7 +7,7 @@
 //! IR SHAPE and the OCaml→Rust wire contract, not a trajectory.
 
 use ir::intervention::{
-    AgendaScope, CmpOp, FireSource, ObsReducer, TriggerExpr, TriggerQuantity, TriggerThreshold,
+    CmpOp, FireSource, ObsReducer, TriggerExpr, TriggerQuantity, TriggerThreshold,
 };
 use std::path::PathBuf;
 
@@ -32,7 +32,6 @@ fn sir_observed_threshold_golden_is_reactive() {
     assert_eq!(t.after, 21.0);
     assert!(t.once);
     assert_eq!(t.cooldown, None);
-    assert_eq!(t.scope, AgendaScope::SharedExogenous);
     match &t.when_ {
         TriggerExpr::Cmp {
             lhs: TriggerQuantity::Observed { stream, window, reducer },

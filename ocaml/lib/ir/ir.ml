@@ -243,12 +243,6 @@ type trigger_expr =
   | TEOr  of trigger_expr * trigger_expr
   | TENot of trigger_expr
 
-(* gh#204. The scope a reactive policy's trigger reads from — the
-   inference-safety axis. Phase 1 supports only [SharedExogenous]. *)
-type agenda_scope =
-  | SharedExogenous   (* scope = exogenous : trigger reads external data, shared *)
-  | ParticleLocal     (* scope = particle  : trigger reads latent state          *)
-
 (* gh#204. A reactive (state/observation-triggered) fire source: fire when
    [when_] holds, [after] a non-negative lag, optionally rate-limited by
    [cooldown]. The action grammar and effect resolution are shared with
@@ -258,7 +252,6 @@ type reactive_trigger = {
   after:    float;          (* non-negative lag before the effect fires    *)
   once:     bool;           (* fire-and-disable; mutually exclusive w/ cooldown *)
   cooldown: float option;   (* min time between firings when [once = false] *)
-  scope:    agenda_scope;
 }
 
 (* gh#204. How an intervention's fire times are produced — orthogonal to

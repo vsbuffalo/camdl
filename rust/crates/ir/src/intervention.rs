@@ -157,23 +157,6 @@ pub enum TriggerExpr {
 
 // ── Fire source ─────────────────────────────────────────────────────────────
 
-/// The scope a reactive policy's trigger reads from — the inference-safety axis
-/// (gh#204). The IR must carry it so inference can reject unsafe combinations;
-/// phase 1 supports only [`SharedExogenous`](AgendaScope::SharedExogenous).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgendaScope {
-    /// All particles share one agenda. Trigger inputs are external
-    /// observations / deterministic data, identical for every particle at a
-    /// boundary, so the shared `Schedule` CRN coupling is preserved. DSL:
-    /// `scope = exogenous`.
-    SharedExogenous,
-    /// Each particle has its own agenda because the trigger reads latent state.
-    /// DSL: `scope = particle`. Rejected in inference until agenda state is
-    /// part of particle state (later phase).
-    ParticleLocal,
-}
-
 /// A reactive (state/observation-triggered) fire source (gh#204): fire when
 /// `when_` holds, `after` a non-negative lag, optionally rate-limited by
 /// `cooldown`. The action grammar and effect resolution are shared with
@@ -194,8 +177,6 @@ pub struct ReactiveTrigger {
     /// Minimum time between firings when `once = false`. Absent ⇒ no rate limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cooldown: Option<f64>,
-    /// Trigger scope — the inference-safety axis (see [`AgendaScope`]).
-    pub scope: AgendaScope,
 }
 
 /// How an intervention's fire times are produced (gh#204). Orthogonal to
@@ -293,7 +274,7 @@ mod reactive_serde_tests {
     /// and round-trip. A drift in either serde impl trips this.
     #[test]
     fn reactive_intervention_round_trips_camdlc_wire_shape() {
-        let json = r#"{"name":"sia","fire":{"reactive":{"after":21.0,"cooldown":180.0,"once":false,"scope":"shared_exogenous","when":{"cmp":{"lhs":{"observed":{"reducer":"sum","stream":"weekly_afp","window":28.0}},"op":"ge","rhs":{"param":"afp_trigger_threshold"}}}}},"actions":[{"fraction_transfer":{"src":"S","dst":"V","fraction":{"param":"sia_coverage"}}}]}"#;
+        let json = r#"{"name":"sia","fire":{"reactive":{"after":21.0,"cooldown":180.0,"once":false,"when":{"cmp":{"lhs":{"observed":{"reducer":"sum","stream":"weekly_afp","window":28.0}},"op":"ge","rhs":{"param":"afp_trigger_threshold"}}}}},"actions":[{"fraction_transfer":{"src":"S","dst":"V","fraction":{"param":"sia_coverage"}}}]}"#;
         let iv: Intervention =
             serde_json::from_str(json).expect("deserialize reactive intervention");
         assert_eq!(iv.name, "sia");
@@ -306,7 +287,6 @@ mod reactive_serde_tests {
         assert_eq!(trig.after, 21.0);
         assert!(!trig.once);
         assert_eq!(trig.cooldown, Some(180.0));
-        assert_eq!(trig.scope, AgendaScope::SharedExogenous);
         match &trig.when_ {
             TriggerExpr::Cmp {
                 lhs: TriggerQuantity::Observed { stream, window, reducer },
@@ -327,7 +307,7 @@ mod reactive_serde_tests {
     }
 
     /// The compound predicate variants (and/or/not) and the other reducers /
-    /// scope / threshold cases round-trip.
+    /// threshold cases round-trip.
     #[test]
     fn compound_trigger_round_trips() {
         let trig = ReactiveTrigger {
@@ -354,7 +334,6 @@ mod reactive_serde_tests {
             after: 0.0,
             once: true,
             cooldown: None,
-            scope: AgendaScope::ParticleLocal,
         };
         let fs = FireSource::Reactive(trig);
         let json = serde_json::to_string(&fs).expect("serialize");

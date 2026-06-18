@@ -445,11 +445,6 @@
       ]
     },
 
-    "agenda_scope": {
-      "type": "string",
-      "enum": ["shared_exogenous", "particle_local"]
-    },
-
     "obs_reducer": {
       "type": "string",
       "enum": ["latest", "sum", "mean", "max"]
@@ -538,13 +533,12 @@
 
     "reactive_trigger": {
       "type": "object",
-      "required": ["when", "after", "once", "scope"],
+      "required": ["when", "after", "once"],
       "properties": {
         "when": { "$ref": "#/definitions/trigger_expr" },
         "after": { "type": "number" },
         "once": { "type": "boolean" },
-        "cooldown": { "type": "number" },
-        "scope": { "$ref": "#/definitions/agenda_scope" }
+        "cooldown": { "type": "number" }
       }
     },
 

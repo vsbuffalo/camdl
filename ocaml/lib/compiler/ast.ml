@@ -292,7 +292,6 @@ type reactive_decl = {
   rxafter    : expr option;          (* lag before the effect; default 0 *)
   rxonce     : expr option;          (* fire-and-disable; default true *)
   rxcooldown : expr option;          (* min time between firings *)
-  rxscope    : expr option;          (* exogenous (default) | particle *)
   rxaction   : action_decl;
   rxguard    : guard option;         (* where expr — compile-time filter *)
   rxloc      : loc;

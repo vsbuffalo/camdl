@@ -13,6 +13,24 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-06-18 — `scope` key removed from `reactive_interventions {}` (gh#204)
+
+**What.** The `scope = exogenous | particle` reactive key is removed. A reactive
+trigger always reads **reported surveillance** — the realized observation draw,
+shared across particles. The `particle` (latent-state) scope was never wired: it
+parsed but the runtime ignored it, silently behaving as `exogenous`, so it is
+withdrawn until latent-scope triggers are actually implemented (at which point
+the key returns with the inference-safety seam that is its reason to exist). (IR
+schema 0.17 → 0.18.)
+
+**Migration.** Delete the `scope = ...` line — `exogenous` is the only behavior
+and is now implicit.
+
+**Diagnostic.** `scope = ...` in a reactive policy → **E106** ("the `scope`
+reactive key was removed … remove it, exogenous is implicit").
+
+---
+
 ## 2026-06-18 — `reactive_interventions {}` block + new reserved words (gh#204)
 
 **What.** A new top-level block, `reactive_interventions {}`, declares
@@ -26,7 +44,6 @@ reactive_interventions {
     action   = transfer(fraction = cov, from = S, to = V)
     once     = false
     cooldown = 180 'days
-    scope    = exogenous
   }
 }
 ```
@@ -35,9 +52,10 @@ The `when` predicate is a boolean over the trigger inputs `observed(stream)` and
 `sum_observed(stream, window = D)`, combined with `and` / `or` / `not`. Reactive
 policies lower to the IR's new `fire = Reactive(..)` source — internally the
 intervention `schedule` field became `fire: Scheduled | Reactive`, an orthogonal
-axis from `kind` (a reactive policy is `kind = Scenario, fire = Reactive`). They
-are parsed, dimension-checked, and emitted to the IR, but no simulation backend
-executes the reactive agenda yet. (IR schema 0.16 → 0.17.)
+axis from `kind` (a reactive policy is `kind = Scenario, fire = Reactive`).
+Forward chain-binomial runs the agenda; Gillespie/ODE and inference reject an
+active reactive policy with a `REACTIVE_INTERVENTIONS` capability error. (IR
+schema 0.16 → 0.17.)
 
 **Migration.** Three new reserved words — `reactive_interventions`, `when`,
 `action` — are added. A model that used one as a compartment / parameter /
@@ -50,9 +68,9 @@ recognized only inside a `when` predicate. No other change to existing models
 **E278** ("only valid inside a reactive trigger predicate"). Reactive
 validation: once+cooldown contradiction **E276**; negative `after` / `cooldown`
 **E274**; non-comparison `when` **E273**; threshold not a constant/parameter
-**E272**; stream-arg / window arity **E270** / **E271**; bad `scope` **E277**.
-Running a model with an _active_ reactive policy → a `REACTIVE_INTERVENTIONS`
-capability error (parsed but not yet executable).
+**E272**; stream-arg / window arity **E270** / **E271**. Running a model with an
+_active_ reactive policy → a `REACTIVE_INTERVENTIONS` capability error (parsed
+but not yet executable).
 
 ## 2026-06-16 — `log_uniform` and `truncated_normal` prior distributions (gh#155)
 

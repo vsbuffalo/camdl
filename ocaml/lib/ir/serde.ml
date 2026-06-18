@@ -577,16 +577,6 @@ let action_of_json j =
    AgendaScope is a snake_case unit enum (a bare string); ReactiveTrigger is a
    struct (cooldown skipped when absent); FireSource is externally tagged
    ({"scheduled": ..} / {"reactive": ..}). *)
-let agenda_scope_to_json (s : agenda_scope) : Yojson.Safe.t =
-  match s with
-  | SharedExogenous -> str "shared_exogenous"
-  | ParticleLocal   -> str "particle_local"
-
-let agenda_scope_of_json j =
-  match as_string j with
-  | "shared_exogenous" -> SharedExogenous
-  | "particle_local"   -> ParticleLocal
-  | s -> fail "unknown agenda_scope '%s'" s
 
 (* gh#204. Reactive trigger predicate. Wire shapes mirror the Rust serde:
    CmpOp/ObsReducer are snake_case unit enums; TriggerQuantity / TriggerThreshold
@@ -671,7 +661,6 @@ let reactive_trigger_to_json (t : reactive_trigger) : Yojson.Safe.t =
       ("after", flt t.after);
       ("once",  bool t.once) ]
     @ (match t.cooldown with None -> [] | Some c -> [("cooldown", flt c)])
-    @ [ ("scope", agenda_scope_to_json t.scope) ]
   )
 
 let reactive_trigger_of_json j =
@@ -679,8 +668,7 @@ let reactive_trigger_of_json j =
     after    = as_float (member "after" j);
     once     = as_bool (member "once" j);
     cooldown = (match member_opt "cooldown" j with
-                | Some n -> Some (as_float n) | None -> None);
-    scope    = agenda_scope_of_json (member "scope" j); }
+                | Some n -> Some (as_float n) | None -> None); }
 
 let fire_source_to_json (f : fire_source) : Yojson.Safe.t =
   match f with

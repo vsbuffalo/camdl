@@ -1,7 +1,6 @@
-# gh#204 PR1 compiler/IR golden: a minimal SIR with one observation stream and a
+# gh#204 compiler/IR golden: a minimal SIR with one observation stream and a
 # single reactive policy. Pins FireSource::Reactive, the TriggerExpr shape, and
-# the `after` / `once` / `scope` fields. Compile-only — the runtime rejects an
-# active reactive policy until the agenda backend lands (REACTIVE_INTERVENTIONS).
+# the `after` / `once` fields. Forward chain-binomial runs the agenda.
 
 time_unit = 'days
 
@@ -38,7 +37,6 @@ reactive_interventions {
     after  = 21 'days
     action = transfer(fraction = sia_cov, from = S, to = V)
     once   = true
-    scope  = exogenous
   }
 }
 

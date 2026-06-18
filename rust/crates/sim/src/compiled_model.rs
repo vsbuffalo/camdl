@@ -1414,7 +1414,7 @@ mod tests {
         use crate::Capabilities;
         use crate::{ChainBinomialSim, GillespieSim, OdeSim, Simulate};
         use ir::intervention::{
-            Action, AgendaScope, CmpOp, FireSource, FractionTransfer, Intervention,
+            Action, CmpOp, FireSource, FractionTransfer, Intervention,
             InterventionKind, ObsReducer, ReactiveTrigger, TriggerExpr, TriggerQuantity,
             TriggerThreshold,
         };
@@ -1449,7 +1449,6 @@ mod tests {
                 after: 21.0,
                 once: true,
                 cooldown: None,
-                scope: AgendaScope::SharedExogenous,
             }),
             actions: vec![Action::FractionTransfer(FractionTransfer {
                 src: "S".into(),

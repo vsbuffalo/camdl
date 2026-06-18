@@ -26,7 +26,7 @@
 
 use ir::expr::{BinOp, Expr, UnOp};
 use ir::intervention::{
-    Action, AgendaScope, CmpOp, FireSource, Intervention, InterventionKind,
+    Action, CmpOp, FireSource, Intervention, InterventionKind,
     InterventionSchedule, ObsReducer, ReactiveTrigger, RecurringSchedule, TriggerExpr,
     TriggerQuantity, TriggerThreshold,
 };
@@ -728,17 +728,6 @@ impl ContentAddressed for InterventionSchedule {
     }
 }
 
-impl ContentAddressed for AgendaScope {
-    fn hash_into(&self, h: &mut CanonicalHasher) {
-        header(h, "ir::intervention::AgendaScope");
-        // Permanent variant indices (run-id stability) — new scopes append.
-        let idx: u32 = match self {
-            AgendaScope::SharedExogenous => 0,
-            AgendaScope::ParticleLocal   => 1,
-        };
-        h.write_u32(idx);
-    }
-}
 
 impl ContentAddressed for CmpOp {
     fn hash_into(&self, h: &mut CanonicalHasher) {
@@ -835,7 +824,6 @@ impl ContentAddressed for ReactiveTrigger {
         h.write_f64_bits(self.after);
         self.once.hash_into(h);
         hash_opt_f64(h, &self.cooldown);
-        self.scope.hash_into(h);
     }
 }
 

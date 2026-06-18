@@ -37,7 +37,6 @@ reactive_interventions {
     action   = transfer(fraction = cov, from = S[p], to = V[p])
     cooldown = 180 'days
     once     = false
-    scope    = exogenous
   }
 }
 
