@@ -119,6 +119,12 @@ impl Simulate for ChainBinomialSim {
             // `EvalCtx.dt`, so a `dt`-referencing rate is meaningful here
             // (see `gate_dt_rate_exact_clip.rs`). gh#54.
             | crate::Capabilities::RUNTIME_DT
+            // gh#204 PR2: forward chain-binomial runs the reactive agenda (the
+            // realized-obs trigger + due-batch firing). FORWARD only — the
+            // inference table in `fit/methods.rs::check_model_capabilities` still
+            // withholds it (no reactive-aware filter yet), and gillespie/ode
+            // forward still reject (PR3).
+            | crate::Capabilities::REACTIVE_INTERVENTIONS
     }
 
     fn name(&self) -> &'static str { "chain_binomial" }
@@ -207,6 +213,16 @@ pub fn run_chain_binomial_with_observer(
         cursor.pass_output();
     }
 
+    // gh#204 PR2: reactive agenda. `None` unless the (post-scenario-filter) model
+    // carries an active reactive policy, so non-reactive sims are byte-identical.
+    // The realized-obs draws run on a DEDICATED RNG stream (distinct salt off the
+    // run seed), so the surveillance trigger never perturbs the dynamics `rng`
+    // (paired-seed / CRN preserved; the equivalence oracle stays byte-identical).
+    const REACTIVE_OBS_SEED_SALT: u64 = 0x52454143_54564f42; // "REACTVOB"
+    let mut agenda =
+        crate::reactive::ReactiveAgenda::from_model(model).map_err(SimError::Validation)?;
+    let mut obs_rng = StatefulRng::new(seed ^ REACTIVE_OBS_SEED_SALT);
+
     while t < cfg.t_end {
         // Progress tick: report current time before drawing this step. RNG-free.
         if let Some(cb) = tick.as_deref_mut() { cb(t); }
@@ -243,6 +259,15 @@ pub fn run_chain_binomial_with_observer(
         // boundary t_grid + dt (the firing key step_one used internally before
         // gh#216 lifted the decision to the caller). Byte-identical.
         crate::effects::due_effects(model, &fire_steps, t_grid + dt, cfg.dt, &mut scratch.effect_batch);
+        // gh#204 hook A: merge reactive effects due at this boundary into the
+        // SAME due-batch as scheduled interventions, so they fire through the
+        // identical apply_intervention_effects + post-advance + balance +
+        // negative-count lifecycle (no fork).
+        if let Some(a) = agenda.as_mut() {
+            for iv_idx in a.due_iv_idxs(t_grid + dt) {
+                scratch.effect_batch.intervention_idx.push(iv_idx);
+            }
+        }
         step_one(model, &mut int_s.counts, &mut flows, &mut real_s, params, t_grid, dt, &mut rng, &mut scratch)?;
 
         // Lineage observer: feed each transition's per-step flow count against
@@ -261,6 +286,11 @@ pub fn run_chain_binomial_with_observer(
         // Accumulate flows into output FlowVec
         for (i, &f) in flows.iter().enumerate() {
             current_flows.add(i, f);
+        }
+        // gh#204 hook B: accumulate this substep's flows into each reactive obs
+        // stream's interval (for incidence triggers).
+        if let Some(a) = agenda.as_mut() {
+            a.accumulate(&flows);
         }
 
         t += dt;
@@ -283,6 +313,15 @@ pub fn run_chain_binomial_with_observer(
             });
             current_flows.reset();
         });
+
+        // gh#204 hook C: at an observation emit boundary (post-output, per the
+        // lifecycle) draw the realized obs, evaluate the reactive triggers, and
+        // enqueue their effects for a later boundary. No-op unless a stream emits
+        // at `t`. The enqueued effect (lag ≥ 0) cannot affect this `t` — it is
+        // merged in a subsequent iteration's hook A.
+        if let Some(a) = agenda.as_mut() {
+            a.on_boundary(t, &int_s, &real_s, params, model, &mut obs_rng);
+        }
     }
 
     schedule.drain_outputs(&mut cursor, f64::INFINITY, |ot| {

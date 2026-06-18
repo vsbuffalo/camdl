@@ -1,15 +1,17 @@
-//! gh#204 PR1 runtime contract: a reactive intervention is a policy
-//! (`kind = Scenario`), inactive by default. The runtime accepts a run where the
-//! reactive policy is NOT enabled (it is dropped, like any toggleable
-//! intervention), and rejects a run where it IS active with the
-//! `REACTIVE_INTERVENTIONS` capability error — no backend executes the agenda
-//! yet.
+//! gh#204 runtime contract for reactive interventions.
 //!
-//! Uses the COMMITTED compiler-generated golden
-//! (`tests/fixtures/reactive/ir/reactive_sir_observed_threshold.ir.json`, kept
-//! in sync by `make check-reactive-golden`) rather than a hand-written IR
-//! literal, so the rejection exercises the real IR shape. Params are supplied on
-//! the CLI (the golden leaves them estimated).
+//! PR1 represented + rejected them everywhere. PR2 makes **forward
+//! chain-binomial** run the reactive agenda, so:
+//!   - inactive (not enabled) → runs the baseline (policy dropped, like any
+//!     toggleable intervention);
+//!   - active on chain-binomial → RUNS (the agenda fires the policy);
+//!   - active on gillespie/ode (forward) → still rejected with the
+//!     `REACTIVE_INTERVENTIONS` capability error (PR3);
+//!   - the inference path is covered separately (fit/methods.rs) — still
+//!     withheld there (PR4).
+//!
+//! Uses the COMMITTED compiler-generated golden (kept in sync by
+//! `make check-reactive-golden`) with params supplied on the CLI.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -46,7 +48,7 @@ const PARAMS: &[&str] = &[
     "--param", "I0=10",
 ];
 
-fn run(extra: &[&str]) -> std::process::Output {
+fn run(backend: &str, extra: &[&str]) -> std::process::Output {
     let bin = skip_if_missing_binary();
     let ir = golden_ir();
     let tmp = tempfile::tempdir().unwrap();
@@ -56,7 +58,7 @@ fn run(extra: &[&str]) -> std::process::Output {
     args.extend(extra.iter().map(|s| s.to_string()));
     args.extend(PARAMS.iter().map(|s| s.to_string()));
     args.extend(
-        ["--seed", "1", "--backend", "chain_binomial", "--dt", "1.0",
+        ["--seed", "1", "--backend", backend, "--dt", "1.0",
          "-o", &traj.to_string_lossy(), "--output-dir", &cas_dir.to_string_lossy()]
             .iter()
             .map(|s| s.to_string()),
@@ -64,12 +66,12 @@ fn run(extra: &[&str]) -> std::process::Output {
     Command::new(&bin).args(&args).output().expect("spawn camdl")
 }
 
-/// Dormant reactive policy (not enabled) → the run is accepted; the policy is
-/// dropped like any toggleable intervention.
+/// Dormant reactive policy (not enabled) → accepted; dropped like any
+/// toggleable intervention.
 #[test]
 fn reactive_inactive_run_is_accepted() {
     let _ = skip_if_missing_binary();
-    let out = run(&[]);
+    let out = run("chain_binomial", &[]);
     assert!(
         out.status.success(),
         "a run that does not enable the reactive policy must be accepted; stderr={}",
@@ -77,13 +79,24 @@ fn reactive_inactive_run_is_accepted() {
     );
 }
 
-/// `--enable sia` activates the reactive policy → rejected at dispatch with the
-/// capability error (no backend runs the agenda yet).
+/// `--enable sia` on chain-binomial → the reactive agenda RUNS the policy (PR2).
 #[test]
-fn reactive_active_via_enable_is_rejected() {
+fn reactive_active_on_chain_binomial_runs() {
     let _ = skip_if_missing_binary();
-    let out = run(&["--enable", "sia"]);
-    assert!(!out.status.success(), "an enabled reactive policy must be rejected");
+    let out = run("chain_binomial", &["--enable", "sia"]);
+    assert!(
+        out.status.success(),
+        "forward chain-binomial runs the reactive agenda; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `--enable sia` on gillespie → still rejected (no reactive agenda there yet).
+#[test]
+fn reactive_active_on_gillespie_is_rejected() {
+    let _ = skip_if_missing_binary();
+    let out = run("gillespie", &["--enable", "sia"]);
+    assert!(!out.status.success(), "gillespie does not run reactive policies yet");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("REACTIVE_INTERVENTIONS"),

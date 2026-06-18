@@ -1403,13 +1403,14 @@ mod tests {
     }
 
     /// gh#204: a model carrying a reactive (state/observation-triggered) fire
-    /// source is parsed and compiles, but `required_capabilities()` raises
-    /// `REACTIVE_INTERVENTIONS`, and NO forward backend grants it — so the
-    /// dispatch gate (`!caps.contains(required)`) rejects it on every path
-    /// rather than silently dropping the policy. This pins the PR1 contract:
-    /// the IR can represent reactive, the runtime refuses to run it.
+    /// source is parsed and compiles, and `required_capabilities()` raises
+    /// `REACTIVE_INTERVENTIONS` — so the
+    /// dispatch gate (`!caps.contains(required)`) routes by backend: forward
+    /// chain-binomial grants the capability and runs the agenda (PR2), while
+    /// Gillespie and ODE still lack it, so the gate rejects them rather than
+    /// silently dropping the policy.
     #[test]
-    fn reactive_fire_source_requires_unsupported_capability() {
+    fn reactive_fire_source_capability_is_granted_only_by_chain_binomial() {
         use crate::Capabilities;
         use crate::{ChainBinomialSim, GillespieSim, OdeSim, Simulate};
         use ir::intervention::{
@@ -1466,19 +1467,27 @@ mod tests {
             "a reactive fire source must raise REACTIVE_INTERVENTIONS"
         );
 
-        // No forward backend declares it ⇒ every dispatch fails the gate.
-        for caps in [
-            ChainBinomialSim.capabilities(),
-            GillespieSim.capabilities(),
-            OdeSim.capabilities(),
-        ] {
+        // Forward chain-binomial grants it (PR2) ⇒ the gate passes there.
+        assert!(
+            ChainBinomialSim
+                .capabilities()
+                .contains(Capabilities::REACTIVE_INTERVENTIONS),
+            "forward chain-binomial runs the reactive agenda (PR2)"
+        );
+        assert!(
+            ChainBinomialSim.capabilities().contains(required),
+            "the dispatch gate (!caps.contains(required)) must accept a reactive model on chain-binomial"
+        );
+
+        // Gillespie and ODE do NOT declare it ⇒ the gate rejects them (PR3).
+        for caps in [GillespieSim.capabilities(), OdeSim.capabilities()] {
             assert!(
                 !caps.contains(Capabilities::REACTIVE_INTERVENTIONS),
-                "no backend may grant REACTIVE_INTERVENTIONS in PR1"
+                "gillespie/ode do not run reactive policies yet"
             );
             assert!(
                 !caps.contains(required),
-                "the dispatch gate (!caps.contains(required)) must reject a reactive model"
+                "the dispatch gate (!caps.contains(required)) must reject a reactive model on gillespie/ode"
             );
         }
     }
