@@ -1,7 +1,16 @@
 # Loop-invariant code motion: per-eval staging of param/table-only subexpressions
 
-Date: 2026-06-20 Status: proposal — design agreed, not yet implemented Issue:
+Date: 2026-06-20 Status: Phase 1 implemented (ODE/forward; default-off) Issue:
 gh#272 Schema: 0.18 → 0.19 (adds `per_eval_bindings` + `Expr::PerEvalRef`)
+
+Implemented: ea4300cc (step 1.1 — IR substrate + on-demand eval), 8cfe9b8a (step
+1.2 — the OCaml LICM pass), de71c112 (step 1.3 — per-eval cache tier +
+EvalScope). Measured on the real MRE kernel: ~4.2× faster per ODE step, bringing
+the in-model fittable-γ kernel to ~precomputed-matrix speed. Still opt-in
+(`CAMDL_LICM`). Remaining: Phase 2 (stochastic per-particle EvalScope — pure
+performance; all methods are already _correct_ via the on-demand fallback), the
+default-on flip (a deliberate, run-id-re-keying release decision), and the
+flat-eval tape / strength-reduction follow-ons.
 
 ## Problem
 
