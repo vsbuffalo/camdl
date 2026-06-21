@@ -1,0 +1,73 @@
+# A/B gate fixture for the gh#272 loop-invariant code-motion (LICM) pass.
+#
+# A 4-patch metapopulation SEIR whose gravity coupling kernel is computed
+# IN-MODEL from inline tables (pop N0, distance ratios dratio) with the
+# distance-decay exponent `gamma_k` a FITTED parameter:
+#   W[l,q] ∝ N0[q] * exp(-gamma_k * log(dratio[l,q])), row-normalized inline.
+# The exp(-gamma_k*log(.)) terms and the normalization sum are loop-invariant
+# (depend only on params + tables) but inlined into every per-stratum rate; LICM
+# hoists them into `per_eval_bindings`. The FOI is GUARDED
+# (if N[q] > 0 then I[q]/N[q] else 0) so the speculative-hoist-past-a-guard case
+# is exercised: LICM lifts the invariant W factor out of the guarded branch while
+# preserving the Cond.
+#
+# Self-contained (inline tables, no read()) so the gate compiles offline and the
+# fixtures carry no external data.
+#
+# Regenerate (params baked via --set so the fixtures simulate deterministically;
+# then recompile both .ir.json siblings — see gate_licm_ab.rs):
+#   SET="--set R0=2.0 --set gamma=0.13 --set sigma=0.11 --set kappa=0.5 \
+#        --set gamma_k=2.0 --set theta=0.02"
+#   camdlc licm_ab.camdl --no-dim-check $SET             > licm_ab_off.ir.json
+#   CAMDL_LICM=1 camdlc licm_ab.camdl --no-dim-check $SET > licm_ab_on.ir.json
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  patch = [p0, p1, p2, p3]
+}
+stratify(by = patch)
+
+tables {
+  N0    : patch         = [1000.0, 2000.0, 1500.0, 800.0]
+  dens  : patch         = [50.0, 120.0, 80.0, 30.0]
+  dratio : patch × patch = [[1.0, 2.0, 3.0, 4.0],
+                            [2.0, 1.0, 2.5, 3.5],
+                            [3.0, 2.5, 1.0, 1.5],
+                            [4.0, 3.5, 1.5, 1.0]]
+}
+
+parameters {
+  R0      : positive    in [0.5, 6.0]
+  gamma   : rate        in [0.05, 0.5]
+  sigma   : rate        in [0.05, 0.5]
+  kappa   : positive    in [0.0, 2.0]
+  gamma_k : positive    in [0.5, 10.0]
+  theta   : positive    in [0.0, 1.5]
+}
+
+let beta = R0 * gamma
+let N[l in patch]    = S[l] + E[l] + I[l] + R[l]
+let dfac[l in patch] = exp(theta * log(dens[l]))
+
+transitions {
+  infection[l in patch] : S[l] --> E[l]
+    @ beta * dfac[l] * S[l] * (
+        (if N[l] > 0 then I[l] / N[l] else 0.0)
+      + kappa * ( sum(q in patch, N0[q] * exp(-1.0 * gamma_k * log(dratio[l, q]))
+                      * (if N[q] > 0 then I[q] / N[q] else 0.0))
+                / sum(r in patch, N0[r] * exp(-1.0 * gamma_k * log(dratio[l, r]))) ))
+  progression[l in patch] : E[l] --> I[l] @ sigma * E[l]
+  recovery[l in patch]    : I[l] --> R[l] @ gamma * I[l]
+}
+
+init {
+  S[l in patch] = N0[l]
+  I[p0] = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 120 'days
+}

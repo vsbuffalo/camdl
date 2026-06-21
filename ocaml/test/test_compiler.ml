@@ -252,6 +252,109 @@ let test_constant_fold_collapses_sparse_foi_reduce () =
   Alcotest.(check int) "fold collapses FOI Reduce to k=2 terms" 2 after;
   Alcotest.(check bool) "fold strictly shrank the FOI Reduce" true (after < before)
 
+(* ── gh#272 LICM pass ─────────────────────────────────────────────────────────
+   Loop-invariant code motion hoists param/table-only subexpressions out of the
+   dynamics rates into `per_eval_bindings`. These pin the variant/invariant
+   classification (esp. that `Dt`/`Time`/forcing/state are VARIANT — a `Dt`
+   mis-classified as invariant would freeze the integrator step and silently
+   corrupt a trajectory), the cost threshold, and that the pass actually fires.
+   The byte-identity soundness proof is the Rust A/B gate gate_licm_ab.rs. *)
+
+let test_licm_invariant_classification () =
+  let open Ir in
+  (* Param + table + const, no state/time → invariant. *)
+  let kernel = BinOp { op = Mul; left = TableLookup ("N0", [Const 1.0]);
+    right = UnOp { op = Exp; arg = BinOp { op = Mul;
+      left = UnOp { op = Neg; arg = Param "gamma_k" };
+      right = UnOp { op = Log; arg = TableLookup ("dratio", [Const 0.0; Const 1.0]) } } } } in
+  Alcotest.(check bool) "param/table/const kernel is invariant" true (Licm.is_invariant kernel);
+  Alcotest.(check bool) "R0*gamma is invariant" true
+    (Licm.is_invariant (BinOp { op = Mul; left = Param "R0"; right = Param "gamma" }));
+  (* The variant nodes — each must classify as NOT invariant. The Dt case is the
+     load-bearing one (gh#272 review): the pass must never hoist a dt subtree. *)
+  Alcotest.(check bool) "Pop is variant" false (Licm.is_invariant (Pop "I"));
+  Alcotest.(check bool) "PopSum is variant" false (Licm.is_invariant (PopSum ["S"; "I"]));
+  Alcotest.(check bool) "Time is variant" false (Licm.is_invariant Time);
+  Alcotest.(check bool) "Dt is variant" false (Licm.is_invariant Dt);
+  Alcotest.(check bool) "TimeFunc (forcing) is variant" false (Licm.is_invariant (TimeFunc "school"));
+  Alcotest.(check bool) "BindingRef (state) is variant" false (Licm.is_invariant (BindingRef "N"));
+  (* exp(c) * dt is variant (contains Dt), so the whole product is never hoisted. *)
+  Alcotest.(check bool) "exp(c)*dt is variant" false
+    (Licm.is_invariant (BinOp { op = Mul; left = UnOp { op = Exp; arg = Const 0.5 }; right = Dt }))
+
+let test_licm_cost_threshold () =
+  let open Ir in
+  (* Worth hoisting iff a transcendental / Pow / Reduce is present. *)
+  Alcotest.(check bool) "exp(x) is expensive" true
+    (Licm.contains_expensive (UnOp { op = Exp; arg = Param "x" }));
+  Alcotest.(check bool) "x^y is expensive" true
+    (Licm.contains_expensive (BinOp { op = Pow; left = Param "x"; right = Const 2.0 }));
+  Alcotest.(check bool) "Reduce is expensive" true
+    (Licm.contains_expensive (Reduce [Param "a"; Param "b"]));
+  Alcotest.(check bool) "R0*gamma is NOT worth hoisting" false
+    (Licm.contains_expensive (BinOp { op = Mul; left = Param "R0"; right = Param "gamma" }));
+  Alcotest.(check bool) "bare Param is NOT worth hoisting" false (Licm.contains_expensive (Param "x"))
+
+let licm_kernel_src = {|
+    time_unit = 'days
+    dimensions { patch = [p0, p1] }
+    compartments { S, E, I, R }
+    stratify(by = patch)
+    parameters {
+      R0 : positive in [0.5, 6.0]
+      gamma : rate in [0.05, 0.5]
+      sigma : rate in [0.05, 0.5]
+      gamma_k : positive in [0.5, 10.0]
+    }
+    tables {
+      N0 : patch = [1000.0, 2000.0]
+      dratio : patch × patch = [[1.0, 2.0], [2.0, 1.0]]
+    }
+    let N[l in patch] = S[l] + E[l] + I[l] + R[l]
+    transitions {
+      infection[l in patch] : S[l] --> E[l]
+        @ R0 * gamma * S[l]
+          * sum(q in patch, N0[q] * exp(-1.0 * gamma_k * log(dratio[l, q])) * I[q] / N[q])
+          / sum(r in patch, N0[r] * exp(-1.0 * gamma_k * log(dratio[l, r])))
+      progression[l in patch] : E[l] --> I[l] @ sigma * E[l]
+      recovery[l in patch] : I[l] --> R[l] @ gamma * I[l]
+    }
+    init { S_p0 = 990  I_p0 = 10 }
+    simulate { from = 0 'days  to = 30 'days }
+  |}
+
+let rec count_per_eval_refs (e : Ir.expr) : int =
+  let open Ir in
+  match e with
+  | PerEvalRef _ -> 1
+  | BinOp { left; right; _ } -> count_per_eval_refs left + count_per_eval_refs right
+  | UnOp { arg; _ } -> count_per_eval_refs arg
+  | Cond { pred; then_; else_ } ->
+    count_per_eval_refs pred + count_per_eval_refs then_ + count_per_eval_refs else_
+  | TableLookup (_, idxs) | Reduce idxs -> List.fold_left (fun a e -> a + count_per_eval_refs e) 0 idxs
+  | UncheckedDim u -> count_per_eval_refs u.inner
+  | _ -> 0
+
+let test_licm_hoists_kernel () =
+  let m = match Compiler.compile ~name:"licm_kernel" licm_kernel_src with
+    | Ok m -> m
+    | Error e -> Alcotest.failf "compile failed: %s" e in
+  (* The default pipeline does not run LICM (opt-in). Apply it directly. *)
+  Alcotest.(check bool) "no per_eval bindings before LICM" true (m.per_eval_bindings = []);
+  let hoisted = Licm.licm_model m in
+  (* The pass fired: bindings were created and the rates reference them. *)
+  Alcotest.(check bool) "LICM created per_eval bindings" true (hoisted.per_eval_bindings <> []);
+  let refs_in_rates =
+    List.fold_left (fun acc (t : Ir.transition) -> acc + count_per_eval_refs t.rate) 0 hoisted.transitions in
+  Alcotest.(check bool) "rates now reference PerEvalRefs" true (refs_in_rates > 0);
+  (* Every hoisted body is invariant (no state/time/dt smuggled in) — the keystone
+     invariant the Rust runtime relies on. *)
+  Alcotest.(check bool) "every per_eval body is invariant" true
+    (List.for_all (fun (b : Ir.binding) -> Licm.is_invariant b.bexpr) hoisted.per_eval_bindings);
+  (* The transition list is otherwise structurally preserved (same count). *)
+  Alcotest.(check int) "transition count unchanged"
+    (List.length m.transitions) (List.length hoisted.transitions)
+
 (* ── Binding param-free invariant (E512, defensive) ───────────────────────────
    The hoist/autodiff contract: [autodiff.ml] differentiates [BindingRef] to 0,
    so a hoisted [model.bindings] body must be param-free or its gradient is
@@ -7232,6 +7335,14 @@ let () =
     "constant_fold", [
       Alcotest.test_case "sparse ring FOI Reduce P=4 collapses to k=2"
         `Quick test_constant_fold_collapses_sparse_foi_reduce;
+    ];
+    "licm", [
+      Alcotest.test_case "invariant/variant classification (Dt/Time/forcing/state are variant)"
+        `Quick test_licm_invariant_classification;
+      Alcotest.test_case "cost threshold (transcendental/Pow/Reduce worth hoisting)"
+        `Quick test_licm_cost_threshold;
+      Alcotest.test_case "hoists the in-model kernel into per_eval bindings"
+        `Quick test_licm_hoists_kernel;
     ];
     "binding_param_free_invariant", [
       Alcotest.test_case "references_param on hand-built exprs"

@@ -1,0 +1,242 @@
+//! A/B gate for the gh#272 loop-invariant code-motion (LICM) pass — the
+//! byte-identical soundness proof the pass's claim rests on.
+//!
+//! LICM (`ocaml/lib/ir/licm.ml`) extracts maximal param/table-only invariant
+//! subexpressions (the in-model gravity kernel's `exp(-gamma_k*log(dratio))`
+//! terms and its normalization sum) out of the dynamics rates into
+//! `per_eval_bindings`, replacing each with a `PerEvalRef`. It claims to be
+//! *trajectory-preserving* (the runtime evaluates the hoisted binding to the
+//! same value the inlined subtree would). This gate makes that a test, on a
+//! model where the pass actually fires.
+//!
+//! Two committed fixtures compiled from the SAME source (`licm_ab.camdl`, a
+//! 4-patch in-model gravity kernel with a guarded FOI):
+//!   - `licm_ab_off.ir.json` — `camdlc` with LICM OFF (kernel inlined)
+//!   - `licm_ab_on.ir.json`  — `CAMDL_LICM=1 camdlc` (kernel hoisted)
+//! See the source header for the exact regeneration commands. The fixtures are
+//! static IR (the test does not recompile), so the default-flag flip is
+//! decoupled from this gate.
+//!
+//! Two assertions:
+//!   1. NON-VACUITY — the ON fixture has `per_eval_bindings` and `PerEvalRef`
+//!      nodes (the pass fired) and is strictly smaller; the OFF fixture has none.
+//!      A green test on a no-op pass proves nothing; this guards it.
+//!   2. SOUNDNESS — for every supported backend at a fixed seed, the hoisted and
+//!      inlined models simulate to a byte-identical trajectory (same FNV-1a
+//!      hash). This is what "trajectory-preserving" means.
+
+use std::path::PathBuf;
+use ir::expr::Expr;
+use sim::{
+    compiled_model::CompiledModel,
+    config::{ChainBinomialConfig, GillespieConfig, OdeConfig, SimConfig},
+    simulate::Simulate,
+    ChainBinomialSim, GillespieSim, OdeSim,
+};
+
+const SEED: u64 = 42;
+
+fn fixtures_dir() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    PathBuf::from(&manifest).join("tests/fixtures")
+}
+
+fn load(name: &str) -> (ir::Model, usize) {
+    let path = fixtures_dir().join(format!("{}.ir.json", name));
+    let contents = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {:?}: {}", path, e));
+    let model = ir::from_str(&contents)
+        .unwrap_or_else(|e| panic!("failed to parse {}: {}", name, e));
+    (model, contents.len())
+}
+
+/// Count `PerEvalRef` nodes across all transition rates + rate_grads + ODE
+/// derivatives (the surfaces LICM rewrites).
+fn count_per_eval_refs(m: &ir::Model) -> usize {
+    fn in_expr(e: &Expr) -> usize {
+        match e {
+            Expr::PerEvalRef(_) => 1,
+            Expr::BinOp(w) => in_expr(&w.bin_op.left) + in_expr(&w.bin_op.right),
+            Expr::UnOp(w) => in_expr(&w.un_op.arg),
+            Expr::Cond(w) => in_expr(&w.cond.pred) + in_expr(&w.cond.then) + in_expr(&w.cond.else_),
+            Expr::TableLookup(w) => w.table_lookup.indices.iter().map(in_expr).sum(),
+            Expr::Reduce(w) => w.reduce.iter().map(in_expr).sum(),
+            Expr::UncheckedDim(w) => in_expr(&w.unchecked_dim.inner),
+            _ => 0,
+        }
+    }
+    let mut n = 0;
+    for t in &m.transitions {
+        n += in_expr(&t.rate);
+        for (_p, g) in &t.rate_grad {
+            n += in_expr(g);
+        }
+    }
+    for eq in &m.ode_equations {
+        n += in_expr(&eq.derivative);
+    }
+    n
+}
+
+/// FNV-1a/64 over the full trajectory numeric content — the same hash the
+/// trajectory-baseline / constant-fold gates use.
+fn trajectory_hash(traj: &sim::state::Trajectory) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    };
+    for snap in &traj.snapshots {
+        mix(&snap.t.to_bits().to_le_bytes());
+        for &c in &snap.int_state.counts {
+            mix(&c.to_le_bytes());
+        }
+        for &v in &snap.real_state.values {
+            mix(&v.to_bits().to_le_bytes());
+        }
+        match &snap.flows {
+            sim::state::Flows::Int(fs) => {
+                for &f in fs {
+                    mix(&f.to_le_bytes());
+                }
+            }
+            sim::state::Flows::Real(fs) => {
+                for &f in fs {
+                    mix(&f.to_bits().to_le_bytes());
+                }
+            }
+        }
+    }
+    h
+}
+
+#[test]
+fn gate_licm_is_byte_identical() {
+    sim::eval_stats::set_allow_degenerate_rates(true);
+
+    let (off, off_bytes) = load("licm_ab_off");
+    let (on, on_bytes) = load("licm_ab_on");
+
+    // ── 1. NON-VACUITY ──────────────────────────────────────────────────────
+    let off_refs = count_per_eval_refs(&off);
+    let on_refs = count_per_eval_refs(&on);
+    assert_eq!(
+        off_refs, 0,
+        "OFF fixture already has PerEvalRef nodes — regenerated with LICM on?"
+    );
+    assert!(
+        on_refs > 0 && !on.per_eval_bindings.is_empty(),
+        "LICM did not fire on the ON fixture: {on_refs} PerEvalRef nodes, \
+         {} per_eval_bindings. Regenerate from licm_ab.camdl (see its header).",
+        on.per_eval_bindings.len()
+    );
+    assert!(
+        on_bytes < off_bytes,
+        "LICM did not shrink the IR (off={off_bytes} bytes, on={on_bytes} bytes)"
+    );
+    eprintln!(
+        "non-vacuity: PerEvalRef {off_refs} -> {on_refs}; \
+         per_eval_bindings={}; IR {off_bytes} -> {on_bytes} bytes",
+        on.per_eval_bindings.len()
+    );
+
+    // ── 2. SOUNDNESS ────────────────────────────────────────────────────────
+    let compiled_off = CompiledModel::new(off.clone()).expect("OFF model failed to compile");
+    let compiled_on = CompiledModel::new(on.clone()).expect("ON model failed to compile");
+
+    let params_off = compiled_off.default_params.clone();
+    let params_on = compiled_on.default_params.clone();
+
+    let t_start = off.simulation.t_start;
+    let t_end = off.simulation.t_end;
+    assert_eq!(t_end, on.simulation.t_end, "fixtures disagree on t_end");
+
+    let backends: &[(&str, SimConfig)] = &[
+        ("gillespie", SimConfig::Gillespie(GillespieConfig { t_start, t_end, output_dt: None })),
+        ("chain_binomial", SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0 })),
+        ("ode", SimConfig::Ode(OdeConfig { t_start, t_end, dt: 1.0 })),
+    ];
+
+    let required = compiled_off.required_capabilities();
+    let mut checked = 0usize;
+    for (backend, config) in backends {
+        let sim: &dyn Simulate = match *backend {
+            "gillespie" => &GillespieSim,
+            "ode" => &OdeSim,
+            _ => &ChainBinomialSim,
+        };
+        if !(required - sim.capabilities()).is_empty() {
+            continue;
+        }
+        let traj_off = sim
+            .run(&compiled_off, &params_off, SEED, config)
+            .unwrap_or_else(|e| panic!("OFF {backend} sim failed: {e:?}"));
+        let traj_on = sim
+            .run(&compiled_on, &params_on, SEED, config)
+            .unwrap_or_else(|e| panic!("ON {backend} sim failed: {e:?}"));
+
+        let h_off = trajectory_hash(&traj_off);
+        let h_on = trajectory_hash(&traj_on);
+        assert_eq!(
+            h_off, h_on,
+            "TRAJECTORY DIVERGED on {backend}: LICM is NOT byte-identical \
+             (off 0x{h_off:016x} != on 0x{h_on:016x}). This is a soundness bug \
+             in the hoist (e.g. a variant subtree mis-classified as invariant), \
+             not a golden update."
+        );
+        eprintln!("{backend}: byte-identical (hash 0x{h_off:016x})");
+        checked += 1;
+    }
+    assert!(checked >= 3, "expected at least 3 backends checked, got {checked}");
+
+    // ── 3. GRADIENT VALUE-IDENTITY ──────────────────────────────────────────
+    // `rate_grad` is hoisted too (LICM rewrites it), but the forward backends
+    // above never evaluate it. Evaluate every transition's rate_grad expression
+    // at the initial state + default params, off vs on, and assert bitwise-equal
+    // — the direct check that hoisting the gradient surface is value-preserving
+    // (the gradient eval-equality gate the proposal calls for). Each context
+    // points at its own model so a `PerEvalRef` resolves against the right
+    // `per_eval_bindings`.
+    let (int_off, real_off) = compiled_off.initial_state(&params_off).expect("off init state");
+    let (int_on, real_on) = compiled_on.initial_state(&params_on).expect("on init state");
+    let ctx_off = sim::propensity::EvalCtx {
+        model: &compiled_off, int_s: &int_off, real_s: &real_off, params: &params_off,
+        t: t_start, dt: 1.0, projected: None, aux: None, int_float_override: None,
+    };
+    let ctx_on = sim::propensity::EvalCtx {
+        model: &compiled_on, int_s: &int_on, real_s: &real_on, params: &params_on,
+        t: t_start, dt: 1.0, projected: None, aux: None, int_float_override: None,
+    };
+    // `rate_grad` is a HashMap in the IR, so its per-transition term ORDER is
+    // non-deterministic — compare by param index (the value), not by position.
+    use std::collections::HashMap;
+    let mut grad_terms = 0usize;
+    for (ti, (g_off, g_on)) in compiled_off.resolved.rate_grads_indexed.iter()
+        .zip(compiled_on.resolved.rate_grads_indexed.iter())
+        .enumerate()
+    {
+        let off_map: HashMap<usize, u64> = g_off.iter()
+            .map(|(p, e)| (*p, sim::resolved_expr::eval_resolved(e, &ctx_off).to_bits())).collect();
+        let on_map: HashMap<usize, u64> = g_on.iter()
+            .map(|(p, e)| (*p, sim::resolved_expr::eval_resolved(e, &ctx_on).to_bits())).collect();
+        assert_eq!(
+            off_map.len(), on_map.len(),
+            "rate_grad term count differs at transition {ti} (off={}, on={})",
+            off_map.len(), on_map.len()
+        );
+        for (p, &v_off) in &off_map {
+            let v_on = *on_map.get(p)
+                .unwrap_or_else(|| panic!("param idx {p} present in OFF rate_grad but not ON, transition {ti}"));
+            assert_eq!(
+                v_off, v_on,
+                "GRADIENT DIVERGED transition {ti} param idx {p}: off bits=0x{v_off:016x} \
+                 on bits=0x{v_on:016x} — LICM hoisting of rate_grad is not value-preserving"
+            );
+            grad_terms += 1;
+        }
+    }
+    assert!(grad_terms > 0, "no rate_grad terms evaluated — fixture has no gradients?");
+    eprintln!("gradient: {grad_terms} rate_grad terms byte-identical off vs on");
+}
