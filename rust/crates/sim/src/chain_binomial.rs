@@ -107,6 +107,12 @@ impl Simulate for ChainBinomialSim {
                 got: config.variant_name(),
             }),
         };
+        // gh#272: per-eval cache scope for the forward run (theta fixed). No-op
+        // for models without per-eval bindings. The stochastic-inference paths
+        // (PF/IF2) use the producer step with per-particle theta and are scoped
+        // separately (a later increment), so this forward-only dispatch is safe.
+        let _eval_scope =
+            crate::resolved_expr::EvalScope::enter(model.resolved.per_eval_bindings.len());
         run_chain_binomial(model, params, seed, cfg)
     }
 

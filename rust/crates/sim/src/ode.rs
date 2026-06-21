@@ -517,6 +517,15 @@ pub fn run_ode(
     // otherwise spin the RK4 substep loop forever (time never advances).
     model.validate_schedule(cfg.dt, params)?;
 
+    // gh#272: enter the per-eval cache scope for the whole integration. `params`
+    // is fixed for this call (one theta-stable span), so a param/table-only
+    // `PerEvalRef` is evaluated once here and reused across every RK stage of
+    // every step — NOT per-stage like the nested `CacheScope` in `ode_derivs`.
+    // This single site covers both forward ODE simulate and `compute_ode_loglik`
+    // (both route through `run_ode`). No-op for models without per-eval bindings.
+    let _eval_scope =
+        crate::resolved_expr::EvalScope::enter(model.resolved.per_eval_bindings.len());
+
     let (int_s0, real_s0) = model.initial_state(params)?;
     let n_transitions = model.model.transitions.len();
     let mut state = OdeState {

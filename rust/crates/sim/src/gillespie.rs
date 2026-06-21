@@ -45,6 +45,10 @@ impl Simulate for GillespieSim {
                 got: config.variant_name(),
             }),
         };
+        // gh#272: per-eval cache scope for the forward run (theta fixed). No-op
+        // for models without per-eval bindings.
+        let _eval_scope =
+            crate::resolved_expr::EvalScope::enter(model.resolved.per_eval_bindings.len());
         run_gillespie(model, params, seed, cfg)
     }
 

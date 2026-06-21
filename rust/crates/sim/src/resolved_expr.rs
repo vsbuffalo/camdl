@@ -306,6 +306,17 @@ struct BindingCache {
     /// cache actually served hits (else byte-identity proves nothing). Not used
     /// on the hot path beyond a single increment per hit.
     hits:   u64,
+
+    // gh#272 per-eval tier. Independent of the per-step tier above (own buffers
+    // AND own `pe_active`): the per-step `CacheScope` is dropped per RK stage on
+    // the ODE path and would otherwise clear a shared `active` mid-trajectory.
+    // The generation bumps per `EvalScope` (per theta-stable scope) rather than
+    // per step, so a param/table-only `PerEvalRef` is evaluated once per scope.
+    pe_val:    Vec<f64>,
+    pe_stamp:  Vec<u32>,
+    pe_gen:    u32,
+    pe_active: bool,
+    pe_hits:   u64,
 }
 
 thread_local! {
@@ -384,6 +395,85 @@ pub fn take_binding_cache_hits() -> u64 {
         c.hits = 0;
         n
     })
+}
+
+// gh#272: per-eval cache tier toggle, the sibling of the per-step machinery
+// above. A DISTINCT flag/env/override so the A/B gate can flip the per-eval tier
+// independently of the per-step one and prove byte-identity.
+thread_local! {
+    static PE_CACHE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// `CAMDL_NO_PER_EVAL_CACHE` forces the per-eval on-demand path (every
+/// `PerEvalRef` re-evaluates its body), making a run comparable to the
+/// pre-cache evaluator. The per-thread override (set by the A/B gate) wins.
+fn per_eval_cache_disabled() -> bool {
+    if let Some(off) = PE_CACHE_OVERRIDE.with(|c| c.get()) {
+        return off;
+    }
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("CAMDL_NO_PER_EVAL_CACHE").is_some())
+}
+
+/// Test/bench hook: force the per-eval cache off/on for the current thread.
+pub fn set_per_eval_cache_disabled(off: bool) {
+    PE_CACHE_OVERRIDE.with(|c| c.set(Some(off)));
+}
+
+/// Test/bench hook: read and reset this thread's cumulative per-eval-cache hit
+/// count. A non-vacuity guard distinct from `take_binding_cache_hits` — the
+/// per-step counter is non-zero regardless, so the per-eval A/B gate must read
+/// THIS one.
+pub fn take_per_eval_cache_hits() -> u64 {
+    BINDING_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let n = c.pe_hits;
+        c.pe_hits = 0;
+        n
+    })
+}
+
+/// gh#272 RAII scope that activates the per-eval cache tier for one theta-stable
+/// span (a whole trajectory / likelihood eval, where the parameter vector is
+/// fixed). `enter` bumps the per-eval generation (invalidating the prior scope's
+/// values) and marks the tier active; `Drop` deactivates it so a `PerEvalRef`
+/// evaluated outside any scope falls through to on-demand eval — byte-identical
+/// to the no-cache path. Independent of `CacheScope`: nesting a per-step
+/// `CacheScope` inside an `EvalScope` (the ODE path does this every RK stage)
+/// leaves the per-eval buffers and `pe_active` untouched.
+pub struct EvalScope;
+
+impl EvalScope {
+    #[inline]
+    pub fn enter(n_per_eval: usize) -> Self {
+        if !per_eval_cache_disabled() {
+            BINDING_CACHE.with(|c| {
+                let mut c = c.borrow_mut();
+                if c.pe_val.len() != n_per_eval {
+                    c.pe_val = vec![0.0; n_per_eval];
+                    c.pe_stamp = vec![0; n_per_eval];
+                    c.pe_gen = 0;
+                }
+                c.pe_gen = c.pe_gen.wrapping_add(1);
+                if c.pe_gen == 0 {
+                    // Generation wrapped: clear stamps so no stale slot aliases gen 0.
+                    c.pe_stamp.iter_mut().for_each(|s| *s = 0);
+                    c.pe_gen = 1;
+                }
+                c.pe_active = true;
+            });
+        }
+        EvalScope
+    }
+}
+
+impl Drop for EvalScope {
+    #[inline]
+    fn drop(&mut self) {
+        if !per_eval_cache_disabled() {
+            BINDING_CACHE.with(|c| c.borrow_mut().pe_active = false);
+        }
+    }
 }
 
 /// RAII scope that activates the binding cache for one propensity-vector
@@ -639,13 +729,39 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
                 }
             }
         }
-        // gh#272 LICM: on-demand evaluation of a per-eval binding body. The
-        // per-eval cache tier is a later increment; until then this re-evaluates
-        // each reference (correct, just not yet fast). The body is param/table-only
-        // and topologically ordered (a per-eval body only references earlier
-        // per-eval slots), so this recursion terminates.
+        // gh#272 LICM: a per-eval binding body is param/table-only and constant
+        // within an `EvalScope` (a theta-stable span). Memoized in the per-eval
+        // cache tier, keyed on `pe_gen`; outside a scope (`pe_active == false`)
+        // it falls through to on-demand eval — byte-identical to the no-cache
+        // path. Bodies are topologically ordered (a body only references earlier
+        // per-eval slots), so the miss-path recursion terminates; the borrow is
+        // released before recursing (a body may re-enter this arm).
         ResolvedExpr::PerEvalRef(slot) => {
-            eval_resolved(&ctx.model.resolved.per_eval_bindings[*slot], ctx)
+            let hit = BINDING_CACHE.with(|c| {
+                let mut c = c.borrow_mut();
+                if c.pe_active && *slot < c.pe_stamp.len() && c.pe_stamp[*slot] == c.pe_gen {
+                    c.pe_hits = c.pe_hits.wrapping_add(1);
+                    Some(c.pe_val[*slot])
+                } else {
+                    None
+                }
+            });
+            match hit {
+                Some(v) => v,
+                None => {
+                    // Borrow released before recursing — a per-eval body may
+                    // reference earlier per-eval slots, re-entering this arm.
+                    let v = eval_resolved(&ctx.model.resolved.per_eval_bindings[*slot], ctx);
+                    BINDING_CACHE.with(|c| {
+                        let mut c = c.borrow_mut();
+                        if c.pe_active && *slot < c.pe_val.len() {
+                            c.pe_val[*slot] = v;
+                            c.pe_stamp[*slot] = c.pe_gen;
+                        }
+                    });
+                    v
+                }
+            }
         }
     }
 }

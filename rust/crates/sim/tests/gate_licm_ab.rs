@@ -239,4 +239,40 @@ fn gate_licm_is_byte_identical() {
     }
     assert!(grad_terms > 0, "no rate_grad terms evaluated — fixture has no gradients?");
     eprintln!("gradient: {grad_terms} rate_grad terms byte-identical off vs on");
+
+    // ── 4. PER-EVAL CACHE A/B ───────────────────────────────────────────────
+    // On the SAME hoisted (ON) model, flipping the per-eval cache must not change
+    // the trajectory (the cache returns exactly what on-demand eval would), and
+    // the cache must actually serve hits — else byte-identity is vacuous and the
+    // EvalScope was never entered. This isolates cache correctness from hoist
+    // correctness (sections 2-3). Single-threaded ODE run, so the per-thread
+    // toggle and hit counter apply on this thread.
+    let ode_cfg = SimConfig::Ode(OdeConfig { t_start, t_end, dt: 1.0 });
+
+    sim::resolved_expr::set_per_eval_cache_disabled(false); // cache ON
+    let _ = sim::resolved_expr::take_per_eval_cache_hits(); // reset counter
+    let traj_cache_on = OdeSim
+        .run(&compiled_on, &params_on, SEED, &ode_cfg)
+        .expect("ON model ode sim (cache on) failed");
+    let pe_hits = sim::resolved_expr::take_per_eval_cache_hits();
+    let h_cache_on = trajectory_hash(&traj_cache_on);
+
+    sim::resolved_expr::set_per_eval_cache_disabled(true); // cache OFF (on-demand)
+    let traj_cache_off = OdeSim
+        .run(&compiled_on, &params_on, SEED, &ode_cfg)
+        .expect("ON model ode sim (cache off) failed");
+    let h_cache_off = trajectory_hash(&traj_cache_off);
+    sim::resolved_expr::set_per_eval_cache_disabled(false); // restore
+
+    assert!(
+        pe_hits > 0,
+        "per-eval cache served 0 hits — vacuous (EvalScope not entered, or the \
+         model has no per-eval bindings reused across steps)"
+    );
+    assert_eq!(
+        h_cache_on, h_cache_off,
+        "per-eval cache on (0x{h_cache_on:016x}) != off (0x{h_cache_off:016x}) — \
+         the cache is not byte-identical to on-demand evaluation"
+    );
+    eprintln!("per-eval cache: {pe_hits} hits; cache-on == cache-off (hash 0x{h_cache_on:016x})");
 }
