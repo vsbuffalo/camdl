@@ -138,7 +138,7 @@ fn test_propensity_non_negativity() {
     for counts in test_states {
         let int_s = IntState::from_vec(counts);
         let real_s = RealState::new(0);
-        eval_propensities(&compiled, &int_s, &real_s, params, 0.0, 1.0, &mut propensities).unwrap();
+        eval_propensities(&compiled, &int_s, &real_s, params, 0.0, 1.0, None, &mut propensities).unwrap();
         for &p in &propensities {
             assert!(p >= 0.0, "negative propensity: {}", p);
         }

@@ -118,7 +118,7 @@ fn flat_matches_eval_resolved_on_all_goldens() {
                     dt: 1.0,
                     projected: None,
                     aux: None,
-                    int_float_override: None,
+                    int_float_override: None, per_eval: None,
                 };
                 let mut scratch: Vec<f64> = Vec::with_capacity(cap + 16);
                 let mut cache = FlatCache::new(vm.n_bindings);
@@ -193,7 +193,7 @@ fn flat_matches_eval_resolved_on_latent_edge_cases() {
         dt: 1.0,
         projected: None,
         aux: None,
-        int_float_override: None,
+        int_float_override: None, per_eval: None,
     };
     let mut scratch: Vec<f64> = Vec::with_capacity(cap + 16);
     let mut cache = FlatCache::new(vm.n_bindings);

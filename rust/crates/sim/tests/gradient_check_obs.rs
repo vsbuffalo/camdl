@@ -250,7 +250,7 @@ fn obs_sd_for_likelihood(
     use sim::resolved_expr::{ResolvedLikelihood, eval_resolved};
     let ctx = |proj: f64| EvalCtx {
         model: compiled, int_s, real_s, params, t, dt: 0.0,
-        projected: Some(proj), aux: None, int_float_override: None,
+        projected: Some(proj), aux: None, int_float_override: None, per_eval: None,
     };
     match lh {
         ResolvedLikelihood::NegBinomial { mean, dispersion } => {
@@ -297,7 +297,7 @@ fn obs_mean_for_likelihood(
     use sim::resolved_expr::{ResolvedLikelihood, eval_resolved};
     let ctx = |proj: f64| EvalCtx {
         model: compiled, int_s, real_s, params, t, dt: 0.0,
-        projected: Some(proj), aux: None, int_float_override: None,
+        projected: Some(proj), aux: None, int_float_override: None, per_eval: None,
     };
     match lh {
         ResolvedLikelihood::NegBinomial { mean, .. } => eval_resolved(mean, &ctx(projected)),

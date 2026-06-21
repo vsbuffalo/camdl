@@ -111,7 +111,7 @@ fn assert_resolved_matches(expr: &Expr, model: &CompiledModel, int_s: &IntState,
     sim::eval_stats::set_allow_degenerate_rates(true);
     let rctx = resolve_ctx_from(model);
     let resolved = resolve_expr(expr, &rctx).expect("resolve_expr failed");
-    let ctx = EvalCtx { model, int_s, real_s, params, t, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model, int_s, real_s, params, t, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let expected = eval_expr(expr, &ctx).expect("eval_expr failed");
     let actual = eval_resolved(&resolved, &ctx);
     sim::eval_stats::set_allow_degenerate_rates(false);
@@ -322,7 +322,7 @@ fn test_derivative_matches() {
 
     let rctx = resolve_ctx_from(&model);
     let resolved = resolve_expr(&expr, &rctx).unwrap();
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &params, t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &params, t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
 
     // beta is param index 0
     let old_deriv = sim::propensity::eval_expr_deriv(&expr, 0, &ctx);
@@ -360,7 +360,7 @@ fn test_per_eval_ref_resolves_and_evals() {
     let real_s = RealState::new(0);
     let params = vec![0.7];
     let rctx = resolve_ctx_from(&model);
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &params, t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &params, t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
 
     let rw = resolve_expr(&Expr::per_eval_ref("w"), &rctx).unwrap();
     assert!((eval_resolved(&rw, &ctx) - 0.7_f64.exp()).abs() < 1e-12);
@@ -399,7 +399,7 @@ fn test_projected() {
     let expr = Expr::Projected(ir::expr::ProjectedExpr { projected: () });
     let resolved = resolve_expr(&expr, &rctx).unwrap();
 
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: Some(42.0), aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: Some(42.0), aux: None, int_float_override: None, per_eval: None };
     let val = eval_resolved(&resolved, &ctx);
     assert!((val - 42.0).abs() < 1e-12);
 }

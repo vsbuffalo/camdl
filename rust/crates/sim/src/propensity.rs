@@ -60,6 +60,15 @@ pub struct EvalCtx<'a> {
     /// instead of casting int_s.counts[] to f64. Avoids the
     /// per-substep rounding that quantized RK4 integration.
     pub int_float_override: Option<&'a [f64]>,
+    /// gh#272 LICM: the per-eval prologue — values of `model.per_eval_bindings`
+    /// computed ONCE for this θ-stable span (a whole trajectory / likelihood
+    /// eval). `ResolvedExpr::PerEvalRef(slot)` reads `per_eval[slot]` directly.
+    /// Owned by whoever holds θ (a backend run / inference particle) and lent in
+    /// as data — so there is no shared mutable cache to alias across particles;
+    /// the value is structurally bound to the θ it was computed at. `None` ⇒
+    /// on-demand eval (byte-identical, just not amortized), so a path that hasn't
+    /// staged the prologue is still correct. Sibling of `int_float_override`.
+    pub per_eval: Option<&'a [f64]>,
 }
 
 /// Evaluate a single expression. No allocations in steady state.
@@ -557,6 +566,11 @@ pub fn eval_propensities(
     params: &[f64],
     t: f64,
     dt: f64,
+    // gh#272 LICM: the per-eval prologue for this θ-span, staged once by the
+    // caller (`eval_per_eval_scratch`) and lent into every rate eval. `None` ⇒
+    // on-demand (byte-identical). Forward backends stage it once before their
+    // step loop; inference producer steps pass `None` (Phase 2 wires staging).
+    per_eval: Option<&[f64]>,
     out: &mut Vec<f64>,
 ) -> Result<(), SimError> {
     // gh#81 Phase 2. Detect non-finite parameter values BEFORE rate eval
@@ -579,7 +593,7 @@ pub fn eval_propensities(
         }
     }
 
-    let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval };
 
     // gh#209: flat-bytecode propensity path (opt-in `CAMDL_EVAL_FLAT`). Built
     // once at construction; `Some` iff the toggle is on. The flat VM uses its

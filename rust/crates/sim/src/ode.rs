@@ -63,6 +63,9 @@ fn ode_derivs(
     params: &[f64],
     t: f64,
     dt: f64,
+    // gh#272: the per-eval prologue for this θ-span (computed once in `run_ode`),
+    // lent into every RK-stage eval. `None` ⇒ on-demand (byte-identical).
+    per_eval: Option<&[f64]>,
     d_int: &mut [f64],
     d_real: &mut [f64],
     d_flow: &mut [f64],
@@ -76,6 +79,7 @@ fn ode_derivs(
         projected: None,
         aux: None,
         int_float_override: Some(int_vals),
+        per_eval,
     };
 
     // Activate the per-state binding cache for this stage: each model binding
@@ -137,6 +141,7 @@ fn rk4_step(
     params: &[f64],
     t: f64,
     dt: f64,
+    per_eval: Option<&[f64]>,
 ) -> Result<(), SimError> {
     let ni = int_vals.len();
     let nr = real_vals.len();
@@ -147,7 +152,7 @@ fn rk4_step(
     let mut df = vec![0.0f64; nf];
 
     // k1
-    ode_derivs(model, int_vals, real_vals, params, t, dt, &mut di, &mut dr, &mut df)?;
+    ode_derivs(model, int_vals, real_vals, params, t, dt, per_eval, &mut di, &mut dr, &mut df)?;
     let k1i: Vec<f64> = di.clone();
     let k1r: Vec<f64> = dr.clone();
     let k1f: Vec<f64> = df.clone();
@@ -155,7 +160,7 @@ fn rk4_step(
     // k2
     let s2i: Vec<f64> = int_vals.iter().zip(&k1i).map(|(x, k)| x + 0.5 * dt * k).collect();
     let s2r: Vec<f64> = real_vals.iter().zip(&k1r).map(|(x, k)| x + 0.5 * dt * k).collect();
-    ode_derivs(model, &s2i, &s2r, params, t + 0.5 * dt, dt, &mut di, &mut dr, &mut df)?;
+    ode_derivs(model, &s2i, &s2r, params, t + 0.5 * dt, dt, per_eval, &mut di, &mut dr, &mut df)?;
     let k2i: Vec<f64> = di.clone();
     let k2r: Vec<f64> = dr.clone();
     let k2f: Vec<f64> = df.clone();
@@ -163,7 +168,7 @@ fn rk4_step(
     // k3
     let s3i: Vec<f64> = int_vals.iter().zip(&k2i).map(|(x, k)| x + 0.5 * dt * k).collect();
     let s3r: Vec<f64> = real_vals.iter().zip(&k2r).map(|(x, k)| x + 0.5 * dt * k).collect();
-    ode_derivs(model, &s3i, &s3r, params, t + 0.5 * dt, dt, &mut di, &mut dr, &mut df)?;
+    ode_derivs(model, &s3i, &s3r, params, t + 0.5 * dt, dt, per_eval, &mut di, &mut dr, &mut df)?;
     let k3i: Vec<f64> = di.clone();
     let k3r: Vec<f64> = dr.clone();
     let k3f: Vec<f64> = df.clone();
@@ -171,7 +176,7 @@ fn rk4_step(
     // k4
     let s4i: Vec<f64> = int_vals.iter().zip(&k3i).map(|(x, k)| x + dt * k).collect();
     let s4r: Vec<f64> = real_vals.iter().zip(&k3r).map(|(x, k)| x + dt * k).collect();
-    ode_derivs(model, &s4i, &s4r, params, t + dt, dt, &mut di, &mut dr, &mut df)?;
+    ode_derivs(model, &s4i, &s4r, params, t + dt, dt, per_eval, &mut di, &mut dr, &mut df)?;
     let k4i = &di;
     let k4r = &dr;
     let k4f = &df;
@@ -224,6 +229,7 @@ trait OdeStepper {
         t: f64,
         h_max: f64,
         state: &mut OdeState,
+        per_eval: Option<&[f64]>,
     ) -> Result<f64, SimError>;
 }
 
@@ -250,6 +256,7 @@ impl OdeStepper for Rk4Fixed {
         t: f64,
         h_max: f64,
         state: &mut OdeState,
+        per_eval: Option<&[f64]>,
     ) -> Result<f64, SimError> {
         // Clip the nominal step to land on the boundary: `dt.min(h_max)`,
         // bit-identical to the old `Schedule::substep` (= `dt.min(boundary - t)`).
@@ -261,20 +268,20 @@ impl OdeStepper for Rk4Fixed {
             // is undefined when the rate depends on the step size. gh#126 §#11:
             // the `Expr::Dt` rate (gh#54) sees `h` (dt_actual), matching the RK4
             // derivs and the StepClock rule. Evaluated at the start-of-step
-            // ROUNDED integer state (`int_float_override: None`), as it was before
+            // ROUNDED integer state (`int_float_override: None, per_eval: None`), as it was before
             // this change. The user is warned once at load (see the CLI).
             let (is, rs) = to_states(&state.int, &state.real);
             let mut propensities = Vec::with_capacity(state.flow.len());
-            eval_propensities(model, &is, &rs, params, t, h, &mut propensities)?;
+            eval_propensities(model, &is, &rs, params, t, h, per_eval, &mut propensities)?;
             for (i, &p) in propensities.iter().enumerate() {
                 state.flow[i] += p * h;
             }
-            rk4_step(model, &mut state.int, &mut state.real, None, params, t, h)?;
+            rk4_step(model, &mut state.int, &mut state.real, None, params, t, h, per_eval)?;
         } else {
             // Augmented flow (Q1B): `dc_i/dt = propensity_i` carried through the
             // SAME RK4 stages as the compartments — one mechanism, integrator-
             // order incidence, and no standalone 5th propensity eval.
-            rk4_step(model, &mut state.int, &mut state.real, Some(&mut state.flow), params, t, h)?;
+            rk4_step(model, &mut state.int, &mut state.real, Some(&mut state.flow), params, t, h, per_eval)?;
         }
         Ok(h)
     }
@@ -370,6 +377,7 @@ fn dopri5_try_step(
     state: &OdeState,
     atol: f64,
     rtol: f64,
+    per_eval: Option<&[f64]>,
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, f64), SimError> {
     let (ni, nr, nf) = (state.int.len(), state.real.len(), state.flow.len());
     let mut ki: Vec<Vec<f64>> = Vec::with_capacity(7);
@@ -394,7 +402,7 @@ fn dopri5_try_step(
         }
         // dt = h passed for signature parity; rk45 rejects RUNTIME_DT models, so
         // no rate reads Expr::Dt here.
-        ode_derivs(model, &si, &sr, params, t + DP_C[i] * h, h, &mut di, &mut dr, &mut df)?;
+        ode_derivs(model, &si, &sr, params, t + DP_C[i] * h, h, per_eval, &mut di, &mut dr, &mut df)?;
         ki.push(di.clone());
         kr.push(dr.clone());
         kf.push(df.clone());
@@ -449,13 +457,14 @@ impl OdeStepper for Dopri5 {
         t: f64,
         h_max: f64,
         state: &mut OdeState,
+        per_eval: Option<&[f64]>,
     ) -> Result<f64, SimError> {
         let mut h = self.h.min(h_max);
         if !(h > 0.0) { h = h_max; }
         let mut rejections = 0u32;
         loop {
             let (y5_int, y5_real, flow_inc, err) =
-                dopri5_try_step(model, params, t, h, state, self.atol, self.rtol)?;
+                dopri5_try_step(model, params, t, h, state, self.atol, self.rtol, per_eval)?;
             if err <= 1.0 {
                 // Accept. Commit state + augmented flow.
                 state.int = y5_int;
@@ -517,14 +526,20 @@ pub fn run_ode(
     // otherwise spin the RK4 substep loop forever (time never advances).
     model.validate_schedule(cfg.dt, params)?;
 
-    // gh#272: enter the per-eval cache scope for the whole integration. `params`
-    // is fixed for this call (one theta-stable span), so a param/table-only
-    // `PerEvalRef` is evaluated once here and reused across every RK stage of
-    // every step — NOT per-stage like the nested `CacheScope` in `ode_derivs`.
-    // This single site covers both forward ODE simulate and `compute_ode_loglik`
-    // (both route through `run_ode`). No-op for models without per-eval bindings.
-    let _eval_scope =
-        crate::resolved_expr::EvalScope::enter(model.resolved.per_eval_bindings.len());
+    // gh#272: stage the per-eval prologue ONCE for this θ-stable span. `params`
+    // is fixed for this whole `run_ode` call, so the param/table-only
+    // `per_eval_bindings` are evaluated here and lent (`per_eval.as_deref()`) into
+    // every RK stage of every step — NOT recomputed per stage. The scratch is
+    // owned by this call and passed as data, so it is structurally bound to this
+    // θ (no shared cache to alias). `None` for models without per-eval bindings,
+    // in which case `PerEvalRef` would fall through to on-demand eval anyway. This
+    // single site covers forward ODE simulate AND `compute_ode_loglik` (both route
+    // through `run_ode`).
+    let per_eval: Option<Vec<f64>> = if model.resolved.per_eval_bindings.is_empty() {
+        None
+    } else {
+        Some(crate::resolved_expr::eval_per_eval_scratch(model, params, cfg.t_start, cfg.dt))
+    };
 
     let (int_s0, real_s0) = model.initial_state(params)?;
     let n_transitions = model.model.transitions.len();
@@ -617,7 +632,7 @@ pub fn run_ode(
         // rk45 takes several internal steps). `h_max <= MIN_STEP_EPS` ⇔ arrived.
         let h_max = stop.t - t;
         if h_max > MIN_STEP_EPS {
-            t += stepper.advance(model, params, t, h_max, &mut state)?;
+            t += stepper.advance(model, params, t, h_max, &mut state, per_eval.as_deref())?;
             continue;
         }
 

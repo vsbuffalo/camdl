@@ -247,7 +247,7 @@ fn resolve_one(
 ) -> Result<(), SimError> {
     let ctx = EvalCtx {
         model, int_s: snap.int, real_s: snap.real, params, t, dt,
-        projected: None, aux: None, int_float_override: None,
+        projected: None, aux: None, int_float_override: None, per_eval: None,
     };
     let v = eval_resolved(&model.resolved.intervention_exprs[iv_idx][action_idx], &ctx);
     let v = crate::intervention::finite_action_value(v, iv_name, action, t)?;
@@ -430,6 +430,9 @@ fn eval_amount_f64(
     let ctx = EvalCtx {
         model, int_s: &placeholder, real_s: &rs, params, t, dt,
         projected: None, aux: None, int_float_override: Some(int_f64),
+        // gh#272: intervention action exprs are never rewritten by LICM, so no
+        // PerEvalRef appears here — the prologue is irrelevant.
+        per_eval: None,
     };
     eval_resolved(&model.resolved.intervention_exprs[iv_idx][action_idx], &ctx)
 }

@@ -45,10 +45,8 @@ impl Simulate for GillespieSim {
                 got: config.variant_name(),
             }),
         };
-        // gh#272: per-eval cache scope for the forward run (theta fixed). No-op
-        // for models without per-eval bindings.
-        let _eval_scope =
-            crate::resolved_expr::EvalScope::enter(model.resolved.per_eval_bindings.len());
+        // gh#272 LICM: `run_gillespie_with_observer` stages the per-eval prologue
+        // once for this θ-stable run and lends it into every rate eval.
         run_gillespie(model, params, seed, cfg)
     }
 
@@ -165,6 +163,21 @@ pub fn run_gillespie_with_observer(
     model.validate_schedule(iv_resolution_dt, params)?;
     let fire_steps = model.resolve_fire_steps(iv_resolution_dt, params);
 
+    // gh#272 LICM: stage the per-eval prologue ONCE for this forward run. `params`
+    // is fixed for the whole run, so the param/table-only `per_eval_bindings` are
+    // evaluated here and lent into every rate eval of every event — not recomputed
+    // per event. The scratch is owned here and passed as data (no shared cache to
+    // alias). `None` for models without per-eval bindings, where `PerEvalRef` would
+    // fall through to on-demand eval anyway. `t`/`dt` are inert (a per-eval body
+    // reads no `Time`/`Dt`).
+    let per_eval_scratch: Option<Vec<f64>> = if model.resolved.per_eval_bindings.is_empty() {
+        None
+    } else {
+        Some(crate::resolved_expr::eval_per_eval_scratch(
+            model, params, cfg.t_start, iv_resolution_dt))
+    };
+    let per_eval = per_eval_scratch.as_deref();
+
     // Merged timeline spine. Gillespie is event-driven: it PROPOSES an
     // exponential time and the schedule CLIPS it to the next boundary
     // (Schedule::clip). The grid is iv_resolution_dt (no integrator dt of its
@@ -195,7 +208,7 @@ pub fn run_gillespie_with_observer(
     }
 
     // Initial full propensity evaluation — maintained incrementally from here on.
-    eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), &mut propensities)?;
+    eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
     let mut lambda_total: f64 = propensities.iter().sum();
     let mut event_count: usize = 0;
 
@@ -208,7 +221,7 @@ pub fn run_gillespie_with_observer(
         // If lambda_total looks zero (from incremental drift or genuine absorbing state),
         // do a full recompute to verify before treating as absorbing.
         if lambda_total <= 0.0 {
-            eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), &mut propensities)?;
+            eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
             lambda_total = propensities.iter().sum();
         }
 
@@ -264,7 +277,7 @@ pub fn run_gillespie_with_observer(
             // If a scheduled effect fired the state changed — recompute; the model
             // may leave the absorbing state.
             if stop.has(StopReason::ScheduledEffect) {
-                eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), &mut propensities)?;
+                eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
                 lambda_total = propensities.iter().sum();
             }
 
@@ -333,11 +346,11 @@ pub fn run_gillespie_with_observer(
 
             if stop.has(StopReason::ScheduledEffect) {
                 // Full recompute after intervention (integer state changed).
-                eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), &mut propensities)?;
+                eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
                 lambda_total = propensities.iter().sum();
             } else {
                 // Time advanced but no state change: re-evaluate time-dependent transitions.
-                let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, aux: None, int_float_override: None };
+                let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, aux: None, int_float_override: None, per_eval };
                 for &tr_idx in &model.time_dep_transitions {
                     let old = propensities[tr_idx];
                     let new_p = eval_one(tr_idx, &ctx)?;
@@ -413,7 +426,7 @@ pub fn run_gillespie_with_observer(
         event_count += 1;
         if event_count.is_multiple_of(FULL_RECOMPUTE_INTERVAL) {
             // Periodic full recompute prevents floating-point drift in lambda_total
-            eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), &mut propensities)?;
+            eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
             lambda_total = propensities.iter().sum();
         } else {
             // Incremental update: only recompute transitions whose dependencies changed.
@@ -421,7 +434,7 @@ pub fn run_gillespie_with_observer(
             // avoid evaluating the same transition twice when multiple stoich entries
             // share a dependent transition (e.g., N[p] = S[p] + E[p] + ...).
             let mut updated: Vec<usize> = Vec::with_capacity(16);
-            let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, aux: None, int_float_override: None };
+            let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, aux: None, int_float_override: None, per_eval };
 
             // Compartment-dependent transitions
             for &(local, _) in &model.transition_stoich[fired_idx] {

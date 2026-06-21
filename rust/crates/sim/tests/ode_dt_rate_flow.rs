@@ -74,7 +74,7 @@ fn ode_flow_uses_realized_substep_dt_not_grid_dt() {
     // so the oracle is the raw real product.
     let flow = |dt_arg: f64| -> f64 {
         let mut p = Vec::new();
-        eval_propensities(&compiled, &int0, &real0, &params, t_start, dt_arg, &mut p)
+        eval_propensities(&compiled, &int0, &real0, &params, t_start, dt_arg, None, &mut p)
             .expect("eval propensities");
         p[infection] * dt_actual
     };
@@ -128,7 +128,7 @@ fn ode_subunit_flow_is_not_rounded_to_zero() {
     // from the exactly-known initial state with dt = 1.
     let dt = 1.0;
     let mut p = Vec::new();
-    eval_propensities(&compiled, &int0, &real0, &params, t_start, dt, &mut p)
+    eval_propensities(&compiled, &int0, &real0, &params, t_start, dt, None, &mut p)
         .expect("eval propensities");
     let oracle = p[infection] * dt;
     assert!(

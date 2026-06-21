@@ -65,7 +65,7 @@ fn nonfinite_param_in_rate_eval_returns_structured_error() {
     let mut propensities = Vec::new();
 
     let err = eval_propensities(
-        &compiled, &int_s, &real_s, &params, -101.0, 1.0, &mut propensities,
+        &compiled, &int_s, &real_s, &params, -101.0, 1.0, None, &mut propensities,
     ).expect_err("non-finite param should surface a structured error");
 
     match err {
@@ -100,7 +100,7 @@ fn nonfinite_param_pos_infinity_returns_structured_error() {
     let mut propensities = Vec::new();
 
     let err = eval_propensities(
-        &compiled, &int_s, &real_s, &params, 0.0, 1.0, &mut propensities,
+        &compiled, &int_s, &real_s, &params, 0.0, 1.0, None, &mut propensities,
     ).expect_err("+Inf param should surface a structured error");
 
     match err {
@@ -127,7 +127,7 @@ fn nonfinite_param_neg_infinity_returns_structured_error() {
     let mut propensities = Vec::new();
 
     let err = eval_propensities(
-        &compiled, &int_s, &real_s, &params, 0.0, 1.0, &mut propensities,
+        &compiled, &int_s, &real_s, &params, 0.0, 1.0, None, &mut propensities,
     ).expect_err("-Inf param should surface a structured error");
 
     match err {
@@ -177,7 +177,7 @@ fn finite_params_still_evaluate_normally() {
     let mut propensities = Vec::new();
 
     eval_propensities(
-        &compiled, &int_s, &real_s, &params, 0.0, 1.0, &mut propensities,
+        &compiled, &int_s, &real_s, &params, 0.0, 1.0, None, &mut propensities,
     ).expect("happy path: finite params should evaluate without error");
 
     assert!(!propensities.is_empty(), "expected non-empty propensities vector");

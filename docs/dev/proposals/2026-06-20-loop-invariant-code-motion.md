@@ -3,14 +3,17 @@
 Date: 2026-06-20 Status: Phase 1 implemented (ODE/forward; default-off) Issue:
 gh#272 Schema: 0.18 → 0.19 (adds `per_eval_bindings` + `Expr::PerEvalRef`)
 
-Implemented: ea4300cc (step 1.1 — IR substrate + on-demand eval), 8cfe9b8a (step
-1.2 — the OCaml LICM pass), de71c112 (step 1.3 — per-eval cache tier +
-EvalScope). Measured on the real MRE kernel: ~4.2× faster per ODE step, bringing
-the in-model fittable-γ kernel to ~precomputed-matrix speed. Still opt-in
-(`CAMDL_LICM`). Remaining: Phase 2 (stochastic per-particle EvalScope — pure
-performance; all methods are already _correct_ via the on-demand fallback), the
-default-on flip (a deliberate, run-id-re-keying release decision), and the
-flat-eval tape / strength-reduction follow-ons.
+The runtime half is **Design C — a staged per-eval scratch threaded as data on
+`EvalCtx`** (`per_eval: Option<&[f64]>`, the sibling of `int_float_override`).
+The compiler half — the OCaml LICM pass, the IR nodes, the keystone validation —
+is shared with the original sketch; only the runtime evaluation of `PerEvalRef`
+differs from the first cut. Measured on the real MRE kernel: ~4.2× faster per
+ODE step, bringing the in-model fittable-γ kernel to ~precomputed-matrix speed.
+Still opt-in (`CAMDL_LICM`). Remaining: Phase 2 (stochastic per-particle staging
+— pure performance; the inference producer steps already pass `None` and are
+_correct_ via the on-demand fallback), the default-on flip (a deliberate,
+run-id-re-keying release decision), and the flat-eval tape / strength-reduction
+follow-ons.
 
 ## Problem
 
@@ -297,134 +300,114 @@ rewrite inside the hoisted body, not load-bearing for the main win.
    **topologically ordered** (`PerEvalRef(j)` ⇒ `j < i`), the invariant the
    `BindingRef` path gets for free from the expander's reverse-topological
    `hoisted_rev` but LICM's fresh accumulator must re-establish.
-2. **Per-eval cache tier**: a second generation on the existing thread-local
-   `BindingCache` (`rust/crates/sim/src/resolved_expr.rs`). The existing
-   generation bumps per `eval_propensities` (per step); the new generation bumps
-   per **`EvalScope`** (per θ-stable boundary). `PerEvalRef` memoizes against
-   the per-eval generation; `BindingRef` keeps memoizing against the per-step
-   one. The two tiers index **disjoint slot spaces** (`bindings` vs
-   `per_eval_bindings`), so the per-eval tier needs its **own**
-   `val`/`stamp`/`gen` **and its own `active` flag** in the `BindingCache`
-   struct — not a shared buffer (slot `k` would collide) and **not the shared
-   `active`**. The shared `active` is the trap: the per-step `CacheScope` is
-   dropped **per RK stage** on the ODE path (`ode.rs:89`, "dropped at the end of
-   this stage"), and `CacheScope::Drop` sets `active = false`
-   (`resolved_expr.rs:404`). Reusing that one flag, the first nested stage's
-   `Drop` deactivates per-eval caching for the rest of the trajectory (no
-   speedup) — and "fixing" it by not clearing the flag breaks the per-step
-   tier's own invalidation (silent-wrong `N[p]`). `CacheScope::enter`'s per-step
-   resize (`resolved_expr.rs:382`, `if c.val.len() != n_bindings { … }`) must
-   likewise leave the per-eval vectors untouched. Same struct, two fully
-   independent tiers.
+2. **Staged per-eval scratch on `EvalCtx`.** `EvalCtx` gains
+   `per_eval: Option<&'a [f64]>` (the sibling of `int_float_override`). For a
+   θ-stable span, the values of `model.resolved.per_eval_bindings` are computed
+   **once** into an owned `Vec<f64>` by
+   `eval_per_eval_scratch(model, params, t,
+   dt)` (`resolved_expr.rs`) and
+   lent into every rate eval of that span. The eval arm is a slice read:
 
-   **Borrow discipline.** A per-eval body references earlier per-eval bindings
-   (`Z_p = Σ_r PerEvalRef(Wnum_p_r)`), so `PerEvalRef` eval must **release the
-   `RefCell` borrow before recursing** into an earlier slot — exactly as the
-   `BindingRef` arm does (`resolved_expr.rs:597–621`: borrow scoped to the hit
-   check, recursion only after). Holding `borrow_mut()` across the recursion
-   panics (`BorrowMutError`) on the `Z_p → Wnum` shape — which _is_ the
-   benchmark — so the keystone test must exercise a per-eval body that
-   references an earlier one.
-3. **Safe fallback (no active scope ⇒ on-demand eval).** When no `EvalScope` is
-   active, `PerEvalRef` evaluates its body directly — exactly as `BindingRef`
-   already does on a cache miss (`resolved_expr.rs:608`,
-   `None => eval_resolved(
-   &bindings[slot], ctx)`). So `PerEvalRef` is
-   **correct on every backend regardless of whether that backend has wired an
-   `EvalScope` yet** — it is only _faster_ where a scope is present. The phase
-   split (below) is safe by construction, not by "don't use it there."
-4. **Flat evaluator** (`flat_eval.rs`, opt-in `CAMDL_EVAL_FLAT`) is a
-   **first-class sub-deliverable, not a one-line arm.** It does _not_ use the
-   thread-local `BindingCache`; it has its own `FlatVm` with a `binding_progs`
-   tape and a `FlatCache` (`val`/`stamp`/`gen`/`active`) threaded through
-   `run`'s signature and the `FLAT_STATE` thread-local (`propensity.rs`).
-   `PerEvalRef` needs the parallel build-out: a second `per_eval_progs` tape on
-   `FlatVm` (`build` gains a third arg), a **second `FlatCache` tier** (disjoint
-   slots, per-eval generation) plumbed through `run`/`eval_flat` and
-   `FLAT_STATE`, an `Op::PerEval(slot)` mirroring `Op::Binding`
-   (`flat_eval.rs:254`), and `EvalScope::enter` must bump the per-eval
-   generation in **both** the `BINDING_CACHE` and `FLAT_STATE` thread-locals (or
-   the flat path silently never reuses — correct via fallback, but no speedup).
-5. **`EvalScope`** RAII (sibling of `CacheScope`), entered at each backend's
-   θ-stable boundary:
-   - ODE: **at the top of `OdeSim::run` (`ode.rs:508`), wrapping the
-     `while next_stop { stepper.advance(…) }` driver loop (`:602`) — _not_
-     inside `ode_derivs` / next to the per-stage `CacheScope` (`ode.rs:89`).** θ
-     is fixed for the whole `run_ode` call; that is the unique θ-stable span.
-     Placing it where the per-stage `CacheScope` lives (the obvious copy-paste)
-     bumps the per-eval generation ~2000× per integration → zero cross-step
-     reuse → the 3.77× evaporates. This one site covers **both** ODE inference
-     (`compute_ode_loglik → OdeSim::run`, `runner.rs:775/792`) and forward ODE
-     simulate, since both route through `OdeSim::run`.
-   - Forward simulate (chain_binomial/gillespie): once per run.
-   - PF / IF2: **inside** each particle's closure body, _per particle_. The
-     rayon parallel region opens at `particle_filter.rs:274` (`par_iter_mut`);
-     the per-particle closure body begins at `:278`; the substep loop is `:284`.
-     The `EvalScope` must be entered **inside that closure (per particle)**, and
-     `EvalScope::enter` must **bump the per-eval generation** (mirroring
-     `CacheScope::enter`, `resolved_expr.rs:387`), so when a rayon worker
-     processes particle 3 then particle 17, particle 3's cached kernel is
-     invalidated before particle 17 runs. This is load-bearing for IF2, where
-     each particle carries a distinct perturbed θ (`if2.rs:444`): a scope
-     entered _around_ the parallel region (on the calling thread) would leave
-     each worker holding a stale per-eval cache from a different particle's θ →
-     silent-wrong gradient. Entered per particle, the kernel is constant across
-     that particle's interval substeps (the win) and correct across the
-     per-particle θ change (the invariant).
-   - PGAS: per CSMC sweep (θ fixed during the conditional filter, perturbed by
-     NUTS between sweeps).
+   ```rust
+   ResolvedExpr::PerEvalRef(slot) => match ctx.per_eval {
+       Some(scratch) => scratch[*slot],
+       None => eval_resolved(&ctx.model.resolved.per_eval_bindings[*slot], ctx),
+   }
+   ```
 
-### Runtime invalidation: staged per-eval scratch (Design C — the chosen architecture)
+   The scratch is built in topological order, lending the already-filled prefix
+   (`per_eval: Some(&scratch[..i])`) while evaluating body `i`, so a body that
+   references an earlier slot (`Z_p = Σ_r PerEvalRef(Wnum_p_r)` — the benchmark
+   shape) reads the staged prefix value. No thread-local cache, no generation,
+   no `RefCell` borrow dance: the scratch is owned by the caller and passed as
+   data.
+3. **Safe fallback (`None` ⇒ on-demand eval).** When the caller has not staged a
+   scratch (`per_eval == None`), `PerEvalRef` evaluates its body directly —
+   byte-identical to the staged read, just unamortized. So `PerEvalRef` is
+   **correct on every eval site regardless of whether that site stages a
+   scratch**; the phase split (below) is safe by construction, not by "don't use
+   it there." Every non-LICM eval site (obs likelihoods, interventions, priors,
+   inference producer steps) passes `None`.
+4. **Flat evaluator** (`flat_eval.rs`, opt-in `CAMDL_EVAL_FLAT`) is an
+   independent opt-in path that returns before the `EvalCtx` eval and does not
+   read `per_eval`. Wiring the staged scratch into the flat VM (an
+   `Op::PerEval(slot)` tape read) is a follow-on; until then, the `CAMDL_LICM` ×
+   `CAMDL_EVAL_FLAT` combination is handled by the flat builder (both flags are
+   off by default).
+5. **Staging sites — one per θ-stable span.** The scratch is computed once at
+   the entry of each fixed-θ span and threaded down to the eval sites it covers:
+   - ODE: at the top of `run_ode` (`ode.rs`), before the
+     `while next_stop {
+     stepper.advance(…) }` driver loop, lent through
+     `OdeStepper::advance` → `rk4_step`/`dopri5_try_step` → `ode_derivs` (and
+     the euler-flow `eval_propensities`). θ is fixed for the whole `run_ode`
+     call; that one site covers **both** ODE inference
+     (`compute_ode_loglik → run_ode`) and forward ODE simulate.
+   - Forward simulate (chain_binomial/gillespie): staged once at the top of
+     `run_chain_binomial_with_observer` / `run_gillespie_with_observer` and lent
+     into every `step_one` / `eval_propensities` of the run. `step_one` — the
+     producer step shared with inference — takes `per_eval` as a parameter, so
+     forward passes the staged scratch and inference passes `None`.
+   - PF / IF2 / PGAS / PMMH: the inference producer steps pass `None` today
+     (on-demand, byte-identical). Per-particle staging is Phase 2 — and because
+     the scratch is owned/lent data, "one scratch per particle" is just a local
+     `Vec` inside the per-particle closure, structurally bound to that
+     particle's θ. There is no shared cache to mis-scope, so IF2's per-particle
+     perturbed θ (`if2.rs`) cannot serve one particle's kernel to another's θ —
+     the correctness obligation the original cache design carried as placement
+     discipline is dissolved into the type.
 
-The thread-local cache + RAII `EvalScope` above (call it Design A) is what Phase
-1 shipped, and it works (≈4.2× measured). But three independent design reviews
-converged on a cleaner architecture for the runtime half, and it is what the
-remaining runtime work should adopt. The compiler half — the LICM pass, the IR
-nodes, the keystone validation — is **unchanged**; only the way the runtime
-evaluates `PerEvalRef` changes.
+### Why Design C — the alternatives considered
 
-**The problem with Design A.** The per-eval cache is shared thread-local state
-invalidated by a generation a per-backend `EvalScope` bumps. Correctness then
-depends on each backend placing the scope at a θ-stable boundary — and the
-inference loops nest θ differently (IF2 perturbs θ _per particle_). A scope
-entered around the parallel region instead of per particle silently serves one
-particle's kernel to another's θ. The design carries a correctness obligation as
-placement discipline rather than as a type, and it accretes a second of every
-cache primitive (generation, `active`, override, hit counter, plus a separate
-flat-VM tier).
+The runtime evaluates `PerEvalRef` via **Design C** (the staged scratch above).
+Two other designs were considered and rejected; the comparison is the design
+record. The compiler half — the LICM pass, the IR nodes, the keystone validation
+— is identical under all three; only the runtime evaluation of `PerEvalRef`
+differs.
 
-**Design C — a staged prologue, threaded as data.** Compute the per-eval
-bindings once for the θ-stable span into an owned `Vec<f64>` scratch, and thread
-it as a borrow on `EvalCtx` (`per_eval: Option<&[f64]>`, the exact sibling of
-the existing `int_float_override: Option<&[f64]>`). `PerEvalRef(slot)` becomes
-`ctx.per_eval[slot]` — a slice read — falling through to on-demand eval when
-`None` (byte-identical, so an un-staged path is correct, just unamortized).
+**Design A — a thread-local per-eval cache tier + RAII `EvalScope`.** A first
+cut used a second generation on the thread-local `BindingCache`, invalidated per
+θ-stable span by an `EvalScope` RAII guard each backend enters. It works (≈4.2×
+measured), but the per-eval cache is shared thread-local state invalidated by a
+generation a per-backend `EvalScope` bumps. Correctness then depends on each
+backend placing the scope at a θ-stable boundary — and the inference loops nest
+θ differently (IF2 perturbs θ _per particle_). A scope entered around the
+parallel region instead of per particle silently serves one particle's kernel to
+another's θ. The design carries a correctness obligation as placement discipline
+rather than as a type, and it accretes a second of every cache primitive
+(generation, `active`, override, hit counter, plus a separate flat-VM tier).
+
+**Design C — a staged prologue, threaded as data (implemented).** Compute the
+per-eval bindings once for the θ-stable span into an owned `Vec<f64>` scratch,
+and thread it as a borrow on `EvalCtx` (`per_eval: Option<&[f64]>`, the exact
+sibling of the existing `int_float_override: Option<&[f64]>`).
+`PerEvalRef(slot)` is `ctx.per_eval[slot]` — a slice read — falling through to
+on-demand eval when `None` (byte-identical, so an un-staged path is correct,
+just unamortized).
 
 This is **correct by construction**: the scratch is owned/lent, not ambient, so
 there is no shared mutable cache to alias across particles — the value is
 structurally bound to the θ it was computed at, and the `if2.rs` per-particle
 case is just "one scratch per particle." A missed wiring is a _compile error_ (a
-typed field), not a silent stale read. It **deletes** Design A's second cache
-tier, the `EvalScope` RAII, the borrow-before-recurse dance, and the flat-VM
-tier. And it is the extensible seam: the future `const` stage and the
-gradient-path per-eval stage each compose as another owned scratch read by
-index, where Design A would need a third and fourth thread-local tier.
+typed field), not a silent stale read. It carries no thread-local cache tier, no
+`EvalScope` RAII, no borrow-before-recurse dance, and no flat-VM cache tier. And
+it is the extensible seam: a future `const` stage and the gradient-path per-eval
+stage each compose as another owned scratch read by index, where Design A would
+need a third and fourth thread-local tier.
 
 (Design B — auto-invalidate by keying the cache on the param vector — was
 rejected: IF2/PGAS/PMMH **mutate the θ buffer in place** (`if2.rs:391,480`;
 `pmmh.rs:467`), so pointer-identity keying serves stale values, and
 content-hashing has no existing identity to hang on and costs a per-eval hash.)
 
-**Migration (the chosen plan).** Keep steps 1.1 (IR substrate) and 1.2 (the LICM
-pass) verbatim. Replace step 1.3's thread-local tier + `EvalScope` with the
-staged scratch: add `per_eval: Option<&[f64]>` to `EvalCtx` (~70 construction
-sites, mostly `None`; only rate / rate_grad / ode-derivative eval sites carry
-the scratch since `PerEvalRef` appears only there), a `PerEvalScratch` computed
-at each θ-span entry, and thread it through `ode_derivs` (via the `OdeStepper`
-stepper) and `eval_propensities`. The A/B gate transfers directly
-(`scratch present vs absent` replaces `cache on vs off`). It is a real but
-bounded refactor of the eval hot path — to be done as a careful, gated focused
-pass, not rushed.
+**What landed.** Steps 1.1 (IR substrate) and 1.2 (the LICM pass) are as
+originally specced. The runtime adds `per_eval: Option<&[f64]>` to `EvalCtx`
+(every construction site `None` except the rate / rate_grad / ode-derivative
+eval path, since `PerEvalRef` appears only there), `eval_per_eval_scratch`
+computed at each θ-span entry, and threads it through `OdeStepper::advance` →
+`ode_derivs` and through `eval_propensities` / `step_one`. The A/B gate
+(`gate_licm_ab.rs` §4) asserts `scratch present == scratch absent` at expression
+granularity, replacing the original cache-on/off comparison.
 
 ### Consumer surface: three classes
 
@@ -655,23 +638,22 @@ counter counts.
   prologue), so the gate must pin that the preserved `Cond` still gates the
   value identically and the unused non-finite never reaches the trajectory —
   converting the speculative-hoist soundness argument from reasoned to tested.
-- **Per-eval cache A/B**: extend `gate_binding_cache_ab.rs` to the per-eval tier
-  (cache on/off → identical trajectory). Assert hits > 0 on a **distinct**
-  `take_per_eval_cache_hits` counter — the existing per-step counter is nonzero
-  regardless, so reusing it makes the non-vacuity check vacuous. **Include an
-  IF2 run with per-particle θ perturbation** so the per-particle scope reset is
-  exercised — a scope entered _around_ the parallel region instead of per
-  particle would alias stale θ and fail this gate.
-- **ODE-loglik under rayon** (no silent gap): both existing gates call
-  `OdeSim::run` directly, never the inference seam. The benchmark's own path —
-  `compute_ode_loglik` run under a multi-θ rayon `par_iter`
-  (MH/PMMH/nlopt/profile, `pmmh.rs:566`, `nlopt_stage.rs:162`,
-  `profile.rs:1209`) — is where a mis-scoped thread-local `EvalScope` would
-  alias a stale θ's kernel. Add a gate that flips `CAMDL_LICM` and asserts an
-  identical loglik from `compute_ode_loglik` under that parallel context. Name
-  `correlated_pf`/PMMH explicitly in the cache-gate matrix too (the fallback
-  keeps them _correct_ without a scope, but "covered by the IF2 clause" is the
-  exact hand-wave to avoid).
+- **Staged-scratch A/B** (`gate_licm_ab.rs` §4): on the hoisted (ON) model,
+  stage the per-eval scratch at a fixed (state, θ) and assert
+  `eval(Some(scratch)) == eval(None)` (on-demand) bitwise for every rate /
+  rate_grad / ode-derivative expression. This isolates the runtime read
+  mechanism from hoist soundness (§2-3) and end-to-end identity (§2, which
+  simulates the ON model — `run_ode` stages the scratch — byte-identical to the
+  fully-inlined OFF model). Non-vacuity: the ON model has non-empty
+  `per_eval_bindings`, so the scratch is non-empty and the rate surface carries
+  exercised `PerEvalRef` nodes.
+- **ODE-loglik under rayon** (no silent gap): both existing trajectory gates
+  call `OdeSim::run` directly, never the inference seam. A gate that flips
+  `CAMDL_LICM` and asserts an identical loglik from `compute_ode_loglik` under a
+  multi-θ rayon `par_iter` (MH/PMMH/nlopt/profile, `pmmh.rs:566`,
+  `nlopt_stage.rs:162`, `profile.rs:1209`) pins the parallel path. Under Design
+  C the scratch is owned/lent per `run_ode` call (no thread-local to alias), so
+  this is a belt-and-braces regression guard rather than a correctness crux.
 - **Gradient correctness**: `gradient_check*.rs` must stay green with the pass
   on. Add a **value** check: evaluate `rate_grad` LICM-off vs LICM-on at a fixed
   (state, θ) and assert equality (the _serialized_ `rate_grad` necessarily
@@ -699,29 +681,28 @@ commit — a golden diff is never collateral.
 ## Phasing
 
 1. **IR node + pass + forward path.** Schema 0.19, the LICM pass, the Rust
-   runtime (`PerEvalRef` eval + per-eval cache tier + flat-eval `Op` + the
-   on-demand fallback), and `EvalScope` for the ODE backend and forward
-   simulate. No gradient-consumer _logic_ changes are needed (the pass is scoped
-   to the `eval_resolved` surfaces); the exhaustive gradient consumers
+   runtime (`PerEvalRef` eval + the staged `EvalCtx.per_eval` scratch + the
+   on-demand fallback), staged at the ODE and forward-simulate θ-span entries.
+   No gradient-consumer _logic_ changes are needed (the pass is scoped to the
+   `eval_resolved` surfaces); the exhaustive gradient consumers
    (`eval_resolved_deriv`, `eval_expr_deriv`, `collect_param_refs`) get the
    mechanical `unreachable!()` arm from Class A to compile, but no
    differentiation behaviour changes. Nails the benchmark. Default-off. The
-   on-demand fallback makes this safe on the stochastic backends even before
-   they wire a scope.
-2. **Stochastic backends**: `EvalScope` inside the PF/IF2/PGAS per-particle (and
-   CSMC) boundaries. Per-particle-interval reuse. Gated by the existing
-   inference oracles.
+   on-demand fallback makes this safe on the inference backends even before they
+   stage a scratch.
+2. **Stochastic backends**: stage a per-particle scratch inside the PF/IF2/PGAS
+   per-particle (and CSMC) closures — a local `Vec` bound to that particle's θ.
+   Per-particle-interval reuse. Gated by the existing inference oracles.
 3. Flip default-on; golden regen.
 4. (Optional) strength-reduction peephole.
 
 ## Risks, non-goals, open questions
 
-- **EvalScope boundary correctness** is the crux for the stochastic backends —
-  the scope must bracket exactly a θ-stable span. ODE/forward (Phase 1) is
-  trivial (one scope per trajectory). The PF/IF2/PGAS boundaries (Phase 2) need
-  the exact call sites pinned and gated against the inference oracles before
-  flipping on. The on-demand fallback bounds the blast radius: a missing or
-  mis-scoped `EvalScope` costs performance, never correctness.
+- **Per-particle staging (Phase 2)** must compute the scratch from exactly that
+  particle's θ. Because the scratch is owned/lent data (not ambient thread-local
+  state), this is a local `Vec` inside the per-particle closure — there is no
+  scope to mis-bracket. The on-demand fallback bounds the blast radius further:
+  a missing scratch costs performance, never correctness.
 - **Bitwise CSE** is a correctness requirement, not an optimization detail (the
   `-0.0` Reduce seed). The CSE key must be a bitwise expr hash.
 - **CSE cost threshold** (when a subtree is worth hoisting) is a heuristic;

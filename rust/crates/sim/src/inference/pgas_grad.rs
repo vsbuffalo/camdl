@@ -73,10 +73,12 @@ pub fn log_transition_density_grad(
     let real_s = RealState::new(model.real_local_to_global.len());
 
     let mut propensities = vec![0.0; n_tr];
-    eval_propensities(model, &int_s, &real_s, params, t, dt, &mut propensities)?;
+    // Inference producer/gradient step: per-particle θ. `None` ⇒ on-demand,
+    // byte-identical (Phase 2 stages per-particle scratch here).
+    eval_propensities(model, &int_s, &real_s, params, t, dt, None, &mut propensities)?;
 
     let ctx = EvalCtx {
-        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None,
+        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval: None,
     };
 
     let mut log_p = 0.0;
@@ -320,11 +322,13 @@ fn gamma_density_value_and_grad_substep(
 
     let n_tr = model.model.transitions.len();
     let mut propensities = vec![0.0; n_tr];
-    eval_propensities(model, &int_s, &real_s, params, t, dt, &mut propensities)?;
+    // Inference producer/gradient step: per-particle θ. `None` ⇒ on-demand,
+    // byte-identical (Phase 2 stages per-particle scratch here).
+    eval_propensities(model, &int_s, &real_s, params, t, dt, None, &mut propensities)?;
 
     let ctx = EvalCtx {
         model, int_s: &int_s, real_s: &real_s, params, t, dt,
-        projected: None, aux: None, int_float_override: None,
+        projected: None, aux: None, int_float_override: None, per_eval: None,
     };
 
     let mut gamma_idx_local: usize = 0;

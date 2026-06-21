@@ -118,7 +118,7 @@ fn test_runtime_oob_table_lookup_returns_err_not_panic() {
     let mut out = Vec::new();
     // Must be Err (a typed SimError), NOT a panic. Against the buggy code this
     // call panics inside eval_resolved (red); the fix makes it return Err.
-    let res = eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, &mut out);
+    let res = eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out);
     assert!(
         res.is_err(),
         "out-of-range table lookup must return Err, not panic or a value; got {:?}",
@@ -138,7 +138,7 @@ fn test_const() {
     let int_s = IntState::new(1);
     let real_s = RealState::new(0);
     let expr = Expr::Const(ConstExpr { value: 3.14 });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!((result - 3.14).abs() < 1e-12);
 }
@@ -153,7 +153,7 @@ fn test_param() {
     let real_s = RealState::new(0);
     let params = vec![0.5f64];
     let expr = Expr::Param(ParamExpr { param: "beta".into() });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &params, t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &params, t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!((result - 0.5).abs() < 1e-12);
 }
@@ -168,7 +168,7 @@ fn test_pop_integer() {
     int_s.counts[0] = 42; // I is first
     let real_s = RealState::new(0);
     let expr = Expr::Pop(PopExpr { pop: "I".into() });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!((result - 42.0).abs() < 1e-12);
 }
@@ -182,7 +182,7 @@ fn test_pop_sum() {
     let int_s = IntState::from_vec(vec![100, 20, 30]);
     let real_s = RealState::new(0);
     let expr = Expr::PopSum(PopSumExpr { pop_sum: vec!["S".into(), "I".into(), "R".into()] });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!((result - 150.0).abs() < 1e-12);
 }
@@ -193,7 +193,7 @@ fn test_time() {
     let int_s = IntState::new(1);
     let real_s = RealState::new(0);
     let expr = Expr::Time(TimeExpr { time: () });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 7.5, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 7.5, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!((result - 7.5).abs() < 1e-12);
 }
@@ -206,7 +206,7 @@ fn test_dt_evaluates_to_ctx_dt() {
     let real_s = RealState::new(0);
     let expr = Expr::Dt(DtExpr { dt: () });
     for &dt in &[1.0_f64, 0.5, 0.25, 0.1, 7.0] {
-        let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt, projected: None, aux: None, int_float_override: None };
+        let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt, projected: None, aux: None, int_float_override: None, per_eval: None };
         let result = eval_expr(&expr, &ctx).unwrap();
         assert!((result - dt).abs() < 1e-12, "dt={} got {}", dt, result);
     }
@@ -231,7 +231,7 @@ fn eval_unop(op: UnOp, arg: f64) -> f64 {
     let expr = Expr::UnOp(UnOpWrap {
         un_op: UnOpExpr { op, arg: Box::new(Expr::Const(ConstExpr { value: arg })) },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     eval_expr(&expr, &ctx).unwrap()
 }
 
@@ -281,7 +281,7 @@ fn test_binop_add() {
             right: Box::new(Expr::Const(ConstExpr { value: 4.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!((result - 7.0).abs() < 1e-12);
 }
@@ -298,7 +298,7 @@ fn test_binop_mul() {
             right: Box::new(Expr::Const(ConstExpr { value: 7.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!((result - 42.0).abs() < 1e-12);
 }
@@ -315,7 +315,7 @@ fn test_binop_div() {
             right: Box::new(Expr::Const(ConstExpr { value: 3.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!((result - 10.0 / 3.0).abs() < 1e-10);
 }
@@ -337,7 +337,7 @@ fn test_div_by_zero_errors_by_default() {
             right: Box::new(Expr::Const(ConstExpr { value: 0.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     sim::eval_stats::set_allow_degenerate_rates(false);
     let err = eval_expr(&expr, &ctx).unwrap_err();
     assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::DivByZero, .. }),
@@ -361,7 +361,7 @@ fn test_unop_exp() {
             arg: Box::new(Expr::Const(ConstExpr { value: 1.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!((result - std::f64::consts::E).abs() < 1e-10);
 }
@@ -377,7 +377,7 @@ fn test_unop_neg() {
             arg: Box::new(Expr::Const(ConstExpr { value: 5.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     assert!((eval_expr(&expr, &ctx).unwrap() - (-5.0)).abs() < 1e-12);
 }
 
@@ -392,7 +392,7 @@ fn test_unop_log() {
             arg: Box::new(Expr::Const(ConstExpr { value: std::f64::consts::E })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     assert!((eval_expr(&expr, &ctx).unwrap() - 1.0).abs() < 1e-10);
 }
 
@@ -407,7 +407,7 @@ fn test_unop_sqrt() {
             arg: Box::new(Expr::Const(ConstExpr { value: 16.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     assert!((eval_expr(&expr, &ctx).unwrap() - 4.0).abs() < 1e-12);
 }
 
@@ -422,7 +422,7 @@ fn test_unop_abs() {
             arg: Box::new(Expr::Const(ConstExpr { value: -7.5 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     assert!((eval_expr(&expr, &ctx).unwrap() - 7.5).abs() < 1e-12);
 }
 
@@ -437,7 +437,7 @@ fn test_unop_floor() {
             arg: Box::new(Expr::Const(ConstExpr { value: 3.7 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     assert!((eval_expr(&expr, &ctx).unwrap() - 3.0).abs() < 1e-12);
 }
 
@@ -452,7 +452,7 @@ fn test_unop_ceil() {
             arg: Box::new(Expr::Const(ConstExpr { value: 3.2 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     assert!((eval_expr(&expr, &ctx).unwrap() - 4.0).abs() < 1e-12);
 }
 
@@ -469,7 +469,7 @@ fn test_cond_pred_positive() {
             else_: Box::new(Expr::Const(ConstExpr { value: 0.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert_eq!(result, 5.0);
 }
@@ -487,7 +487,7 @@ fn test_cond_pred_zero() {
             else_: Box::new(Expr::Const(ConstExpr { value: 0.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert_eq!(result, 0.0);
 }
@@ -505,7 +505,7 @@ fn test_cond_pred_negative() {
             else_: Box::new(Expr::Const(ConstExpr { value: 99.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert_eq!(result, 99.0);
 }
@@ -522,7 +522,7 @@ fn test_binop_gt_true() {
             right: Box::new(Expr::Const(ConstExpr { value: 3.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert_eq!(result, 1.0);
 }
@@ -539,7 +539,7 @@ fn test_binop_gt_false() {
             right: Box::new(Expr::Const(ConstExpr { value: 5.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert_eq!(result, 0.0);
 }
@@ -556,7 +556,7 @@ fn test_binop_eq_true() {
             right: Box::new(Expr::Const(ConstExpr { value: 4.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert_eq!(result, 1.0);
 }
@@ -574,7 +574,7 @@ fn test_binop_le() {
             right: Box::new(Expr::Const(ConstExpr { value: 3.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert_eq!(result, 1.0);
 }
@@ -589,7 +589,7 @@ fn test_log_negative_returns_neg_inf() {
     let expr = Expr::UnOp(UnOpWrap {
         un_op: UnOpExpr { op: UnOp::Log, arg: Box::new(Expr::Const(ConstExpr { value: -1.0 })) },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let result = eval_expr(&expr, &ctx).unwrap();
     assert!(result.is_infinite() && result < 0.0, "log(-1) should be -inf, got {}", result);
 }
@@ -604,7 +604,7 @@ fn test_sqrt_negative_errors_by_default() {
     let expr = Expr::UnOp(UnOpWrap {
         un_op: UnOpExpr { op: UnOp::Sqrt, arg: Box::new(Expr::Const(ConstExpr { value: -4.0 })) },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     sim::eval_stats::set_allow_degenerate_rates(false);
     let err = eval_expr(&expr, &ctx).unwrap_err();
     assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::SqrtNegative, .. }),
@@ -628,7 +628,7 @@ fn test_pow_negative_base_fractional_exp_errors_by_default() {
             right: Box::new(Expr::Const(ConstExpr { value: 0.5 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     sim::eval_stats::set_allow_degenerate_rates(false);
     let err = eval_expr(&expr, &ctx).unwrap_err();
     assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::PowNanInf, .. }),
@@ -652,7 +652,7 @@ fn test_pow_zero_to_negative_errors_by_default() {
             right: Box::new(Expr::Const(ConstExpr { value: -1.0 })),
         },
     });
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None };
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     sim::eval_stats::set_allow_degenerate_rates(false);
     let err = eval_expr(&expr, &ctx).unwrap_err();
     assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::PowNanInf, .. }),

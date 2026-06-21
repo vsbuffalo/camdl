@@ -195,7 +195,7 @@ fn dt_rate_propensity_scales_with_eval_ctx_dt() {
         let mut int_s = IntState::new(rec.counts_before.len());
         int_s.counts.copy_from_slice(&rec.counts_before);
         let mut prop_grid = Vec::new();
-        eval_propensities(&compiled, &int_s, &real_s, &params, rec.t0, DT, &mut prop_grid)
+        eval_propensities(&compiled, &int_s, &real_s, &params, rec.t0, DT, None, &mut prop_grid)
             .expect("eval at grid dt");
         if prop_grid[inf] > 0.0 {
             chosen = Some((rec.t0, rec.dt_substep, int_s, prop_grid));
@@ -207,7 +207,7 @@ fn dt_rate_propensity_scales_with_eval_ctx_dt() {
     assert!(short_dt > 0.0 && short_dt < DT, "need a genuinely shortened substep");
 
     let mut prop_short = Vec::new();
-    eval_propensities(&compiled, &int_s, &real_s, &params, t0, short_dt, &mut prop_short)
+    eval_propensities(&compiled, &int_s, &real_s, &params, t0, short_dt, None, &mut prop_short)
         .expect("eval at realized dt");
 
     // infection rate = beta·S·I/N · (dt/tau): linear in EvalCtx.dt, so the only

@@ -203,11 +203,11 @@ fn gate_licm_is_byte_identical() {
     let (int_on, real_on) = compiled_on.initial_state(&params_on).expect("on init state");
     let ctx_off = sim::propensity::EvalCtx {
         model: &compiled_off, int_s: &int_off, real_s: &real_off, params: &params_off,
-        t: t_start, dt: 1.0, projected: None, aux: None, int_float_override: None,
+        t: t_start, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None,
     };
     let ctx_on = sim::propensity::EvalCtx {
         model: &compiled_on, int_s: &int_on, real_s: &real_on, params: &params_on,
-        t: t_start, dt: 1.0, projected: None, aux: None, int_float_override: None,
+        t: t_start, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None,
     };
     // `rate_grad` is a HashMap in the IR, so its per-transition term ORDER is
     // non-deterministic — compare by param index (the value), not by position.
@@ -240,39 +240,60 @@ fn gate_licm_is_byte_identical() {
     assert!(grad_terms > 0, "no rate_grad terms evaluated — fixture has no gradients?");
     eprintln!("gradient: {grad_terms} rate_grad terms byte-identical off vs on");
 
-    // ── 4. PER-EVAL CACHE A/B ───────────────────────────────────────────────
-    // On the SAME hoisted (ON) model, flipping the per-eval cache must not change
-    // the trajectory (the cache returns exactly what on-demand eval would), and
-    // the cache must actually serve hits — else byte-identity is vacuous and the
-    // EvalScope was never entered. This isolates cache correctness from hoist
-    // correctness (sections 2-3). Single-threaded ODE run, so the per-thread
-    // toggle and hit counter apply on this thread.
-    let ode_cfg = SimConfig::Ode(OdeConfig { t_start, t_end, dt: 1.0 });
-
-    sim::resolved_expr::set_per_eval_cache_disabled(false); // cache ON
-    let _ = sim::resolved_expr::take_per_eval_cache_hits(); // reset counter
-    let traj_cache_on = OdeSim
-        .run(&compiled_on, &params_on, SEED, &ode_cfg)
-        .expect("ON model ode sim (cache on) failed");
-    let pe_hits = sim::resolved_expr::take_per_eval_cache_hits();
-    let h_cache_on = trajectory_hash(&traj_cache_on);
-
-    sim::resolved_expr::set_per_eval_cache_disabled(true); // cache OFF (on-demand)
-    let traj_cache_off = OdeSim
-        .run(&compiled_on, &params_on, SEED, &ode_cfg)
-        .expect("ON model ode sim (cache off) failed");
-    let h_cache_off = trajectory_hash(&traj_cache_off);
-    sim::resolved_expr::set_per_eval_cache_disabled(false); // restore
-
+    // ── 4. STAGED-SCRATCH A/B ───────────────────────────────────────────────
+    // Design C runtime mechanism: a `PerEvalRef` reads `ctx.per_eval[slot]` when
+    // the caller has staged the prologue, and falls through to on-demand eval
+    // (`eval_resolved(per_eval_bindings[slot], ..)`) when it has not. Both must
+    // yield the SAME value — the staged scratch is exactly what on-demand eval
+    // would compute, just hoisted out of the loop. This isolates the runtime
+    // read mechanism from the hoist-soundness (§2-3) and the end-to-end identity:
+    // §2 already proves the ON model (run_ode stages the scratch) is byte-
+    // identical to the fully-inlined OFF model, so staged-vs-inlined is covered
+    // end-to-end; this section pins staged-vs-on-demand at expression granularity.
+    //
+    // Stage the prologue on the ON model at the initial (state, t), then for every
+    // rate / rate_grad / ODE-derivative expression assert eval-with-scratch ==
+    // eval-with-None, bitwise. `ctx_on` (above) is the on-demand path (per_eval:
+    // None). Non-vacuity: the ON model has per-eval bindings (§1), so the scratch
+    // is non-empty and the rate surface carries `PerEvalRef` nodes that exercise
+    // both arms.
+    let scratch = sim::resolved_expr::eval_per_eval_scratch(
+        &compiled_on, &params_on, t_start, 1.0);
     assert!(
-        pe_hits > 0,
-        "per-eval cache served 0 hits — vacuous (EvalScope not entered, or the \
-         model has no per-eval bindings reused across steps)"
+        !scratch.is_empty(),
+        "ON model staged an empty per-eval scratch — nothing to A/B (pass did not fire?)"
     );
-    assert_eq!(
-        h_cache_on, h_cache_off,
-        "per-eval cache on (0x{h_cache_on:016x}) != off (0x{h_cache_off:016x}) — \
-         the cache is not byte-identical to on-demand evaluation"
+    let ctx_staged = sim::propensity::EvalCtx {
+        model: &compiled_on, int_s: &int_on, real_s: &real_on, params: &params_on,
+        t: t_start, dt: 1.0, projected: None, aux: None, int_float_override: None,
+        per_eval: Some(&scratch),
+    };
+    let mut pe_checks = 0usize;
+    let mut check = |e: &sim::resolved_expr::ResolvedExpr, what: &str| {
+        let v_staged = sim::resolved_expr::eval_resolved(e, &ctx_staged).to_bits();
+        let v_demand = sim::resolved_expr::eval_resolved(e, &ctx_on).to_bits();
+        assert_eq!(
+            v_staged, v_demand,
+            "STAGED != ON-DEMAND ({what}): staged bits=0x{v_staged:016x} \
+             demand bits=0x{v_demand:016x} — the staged scratch diverges from \
+             on-demand evaluation (a slot-indexing / prefix-slicing bug)"
+        );
+        pe_checks += 1;
+    };
+    for (ti, rate) in compiled_on.resolved.rates.iter().enumerate() {
+        check(rate, &format!("rate transition {ti}"));
+    }
+    for g in &compiled_on.resolved.rate_grads_indexed {
+        for (_p, e) in g {
+            check(e, "rate_grad");
+        }
+    }
+    for d in &compiled_on.resolved.ode_derivatives {
+        check(d, "ode_derivative");
+    }
+    assert!(pe_checks > 0, "no expressions evaluated in the staged-scratch A/B");
+    eprintln!(
+        "staged-scratch A/B: {} bindings staged; {pe_checks} exprs staged == on-demand",
+        scratch.len()
     );
-    eprintln!("per-eval cache: {pe_hits} hits; cache-on == cache-off (hash 0x{h_cache_on:016x})");
 }

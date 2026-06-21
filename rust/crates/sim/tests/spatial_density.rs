@@ -269,7 +269,7 @@ fn test_density_seir_spatial_5_vignette_regression() {
             let int_s = sim::state::IntState { counts: counts_before.to_vec() };
             let real_s = sim::state::RealState::new(compiled.real_local_to_global.len());
             sim::propensity::eval_propensities(
-                &compiled, &int_s, &real_s, &params, t, 1.0, &mut propensities
+                &compiled, &int_s, &real_s, &params, t, 1.0, None, &mut propensities
             ).unwrap();
 
             for &(src_local, ref group) in &compiled.source_groups {
@@ -351,7 +351,7 @@ fn test_density_downstream_multi_seed() {
                     let int_s = sim::state::IntState { counts: counts_before.to_vec() };
                     let real_s = sim::state::RealState::new(compiled.real_local_to_global.len());
                     sim::propensity::eval_propensities(
-                        &compiled, &int_s, &real_s, &params, t, 1.0, &mut propensities
+                        &compiled, &int_s, &real_s, &params, t, 1.0, None, &mut propensities
                     ).unwrap();
 
                     for &(src_local, ref group) in &compiled.source_groups {
@@ -436,7 +436,7 @@ fn test_step_one_zero_infection_flow() {
         let mut flows = vec![0u64; n_tr];
         scratch.gamma_used.clear();
         sim::effects::due_effects(&compiled, &fire_steps, step as f64 + 1.0, 1.0, &mut scratch.effect_batch);
-        step_one(&compiled, &mut counts, &mut flows, &mut real, &params, step as f64, 1.0, &mut rng, &mut scratch).unwrap();
+        step_one(&compiled, &mut counts, &mut flows, &mut real, &params, step as f64, 1.0, None, &mut rng, &mut scratch).unwrap();
 
         if flows[inf_p5_idx] > 0 {
             eprintln!("  STEP {}: infection_p5 has {} flows but I_p5 was {}",

@@ -731,10 +731,12 @@ pub fn log_transition_density_substep(
     let real_s = RealState::new(model.real_local_to_global.len());
 
     let mut propensities = vec![0.0; n_tr];
-    eval_propensities(model, &int_s, &real_s, params, t, dt, &mut propensities)?;
+    // Inference producer step: per-particle θ. `None` ⇒ on-demand, byte-identical
+    // (Phase 2 stages per-particle scratch here).
+    eval_propensities(model, &int_s, &real_s, params, t, dt, None, &mut propensities)?;
 
     let ctx = EvalCtx {
-        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None,
+        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval: None,
     };
 
     // Per-transition: is it deterministic? What's its sigma_sq?
@@ -936,7 +938,7 @@ pub fn complete_data_loglik(
             let ctx = EvalCtx {
                 model, int_s: &int_s_local, real_s: &real_s_local,
                 params, t, dt: dt_s,
-                projected: None, aux: None, int_float_override: None,
+                projected: None, aux: None, int_float_override: None, per_eval: None,
             };
             let mut gamma_idx_local = 0;
             for &(src_local, ref group) in &model.source_groups {
@@ -945,7 +947,7 @@ pub fn complete_data_loglik(
                 // Recompute propensities for rate check (same start-of-step state).
                 let mut local_props = vec![0.0; n_tr];
                 let _ = eval_propensities(model, &int_s_local, &real_s_local,
-                    params, ctx.t, dt_s, &mut local_props);
+                    params, ctx.t, dt_s, None, &mut local_props);
                 for &tr_idx in group {
                     let rate = local_props[tr_idx];
                     if rate <= RATE_EPSILON { continue; }
@@ -1128,7 +1130,8 @@ pub fn simulate_reference_on_grid(
         // Populate the due batch step_one applies (gh#216). `dt` is the nominal
         // grid the firing keys on; `dt_s` is the realized (possibly clipped) step.
         fill_producer_batch(model, &fire_steps, t0 + dt_s, dt, s, firing, &mut scratch.effect_batch);
-        step_one(model, &mut counts, &mut flows, &mut real, params, t0, dt_s, rng, &mut scratch)?;
+        // Inference producer step: per-particle θ ⇒ `None` (on-demand, byte-identical).
+        step_one(model, &mut counts, &mut flows, &mut real, params, t0, dt_s, None, rng, &mut scratch)?;
 
         // Verify: density evaluation of this record won't produce k > n.
         // This catches state/flow mismatches before they cause -inf later.
@@ -1389,7 +1392,8 @@ pub fn csmc_as(
                 step_one(
                     model, cnt, flows, real,
                     // `step_dt` is the realized substep (clipped under Exact).
-                    params, t, step_dt, rng, scratch,
+                    // Inference producer step: per-particle θ ⇒ `None`.
+                    params, t, step_dt, None, rng, scratch,
                 )?;
 
                 std::mem::swap(gammas, &mut scratch.gamma_used);

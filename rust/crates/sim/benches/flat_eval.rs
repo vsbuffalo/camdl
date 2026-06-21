@@ -106,7 +106,7 @@ fn main() {
         dt: 1.0,
         projected: None,
         aux: None,
-        int_float_override: None,
+        int_float_override: None, per_eval: None,
     };
 
     // ── Bit-exactness: eval_flat must match eval_resolved on every rate ──
@@ -144,7 +144,7 @@ fn main() {
             let ctx = EvalCtx {
                 model: &cm, int_s: &int_s, real_s: &real_s,
                 params: black_box(params.as_slice()), t: black_box(0.0), dt: 1.0,
-                projected: None, aux: None, int_float_override: None,
+                projected: None, aux: None, int_float_override: None, per_eval: None,
             };
             for i in 0..n_tr {
                 acc += eval_resolved(&rates[i], &ctx);
@@ -162,7 +162,7 @@ fn main() {
             let ctx = EvalCtx {
                 model: &cm, int_s: &int_s, real_s: &real_s,
                 params: black_box(params.as_slice()), t: black_box(0.0), dt: 1.0,
-                projected: None, aux: None, int_float_override: None,
+                projected: None, aux: None, int_float_override: None, per_eval: None,
             };
             for i in 0..n_tr {
                 acc += eval_flat(vm, &vm.rates[i], &ctx, &mut scratch, &mut cache);

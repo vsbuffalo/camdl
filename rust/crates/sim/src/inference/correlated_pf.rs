@@ -357,7 +357,7 @@ pub fn bootstrap_filter_correlated(
         let real_s = crate::state::RealState::new(model.real_local_to_global.len());
         let ctx = crate::propensity::EvalCtx {
             model, int_s: &int_s, real_s: &real_s, params,
-            t: 0.0, dt: config.dt, projected: None, aux: None, int_float_override: None,
+            t: 0.0, dt: config.dt, projected: None, aux: None, int_float_override: None, per_eval: None,
         };
         let mut first_sq: Option<f64> = None;
         for re in model.resolved.overdispersion.iter().flatten() {
@@ -386,7 +386,7 @@ pub fn bootstrap_filter_correlated(
                 let real_s = crate::state::RealState::new(model.real_local_to_global.len());
                 let ctx = crate::propensity::EvalCtx {
                     model, int_s: &int_s, real_s: &real_s, params,
-                    t: 0.0, dt, projected: None, aux: None, int_float_override: None,
+                    t: 0.0, dt, projected: None, aux: None, int_float_override: None, per_eval: None,
                 };
                 crate::resolved_expr::eval_resolved(re, &ctx)
             })
@@ -499,7 +499,8 @@ pub fn bootstrap_filter_correlated(
                     crate::chain_binomial::step_one(
                         model, &mut state.counts, &mut state.flow_accumulators,
                         &mut real,
-                        params, t_local, step_dt, rng, scratch,
+                        // Inference producer step: per-particle θ ⇒ `None` (on-demand, byte-identical).
+                        params, t_local, step_dt, None, rng, scratch,
                     )?;
                 }
                 Ok(())

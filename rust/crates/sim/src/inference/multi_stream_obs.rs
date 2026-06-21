@@ -330,7 +330,7 @@ pub fn eval_stream_projection(
                     model: compiled, int_s: scratch, real_s, params,
                     // dt: 0.0 — observation projection runs at obs
                     // boundaries with no integrator step in scope.
-                    t, dt: 0.0, projected: None, aux: None, int_float_override: None,
+                    t, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None,
                 };
                 eval_resolved(expr, &ctx)
             })

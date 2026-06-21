@@ -96,7 +96,8 @@ impl ProcessModel for ChainBinomialProcess {
             &mut state.counts,
             &mut state.flow_accumulators,
             &mut real,
-            params, t, dt, rng, scratch,
+            // Inference producer step: per-particle θ ⇒ `None` (on-demand, byte-identical).
+            params, t, dt, None, rng, scratch,
         )
     }
 

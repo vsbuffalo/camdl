@@ -155,7 +155,7 @@ fn generate_data(compiled: &CompiledModel, params: &[f64]) -> (Vec<f64>, Vec<f64
         for _ in 0..7 {
             let fire_steps = compiled.resolve_fire_steps(1.0, params);
             sim::effects::due_effects(compiled, &fire_steps, t + 1.0, 1.0, &mut scratch.effect_batch);
-            step_one(compiled, &mut state.counts, &mut state.flow_accumulators, &mut real, params, t, 1.0, &mut rng, &mut scratch).unwrap();
+            step_one(compiled, &mut state.counts, &mut state.flow_accumulators, &mut real, params, t, 1.0, None, &mut rng, &mut scratch).unwrap();
             t += 1.0;
         }
         // Project: recovery flow (index 1)
