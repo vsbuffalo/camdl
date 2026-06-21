@@ -252,6 +252,11 @@ fn emit(e: &ResolvedExpr, f: &mut FlatProg) {
         }
         ResolvedExpr::UncheckedDim { inner } => emit(inner, f), // transparent
         ResolvedExpr::BindingRef(slot) => f.ops.push(Op::Binding(*slot as u32)),
+        // gh#272: the flat VM's per-eval tape is deferred (step 1.4). Until then
+        // `build` is gated off for models with per-eval bindings (see
+        // `CompiledModel::new`), so this node never reaches the emitter.
+        ResolvedExpr::PerEvalRef(_) =>
+            unreachable!("flat VM emitted for a per-eval model; build() must be gated off"),
         // The one deliberately-delegated node: TableLookup. Reimplementing the
         // OOB thread-local recording + per-policy machinery as opcodes is large
         // and risky for a rare node; delegating its whole sub-tree to

@@ -217,6 +217,7 @@ fn test_overdispersion_variance_chain_binomial() {
         interventions: vec![],
         observations: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![
             Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Fixed { value: 0.01 }, param_kind: None, param_dim: None },
             Parameter { name: "sigma_sq".into(), value: ir::parameter::ParamValue::Fixed { value: 0.5 }, param_kind: None, param_dim: None },
@@ -317,6 +318,7 @@ fn test_fraction_transfer_edge_cases() {
             interventions: vec![iv],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![],
             initial_conditions: InitialConditions::Parameterized(HashMap::new()),
             output: OutputConfig {

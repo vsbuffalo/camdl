@@ -335,6 +335,7 @@ let rec infer st ~ctx (e : expr) : dim =
     (match Hashtbl.find_opt st.binding_dims name with
      | Some d -> resolve st d
      | None -> fresh_var st)
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 and is_bare_const = function
   | Const _ -> true
@@ -492,6 +493,7 @@ let rec propagate st ~ctx (e : expr) (expected : dim_vec) : unit =
     propagate st ~ctx c.else_ expected
   | Reduce terms -> propagate st ~ctx (reduce_add_chain terms) expected
   | BindingRef _ -> ()   (* leaf; inc1b may propagate the expectation into the binding *)
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 (* Flatten a multiplicative chain into (numerator_factors, denominator_factors).
    E.g. Div(Mul(Mul(a,b),c), d) → ([a;b;c], [d]) *)
@@ -644,6 +646,7 @@ let rec read_dim st (e : expr) : dim =
     (match Hashtbl.find_opt st.binding_dims name with
      | Some d -> resolve st d
      | None -> Unknown (-1))
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 and read_dim_binop st (b : bin_op_expr) : dim =
   let dl = read_dim st b.left in
@@ -746,6 +749,7 @@ let rec expr_to_short_string (e : expr) : string =
   | Reduce terms ->
     "(" ^ String.concat " + " (List.map expr_to_short_string terms) ^ ")"
   | BindingRef n -> n
+  | PerEvalRef n -> n   (* display helper: render the name, never crash in error formatting *)
 
 (* ── Main check ─────────────────────────────────────────────────────────── *)
 

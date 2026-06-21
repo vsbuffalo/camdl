@@ -62,8 +62,16 @@ fn collect(e: &Expr, out: &mut HashSet<String>) {
         | Expr::Dt(_)
         | Expr::TimeFunc(_)
         | Expr::Projected(_)
-        | Expr::ObsColumnRef(_)
-        | Expr::BindingRef(_) => {}
+        | Expr::ObsColumnRef(_) => {}
+        // A `BindingRef` body is state-only (param-free, enforced at
+        // `CompiledModel::new`), so it adds no refs.
+        Expr::BindingRef(_) => {}
+        // gh#272 LICM: a per-eval body IS param-carrying. This guard runs on the
+        // pre-LICM IR (no PerEvalRef present), so the leaf is correct today. NOTE
+        // for the stochastic phase: if this guard is ever run on post-LICM IR, it
+        // must traverse the per-eval body (via `per_eval_bindings`) to see the
+        // params it carries, or a hoisted coefficient param would be missed.
+        Expr::PerEvalRef(_) => {}
     }
 }
 
@@ -256,6 +264,7 @@ mod tests {
             interventions: vec![],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![],
             initial_conditions: InitialConditions::Parameterized(HashMap::new()),
             output: ir::model::OutputConfig {

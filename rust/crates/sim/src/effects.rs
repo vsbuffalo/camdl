@@ -734,6 +734,7 @@ mod tests {
             }],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "p".into(), value: ir::parameter::ParamValue::Fixed { value: 1.0 }, param_kind: None, param_dim: None }],
             initial_conditions: InitialConditions::Explicit({
                 let mut h = HashMap::new();
@@ -1087,6 +1088,7 @@ mod tests {
             }],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "p".into(), value: ir::parameter::ParamValue::Fixed { value: 1.0 }, param_kind: None, param_dim: None }],
             initial_conditions: InitialConditions::Explicit({
                 let mut h = HashMap::new();
@@ -1215,6 +1217,7 @@ mod tests {
             interventions: vec![mk("evt", true), mk("camp", false)],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "p".into(), value: ir::parameter::ParamValue::Fixed { value: 1.0 }, param_kind: None, param_dim: None }],
             initial_conditions: InitialConditions::Explicit({
                 let mut h = HashMap::new();

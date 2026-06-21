@@ -86,6 +86,20 @@
       }
     },
 
+    "per_eval_bindings": {
+      "comment": "gh#272 LICM: param/table-only loop-invariant bindings, topologically ordered. Produced by the loop-invariant-code-motion pass (post-autodiff, CAMDL_LICM); omitted when empty (default). Same shape as `bindings`, but bodies may be param-carrying and are cached once per theta-stable scope rather than per step.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "expr"],
+        "properties": {
+          "name": { "type": "string" },
+          "expr": { "$ref": "#/definitions/expr" }
+        },
+        "additionalProperties": false
+      }
+    },
+
     "initial_conditions": { "$ref": "#/definitions/initial_conditions" },
 
     "output": { "$ref": "#/definitions/output_config" },
@@ -236,6 +250,14 @@
           "required": ["binding_ref"],
           "properties": {
             "binding_ref": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "comment": "gh#272 LICM: reference to a model-level per_eval_binding by name. Param/table-only loop-invariant; cached once per theta-stable scope. Produced only by the LICM pass (post-autodiff); never present in default-off IR.",
+          "required": ["per_eval_ref"],
+          "properties": {
+            "per_eval_ref": { "type": "string" }
           },
           "additionalProperties": false
         },

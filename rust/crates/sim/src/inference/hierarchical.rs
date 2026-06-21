@@ -136,6 +136,8 @@ pub fn eval_prior_arg<E: ParamEnv>(expr: &Expr, env: &E) -> f64 {
         Expr::Reduce(w) => w.reduce.iter().map(|t| eval_prior_arg(t, env)).sum(),
         // Bindings are state-derived → invalid in prior args (like Pop): NaN.
         Expr::BindingRef(_) => f64::NAN,
+        // gh#272: a per-eval ref is equally invalid in a prior argument: NaN.
+        Expr::PerEvalRef(_) => f64::NAN,
     }
 }
 

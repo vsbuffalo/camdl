@@ -46,6 +46,7 @@ pub(crate) fn resolve_likelihood_from_model(
         global_to_real: &compiled.global_to_real,
         table_meta: &table_meta,
         binding_index: &compiled.binding_index,
+        per_eval_index: &compiled.per_eval_index,
     };
     resolve_likelihood(likelihood, &ctx)
 }

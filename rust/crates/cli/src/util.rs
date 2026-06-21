@@ -3544,6 +3544,7 @@ mod tests {
             compartments: vec![], transitions: vec![], ode_equations: vec![],
             time_functions: vec![], tables: vec![], observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![],
             initial_conditions: ir::model::InitialConditions::Explicit(
                 std::collections::HashMap::new()),
@@ -3745,6 +3746,7 @@ mod tests {
             interventions: Vec::new(),
             observations: Vec::new(),
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![ir::parameter::Parameter {
                 name: "x".into(),
                 value: match (value, bounds) {

@@ -57,6 +57,7 @@ let rec pops_in_expr (acc : string list) (e : expr) : string list =
   | Const _ | Param _ | Time | Dt | TimeFunc _ | BindingRef _ | Projected
   | ObsColumnRef _ ->
     acc
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   (* Compound nodes: recurse into every sub-expression. *)
   | BinOp { op = _; left; right } ->
     pops_in_expr (pops_in_expr acc left) right

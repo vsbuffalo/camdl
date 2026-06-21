@@ -58,6 +58,7 @@ let first_param (e : expr) : string option =
     | Param p -> Some p
     | Const _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
     | Projected | ObsColumnRef _ -> None
+    | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
     | BinOp b -> (match go b.left with Some _ as r -> r | None -> go b.right)
     | UnOp u  -> go u.arg
     | Cond c  ->
@@ -100,6 +101,7 @@ let check_expr_refs ~site ~comps ~params ~tables ~tfs errors e =
     | UncheckedDim u -> go u.inner
     | Reduce terms -> List.iter go terms
     | BindingRef _ -> ()   (* leaf; binding name resolution happens at CompiledModel::new *)
+    | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   in
   go e
 

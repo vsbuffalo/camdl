@@ -29,6 +29,7 @@ fn tiny_model() -> Model {
         observations: vec![],
         parameters: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         initial_conditions: InitialConditions::Explicit(Default::default()),
         output: OutputConfig {
             times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 }),

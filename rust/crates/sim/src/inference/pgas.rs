@@ -64,6 +64,12 @@ fn collect_param_refs(e: &ir::expr::Expr, out: &mut std::collections::HashSet<St
         }
         // Hoisted bindings are param-free; nothing to collect.
         ir::expr::Expr::BindingRef(_) => {}
+        // gh#272: this guard runs only on `DerivedExpr` obs projections, which LICM
+        // never rewrites, so a PerEvalRef cannot appear here. Panic enforces that
+        // scoping invariant rather than silently dropping a param (it is
+        // param-carrying — a silent skip would defeat the gh#76 guard).
+        ir::expr::Expr::PerEvalRef(_) =>
+            unreachable!("PerEvalRef reached collect_param_refs: LICM scoping invariant violated"),
     }
 }
 

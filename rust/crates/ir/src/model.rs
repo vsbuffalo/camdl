@@ -184,6 +184,12 @@ pub struct Model {
     /// so an empty list adds no JSON noise (inc1a emits none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings:           Vec<Binding>,
+    /// gh#272 LICM: param/table-only loop-invariant bindings, topologically
+    /// ordered. Produced by the LICM pass (post-autodiff, `CAMDL_LICM`); empty by
+    /// default. `default`/`skip_serializing_if` mirror `bindings` so default-off
+    /// IR is byte-identical to pre-0.19 (the empty field is omitted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub per_eval_bindings:  Vec<Binding>,
     pub initial_conditions: InitialConditions,
     pub output:             OutputConfig,
     pub simulation:         SimulationConfig,

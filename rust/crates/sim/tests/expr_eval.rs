@@ -35,6 +35,7 @@ fn minimal_model(compartments: Vec<Compartment>, params: Vec<Parameter>) -> Mode
         interventions: vec![],
         observations: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: params,
         initial_conditions: InitialConditions::Parameterized(HashMap::new()),
         output: OutputConfig {

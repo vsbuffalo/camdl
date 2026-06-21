@@ -28,7 +28,7 @@ fn count_nodes(e: &Expr, nodes: &mut u64, probes: &mut u64) {
     match e {
         Expr::Param(_) | Expr::Pop(_) | Expr::ObsColumnRef(_) => *probes += 1,
         Expr::PopSum(ps) => *probes += ps.pop_sum.len() as u64,
-        Expr::TimeFunc(_) | Expr::BindingRef(_) => *probes += 1,
+        Expr::TimeFunc(_) | Expr::BindingRef(_) | Expr::PerEvalRef(_) => *probes += 1,
         Expr::TableLookup(w) => {
             *probes += 1;
             for ix in &w.table_lookup.indices {

@@ -107,6 +107,7 @@ fn death_model(event_times: Option<Vec<f64>>) -> CompiledModel {
         interventions,
         observations: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![
             Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.01 }, param_kind: None, param_dim: None },
         ],

@@ -30,6 +30,7 @@ let prec_expr : Ir.expr -> int = function
   | Ir.UncheckedDim _ -> 10   (* function-call-like, atomic *)
   | Ir.Reduce _ -> 10         (* rendered self-parenthesized, atomic *)
   | Ir.BindingRef _ -> 10     (* a name, atomic *)
+  | Ir.PerEvalRef _ -> 10     (* a name, atomic *)
   | Ir.BinOp { op; _ } -> prec_binop op
   | Ir.UnOp  _         -> 9
   | Ir.Cond  _         -> 1
@@ -172,6 +173,8 @@ and pp_inner ~mode ~split ~ascii ppf = function
     ) terms;
     Fmt.pf ppf ")"
   | Ir.BindingRef n ->
+    Term_style.param Fmt.string ppf n
+  | Ir.PerEvalRef n ->
     Term_style.param Fmt.string ppf n
 
 (** Render an IR expression to a plain (ASCII, IR-name) string. Used by

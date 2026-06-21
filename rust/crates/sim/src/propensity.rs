@@ -271,6 +271,15 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                     format!("reference to unknown binding '{}'", w.binding_ref)))?;
             eval_expr(&b.expr, ctx)
         }
+        Expr::PerEvalRef(w) => {
+            // gh#272: on-demand by name (the unresolved differential-validation
+            // path, CAMDL_EVAL_UNRESOLVED). Mirrors BindingRef.
+            let b = ctx.model.model.per_eval_bindings.iter()
+                .find(|b| b.name == w.per_eval_ref)
+                .ok_or_else(|| SimError::Validation(
+                    format!("reference to unknown per-eval binding '{}'", w.per_eval_ref)))?;
+            eval_expr(&b.expr, ctx)
+        }
     }
 }
 
@@ -359,6 +368,11 @@ pub fn eval_expr_deriv(expr: &Expr, wrt: usize, ctx: &EvalCtx<'_>) -> f64 {
         }
         // Hoisted bindings are param-free (state-only): d/dp = 0.
         Expr::BindingRef(_) => 0.0,
+        // gh#272: LICM is scoped to forward surfaces, so a PerEvalRef never reaches
+        // this differentiator (it is param-carrying — a silent 0 would drop a real
+        // gradient). Panic enforces the scoping invariant rather than assuming it.
+        Expr::PerEvalRef(_) =>
+            unreachable!("PerEvalRef reached eval_expr_deriv: LICM scoping invariant violated"),
     }
 }
 

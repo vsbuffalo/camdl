@@ -197,6 +197,13 @@ impl ContentAddressed for Expr {
                 h.write_u32(15);
                 h.write_str(&w.obs_column_ref);
             }
+            // gh#272 LICM: fresh variant index 16 (not inserted between 14/15) so
+            // existing nodes keep their hash — only the new node and the empty
+            // `per_eval_bindings` field shift the model hash at 0.19.
+            Expr::PerEvalRef(w) => {
+                h.write_u32(16);
+                h.write_str(&w.per_eval_ref);
+            }
         }
     }
 }
@@ -1061,6 +1068,11 @@ impl ContentAddressed for Model {
         self.observations.hash_into(h);
         self.parameters.hash_into(h);
         self.bindings.hash_into(h);
+        // gh#272 LICM: identity field (the emitted IR is hashed). Empty by default
+        // — but the empty Vec's length prefix still shifts the model hash at the
+        // 0.19 schema bump (a deliberate, version-bumped re-key); pinned by the
+        // distinctness test in this module.
+        self.per_eval_bindings.hash_into(h);
         self.initial_conditions.hash_into(h);
         self.output.hash_into(h);
         self.simulation.hash_into(h);

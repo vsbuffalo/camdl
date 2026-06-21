@@ -63,6 +63,7 @@ fn model() -> Arc<CompiledModel> {
         interventions: vec![],
         observations: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![
             Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.01 }, param_kind: None, param_dim: None },
         ],

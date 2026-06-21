@@ -147,6 +147,7 @@ fn sir_with_seed_event() -> Model {
         interventions: vec![seed_event],
         presets: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         model_structure: None, balance: None, identity_tracked_compartments: vec![],
     }
 }
@@ -235,6 +236,7 @@ fn seir_with_seed_event(n_seed: i64, tau: f64) -> Model {
         interventions: vec![seed_event],
         presets: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         model_structure: None, balance: None, identity_tracked_compartments: vec![],
     }
 }

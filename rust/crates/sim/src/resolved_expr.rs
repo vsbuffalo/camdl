@@ -82,6 +82,11 @@ pub enum ResolvedExpr {
     /// Fix B: reference to a model-level binding by slot. Evaluated on-demand
     /// from `ctx.model.resolved.bindings[slot]`.
     BindingRef(usize),
+    /// gh#272 LICM: reference to a model-level per-eval binding by slot.
+    /// Param/table-only and loop-invariant; evaluated on-demand from
+    /// `ctx.model.resolved.per_eval_bindings[slot]` (a later increment adds the
+    /// per-eval cache tier). Produced only by the LICM pass.
+    PerEvalRef(usize),
 }
 
 /// Returns true if the expression references compartment state (Pop, PopSum).
@@ -103,6 +108,11 @@ pub fn references_state(expr: &ResolvedExpr) -> bool {
         ResolvedExpr::Reduce(terms) => terms.iter().any(references_state),
         // Hoisted bindings are state-derived (N/I_agg/F read compartments).
         ResolvedExpr::BindingRef(_) => true,
+        // gh#272: per-eval bindings are param/table-only by construction (the
+        // constructor validation rejects any state reference), so they never
+        // reference state. The contrast with BindingRef above is the keystone
+        // invariant boundary.
+        ResolvedExpr::PerEvalRef(_) => false,
         _ => false,
     }
 }
@@ -123,6 +133,9 @@ pub struct ResolveCtx<'a> {
     /// Fix B: model-level binding name → slot. `BindingRef(name)` resolves to
     /// `ResolvedExpr::BindingRef(slot)`, like Param/Pop/TableLookup.
     pub binding_index: &'a HashMap<String, usize>,
+    /// gh#272 LICM: per-eval binding name → slot. `PerEvalRef(name)` resolves to
+    /// `ResolvedExpr::PerEvalRef(slot)`, the sibling of `binding_index`.
+    pub per_eval_index: &'a HashMap<String, usize>,
 }
 
 /// Resolve an `Expr` tree into a `ResolvedExpr` tree.
@@ -250,6 +263,12 @@ pub fn resolve_expr(expr: &Expr, ctx: &ResolveCtx<'_>) -> Result<ResolvedExpr, S
                 .ok_or_else(|| SimError::Validation(
                     format!("reference to unknown binding '{}'", w.binding_ref)))?;
             Ok(ResolvedExpr::BindingRef(slot))
+        }
+        Expr::PerEvalRef(w) => {
+            let slot = *ctx.per_eval_index.get(w.per_eval_ref.as_str())
+                .ok_or_else(|| SimError::Validation(
+                    format!("reference to unknown per-eval binding '{}'", w.per_eval_ref)))?;
+            Ok(ResolvedExpr::PerEvalRef(slot))
         }
     }
 }
@@ -620,6 +639,14 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
                 }
             }
         }
+        // gh#272 LICM: on-demand evaluation of a per-eval binding body. The
+        // per-eval cache tier is a later increment; until then this re-evaluates
+        // each reference (correct, just not yet fast). The body is param/table-only
+        // and topologically ordered (a per-eval body only references earlier
+        // per-eval slots), so this recursion terminates.
+        ResolvedExpr::PerEvalRef(slot) => {
+            eval_resolved(&ctx.model.resolved.per_eval_bindings[*slot], ctx)
+        }
     }
 }
 
@@ -755,5 +782,11 @@ pub fn eval_resolved_deriv(expr: &ResolvedExpr, wrt: usize, ctx: &EvalCtx<'_>) -
             terms.iter().map(|t| eval_resolved_deriv(t, wrt, ctx)).sum(),
         // Hoisted bindings are param-free (state-only): d/dp = 0.
         ResolvedExpr::BindingRef(_) => 0.0,
+        // gh#272: LICM is scoped to the `eval_resolved` (forward) surfaces, so a
+        // PerEvalRef never reaches this secondary forward-mode differentiator (it
+        // is param-carrying — a silent 0 would drop a real gradient). The panic
+        // enforces the scoping invariant rather than assuming it.
+        ResolvedExpr::PerEvalRef(_) =>
+            unreachable!("PerEvalRef reached eval_resolved_deriv: LICM scoping invariant violated"),
     }
 }

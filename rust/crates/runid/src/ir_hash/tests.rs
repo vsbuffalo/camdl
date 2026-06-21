@@ -145,6 +145,7 @@ fn representative_model() -> Model {
             name: "N".into(),
             expr: Expr::pop_sum(vec!["S".into(), "I".into(), "R".into()]),
         }],
+        per_eval_bindings: vec![],
         initial_conditions: InitialConditions::Explicit(ic),
         output: OutputConfig {
             times: OutputSchedule::Regular(RegularOutputSchedule {
@@ -202,9 +203,34 @@ fn model_golden_hash() {
     // the version handshake (ir/VERSION -> 0.17) signposts it. (Earlier moves:
     // observation data-entry at 0.12; gh#191 ParamValue ADT at 0.11;
     // param_kind/kind enum-ification at 0.10; table OOB Clamp/Wrap -> Error.)
-    const GOLDEN: &str = "934b33fa0576e38a2c421d226f3d0f13578e2740b0b990ecf2646765589d8467";
+    // gh#272 LICM (ir/VERSION -> 0.19): `Model::hash_into` now folds
+    // `per_eval_bindings`. The empty Vec's length prefix shifts every model hash,
+    // so the GOLDEN moves once at the schema bump even with the pass default-off
+    // (a deliberate, version-bumped re-key — see the proposal's "Run identity").
+    const GOLDEN: &str = "59495f07d5f08e29f3ae4925a5a6bccc3c266ccb822eb1af1da2add3153a053a";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
+}
+
+/// gh#272: a non-empty `per_eval_bindings` must change the model hash. The
+/// blocker the proposal flagged was that adding the field to the struct (and the
+/// `hash_into` line) is invisible to `model_golden_hash` on its own — an empty Vec
+/// hashes the same whether or not the field is folded. This pins that the field is
+/// actually read by the hash, so flipping the LICM pass on re-keys `run_id`.
+#[test]
+fn ir_per_eval_bindings_changes_hash() {
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    m.per_eval_bindings.push(Binding {
+        name: "__licm_0".into(),
+        expr: Expr::param("beta"),
+    });
+    assert_ne!(
+        base,
+        m.content_hash(),
+        "a non-empty per_eval_bindings must change the model hash (else flipping LICM \
+         on would collide run_id with the off-form)"
+    );
 }
 
 /// `Const(0.0)` vs `Const(-0.0)` must produce *distinct* hashes — the

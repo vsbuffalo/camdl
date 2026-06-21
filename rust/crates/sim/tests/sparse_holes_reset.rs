@@ -93,6 +93,7 @@ fn model(k_per_unit: f64) -> Arc<CompiledModel> {
             },
         ],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![
             Parameter { name: "dummy".into(), value: ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None },
         ],

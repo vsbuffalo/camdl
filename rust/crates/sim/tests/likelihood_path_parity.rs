@@ -100,6 +100,7 @@ fn model() -> Arc<CompiledModel> {
             },
         ],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![
             Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None },
             Parameter { name: "rho".into(), value: ir::parameter::ParamValue::Fixed { value: 0.3 }, param_kind: None, param_dim: None },

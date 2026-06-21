@@ -91,6 +91,7 @@ fn seir_model() -> (CompiledModel, Vec<f64>) {
         interventions: vec![],
         observations: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![
             Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Fixed { value: 0.3 }, param_kind: None, param_dim: None },
             Parameter { name: "sigma".into(), value: ir::parameter::ParamValue::Fixed { value: 0.2 }, param_kind: None, param_dim: None },

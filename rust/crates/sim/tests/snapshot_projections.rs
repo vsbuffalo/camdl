@@ -82,6 +82,7 @@ fn model_with_obs(
             }),
         }],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![],
         initial_conditions: InitialConditions::Explicit(initial),
         output: OutputConfig {
@@ -355,6 +356,7 @@ fn snapshot_reads_post_intervention_state() {
             }),
         }],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![],
         initial_conditions: InitialConditions::Explicit(init),
         output: OutputConfig {

@@ -77,6 +77,7 @@ let dep_of_expr ~binding_dep (e : Ir.expr) : dep =
        expressions may pull it more-dynamic (e.g. a state-indexed lookup). *)
     | Ir.TableLookup (_, idxs) -> join Data (join_list (List.map go idxs))
     | Ir.BindingRef name -> binding_dep name
+    | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
     | Ir.Projected -> Projected
     (* A per-observation aux column is external data supplied at load, not a
        function of simulator state — classify as Data (like a constant-indexed

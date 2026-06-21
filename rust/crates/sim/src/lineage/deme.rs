@@ -287,6 +287,7 @@ mod tests {
             interventions: vec![],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![],
             initial_conditions: InitialConditions::Explicit(HashMap::new()),
             output: OutputConfig {

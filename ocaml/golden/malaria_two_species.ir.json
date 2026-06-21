@@ -1,4 +1,4 @@
-{"ir_version":"0.18","validated_by":"ocaml-compiler-v0.18","model":{"name":"malaria_two_species","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.19","validated_by":"ocaml-compiler-v0.19","model":{"name":"malaria_two_species","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"L_B","kind":"integer"},
 {"name":"S_B","kind":"integer"},
 {"name":"E_B","kind":"integer"},

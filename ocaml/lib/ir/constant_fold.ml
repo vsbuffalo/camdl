@@ -66,6 +66,8 @@ let rec fold tbls (e : expr) : expr =
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
   | Projected | ObsColumnRef _ ->
       e
+  (* LICM runs after constant_fold, so a PerEvalRef cannot appear here. *)
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   | UnOp { op; arg } -> UnOp { op; arg = fold tbls arg }
   | Cond { pred; then_; else_ } ->
       Cond { pred = fold tbls pred; then_ = fold tbls then_; else_ = fold tbls else_ }

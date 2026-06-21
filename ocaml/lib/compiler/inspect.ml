@@ -298,7 +298,7 @@ let rec expr_node_count (e : Ir.expr) : int =
   let open Ir in
   match e with
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-  | BindingRef _ | Projected | ObsColumnRef _ -> 1
+  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> 1
   | BinOp b -> 1 + expr_node_count b.left + expr_node_count b.right
   | UnOp u  -> 1 + expr_node_count u.arg
   | Cond c  -> 1 + expr_node_count c.pred + expr_node_count c.then_ + expr_node_count c.else_
@@ -320,13 +320,14 @@ let rec reduce_term_count (e : Ir.expr) : int =
   | TableLookup (_, idxs) -> List.fold_left (fun a i -> a + reduce_term_count i) 0 idxs
   | UncheckedDim u -> reduce_term_count u.inner
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-  | BindingRef _ | Projected | ObsColumnRef _ -> 0
+  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> 0
 
 (* Count BindingRefs to [name] within an expr tree. *)
 let rec count_bindingref name (e : Ir.expr) : int =
   let open Ir in
   match e with
   | BindingRef n -> if n = name then 1 else 0
+  | PerEvalRef _ -> 0   (* a per-eval ref is not a BindingRef *)
   | BinOp b -> count_bindingref name b.left + count_bindingref name b.right
   | UnOp u  -> count_bindingref name u.arg
   | Cond c  -> count_bindingref name c.pred + count_bindingref name c.then_ + count_bindingref name c.else_
@@ -362,7 +363,7 @@ let rec count_hazard_idioms (e : Ir.expr) : int =
     | Reduce terms -> List.fold_left (fun a t -> a + count_hazard_idioms t) 0 terms
     | UncheckedDim u -> count_hazard_idioms u.inner
     | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-    | BindingRef _ | Projected | ObsColumnRef _ -> 0)
+    | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> 0)
 
 (* Structural hash of an expr, for detecting duplicated subexpressions. A
    simple recursive polynomial hash over the constructor shape + leaf payloads.
@@ -379,6 +380,7 @@ let rec expr_hash (e : Ir.expr) : int =
   | Dt -> mix 6 []
   | TimeFunc n -> mix 7 [ Hashtbl.hash n ]
   | BindingRef n -> mix 8 [ Hashtbl.hash n ]
+  | PerEvalRef n -> mix 17 [ Hashtbl.hash n ]
   | Projected -> mix 9 []
   | BinOp b -> mix 10 [ Hashtbl.hash b.op; expr_hash b.left; expr_hash b.right ]
   | UnOp u -> mix 11 [ Hashtbl.hash u.op; expr_hash u.arg ]
@@ -407,7 +409,7 @@ let count_duplicated_subexprs ?(threshold = 3) (roots : Ir.expr list) : int =
     | Reduce terms -> List.iter walk terms
     | UncheckedDim u -> walk u.inner
     | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-    | BindingRef _ | Projected | ObsColumnRef _ -> ()
+    | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> ()
   in
   List.iter walk roots;
   Hashtbl.fold (fun _ n acc -> if n >= threshold then acc + 1 else acc) counts 0

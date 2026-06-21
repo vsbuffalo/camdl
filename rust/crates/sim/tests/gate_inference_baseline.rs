@@ -131,6 +131,7 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
             }),
         }],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![param("beta", 0.4), param("gamma", 0.15), param("rho", 0.6), param("k", 10.0)],
         initial_conditions: InitialConditions::Explicit({
             let mut h = HashMap::new();

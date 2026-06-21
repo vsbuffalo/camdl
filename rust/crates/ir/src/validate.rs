@@ -473,6 +473,9 @@ fn check_expr(expr: &Expr, ctx: &RefCtx<'_>, allow_projected: bool, errors: &mut
         }
         // Leaf: binding-name resolution happens at CompiledModel::new (binding_index).
         Expr::BindingRef(_) => {}
+        // gh#272 LICM: leaf; per-eval-name resolution happens at CompiledModel::new
+        // (per_eval_index), which errors on an unknown name.
+        Expr::PerEvalRef(_) => {}
         // Leaf: a per-observation aux data column reference. Like `Projected`,
         // it is only meaningful inside a likelihood; the binder resolves the
         // name against the stream's declared aux columns at load. No

@@ -3018,6 +3018,7 @@ mod tests {
             ode_equations: vec![], time_functions: vec![], tables: vec![],
             interventions: vec![], observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![
                 Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.3), bounds: Some((0.01, 2.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None },
                 Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.1), bounds: Some((0.01, 1.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None },
@@ -3192,6 +3193,7 @@ mod tests {
             time_functions: vec![], tables: vec![], interventions: vec![],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.0), bounds: Some((0.0, 10.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None }],
             initial_conditions: InitialConditions::Explicit({
                 let mut m = HashMap::new(); m.insert("S".into(), 100.0); m
@@ -3295,6 +3297,7 @@ mod tests {
             time_functions: vec![], tables: vec![], interventions: vec![],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "R0".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.0), bounds: Some((1.0, 200.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None }],
             initial_conditions: InitialConditions::Explicit({
                 let mut m = HashMap::new(); m.insert("S".into(), 100.0); m
@@ -3435,6 +3438,7 @@ mod tests {
             compartments: vec![], transitions: vec![], ode_equations: vec![],
             time_functions: vec![], tables: vec![], interventions: vec![], observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![beta_with_ir_prior, gamma_no_prior],
             initial_conditions: ir::model::InitialConditions::Explicit(HashMap::new()),
             output: ir::model::OutputConfig {
@@ -3499,7 +3503,7 @@ mod tests {
             description: None, origin: None, origin_rata_die: None,
             compartments: vec![], transitions: vec![], ode_equations: vec![],
             time_functions: vec![], tables: vec![], interventions: vec![], observations: vec![],
-            bindings: vec![], parameters: vec![p],
+            bindings: vec![], per_eval_bindings: vec![], parameters: vec![p],
             initial_conditions: ir::model::InitialConditions::Explicit(HashMap::new()),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![]),
@@ -4146,6 +4150,7 @@ dt = 1.0
             time_functions: vec![], tables: vec![], interventions: vec![],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![Parameter { name: name.into(), value: ir::parameter::ParamValue::Estimated { init: Some((lo + hi) * 0.5), bounds: Some((lo, hi)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: kind, param_dim: None }],
             initial_conditions: InitialConditions::Explicit({
                 let mut m = HashMap::new(); m.insert("S".into(), 1.0); m
@@ -4647,6 +4652,7 @@ dt = 1.0
                 },
             ],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![
                 Parameter { name: "dummy".into(), value: ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None },
             ],

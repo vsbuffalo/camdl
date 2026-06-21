@@ -117,7 +117,7 @@ fn collect_obs_column_refs(e: &ir::expr::Expr, out: &mut Vec<String>) {
         }
         Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
         | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
-        | Expr::BindingRef(_) => {}
+        | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
 }
 
@@ -281,6 +281,7 @@ impl StreamProjection {
                     global_to_real: &compiled.global_to_real,
                     table_meta: &table_meta,
                     binding_index: &compiled.binding_index,
+                    per_eval_index: &compiled.per_eval_index,
                 };
                 let resolved = resolve_expr(expr, &ctx).map_err(|e| format!(
                     "observation '{}': cannot resolve state-snapshot expression: {:?}",
@@ -1667,6 +1668,7 @@ mod hole_scoring_tests {
                 },
             ],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters: vec![
                 Parameter { name: "gamma".into(), value: ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None },
                 Parameter { name: "rho".into(), value: ParamValue::Fixed { value: 0.5 }, param_kind: None, param_dim: None },

@@ -471,6 +471,7 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
         ode_equations: vec![], time_functions: vec![], tables: vec![], interventions: vec![],
         observations: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![
             Parameter { name: "gamma".into(), value: ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None },
             Parameter { name: "k".into(), value: ParamValue::Fixed { value: 5.0 }, param_kind: None, param_dim: None },

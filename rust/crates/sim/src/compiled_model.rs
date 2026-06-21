@@ -198,6 +198,9 @@ fn collect_int_comp_deps(
                 collect_int_comp_deps(body, comp_index, global_to_int, bindings, deps);
             }
         }
+        // gh#272: a per-eval body is param/table-only (no compartments), so it
+        // contributes no integer-compartment dependencies — no descent needed.
+        Expr::PerEvalRef(_) => {}
         // Const, Param, Time, TimeFunc: no compartment dependencies
         _ => {}
     }
@@ -240,6 +243,9 @@ fn expr_is_time_dependent(expr: &Expr, bindings: &HashMap<&str, &Expr>) -> bool 
             Some(body) => expr_is_time_dependent(body, bindings),
             None => false,
         },
+        // gh#272: a per-eval body is param/table-only (no Time/Dt/forcing) by the
+        // keystone invariant, so it is never time-dependent.
+        Expr::PerEvalRef(_) => false,
         _ => false,
     }
 }
@@ -268,6 +274,9 @@ fn expr_refs_param(expr: &Expr) -> bool {
         Expr::Reduce(w) => w.reduce.iter().any(expr_refs_param),
         Expr::UncheckedDim(w) => expr_refs_param(&w.unchecked_dim.inner),
         // Leaves / non-param nodes. BindingRef: not traversed (see doc above).
+        // PerEvalRef: likewise not traversed — this net only runs on `model.bindings`
+        // (which never contain a PerEvalRef), so the value is moot; grouped with
+        // BindingRef for consistency.
         Expr::Const(_)
         | Expr::Pop(_)
         | Expr::PopSum(_)
@@ -276,7 +285,8 @@ fn expr_refs_param(expr: &Expr) -> bool {
         | Expr::TimeFunc(_)
         | Expr::Projected(_)
         | Expr::ObsColumnRef(_)
-        | Expr::BindingRef(_) => false,
+        | Expr::BindingRef(_)
+        | Expr::PerEvalRef(_) => false,
     }
 }
 
@@ -417,7 +427,7 @@ fn collect_param_names(expr: &Expr, out: &mut Vec<String>) {
         Expr::UncheckedDim(w) => collect_param_names(&w.unchecked_dim.inner, out),
         Expr::Const(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_)
         | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
-        | Expr::BindingRef(_) => {}
+        | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
 }
 
@@ -459,6 +469,9 @@ pub struct CompiledModel {
     pub param_index: HashMap<String, usize>,
     /// Fix B: model-level binding name → slot (index into `resolved.bindings`).
     pub binding_index: HashMap<String, usize>,
+    /// gh#272 LICM: per-eval binding name → slot (index into
+    /// `resolved.per_eval_bindings`). Empty by default.
+    pub per_eval_index: HashMap<String, usize>,
 
     /// time_function name → index in model.time_functions
     pub time_func_index: HashMap<String, usize>,
@@ -565,6 +578,10 @@ pub struct ResolvedModel {
     /// Fix B: resolved shared-binding bodies, indexed by slot (matches
     /// `CompiledModel.binding_index`). Evaluated on-demand by `BindingRef`.
     pub bindings: Vec<ResolvedExpr>,
+    /// gh#272 LICM: resolved per-eval binding bodies, indexed by slot (matches
+    /// `CompiledModel.per_eval_index`). Evaluated on-demand by `PerEvalRef` (with
+    /// a per-eval cache tier added in a later increment). Empty by default.
+    pub per_eval_bindings: Vec<ResolvedExpr>,
     /// Per-transition resolved overdispersion σ² (None for Poisson/Deterministic).
     pub overdispersion: Vec<Option<ResolvedExpr>>,
     /// Per-transition resolved rate gradients: Vec of (param_name, resolved_expr).
@@ -607,7 +624,11 @@ fn expr_contains_dt(e: &Expr) -> bool {
         | Expr::Time(_)
         | Expr::Projected(_)
         | Expr::ObsColumnRef(_)
-        | Expr::BindingRef(_) => false,
+        | Expr::BindingRef(_)
+        // gh#272: a per-eval body is param/table-only (no Dt) by the keystone
+        // invariant — enforced at CompiledModel::new — so this leaf is false
+        // without descending into the body.
+        | Expr::PerEvalRef(_) => false,
         Expr::BinOp(w) => {
             expr_contains_dt(&w.bin_op.left) || expr_contains_dt(&w.bin_op.right)
         }
@@ -1032,6 +1053,18 @@ impl CompiledModel {
         let binding_index: HashMap<String, usize> = model.bindings.iter()
             .enumerate().map(|(i, b)| (b.name.clone(), i)).collect();
 
+        // gh#272 LICM: per-eval binding name -> slot. Assert-unique on insert (a
+        // duplicate name would mis-resolve a self-reference); LICM mints
+        // collision-proof names, so a duplicate here is a compiler bug.
+        let mut per_eval_index: HashMap<String, usize> =
+            HashMap::with_capacity(model.per_eval_bindings.len());
+        for (i, b) in model.per_eval_bindings.iter().enumerate() {
+            if per_eval_index.insert(b.name.clone(), i).is_some() {
+                return Err(SimError::Validation(format!(
+                    "duplicate per-eval binding name '{}' (gh#272 LICM invariant)", b.name)));
+            }
+        }
+
         let resolve_ctx = ResolveCtx {
             comp_index: &comp_index,
             param_index: &param_index,
@@ -1041,6 +1074,7 @@ impl CompiledModel {
             global_to_real: &global_to_real,
             table_meta: &table_meta,
             binding_index: &binding_index,
+            per_eval_index: &per_eval_index,
         };
 
         // Resolve balance constraint
@@ -1064,6 +1098,12 @@ impl CompiledModel {
 
         // Fix B: resolve shared-binding bodies (slot order matches binding_index).
         let resolved_bindings: Vec<ResolvedExpr> = model.bindings.iter()
+            .map(|b| resolve_expr(&b.expr, &resolve_ctx))
+            .collect::<Result<_, _>>()?;
+
+        // gh#272 LICM: resolve per-eval binding bodies (slot order matches
+        // per_eval_index). Param/table-only and topologically ordered.
+        let resolved_per_eval_bindings: Vec<ResolvedExpr> = model.per_eval_bindings.iter()
             .map(|b| resolve_expr(&b.expr, &resolve_ctx))
             .collect::<Result<_, _>>()?;
 
@@ -1197,7 +1237,12 @@ impl CompiledModel {
 
         // gh#209: build the flat-bytecode VM once, only when the toggle is on,
         // so default models pay nothing. Mirrors `cm.resolved.{rates,bindings}`.
-        let flat_vm = if crate::flat_eval::eval_flat_enabled() {
+        // gh#272: the flat VM's per-eval tape is deferred (step 1.4), so skip the
+        // flat path for per-eval models — they fall back to `eval_resolved`, which
+        // handles `PerEvalRef`. (Default-off LICM ⇒ this is never hit today.)
+        let flat_vm = if crate::flat_eval::eval_flat_enabled()
+            && model.per_eval_bindings.is_empty()
+        {
             Some(crate::flat_eval::build(&rates, &resolved_bindings))
         } else {
             None
@@ -1206,6 +1251,7 @@ impl CompiledModel {
         let resolved = ResolvedModel {
             rates,
             bindings: resolved_bindings,
+            per_eval_bindings: resolved_per_eval_bindings,
             overdispersion,
             rate_grads,
             rate_grads_indexed,
@@ -1220,6 +1266,7 @@ impl CompiledModel {
             comp_index,
             param_index,
             binding_index,
+            per_eval_index,
             time_func_index,
             table_index,
             int_comp_indices,

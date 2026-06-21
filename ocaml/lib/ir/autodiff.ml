@@ -64,6 +64,7 @@ let rec mentions (param : string) (e : expr) : bool =
   | UncheckedDim u -> mentions param u.inner
   | Reduce terms -> List.exists (mentions param) terms
   | BindingRef _ -> false   (* hoisted bindings are param-free (state-only) *)
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 (** Coefficient expressions of a forcing kind — used to decide whether an
     unsupported kind actually depends on the differentiation parameter. *)
@@ -322,6 +323,7 @@ let differentiate (top : expr) (param : string)
 
     (* Hoisted FOI bindings are param-free (state-only): d/dp BindingRef = 0. *)
     | BindingRef _ -> Known (Const 0.0)
+    | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   in
   d top
 

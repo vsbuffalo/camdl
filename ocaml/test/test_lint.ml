@@ -76,6 +76,7 @@ let empty_model
     observations;
     parameters;
     bindings;
+    per_eval_bindings = [];
     initial_conditions;
     output = {
       times = OutRegular { start = 0.0; step = 1.0; end_ = 100.0 };

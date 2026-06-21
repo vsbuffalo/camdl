@@ -924,6 +924,7 @@ mod tests {
             interventions: vec![],
             observations: vec![],
             bindings: vec![],
+            per_eval_bindings: vec![],
             parameters,
             initial_conditions: ir::model::InitialConditions::Explicit(
                 Default::default()),

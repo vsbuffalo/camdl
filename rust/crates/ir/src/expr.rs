@@ -126,6 +126,16 @@ pub struct BindingRefWrap {
     pub binding_ref: String,
 }
 
+/// `{"per_eval_ref": "<name>"}` — reference to a model-level `per_eval_binding`
+/// by name (gh#272 LICM). Like `BindingRefWrap`, but the body is param/table-only
+/// (loop-invariant within a trajectory) and may be param-carrying, so it is cached
+/// once per θ-stable scope rather than per step. Produced only by the LICM pass;
+/// never present in default-off IR.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerEvalRefWrap {
+    pub per_eval_ref: String,
+}
+
 /// `{"time": null}` — unit value serialises to JSON null.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimeExpr {
@@ -237,6 +247,7 @@ pub enum Expr {
     UncheckedDim(UncheckedDimWrap),
     Reduce(ReduceWrap),
     BindingRef(BindingRefWrap),
+    PerEvalRef(PerEvalRefWrap),
     ObsColumnRef(ObsColumnRefExpr),
 }
 
@@ -276,6 +287,9 @@ impl Expr {
     }
     pub fn binding_ref(name: impl Into<String>) -> Self {
         Expr::BindingRef(BindingRefWrap { binding_ref: name.into() })
+    }
+    pub fn per_eval_ref(name: impl Into<String>) -> Self {
+        Expr::PerEvalRef(PerEvalRefWrap { per_eval_ref: name.into() })
     }
     pub fn obs_column_ref(name: impl Into<String>) -> Self {
         Expr::ObsColumnRef(ObsColumnRefExpr { obs_column_ref: name.into() })
@@ -361,6 +375,7 @@ impl<'de> Deserialize<'de> for Expr {
                     }
                     "reduce" => Expr::Reduce(ReduceWrap { reduce: map.next_value()? }),
                     "binding_ref" => Expr::BindingRef(BindingRefWrap { binding_ref: map.next_value()? }),
+                    "per_eval_ref" => Expr::PerEvalRef(PerEvalRefWrap { per_eval_ref: map.next_value()? }),
                     "obs_column_ref" => {
                         Expr::ObsColumnRef(ObsColumnRefExpr { obs_column_ref: map.next_value()? })
                     }
@@ -369,7 +384,7 @@ impl<'de> Deserialize<'de> for Expr {
                             "unknown expression node kind '{other}' (expected one of: const, \
                              param, pop, pop_sum, time, dt, bin_op, un_op, cond, time_func, \
                              table_lookup, projected, unchecked_dim, reduce, binding_ref, \
-                             obs_column_ref)"
+                             per_eval_ref, obs_column_ref)"
                         )))
                     }
                 };

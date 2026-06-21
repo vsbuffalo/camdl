@@ -3477,6 +3477,7 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
       | Ir.UncheckedDim u -> check_refs u.inner
       | Ir.Reduce terms -> List.iter check_refs terms
       | Ir.BindingRef _ -> ()
+      | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
     in
     List.iter (fun (_, e) -> check_refs e) resolved_args;
     `Hierarchical {
@@ -4038,6 +4039,7 @@ let resolve_comp_name ctx env e =
       | Ir.UncheckedDim _ -> "a dimensional-escape expression"
       | Ir.Reduce _   -> "a sum (reduce)"
       | Ir.BindingRef _ -> "a binding reference"
+      | Ir.PerEvalRef _ -> "a per-eval binding reference"
     in
     Diagnostics.error ctx.diags
       ~code:"E264"
@@ -6312,6 +6314,7 @@ let build_model_structure ctx expanded_trs =
     (* Every term of a sum is a numerator contribution (like Add). *)
     | Ir.Reduce terms -> List.fold_left collect_numerator_pops acc terms
     | Ir.BindingRef _ -> acc
+    | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   in
   let seen_tr  = Hashtbl.create 4 in
   let seen_inf = Hashtbl.create 4 in
@@ -6363,6 +6366,7 @@ let rec expr_contains_param_or_pop = function
   | Ir.TableLookup (_, args) -> List.exists expr_contains_param_or_pop args
   | Ir.Reduce terms -> List.exists expr_contains_param_or_pop terms
   | Ir.BindingRef _ -> false
+  | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   | Ir.Const _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> false
 
 (* Treat `UncheckedDim { inner = Const c; ... }` (the IR form of unit
@@ -6431,6 +6435,7 @@ let rec walk_expr_for_l401 ~on_match e =
     List.iter (walk_expr_for_l401 ~on_match) args
   | Ir.Reduce terms -> List.iter (walk_expr_for_l401 ~on_match) terms
   | Ir.BindingRef _ -> ()
+  | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> ()
 
@@ -6586,6 +6591,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
     Ir.observations       = expand_observations ctx;
     Ir.parameters         = expand_parameters ctx;
     Ir.bindings           = [];   (* filled below from ctx.hoisted_rev once all resolution is done *)
+    Ir.per_eval_bindings  = [];   (* gh#272 LICM: empty until the LICM pass runs (post-autodiff) *)
     Ir.initial_conditions = expand_init ctx;
     Ir.output             = expand_output ctx;
     Ir.simulation         = expand_simulate ctx;

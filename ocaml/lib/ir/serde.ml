@@ -111,6 +111,7 @@ let rec expr_to_json (e : expr) : Yojson.Safe.t =
   | PopSum ps    -> obj [("pop_sum", arr (List.map str ps))]
   | Reduce terms -> obj [("reduce", arr (List.map expr_to_json terms))]
   | BindingRef n -> obj [("binding_ref", str n)]
+  | PerEvalRef n -> obj [("per_eval_ref", str n)]
   | Time         -> obj [("time", null)]
   | Dt           -> obj [("dt", null)]
   | Projected    -> obj [("projected", null)]
@@ -170,6 +171,7 @@ let rec expr_of_json (j : Yojson.Safe.t) : expr =
     | ["pop_sum"]      -> PopSum (List.map as_string (as_list (List.assoc "pop_sum" kvs)))
     | ["reduce"]       -> Reduce (List.map expr_of_json (as_list (List.assoc "reduce" kvs)))
     | ["binding_ref"]  -> BindingRef (as_string (List.assoc "binding_ref" kvs))
+    | ["per_eval_ref"] -> PerEvalRef (as_string (List.assoc "per_eval_ref" kvs))
     | ["time"]         -> Time
     | ["dt"]           -> Dt
     | ["projected"]    -> Projected
@@ -1259,6 +1261,9 @@ let model_to_json (m : model) : Yojson.Safe.t =
     @ (match m.bindings with
        | [] -> []
        | bs -> [("bindings", arr (List.map binding_to_json bs))])
+    @ (match m.per_eval_bindings with
+       | [] -> []
+       | bs -> [("per_eval_bindings", arr (List.map binding_to_json bs))])
   )
 
 let model_of_json (j : Yojson.Safe.t) : model =
@@ -1277,6 +1282,8 @@ let model_of_json (j : Yojson.Safe.t) : model =
     observations       = List.map observation_model_of_json (as_list (member "observations"  j));
     parameters         = List.map parameter_of_json        (as_list (member "parameters"     j));
     bindings           = (match member_opt "bindings" j with
+                          | Some (`List v) -> List.map binding_of_json v | _ -> []);
+    per_eval_bindings  = (match member_opt "per_eval_bindings" j with
                           | Some (`List v) -> List.map binding_of_json v | _ -> []);
     initial_conditions = initial_conditions_of_json (member "initial_conditions" j);
     output             = output_config_of_json     (member "output"     j);

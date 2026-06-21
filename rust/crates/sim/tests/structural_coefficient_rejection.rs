@@ -40,6 +40,7 @@ fn model_with_forcing(kind: TimeFuncKind) -> Model {
         interventions: vec![],
         observations: vec![],
         bindings: vec![],
+        per_eval_bindings: vec![],
         parameters: vec![Parameter {
             name: "v".into(),
             value: ParamValue::Fixed { value: 1.0 },

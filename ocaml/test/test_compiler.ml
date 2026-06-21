@@ -197,7 +197,7 @@ let rec max_reduce_terms (e : Ir.expr) : int =
     List.fold_left (fun acc i -> max acc (max_reduce_terms i)) 0 idxs
   | UncheckedDim { inner; _ } -> max_reduce_terms inner
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-  | BindingRef _ | Projected | ObsColumnRef _ -> 0
+  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> 0
 
 let max_foi_reduce_terms (m : Ir.model) : int =
   List.fold_left (fun acc (t : Ir.transition) -> max acc (max_reduce_terms t.rate))
@@ -1321,6 +1321,7 @@ let rec collect_pops = function
   | Ir.UncheckedDim u -> collect_pops u.inner
   | Ir.Reduce terms -> List.concat_map collect_pops terms
   | Ir.BindingRef _ -> []
+  | Ir.PerEvalRef _ -> []
 
 let test_let_binding_is_extracted () =
   let src = {|
@@ -2175,6 +2176,7 @@ let test_l401_no_fire_when_dt_used () =
       | Ir.TableLookup (_, args) -> List.exists contains_dt args
       | Ir.Reduce terms -> List.exists contains_dt terms
       | Ir.BindingRef _ -> false
+      | Ir.PerEvalRef _ -> false
       | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
       | Ir.Time | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> false
     in
