@@ -374,6 +374,58 @@ rewrite inside the hoisted body, not load-bearing for the main win.
    - PGAS: per CSMC sweep (θ fixed during the conditional filter, perturbed by
      NUTS between sweeps).
 
+### Runtime invalidation: staged per-eval scratch (Design C — the chosen architecture)
+
+The thread-local cache + RAII `EvalScope` above (call it Design A) is what Phase
+1 shipped, and it works (≈4.2× measured). But three independent design reviews
+converged on a cleaner architecture for the runtime half, and it is what the
+remaining runtime work should adopt. The compiler half — the LICM pass, the IR
+nodes, the keystone validation — is **unchanged**; only the way the runtime
+evaluates `PerEvalRef` changes.
+
+**The problem with Design A.** The per-eval cache is shared thread-local state
+invalidated by a generation a per-backend `EvalScope` bumps. Correctness then
+depends on each backend placing the scope at a θ-stable boundary — and the
+inference loops nest θ differently (IF2 perturbs θ _per particle_). A scope
+entered around the parallel region instead of per particle silently serves one
+particle's kernel to another's θ. The design carries a correctness obligation as
+placement discipline rather than as a type, and it accretes a second of every
+cache primitive (generation, `active`, override, hit counter, plus a separate
+flat-VM tier).
+
+**Design C — a staged prologue, threaded as data.** Compute the per-eval
+bindings once for the θ-stable span into an owned `Vec<f64>` scratch, and thread
+it as a borrow on `EvalCtx` (`per_eval: Option<&[f64]>`, the exact sibling of
+the existing `int_float_override: Option<&[f64]>`). `PerEvalRef(slot)` becomes
+`ctx.per_eval[slot]` — a slice read — falling through to on-demand eval when
+`None` (byte-identical, so an un-staged path is correct, just unamortized).
+
+This is **correct by construction**: the scratch is owned/lent, not ambient, so
+there is no shared mutable cache to alias across particles — the value is
+structurally bound to the θ it was computed at, and the `if2.rs` per-particle
+case is just "one scratch per particle." A missed wiring is a _compile error_ (a
+typed field), not a silent stale read. It **deletes** Design A's second cache
+tier, the `EvalScope` RAII, the borrow-before-recurse dance, and the flat-VM
+tier. And it is the extensible seam: the future `const` stage and the
+gradient-path per-eval stage each compose as another owned scratch read by
+index, where Design A would need a third and fourth thread-local tier.
+
+(Design B — auto-invalidate by keying the cache on the param vector — was
+rejected: IF2/PGAS/PMMH **mutate the θ buffer in place** (`if2.rs:391,480`;
+`pmmh.rs:467`), so pointer-identity keying serves stale values, and
+content-hashing has no existing identity to hang on and costs a per-eval hash.)
+
+**Migration (the chosen plan).** Keep steps 1.1 (IR substrate) and 1.2 (the LICM
+pass) verbatim. Replace step 1.3's thread-local tier + `EvalScope` with the
+staged scratch: add `per_eval: Option<&[f64]>` to `EvalCtx` (~70 construction
+sites, mostly `None`; only rate / rate_grad / ode-derivative eval sites carry
+the scratch since `PerEvalRef` appears only there), a `PerEvalScratch` computed
+at each θ-span entry, and thread it through `ode_derivs` (via the `OdeStepper`
+stepper) and `eval_propensities`. The A/B gate transfers directly
+(`scratch present vs absent` replaces `cache on vs off`). It is a real but
+bounded refactor of the eval hot path — to be done as a careful, gated focused
+pass, not rushed.
+
 ### Consumer surface: three classes
 
 Adding an `Expr`/`ResolvedExpr` variant touches many traversals. They fall into
