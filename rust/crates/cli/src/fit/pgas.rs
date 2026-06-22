@@ -423,7 +423,8 @@ pub fn run_stage(
     if has_starts {
         eprintln!("  starting all chains from prior stage (--starts-from)");
     } else {
-        eprintln!("  random starts: uniform within parameter bounds");
+        eprintln!("  chain starts: init = {} (per-parameter ranges below)",
+            pgas_opts.init_method);
         for spec in &config.estimated_params {
             let vals: Vec<f64> = chain_starts.iter().map(|p| p[spec.index]).collect();
             eprintln!("    {:12} [{:.4} .. {:.4}]", spec.name,

@@ -198,9 +198,9 @@ purpose" without the warning.
 
 Common to every stage:
 
-- `init = "lhs"` (default, scale-aware Latin-hypercube)
-  `| "single" | "uniform" | "survey_top_k"` — how per-chain starting points are
-  drawn.
+- `init = "uniform_unconstrained"` (default, Stan-style boundary-avoiding draws
+  on the unconstrained scale) `| "lhs" | "single" | "uniform" | "survey_top_k"`
+  — how per-chain starting points are drawn.
 - `init_mle = "<upstream-stage>"` — where this stage's base point comes from.
 
 ### Seeding chains from a survey

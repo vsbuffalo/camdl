@@ -40,6 +40,10 @@ pub enum InitModeTag {
     Uniform,
     /// Latin-hypercube stratified within [estimate] bounds
     Lhs,
+    /// Stan-style: i.i.d. U(-2,2) on the unconstrained scale, mapped into
+    /// bounds (boundary-avoiding, scale-invariant; the default)
+    #[clap(name = "uniform_unconstrained")]
+    UniformUnconstrained,
     /// per-chain sample from each parameter's `~ <dist>` declaration
     #[clap(name = "from_prior")]
     FromPrior,
@@ -64,6 +68,7 @@ impl std::fmt::Display for InitModeTag {
             InitModeTag::Single        => "single",
             InitModeTag::Uniform       => "uniform",
             InitModeTag::Lhs           => "lhs",
+            InitModeTag::UniformUnconstrained => "uniform_unconstrained",
             InitModeTag::FromPrior     => "from_prior",
             InitModeTag::FromPosterior => "from_posterior",
             InitModeTag::FromMle       => "from_mle",
@@ -119,6 +124,7 @@ impl InitModeTag {
         }
         Ok(match self {
             InitModeTag::Single  => InitMethod::Single,
+            InitModeTag::UniformUnconstrained => InitMethod::UniformUnconstrained,
             InitModeTag::Uniform => InitMethod::Uniform,
             InitModeTag::Lhs     => InitMethod::Lhs,
             InitModeTag::FromPrior => InitMethod::FromPrior,
@@ -164,10 +170,14 @@ impl InitModeTag {
 pub const INIT_LONG_ABOUT: &str = "\
 INIT MODES (where do chain starting points come from?)
 
+  uniform_unconstrained
+                     (default) Stan-style: per-chain i.i.d. U(-2, 2) on the
+                     unconstrained scale, mapped into bounds (boundary-avoiding,
+                     scale-invariant; over-dispersed for MCMC diagnostics)
   single             every chain starts at the seeded base params
   uniform            per-chain U(lo, hi) over [estimate] parameter bounds
   lhs                Latin-hypercube stratified within bounds (scale-aware
-                     via Transform; best basin coverage at low chain counts)
+                     via Transform; best full-bounds coverage at low chain counts)
   from_params        load a single point from a flat params TOML; pass
                      --params <path>. (Use this where you'd previously
                      have written --params <path> on profile or if2.)

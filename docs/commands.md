@@ -160,8 +160,10 @@ estimate (θ̂). A downstream stage picks where to start with two knobs:
 - **the source** — where the starting point comes from: random bounds, a prior,
   an _upstream stage's_ MLE or posterior, an explicit params file, or a survey's
   top-K rows;
-- **the spread** — how chains are distributed around it: all at one point
-  (`single`), Latin-hypercube perturbation (`lhs`), or uniform over bounds.
+- **the spread** — how chains are distributed around it: Stan-style
+  boundary-avoiding draws on the unconstrained scale (`uniform_unconstrained`,
+  the default), all at one point (`single`), Latin-hypercube perturbation
+  (`lhs`), or uniform over bounds.
 
 Both PGAS and PMMH can start from an IF2 scout's MLE this way — there is no
 asymmetry between them. A posterior stage can equally start `from_posterior`

@@ -619,6 +619,7 @@ mod tests {
             (InitMethod::Single,        "single"),
             (InitMethod::Uniform,       "uniform"),
             (InitMethod::Lhs,           "lhs"),
+            (InitMethod::UniformUnconstrained, "uniform_unconstrained"),
             (InitMethod::SurveyTopK,    "survey_top_k"),
             (InitMethod::FromPrior,     "from_prior"),
             (InitMethod::FromPosterior {

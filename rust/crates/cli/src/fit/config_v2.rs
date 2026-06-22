@@ -5509,7 +5509,7 @@ decibans_thresh = 100.0
         let stage = make_pgas_stage(1000);
         let payload_bytes = serde_json::to_vec(&stage.identity_payload()).unwrap();
         let payload_str = String::from_utf8(payload_bytes).unwrap();
-        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"init_method":"lhs","max_tree_depth":10,"particles":100,"starts_from":"random","survey_path":null,"survey_top_k_n":null,"tempering":[1.0],"thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
+        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"init_method":"uniform_unconstrained","max_tree_depth":10,"particles":100,"starts_from":"random","survey_path":null,"survey_top_k_n":null,"tempering":[1.0],"thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
         assert_eq!(payload_str, expected,
             "identity_payload byte format drifted — every existing \
              resume_state.bin would be invalidated. If this change is \
@@ -5522,7 +5522,7 @@ decibans_thresh = 100.0
     fn pmmh_identity_payload_byte_stable() {
         let stage = make_pmmh_stage(1000);
         let payload_str = serde_json::to_string(&stage.identity_payload()).unwrap();
-        let expected = r#"{"adapt":true,"adapt_start":300,"algorithm":"pmmh","backend":"chain_binomial","burn_in":200,"chains":4,"init_method":"lhs","particles":100,"rho":null,"starts_from":"random","survey_path":null,"survey_top_k_n":null,"thin":2}"#;
+        let expected = r#"{"adapt":true,"adapt_start":300,"algorithm":"pmmh","backend":"chain_binomial","burn_in":200,"chains":4,"init_method":"uniform_unconstrained","particles":100,"rho":null,"starts_from":"random","survey_path":null,"survey_top_k_n":null,"thin":2}"#;
         assert_eq!(payload_str, expected,
             "PMMH identity_payload byte format drifted — see \
              pgas_identity_payload_byte_stable for context.");
