@@ -281,10 +281,23 @@ pub fn best_ll(x: f64) -> String {
     if x.is_finite() { format!("best ll={:.1}", x) } else { "best ll=-inf".to_string() }
 }
 
-/// Standard "current log-likelihood" metric string for iterative fitters
-/// (`fit` IF2 / PGAS, `pfilter`). Mirrors [`best_ll`]'s finite/-inf handling.
+/// Current log-likelihood metric string, prefixed by the loglik *class*:
+/// `ll(complete)=` for PGAS's complete-data value, `ll=` for a marginal
+/// `log p(y | θ)` (gh#280). This is the live-feed analogue of the
+/// `log_complete_data_ll` trace column — it stops a complete-data value being
+/// read as a marginal on the bar a human or agent watches mid-run. Mirrors
+/// [`best_ll`]'s finite / -inf handling.
+pub fn ll_kind(x: f64, kind: crate::fit::loglik::LoglikType) -> String {
+    let prefix = kind.metric_prefix();
+    if x.is_finite() { format!("{prefix}={:.1}", x) } else { format!("{prefix}=-inf") }
+}
+
+/// Standard "current log-likelihood" metric string for marginal-reporting
+/// iterative fitters (`fit` IF2, `pfilter`). A thin [`ll_kind`] wrapper
+/// fixing the class to marginal (`ll=`); PGAS passes `CompleteData` to
+/// [`ll_kind`] directly so its feed reads `ll(complete)=`.
 pub fn ll(x: f64) -> String {
-    if x.is_finite() { format!("ll={:.1}", x) } else { "ll=-inf".to_string() }
+    ll_kind(x, crate::fit::loglik::LoglikType::Marginal)
 }
 
 /// Standard MCMC metric string carrying the current log-likelihood and the
@@ -305,6 +318,20 @@ mod tests {
         assert_eq!(ll(f64::NEG_INFINITY), "ll=-inf");
         // NaN / +inf are not finite → the -inf label (matches best_ll).
         assert_eq!(ll(f64::NAN), "ll=-inf");
+    }
+
+    #[test]
+    fn ll_kind_carries_the_class_prefix() {
+        use crate::fit::loglik::LoglikType;
+        // Marginal class → `ll=`; complete-data → `ll(complete)=` (gh#280).
+        assert_eq!(ll_kind(-12.34, LoglikType::Marginal), "ll=-12.3");
+        assert_eq!(ll_kind(-12.34, LoglikType::If2), "ll=-12.3");
+        assert_eq!(ll_kind(-12.34, LoglikType::CompleteData), "ll(complete)=-12.3");
+        // -inf / NaN / +inf all fall to the `<prefix>=-inf` label.
+        assert_eq!(ll_kind(f64::NEG_INFINITY, LoglikType::CompleteData), "ll(complete)=-inf");
+        assert_eq!(ll_kind(f64::NAN, LoglikType::Marginal), "ll=-inf");
+        // `ll` is exactly the marginal-default wrapper.
+        assert_eq!(ll(-12.34), ll_kind(-12.34, LoglikType::Marginal));
     }
 
     #[test]

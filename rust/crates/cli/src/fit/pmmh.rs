@@ -5,6 +5,7 @@
 //! convergence diagnostics (R̂, ESS), and a summary JSON.
 
 use crate::fit::state::FitState;
+use crate::fit::loglik::LoglikType;
 use crate::fit::runner::{self, FitRunConfig};
 use crate::cas::iso8601_utc;
 use rayon::prelude::*;
@@ -942,7 +943,7 @@ pub fn run_stage(
         n_good_chains: if n_good_chains < n_chains { Some(n_good_chains) } else { None },
         start_values,
         rw_sd: HashMap::new(),
-        loglik_type: Some("marginal".into()),
+        loglik_type: Some(LoglikType::Marginal),
         acceptance_rate: Some(map_result.acceptance_rate),
         // Bayesian stages don't produce an IF2-style Â table; the
         // refine-gates proposal only gates on scout→refine handoffs.

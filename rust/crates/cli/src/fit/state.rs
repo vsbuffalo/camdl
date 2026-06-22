@@ -23,10 +23,11 @@ pub struct FitState {
     pub n_good_chains: Option<usize>,
     pub start_values: HashMap<String, f64>,
     pub rw_sd: HashMap<String, f64>,
-    /// What kind of log-likelihood is in `best_loglik`.
-    /// "marginal" (PMMH), "complete_data" (PGAS), "if2" (IF2/scout/refine).
+    /// What kind of log-likelihood is in `best_loglik` (gh#280). Serializes
+    /// to the same `snake_case` tags this field carried as a free string
+    /// before, so legacy `fit_state.toml` files deserialize unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub loglik_type: Option<String>,
+    pub loglik_type: Option<crate::fit::loglik::LoglikType>,
     /// Overall acceptance rate of the best chain (PGAS/PMMH only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_rate: Option<f64>,
@@ -164,7 +165,7 @@ mod tests {
             n_good_chains: Some(2),
             start_values: HashMap::from([("beta".into(), 0.8)]),
             rw_sd: HashMap::new(),
-            loglik_type: Some("if2".into()),
+            loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement,
             ivp_params: vec!["s0".into()],

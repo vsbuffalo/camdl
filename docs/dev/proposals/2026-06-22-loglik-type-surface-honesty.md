@@ -1,6 +1,6 @@
 ---
 date: 2026-06-22
-status: RFC — design sketch, no code yet
+status: implemented (gh#280) — core Changes 1–3 + Amendment A2.2/A3/A5; A1/A2.1/A4 deferred
 related:
   - 2026-06-20-model-criticism-outputs.md # prequential elpd is the comparison-correct quantity
 area: inference output / progress feed / machine-readable artifacts / fit summary + table
@@ -292,3 +292,38 @@ proposal declared clean.
   the live-feed key: anything grepping `ll=` on a PGAS run was already reading
   the non-comparable joint, so the break is the fix. State it as a contract
   change, not a cosmetic tweak.
+
+## Amendment A — resolution (gh#280 implementation)
+
+- **A2.2 — folded in.** `is_marginal()` documents that it answers _kind_, not
+  comparability (equal backend also required); no `comparison_class()` helper
+  was added — there is no consumer for one yet, and a speculative public API
+  would be dead code.
+- **A3 — folded in (design only).** `is_marginal()` is now defined by inclusion
+  (`If2 | Marginal | OdeMarginal`), so a future non-marginal kind defaults to
+  non-marginal instead of silently joining the marginals. The `ObsConditional`
+  variant is **not** added — there is no producer/consumer yet, per A3's own
+  instruction.
+- **A5 — folded in, with a wording correction.** The PGAS live-feed prefix is
+  `ll(complete)=` (not `cdll=`, and not A5's suggested `ll(joint)=`). "joint" is
+  ambiguous — joint over _what_? — and a reader can misread it as the joint over
+  the observation vector, i.e. the marginal, inverting the meaning. "complete"
+  echoes the codebase's established term (`log_complete_data_ll` column,
+  `complete_data` tag), is legible without a legend, and is still a distinct key
+  from `ll=`, so a marginal scraper never picks it up.
+- **A1 — deferred (narrow framing).** The `io::progress` heartbeat stays
+  liveness-only. `io` is a dependency of `cli`, so it cannot reference
+  `cli::fit::loglik::LoglikType`; a typed heartbeat loglik would force
+  relocating the enum into `io` (a layering inversion) or re-stringifying it
+  (the fork this RFC removes). The typed loglik lives in the result artifacts
+  (run.json / StageReport / survey TSV / fit table). A typed heartbeat field is
+  a clean follow-up if a live watcher needs it.
+- **A2.1 — deferred.** Co-locating `backend` is a distinct comparability concern
+  the core RFC already scopes out, and `backend` is not in scope at
+  `StageReport` / survey / profile / pfilter `run.json` without threading it
+  through. A focused "carry backend for comparability" change is the right home
+  (`browse --format json` already emits `backend`).
+- **A4 — deferred.** The trace surface is untouched here; writing `loglik_type`
+  into _new_ trace metadata is a separate `trace_writer` change. The claim is
+  corrected: the PGAS trace column is clean for **new** runs only (post
+  `587df38d`); legacy traces on disk are not migrated (alpha).

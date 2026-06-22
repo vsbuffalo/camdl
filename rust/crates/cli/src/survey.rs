@@ -568,6 +568,9 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         "n_points":        n_points,
         "estimated":       estimated_names,
         "best_loglik":     best_loglik,
+        // A survey grid evaluates a marginal `log p(y | θ)` at each point
+        // (PF or clean-eval), so the whole landscape is marginal-class (gh#280).
+        "loglik_type":     crate::fit::loglik::LoglikType::Marginal.tag(),
         "wall_time_seconds": elapsed,
         "model_identity":  model_identity,
         "data_hashes":     resolved.data_hashes,
@@ -1114,7 +1117,11 @@ fn write_landscape_tsv(
             run_hash, crate::version::VERSION_SHORT)?;
         writeln!(f, "# eval={}; n_points={}", eval.as_str(), rows.len())?;
         // Header row: param columns, then loglik / loglik_se /
-        // (mean_ess if pfilter) / n_replicates / point_id.
+        // (mean_ess if pfilter) / n_replicates / point_id / loglik_type.
+        // `loglik_type` is appended last (a grid is a single marginal class,
+        // so the column is constant) — appended, never inserted, so a
+        // positional reader of the existing columns is unaffected (gh#280).
+        let loglik_type = crate::fit::loglik::LoglikType::Marginal.tag();
         let mut cols: Vec<String> = estimated.iter().map(|ep| ep.name.clone()).collect();
         cols.push("loglik".into());
         cols.push("loglik_se".into());
@@ -1123,6 +1130,7 @@ fn write_landscape_tsv(
         }
         cols.push("n_replicates".into());
         cols.push("point_id".into());
+        cols.push("loglik_type".into());
         writeln!(f, "{}", cols.join("\t"))?;
         for r in rows {
             let mut fields: Vec<String> = r.param_values.iter()
@@ -1134,6 +1142,7 @@ fn write_landscape_tsv(
             }
             fields.push(r.n_replicates.to_string());
             fields.push(r.point_id.to_string());
+            fields.push(loglik_type.to_string());
             writeln!(f, "{}", fields.join("\t"))?;
         }
     }
@@ -1440,14 +1449,18 @@ mod tests {
         // First two lines are comments.
         assert!(lines[0].starts_with("# camdl survey"));
         assert!(lines[1].starts_with("# eval="));
-        // Header: beta, gamma, loglik, loglik_se, mean_ess, n_replicates, point_id
+        // Header: params, loglik, loglik_se, mean_ess, n_replicates, point_id,
+        // then the appended loglik_type column (gh#280).
         let header: Vec<&str> = lines[2].split('\t').collect();
         assert_eq!(header,
-            vec!["beta", "gamma", "loglik", "loglik_se", "mean_ess", "n_replicates", "point_id"]);
-        // Data row.
+            vec!["beta", "gamma", "loglik", "loglik_se", "mean_ess",
+                 "n_replicates", "point_id", "loglik_type"]);
+        // Data row: the existing columns are unmoved (point_id still at 6),
+        // and the appended column carries the marginal class.
         let row: Vec<&str> = lines[3].split('\t').collect();
-        assert_eq!(row.len(), 7);
+        assert_eq!(row.len(), 8);
         assert_eq!(row[6], "0");
+        assert_eq!(row[7], "marginal");
     }
 
     #[test]
@@ -1475,7 +1488,8 @@ mod tests {
         let s = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = s.lines().collect();
         let header: Vec<&str> = lines[2].split('\t').collect();
-        assert_eq!(header, vec!["beta", "loglik", "loglik_se", "n_replicates", "point_id"]);
+        assert_eq!(header,
+            vec!["beta", "loglik", "loglik_se", "n_replicates", "point_id", "loglik_type"]);
     }
 
     #[test]

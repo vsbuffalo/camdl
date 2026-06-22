@@ -1632,6 +1632,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             "grid_point": grid_idx,
             "start": start_idx,
             "best_loglik": if final_loglik.is_finite() { Some(final_loglik) } else { None },
+            // The class of the profiled loglik follows the profile method
+            // (gh#280): if2 / marginal / ode_marginal — a marginal in every
+            // case, never PGAS's joint.
+            "loglik_type": crate::fit::loglik::LoglikType::from(profile_algo.method_kind()).tag(),
             "wall_time_seconds": elapsed,
             "provenance": run_provenance_json.clone(),
         });

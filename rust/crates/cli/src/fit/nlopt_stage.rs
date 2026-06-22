@@ -23,6 +23,7 @@ use sim::inference::deterministic::{
 use crate::fit::config_v2::{DtCheckConfig, FitConfigV2, GateConfig, NloptStageConfig, Stage};
 use crate::fit::dt_check;
 use crate::fit::init::{build_chain_param_vecs, InitMethod};
+use crate::fit::loglik::LoglikType;
 use crate::fit::methods::check_model_capabilities;
 use crate::fit::runner::{compute_ode_loglik, ode_step_dt, FitRunConfig};
 use crate::fit::state::FitState;
@@ -278,7 +279,7 @@ pub fn run_stage(
         ),
         start_values,
         rw_sd,
-        loglik_type: Some("ode_marginal".to_string()),
+        loglik_type: Some(LoglikType::OdeMarginal),
         acceptance_rate: None,
         tail_chain_agreement: convergence.chain_agreement.clone(),
         ivp_params,

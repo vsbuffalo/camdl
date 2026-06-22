@@ -360,8 +360,10 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
                 // headline + the theta_hat table from the typed payload.
                 println!("\n  stage: {} (algorithm = {})", resolved.stage, r.algorithm);
                 println!(
-                    "    loglik:   {:.2}     converged chains: {}/{}",
-                    r.best_loglik, r.n_converged, r.n_chains
+                    "    loglik:   {:.2} ({})     converged chains: {}/{}",
+                    r.best_loglik,
+                    crate::fit::loglik::LoglikType::from(&typed).tag(),
+                    r.n_converged, r.n_chains
                 );
                 if r.n_chains > 1 {
                     println!(
@@ -466,8 +468,11 @@ impl Formatter {
             self.bold(stage),
             "═".repeat(74_usize.saturating_sub(stage.len()))));
 
-        // Headline
-        s.push_str(&format!("  best loglik:  {:.1}", state.best_loglik));
+        // Headline — type tag *after* the number (gh#280), so a scraper
+        // reading `loglik=<num>` stops at the first non-numeric char.
+        s.push_str(&format!("  best loglik:  {:.1} ({})",
+            state.best_loglik,
+            crate::fit::loglik::LoglikType::tag_or_unknown(state.loglik_type)));
         if !state.chain_eval_logliks.is_empty() {
             // The headline loglik is the cross-chain max of the
             // re-scored per-chain values (loglik-eval — see
@@ -1006,6 +1011,11 @@ pub struct StageReport {
     /// IF2: best loglik-eval result. PMMH: `map_loglik`. PGAS: `None`
     /// (no point estimate).
     pub best_loglik: Option<f64>,
+    /// The class of `best_loglik` (gh#280): `complete_data` for PGAS's
+    /// joint value, a marginal kind otherwise. Derived from the typed
+    /// `method_result`; `None` only when that failed to load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loglik_type: Option<crate::fit::loglik::LoglikType>,
     pub initial_loglik: Option<f64>,
     pub camdl_version: Option<String>,
     /// Compound IF2 gate. `None` for Bayesian stages (the gate
@@ -1215,6 +1225,7 @@ fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
                 converged: false,
                 gate_verdict: "n/a".into(),
                 best_loglik: None,
+                loglik_type: None,
                 max_chain_agreement: None,
                 max_rhat: None,
                 acceptance_rate: None,
@@ -1256,11 +1267,13 @@ fn bayesian_stage_report(
         Some(MethodResult::Pmmh(r)) => dates_from(&r.posterior_mean),
         _ => BTreeMap::new(),
     };
+    let loglik_type = method_result.as_ref().map(crate::fit::loglik::LoglikType::from);
     StageReport {
         name: stage.to_string(),
         method: method.to_string(),
         n_chains,
         best_loglik,
+        loglik_type,
         initial_loglik: None,
         camdl_version: Some(version::VERSION_SHORT.to_string()),
         gate: None,
@@ -1425,6 +1438,13 @@ fn if2_stage_report(
         method: "if2".into(),
         n_chains: state.n_chains,
         best_loglik: Some(state.best_loglik),
+        // Derive from the typed result; fall back to the stage's recorded
+        // kind so a legacy run with no loadable `method_result` still
+        // labels its IF2 marginal rather than reading `unknown`.
+        loglik_type: method_result
+            .as_ref()
+            .map(crate::fit::loglik::LoglikType::from)
+            .or(state.loglik_type),
         initial_loglik: if state.initial_loglik.is_finite() {
             Some(state.initial_loglik)
         } else { None },
@@ -1462,7 +1482,8 @@ fn render_md_stage(stage: &StageReport) -> String {
     let mut s = String::new();
     s.push_str(&format!("## `{}` ({})\n\n", stage.name, stage.method));
     if let Some(ll) = stage.best_loglik {
-        s.push_str(&format!("- best loglik: **{:.2}**\n", ll));
+        s.push_str(&format!("- best loglik: **{:.2}** ({})\n",
+            ll, crate::fit::loglik::LoglikType::tag_or_unknown(stage.loglik_type)));
     }
     s.push_str(&format!("- chains: {}\n", stage.n_chains));
     if let Some(init) = stage.initial_loglik {
@@ -1617,8 +1638,10 @@ fn render_latex_stage(stage: &StageReport) -> String {
 
     if let Some(ll) = stage.best_loglik {
         s.push_str(&format!(
-            "Best log-likelihood: \\textbf{{{:.2}}}; chains: {}\n\n",
-            ll, stage.n_chains
+            "Best log-likelihood: \\textbf{{{:.2}}} ({}); chains: {}\n\n",
+            ll,
+            crate::fit::loglik::LoglikType::tag_or_unknown(stage.loglik_type),
+            stage.n_chains
         ));
     } else {
         s.push_str(&format!("chains: {}\n\n", stage.n_chains));
@@ -1830,7 +1853,7 @@ mod tests {
             n_good_chains: Some(8),
             start_values: start,
             rw_sd: HashMap::new(),
-            loglik_type: Some("if2".into()),
+            loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: agreement,
             ivp_params: vec!["I0".into()],
@@ -2374,5 +2397,104 @@ mod tests {
         // skip_serializing_if = Option::is_none → field absent, not null.
         assert!(json.get("estimate_date").is_none(),
             "numeric param must omit estimate_date entirely: {}", json);
+    }
+
+    fn synthetic_pgas_result() -> MethodResult {
+        MethodResult::Pgas(PgasStageResult {
+            n_samples: 100,
+            posterior_mean: BTreeMap::new(),
+            posterior_q025: BTreeMap::new(),
+            posterior_q975: BTreeMap::new(),
+            ess_per_param: BTreeMap::new(),
+            max_rhat: 1.02,
+            acceptance_per_param: BTreeMap::new(),
+            n_chains: 4,
+        })
+    }
+
+    fn synthetic_pmmh_result() -> MethodResult {
+        MethodResult::Pmmh(PmmhStageResult {
+            n_samples: 100,
+            posterior_mean: BTreeMap::new(),
+            ess: BTreeMap::new(),
+            max_rhat: 1.03,
+            acceptance_rate: 0.24,
+            map_loglik: -3801.2,
+            n_chains: 4,
+        })
+    }
+
+    fn synthetic_if2_result() -> MethodResult {
+        MethodResult::If2(If2StageResult {
+            best_loglik: -3804.9,
+            best_chain: 1,
+            theta_hat: BTreeMap::new(),
+            max_chain_agreement: 1.04,
+            gate_verdict: crate::fit::method_result::GateVerdict::Pass,
+            ess_at_mle: None,
+            n_chains: 8,
+            n_iter: 50,
+        })
+    }
+
+    /// gh#280: every `StageReport` JSON object carries `loglik_type`,
+    /// derived from the typed `method_result`. Fails on the pre-gh#280 code
+    /// (the struct had no such field). The PGAS value MUST read
+    /// `complete_data` even though its `best_loglik` is null — that is the
+    /// joint-vs-marginal distinction an agent scrapes.
+    #[test]
+    fn stage_report_json_carries_loglik_type() {
+        let cal = CalendarContext::default();
+
+        let pgas = bayesian_stage_report("pgas", "pgas", Some(synthetic_pgas_result()), &cal);
+        let j = serde_json::to_value(&pgas).unwrap();
+        assert_eq!(j["loglik_type"], serde_json::json!("complete_data"),
+            "PGAS stage must tag its joint loglik: {j}");
+        assert!(j["best_loglik"].is_null(),
+            "PGAS has no scalar best_loglik, yet still carries loglik_type: {j}");
+
+        let pmmh = bayesian_stage_report("pmmh", "pmmh", Some(synthetic_pmmh_result()), &cal);
+        let j = serde_json::to_value(&pmmh).unwrap();
+        assert_eq!(j["loglik_type"], serde_json::json!("marginal"),
+            "PMMH MAP loglik is marginal: {j}");
+
+        // IF2 via the dedicated builder. No stage dir on disk → the
+        // provenance reads tolerate absence; loglik_type comes from the
+        // typed result.
+        let if2 = if2_stage_report(
+            "scout", "/nonexistent/stage", &synthetic_fit_state(),
+            Some(synthetic_if2_result()), None, None, &cal,
+        );
+        let j = serde_json::to_value(&if2).unwrap();
+        assert_eq!(j["loglik_type"], serde_json::json!("if2"),
+            "IF2 stage must tag its marginal: {j}");
+    }
+
+    /// gh#280: human headlines label the loglik class, with the tag rendered
+    /// *after* the number so a `loglik=<num>` scraper stops before it.
+    #[test]
+    fn headlines_label_the_loglik_class() {
+        let cal = CalendarContext::default();
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+
+        // Terminal IF2 headline.
+        let block = fmt.stage_block(
+            "scout", "/nonexistent/stage", &synthetic_fit_state(), None, None, None,
+        );
+        let line = block.text.lines().find(|l| l.contains("best loglik:"))
+            .expect("IF2 block has a best-loglik headline");
+        assert!(line.contains("(if2)"), "IF2 headline must carry (if2): {line}");
+        let num_at = line.find(|c: char| c == '-' || c.is_ascii_digit()).unwrap();
+        let tag_at = line.find("(if2)").unwrap();
+        assert!(tag_at > num_at, "type tag must render after the number: {line}");
+
+        // Markdown + LaTeX exports of a PMMH (marginal) stage.
+        let pmmh = bayesian_stage_report("pmmh", "pmmh", Some(synthetic_pmmh_result()), &cal);
+        let md = render_md_stage(&pmmh);
+        assert!(md.contains("- best loglik:") && md.contains("(marginal)"),
+            "md PMMH headline carries (marginal): {md}");
+        let tex = render_latex_stage(&pmmh);
+        assert!(tex.contains("Best log-likelihood") && tex.contains("(marginal)"),
+            "latex PMMH headline carries (marginal): {tex}");
     }
 }

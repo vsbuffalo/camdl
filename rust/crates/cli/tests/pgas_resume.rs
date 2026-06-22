@@ -279,3 +279,27 @@ fn pgas_resume_rejects_when_identity_field_changes() {
     assert!(stderr.contains("config hash mismatch") || stderr.contains("no resume state"),
         "expected config-hash-mismatch error: got {}", stderr);
 }
+
+/// gh#280: PGAS reports a complete-data loglik, so its live progress feed must
+/// read `ll(complete)=`, not the bare `ll=` that means a marginal for every
+/// other method. `--progress plain` bumps verbosity to Info (main.rs) so the
+/// throttled per-sweep line reaches stderr; the first sweep always emits.
+#[test]
+fn pgas_plain_progress_feed_marks_complete_data() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("plain_complete");
+    let (ir, data) = write_fixture(tmp.path());
+    let toml = write_fit_toml(tmp.path(), &ir, &data, 8, 1);
+
+    let out = Command::new(&bin)
+        .arg("fit").arg("run").arg(&toml)
+        .arg("--seed").arg("1")
+        .arg("--progress").arg("plain")
+        .output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "PGAS fit must run: {}", stderr);
+    assert!(stderr.contains("ll(complete)="),
+        "PGAS plain-progress feed must carry the complete-data prefix \
+         `ll(complete)=`, not a bare `ll=`:\n{stderr}");
+}

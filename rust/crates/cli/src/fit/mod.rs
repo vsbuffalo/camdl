@@ -8,6 +8,7 @@
 pub mod cas;  // gh#147 M3.2: fit-stage CAS identity (resolve_fit_stage)
 pub mod coeff_guard;  // gh#119: NUTS guard — param only inside a forcing/table coefficient
 pub mod config_v2;
+pub mod loglik;  // gh#280: LoglikType — the single typed source for loglik class
 pub mod state;
 pub mod provenance;
 pub mod runner;
@@ -1192,7 +1193,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     n_good_chains: None,
                     start_values,
                     rw_sd,
-                    loglik_type: Some("if2".into()),
+                    loglik_type: Some(loglik::LoglikType::If2),
                     acceptance_rate: None,
                     tail_chain_agreement: chain_results.chain_agreement.clone(),
                     ivp_params: run_config.estimated_params.iter()

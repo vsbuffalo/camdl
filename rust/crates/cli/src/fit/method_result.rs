@@ -782,7 +782,7 @@ mod tests {
             n_good_chains: Some(4),
             start_values,
             rw_sd: HashMap::new(),
-            loglik_type: Some("if2".into()),
+            loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: agreement,
             ivp_params: vec![],

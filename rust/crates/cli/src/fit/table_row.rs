@@ -85,6 +85,11 @@ pub struct TableRow {
     /// IF2 → best clean-eval loglik. PMMH → `map_loglik`. PGAS →
     /// `null` (no point estimate).
     pub best_loglik: Option<f64>,
+    /// The class of `best_loglik` (gh#280): `complete_data` for PGAS's
+    /// joint, a marginal kind otherwise. Always populated (derived from the
+    /// typed `MethodResult`); present even for PGAS, whose `best_loglik` is
+    /// `null`. `None` only on the error-placeholder row.
+    pub loglik_type: Option<crate::fit::loglik::LoglikType>,
     /// Maximum chain-agreement Â (NOT Gelman-Rubin). IF2 only; null
     /// otherwise. See `If2StageResult.max_chain_agreement`.
     pub max_chain_agreement: Option<f64>,
@@ -208,6 +213,7 @@ pub fn build_row(
         converged: mview.converged,
         gate_verdict: mview.gate_verdict,
         best_loglik: mview.best_loglik,
+        loglik_type: Some(crate::fit::loglik::LoglikType::from(&method_result)),
         max_chain_agreement: mview.max_chain_agreement,
         max_rhat: mview.max_rhat,
         acceptance_rate: mview.acceptance_rate,

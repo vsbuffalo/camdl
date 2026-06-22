@@ -344,7 +344,7 @@ mod tests {
             n_good_chains: None,
             start_values: HashMap::new(),
             rw_sd: HashMap::new(),
-            loglik_type: Some("if2".into()),
+            loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: tail_chain_agreement.iter()
                 .map(|(k, v)| (k.to_string(), *v)).collect(),

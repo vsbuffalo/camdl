@@ -5,6 +5,7 @@
 //! Outputs per-chain trace files, convergence diagnostics, and summary.
 
 use crate::fit::state::FitState;
+use crate::fit::loglik::LoglikType;
 use crate::fit::runner::FitRunConfig;
 use crate::cas::iso8601_utc;
 use sim::inference::{
@@ -642,10 +643,14 @@ pub fn run_stage(
                 // Passive bar tick. The callback fires once per sweep in order,
                 // so `inc(1)` tracks position = sweep+1 exactly. The metric is
                 // the cold-chain complete-data loglik the sampler already
-                // reports. `Task` handles Pretty (redraw) / Plain (throttled
-                // `chain N pos/len ll=…` line) / None (no-op) — no mode
-                // branching here.
-                task.set(crate::progress::ll(result.log_complete_data_ll));
+                // reports — fed as `CompleteData` so the live feed reads
+                // `ll(complete)=…`, not the bare `ll=…` that means a marginal
+                // for every other method (gh#280). `Task` handles Pretty
+                // (redraw) / Plain (`chain N pos/len ll(complete)=…`) / None.
+                task.set(crate::progress::ll_kind(
+                    result.log_complete_data_ll,
+                    LoglikType::CompleteData,
+                ));
                 task.inc(1);
 
                 // gh#278: report progress to the shared heartbeat (monotonic
@@ -936,7 +941,7 @@ pub fn run_stage(
         n_good_chains: None,
         start_values,
         rw_sd: HashMap::new(),
-        loglik_type: Some("complete_data".into()),
+        loglik_type: Some(LoglikType::CompleteData),
         acceptance_rate: Some(best_chain.1.iter()
             .map(|s| s.accepted.iter().filter(|&&a| a).count() as f64 / s.accepted.len().max(1) as f64)
             .sum::<f64>() / best_chain.1.len().max(1) as f64),

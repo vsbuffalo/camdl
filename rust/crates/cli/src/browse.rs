@@ -1412,6 +1412,10 @@ fn print_fits_json(fits: &[FitEntry]) {
                     "seed": s.seed,
                     "n_chains": s.n_chains,
                     "best_loglik": s.best_loglik,
+                    // The loglik class is a property of the method (gh#280), so
+                    // a PGAS stage reads `complete_data` even though it carries
+                    // no scalar `best_loglik`.
+                    "loglik_type": crate::fit::loglik::LoglikType::from(s.method).tag(),
                     "best_chain": s.best_chain,
                 })
             })

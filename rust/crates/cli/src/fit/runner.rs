@@ -3729,7 +3729,7 @@ dt = 1.0
             best_chain: 0, n_chains: 1, n_good_chains: Some(1),
             start_values,
             rw_sd: HashMap::new(),
-            loglik_type: Some("if2".into()),
+            loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: HashMap::new(),
             ivp_params: Vec::new(),

@@ -496,6 +496,9 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         let sd_field = if n_reps > 1 { serde_json::json!(sd_ll) } else { serde_json::Value::Null };
         let inputs_json = serde_json::json!({
             "loglik": mean_ll,
+            // A bootstrap particle filter estimates the marginal `log p(y | θ)`
+            // (gh#280) — the comparison-correct class, never PGAS's joint.
+            "loglik_type": crate::fit::loglik::LoglikType::Marginal.tag(),
             "loglik_sd": sd_field,
             "n_replicates": n_reps,
             "n_particles": n_particles,

@@ -318,10 +318,10 @@ fn render_json(rows: &[TableRow]) {
 fn render_text(rows: &[TableRow]) -> String {
     let mut s = String::new();
     s.push_str(&format!(
-        "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {:>10} {:>6}\n",
-        "fit_id", "label", "stem", "method", "stages", "converged", "best_ll", "age"
+        "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {:>10} {:<13} {:>6}\n",
+        "fit_id", "label", "stem", "method", "stages", "converged", "best_ll", "ll_type", "age"
     ));
-    s.push_str(&"-".repeat(96));
+    s.push_str(&"-".repeat(110));
     s.push('\n');
     if rows.is_empty() {
         s.push_str("(no fits matched)\n");
@@ -335,11 +335,14 @@ fn render_text(rows: &[TableRow]) -> String {
             .best_loglik
             .map(|v| format!("{:>10.1}", v))
             .unwrap_or_else(|| format!("{:>10}", "—"));
+        // `best_ll` is `—` for PGAS, so the type column is what tells a
+        // reader the row carries a complete-data (joint) value (gh#280).
+        let ll_type = super::loglik::LoglikType::tag_or_unknown(r.loglik_type);
         let age = format_age(r.age_seconds);
         s.push_str(&format!(
-            "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {} {:>6}\n",
+            "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {} {:<13} {:>6}\n",
             r.fit_id, truncate(label, 22), truncate(&r.stem, 14),
-            r.method, truncate(&stages, 6), converged, best, age,
+            r.method, truncate(&stages, 6), converged, best, ll_type, age,
         ));
     }
     s
@@ -348,10 +351,10 @@ fn render_text(rows: &[TableRow]) -> String {
 fn render_md(rows: &[TableRow]) -> String {
     let mut s = String::new();
     s.push_str(
-        "| fit_id | label | stem | method | stages | converged | best_ll | age |\n",
+        "| fit_id | label | stem | method | stages | converged | best_ll | ll_type | age |\n",
     );
     s.push_str(
-        "|---|---|---|---|---|---|---|---|\n",
+        "|---|---|---|---|---|---|---|---|---|\n",
     );
     for r in rows {
         let label = r.label.as_deref().unwrap_or("<unlabelled>");
@@ -361,10 +364,11 @@ fn render_md(rows: &[TableRow]) -> String {
             .best_loglik
             .map(|v| format!("{:.1}", v))
             .unwrap_or_else(|| "—".into());
+        let ll_type = super::loglik::LoglikType::tag_or_unknown(r.loglik_type);
         let age = format_age(r.age_seconds);
         s.push_str(&format!(
-            "| `{}` | {} | `{}` | {} | {} | {} | {} | {} |\n",
-            r.fit_id, label, r.stem, r.method, stages, converged, best, age,
+            "| `{}` | {} | `{}` | {} | {} | {} | {} | {} | {} |\n",
+            r.fit_id, label, r.stem, r.method, stages, converged, best, ll_type, age,
         ));
     }
     s
@@ -372,7 +376,9 @@ fn render_md(rows: &[TableRow]) -> String {
 
 fn render_csv(rows: &[TableRow]) -> String {
     let mut s = String::new();
-    s.push_str("fit_id,fit_hash,label,stem,model_identity,method,stages,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale\n");
+    // `loglik_type` is appended last (gh#280): CSV is positional, so a new
+    // column never shifts an existing one out from under a consumer.
+    s.push_str("fit_id,fit_hash,label,stem,model_identity,method,stages,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale,loglik_type\n");
     for r in rows {
         let label = csv_field(r.label.as_deref().unwrap_or(""));
         let stages = r.stages.join("+");
@@ -387,7 +393,7 @@ fn render_csv(rows: &[TableRow]) -> String {
         let max_r = r.max_rhat.map(|v| format!("{}", v)).unwrap_or_default();
         let acc = r.acceptance_rate.map(|v| format!("{}", v)).unwrap_or_default();
         s.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             r.fit_id,
             r.fit_hash,
             label,
@@ -405,6 +411,7 @@ fn render_csv(rows: &[TableRow]) -> String {
             r.age_seconds,
             r.created_at,
             r.stale,
+            super::loglik::LoglikType::tag_or_unknown(r.loglik_type),
         ));
     }
     s
@@ -487,6 +494,60 @@ mod tests {
         assert_eq!(format_age(60 * 60 * 3), "3h");
         assert_eq!(format_age(60 * 60 * 24 * 5), "5d");
         assert_eq!(format_age(60 * 60 * 24 * 30), "4w");
+    }
+
+    /// A minimal row carrying the given loglik class — everything else is
+    /// the empty/zero placeholder shape used by the error branch.
+    fn row_with_type(loglik_type: Option<crate::fit::loglik::LoglikType>) -> TableRow {
+        TableRow {
+            schema: table_row::TableRowSchema::current(),
+            fit_id: "abc12345".into(),
+            fit_hash: "abc12345".into(),
+            label: None,
+            stem: "model".into(),
+            model_identity: "mid".into(),
+            stages: vec!["pgas".into()],
+            method: "pgas".into(),
+            config_diff_from_baseline: super::super::config_diff::ConfigDiff::identity(""),
+            converged: true,
+            gate_verdict: "n/a".into(),
+            best_loglik: None,
+            loglik_type,
+            max_chain_agreement: None,
+            max_rhat: Some(1.01),
+            acceptance_rate: None,
+            ess_at_mle: None,
+            ess_posterior: None,
+            params: std::collections::BTreeMap::new(),
+            delta_ll_vs_best: 0.0,
+            age_seconds: 0,
+            created_at: String::new(),
+            stale: false,
+            stale_reason: None,
+        }
+    }
+
+    /// gh#280: the CSV gains an **appended** `loglik_type` column (positional,
+    /// so existing columns never shift). A PGAS row whose `best_loglik` is
+    /// empty still reports `complete_data` in the new column. Fails on the
+    /// pre-gh#280 header (no such column).
+    #[test]
+    fn csv_appends_loglik_type_column() {
+        let csv = render_csv(&[row_with_type(Some(crate::fit::loglik::LoglikType::CompleteData))]);
+        let header = csv.lines().next().unwrap();
+        assert!(header.ends_with(",loglik_type"),
+            "loglik_type must be the last (appended) column: {header}");
+        // best_loglik stays where it was — the column count grew by exactly 1.
+        assert_eq!(header.split(',').count(),
+            csv.lines().nth(1).unwrap().split(',').count(),
+            "header and row must have the same field count");
+        let row = csv.lines().nth(1).unwrap();
+        assert!(row.ends_with(",complete_data"),
+            "PGAS row's appended column carries the joint tag: {row}");
+        // A legacy row with no type renders `unknown`, never inferred.
+        let csv2 = render_csv(&[row_with_type(None)]);
+        assert!(csv2.lines().nth(1).unwrap().ends_with(",unknown"),
+            "absent type renders `unknown`: {csv2}");
     }
 
     /// Cohort filtering on `--with-method` keeps only the requested
