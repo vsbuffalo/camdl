@@ -575,7 +575,7 @@ When the stage declares `init = "from_mle"` +
   values)
 - Explicit `--rw-sd` CLI flags override everything
 
-When no `init_mle` is declared (default `init = "lhs"`, etc.):
+When no `init_mle` is declared (default `init = "uniform_unconstrained"`, etc.):
 
 - Starting values come from model defaults + fit.toml `start` fields
 - rw_sd comes from fit.toml `[estimate]` rw_sd values

@@ -70,6 +70,29 @@ pub enum InitMethod {
     Single,
     Uniform,
     Lhs,
+    /// Stan-style initialization. Each chain's start is an i.i.d. draw
+    /// `z ~ Uniform(-RADIUS, RADIUS)` on the *unconstrained* scale
+    /// (Stan's `init_radius`, default 2), squashed to the open unit
+    /// interval `u = σ(z)` via the logistic sigmoid, then mapped to the
+    /// natural parameter scale through the same transform-aware seam LHS
+    /// uses ([`lhs_map_to_natural`]): log-uniform interior for `Log`
+    /// parameters with positive bounds, linear interior otherwise.
+    ///
+    /// Boundary-avoiding (`σ(±2) ≈ (0.119, 0.881)` is a fixed interior
+    /// band, so starts never sit on a bound — no degenerate `-inf`
+    /// likelihoods or zero-gradient starts) and scale-invariant (the same
+    /// radius works whether a parameter is `O(1)` or `O(1e6)`). This is
+    /// Stan's well-tested default initialization (mc-stan.org Reference
+    /// Manual, "Initialization"). For a `Logit` parameter it is exactly
+    /// Stan's `lo + (hi-lo)·σ(z)`; for a `Log` rate it is the
+    /// camdl-faithful log-scale analog `lo·(hi/lo)^σ(z)`, keeping the
+    /// gh#42 log-scale-awareness that drove LHS past the legacy linear
+    /// `Uniform`. Draws are i.i.d. (no Latin-hypercube stratification) —
+    /// over-dispersed independent starts are the textbook basis for MCMC
+    /// convergence diagnostics. `n_chains < 2 ⇒ base` (same contract as
+    /// LHS/Uniform), so flipping the default only moves multi-chain fits.
+    #[serde(rename = "uniform_unconstrained")]
+    UniformUnconstrained,
     /// Pull per-chain starts from the top-K rows of a `camdl survey`
     /// landscape. Requires sibling fields `survey_path` (CAS dir) and
     /// `survey_top_k_n` (defaults to `chains`) on the same stage. The
@@ -131,16 +154,20 @@ pub enum MleSource {
 }
 
 impl Default for InitMethod {
-    /// LHS — Latin-hypercube stratified sampling, scale-aware via the
-    /// parameter's `Transform`. Strictly better basin coverage than
-    /// `Uniform` at the chain counts we typically run (gh#42 typhoid
-    /// evidence: 30 LHS-drawn chains reach a basin 80,542 nats better
-    /// than 8 uniform-random-start chains, holding everything else
-    /// equal). The legacy `Uniform` default existed for backward
-    /// compat with v1 scout's inline random-start loop; LHS supersedes
-    /// it and is now the default across IF2 / PGAS / PMMH / NLopt
-    /// multi-chain stages.
-    fn default() -> Self { InitMethod::Lhs }
+    /// Stan-style `UniformUnconstrained` — i.i.d. boundary-avoiding,
+    /// scale-invariant draws on the unconstrained scale (see the variant
+    /// doc). It keeps the log-scale-awareness that drove the gh#42 win
+    /// over the legacy linear `Uniform` (both route through
+    /// [`lhs_map_to_natural`]) while adding Stan's robustness: starts can
+    /// never land on a bound, and the radius is bounds-independent. The
+    /// trade-off versus `Lhs` is i.i.d. rather than Latin-hypercube
+    /// stratified draws — over-dispersed independent starts are the
+    /// textbook choice for MCMC convergence diagnostics, at the cost of
+    /// LHS's guaranteed full-bounds stratification (which matters most for
+    /// low-chain-count IF2 scout basin-finding; a scout that wants maximal
+    /// coverage can set `init = "lhs"`). Default across IF2 / PGAS / PMMH
+    /// / NLopt multi-chain stages.
+    fn default() -> Self { InitMethod::UniformUnconstrained }
 }
 
 impl std::str::FromStr for InitMethod {
@@ -155,12 +182,14 @@ impl std::str::FromStr for InitMethod {
             "single"        => Ok(InitMethod::Single),
             "uniform"       => Ok(InitMethod::Uniform),
             "lhs"           => Ok(InitMethod::Lhs),
+            "uniform_unconstrained" | "uniform-unconstrained"
+                            => Ok(InitMethod::UniformUnconstrained),
             "survey_top_k"  => Ok(InitMethod::SurveyTopK),
             "from_prior" | "from-prior" => Ok(InitMethod::FromPrior),
             other => Err(format!(
                 "unknown init_method '{}': expected one of \
-                 single, uniform, lhs, survey_top_k, from_prior. \
-                 from-posterior / from-mle / from-params require \
+                 single, uniform, lhs, uniform_unconstrained, survey_top_k, \
+                 from_prior. from-posterior / from-mle / from-params require \
                  companion path flags and cannot be set as a bare string.",
                 other)),
         }
@@ -180,6 +209,7 @@ impl std::fmt::Display for InitMethod {
             InitMethod::Single             => "single",
             InitMethod::Uniform            => "uniform",
             InitMethod::Lhs                => "lhs",
+            InitMethod::UniformUnconstrained => "uniform_unconstrained",
             InitMethod::SurveyTopK         => "survey_top_k",
             InitMethod::FromPrior          => "from_prior",
             InitMethod::FromPosterior { .. } => "from_posterior",
@@ -204,6 +234,7 @@ impl clap::ValueEnum for InitMethod {
             InitMethod::Single,
             InitMethod::Uniform,
             InitMethod::Lhs,
+            InitMethod::UniformUnconstrained,
             InitMethod::SurveyTopK,
             InitMethod::FromPrior,
         ]
@@ -214,6 +245,7 @@ impl clap::ValueEnum for InitMethod {
             InitMethod::Single       => "single",
             InitMethod::Uniform      => "uniform",
             InitMethod::Lhs          => "lhs",
+            InitMethod::UniformUnconstrained => "uniform_unconstrained",
             InitMethod::SurveyTopK   => "survey_top_k",
             InitMethod::FromPrior    => "from_prior",
             // Payload variants are not surfaced via value_enum.
@@ -248,6 +280,10 @@ pub fn build_chain_starts(
         InitMethod::Lhs => {
             if n_chains < 2 { return None; }
             Some(build_lhs_chain_starts(base, n_chains, seed))
+        }
+        InitMethod::UniformUnconstrained => {
+            if n_chains < 2 { return None; }
+            Some(build_uniform_unconstrained_chain_starts(base, n_chains, seed))
         }
         InitMethod::SurveyTopK => {
             // Routed through `build_chain_starts_from_survey` at the
@@ -559,6 +595,42 @@ fn build_lhs_chain_starts(
     (0..n_chains).map(|chain_id| {
         base.iter().enumerate().map(|(d, spec)| {
             let initial = lhs_map_to_natural(spec, u[chain_id][d]);
+            EstimatedParam { initial, ..spec.clone() }
+        }).collect()
+    }).collect()
+}
+
+/// Stan's default initialization radius on the unconstrained scale: each
+/// chain draws `z ~ Uniform(-2, 2)` per parameter (Stan's `init_radius`,
+/// mc-stan.org Reference Manual, "Initialization"). Hardcoded for v1.
+pub(crate) const STAN_INIT_RADIUS: f64 = 2.0;
+
+/// Stan-style starts: i.i.d. `z ~ Uniform(-R, R)` on the unconstrained
+/// scale, squashed to the open unit interval `u = σ(z)` and mapped to
+/// natural scale through the same transform-aware seam as LHS
+/// ([`lhs_map_to_natural`]). See [`InitMethod::UniformUnconstrained`] for
+/// the geometry and the robustness rationale.
+///
+/// Per-chain RNGs derive from `seed` via `derive_chain_seed` (same as
+/// `build_uniform_chain_starts`), so draws are independent across chains
+/// and reproducible given the fit seed. Unlike LHS there is no
+/// stratification: each `(chain, param)` coordinate is an independent
+/// squashed-uniform draw.
+fn build_uniform_unconstrained_chain_starts(
+    base: &[EstimatedParam],
+    n_chains: usize,
+    seed: u64,
+) -> Vec<Vec<EstimatedParam>> {
+    (0..n_chains).map(|chain_id| {
+        let mut rng = StatefulRng::new(derive_chain_seed(seed, chain_id));
+        base.iter().map(|spec| {
+            // z ~ U(-R, R) on the unconstrained scale; σ(z) lands in the
+            // open interior of [0, 1] (σ(±2) ≈ 0.119 / 0.881), so the
+            // mapped start never sits on a bound regardless of [lo, hi]
+            // width — boundary-avoiding and scale-invariant.
+            let z = (rng.uniform() * 2.0 - 1.0) * STAN_INIT_RADIUS;
+            let u = 1.0 / (1.0 + (-z).exp());
+            let initial = lhs_map_to_natural(spec, u);
             EstimatedParam { initial, ..spec.clone() }
         }).collect()
     }).collect()
@@ -1037,6 +1109,7 @@ pub fn format_chain_init_source(
         InitMethod::Single => "single".into(),
         InitMethod::Uniform => "uniform".into(),
         InitMethod::Lhs => "lhs".into(),
+        InitMethod::UniformUnconstrained => "uniform_unconstrained".into(),
         InitMethod::SurveyTopK => {
             // SurveyTopKResult should have been provided. Defensive
             // fallback so a wiring bug doesn't write a corrupt
@@ -1160,11 +1233,11 @@ mod tests {
     }
 
     #[test]
-    fn init_method_default_is_lhs() {
-        // LHS by default for all multi-chain stages — see
-        // Default impl in init.rs for the rationale (gh#42 typhoid
-        // evidence + the supersession of the legacy Uniform default).
-        assert_eq!(InitMethod::default(), InitMethod::Lhs);
+    fn init_method_default_is_uniform_unconstrained() {
+        // Stan-style UniformUnconstrained by default for all multi-chain
+        // stages — boundary-avoiding + scale-invariant; keeps the gh#42
+        // log-scale awareness, adds Stan's robustness over Uniform/LHS.
+        assert_eq!(InitMethod::default(), InitMethod::UniformUnconstrained);
     }
 
     #[test]
@@ -1173,6 +1246,7 @@ mod tests {
             InitMethod::Single,
             InitMethod::Uniform,
             InitMethod::Lhs,
+            InitMethod::UniformUnconstrained,
             InitMethod::SurveyTopK,
             InitMethod::FromPrior,
         ] {
@@ -1203,6 +1277,7 @@ mod tests {
             (InitMethod::Single,                              "single"),
             (InitMethod::Uniform,                             "uniform"),
             (InitMethod::Lhs,                                 "lhs"),
+            (InitMethod::UniformUnconstrained,                "uniform_unconstrained"),
             (InitMethod::SurveyTopK,                          "survey_top_k"),
             (InitMethod::FromPrior,                           "from_prior"),
             (InitMethod::FromPosterior {
@@ -1302,6 +1377,66 @@ mod tests {
                 assert_eq!(p1.initial, p2.initial);
             }
         }
+    }
+
+    #[test]
+    fn uniform_unconstrained_n1_returns_none() {
+        // Single chain ⇒ base spec — same `n_chains < 2` contract as
+        // LHS/Uniform, so flipping the default only moves multi-chain fits.
+        let base = vec![ep("a", 0.0, 1.0, Transform::None, 0.5)];
+        assert!(build_chain_starts(InitMethod::UniformUnconstrained, &base, 1, 42).is_none());
+    }
+
+    #[test]
+    fn uniform_unconstrained_is_boundary_avoiding() {
+        // z ~ U(-2,2) ⇒ σ(z) ∈ (σ(-2), σ(2)) ≈ (0.1192, 0.8808), a fixed
+        // interior band independent of the bounds. For a linear param on
+        // [lo,hi] every start falls strictly inside the band — never on a
+        // bound.
+        let (lo, hi) = (0.0_f64, 1.0_f64);
+        let sig = |z: f64| 1.0 / (1.0 + (-z).exp());
+        let band_lo = lo + (hi - lo) * sig(-STAN_INIT_RADIUS);
+        let band_hi = lo + (hi - lo) * sig(STAN_INIT_RADIUS);
+        let base = vec![ep("p", lo, hi, Transform::None, 0.5)];
+        let starts = build_chain_starts(InitMethod::UniformUnconstrained, &base, 200, 7).unwrap();
+        for c in &starts {
+            let v = c[0].initial;
+            assert!(v > band_lo - 1e-12 && v < band_hi + 1e-12,
+                "start {v} escaped the σ(±2) interior band [{band_lo}, {band_hi}]");
+            assert!(v > lo && v < hi, "start {v} on/outside bound [{lo}, {hi}]");
+        }
+    }
+
+    #[test]
+    fn uniform_unconstrained_log_param_stays_in_log_interior() {
+        // Log param [1e-5, 1e-2]: θ = lo·(hi/lo)^σ(z). log10-interior band
+        // is [-5 + 3·σ(-2), -5 + 3·σ(2)] = [-4.64, -2.36] — strictly inside
+        // the declared decades.
+        let base = vec![ep("rate", 1e-5, 1e-2, Transform::Log { lo: 1e-5, hi: 1e-2 }, 1e-3)];
+        let starts = build_chain_starts(InitMethod::UniformUnconstrained, &base, 200, 7).unwrap();
+        for c in &starts {
+            let l = c[0].initial.log10();
+            assert!(l > -4.65 && l < -2.35,
+                "log10(start) = {l} escaped the σ(±2) log-interior [-4.64, -2.36]");
+        }
+    }
+
+    #[test]
+    fn uniform_unconstrained_deterministic_and_iid() {
+        let base = vec![
+            ep("a", 0.0, 1.0, Transform::None, 0.5),
+            ep("b", 1e-3, 1.0, Transform::Log { lo: 1e-3, hi: 1.0 }, 0.1),
+        ];
+        let s1 = build_chain_starts(InitMethod::UniformUnconstrained, &base, 16, 42).unwrap();
+        let s2 = build_chain_starts(InitMethod::UniformUnconstrained, &base, 16, 42).unwrap();
+        for (c1, c2) in s1.iter().zip(s2.iter()) {
+            for (p1, p2) in c1.iter().zip(c2.iter()) {
+                assert_eq!(p1.initial, p2.initial);
+            }
+        }
+        // i.i.d. across chains: chain 0 and chain 1 differ on both params.
+        assert_ne!(s1[0][0].initial, s1[1][0].initial);
+        assert_ne!(s1[0][1].initial, s1[1][1].initial);
     }
 
     #[test]

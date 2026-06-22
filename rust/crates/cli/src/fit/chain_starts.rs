@@ -57,6 +57,10 @@ pub enum InitSource {
     /// Per-chain uniform random draw within parameter bounds (legacy
     /// `Uniform` mode).
     UniformDraw { seed: u64 },
+    /// Per-chain Stan-style draw: i.i.d. `Uniform(-2, 2)` on the
+    /// unconstrained scale, squashed and mapped into bounds
+    /// (`InitMethod::UniformUnconstrained`).
+    UnconstrainedDraw { seed: u64 },
     /// One stratum of an LHS layout.
     LhsCell { row: usize },
     /// Per-chain draw from a parameter's `~` prior declaration (or
@@ -79,6 +83,7 @@ impl InitSource {
         match self {
             InitSource::SeededBase      => "seeded_base",
             InitSource::UniformDraw{..} => "uniform_draw",
+            InitSource::UnconstrainedDraw{..} => "unconstrained_draw",
             InitSource::LhsCell{..}     => "lhs_cell",
             InitSource::PriorDraw{..}   => "prior_draw",
             InitSource::PosteriorRow{..}=> "posterior_row",
@@ -227,6 +232,8 @@ pub fn draw_chain_starts(
             draw_uniform(resolved, n_chains, seed),
         InitMethod::Lhs =>
             draw_lhs(resolved, n_chains, seed),
+        InitMethod::UniformUnconstrained =>
+            draw_uniform_unconstrained(resolved, n_chains, seed),
         InitMethod::SurveyTopK => {
             // SurveyTopK requires a SurveyFitContext that's only built
             // at the stage callsite; the canonical entry point for
@@ -364,6 +371,47 @@ fn draw_lhs(
             chain_id,
             values,
             source: InitSource::LhsCell { row: chain_id },
+        }
+    }).collect()
+}
+
+fn draw_uniform_unconstrained(
+    resolved: &ResolvedParameters,
+    n_chains: usize,
+    seed: u64,
+) -> Vec<ChainStart> {
+    // Stan-style: i.i.d. `z ~ U(-R, R)` per (chain, param) on the
+    // unconstrained scale, squashed to `u = σ(z)` (a fixed interior band)
+    // then mapped into `[lo, hi]`. Boundary-avoiding and scale-invariant.
+    // Like `draw_lhs`, this surface uses the linear `[lo, hi]` mapping (it
+    // has bounds, not the full `Transform`); the Transform-aware
+    // production path for legacy modes lives in
+    // `init::build_uniform_unconstrained_chain_starts`.
+    let n_params = resolved.estimate_set.len();
+    if n_params == 0 || n_chains < 2 {
+        return draw_single(resolved, n_chains);
+    }
+    let radius = crate::fit::init::STAN_INIT_RADIUS;
+    let bounds_map = bounds_map_for_estimate(resolved);
+    let base = estimate_values_from_resolved(resolved);
+    (0..n_chains).map(|chain_id| {
+        let chain_seed = derive_chain_seed(seed, chain_id);
+        let mut rng = StatefulRng::new(chain_seed);
+        let mut values = HashMap::with_capacity(n_params);
+        for name in &resolved.estimate_set {
+            let z = (rng.uniform() * 2.0 - 1.0) * radius;
+            let u = 1.0 / (1.0 + (-z).exp());
+            let val = match bounds_map.get(name) {
+                Some((lo, hi)) if lo.is_finite() && hi.is_finite() =>
+                    lo + u * (hi - lo),
+                _ => base.get(name).copied().unwrap_or(0.0) * (0.5 + u),
+            };
+            values.insert(name.clone(), val);
+        }
+        ChainStart {
+            chain_id,
+            values,
+            source: InitSource::UnconstrainedDraw { seed: chain_seed },
         }
     }).collect()
 }

@@ -987,6 +987,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                                 seed: crate::util::derive_chain_seed(
                                     seeds[0], chain_id),
                             },
+                        crate::fit::init::InitMethod::UniformUnconstrained =>
+                            crate::fit::chain_starts::InitSource::UnconstrainedDraw {
+                                seed: crate::util::derive_chain_seed(
+                                    seeds[0], chain_id),
+                            },
                         crate::fit::init::InitMethod::Single |
                         crate::fit::init::InitMethod::SurveyTopK =>
                             crate::fit::chain_starts::InitSource::SeededBase,

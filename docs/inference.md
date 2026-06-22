@@ -968,7 +968,7 @@ variance, so NUTS takes appropriately-sized steps in every direction.
 camdl fit run fit.toml --stage pgas
 
 # From random starts (overdispersed initialization):
-#   [stages.pgas] init = "lhs"  (or omit; lhs is the default)
+#   [stages.pgas] init = "uniform_unconstrained"  (or omit; it's the default)
 camdl fit run fit.toml --stage pgas --seed 42
 
 # Force MH-within-Gibbs instead of NUTS
@@ -1264,23 +1264,33 @@ and **profile**.
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 16
-init = "lhs" # this is now the default; shown for clarity
+init = "uniform_unconstrained" # this is the default; shown for clarity
 ```
 
-| Mode            | Behaviour                                                                                                                                                                                                                                                             | When to use                                                                                                                                                                                  |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lhs` (default) | Latin-hypercube stratified sampling, **scale-aware via the parameter's transform**: `Log`-typed rates are sampled in log space and exponentiated, so a single LHS pass spans orders of magnitude. `Logit`/`None`-typed parameters are sampled linearly in `[lo, hi]`. | The default for every multi-chain stage. Stratified coverage at the chain counts we typically run; supersedes the legacy `uniform` default.                                                  |
-| `uniform`       | Per-chain uniform random within natural-scale bounds. Chain 0 keeps the seeded start.                                                                                                                                                                                 | Legacy mode. Equivalent to LHS for `Logit`/`None` parameters, but worse for `Log`-typed parameters at low chain count (clumps in linear space). Kept for reproducibility of pre-LHS results. |
-| `single`        | Every chain at the seeded `[estimate].start` (or its `Transform`-aware uniform fallback when `start` is omitted). Chains differ only by per-chain RNG.                                                                                                                | See "When `single` is the right choice" below.                                                                                                                                               |
+| Mode                              | Behaviour                                                                                                                                                                                                                                                                                                                                                               | When to use                                                                                                                                                                                                 |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `uniform_unconstrained` (default) | Stan-style: each chain draws `z ~ Uniform(-2, 2)` i.i.d. per parameter on the **unconstrained** scale, squashes it to `u = σ(z)`, and maps that into bounds the transform-aware way `lhs` does (log-uniform for `Log` rates, linear otherwise). `σ(±2) ≈ (0.119, 0.881)` is a fixed interior band, so starts never sit on a bound and the radius is bounds-independent. | The default for every multi-chain stage. Boundary-avoiding (no `-inf`/zero-gradient starts) and scale-invariant; Stan's well-tested default. Over-dispersed i.i.d. starts are the textbook basis for R-hat. |
+| `lhs`                             | Latin-hypercube stratified sampling, **scale-aware via the parameter's transform**: `Log`-typed rates are sampled in log space and exponentiated, so a single LHS pass spans orders of magnitude. `Logit`/`None`-typed parameters are sampled linearly in `[lo, hi]`.                                                                                                   | When you want _stratified_ full-bounds coverage rather than i.i.d. draws — most useful for low-chain-count IF2 scout basin-finding.                                                                         |
+| `uniform`                         | Per-chain uniform random within natural-scale bounds. Chain 0 keeps the seeded start.                                                                                                                                                                                                                                                                                   | Legacy mode. Linear in natural space, so it clumps for `Log`-typed parameters at low chain count. Kept for reproducibility of pre-`lhs` results.                                                            |
+| `single`                          | Every chain at the seeded `[estimate].start` (or its `Transform`-aware uniform fallback when `start` is omitted). Chains differ only by per-chain RNG.                                                                                                                                                                                                                  | See "When `single` is the right choice" below.                                                                                                                                                              |
 
 When a stage uses `init = "from_mle"` + `init_mle = "<prior>"`, every chain
 starts from the prior stage's MLE — that's the intent of the handoff.
 
-**Why LHS is the default.** With single-point starts (or clumpy uniform starts
-at low chain counts), chains find one basin and miss the rest. On stratified epi
-models with multiple modes, LHS-drawn starts reach basins that single-point
-starts never see — on the typhoid stratified scout, 30 LHS chains beat 8
-uniform-random chains by ~80,000 nats, holding everything else equal.
+**Why `uniform_unconstrained` is the default.** Stan initializes by drawing
+`Uniform(-2, 2)` on the unconstrained (transformed) scale and mapping back into
+the constrained space (mc-stan.org Reference Manual, "Initialization"). It's
+**boundary-avoiding** — the sigmoid squash keeps every draw in the interior of
+`[lo, hi]`, so no chain begins where the likelihood is `-inf` or the gradient
+degenerates — and **scale-invariant**: the same radius works whether a parameter
+is `O(1)` or `O(1e6)`. camdl keeps the same transform-aware mapping `lhs` uses
+(`Log` rates in log space), so it retains the log-scale awareness that drove
+`lhs` past the legacy linear `uniform`, and simply replaces LHS's stratified
+draw with i.i.d. over-dispersed draws — the standard recipe for diagnosing MCMC
+convergence via R-hat. The one thing it gives up versus `lhs` is _guaranteed_
+stratified coverage of each dimension's range; a low-chain-count scout that
+needs that (e.g. the typhoid stratified scout, where 30 LHS chains beat 8
+uniform-random chains by ~80,000 nats) can set `init = "lhs"`.
 
 **When `single` is the right choice.** Four legitimate cases:
 
