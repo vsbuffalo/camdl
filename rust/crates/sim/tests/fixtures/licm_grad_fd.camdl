@@ -1,0 +1,59 @@
+# Finite-difference gradient gate for the gh#272 LICM pass (gh#284 coverage).
+#
+# A single-patch SEIR whose infection rate carries a param-only TRANSCENDENTAL
+# kernel `exp(-kappa)`: LICM hoists `beta * exp(-1.0 * kappa)` (invariant +
+# expensive) into a `per_eval_binding`, so the rate AND its autodiff gradient
+# w.r.t. the kernel parameter `kappa` evaluate through the staged per-eval path.
+# A NegBinomial observation makes the model fittable.
+#
+# The companion test (gradient_check_obs.rs::licm_hoisting_kernel_grad_matches_fd)
+# asserts the model actually hoists (per_eval_bindings non-empty — non-vacuity)
+# and that the analytic complete-data-loglik gradient, INCLUDING `kappa`, matches
+# a central finite difference. This is the DIRECT LICM-on gradient check: the A/B
+# gate (gate_licm_ab.rs) proves on == off, this proves on == truth.
+#
+# Regenerate (LICM is default-on since the gh#272 flip; the test sets parameter
+# values, so none are baked here):
+#   camdlc licm_grad_fd.camdl > licm_grad_fd.ir.json
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+let N = S + E + I + R
+
+parameters {
+  beta   : rate        in [0.001, 0.5]
+  sigma  : rate        in [0.01,  1.0]
+  gamma  : rate        in [0.01,  1.0]
+  kappa  : positive    in [0.0,   3.0]   # transcendental-kernel param (hoisted)
+  rho    : probability in [0.0,   1.0]   # reporting fraction
+  k      : real        in [0.1,  100.0]  # NB dispersion
+  N0     : count       in [1000, 1000000]
+  I0     : count       in [1,    10000]
+}
+
+transitions {
+  infection   : S --> E  @ beta * exp(-1.0 * kappa) * S * I / N
+  progression : E --> I  @ sigma * E
+  recovery    : I --> R  @ gamma * I
+}
+
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 60 'days
+}

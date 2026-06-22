@@ -461,6 +461,66 @@ fn gh76_negbin_obs_grad_matches_fd() {
     );
 }
 
+#[test]
+fn licm_hoisting_kernel_grad_matches_fd() {
+    // gh#284 coverage: the DIRECT LICM-on gradient check. The existing FD tests
+    // load `seir_observations` (linear rate, 0 per-eval bindings), so LICM-on
+    // gradient correctness rested on COMPOSING two suites — the A/B gate
+    // (on == off) and these FD checks (off == truth). This test closes the gap:
+    // a fixture whose infection rate carries a param-only transcendental kernel
+    // `beta * exp(-kappa)` that LICM actually hoists, checked FD-vs-analytic on
+    // `kappa` itself — whose gradient routes through a `per_eval_binding`
+    // (`__licm_1 = beta * exp(-kappa) * -1`). on == truth, directly.
+    let mut model = load_model("tests/fixtures/licm_grad_fd.ir.json");
+    set_param_defaults(&mut model, &[
+        ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1), ("kappa", 0.4),
+        ("rho", 0.5), ("k", 5.0), ("N0", 10000.0), ("I0", 10.0),
+    ]);
+    // (t_end = 60 days comes from the fixture; no override needed.)
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+
+    // Non-vacuity: the pass actually fired. Without this, a future change that
+    // stopped hoisting this kernel would turn the test into a no-op LICM check.
+    assert!(
+        !compiled.model.per_eval_bindings.is_empty(),
+        "fixture must hoist (per_eval_bindings non-empty) or this is not a LICM-on check"
+    );
+
+    let (params, param_names) = build_params_and_names(&compiled);
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let dt = 1.0;
+    let mut rng = StatefulRng::new(43);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let n_substeps = trajectory.substeps.len();
+
+    let (substep_idx, obs_times) = obs_substep_indices_regular(
+        t_start, dt, n_substeps, 7.0, 7.0, t_end,
+    );
+
+    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+    let observations: Vec<Observation> = obs_times.iter()
+        .map(|&t| Observation { time: t, value: 0.0 }).collect();
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let kappa_idx = compiled.param_index["kappa"];
+    let beta_idx = compiled.param_index["beta"];
+    let rho_idx = compiled.param_index["rho"];
+    let k_idx = compiled.param_index["k"];
+
+    fd_check(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices,
+        // kappa is the load-bearing index — its gradient runs through the
+        // hoisted per-eval binding; beta/rho/k guard the rest of the surface.
+        &[kappa_idx, beta_idx, rho_idx, k_idx],
+        dt, 1e-4,
+        "licm_hoisting_kernel",
+    );
+}
+
 /// Build a Poisson-only obs version of seir_observations programmatically.
 fn build_poisson_seir() -> ir::Model {
     let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");

@@ -192,6 +192,18 @@ let integrator_serde_test () =
   in
   Alcotest.(check bool) "unknown integrator method is rejected" true rejects_unknown
 
+(* gh#284: the `PerEvalRef` expr variant (gh#272 LICM) appears in no golden model
+   — no golden hoists — so the golden-driven round-trip above never exercises its
+   serde path. Assert it directly, both bare and nested in a compound node,
+   mirroring the Rust `roundtrips_every_variant` coverage. *)
+let expr_serde_test () =
+  let open Ir in
+  let roundtrips (e : expr) = Serde.expr_of_json (Serde.expr_to_json e) = e in
+  Alcotest.(check bool) "bare PerEvalRef round-trips" true
+    (roundtrips (PerEvalRef "__licm_0"));
+  Alcotest.(check bool) "PerEvalRef nested in a BinOp round-trips" true
+    (roundtrips (BinOp { op = Mul; left = PerEvalRef "__licm_1"; right = Param "beta" }))
+
 let () =
   let tests =
     List.map (fun name ->
@@ -206,6 +218,7 @@ let () =
   let invariant_tests = [
     Alcotest.test_case "prior_spec single slot" `Quick prior_spec_single_slot_test;
     Alcotest.test_case "integrator serde (rk45 round-trip + strict)" `Quick integrator_serde_test;
+    Alcotest.test_case "expr serde (PerEvalRef round-trips)" `Quick expr_serde_test;
   ] in
   Alcotest.run "IR round-trip" [
     ("golden", tests);

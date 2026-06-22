@@ -185,9 +185,11 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings:           Vec<Binding>,
     /// gh#272 LICM: param/table-only loop-invariant bindings, topologically
-    /// ordered. Produced by the LICM pass (post-autodiff, `CAMDL_LICM`); empty by
-    /// default. `default`/`skip_serializing_if` mirror `bindings` so default-off
-    /// IR is byte-identical to pre-0.19 (the empty field is omitted).
+    /// ordered. Produced by the LICM pass (post-autodiff), which is on by default
+    /// (`CAMDL_NO_LICM` / `--no-licm` disables it); empty only when the pass is
+    /// off or the model has no hoistable subexpression.
+    /// `default`/`skip_serializing_if` mirror `bindings` so an empty field is
+    /// omitted (byte-identical to a model that produced no per-eval bindings).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub per_eval_bindings:  Vec<Binding>,
     pub initial_conditions: InitialConditions,

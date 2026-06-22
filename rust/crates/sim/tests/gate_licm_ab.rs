@@ -393,7 +393,7 @@ fn gate_licm_inference_producer_byte_identical() {
 // Drive all three on the hoisted (ON) and inlined (OFF) fixtures at the same
 // seed / params / grid, and assert the PGAS complete-data log-likelihood AND its
 // gradient are byte-identical off vs on. This is the result-level standing gate:
-// flipping `--licm` on must not move a PGAS fit's numbers. (Measured on the real
+// toggling `--no-licm` must not move a PGAS fit's numbers. (Measured on the real
 // SLE-14 model the loglik is identical to the last decimal — −25771.0 both — at
 // a 5.9× speedup; this pins that equality permanently on a self-contained
 // fixture.) gh#272 Phase 2.

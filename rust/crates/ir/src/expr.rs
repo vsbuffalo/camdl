@@ -437,6 +437,7 @@ mod deserialize_tests {
             Expr::reduce(vec![]), // empty sum (= 0)
             Expr::binding_ref("N_patch1"),
             Expr::obs_column_ref("tested"),
+            Expr::per_eval_ref("__licm_0"), // gh#272 LICM variant (gh#284: close the hole)
         ] {
             roundtrip(&e);
         }
