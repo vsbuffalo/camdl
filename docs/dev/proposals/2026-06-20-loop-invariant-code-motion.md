@@ -1,7 +1,8 @@
 # Loop-invariant code motion: per-eval staging of param/table-only subexpressions
 
-Date: 2026-06-20 Status: Phase 1 implemented (ODE/forward; default-off) Issue:
-gh#272 Schema: 0.18 → 0.19 (adds `per_eval_bindings` + `Expr::PerEvalRef`)
+Date: 2026-06-20 Status: Phases 1–2 implemented (ODE/forward + stochastic
+inference; default-off) Issue: gh#272 Schema: 0.18 → 0.19 (adds
+`per_eval_bindings` + `Expr::PerEvalRef`)
 
 The runtime half is **Design C — a staged per-eval scratch threaded as data on
 `EvalCtx`** (`per_eval: Option<&[f64]>`, the sibling of `int_float_override`).
@@ -9,11 +10,14 @@ The compiler half — the OCaml LICM pass, the IR nodes, the keystone validation
 is shared with the original sketch; only the runtime evaluation of `PerEvalRef`
 differs from the first cut. Measured on the real MRE kernel: ~4.2× faster per
 ODE step, bringing the in-model fittable-γ kernel to ~precomputed-matrix speed.
-Still opt-in (`CAMDL_LICM`). Remaining: Phase 2 (stochastic per-particle staging
-— pure performance; the inference producer steps already pass `None` and are
-_correct_ via the on-demand fallback), the default-on flip (a deliberate,
-run-id-re-keying release decision), and the flat-eval tape / strength-reduction
-follow-ons.
+The staged scratch is now threaded through every backend AND every stochastic
+inference producer (PF / IF2 / PGAS / PMMH), so the in-model fittable kernel
+reaches fixed-kernel parity on the production Bayesian path, not just the ODE
+skeleton. Still opt-in (`CAMDL_LICM`). Remaining: the default-on flip (a
+deliberate, run-id-re-keying release decision), an opt-in `--licm` flag wired
+into the run identity so `camdl fit` can pick LICM up before the flip (today the
+env flag is a no-op through fit — its IR cache keys on source + camdlc hash, not
+the flag), and the flat-eval tape / strength-reduction follow-ons.
 
 ## Problem
 
@@ -348,14 +352,23 @@ rewrite inside the hoisted body, not load-bearing for the main win.
      into every `step_one` / `eval_propensities` of the run. `step_one` — the
      producer step shared with inference — takes `per_eval` as a parameter, so
      forward passes the staged scratch and inference passes `None`.
-   - PF / IF2 / PGAS / PMMH: the inference producer steps pass `None` today
-     (on-demand, byte-identical). Per-particle staging is Phase 2 — and because
-     the scratch is owned/lent data, "one scratch per particle" is just a local
-     `Vec` inside the per-particle closure, structurally bound to that
-     particle's θ. There is no shared cache to mis-scope, so IF2's per-particle
-     perturbed θ (`if2.rs`) cannot serve one particle's kernel to another's θ —
-     the correctness obligation the original cache design carried as placement
-     discipline is dissolved into the type.
+   - Stochastic inference producers, each staged at its θ-stable boundary above
+     the substep loop and threaded through the shared `step_one` /
+     `log_transition_density_substep`:
+     - **PF** (`bootstrap_filter`) and **PMMH** (`bootstrap_filter_correlated`):
+       θ is global to the filter → stage once at the top, lend into every
+       particle's every substep.
+     - **IF2** (`run_if2`): θ is per-particle → stage inside the per-particle
+       closure from `pp`, before its substep walk. Because the scratch is
+       owned/lent data, "one scratch per particle" is just a local `Vec`
+       structurally bound to that particle's θ; there is no shared cache to
+       mis-scope, so IF2's per-particle perturbed θ cannot serve one particle's
+       kernel to another's θ — the correctness obligation the original cache
+       design carried as placement discipline is dissolved into the type.
+     - **PGAS** (`csmc_as` per sweep; `complete_data_loglik`[`_grad`];
+       `simulate_reference_on_grid`): θ is fixed per call → stage at the top,
+       thread into the producer, the per-substep density/gradient evals, and the
+       rate_grad `EvalCtx`.
 
 ### Why Design C — the alternatives considered
 
@@ -647,6 +660,16 @@ counter counts.
   fully-inlined OFF model). Non-vacuity: the ON model has non-empty
   `per_eval_bindings`, so the scratch is non-empty and the rate surface carries
   exercised `PerEvalRef` nodes.
+- **Inference producer A/B** (`gate_licm_inference_producer_byte_identical`):
+  the inference-path analogue of §2. PF / IF2 / PGAS / PMMH all advance
+  particles via `ProcessModel::step` → `chain_binomial::step_one` (the one
+  shared producer seam). Stepping the ON model with its staged scratch and the
+  OFF model on-demand under the same seed must yield byte-identical particle
+  counts AND flow accumulators across the window — a wrong-θ stage (the IF2
+  silent-wrong risk) would change the draws and diverge. Counts are integer, so
+  this is exact. The full inference loglik is a deterministic function of these
+  producer states plus per_eval-free observation scoring, so its byte-identity
+  follows.
 - **ODE-loglik under rayon** (no silent gap): both existing trajectory gates
   call `OdeSim::run` directly, never the inference seam. A gate that flips
   `CAMDL_LICM` and asserts an identical loglik from `compute_ode_loglik` under a
@@ -690,19 +713,25 @@ commit — a golden diff is never collateral.
    differentiation behaviour changes. Nails the benchmark. Default-off. The
    on-demand fallback makes this safe on the inference backends even before they
    stage a scratch.
-2. **Stochastic backends**: stage a per-particle scratch inside the PF/IF2/PGAS
-   per-particle (and CSMC) closures — a local `Vec` bound to that particle's θ.
-   Per-particle-interval reuse. Gated by the existing inference oracles.
-3. Flip default-on; golden regen.
-4. (Optional) strength-reduction peephole.
+2. **Stochastic backends (done).** Staged scratch threaded through the PF / IF2
+   / PGAS / PMMH producers at their θ-stable boundaries (filter-global for
+   PF/PMMH, per-particle for IF2, per-sweep/per-call for PGAS). Gated by the
+   existing inference oracles (LICM-off byte-identity) plus a new producer A/B
+   (`gate_licm_inference_producer_byte_identical`): ON staged vs OFF on-demand
+   through `step_one` yields byte-identical counts + flow accumulators.
+3. Flip default-on; golden regen. Precede with an opt-in `--licm` flag wired
+   into the run identity (the `config` level), so `camdl fit` can pick LICM up
+   before the flip — today `CAMDL_LICM` is a no-op through fit (its IR cache
+   keys on source + camdlc hash, not the flag).
+4. (Optional) strength-reduction peephole; flat-eval per-eval tape.
 
 ## Risks, non-goals, open questions
 
-- **Per-particle staging (Phase 2)** must compute the scratch from exactly that
+- **Per-particle staging (done).** IF2 computes the scratch from exactly that
   particle's θ. Because the scratch is owned/lent data (not ambient thread-local
   state), this is a local `Vec` inside the per-particle closure — there is no
-  scope to mis-bracket. The on-demand fallback bounds the blast radius further:
-  a missing scratch costs performance, never correctness.
+  scope to mis-bracket. The producer A/B and the on-demand fallback bound the
+  blast radius: a missing scratch costs performance, never correctness.
 - **Bitwise CSE** is a correctness requirement, not an optimization detail (the
   `-0.0` Reduce seed). The CSE key must be a bitwise expr hash.
 - **CSE cost threshold** (when a subtree is worth hoisting) is a heuristic;
