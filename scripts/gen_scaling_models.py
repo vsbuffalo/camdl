@@ -245,7 +245,8 @@ def _c_matrix(A: int) -> str:
 
 
 def gen_polio(P: int, A: int, grad: str, observe: bool = False,
-              coupling_degree: int = 0, to: str = "12 'years") -> str:
+              coupling_degree: int = 0, to: str = "12 'years",
+              immunity: float = 0.8, iota: float = 0.0, pop: int = 20010) -> str:
     """cVDPV2 metapop faithfully mirroring Daniel Klein's Sokoto model
     (gh#207/#209 + his exp-07 codegen): per (patch, age) stratum S, I_v
     (vaccine-derived), I_c (circulating), R, plus a single un-stratified AFP
@@ -291,6 +292,7 @@ def gen_polio(P: int, A: int, grad: str, observe: bool = False,
     birth_t   = pf("birth_rate", "0.0001")
     omega_t   = {a: pf(f"omega_{a}", "0.005") for a in ages}
     mu_t      = {a: pf(f"mu_{a}", "0.0002") for a in ages}
+    iota_t    = pf("iota", str(iota))
 
     L: list[str] = []
     L.append(f"# Auto-generated polio-cVDPV2 metapop: P={P} A={A} grad={grad}")
@@ -323,6 +325,8 @@ def gen_polio(P: int, A: int, grad: str, observe: bool = False,
         L.append("  mu_rev           : probability in [0.0, 0.1]")
         L.append("  rho_afp          : positive    in [1e-6, 1.0]")
         L.append("  k                : positive    in [0.1, 100.0]")
+        L.append("  iota             : positive    in [0.0, 1.0]")
+        L.append(f"  S0               : count       in [0, {pop}]")
         if coupling_degree > 0:
             L.append("  kappa            : rate        in [0.0, 1.0]")
         L.append("  aging_rate       : rate        in [0.0001, 0.01]")
@@ -348,7 +352,13 @@ def gen_polio(P: int, A: int, grad: str, observe: bool = False,
     L.append("")
 
     foi_v = "beta_v * S[l, a] * sum(b in age, C_age[a, b] * I_v[l, b] / N_age[l, b])"
-    foi_c = "beta_c * S[l, a] * sum(b in age, C_age[a, b] * I_c[l, b] / N_age[l, b])"
+    # A low external force of infection `iota` (imported circulating virus) keeps
+    # the circulating chain from going fully extinct — the fadeout-and-reemergence
+    # term, per the single-pop cvdpv2 model and the GPEI seeding assumption.
+    # `iota` is a parameter (scenarios switch it: 0 for a self-propagating
+    # outbreak, >0 for the contained import-sustained endemic).
+    foi_c = (f"beta_c * S[l, a] * (sum(b in age, C_age[a, b] * I_c[l, b] / N_age[l, b])"
+             f" + {iota_t})")
 
     L.append("transitions {")
     # Within-patch FOI with age mixing; I_v can revert to I_c at rate mu_rev.
@@ -400,12 +410,24 @@ def gen_polio(P: int, A: int, grad: str, observe: bool = False,
         L.append("}")
         L.append("")
 
+    # Initial conditions from population immunity. Susceptibles S0 (per cell) is
+    # a PARAMETER so scenarios set the regime: low immunity (high S0) → a
+    # self-propagating outbreak; high immunity (low S0) → contained endemic just
+    # below the EIP* = 1 - 1/R0 interruption threshold. seed = small planting.
+    seed = 5
+    if full:
+        s_expr = "S0"
+        r_expr = f"{pop - 2 * seed} - S0"
+    else:
+        s0_lit = round((1.0 - immunity) * pop)
+        s_expr = str(s0_lit)
+        r_expr = str(pop - 2 * seed - s0_lit)
     L.append("init {")
     L.append("  AFP = 0")
-    L.append("  S[l in patch, a in age] = 4000")
-    L.append("  I_v[l in patch, a in age] = 5")
-    L.append("  I_c[l in patch, a in age] = 5")
-    L.append("  R[l in patch, a in age] = 16000")
+    L.append(f"  S[l in patch, a in age] = {s_expr}")
+    L.append(f"  I_v[l in patch, a in age] = {seed}")
+    L.append(f"  I_c[l in patch, a in age] = {seed}")
+    L.append(f"  R[l in patch, a in age] = {r_expr}")
     L.append("}")
     L.append("")
     L.append("simulate {")
@@ -415,28 +437,45 @@ def gen_polio(P: int, A: int, grad: str, observe: bool = False,
     L.append("")
 
     if full:
+        # Two literature-grounded cVDPV2 regimes, switched by initial immunity
+        # (S0) and importation (iota). Shared transmission params (type-2 R0~5,
+        # ~28-day shedding γ≈1/28, PIR 1:2000) per Thompson/Duintjer Tebbens and
+        # the IDM Nigeria model; see tests/recovery/cases/polio_metapop/README.
+        s0_outbreak = round(0.45 * pop)   # ~55% immune: under-vaccinated pocket
+        s0_endemic  = round(0.10 * pop)   # ~90% immune: contained, above EIP*
+
+        def scenario(name: str, label: str, s0: int, iota_v: str) -> None:
+            L.append(f"  {name} {{")
+            L.append(f'    label = "{label}"')
+            L.append("    set = {")
+            L.append("      R0_c = 5.0")
+            L.append("      R0_v = 2.0")
+            L.append("      gamma_v = 0.0357")
+            L.append("      gamma_c = 0.0357")
+            L.append("      p_recover_immune = 0.95")
+            L.append("      mu_rev = 0.02")
+            L.append("      rho_afp = 0.0005")
+            L.append("      k = 5.0")
+            L.append(f"      iota = {iota_v}")
+            L.append(f"      S0 = {s0}")
+            if coupling_degree > 0:
+                L.append("      kappa = 0.05")
+            L.append("      aging_rate = 0.0005")
+            L.append("      birth_rate = 0.0001")
+            for a in ages:
+                L.append(f"      omega_{a} = 0.0002")
+            for a in ages:
+                L.append(f"      mu_{a} = 0.0002")
+            L.append("    }")
+            L.append("  }")
+
         L.append("scenarios {")
-        L.append("  baseline {")
-        L.append('    label = "polio metapop baseline"')
-        L.append("    set = {")
-        L.append("      R0_c = 6.0")
-        L.append("      R0_v = 2.0")
-        L.append("      gamma_v = 0.05")
-        L.append("      gamma_c = 0.05")
-        L.append("      p_recover_immune = 0.8")
-        L.append("      mu_rev = 0.02")
-        L.append("      rho_afp = 0.005")
-        L.append("      k = 5.0")
-        if coupling_degree > 0:
-            L.append("      kappa = 0.05")
-        L.append("      aging_rate = 0.0005")
-        L.append("      birth_rate = 0.0001")
-        for a in ages:
-            L.append(f"      omega_{a} = 0.005")
-        for a in ages:
-            L.append(f"      mu_{a} = 0.0002")
-        L.append("    }")
-        L.append("  }")
+        scenario("outbreak",
+                 "under-vaccinated outbreak pocket (R_eff>1, R0 identifiable)",
+                 s0_outbreak, "0.0")
+        scenario("endemic",
+                 "contained sub-threshold endemic (opaque, R0 weakly identified)",
+                 s0_endemic, "0.0001")
         L.append("}")
         L.append("")
 
@@ -454,6 +493,14 @@ def main() -> int:
                          "+ AFP, age-mixing FOI, gravity imports, aging/waning/demography")
     ap.add_argument("--to", default="12 'years", metavar="HORIZON",
                     help="[polio] simulate horizon (default '12 \\'years', matching his)")
+    ap.add_argument("--immunity", type=float, default=0.8, metavar="FRAC",
+                    help="[polio] initial immune fraction (R/N) — high (~0.8-0.9) keeps "
+                         "R_eff just above 1, the low-level-endemic cVDPV2 regime")
+    ap.add_argument("--iota", type=float, default=0.0, metavar="VAL",
+                    help="[polio] external force of infection on the circulating chain "
+                         "(imported virus) — prevents full extinction / fadeout-reemergence")
+    ap.add_argument("--pop", type=int, default=20010, metavar="N",
+                    help="[polio] population per (patch,age) cell")
     ap.add_argument("--coupling", choices=("on", "off"), default="on")
     ap.add_argument("--grad", choices=("full", "minimal"), default="full")
     ap.add_argument("--observe", action="store_true",
@@ -470,7 +517,8 @@ def main() -> int:
 
     if args.shape == "polio":
         text = gen_polio(args.patches, args.ages, args.grad,
-                         args.observe, coupling_degree=args.coupling_degree, to=args.to)
+                         args.observe, coupling_degree=args.coupling_degree, to=args.to,
+                         immunity=args.immunity, iota=args.iota, pop=args.pop)
     else:
         text = gen_camdl(args.patches, args.ages, args.coupling, args.grad, args.observe,
                          coupling_degree=args.coupling_degree)

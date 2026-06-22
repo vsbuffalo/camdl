@@ -41,7 +41,9 @@ export CAMDL_SKIP_VERSION_CHECK := 1
 CAMDL := cargo run --quiet --manifest-path $(REPO)/rust/Cargo.toml -p cli --
 MODEL := model.camdl              # paths below resolve inside $(CASE)
 TRUTH := --params truth.toml      # planted ground truth (single source)
-DATA  := $(CASE)/data/cases_child.tsv
+# Stream-name-agnostic synth sentinel: a case may emit cases_child/adult.tsv,
+# afp.tsv, … — gate the fits on a stamp, not on a specific stream filename.
+SYNTH := $(CASE)/data/.synth-stamp
 
 .PHONY: help ocaml synth if2 pgas pmmh ensemble survey all clean
 .DEFAULT_GOAL := help
@@ -54,21 +56,24 @@ help: ## show this help
 ocaml:
 	@cd $(REPO)/ocaml && dune build 2>/dev/null
 
-# Synthetic data: simulate at the truth + sample the per-age observation streams.
-$(DATA): $(CASE)/$(MODEL) $(CASE)/truth.toml | ocaml
+# Synthetic data: simulate at the truth + sample every observation stream the
+# model declares (one TSV per stream under data/). The stamp makes the recipe
+# stream-name-agnostic so cases with different obs blocks share this harness.
+$(SYNTH): $(CASE)/$(MODEL) $(CASE)/truth.toml | ocaml
 	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain_binomial --seed 1 $(TRUTH) \
 	  --obs-only-dir data --output-dir results
-synth: $(DATA) ## simulate at truth.toml → per-age obs streams
+	@touch $(SYNTH)
+synth: $(SYNTH) ## simulate at truth.toml → obs streams
 
-if2:  $(DATA) ; cd $(CASE) && $(CAMDL) fit run if2.toml  --allow-nonconverged-scout ## IF2 fit
-pgas: $(DATA) ; cd $(CASE) && $(CAMDL) fit run pgas.toml --allow-nonconverged-scout ## PGAS fit
-pmmh: $(DATA) ; cd $(CASE) && $(CAMDL) fit run pmmh.toml --allow-nonconverged-scout ## PMMH fit
+if2:  $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run if2.toml  --allow-nonconverged-scout ## IF2 fit
+pgas: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pgas.toml --allow-nonconverged-scout ## PGAS fit
+pmmh: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pmmh.toml --allow-nonconverged-scout ## PMMH fit
 
 ensemble: | ocaml ## 30-replicate forward sim (cells bar)
 	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain_binomial $(TRUTH) \
 	  --replicates 30 --output-dir results
 
-survey: $(DATA) ## likelihood survey over if2.toml bounds (best-ll bar)
+survey: $(SYNTH) ## likelihood survey over if2.toml bounds (best-ll bar)
 	cd $(CASE) && $(CAMDL) survey $(MODEL) --fit if2.toml --n-points 400 --output results
 
 all: if2 pgas pmmh ## synth + all three fits
