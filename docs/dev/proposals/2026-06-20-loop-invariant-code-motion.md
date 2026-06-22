@@ -44,6 +44,9 @@ and the kernel form. So the entire **26.3 ms/eval delta is the forward
 integration of the kernel** — ~73% of every in-model eval is loop-invariant
 rebuild.
 
+(Measured speedups with LICM on, and the on/off byte-identity evidence, are in
+`docs/dev/notes/2026-06-22-licm-kernel-benchmark.md`.)
+
 The motivation for the in-model form is the Xia/Bjørnstad/Grenfell idiom: make
 the gravity distance-decay exponent γ a _fitted_ parameter with a posterior,
 instead of profiling over rebuilt `kernel.tsv` files. This is the _correct_
@@ -670,6 +673,15 @@ counter counts.
   this is exact. The full inference loglik is a deterministic function of these
   producer states plus per_eval-free observation scoring, so its byte-identity
   follows.
+- **PGAS loglik A/B** (`gate_licm_pgas_loglik_byte_identical`): the result-level
+  standing gate. Drives all three PGAS surfaces that carry `PerEvalRef` — the
+  CSMC producer (`simulate_reference_on_grid` → `step_one`), the transition
+  density (`complete_data_loglik` → `log_transition_density_substep`), and the
+  NUTS gradient (`complete_data_loglik_grad`) — on the ON and OFF fixtures at
+  the same seed, and asserts the complete-data log-likelihood AND its full
+  gradient are byte-identical. This is the permanent regression guard that
+  flipping `--licm` cannot move a PGAS fit's numbers, on a self-contained
+  fixture, fast and in-tree.
 - **ODE-loglik under rayon** (no silent gap): both existing trajectory gates
   call `OdeSim::run` directly, never the inference seam. A gate that flips
   `CAMDL_LICM` and asserts an identical loglik from `compute_ode_loglik` under a
