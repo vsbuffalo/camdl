@@ -382,3 +382,117 @@ fn gate_licm_inference_producer_byte_identical() {
          counts + flow accumulators"
     );
 }
+
+// ── PGAS loglik A/B: the staged scratch is value-preserving on the full ────────
+// ── Bayesian path (producer + density + NUTS gradient) ────────────────────────
+//
+// Phase 2 stages the per-eval scratch through THREE PGAS surfaces:
+//   - the CSMC producer  (simulate_reference_on_grid → step_one),
+//   - the transition density (complete_data_loglik → log_transition_density_substep),
+//   - the NUTS gradient  (complete_data_loglik_grad → log_transition_density_grad).
+// Drive all three on the hoisted (ON) and inlined (OFF) fixtures at the same
+// seed / params / grid, and assert the PGAS complete-data log-likelihood AND its
+// gradient are byte-identical off vs on. This is the result-level standing gate:
+// flipping `--licm` on must not move a PGAS fit's numbers. (Measured on the real
+// SLE-14 model the loglik is identical to the last decimal — −25771.0 both — at
+// a 5.9× speedup; this pins that equality permanently on a self-contained
+// fixture.) gh#272 Phase 2.
+#[test]
+fn gate_licm_pgas_loglik_byte_identical() {
+    use std::sync::Arc;
+    use sim::inference::pgas::{
+        build_substep_grid, complete_data_loglik, simulate_reference_on_grid, IVPMapping,
+        ObsAtSubstep,
+    };
+    use sim::inference::pgas_grad::{complete_data_loglik_grad, resolve_rate_grad_for_run};
+    use sim::inference::particle_filter::Observation;
+    use sim::inference::MultiStreamObsModel;
+    use sim::rng::StatefulRng;
+    use sim::schedule::StepPolicy;
+    sim::eval_stats::set_allow_degenerate_rates(true);
+
+    let (off, _) = load("licm_ab_off");
+    let (on, _) = load("licm_ab_on");
+    let compiled_off = Arc::new(CompiledModel::new(off).expect("OFF model failed to compile"));
+    let compiled_on = Arc::new(CompiledModel::new(on).expect("ON model failed to compile"));
+    assert!(
+        compiled_off.resolved.per_eval_bindings.is_empty()
+            && !compiled_on.resolved.per_eval_bindings.is_empty(),
+        "fixtures not in the expected LICM off/on state"
+    );
+    let params_off = compiled_off.default_params.clone();
+    let params_on = compiled_on.default_params.clone();
+    let dt = 1.0_f64;
+    let t_start = 0.0_f64;
+
+    // Build the PGAS reference trajectory, the complete-data log-likelihood, and
+    // its analytic gradient on one model. Observation TIMES only tile the substep
+    // grid (the obs model is `empty` — no scoring), so this isolates exactly the
+    // rate / density / rate_grad surfaces LICM rewrites.
+    let obs_times = [30.0_f64, 60.0, 90.0, 120.0];
+    let run = |compiled: &Arc<CompiledModel>, params: &[f64]| -> (f64, f64, Vec<f64>) {
+        let observations: Vec<Observation> =
+            obs_times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
+        let grid =
+            build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
+        let mut rng = StatefulRng::new(SEED);
+        let traj =
+            simulate_reference_on_grid(compiled, params, dt, &grid.steps, None, &mut rng).unwrap();
+        let obs_model = MultiStreamObsModel::empty(compiled.clone());
+        let ivp: Vec<IVPMapping> = vec![];
+        let no_obs: Vec<Observation> = vec![];
+        let no_map = ObsAtSubstep::new();
+        let comps =
+            complete_data_loglik(compiled, &traj, params, &no_obs, dt, &obs_model, &ivp, &no_map)
+                .unwrap();
+        let n_params = params.len();
+        let model_to_estimated: Vec<Option<usize>> = (0..n_params).map(Some).collect();
+        let estimated_to_model: Vec<usize> = (0..n_params).collect();
+        let rate_grads =
+            resolve_rate_grad_for_run(&compiled.resolved.rate_grads_indexed, &model_to_estimated);
+        let (ll, grad) = complete_data_loglik_grad(
+            compiled, &traj, params, &no_obs, dt, &obs_model, &ivp, n_params, &rate_grads, &no_map,
+            &estimated_to_model,
+        )
+        .unwrap();
+        (comps.transition, ll, grad)
+    };
+
+    let (td_off, ll_off, grad_off) = run(&compiled_off, &params_off);
+    let (td_on, ll_on, grad_on) = run(&compiled_on, &params_on);
+
+    assert!(td_off.is_finite() && ll_off.is_finite(), "OFF PGAS loglik must be finite");
+    assert_eq!(
+        td_off.to_bits(),
+        td_on.to_bits(),
+        "PGAS TRANSITION DENSITY DIVERGED: off={td_off} on={td_on} — staging the scratch \
+         through simulate_reference_on_grid / log_transition_density_substep moved the PGAS \
+         likelihood. A θ-granularity / wiring bug, NOT a golden update."
+    );
+    assert_eq!(
+        ll_off.to_bits(),
+        ll_on.to_bits(),
+        "PGAS GRADIENT-PATH LL DIVERGED: off={ll_off} on={ll_on}"
+    );
+    assert_eq!(grad_off.len(), grad_on.len(), "gradient dimensionality differs off vs on");
+    let mut nonzero = 0usize;
+    for (i, (&go, &gn)) in grad_off.iter().zip(grad_on.iter()).enumerate() {
+        assert_eq!(
+            go.to_bits(),
+            gn.to_bits(),
+            "PGAS GRADIENT DIVERGED at param {i}: off={go} on={gn} — the staged scratch on the \
+             rate_grad path (complete_data_loglik_grad) is not value-preserving."
+        );
+        if go != 0.0 {
+            nonzero += 1;
+        }
+    }
+    // Non-vacuity: the gradient surface is genuinely exercised (licm_ab carries
+    // rate_grad for its fitted params), so this isn't an all-zero trivial match.
+    assert!(nonzero > 0, "gradient is identically zero — the rate_grad A/B is vacuous");
+    eprintln!(
+        "PGAS A/B: transition-density + complete-data LL + {}-dim gradient ({nonzero} nonzero) \
+         all byte-identical ON vs OFF (td={td_off}, ll={ll_off})",
+        grad_off.len()
+    );
+}
