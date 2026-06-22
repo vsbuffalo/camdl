@@ -1,0 +1,24 @@
+name: install-e2e
+
+# End-to-end no-sudo install test on gh#205's exact environment: Ubuntu 18.04
+# (glibc 2.27, system cmake 3.10). The image has no sudo and builds as a
+# non-root user, so any privilege escalation fails the build. It exercises the
+# portable-CMake fetch, the opam prebuilt-binary path, and a full glibc-2.27
+# from-source build — the part the fast install-script job (in ci.yml) can't.
+#
+# Slow (full toolchain + project build), so it runs nightly and on demand, not
+# per-PR. A green build == install.sh produced a working `camdl` with zero
+# privilege.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # nightly ~07:00 UTC (default branch only)
+  workflow_dispatch: {}
+
+jobs:
+  ubuntu1804:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build install image (Ubuntu 18.04, non-root, no sudo)
+        run: docker build -f tests/install/Dockerfile.ubuntu1804 -t camdl-install-test .

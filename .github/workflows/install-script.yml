@@ -1,0 +1,31 @@
+name: install-script
+
+# Fast tier for install.sh: shellcheck + offline unit tests (version_ge, the
+# cmake >= 3.13 gate, cmake_plat, and the no-sudo contract — a sudo shim aborts
+# if any ensure_* reaches for root). Runs only when the installer or its tests
+# change. The end-to-end no-sudo build on gh#205's box is the separate nightly
+# install-e2e workflow. shellcheck is preinstalled on GitHub's ubuntu runner.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "tests/install_sh_test.sh"
+      - ".github/workflows/install-script.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "tests/install_sh_test.sh"
+      - ".github/workflows/install-script.yml"
+
+jobs:
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck install.sh tests/install_sh_test.sh
+      - name: install.sh unit tests
+        run: bash tests/install_sh_test.sh

@@ -96,13 +96,13 @@ dev-camdlc: build-ocaml
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-.PHONY: test test-ocaml test-rust test-inference test-integration test-docs test-cli-docs
+.PHONY: test test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-install
 
 # `make test` runs the full surface. The Rust suite is split into two groups so
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: test-ocaml check-reactive-golden test-rust test-inference test-integration test-docs test-cli-docs
+test: test-ocaml check-reactive-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
 
 # Inner-loop gate: the whole Rust workspace (unit + integration + doctests) via
 # `cargo test`. Deliberately SKIPS the slow cross-language / doc phases
@@ -201,6 +201,19 @@ CLI_DOCS := docs/workflow.md docs/inference.md docs/debugging.md docs/diagnosing
 test-cli-docs: build-rust
 	bash scripts/check_cli_docs.sh --selftest
 	bash scripts/check_cli_docs.sh $(CLI_DOCS)
+
+# install.sh fast tier: shellcheck (if present) + offline unit tests
+# (version_ge, the cmake>=3.13 gate, cmake_plat, and the no-sudo contract — a
+# sudo shim aborts if any ensure_* reaches for root). Fast and offline, so it
+# rides in the authoritative `make test`. The full end-to-end build is the
+# container test, tests/install/Dockerfile.ubuntu1804 (amd64, run in CI/nightly).
+test-install:
+	@if command -v shellcheck >/dev/null 2>&1; then \
+	  shellcheck install.sh tests/install_sh_test.sh; \
+	else \
+	  echo "shellcheck not found — skipping lint (CI installs it)"; \
+	fi
+	bash tests/install_sh_test.sh
 
 # ── Golden file management ────────────────────────────────────────────────────
 

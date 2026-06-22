@@ -1,0 +1,43 @@
+# End-to-end no-sudo install test on the exact environment from gh#205:
+# Ubuntu 18.04 — glibc 2.27, system cmake 3.10 (< the 3.13 nlopt needs).
+# The build runs as a non-root user with NO sudo in the image, so any attempt
+# by install.sh to escalate fails loudly ("sudo: command not found"). A green
+# build proves install.sh produced a working `camdl` with zero privilege.
+#
+# Build from the repo root:
+#   docker build -f tests/install/Dockerfile.ubuntu1804 -t camdl-install-test .
+#
+# What it exercises that the unit tests can't:
+#   - the portable-CMake fetch (system cmake 3.10 is present but too old)
+#   - the opam prebuilt-binary download + install into ~/.local/bin
+#   - a real glibc-2.27 from-source build of both toolchains
+#
+# NOTE: this is an amd64 image and a full from-source build (OCaml switch
+# compile + Rust release). It is SLOW — minutes on a native amd64 host, far
+# longer under emulation on Apple Silicon. Run it on an amd64 CI runner or
+# host, not in the inner loop.
+
+FROM ubuntu:18.04
+
+# Genuine base prerequisites only — exactly what ensure_base_tools checks for —
+# plus ca-certificates (TLS), bubblewrap (so opam can sandbox), and the OLD
+# system cmake (3.10) to reproduce gh#205 friction #1. Installed as root *in
+# the image build*; this stands in for "an admin provisioned the box". The
+# camdl install below runs unprivileged and `sudo` is deliberately NOT present.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      make git curl tar ca-certificates bubblewrap cmake \
+ && rm -rf /var/lib/apt/lists/*
+
+# Non-root user, no sudo. If install.sh reaches for root, the build dies here.
+RUN useradd --create-home builder
+USER builder
+WORKDIR /home/builder/camdl
+COPY --chown=builder:builder . .
+
+# The test: a clean no-sudo install...
+RUN ./install.sh
+# ...then prove the binary actually runs (mirrors the rc lines install.sh prints).
+RUN export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" \
+ && eval "$(opam env)" \
+ && camdl --version

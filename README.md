@@ -32,7 +32,7 @@ model.camdl ──→ camdlc ──→ model.ir.json
 | Domain               | What camdl does                                                                                                                                                                                                                                                                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Modelling**        | Compartments, stratification (age, space, risk), contact matrices, Erlang staging, forcing functions, interventions, events, balance constraints, scenarios                                                                                                                                                                           |
-| **Simulation**       | Gillespie SSA, chain-binomial (Euler-multinomial), ODE (RK4). Extra-demographic stochasticity via `overdispersed()`. Deterministic flows via `deterministic()`.                                                                                                                                                             |
+| **Simulation**       | Gillespie SSA, chain-binomial (Euler-multinomial), ODE (RK4). Extra-demographic stochasticity via `overdispersed()`. Deterministic flows via `deterministic()`.                                                                                                                                                                       |
 | **Inference**        | IF2 (MLE), PGAS with NUTS (Bayesian posterior), bootstrap particle filter, 1D/2D profiles. Source-to-source autodiff: compiler emits gradient expressions, enabling HMC.                                                                                                                                                              |
 | **Fitting workflow** | Declarative `fit.toml` (named stages → `camdl fit run`). IF2 finds the MLE; PGAS+NUTS characterises the Bayesian posterior with exact complete-data likelihood + analytical gradients from the compiler. Mandatory convergence gates between stages, Richardson dt-convergence audit after every fit, content-addressable provenance. |
 | **Experiments**      | Multi-scenario seed ensembles, Sobol sensitivity analysis, parameter sweeps. Content-addressable output with caching.                                                                                                                                                                                                                 |
@@ -53,10 +53,15 @@ install`:
 ./install.sh
 ```
 
-It's idempotent — safe to re-run — and uses your system package manager (apt /
-dnf / yum / pacman / zypper on Linux, Homebrew on macOS, installing brew + Xcode
-CLT if absent). Override the OCaml switch version with
-`OCAML_SWITCH_VERSION=5.2.1 ./install.sh`.
+It's idempotent — safe to re-run — and **never calls `sudo` or a system package
+manager**. Everything it installs lands in paths you own: opam and (if the
+system CMake is missing or older than 3.13) a portable CMake go under `$PREFIX`
+(default `~/.local`); the OCaml switch under `~/.opam`; Rust under `~/.cargo`.
+This makes it work on locked-down, no-root machines (HPC login nodes, older
+distros). It expects a few base tools (`make`, `git`, `curl`, `tar`) to already
+be present; if any are missing it prints the one-time command to install them
+and stops, rather than escalating on your behalf. Override the OCaml switch
+version with `OCAML_SWITCH_VERSION=5.2.1 ./install.sh`.
 
 For per-branch testing (e.g. installing a feature branch alongside your default
 install for comparison), override the install prefix with the `PREFIX` env var:
@@ -298,8 +303,8 @@ camdl simulate MODEL [--backend gillespie|chain_binomial|ode]
 | ODE (RK4)      | `--backend ode --dt 0.1`            | Deterministic                                   |
 
 Same seed + same backend = identical trajectory (Common Random Numbers).
-`overdispersed()` requires chain-binomial. The backend capability
-system enforces this at dispatch time.
+`overdispersed()` requires chain-binomial. The backend capability system
+enforces this at dispatch time.
 
 ---
 
