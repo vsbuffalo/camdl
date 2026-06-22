@@ -31,19 +31,49 @@ open Ir
    These are exactly the nodes constant within a single trajectory once theta is
    bound. NOTE this is the variant/invariant predicate the proposal calls for; it
    covers `Dt` explicitly (a deliberate divergence from `expr_is_time_dependent`,
-   which omits it). *)
-let rec is_invariant (e : expr) : bool =
-  match e with
-  | Const _ | Param _ -> true
-  | PerEvalRef _ -> true   (* its body is invariant; never present in LICM input *)
-  | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
-  | Projected | ObsColumnRef _ -> false
-  | TableLookup (_, idxs) -> List.for_all is_invariant idxs
-  | BinOp { left; right; _ } -> is_invariant left && is_invariant right
-  | UnOp { arg; _ } -> is_invariant arg
-  | Cond { pred; then_; else_ } -> is_invariant pred && is_invariant then_ && is_invariant else_
-  | Reduce ts -> List.for_all is_invariant ts
-  | UncheckedDim u -> is_invariant u.inner
+   which omits it).
+
+   `tbls` maps each table name to its definition so a `TableLookup` is judged on
+   its CELL BODIES, not just its index (gh#284): an inline cell that references
+   state (a future contact table scaling with prevalence) makes the whole lookup
+   variant even with a constant index. An external table is file-loaded numeric
+   data — constant within a trajectory — so it is invariant. An unknown table is
+   treated conservatively as variant (some other pass diagnoses it). Today every
+   inline cell is constant-valued — its leaves are only `Const`/`Param`, possibly
+   under constant arithmetic (the expander emits no state-dependent cells, and the
+   Rust loader evaluates each cell to a number and rejects any state reference) —
+   so this is value-preserving: no currently-emitted IR changes which subtrees
+   hoist.
+
+   The `visited` set guards the inter-table cell recursion: a table whose inline
+   cell looks up a second table (a future possibility, not emittable today) could
+   otherwise cycle. A table already on the path is conservatively variant. *)
+let is_invariant (tbls : (string, table) Hashtbl.t) (e : expr) : bool =
+  let rec go visited (e : expr) : bool =
+    match e with
+    | Const _ | Param _ -> true
+    | PerEvalRef _ -> true   (* its body is invariant; never present in LICM input *)
+    | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
+    | Projected | ObsColumnRef _ -> false
+    | TableLookup (name, idxs) ->
+      List.for_all (go visited) idxs && cells_invariant visited name
+    | BinOp { left; right; _ } -> go visited left && go visited right
+    | UnOp { arg; _ } -> go visited arg
+    | Cond { pred; then_; else_ } -> go visited pred && go visited then_ && go visited else_
+    | Reduce ts -> List.for_all (go visited) ts
+    | UncheckedDim u -> go visited u.inner
+  (* A table's cells are invariant iff every inline cell body is (external tables
+     carry only file-loaded numbers). Unknown table → conservatively variant; a
+     table already being evaluated (cycle) → conservatively variant. *)
+  and cells_invariant visited (name : string) : bool =
+    if List.mem name visited then false
+    else
+      match Hashtbl.find_opt tbls name with
+      | Some { source = Inline cells; _ } -> List.for_all (go (name :: visited)) cells
+      | Some { source = External _; _ } -> true
+      | None -> false
+  in
+  go [] e
 
 (* Worth hoisting iff the subtree carries a genuinely expensive op — a
    transcendental, a `Pow`, or an n-ary `Reduce`. A bare `Param`/`Const`/
@@ -98,6 +128,7 @@ type ctx = {
   mutable counter      : int;
   table                : (string, string) Hashtbl.t;   (* canon key -> per-eval binding name *)
   mutable rev_bindings : (string * expr) list;          (* accumulated, newest first *)
+  model_tables         : (string, table) Hashtbl.t;     (* table name -> def, for is_invariant *)
 }
 
 (* Per-eval binding names use a reserved `__licm_` prefix and a monotonic
@@ -128,7 +159,7 @@ let intern ctx (e : expr) : expr =
    invariant nodes are left inline. We only descend through VARIANT nodes — an
    invariant node is either hoisted whole or left whole, never split. *)
 let rec rw ctx (e : expr) : expr =
-  if is_invariant e then
+  if is_invariant ctx.model_tables e then
     (if contains_expensive e then intern ctx e else e)
   else
     match e with
@@ -149,7 +180,9 @@ let rec rw ctx (e : expr) : expr =
    maximal subtrees are hoisted whole), so they are trivially topologically
    ordered — insertion order. *)
 let licm_model (m : model) : model =
-  let ctx = { counter = 0; table = Hashtbl.create 256; rev_bindings = [] } in
+  let model_tables = Hashtbl.create (max 1 (List.length m.tables)) in
+  List.iter (fun (t : table) -> Hashtbl.replace model_tables t.name t) m.tables;
+  let ctx = { counter = 0; table = Hashtbl.create 256; rev_bindings = []; model_tables } in
   let transitions =
     List.map
       (fun (t : transition) ->

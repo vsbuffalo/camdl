@@ -108,12 +108,76 @@ pub fn references_state(expr: &ResolvedExpr) -> bool {
         ResolvedExpr::Reduce(terms) => terms.iter().any(references_state),
         // Hoisted bindings are state-derived (N/I_agg/F read compartments).
         ResolvedExpr::BindingRef(_) => true,
-        // gh#272: per-eval bindings are param/table-only by construction (the
-        // constructor validation rejects any state reference), so they never
-        // reference state. The contrast with BindingRef above is the keystone
-        // invariant boundary.
+        // gh#272: per-eval bindings are param/table-only by construction —
+        // `CompiledModel::new` rejects any state (or time-varying) reference via
+        // `per_eval_staging_violation` (gh#284) — so they never reference state.
+        // The contrast with BindingRef above is the keystone invariant boundary.
         ResolvedExpr::PerEvalRef(_) => false,
         _ => false,
+    }
+}
+
+/// gh#284: the LICM per-eval staging contract, enforced in Rust as well as in
+/// the OCaml pass (`licm.ml is_invariant`). The body of per-eval binding `slot`
+/// is staged ONCE per θ-stable span (`stage_per_eval`, at `t_start` against a
+/// zero scratch) and then read every substep, and `eval_per_eval_scratch` lends
+/// body `slot` only the already-filled prefix `&scratch[..slot]`. So the body
+/// must be BOTH:
+///   - loop-invariant — a function of parameters, tables, and constants only; and
+///   - topologically ordered — any `PerEvalRef` it contains must point to a
+///     STRICTLY EARLIER slot (`< slot`).
+/// Returns `Some(kind)` naming the first node that breaks the contract, or `None`
+/// if the body is well-formed.
+///
+/// The invariance half is strictly stronger than [`references_state`]: it rejects
+/// time-varying nodes (`Time` / `Dt` / `TimeFunc`) as well as compartment state.
+/// A state-referencing body would PANIC on the zero scratch (`IntState::new(0)`
+/// index-OOB); a time-varying one would be staged stale and read wrong every
+/// later substep (silent-wrong). The ordering half closes the same panic class
+/// from the other direction: a forward/self `PerEvalRef(slot' >= slot)` reads an
+/// unfilled scratch slot (staged path) or recurses forever (on-demand fallback).
+/// The match is exhaustive on purpose: a new `ResolvedExpr` variant must be
+/// classified here, not silently treated as well-formed.
+pub fn per_eval_staging_violation(expr: &ResolvedExpr, slot: usize) -> Option<&'static str> {
+    match expr {
+        // Invariant leaves: constant for the whole span once θ is bound.
+        ResolvedExpr::Const(_) | ResolvedExpr::Param(_) => None,
+        // An earlier per-eval binding is itself well-formed by this same check;
+        // a forward or self reference breaks the topological staging order.
+        ResolvedExpr::PerEvalRef(other) if *other >= slot => {
+            Some("a forward or cyclic per-eval reference")
+        }
+        ResolvedExpr::PerEvalRef(_) => None,
+        ResolvedExpr::TableLookup { index, .. } => per_eval_staging_violation(index, slot),
+
+        // Compartment state — would panic on the zero stage scratch.
+        ResolvedExpr::IntPop(_)
+        | ResolvedExpr::RealPop(_)
+        | ResolvedExpr::IntPopSum(_)
+        | ResolvedExpr::MixedPopSum { .. } => Some("compartment state (Pop / PopSum)"),
+        // A hoisted binding is state-derived (reads compartments).
+        ResolvedExpr::BindingRef(_) => Some("a state-derived binding"),
+
+        // Time-varying — would be staged stale (silent-wrong every later substep).
+        ResolvedExpr::Time => Some("simulation time (t)"),
+        ResolvedExpr::Dt => Some("the integrator step (dt)"),
+        ResolvedExpr::TimeFunc(_) => Some("a forcing (time-function)"),
+
+        // Observation-context-only — never valid in a dynamics surface anyway.
+        ResolvedExpr::Projected => Some("the observation projection"),
+        ResolvedExpr::ObsColumnRef(_) => Some("an observation data column"),
+
+        // Compound: well-formed iff every child is.
+        ResolvedExpr::BinOp { left, right, .. } => per_eval_staging_violation(left, slot)
+            .or_else(|| per_eval_staging_violation(right, slot)),
+        ResolvedExpr::UnOp { arg, .. } => per_eval_staging_violation(arg, slot),
+        ResolvedExpr::Cond { pred, then_, else_ } => per_eval_staging_violation(pred, slot)
+            .or_else(|| per_eval_staging_violation(then_, slot))
+            .or_else(|| per_eval_staging_violation(else_, slot)),
+        ResolvedExpr::UncheckedDim { inner } => per_eval_staging_violation(inner, slot),
+        ResolvedExpr::Reduce(terms) => {
+            terms.iter().find_map(|t| per_eval_staging_violation(t, slot))
+        }
     }
 }
 

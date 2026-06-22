@@ -1107,6 +1107,35 @@ impl CompiledModel {
             .map(|b| resolve_expr(&b.expr, &resolve_ctx))
             .collect::<Result<_, _>>()?;
 
+        // gh#284: enforce the LICM per-eval staging contract here, not just in
+        // the OCaml pass. `stage_per_eval` evaluates each body ONCE at `t_start`
+        // against a zero scratch, lends body `i` only the prefix `&scratch[..i]`,
+        // and reads the result every substep. So each body must be (a)
+        // loop-invariant — a body referencing compartment state would panic on
+        // the zero scratch (`IntState::new(0)` index-OOB) and a time-varying one
+        // would be staged stale (silent-wrong) — AND (b) topologically ordered:
+        // a forward/self `PerEvalRef(j >= i)` reads an unfilled scratch slot. The
+        // OCaml LICM pass never emits such a body (`licm.ml is_invariant`, and it
+        // produces no inter-binding references), but a hand-edited or
+        // future-emitted IR could; reject it with a located error. Mirrors the
+        // overdispersion σ² and intervention-schedule `references_state` guards
+        // below, with the stronger `per_eval_staging_violation`.
+        for (i, (b, rb)) in model.per_eval_bindings.iter()
+            .zip(&resolved_per_eval_bindings).enumerate()
+        {
+            if let Some(kind) = crate::resolved_expr::per_eval_staging_violation(rb, i) {
+                return Err(SimError::Validation(format!(
+                    "per-eval binding '{}': body references {}, which breaks the \
+                     loop-invariance the LICM staging relies on. A per-eval \
+                     binding must be a function of parameters, tables, constants, \
+                     and earlier per-eval bindings only. (These bindings are \
+                     compiler-generated; a hand-edited IR is the usual cause of \
+                     this error.)",
+                    b.name, kind
+                )));
+            }
+        }
+
         let overdispersion: Vec<Option<ResolvedExpr>> = model.transitions.iter()
             .map(|tr| match &tr.draw_method {
                 ir::transition::DrawMethod::Overdispersed(expr) =>

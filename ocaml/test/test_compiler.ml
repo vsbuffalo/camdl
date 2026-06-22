@@ -260,27 +260,73 @@ let test_constant_fold_collapses_sparse_foi_reduce () =
    corrupt a trajectory), the cost threshold, and that the pass actually fires.
    The byte-identity soundness proof is the Rust A/B gate gate_licm_ab.rs. *)
 
+(* Build a name → table lookup, as `Licm.licm_model` does, so `is_invariant`
+   can judge a `TableLookup` on its cell bodies (gh#284). *)
+let tbls_of (ts : Ir.table list) : (string, Ir.table) Hashtbl.t =
+  let h = Hashtbl.create (max 1 (List.length ts)) in
+  List.iter (fun (t : Ir.table) -> Hashtbl.replace h t.name t) ts;
+  h
+
+let inline_table name cells : Ir.table =
+  { name; source = Ir.Inline cells; out_of_bounds = Ir.Error; cell_kind = None }
+
 let test_licm_invariant_classification () =
   let open Ir in
+  (* The two tables the kernel reads, with constant (invariant) cell bodies. *)
+  let tbls = tbls_of [
+    inline_table "N0" [Const 1000.0; Const 2000.0];
+    inline_table "dratio" [Const 1.0; Const 2.0; Const 2.0; Const 1.0];
+  ] in
   (* Param + table + const, no state/time → invariant. *)
   let kernel = BinOp { op = Mul; left = TableLookup ("N0", [Const 1.0]);
     right = UnOp { op = Exp; arg = BinOp { op = Mul;
       left = UnOp { op = Neg; arg = Param "gamma_k" };
       right = UnOp { op = Log; arg = TableLookup ("dratio", [Const 0.0; Const 1.0]) } } } } in
-  Alcotest.(check bool) "param/table/const kernel is invariant" true (Licm.is_invariant kernel);
+  Alcotest.(check bool) "param/table/const kernel is invariant" true (Licm.is_invariant tbls kernel);
   Alcotest.(check bool) "R0*gamma is invariant" true
-    (Licm.is_invariant (BinOp { op = Mul; left = Param "R0"; right = Param "gamma" }));
+    (Licm.is_invariant tbls (BinOp { op = Mul; left = Param "R0"; right = Param "gamma" }));
   (* The variant nodes — each must classify as NOT invariant. The Dt case is the
      load-bearing one (gh#272 review): the pass must never hoist a dt subtree. *)
-  Alcotest.(check bool) "Pop is variant" false (Licm.is_invariant (Pop "I"));
-  Alcotest.(check bool) "PopSum is variant" false (Licm.is_invariant (PopSum ["S"; "I"]));
-  Alcotest.(check bool) "Time is variant" false (Licm.is_invariant Time);
-  Alcotest.(check bool) "Dt is variant" false (Licm.is_invariant Dt);
-  Alcotest.(check bool) "TimeFunc (forcing) is variant" false (Licm.is_invariant (TimeFunc "school"));
-  Alcotest.(check bool) "BindingRef (state) is variant" false (Licm.is_invariant (BindingRef "N"));
+  Alcotest.(check bool) "Pop is variant" false (Licm.is_invariant tbls (Pop "I"));
+  Alcotest.(check bool) "PopSum is variant" false (Licm.is_invariant tbls (PopSum ["S"; "I"]));
+  Alcotest.(check bool) "Time is variant" false (Licm.is_invariant tbls Time);
+  Alcotest.(check bool) "Dt is variant" false (Licm.is_invariant tbls Dt);
+  Alcotest.(check bool) "TimeFunc (forcing) is variant" false (Licm.is_invariant tbls (TimeFunc "school"));
+  Alcotest.(check bool) "BindingRef (state) is variant" false (Licm.is_invariant tbls (BindingRef "N"));
   (* exp(c) * dt is variant (contains Dt), so the whole product is never hoisted. *)
   Alcotest.(check bool) "exp(c)*dt is variant" false
-    (Licm.is_invariant (BinOp { op = Mul; left = UnOp { op = Exp; arg = Const 0.5 }; right = Dt }))
+    (Licm.is_invariant tbls (BinOp { op = Mul; left = UnOp { op = Exp; arg = Const 0.5 }; right = Dt }))
+
+(* gh#284: `is_invariant` for a `TableLookup` must judge the table's CELL BODIES,
+   not just its index. A state-referencing inline cell makes the whole lookup
+   variant even with a constant index (else it would be hoisted and read stale).
+   External tables (file-loaded numbers) and const-cell inline tables stay
+   invariant; an unknown table is conservatively variant.
+
+   This is a unit test on the predicate, not an end-to-end DSL→reject test:
+   today's DSL cannot express a state-dependent inline table cell (the parser /
+   dim-checker reject the precursors), so the `badtab` shape is built directly.
+   The predicate is the forward-compatible guard for when such cells are
+   allowed. *)
+let test_licm_table_cell_invariance () =
+  let open Ir in
+  let const_tbls = tbls_of [inline_table "ct" [Const 1.0; Const 2.0]] in
+  Alcotest.(check bool) "lookup into const-cell table is invariant" true
+    (Licm.is_invariant const_tbls (TableLookup ("ct", [Const 0.0])));
+  let state_cell_tbls = tbls_of [inline_table "badtab" [Pop "S"; Pop "I"]] in
+  Alcotest.(check bool) "lookup into state-dependent inline table is variant" false
+    (Licm.is_invariant state_cell_tbls (TableLookup ("badtab", [Const 0.0])));
+  (* The whole enclosing expr inherits the variance — a `pow` over a bad cell is
+     NOT hoistable, which is the soundness point. *)
+  Alcotest.(check bool) "expr over a state-dependent cell is variant" false
+    (Licm.is_invariant state_cell_tbls
+       (BinOp { op = Pow; left = TableLookup ("badtab", [Const 0.0]); right = Const 2.0 }));
+  let ext_tbls = tbls_of
+    [{ name = "ext"; source = External "ext.csv"; out_of_bounds = Error; cell_kind = None }] in
+  Alcotest.(check bool) "lookup into external table is invariant" true
+    (Licm.is_invariant ext_tbls (TableLookup ("ext", [Const 0.0])));
+  Alcotest.(check bool) "lookup into unknown table is variant (conservative)" false
+    (Licm.is_invariant (tbls_of []) (TableLookup ("nope", [Const 0.0])))
 
 let test_licm_cost_threshold () =
   let open Ir in
@@ -353,8 +399,9 @@ let test_licm_hoists_kernel () =
   Alcotest.(check bool) "rates reference PerEvalRefs" true (refs_in_rates > 0);
   (* Every hoisted body is invariant (no state/time/dt smuggled in) — the keystone
      invariant the Rust runtime relies on. *)
+  let tbls = tbls_of m.tables in
   Alcotest.(check bool) "every per_eval body is invariant" true
-    (List.for_all (fun (b : Ir.binding) -> Licm.is_invariant b.bexpr) m.per_eval_bindings)
+    (List.for_all (fun (b : Ir.binding) -> Licm.is_invariant tbls b.bexpr) m.per_eval_bindings)
 
 (* ── Binding param-free invariant (E512, defensive) ───────────────────────────
    The hoist/autodiff contract: [autodiff.ml] differentiates [BindingRef] to 0,
@@ -7340,6 +7387,8 @@ let () =
     "licm", [
       Alcotest.test_case "invariant/variant classification (Dt/Time/forcing/state are variant)"
         `Quick test_licm_invariant_classification;
+      Alcotest.test_case "table-cell invariance (state-dependent inline cell is variant)"
+        `Quick test_licm_table_cell_invariance;
       Alcotest.test_case "cost threshold (transcendental/Pow/Reduce worth hoisting)"
         `Quick test_licm_cost_threshold;
       Alcotest.test_case "hoists the in-model kernel into per_eval bindings"
