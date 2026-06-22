@@ -12,7 +12,7 @@ OCAML_GOLDENS := $(wildcard ocaml/golden/*.camdl)
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
-.PHONY: build build-ocaml build-rust
+.PHONY: build build-ocaml build-rust build-benches
 
 build: build-ocaml build-rust
 
@@ -34,6 +34,17 @@ build-ocaml: $(OCAML_IR_VERSION_GEN)
 
 build-rust:
 	cd rust && cargo build --release --workspace --bins
+
+# Compile-only build of every bench target so bench bit-rot fails fast (gh#222).
+# Benches are NOT built by `cargo test` or `cargo build --bins`, and — verified
+# empirically — `cargo clippy --all-targets` does NOT catch a bench that fails to
+# type-check (a criterion bench supplies its own `main`, which clippy's check
+# pass leaves unlinted). So a bench that has rotted against a signature change is
+# dead code that still reads as live until someone runs this. No run needed; the
+# benchmark fixtures and timings are irrelevant — we only need the compiler to
+# prove the bench still matches the API it benchmarks.
+build-benches:
+	cd rust && cargo build --workspace --benches
 
 # ── Install ───────────────────────────────────────────────────────────────────
 

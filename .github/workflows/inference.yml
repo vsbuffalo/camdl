@@ -44,5 +44,12 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      # Compile-only build of every bench (gh#222). Benches ride along with the
+      # sim crate (they all live in rust/crates/sim/benches) but are built by
+      # neither `cargo test` nor clippy --all-targets, so they rot silently
+      # against signature changes. This step makes that bit-rot fail fast.
+      - name: Build benches (compile-only)
+        run: opam exec -- make build-benches
+
       - name: Engine + inference tests (sim crate)
         run: opam exec -- make test-inference

@@ -381,7 +381,9 @@ workflows, on push to `main` and on PRs:
 
 - `ci.yml` — clippy, `make test-rust` (workspace except sim; cargo test), the
   golden-diff (all four corpora), `make test-integration`
-- `inference.yml` — `make test-inference` (the sim crate; cargo test)
+- `inference.yml` — `make build-benches` (compile-only build of every bench, so
+  bench bit-rot fails fast — gh#222) then `make test-inference` (the sim crate;
+  cargo test)
 - `compiler.yml` — `make test-ocaml` (`dune runtest`)
 - `doctest.yml` — `make test-docs` (camdlc doctest of the spec set)
 - `cli-docs.yml` — `make test-cli-docs`
