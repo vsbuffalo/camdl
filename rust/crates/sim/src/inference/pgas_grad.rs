@@ -62,6 +62,9 @@ pub fn log_transition_density_grad(
     params: &[f64],
     t: f64,
     dt: f64,
+    // gh#272 LICM: per-eval prologue staged at the PGAS-grad θ-stable boundary
+    // (`complete_data_loglik_grad`) and threaded in. `None` ⇒ on-demand.
+    per_eval: Option<&[f64]>,
     d: usize,
     rate_grads_for_run: &[Vec<(usize, ResolvedExpr)>],
 ) -> Result<(f64, Vec<f64>), SimError> {
@@ -73,12 +76,13 @@ pub fn log_transition_density_grad(
     let real_s = RealState::new(model.real_local_to_global.len());
 
     let mut propensities = vec![0.0; n_tr];
-    // Inference producer/gradient step: per-particle θ. `None` ⇒ on-demand,
-    // byte-identical (Phase 2 stages per-particle scratch here).
-    eval_propensities(model, &int_s, &real_s, params, t, dt, None, &mut propensities)?;
+    eval_propensities(model, &int_s, &real_s, params, t, dt, per_eval, &mut propensities)?;
 
+    // Evaluates the resolved `rate_grad` expressions below (which carry
+    // `PerEvalRef` after LICM), so it threads the staged scratch — the
+    // gradient-path half of the gh#272 hoist.
     let ctx = EvalCtx {
-        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval: None,
+        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval,
     };
 
     let mut log_p = 0.0;
@@ -304,6 +308,8 @@ fn gamma_density_value_and_grad_substep(
     params: &[f64],
     t: f64,
     dt: f64,
+    // gh#272 LICM: per-eval prologue staged at `complete_data_loglik_grad`.
+    per_eval: Option<&[f64]>,
     estimated_to_model: &[usize],
     log_p: &mut f64,
 ) -> Result<Vec<f64>, SimError> {
@@ -322,13 +328,11 @@ fn gamma_density_value_and_grad_substep(
 
     let n_tr = model.model.transitions.len();
     let mut propensities = vec![0.0; n_tr];
-    // Inference producer/gradient step: per-particle θ. `None` ⇒ on-demand,
-    // byte-identical (Phase 2 stages per-particle scratch here).
-    eval_propensities(model, &int_s, &real_s, params, t, dt, None, &mut propensities)?;
+    eval_propensities(model, &int_s, &real_s, params, t, dt, per_eval, &mut propensities)?;
 
     let ctx = EvalCtx {
         model, int_s: &int_s, real_s: &real_s, params, t, dt,
-        projected: None, aux: None, int_float_override: None, per_eval: None,
+        projected: None, aux: None, int_float_override: None, per_eval,
     };
 
     let mut gamma_idx_local: usize = 0;
@@ -415,6 +419,11 @@ pub fn complete_data_loglik_grad(
     let t_start = model.model.simulation.t_start;
     let n_substeps = trajectory.substeps.len();
     let n_tr = model.model.transitions.len();
+    // gh#272 LICM: stage the per-eval prologue ONCE for this θ (`params` fixed for
+    // the whole gradient evaluation) and thread it into every per-substep grad
+    // eval. `None` ⇒ on-demand.
+    let per_eval_scratch = crate::resolved_expr::stage_per_eval(model, params, t_start, dt);
+    let per_eval = per_eval_scratch.as_deref();
     let mut log_p = 0.0;
     let mut grad = vec![0.0; d];
 
@@ -461,7 +470,7 @@ pub fn complete_data_loglik_grad(
 
         let (td, td_grad) = log_transition_density_grad(
             model, counts_before, &rec.flows, &rec.gammas,
-            params, t, dt_s, d, rate_grads_for_run,
+            params, t, dt_s, per_eval, d, rate_grads_for_run,
         )?;
 
         if !td.is_finite() {
@@ -482,7 +491,7 @@ pub fn complete_data_loglik_grad(
         // diverging from the value fn / MH / swap. The helper adds the value
         // straight into `log_p` (in the value fn's fold order) and returns grad.
         let gamma_grad = gamma_density_value_and_grad_substep(
-            model, counts_before, &rec.gammas, params, t, dt_s, estimated_to_model,
+            model, counts_before, &rec.gammas, params, t, dt_s, per_eval, estimated_to_model,
             &mut log_p,
         )?;
         for i in 0..d { grad[i] += gamma_grad[i]; }

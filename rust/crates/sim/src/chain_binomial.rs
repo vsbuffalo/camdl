@@ -189,12 +189,8 @@ pub fn run_chain_binomial_with_observer(
     // step. Owned here and passed as data (no shared cache to alias). `None` for
     // models without per-eval bindings (`PerEvalRef` falls through to on-demand).
     // `t`/`dt` are inert (a per-eval body reads no `Time`/`Dt`).
-    let per_eval_scratch: Option<Vec<f64>> = if model.resolved.per_eval_bindings.is_empty() {
-        None
-    } else {
-        Some(crate::resolved_expr::eval_per_eval_scratch(
-            model, params, cfg.t_start, cfg.dt))
-    };
+    let per_eval_scratch =
+        crate::resolved_expr::stage_per_eval(model, params, cfg.t_start, cfg.dt);
     let per_eval = per_eval_scratch.as_deref();
 
     // Merged timeline spine. chain_binomial is the SNAP policy: it steps a full

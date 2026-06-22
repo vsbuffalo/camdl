@@ -153,6 +153,15 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         .map(|_| process.new_scratch())
         .collect();
 
+    // gh#272 LICM: stage the per-eval prologue ONCE for this filter. θ (`params`)
+    // is fixed for the whole `bootstrap_filter` call, so the param/table-only
+    // per_eval_bindings are evaluated here and lent into every particle's every
+    // substep — NOT recomputed per step. `None` when LICM is off / nothing
+    // hoistable (`PerEvalRef` then falls through to on-demand, byte-identical).
+    let per_eval_scratch: Option<Vec<f64>> = process.try_compiled_model()
+        .and_then(|m| crate::resolved_expr::stage_per_eval(m, params, config.t_start, dt));
+    let per_eval = per_eval_scratch.as_deref();
+
     let mut total_loglik = 0.0;
     let mut ess_trace = Vec::with_capacity(n_obs);
     let mut logw_var_trace = Vec::with_capacity(n_obs);
@@ -306,7 +315,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
                         Some(idx) => &scheduled.batches[idx],
                         None => &[],
                     };
-                    match process.step(state, params, t_local, step_dt, rng, scratch, due_iv) {
+                    match process.step(state, params, t_local, step_dt, per_eval, rng, scratch, due_iv) {
                         Ok(()) => {}
                         Err(e) if e.is_per_particle_recoverable() => {
                             // Mark dead — the caller folds this into the dead vec

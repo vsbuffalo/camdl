@@ -255,7 +255,7 @@ fn test_density_seir_spatial_5_vignette_regression() {
         let counts_before = &rec.counts_before;
 
         let td = log_transition_density_substep(
-            &compiled, counts_before, &rec.flows, &rec.gammas, &params, t, dt,
+            &compiled, counts_before, &rec.flows, &rec.gammas, &params, t, dt, None,
         ).unwrap();
 
         if !td.is_finite() {
@@ -340,7 +340,7 @@ fn test_density_downstream_multi_seed() {
             let rec = &trajectory.substeps[s];
             let counts_before = &rec.counts_before;
             let td = log_transition_density_substep(
-                &compiled, counts_before, &rec.flows, &rec.gammas, &params, t, dt,
+                &compiled, counts_before, &rec.flows, &rec.gammas, &params, t, dt, None,
             ).unwrap();
             if !td.is_finite() {
                 if n_inf == 0 {

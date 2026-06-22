@@ -78,6 +78,12 @@ pub trait ProcessModel: Send + Sync {
         params: &[f64],
         t: f64,
         dt: f64,
+        // gh#272 LICM: the per-eval prologue staged once at this filter's θ-stable
+        // boundary (whole filter for PF/PMMH θ-global; per-particle for IF2;
+        // per-sweep for PGAS) and lent into the rate eval. `None` ⇒ on-demand
+        // (byte-identical). The producer must NOT stage it here — that would
+        // re-stage per substep, defeating the hoist.
+        per_eval: Option<&[f64]>,
         rng: &mut StatefulRng,
         scratch: &mut Self::Scratch,
         due_effects: &[usize],
@@ -219,6 +225,10 @@ pub trait DensityProcess: ProcessModel {
         params: &[f64],
         t: f64,
         dt: f64,
+        // gh#272 LICM: per-eval prologue staged once at the PGAS sweep boundary
+        // (θ fixed across the conditional filter) and lent into the rate eval.
+        // `None` ⇒ on-demand (byte-identical).
+        per_eval: Option<&[f64]>,
     ) -> Result<f64, crate::error::SimError>;
 
     /// Access to the underlying compiled model for PGAS internals.

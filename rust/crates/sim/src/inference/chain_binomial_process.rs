@@ -66,6 +66,7 @@ impl ProcessModel for ChainBinomialProcess {
         params: &[f64],
         t: f64,
         dt: f64,
+        per_eval: Option<&[f64]>,
         rng: &mut StatefulRng,
         scratch: &mut StepScratch,
         due_effects: &[usize],
@@ -96,8 +97,10 @@ impl ProcessModel for ChainBinomialProcess {
             &mut state.counts,
             &mut state.flow_accumulators,
             &mut real,
-            // Inference producer step: per-particle θ ⇒ `None` (on-demand, byte-identical).
-            params, t, dt, None, rng, scratch,
+            // gh#272 LICM: the scratch staged at the filter's θ-stable boundary
+            // (or `None` ⇒ on-demand). Threaded, NOT staged here (per-substep
+            // staging would defeat the hoist).
+            params, t, dt, per_eval, rng, scratch,
         )
     }
 
@@ -119,9 +122,10 @@ impl DensityProcess for ChainBinomialProcess {
         params: &[f64],
         t: f64,
         dt: f64,
+        per_eval: Option<&[f64]>,
     ) -> Result<f64, SimError> {
         super::pgas::log_transition_density_substep(
-            &self.compiled, counts_before, flows, gammas, params, t, dt,
+            &self.compiled, counts_before, flows, gammas, params, t, dt, per_eval,
         )
     }
 

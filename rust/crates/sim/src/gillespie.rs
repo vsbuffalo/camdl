@@ -170,12 +170,8 @@ pub fn run_gillespie_with_observer(
     // alias). `None` for models without per-eval bindings, where `PerEvalRef` would
     // fall through to on-demand eval anyway. `t`/`dt` are inert (a per-eval body
     // reads no `Time`/`Dt`).
-    let per_eval_scratch: Option<Vec<f64>> = if model.resolved.per_eval_bindings.is_empty() {
-        None
-    } else {
-        Some(crate::resolved_expr::eval_per_eval_scratch(
-            model, params, cfg.t_start, iv_resolution_dt))
-    };
+    let per_eval_scratch =
+        crate::resolved_expr::stage_per_eval(model, params, cfg.t_start, iv_resolution_dt);
     let per_eval = per_eval_scratch.as_deref();
 
     // Merged timeline spine. Gillespie is event-driven: it PROPOSES an

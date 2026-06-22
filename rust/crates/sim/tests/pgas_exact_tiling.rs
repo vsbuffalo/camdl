@@ -157,7 +157,7 @@ fn exact_shortened_substep_density_recompute() {
                 (rec.t0, rec.dt_substep) // the realized grid
             };
             total += log_transition_density_substep(
-                &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt_s,
+                &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt_s, None,
             ).expect("finite per-substep density");
         }
         total

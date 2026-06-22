@@ -115,7 +115,7 @@ fn dt_rate_density_reads_realized_records_under_exact_clip() {
                 (rec.t0, rec.dt_substep)
             };
             total += log_transition_density_substep(
-                &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt_s,
+                &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt_s, None,
             )
             .expect("finite per-substep density");
         }

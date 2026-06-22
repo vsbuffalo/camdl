@@ -297,3 +297,88 @@ fn gate_licm_is_byte_identical() {
         scratch.len()
     );
 }
+
+// ── Inference producer A/B: staged scratch == on-demand through step_one ───────
+//
+// Phase 2 (gh#272) threads the staged per-eval scratch through the stochastic
+// inference producer. PF, IF2, PGAS, and PMMH all advance particles via
+// `ProcessModel::step`, which delegates to `chain_binomial::step_one` — the one
+// seam every stochastic cell shares. Stepping the hoisted (ON) model with its
+// staged scratch and the inlined (OFF) model on-demand, under the SAME seed,
+// must yield byte-identical particle counts AND flow accumulators at every
+// substep. This is the inference-path analogue of §2's forward byte-identity:
+// the proof that staging the scratch through the producer is value-preserving,
+// so PGAS/IF2/PF reach fixed-kernel parity *correctly*, not just faster.
+//
+// A wrong-θ staging bug (the IF2 silent-wrong risk: serving one particle's
+// kernel to another's θ) would change the rates, the draws, and hence the
+// counts — caught here. Counts are an integer trajectory, so this is exact, not
+// tolerance-based. The full PF/IF2/PGAS loglik is a deterministic function of
+// these producer states plus the (per_eval-free) observation scoring, so its
+// byte-identity follows from this seam's.
+#[test]
+fn gate_licm_inference_producer_byte_identical() {
+    use std::sync::Arc;
+    use sim::inference::{ChainBinomialProcess, ProcessModel};
+    use sim::rng::StatefulRng;
+    sim::eval_stats::set_allow_degenerate_rates(true);
+
+    let (off, _) = load("licm_ab_off");
+    let (on, _) = load("licm_ab_on");
+    let compiled_off = Arc::new(CompiledModel::new(off).expect("OFF model failed to compile"));
+    let compiled_on = Arc::new(CompiledModel::new(on).expect("ON model failed to compile"));
+
+    let params_off = compiled_off.default_params.clone();
+    let params_on = compiled_on.default_params.clone();
+    let t_start = 0.0_f64;
+    let dt = 1.0_f64;
+
+    // The producers stage from these. Non-vacuity: ON stages a NON-EMPTY kernel
+    // scratch (the producer takes the staged arm); OFF stages nothing (the
+    // producer takes the on-demand arm). Without this, byte-identity is vacuous.
+    let pe_off = sim::resolved_expr::stage_per_eval(&compiled_off, &params_off, t_start, dt);
+    let pe_on = sim::resolved_expr::stage_per_eval(&compiled_on, &params_on, t_start, dt);
+    assert!(pe_off.is_none(), "OFF fixture unexpectedly has per_eval bindings");
+    assert!(
+        pe_on.as_ref().map_or(false, |s| !s.is_empty()),
+        "ON fixture staged an empty scratch — the LICM pass did not fire"
+    );
+
+    let proc_off = ChainBinomialProcess::new(compiled_off.clone());
+    let proc_on = ChainBinomialProcess::new(compiled_on.clone());
+    let mut s_off = proc_off.initial_state(&params_off).expect("off init state");
+    let mut s_on = proc_on.initial_state(&params_on).expect("on init state");
+    let mut rng_off = StatefulRng::new(SEED);
+    let mut rng_on = StatefulRng::new(SEED);
+    let mut scr_off = proc_off.new_scratch();
+    let mut scr_on = proc_on.new_scratch();
+
+    let n_steps = 120usize; // the fixture's sim window (120 days at dt=1)
+    for s in 0..n_steps {
+        let t = t_start + s as f64;
+        // ON threads the staged scratch (exactly what bootstrap_filter / run_if2 /
+        // csmc_as do); OFF takes the on-demand arm. The fixture has no events or
+        // interventions, so `due_effects` is empty.
+        proc_on
+            .step(&mut s_on, &params_on, t, dt, pe_on.as_deref(), &mut rng_on, &mut scr_on, &[])
+            .expect("on producer step");
+        proc_off
+            .step(&mut s_off, &params_off, t, dt, pe_off.as_deref(), &mut rng_off, &mut scr_off, &[])
+            .expect("off producer step");
+        assert_eq!(
+            s_off.counts, s_on.counts,
+            "PRODUCER COUNTS DIVERGED at substep {s}: LICM-on staged scratch != LICM-off \
+             on-demand through ProcessModel::step (step_one) — a θ-granularity / wiring bug \
+             in the Phase 2 staging, not a golden update."
+        );
+        assert_eq!(
+            s_off.flow_accumulators, s_on.flow_accumulators,
+            "PRODUCER FLOWS DIVERGED at substep {s}: counts matched but flow accumulators did \
+             not — the density/incidence path would diverge."
+        );
+    }
+    eprintln!(
+        "inference producer: {n_steps} substeps byte-identical (ON staged vs OFF on-demand), \
+         counts + flow accumulators"
+    );
+}

@@ -521,6 +521,7 @@ impl ProcessModel for CountingProcess {
         _params: &[f64],
         _t: f64,
         _dt: f64,
+        _per_eval: Option<&[f64]>,
         _rng: &mut StatefulRng,
         _scratch: &mut (),
         _due_interventions: &[usize],

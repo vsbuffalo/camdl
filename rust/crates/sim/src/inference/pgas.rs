@@ -721,6 +721,10 @@ pub fn log_transition_density_substep(
     params: &[f64],
     t: f64,
     dt: f64,
+    // gh#272 LICM: per-eval prologue staged at the PGAS sweep boundary (θ fixed
+    // across the conditional filter), threaded in. `None` ⇒ on-demand. MUST match
+    // the `params` it was staged from, mirroring step_one's identical use.
+    per_eval: Option<&[f64]>,
 ) -> Result<f64, SimError> {
     let n_int = model.int_local_to_global.len();
     let n_tr = model.model.transitions.len();
@@ -731,12 +735,10 @@ pub fn log_transition_density_substep(
     let real_s = RealState::new(model.real_local_to_global.len());
 
     let mut propensities = vec![0.0; n_tr];
-    // Inference producer step: per-particle θ. `None` ⇒ on-demand, byte-identical
-    // (Phase 2 stages per-particle scratch here).
-    eval_propensities(model, &int_s, &real_s, params, t, dt, None, &mut propensities)?;
+    eval_propensities(model, &int_s, &real_s, params, t, dt, per_eval, &mut propensities)?;
 
     let ctx = EvalCtx {
-        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval: None,
+        model, int_s: &int_s, real_s: &real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval,
     };
 
     // Per-transition: is it deterministic? What's its sigma_sq?
@@ -830,6 +832,12 @@ pub fn complete_data_loglik(
 ) -> Result<LogLikComponents, SimError> {
     let n_substeps = trajectory.substeps.len();
     let n_tr = model.model.transitions.len();
+    // gh#272 LICM: stage the per-eval prologue ONCE for this θ (`params` fixed for
+    // the whole complete-data evaluation) and thread it into every per-substep
+    // density/rate eval below. `None` ⇒ on-demand (LICM off / nothing hoistable).
+    let per_eval_scratch =
+        crate::resolved_expr::stage_per_eval(model, params, model.model.simulation.t_start, dt);
+    let per_eval = per_eval_scratch.as_deref();
     let mut ivp_ll = 0.0;
     let mut transition_ll = 0.0;
     let mut observation_ll = 0.0;
@@ -896,7 +904,7 @@ pub fn complete_data_loglik(
 
         // Transition density
         let td = log_transition_density_substep(
-            model, counts_before, &rec.flows, &rec.gammas, params, t, dt_s,
+            model, counts_before, &rec.flows, &rec.gammas, params, t, dt_s, per_eval,
         )?;
         if !td.is_finite() {
             log::debug!("complete_data_loglik: -inf transition density at substep {} (t={:.1})", s, t);
@@ -947,7 +955,7 @@ pub fn complete_data_loglik(
                 // Recompute propensities for rate check (same start-of-step state).
                 let mut local_props = vec![0.0; n_tr];
                 let _ = eval_propensities(model, &int_s_local, &real_s_local,
-                    params, ctx.t, dt_s, None, &mut local_props);
+                    params, ctx.t, dt_s, per_eval, &mut local_props);
                 for &tr_idx in group {
                     let rate = local_props[tr_idx];
                     if rate <= RATE_EPSILON { continue; }
@@ -1105,6 +1113,12 @@ pub fn simulate_reference_on_grid(
     let (init_int, _) = model.initial_state(params)?;
     let n_tr = model.model.transitions.len();
 
+    // gh#272 LICM: stage the per-eval prologue ONCE for this θ (`params` fixed for
+    // the whole reference walk) and thread it into every substep's rate eval.
+    let per_eval_scratch =
+        crate::resolved_expr::stage_per_eval(model, params, model.model.simulation.t_start, dt);
+    let per_eval = per_eval_scratch.as_deref();
+
     // gh#53: resolve fire_steps once at the runtime dt. Used to fill the per-
     // substep effect batch step_one applies (gh#216): the `round(t/dt)` whole
     // batch under Snap, or the `grid_dt`-keyed EVENT half under Exact (scheduled
@@ -1130,14 +1144,13 @@ pub fn simulate_reference_on_grid(
         // Populate the due batch step_one applies (gh#216). `dt` is the nominal
         // grid the firing keys on; `dt_s` is the realized (possibly clipped) step.
         fill_producer_batch(model, &fire_steps, t0 + dt_s, dt, s, firing, &mut scratch.effect_batch);
-        // Inference producer step: per-particle θ ⇒ `None` (on-demand, byte-identical).
-        step_one(model, &mut counts, &mut flows, &mut real, params, t0, dt_s, None, rng, &mut scratch)?;
+        step_one(model, &mut counts, &mut flows, &mut real, params, t0, dt_s, per_eval, rng, &mut scratch)?;
 
         // Verify: density evaluation of this record won't produce k > n.
         // This catches state/flow mismatches before they cause -inf later.
         if cfg!(debug_assertions) {
             let verify_td = log_transition_density_substep(
-                model, &counts_before, &flows, &scratch.gamma_used, params, t0, dt_s,
+                model, &counts_before, &flows, &scratch.gamma_used, params, t0, dt_s, per_eval,
             );
             if let Ok(td) = verify_td {
                 debug_assert!(td.is_finite(),
@@ -1186,6 +1199,12 @@ pub fn csmc_as(
 ) -> Result<(PGASTrajectory, CSMCDiagnostics), SimError> {
     let t_start = model.model.simulation.t_start;
     let n_substeps = reference.substeps.len();
+    // gh#272 LICM: stage the per-eval prologue ONCE for this sweep (θ = `params`
+    // fixed across the conditional filter; NUTS perturbs θ only between sweeps)
+    // and thread it into every producer/density eval below. `None` ⇒ on-demand.
+    let per_eval_scratch =
+        crate::resolved_expr::stage_per_eval(model, params, t_start, dt);
+    let per_eval = per_eval_scratch.as_deref();
     let n_tr = model.model.transitions.len();
     let j_ref = n_particles - 1; // reference particle is the last slot
 
@@ -1392,8 +1411,8 @@ pub fn csmc_as(
                 step_one(
                     model, cnt, flows, real,
                     // `step_dt` is the realized substep (clipped under Exact).
-                    // Inference producer step: per-particle θ ⇒ `None`.
-                    params, t, step_dt, None, rng, scratch,
+                    // gh#272 LICM: scratch staged once for this sweep, threaded in.
+                    params, t, step_dt, per_eval, rng, scratch,
                 )?;
 
                 std::mem::swap(gammas, &mut scratch.gamma_used);
@@ -1471,6 +1490,7 @@ pub fn csmc_as(
                         params,
                         t,
                         step_dt,
+                        per_eval,
                     )?;
                     // Post-resample slot j carries uniform weight (1/N);
                     // the categorical is driven by td alone.
@@ -1584,7 +1604,7 @@ pub fn csmc_as(
             prev_end = rec.t0 + rec.dt_substep;
             let t = rec.t0;
             let verify_td = log_transition_density_substep(
-                model, &rec.counts_before, &rec.flows, &rec.gammas, params, t, rec.dt_substep,
+                model, &rec.counts_before, &rec.flows, &rec.gammas, params, t, rec.dt_substep, per_eval,
             );
             if let Ok(td) = verify_td {
                 debug_assert!(td.is_finite(),

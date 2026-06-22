@@ -535,11 +535,8 @@ pub fn run_ode(
     // in which case `PerEvalRef` would fall through to on-demand eval anyway. This
     // single site covers forward ODE simulate AND `compute_ode_loglik` (both route
     // through `run_ode`).
-    let per_eval: Option<Vec<f64>> = if model.resolved.per_eval_bindings.is_empty() {
-        None
-    } else {
-        Some(crate::resolved_expr::eval_per_eval_scratch(model, params, cfg.t_start, cfg.dt))
-    };
+    let per_eval: Option<Vec<f64>> =
+        crate::resolved_expr::stage_per_eval(model, params, cfg.t_start, cfg.dt);
 
     let (int_s0, real_s0) = model.initial_state(params)?;
     let n_transitions = model.model.transitions.len();

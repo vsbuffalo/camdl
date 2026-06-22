@@ -396,6 +396,13 @@ pub fn bootstrap_filter_correlated(
     let gamma_shape = dt / sigma_sq;
     let gamma_scale = sigma_sq / dt;
 
+    // gh#272 LICM: stage the per-eval prologue ONCE for this filter (θ = `params`
+    // fixed for the whole correlated-PF / PMMH proposal evaluation) and lend it
+    // into every particle's every substep. `None` ⇒ on-demand (byte-identical).
+    let per_eval_scratch =
+        crate::resolved_expr::stage_per_eval(model, params, config.t_start, dt);
+    let per_eval = per_eval_scratch.as_deref();
+
     for obs_idx in 0..n_obs {
         // The substep walk terminates at this obs via Schedule::substeps (cursor
         // points at obs_idx); no explicit obs_time needed. The effect cursor is
@@ -499,8 +506,8 @@ pub fn bootstrap_filter_correlated(
                     crate::chain_binomial::step_one(
                         model, &mut state.counts, &mut state.flow_accumulators,
                         &mut real,
-                        // Inference producer step: per-particle θ ⇒ `None` (on-demand, byte-identical).
-                        params, t_local, step_dt, None, rng, scratch,
+                        // gh#272 LICM: scratch staged once for this filter, threaded in.
+                        params, t_local, step_dt, per_eval, rng, scratch,
                     )?;
                 }
                 Ok(())

@@ -442,6 +442,15 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 .zip(rngs.par_iter_mut())
                 .zip(scratches.par_iter_mut())
                 .map(|(((state, pp), rng), scratch)| {
+                    // gh#272 LICM: stage the per-eval prologue from THIS particle's
+                    // θ (`pp`), once before its substep walk — `pp` is fixed across
+                    // the window (IF2 perturbs θ at observation boundaries, not
+                    // within a window). Per-particle because each carries a distinct
+                    // perturbed θ; the scratch is structurally bound to the `pp` it
+                    // was computed from, so no cross-particle aliasing is possible.
+                    let pe_scratch = process.try_compiled_model()
+                        .and_then(|m| crate::resolved_expr::stage_per_eval(m, pp, t_start, config.dt));
+                    let per_eval = pe_scratch.as_deref();
                     // Shared inner-substep walk (Schedule::substeps); IF2's body is
                     // just the kernel step with the per-particle perturbed params.
                     // `fired` lands the cursor-keyed scheduled-intervention batch.
@@ -450,7 +459,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                             Some(idx) => &scheduled.batches[idx],
                             None => &[],
                         };
-                        process.step(state, pp, t_local, step_dt, rng, scratch, due_iv)?;
+                        process.step(state, pp, t_local, step_dt, per_eval, rng, scratch, due_iv)?;
                     }
                     Ok(())
                 })

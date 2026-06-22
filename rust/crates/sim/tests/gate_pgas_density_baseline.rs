@@ -59,7 +59,7 @@ fn reference_total_logdensity(dt: f64) -> f64 {
     for (s, rec) in traj.substeps.iter().enumerate() {
         let t = t_start + s as f64 * dt;
         total += log_transition_density_substep(
-            &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt,
+            &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt, None,
         )
         .expect("finite per-substep density");
     }

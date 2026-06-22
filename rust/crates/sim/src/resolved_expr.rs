@@ -710,6 +710,25 @@ pub fn eval_per_eval_scratch(
     scratch
 }
 
+/// gh#272 LICM: stage the per-eval prologue for one θ-stable span, or `None` when
+/// the model has no per-eval bindings (LICM off, or nothing hoistable). The
+/// single seam every backend/inference θ-stable boundary routes through: `Some`
+/// is computed once and lent into the span's rate evals; `None` falls through to
+/// on-demand eval. `t`/`dt` are inert (a per-eval body reads no `Time`/`Dt`).
+#[inline]
+pub fn stage_per_eval(
+    model: &crate::CompiledModel,
+    params: &[f64],
+    t: f64,
+    dt: f64,
+) -> Option<Vec<f64>> {
+    if model.resolved.per_eval_bindings.is_empty() {
+        None
+    } else {
+        Some(eval_per_eval_scratch(model, params, t, dt))
+    }
+}
+
 // ── Resolved observation likelihood ──────────────────────────────────────────
 
 /// Pre-resolved observation likelihood. All `Expr` fields replaced by

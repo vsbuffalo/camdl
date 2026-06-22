@@ -260,7 +260,7 @@ fn pgas_simulate_reference_finite_density_on_event_model() {
     for (s, rec) in traj.substeps.iter().enumerate() {
         let t = t_start + s as f64 * dt;
         let td = log_transition_density_substep(
-            &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt,
+            &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt, None,
         ).unwrap();
         assert!(
             td.is_finite(),
@@ -293,7 +293,7 @@ fn pgas_simulate_reference_finite_density_on_seir_event_model() {
     for (s, rec) in traj.substeps.iter().enumerate() {
         let t = t_start + s as f64 * dt;
         let td = log_transition_density_substep(
-            &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt,
+            &compiled, &rec.counts_before, &rec.flows, &rec.gammas, &params, t, dt, None,
         ).unwrap();
         assert!(
             td.is_finite(),
