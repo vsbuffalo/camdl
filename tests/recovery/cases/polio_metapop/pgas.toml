@@ -1,0 +1,45 @@
+# PGAS recovery fit for the polio_metapop case. Paths are relative to this file;
+# output_dir is relative to the working dir (the Makefile runs from the case
+# dir, so both resolve here).
+#
+# Step 1: estimate only R0_c (truth 6.0, started off-truth at 4.0) against the
+# informative AFP stream; everything else fixed at truth.toml. A clean recovery
+# of R0_c -> ~6.0 validates the fit machinery on the spatial polio model.
+output_dir = "results"
+
+[model]
+camdl = "model.camdl"
+
+[data.observations]
+afp = "data/afp.tsv"
+
+[estimate]
+R0_c = { bounds = [1.0, 20.0], start = 4.0, prior = { flat = {} } }
+
+[fixed]
+R0_v             = 2.0
+gamma_v          = 0.05
+gamma_c          = 0.05
+p_recover_immune = 0.8
+mu_rev           = 0.02
+rho_afp          = 0.3
+k                = 5.0
+kappa            = 0.05
+iota             = 0.0
+S0               = 225000
+aging_rate       = 0.0005
+birth_rate       = 0.0001
+omega_a0         = 0.005
+omega_a1         = 0.005
+omega_a2         = 0.005
+mu_a0            = 0.0002
+mu_a1            = 0.0002
+mu_a2            = 0.0002
+
+[stages.posterior]
+algorithm = "pgas"
+backend   = "chain_binomial"
+chains    = 2
+particles = 200
+sweeps    = 200
+burn_in   = 60
