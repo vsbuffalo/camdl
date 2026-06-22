@@ -358,6 +358,14 @@ pub(crate) fn run_camdlc_compile(
     if let Some(dp) = emit_deps {
         cmd.arg("--emit-deps").arg(dp);
     }
+    // gh#272: `--licm` (or `CAMDL_LICM`) turns the loop-invariant code-motion pass
+    // on in the camdlc subprocess. Set it explicitly so the CLI FLAG reaches the
+    // subprocess (the env var would inherit on its own, but the flag does not).
+    // The IR-cache key already folds `licm_enabled()`, so a flag flip recompiles
+    // rather than serving the stale inlined IR.
+    if licm_enabled() {
+        cmd.env("CAMDL_LICM", "1");
+    }
     let output = cmd.output();
 
     spinner.finish_and_clear();
@@ -434,6 +442,28 @@ fn ir_cache_disabled() -> bool {
         || std::env::var_os("CAMDL_NO_IR_CACHE").is_some()
 }
 
+/// Process-wide LICM enable (gh#272, set by `--licm`). LICM is a compile-time
+/// pass that hoists loop-invariant param/table-only subexpressions out of the
+/// rate trees, so it CHANGES the IR camdlc emits (adds `per_eval_bindings` +
+/// `Expr::PerEvalRef`). It is therefore an IR-affecting compiler switch: it must
+/// be folded into the IR-cache key (else flipping it serves stale inlined IR)
+/// AND passed to the camdlc subprocess. It re-keys run identity automatically —
+/// the model-level run-id hash folds the (LICM'd) IR content, which differs from
+/// the inlined IR. Default off, matching `CAMDL_LICM` unset.
+static LICM_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enable LICM for this process (the `--licm` flag). The `CAMDL_LICM` env var is
+/// an equivalent opt-in (either turns it on), so direct-camdlc and env-driven
+/// workflows stay consistent with the flag.
+pub fn set_licm_enabled(enabled: bool) {
+    LICM_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn licm_enabled() -> bool {
+    LICM_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("CAMDL_LICM").is_some()
+}
+
 /// The content-addressed cache key for a compiled `.camdl`. Folds the model
 /// bytes together with the compiler git hash and the IR schema version, so a
 /// model edit, a camdlc upgrade, or an IR-format change each produces a
@@ -442,13 +472,20 @@ fn ir_cache_disabled() -> bool {
 ///
 /// The key must fold in EVERY input that changes the emitted IR bytes: the
 /// model source, the camdlc git-hash, the IR schema version, and the compiler
-/// switches that alter output. Today that switch set is just
-/// `CAMDL_NO_CONSTANT_FOLD` (presence flips the fold pass off → unfolded/dense
-/// IR; `compiler.ml`). Any future IR-affecting compiler env var or flag MUST be
-/// added here, or flipping it on an already-cached model would silently serve
-/// the stale variant.
-pub(crate) fn ir_cache_key(content: &[u8], camdlc_ver: &str, ir_ver: &str, fold_disabled: bool) -> String {
-    let mut buf = Vec::with_capacity(content.len() + camdlc_ver.len() + ir_ver.len() + 3);
+/// switches that alter output. That switch set is `CAMDL_NO_CONSTANT_FOLD`
+/// (presence flips the fold pass off → unfolded/dense IR) and `CAMDL_LICM` /
+/// `--licm` (presence flips loop-invariant code motion on → hoisted IR with
+/// `per_eval_bindings`); both are `compiler.ml` switches that alter output. Any
+/// future IR-affecting compiler env var or flag MUST be added here, or flipping
+/// it on an already-cached model would silently serve the stale variant.
+pub(crate) fn ir_cache_key(
+    content: &[u8],
+    camdlc_ver: &str,
+    ir_ver: &str,
+    fold_disabled: bool,
+    licm_enabled: bool,
+) -> String {
+    let mut buf = Vec::with_capacity(content.len() + camdlc_ver.len() + ir_ver.len() + 4);
     buf.extend_from_slice(content);
     buf.push(0);
     buf.extend_from_slice(camdlc_ver.as_bytes());
@@ -456,6 +493,7 @@ pub(crate) fn ir_cache_key(content: &[u8], camdlc_ver: &str, ir_ver: &str, fold_
     buf.extend_from_slice(ir_ver.as_bytes());
     buf.push(0);
     buf.push(fold_disabled as u8);
+    buf.push(licm_enabled as u8);
     crate::hashing::sha256_hex(&buf)
 }
 
@@ -862,10 +900,11 @@ pub fn resolve_ir_path(path: &str) -> Result<(String, Option<std::path::PathBuf>
     } else {
         match (std::fs::read(path), ir_cache_dir()) {
             (Ok(content), Some(dir)) => {
-                // `CAMDL_NO_CONSTANT_FOLD` presence changes the IR camdlc emits,
-                // so it belongs in the key — else flipping it serves stale IR.
+                // `CAMDL_NO_CONSTANT_FOLD` and `--licm`/`CAMDL_LICM` each change
+                // the IR camdlc emits, so both belong in the key — else flipping
+                // one serves the stale variant.
                 let fold_disabled = std::env::var_os("CAMDL_NO_CONSTANT_FOLD").is_some();
-                let key = ir_cache_key(&content, crate::version::GIT_HASH, ir::IR_VERSION.trim(), fold_disabled);
+                let key = ir_cache_key(&content, crate::version::GIT_HASH, ir::IR_VERSION.trim(), fold_disabled, licm_enabled());
                 Some((dir.join(format!("{}.ir.json", key)), key))
             }
             _ => None,
@@ -1013,13 +1052,17 @@ pub fn load_model(path: &str) -> Result<(ir::Model, String), String> {
 /// Used for compile, check, inspect which are purely compiler operations.
 pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
     let camdlc = find_camdlc()?;
-    let status = std::process::Command::new(&camdlc)
-        .args(args)
+    let mut cmd = std::process::Command::new(&camdlc);
+    cmd.args(args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .map_err(|e| format!("cannot run camdlc: {}", e))?;
+        .stderr(std::process::Stdio::inherit());
+    // gh#272: honor `--licm` on the pass-through compiler subcommands
+    // (`compile`/`check`/`inspect`) too, so they emit/inspect the hoisted IR.
+    if licm_enabled() {
+        cmd.env("CAMDL_LICM", "1");
+    }
+    let status = cmd.status().map_err(|e| format!("cannot run camdlc: {}", e))?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -1781,18 +1824,27 @@ mod ir_cache_key_tests {
 
     #[test]
     fn key_is_stable_and_distinguishes_content_compiler_and_schema() {
-        let a = ir_cache_key(b"model A", "git1", "0.7", false);
+        let a = ir_cache_key(b"model A", "git1", "0.7", false, false);
         // Same inputs → same key (cache hit).
-        assert_eq!(a, ir_cache_key(b"model A", "git1", "0.7", false));
+        assert_eq!(a, ir_cache_key(b"model A", "git1", "0.7", false, false));
         // Different model content → different key (an edit recompiles).
-        assert_ne!(a, ir_cache_key(b"model B", "git1", "0.7", false));
+        assert_ne!(a, ir_cache_key(b"model B", "git1", "0.7", false, false));
         // Different compiler version → different key (a camdlc upgrade recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "git2", "0.7", false));
+        assert_ne!(a, ir_cache_key(b"model A", "git2", "0.7", false, false));
         // Different IR schema version → different key (a format change recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.8", false));
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.8", false, false));
         // Flipping CAMDL_NO_CONSTANT_FOLD changes the emitted IR → different key
         // (must not serve the folded IR when the user asked for unfolded).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", true));
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", true, false));
+        // gh#272: flipping LICM (`--licm` / `CAMDL_LICM`) changes the emitted IR
+        // (hoisted vs inlined) → different key, so the opt-in flag recompiles
+        // rather than serving the stale inlined IR through `camdl fit`.
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, true));
+        // The two switches are independent — neither masks the other.
+        assert_ne!(
+            ir_cache_key(b"model A", "git1", "0.7", true, false),
+            ir_cache_key(b"model A", "git1", "0.7", false, true)
+        );
         // 64-hex sha256.
         assert_eq!(a.len(), 64);
         assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));

@@ -116,6 +116,14 @@ pub(crate) struct Cli {
     /// on by default (`~/.cache/camdl/ir`, or `$CAMDL_IR_CACHE_DIR`).
     #[arg(long, global = true, help_heading = "Global options")]
     no_ir_cache: bool,
+
+    /// Enable loop-invariant code motion (gh#272): hoist param/table-only
+    /// subexpressions (e.g. an in-model gravity coupling kernel) out of the
+    /// per-step rate evaluation so a fittable kernel runs at precomputed-kernel
+    /// speed. Opt-in (off by default); equivalent to `CAMDL_LICM=1`. It changes
+    /// the compiled IR, so a `--licm` run re-keys the IR cache and run identity.
+    #[arg(long, global = true, help_heading = "Global options")]
+    licm: bool,
 }
 
 #[derive(Subcommand)]
@@ -502,6 +510,7 @@ fn main() {
     // wins when both are given.
     progress::init(if cli.no_progress { args::types::ProgressMode::None } else { cli.progress });
     util::set_ir_cache_disabled(cli.no_ir_cache);
+    util::set_licm_enabled(cli.licm);
 
     match cli.command {
         Command::Simulate(a)            => run_simulate(&a),
