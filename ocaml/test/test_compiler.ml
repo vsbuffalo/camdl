@@ -336,24 +336,25 @@ let rec count_per_eval_refs (e : Ir.expr) : int =
   | _ -> 0
 
 let test_licm_hoists_kernel () =
+  (* LICM is ON by default (gh#272 flip), so the default compile already hoists
+     the kernel into per_eval_bindings; CAMDL_NO_LICM would force the inlined
+     variant. The off-vs-on byte-identity is covered by the Rust A/B gate
+     (gate_licm_ab.rs); here we check the pass fired and its output is well-formed.
+     We do NOT re-apply Licm.licm_model to `m` — its input invariant is "no
+     PerEvalRef present", which the hoisted `m` already violates. *)
   let m = match Compiler.compile ~name:"licm_kernel" licm_kernel_src with
     | Ok m -> m
     | Error e -> Alcotest.failf "compile failed: %s" e in
-  (* The default pipeline does not run LICM (opt-in). Apply it directly. *)
-  Alcotest.(check bool) "no per_eval bindings before LICM" true (m.per_eval_bindings = []);
-  let hoisted = Licm.licm_model m in
-  (* The pass fired: bindings were created and the rates reference them. *)
-  Alcotest.(check bool) "LICM created per_eval bindings" true (hoisted.per_eval_bindings <> []);
+  (* The pass fired in the default pipeline: bindings were created and the rates
+     reference them. *)
+  Alcotest.(check bool) "default compile created per_eval bindings" true (m.per_eval_bindings <> []);
   let refs_in_rates =
-    List.fold_left (fun acc (t : Ir.transition) -> acc + count_per_eval_refs t.rate) 0 hoisted.transitions in
-  Alcotest.(check bool) "rates now reference PerEvalRefs" true (refs_in_rates > 0);
+    List.fold_left (fun acc (t : Ir.transition) -> acc + count_per_eval_refs t.rate) 0 m.transitions in
+  Alcotest.(check bool) "rates reference PerEvalRefs" true (refs_in_rates > 0);
   (* Every hoisted body is invariant (no state/time/dt smuggled in) — the keystone
      invariant the Rust runtime relies on. *)
   Alcotest.(check bool) "every per_eval body is invariant" true
-    (List.for_all (fun (b : Ir.binding) -> Licm.is_invariant b.bexpr) hoisted.per_eval_bindings);
-  (* The transition list is otherwise structurally preserved (same count). *)
-  Alcotest.(check int) "transition count unchanged"
-    (List.length m.transitions) (List.length hoisted.transitions)
+    (List.for_all (fun (b : Ir.binding) -> Licm.is_invariant b.bexpr) m.per_eval_bindings)
 
 (* ── Binding param-free invariant (E512, defensive) ───────────────────────────
    The hoist/autodiff contract: [autodiff.ml] differentiates [BindingRef] to 0,

@@ -21,7 +21,8 @@
    subtree (CSE-deduped by a BITWISE expr key) does not change evaluation order,
    so trajectories and gradients are byte-identical. Runs AFTER autodiff +
    constant_fold (it hoists already-folded subtrees; constant_fold never sees a
-   `PerEvalRef`). Opt-in via `CAMDL_LICM`, off by default. *)
+   `PerEvalRef`). On by default; `CAMDL_NO_LICM` forces it off (the inlined
+   variant), mirroring constant_fold / `CAMDL_NO_CONSTANT_FOLD`. *)
 
 open Ir
 

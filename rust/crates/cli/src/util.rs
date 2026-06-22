@@ -358,13 +358,13 @@ pub(crate) fn run_camdlc_compile(
     if let Some(dp) = emit_deps {
         cmd.arg("--emit-deps").arg(dp);
     }
-    // gh#272: `--licm` (or `CAMDL_LICM`) turns the loop-invariant code-motion pass
-    // on in the camdlc subprocess. Set it explicitly so the CLI FLAG reaches the
+    // gh#272: LICM is on by default; `--no-licm` (or `CAMDL_NO_LICM`) turns it OFF
+    // in the camdlc subprocess. Set it explicitly so the CLI FLAG reaches the
     // subprocess (the env var would inherit on its own, but the flag does not).
     // The IR-cache key already folds `licm_enabled()`, so a flag flip recompiles
-    // rather than serving the stale inlined IR.
-    if licm_enabled() {
-        cmd.env("CAMDL_LICM", "1");
+    // rather than serving the stale variant.
+    if !licm_enabled() {
+        cmd.env("CAMDL_NO_LICM", "1");
     }
     let output = cmd.output();
 
@@ -442,26 +442,28 @@ fn ir_cache_disabled() -> bool {
         || std::env::var_os("CAMDL_NO_IR_CACHE").is_some()
 }
 
-/// Process-wide LICM enable (gh#272, set by `--licm`). LICM is a compile-time
+/// Process-wide LICM disable (gh#272, set by `--no-licm`). LICM is a compile-time
 /// pass that hoists loop-invariant param/table-only subexpressions out of the
-/// rate trees, so it CHANGES the IR camdlc emits (adds `per_eval_bindings` +
-/// `Expr::PerEvalRef`). It is therefore an IR-affecting compiler switch: it must
-/// be folded into the IR-cache key (else flipping it serves stale inlined IR)
-/// AND passed to the camdlc subprocess. It re-keys run identity automatically —
-/// the model-level run-id hash folds the (LICM'd) IR content, which differs from
-/// the inlined IR. Default off, matching `CAMDL_LICM` unset.
-static LICM_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// rate trees — value-preserving (proven byte-identical by `gate_licm_ab`), so it
+/// is ON by default and only makes a fittable in-model kernel run at
+/// precomputed-kernel speed. It CHANGES the IR camdlc emits (adds
+/// `per_eval_bindings` + `Expr::PerEvalRef`) for models with hoistable structure,
+/// so it is an IR-affecting compiler switch: the resolved on/off state is folded
+/// into the IR-cache key (else flipping it serves the stale variant) AND the
+/// disable is passed to the camdlc subprocess. `--no-licm` / `CAMDL_NO_LICM` is
+/// the escape hatch (debugging / A-B), mirroring constant_fold /
+/// `CAMDL_NO_CONSTANT_FOLD`.
+static LICM_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Enable LICM for this process (the `--licm` flag). The `CAMDL_LICM` env var is
-/// an equivalent opt-in (either turns it on), so direct-camdlc and env-driven
-/// workflows stay consistent with the flag.
-pub fn set_licm_enabled(enabled: bool) {
-    LICM_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+/// Disable LICM for this process (the `--no-licm` flag). `CAMDL_NO_LICM` is the
+/// equivalent env escape hatch (either forces the inlined IR).
+pub fn set_licm_disabled(disabled: bool) {
+    LICM_DISABLED.store(disabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub(crate) fn licm_enabled() -> bool {
-    LICM_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
-        || std::env::var_os("CAMDL_LICM").is_some()
+    !(LICM_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("CAMDL_NO_LICM").is_some())
 }
 
 /// The content-addressed cache key for a compiled `.camdl`. Folds the model
@@ -473,11 +475,12 @@ pub(crate) fn licm_enabled() -> bool {
 /// The key must fold in EVERY input that changes the emitted IR bytes: the
 /// model source, the camdlc git-hash, the IR schema version, and the compiler
 /// switches that alter output. That switch set is `CAMDL_NO_CONSTANT_FOLD`
-/// (presence flips the fold pass off → unfolded/dense IR) and `CAMDL_LICM` /
-/// `--licm` (presence flips loop-invariant code motion on → hoisted IR with
-/// `per_eval_bindings`); both are `compiler.ml` switches that alter output. Any
-/// future IR-affecting compiler env var or flag MUST be added here, or flipping
-/// it on an already-cached model would silently serve the stale variant.
+/// (presence flips the fold pass off → unfolded/dense IR) and `CAMDL_NO_LICM` /
+/// `--no-licm` (presence flips loop-invariant code motion OFF → inlined IR
+/// without `per_eval_bindings`; LICM is on by default); both are `compiler.ml`
+/// switches that alter output. Any future IR-affecting compiler env var or flag
+/// MUST be added here, or flipping it on an already-cached model would silently
+/// serve the stale variant. (`licm_enabled` is the resolved on/off state.)
 pub(crate) fn ir_cache_key(
     content: &[u8],
     camdlc_ver: &str,
@@ -900,9 +903,9 @@ pub fn resolve_ir_path(path: &str) -> Result<(String, Option<std::path::PathBuf>
     } else {
         match (std::fs::read(path), ir_cache_dir()) {
             (Ok(content), Some(dir)) => {
-                // `CAMDL_NO_CONSTANT_FOLD` and `--licm`/`CAMDL_LICM` each change
-                // the IR camdlc emits, so both belong in the key — else flipping
-                // one serves the stale variant.
+                // `CAMDL_NO_CONSTANT_FOLD` and `--no-licm`/`CAMDL_NO_LICM` each
+                // change the IR camdlc emits, so both belong in the key — else
+                // flipping one serves the stale variant.
                 let fold_disabled = std::env::var_os("CAMDL_NO_CONSTANT_FOLD").is_some();
                 let key = ir_cache_key(&content, crate::version::GIT_HASH, ir::IR_VERSION.trim(), fold_disabled, licm_enabled());
                 Some((dir.join(format!("{}.ir.json", key)), key))
@@ -1057,10 +1060,10 @@ pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
-    // gh#272: honor `--licm` on the pass-through compiler subcommands
-    // (`compile`/`check`/`inspect`) too, so they emit/inspect the hoisted IR.
-    if licm_enabled() {
-        cmd.env("CAMDL_LICM", "1");
+    // gh#272: honor `--no-licm` on the pass-through compiler subcommands
+    // (`compile`/`check`/`inspect`) too, so they emit/inspect the inlined IR.
+    if !licm_enabled() {
+        cmd.env("CAMDL_NO_LICM", "1");
     }
     let status = cmd.status().map_err(|e| format!("cannot run camdlc: {}", e))?;
     std::process::exit(status.code().unwrap_or(1));
@@ -1836,9 +1839,9 @@ mod ir_cache_key_tests {
         // Flipping CAMDL_NO_CONSTANT_FOLD changes the emitted IR → different key
         // (must not serve the folded IR when the user asked for unfolded).
         assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", true, false));
-        // gh#272: flipping LICM (`--licm` / `CAMDL_LICM`) changes the emitted IR
-        // (hoisted vs inlined) → different key, so the opt-in flag recompiles
-        // rather than serving the stale inlined IR through `camdl fit`.
+        // gh#272: LICM on vs off (default-on; `--no-licm` / `CAMDL_NO_LICM` forces
+        // off) changes the emitted IR (hoisted vs inlined) → different key, so the
+        // toggle recompiles rather than serving the stale variant through fit.
         assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, true));
         // The two switches are independent — neither masks the other.
         assert_ne!(

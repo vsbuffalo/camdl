@@ -40,9 +40,10 @@ and expr =
   (* Reference to a model-level PER-EVAL binding by name (gh#272 LICM). Like
      BindingRef, but the body is param/table-only (loop-invariant within a
      trajectory) and may be param-CARRYING — so it is cached once per θ-stable
-     scope, not per step. Produced only by the LICM pass (post-autodiff,
-     CAMDL_LICM); never present in default-off IR. Resolved to a slot at
-     CompiledModel::new against `model.per_eval_bindings`. *)
+     scope, not per step. Produced by the LICM pass (post-autodiff; on by
+     default, `CAMDL_NO_LICM` disables); absent only when LICM is disabled or
+     nothing hoists. Resolved to a slot at CompiledModel::new against
+     `model.per_eval_bindings`. *)
   | PerEvalRef of string
   | Projected                    (* refers to projection output in likelihoods *)
   (* Per-observation auxiliary data column referenced by name in a likelihood

@@ -31,11 +31,14 @@ Two models identical except for the kernel:
 - `model_inmodel.camdl` — `W[p,q] ∝ N0[q]·exp(−γ·log(dratio[p,q]))`,
   row-normalized inline, γ_k a fitted parameter (17.9 MB IR inlined).
 
-LICM is opt-in: `--licm` (or `CAMDL_LICM=1`). It is a compile-time pass, so a
-`--licm` run produces a distinct (hoisted) IR and re-keys the IR cache + run
-identity; see the flag wiring in `rust/crates/cli/src/util.rs` (`ir_cache_key` /
-`run_camdlc_compile`). All timings below are with the IR cache warm (compile
-excluded), `--progress none`, single chain, `dt = 1`.
+LICM is **on by default** (since the gh#272 flip); `--no-licm` / `CAMDL_NO_LICM`
+forces the inlined variant for the off measurements below. It is a compile-time
+pass, so the two variants produce distinct (hoisted vs inlined) IR with distinct
+IR-cache keys + run identity; see the wiring in `rust/crates/cli/src/util.rs`
+(`ir_cache_key` / `run_camdlc_compile`). All timings below are with the IR cache
+warm (compile excluded), `--progress none`, single chain, `dt = 1`. (The off
+measurements were taken with `CAMDL_NO_LICM=1` / before the flip; the commands
+shown predate the flip's `--licm` → `--no-licm` rename — substitute accordingly.)
 
 Reproduction (shortened iteration counts; the upstream perf configs run 20k MH
 iters):
@@ -126,10 +129,11 @@ data):
 
 ## Next
 
-- The opt-in `--licm` flag is wired into the run identity, so `camdl fit` /
-  `simulate` pick it up and re-key correctly. The remaining step is the
-  **default-on flip** — a deliberate, run-id-re-keying, golden-regenerating
-  release decision (it makes every model recompile and re-key once). Hold for
-  maintainer sign-off.
+- **LICM is now default-on** (`--no-licm` / `CAMDL_NO_LICM` to disable). The flip
+  was confirmed golden-neutral: no golden model has hoistable structure, so
+  `make update-golden` under LICM-on changed zero files, and run identity re-keys
+  only for models that actually hoist (a user in-model kernel) — a non-hoisting
+  model's IR is byte-identical to pre-flip, so existing CAS entries stay valid.
 - A self-contained perf fixture (small, committed) would let a perf-acceptance
   number live in CI without the private MRE; not built yet.
+- Follow-ons: the flat-eval per-eval tape and the strength-reduction peephole.

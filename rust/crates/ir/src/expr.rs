@@ -129,8 +129,9 @@ pub struct BindingRefWrap {
 /// `{"per_eval_ref": "<name>"}` — reference to a model-level `per_eval_binding`
 /// by name (gh#272 LICM). Like `BindingRefWrap`, but the body is param/table-only
 /// (loop-invariant within a trajectory) and may be param-carrying, so it is cached
-/// once per θ-stable scope rather than per step. Produced only by the LICM pass;
-/// never present in default-off IR.
+/// once per θ-stable scope rather than per step. Produced by the LICM pass
+/// (on by default); absent only when LICM is disabled (`--no-licm`) or the model
+/// has nothing hoistable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PerEvalRefWrap {
     pub per_eval_ref: String,

@@ -117,13 +117,15 @@ pub(crate) struct Cli {
     #[arg(long, global = true, help_heading = "Global options")]
     no_ir_cache: bool,
 
-    /// Enable loop-invariant code motion (gh#272): hoist param/table-only
-    /// subexpressions (e.g. an in-model gravity coupling kernel) out of the
-    /// per-step rate evaluation so a fittable kernel runs at precomputed-kernel
-    /// speed. Opt-in (off by default); equivalent to `CAMDL_LICM=1`. It changes
-    /// the compiled IR, so a `--licm` run re-keys the IR cache and run identity.
+    /// Disable loop-invariant code motion (gh#272). LICM is ON by default: it
+    /// hoists param/table-only subexpressions (e.g. an in-model gravity coupling
+    /// kernel) out of the per-step rate evaluation so a fittable kernel runs at
+    /// precomputed-kernel speed. It is value-preserving, so `--no-licm` is just
+    /// an escape hatch (debugging / A-B); equivalent to `CAMDL_NO_LICM=1`. It
+    /// changes the compiled IR, so a `--no-licm` run re-keys the IR cache and run
+    /// identity (back to the inlined variant).
     #[arg(long, global = true, help_heading = "Global options")]
-    licm: bool,
+    no_licm: bool,
 }
 
 #[derive(Subcommand)]
@@ -510,7 +512,7 @@ fn main() {
     // wins when both are given.
     progress::init(if cli.no_progress { args::types::ProgressMode::None } else { cli.progress });
     util::set_ir_cache_disabled(cli.no_ir_cache);
-    util::set_licm_enabled(cli.licm);
+    util::set_licm_disabled(cli.no_licm);
 
     match cli.command {
         Command::Simulate(a)            => run_simulate(&a),

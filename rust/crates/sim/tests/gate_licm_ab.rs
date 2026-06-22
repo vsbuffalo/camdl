@@ -11,8 +11,8 @@
 //!
 //! Two committed fixtures compiled from the SAME source (`licm_ab.camdl`, a
 //! 4-patch in-model gravity kernel with a guarded FOI):
-//!   - `licm_ab_off.ir.json` — `camdlc` with LICM OFF (kernel inlined)
-//!   - `licm_ab_on.ir.json`  — `CAMDL_LICM=1 camdlc` (kernel hoisted)
+//!   - `licm_ab_off.ir.json` — `CAMDL_NO_LICM=1 camdlc` (kernel inlined)
+//!   - `licm_ab_on.ir.json`  — `camdlc` (kernel hoisted; LICM is default-on)
 //! See the source header for the exact regeneration commands. The fixtures are
 //! static IR (the test does not recompile), so the default-flag flip is
 //! decoupled from this gate.

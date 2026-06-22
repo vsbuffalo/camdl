@@ -18,8 +18,10 @@
 # then recompile both .ir.json siblings — see gate_licm_ab.rs):
 #   SET="--set R0=2.0 --set gamma=0.13 --set sigma=0.11 --set kappa=0.5 \
 #        --set gamma_k=2.0 --set theta=0.02"
-#   camdlc licm_ab.camdl --no-dim-check $SET             > licm_ab_off.ir.json
-#   CAMDL_LICM=1 camdlc licm_ab.camdl --no-dim-check $SET > licm_ab_on.ir.json
+#   CAMDL_NO_LICM=1 camdlc licm_ab.camdl --no-dim-check $SET > licm_ab_off.ir.json
+#   camdlc licm_ab.camdl --no-dim-check $SET                 > licm_ab_on.ir.json
+# (LICM is on by default since the gh#272 flip; CAMDL_NO_LICM forces the inlined
+#  variant for the _off sibling.)
 time_unit = 'days
 
 compartments { S, E, I, R }
