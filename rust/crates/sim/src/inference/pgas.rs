@@ -235,11 +235,18 @@ impl PGASTrajectory {
     /// `dt_substep` as a stored field) are dropped: an output trajectory carries
     /// state + flows, not the likelihood machinery.
     ///
-    /// **Time.** Each snapshot is stamped at the substep's realized END time
-    /// `t0 + dt_substep` — read from the record, never recomputed as
-    /// `t_start + s·dt`, so an off-grid / exact tiling can't misstamp.
+    /// **Time.** The first snapshot is the initial-condition row at `t_start`
+    /// (`substeps[0].t0`, the path's anchor state `substeps[0].counts_before`,
+    /// zeroed flows); each subsequent snapshot is stamped at the substep's
+    /// realized END time `t0 + dt_substep` — read from the record, never
+    /// recomputed as `t_start + s·dt`, so an off-grid / exact tiling can't
+    /// misstamp. Emitting the `t_start` row is what makes the aggregate
+    /// `Σ flow_infection == S₀ − S_final` hold in a seeded stratum (gh#270): the
+    /// first substep's flow gets its S decrement recorded against the true `S₀`,
+    /// not a post-first-substep value.
     ///
-    /// **Flows.** The per-substep integer flows ride through as [`Flows::Int`].
+    /// **Flows.** The per-substep integer flows ride through as [`Flows::Int`];
+    /// the prepended `t_start` row carries zeroed flows (no interval precedes it).
     ///
     /// **Incidence (`inc_<stream>`).** For each incidence stream (the
     /// `(name, flow_indices)` pairs from
@@ -258,7 +265,31 @@ impl PGASTrajectory {
 
         let coherent = self.coherent_counts_after()?;
         let mut traj = Trajectory::new();
-        let mut incidence: Vec<Vec<f64>> = Vec::with_capacity(self.substeps.len());
+        let mut incidence: Vec<Vec<f64>> = Vec::with_capacity(self.substeps.len() + 1);
+
+        // gh#270: emit the initial-condition row at `t_start` FIRST, so the saved
+        // path carries its own starting point. Without it the first written row is
+        // the END of substep 0, so that substep's infection flow has no S decrement
+        // recorded before it — and the aggregate `Σ flow_infection == S₀ − S_final`
+        // then fails by *exactly* `flow_infection[0]` in any stratum seeded with
+        // `I₀ > 0` (the seed-stratum residual). The anchor is
+        // `substeps[0].counts_before` — the same pre-state `coherent_counts_after`
+        // chains its deltas from, so the path stays continuous — stamped at
+        // `substeps[0].t0` (the realized `t_start`, read from the record, never
+        // recomputed). Flows are zero: no interval precedes `t_start`. This mirrors
+        // the forward chain-binomial writer, which emits a `t_start` snapshot with
+        // zeroed flows before its substep loop.
+        if let Some(first) = self.substeps.first() {
+            traj.push(Snapshot {
+                t: first.t0,
+                int_state: IntState::from_vec(first.counts_before.clone()),
+                real_state: RealState::from_vec(Vec::new()),
+                flows: Flows::Int(vec![0; first.flows.len()]),
+            });
+            if !incidence_streams.is_empty() {
+                incidence.push(vec![0.0; incidence_streams.len()]);
+            }
+        }
 
         for (s, rec) in self.substeps.iter().enumerate() {
             let t = rec.t0 + rec.dt_substep;
@@ -2794,27 +2825,36 @@ mod grid_tests {
         let inc_streams = vec![("cases".to_string(), vec![0usize])];
         let (out, incidence) = traj.to_trajectory(&inc_streams).unwrap();
 
-        // (a) counts == coherent_counts_after.
+        // Row 0 is the initial-condition row at t_start (gh#270): the path's
+        // anchor state with zeroed flows. The two substep rows follow.
         let coh = traj.coherent_counts_after().unwrap();
-        assert_eq!(out.snapshots.len(), 2);
-        for (s, snap) in out.snapshots.iter().enumerate() {
+        assert_eq!(out.snapshots.len(), 3);
+        // (a) initial row = counts_before[0] at t0, zero flows / zero incidence.
+        assert_eq!(out.snapshots[0].t, 0.0);
+        assert_eq!(out.snapshots[0].int_state.counts, vec![100, 0]);
+        assert_eq!(out.snapshots[0].flows.as_int(), &[0, 0]);
+        // (a') substep rows' counts == coherent_counts_after.
+        for (s, snap) in out.snapshots[1..].iter().enumerate() {
             assert_eq!(snap.int_state.counts, coh[s], "snapshot {s} counts");
         }
-        // (b) times stamped at t0 + dt_substep.
-        assert_eq!(out.snapshots[0].t, 1.0);
-        assert_eq!(out.snapshots[1].t, 1.5);
+        // (b) substep times stamped at t0 + dt_substep.
+        assert_eq!(out.snapshots[1].t, 1.0);
+        assert_eq!(out.snapshots[2].t, 1.5);
         // (c) flows ride through.
-        assert_eq!(out.snapshots[0].flows.as_int(), &[10, 0]);
-        assert_eq!(out.snapshots[1].flows.as_int(), &[5, 3]);
+        assert_eq!(out.snapshots[1].flows.as_int(), &[10, 0]);
+        assert_eq!(out.snapshots[2].flows.as_int(), &[5, 3]);
         // (d) inc_cases == Σ_{i∈{0}} substep.flows[i] = the infection flow per
         // substep — NOT a count diff (which would be coh S drop: also 10 then 5
         // here, so to disambiguate we use the SUBSET: recovery flow is excluded).
-        assert_eq!(incidence.len(), 2);
-        assert_eq!(incidence[0], vec![10.0]);
-        assert_eq!(incidence[1], vec![5.0]);
+        // The initial row contributes a leading zero, keeping incidence aligned
+        // 1:1 with the snapshots.
+        assert_eq!(incidence.len(), 3);
+        assert_eq!(incidence[0], vec![0.0]);
+        assert_eq!(incidence[1], vec![10.0]);
+        assert_eq!(incidence[2], vec![5.0]);
         // The projection summed ONLY flow 0; had it summed all flows it would be
         // 10 then 8 (5+3). Confirm it didn't.
-        assert_ne!(incidence[1], vec![8.0]);
+        assert_ne!(incidence[2], vec![8.0]);
     }
 
     /// No incidence streams ⇒ empty incidence sidecar (writer emits no `inc_*`).
@@ -2832,8 +2872,46 @@ mod grid_tests {
             }],
         };
         let (out, incidence) = traj.to_trajectory(&[]).unwrap();
-        assert_eq!(out.snapshots.len(), 1);
+        // One substep ⇒ initial-condition row (t_start) + the substep's end row.
+        assert_eq!(out.snapshots.len(), 2);
+        assert_eq!(out.snapshots[0].int_state.counts, vec![100]); // S₀
+        assert_eq!(out.snapshots[1].int_state.counts, vec![90]);
         assert!(incidence.is_empty());
+    }
+
+    // gh#270 RED reproduction: the saved path must include its t_start initial
+    // row so the seed stratum reconciles `Σ flow_infection == S₀ − S_final`.
+    #[test]
+    fn gh270_seed_stratum_flow_reconciles_with_s_depletion() {
+        // SEIRD-like seed: S starts at N0-I0; first substep has infection flows
+        // (I0 > 0 ⇒ flow_infection[0] > 0). S leaves ONLY via infection.
+        let mk = |cb: [i64; 2], ca: [i64; 2], inf: u64| SubstepRecord {
+            counts_before: cb.to_vec(),
+            counts_after: ca.to_vec(),
+            flows: vec![inf],
+            gammas: vec![],
+            t0: 0.0,
+            dt_substep: 1.0,
+        };
+        let traj = PGASTrajectory {
+            initial_counts: vec![1000, 13],
+            substeps: vec![
+                mk([1000, 13], [994, 19], 6), // first substep: 6 infections
+                mk([994, 19], [990, 22], 4),
+                mk([990, 22], [988, 23], 2),
+            ],
+        };
+        let (out, _) = traj.to_trajectory(&[]).unwrap();
+        let s: Vec<i64> = out.snapshots.iter().map(|sn| sn.int_state.counts[0]).collect();
+        let total_flow: i64 = traj.substeps.iter().map(|r| r.flows[0] as i64).sum();
+        // The audit identity from gh#270: Σ flow_infection == S₀ − S_final.
+        assert_eq!(
+            total_flow,
+            s[0] - s[s.len() - 1],
+            "seed stratum: Σ flow_infection must equal S₀ − S_final (gh#270)"
+        );
+        // And the path must begin at the true initial S (the t_start row).
+        assert_eq!(s[0], 1000, "first written S must be S₀ = initial_counts (t_start row)");
     }
 
     fn obs(times: &[f64]) -> Vec<Observation> {

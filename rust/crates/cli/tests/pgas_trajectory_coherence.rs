@@ -1,7 +1,9 @@
-//! gh#264 + latent-trajectory-output consolidation (2026-06-09): the saved
-//! PGAS posterior trajectories must be (a) a single directionally-coherent
-//! path — `S` monotone non-increasing, each step's `−ΔS` equal to the
-//! infection flow, population conserved — and (b) emitted in the shared
+//! gh#264 / gh#270 + latent-trajectory-output consolidation (2026-06-09): the
+//! saved PGAS posterior trajectories must be (a) a single directionally-coherent
+//! path — `S` monotone non-increasing, each step's `−ΔS` equal to the infection
+//! flow, the AGGREGATE `Σ flow_infection == S₀ − S_final` (gh#270: requires the
+//! path to carry its `t_start` initial row), population conserved — and (b)
+//! emitted in the shared
 //! tidy/long `trajectories.tsv` format: a `# camdl-trajectories v1` header,
 //! leading `chain  draw  time` id columns, int/real compartments,
 //! `flow_<transition>`, then `inc_<stream>` columns whose values are the
@@ -100,7 +102,7 @@ observations {
     cases ~ poisson(rate = projected)
   }
 }
-init { S = 999  I = 1 }
+init { S = 990  I = 10 }
 simulate { from = 0 'days  to = 12 'days }
 "#;
     let model = tmp.join("sir.camdl");
@@ -192,10 +194,13 @@ n_trajectories = 4
     assert!(by_draw.len() >= 1, "expected at least one (chain,draw) group");
 
     let mut total_rows = 0usize;
+    let mut audited_seeded_draw = false;
     for ((_chain, _draw), draw_rows) in &by_draw {
         let mut prev_s: Option<i64> = None;
         let mut pop0: Option<i64> = None;
         let mut prev_t: Option<f64> = None;
+        let mut sum_inf: i64 = 0;
+        let (mut s_first, mut s_last): (Option<i64>, i64) = (None, 0);
         for r in draw_rows {
             let s = r[si] as i64;
             let inf = r[fi_inf] as i64;
@@ -224,12 +229,31 @@ n_trajectories = 4
             if let Some(pt) = prev_t {
                 assert!(r[ti] > pt, "time must increase within a draw, {pt} -> {}", r[ti]);
             }
+            sum_inf += inf;
+            s_first.get_or_insert(s);
+            s_last = s;
             prev_s = Some(s);
             prev_t = Some(r[ti]);
             total_rows += 1;
         }
+        // gh#270: the AGGREGATE must reconcile, not just consecutive steps. The
+        // path includes its t_start initial row, so the first written S is the
+        // true S₀ and every infection — including the first substep's — has its
+        // S decrement recorded. Without the t_start row this fails by exactly
+        // flow_infection[0], the seed-stratum residual. (The per-step check
+        // above can't see this: it exempts the first row.)
+        let s0 = s_first.expect("draw had no rows");
+        assert_eq!(sum_inf, s0 - s_last,
+            "Σ flow_infection ({sum_inf}) must equal S₀−S_final ({}) over the whole path (gh#270)",
+            s0 - s_last);
+        // With I₀ = 10 the seed's first substep almost always infects someone,
+        // so this fixture genuinely exercises the residual (flow_infection[0]>0),
+        // not the vacuous I₀=0 case where the identity holds trivially.
+        if sum_inf > 0 { audited_seeded_draw = true; }
     }
     assert!(total_rows > 0, "no trajectory rows audited");
+    assert!(audited_seeded_draw,
+        "no draw had any infection flow — fixture not exercising the seed residual");
 
     // (4) The §4b "two-line load" acceptance test, in Rust: load the tidy file
     // and compute a posterior median band over S grouped by time. This is the
