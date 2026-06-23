@@ -5,68 +5,12 @@
 
 use std::f64::consts::PI;
 
-/// Log-gamma function via Stirling's approximation with Lanczos correction.
-/// Accurate to ~15 significant digits for x > 0.5.
-pub fn lgamma(x: f64) -> f64 {
-    // Lanczos approximation (g=7, n=9) — same coefficients as Numerical Recipes.
-    const G: f64 = 7.0;
-    const COEFFS: [f64; 9] = [
-        0.999_999_999_999_809_9,
-        676.5203681218851,
-        -1259.1392167224028,
-        771.323_428_777_653_1,
-        -176.615_029_162_140_6,
-        12.507343278686905,
-        -0.13857109526572012,
-        9.984_369_578_019_572e-6,
-        1.5056327351493116e-7,
-    ];
-
-    if x < 0.5 {
-        // Reflection formula: Γ(x)Γ(1-x) = π / sin(πx)
-        return (PI / (PI * x).sin()).ln() - lgamma(1.0 - x);
-    }
-
-    let x = x - 1.0;
-    let mut sum = COEFFS[0];
-    for i in 1..9 {
-        sum += COEFFS[i] / (x + i as f64);
-    }
-    let t = x + G + 0.5;
-    0.5 * (2.0 * PI).ln() + (t.ln() * (x + 0.5)) - t + sum.ln()
-}
-
-/// Digamma function ψ(x) = d/dx ln Γ(x).
-///
-/// Asymptotic expansion for x > 6, recurrence ψ(x+1) = ψ(x) + 1/x
-/// for smaller x. Accurate to ~14 digits.
-pub fn digamma(mut x: f64) -> f64 {
-    if x <= 0.0 && x == x.floor() {
-        return f64::NAN;
-    }
-    if x < 0.0 {
-        return digamma(1.0 - x) - PI / (PI * x).tan();
-    }
-    let mut result = 0.0;
-    while x < 6.0 {
-        result -= 1.0 / x;
-        x += 1.0;
-    }
-    let x2 = 1.0 / (x * x);
-    result + x.ln() - 0.5 / x
-        - x2 * (1.0/12.0 - x2 * (1.0/120.0 - x2 * (1.0/252.0
-        - x2 * (1.0/240.0 - x2 * 1.0/132.0))))
-}
-
-/// Log-density of Gamma(x; shape, scale).
-///
-/// log p(x | a, b) = (a-1)·ln(x) - x/b - a·ln(b) - lgamma(a)
-pub fn log_gamma_density(x: f64, shape: f64, scale: f64) -> f64 {
-    if x <= 0.0 || shape <= 0.0 || scale <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    (shape - 1.0) * x.ln() - x / scale - shape * scale.ln() - lgamma(shape)
-}
+// `lgamma` / `digamma` / `log_gamma_density` / `normal_cdf` / `normal_quantile`
+// now live in the shared `numerics` crate (deduplicated with the standalone
+// `external-harness`, whose probit copy had drifted). Re-exported here so
+// existing `sim::inference::obs_loglik::*` / `sim::inference::*` call sites are
+// unchanged.
+pub use numerics::{digamma, lgamma, log_gamma_density, normal_cdf, normal_quantile};
 
 /// Log-density of one overdispersion gamma multiplier `g ~ Γ(shape = dt/σ²,
 /// scale = σ²/dt)`, the form recorded per overdispersed transition in a PGAS
@@ -241,67 +185,6 @@ pub fn negbin_logpmf(y: f64, mu: f64, k: f64) -> f64 {
 pub fn normal_logpdf(y: f64, mu: f64, sigma: f64) -> f64 {
     if sigma <= 0.0 { return f64::NEG_INFINITY; }
     -0.5 * ((y - mu) / sigma).powi(2) - sigma.ln() - 0.5 * (2.0 * PI).ln()
-}
-
-/// Standard normal CDF via libm::erfc (gh#audit-H2).
-///
-/// Φ(x) = 0.5 × erfc(-x / √2)
-///
-/// Uses libm::erfc (full f64 precision, ~ULP) instead of the prior
-/// Abramowitz & Stegun 7.1.26 rational approximation (max abs error
-/// ~1.5e-7). The A&S form was fine far from the tails but dominated
-/// the tail probability when both Φ values were within 1e-7 of 0 or 1
-/// — the regime where polio AFP surveillance and other rare-event
-/// inference operates. Particle weights at tail observations were
-/// being determined by 1e-7-scale noise rather than the model's
-/// predicted incidence.
-pub fn normal_cdf(x: f64) -> f64 {
-    0.5 * libm::erfc(-x / std::f64::consts::SQRT_2)
-}
-
-/// Inverse standard normal CDF (probit), Φ⁻¹(p) for p ∈ (0, 1).
-///
-/// Beasley–Springer–Moro rational approximation (accurate to ~1e-9 in the
-/// central region, ~1e-6 in the tails). Used for exact inverse-CDF sampling
-/// of truncated distributions (`log_uniform`, `truncated_normal` prior
-/// draws) so the draw lands inside the support without rejection. `libm`
-/// 0.2 has no `erfinv`, hence the explicit polynomial here.
-pub fn normal_quantile(p: f64) -> f64 {
-    const A: [f64; 6] = [
-        -3.969683028665376e+01,  2.209460984245205e+02, -2.759285104469687e+02,
-         1.383577518672690e+02, -3.066479806614716e+01,  2.506628277459239e+00,
-    ];
-    const B: [f64; 5] = [
-        -5.447609879822406e+01,  1.615858368580409e+02, -1.556989798598866e+02,
-         6.680131188771972e+01, -1.328068155288572e+01,
-    ];
-    const C: [f64; 6] = [
-        -7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
-        -2.549732539343734e+00,  4.374664141464968e+00,  2.938163982698783e+00,
-    ];
-    const D: [f64; 4] = [
-         7.784695709041462e-03,  3.224671290700398e-01,  2.445134137142996e+00,
-         3.754408661907416e+00,
-    ];
-    const P_LOW: f64 = 0.02425;
-    const P_HIGH: f64 = 1.0 - P_LOW;
-    // Clamp away from the open-interval endpoints so callers passing 0 or 1
-    // (e.g. a rounded uniform draw) get a finite, monotone result.
-    let p = p.clamp(1e-300, 1.0 - 1e-16);
-    if p < P_LOW {
-        let q = (-2.0 * p.ln()).sqrt();
-        (((((C[0]*q + C[1])*q + C[2])*q + C[3])*q + C[4])*q + C[5])
-            / ((((D[0]*q + D[1])*q + D[2])*q + D[3])*q + 1.0)
-    } else if p <= P_HIGH {
-        let q = p - 0.5;
-        let r = q * q;
-        (((((A[0]*r + A[1])*r + A[2])*r + A[3])*r + A[4])*r + A[5]) * q
-            / (((((B[0]*r + B[1])*r + B[2])*r + B[3])*r + B[4])*r + 1.0)
-    } else {
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
-        -(((((C[0]*q + C[1])*q + C[2])*q + C[3])*q + C[4])*q + C[5])
-            / ((((D[0]*q + D[1])*q + D[2])*q + D[3])*q + 1.0)
-    }
 }
 
 /// Discretized Normal log-PMF (He et al. 2010 observation model).

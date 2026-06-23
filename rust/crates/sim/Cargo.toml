@@ -12,6 +12,7 @@ arrow = { version = "53", optional = true, default-features = false }
 bincode = "1"
 bitflags = "2"
 ir = { path = "../ir" }
+numerics = { path = "../numerics" }
 # gh#audit-H2. libm provides high-precision erfc for the discretized-
 # normal CDF tail accuracy fix (replaces the A&S 7.1.26 rational
 # approximation with max abs error ~1.5e-7, which dominated tail

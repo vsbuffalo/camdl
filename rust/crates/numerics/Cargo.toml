@@ -1,0 +1,11 @@
+[package]
+name = "numerics"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free special-function library shared across the workspace.
+# Pure f64 math (only `libm` for erfc); no camdl-domain types, so it can be
+# depended on by both the inference engine (`sim`) and the standalone
+# `external-harness` without pulling either into the other.
+[dependencies]
+libm = "0.2"

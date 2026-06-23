@@ -869,6 +869,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "numerics",
  "serde",
  "sha2",
  "tempfile",
@@ -1516,6 +1517,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
+name = "numerics"
+version = "0.1.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2065,6 +2073,7 @@ dependencies = [
  "libm",
  "log",
  "nlopt",
+ "numerics",
  "parquet",
  "proptest",
  "rand 0.8.5",
