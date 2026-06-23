@@ -8,6 +8,7 @@ mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)
 mod hashing;
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
+mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
 mod run_paths;      // canonical output-path helpers
 mod cas;
 mod browse;
@@ -949,12 +950,55 @@ fn run_simulate(a: &args::SimulateArgs) {
                     })
                 }
             }
+        } else if source == "posterior" {
+            // Resolve the fit run's canonical post-warm-up draws cloud (the
+            // terminal Bayesian stage's draws.tsv). --fit names the fit results
+            // directory here, not a config TOML.
+            let fit_ref = fit_path_for_draws.as_ref().unwrap_or_else(|| {
+                eprintln!("error: --draws posterior requires --fit <fit results dir> \
+                    (the directory `camdl fit run` printed)");
+                std::process::exit(1);
+            });
+            let resolved = posterior_draws::resolve_posterior_draws(fit_ref, None)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                });
+            let loaded = load_draws_tsv(&resolved.draws_path.to_string_lossy())
+                .unwrap_or_else(|e| {
+                    eprintln!("error loading posterior draws {}: {}",
+                        resolved.draws_path.display(), e);
+                    std::process::exit(1);
+                });
+            let method_label = resolved.method
+                .map(|m| m.as_str())
+                .unwrap_or("posterior");
+            eprintln!("draws: posterior — {} draws from {} stage '{}' ({})",
+                loaded.len(), method_label, resolved.stage, resolved.draws_path.display());
+            loaded
         } else {
-            // File path
-            load_draws_tsv(source).unwrap_or_else(|e| {
+            // File path. #273: when --fit is supplied, backfill any parameter
+            // absent from the draws columns from the fit's [fixed] block, never
+            // overwriting a column the file provides (a raw posterior trace tail
+            // carries only the estimated columns).
+            let mut loaded = load_draws_tsv(source).unwrap_or_else(|e| {
                 eprintln!("error loading draws: {}", e);
                 std::process::exit(1);
-            })
+            });
+            if let Some(fit_ref) = fit_path_for_draws.as_ref() {
+                let fixed = posterior_draws::resolve_fixed_for_backfill(fit_ref)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: --fit [fixed] backfill: {}", e);
+                        std::process::exit(1);
+                    });
+                let filled = posterior_draws::backfill_fixed(&mut loaded, &fixed);
+                if !filled.is_empty() {
+                    let names: Vec<&str> = filled.iter().map(|s| s.as_str()).collect();
+                    eprintln!("draws: backfilled {} fixed parameter(s) from {}: {}",
+                        filled.len(), fit_ref, names.join(", "));
+                }
+            }
+            loaded
         }
     } else {
         // No draws — single point (parameters come from --params / --param)

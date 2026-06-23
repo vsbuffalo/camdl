@@ -528,11 +528,17 @@ pub struct SimulateArgs {
     #[arg(long, conflicts_with = "seeds")]
     pub replicates: Option<usize>,
 
-    /// Parameter draw source: path to params TSV, "uniform", or "prior"
+    /// Parameter draw source: path to a params TSV, "uniform", "prior", or
+    /// "posterior". "posterior" reads a completed fit's canonical post-warm-up
+    /// draws cloud — requires `--fit <fit results dir>`.
     #[arg(long)]
     pub draws: Option<String>,
 
-    /// fit.toml supplying priors for --draws prior
+    /// Companion for `--draws`. With `--draws prior`, a fit.toml supplying
+    /// priors. With `--draws posterior`, the fit results directory to read the
+    /// posterior draws from. With `--draws <file.tsv>`, a fit.toml (or results
+    /// dir) whose `[fixed]` block backfills parameters absent from the file's
+    /// columns — never overwriting a column the file provides (#273).
     #[arg(long, requires = "draws")]
     pub fit: Option<PathBuf>,
 
