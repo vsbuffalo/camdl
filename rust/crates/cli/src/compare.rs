@@ -119,6 +119,14 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         std::process::exit(2);
     }
 
+    // #295 Ask 1: surface the optimism so an in-sample / plug-in score is never
+    // silently read as an honest out-of-sample forecast score. Today every trace
+    // is plug-in + in-sample, so this always fires; when posterior / LFO traces
+    // exist, the per-trace tag drives it.
+    if let Some(caveat) = rows.iter().find_map(|r| r.trace.optimism_caveat()) {
+        eprintln!("note: {caveat}");
+    }
+
     // Baseline: explicit > cfg > argmax elpd.
     let baseline_name = baseline.or(cfg_baseline).unwrap_or_else(|| {
         let best = rows.iter()

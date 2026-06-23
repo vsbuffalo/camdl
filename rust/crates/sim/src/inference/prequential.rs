@@ -27,6 +27,24 @@ pub enum Provenance {
     PlugIn,
 }
 
+/// How the parameters were conditioned on the data when scoring — the **second**
+/// optimism axis (#295), orthogonal to [`Provenance`] (the plug-in-vs-posterior
+/// parameter treatment).
+///
+/// v1 only uses `InSample`: θ is fit to the *full* series, so every
+/// "one-step-ahead" score has already seen the future through θ. The score is
+/// then one-step-ahead in `y` but in-sample in `θ` — optimistic in absolute
+/// level, not a true out-of-sample forecast score. Honest out-of-sample
+/// (`Lfo` / `RollingOrigin`) is #295 Part II; those variants append here without
+/// a schema migration when they land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Conditioning {
+    /// θ fit to all of `y_{1:T}` → one-step-ahead in `y` but not in `θ`.
+    #[default]
+    InSample,
+}
+
 /// One stream's (district's) score at a single step (gh#269).
 ///
 /// The `--save-prequential` joint score is the cross-stream sum; this
@@ -125,8 +143,14 @@ pub struct PrequentialTrace {
     /// Observations y_1 .. y_{t0} initialize the filter and are not
     /// scored.
     pub t0: usize,
-    /// How the predictive was constructed.
+    /// How the predictive was constructed — the parameter-treatment axis
+    /// (`plug_in` today; `posterior` is #295 Part I.2).
     pub provenance: Provenance,
+    /// How the parameters were conditioned on the data — the second optimism
+    /// axis (#295). `#[serde(default)]` so a pre-#295 `prequential.json` (no
+    /// field) reads as `InSample`, which is factually what every such trace is.
+    #[serde(default)]
+    pub conditioning: Conditioning,
     /// Per-step records, length = T - t0.
     pub steps: Vec<PrequentialStep>,
     /// Warnings collected during trace construction.
@@ -137,6 +161,30 @@ impl PrequentialTrace {
     /// Total expected log predictive density (elpd_preq).
     pub fn elpd(&self) -> f64 {
         self.steps.iter().map(|s| s.log_score).sum()
+    }
+
+    /// A one-line caveat when the score is optimistic on either axis — plug-in
+    /// (under-dispersed: scored at a single θ) and/or in-sample (θ fit to all
+    /// the data, so it has seen the future). Returns `None` only when the score
+    /// is honest on both axes (out-of-sample posterior). #295: the number must
+    /// never be silently read as a true out-of-sample forecast score.
+    pub fn optimism_caveat(&self) -> Option<String> {
+        let plug_in = self.provenance == Provenance::PlugIn;
+        let in_sample = self.conditioning == Conditioning::InSample;
+        if !plug_in && !in_sample {
+            return None;
+        }
+        let mut why: Vec<&str> = Vec::new();
+        if plug_in {
+            why.push("plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed)");
+        }
+        if in_sample {
+            why.push("in-sample (θ fit to all the data → optimistic in absolute level)");
+        }
+        Some(format!(
+            "scores are {} — not a leave-future-out forecast score. See LFO (#295).",
+            why.join("; and "),
+        ))
     }
 
     /// Mean CRPS across scored steps.
@@ -315,7 +363,11 @@ pub fn build_trace(
     PrequentialTrace {
         schema_version: 2,
         t0,
+        // This builder scores a single filter pass at one θ over the full data:
+        // plug-in + in-sample. The posterior / LFO producers (#295) stamp their
+        // own values.
         provenance: Provenance::PlugIn,
+        conditioning: Conditioning::InSample,
         steps,
         warnings,
     }
@@ -385,6 +437,43 @@ mod tests {
     use super::*;
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool { (a - b).abs() < tol }
+
+    #[test]
+    fn old_prequential_json_without_conditioning_reads_as_in_sample() {
+        // #295 back-compat: a pre-#295 trace has no `conditioning` field. It must
+        // still deserialize (serde default), reading as the value it factually
+        // is — in-sample — never failing to parse.
+        let old = r#"{
+            "schema_version": 2,
+            "t0": 0,
+            "provenance": "plug_in",
+            "steps": [],
+            "warnings": []
+        }"#;
+        let t: PrequentialTrace = serde_json::from_str(old).expect("old json must still parse");
+        assert_eq!(t.conditioning, Conditioning::InSample);
+        assert_eq!(t.provenance, Provenance::PlugIn);
+    }
+
+    #[test]
+    fn plug_in_in_sample_trace_is_flagged_optimistic() {
+        // The default builder output (plug-in + in-sample) must carry a caveat
+        // on both axes — the #295 "never silently over-read" guarantee.
+        let t = PrequentialTrace {
+            schema_version: 2, t0: 0,
+            provenance: Provenance::PlugIn,
+            conditioning: Conditioning::InSample,
+            steps: vec![], warnings: vec![],
+        };
+        let caveat = t.optimism_caveat().expect("plug-in + in-sample must be flagged");
+        assert!(caveat.contains("plug-in"), "names the treatment optimism: {caveat}");
+        assert!(caveat.contains("in-sample"), "names the conditioning optimism: {caveat}");
+    }
+
+    #[test]
+    fn conditioning_serializes_snake_case() {
+        assert_eq!(serde_json::to_string(&Conditioning::InSample).unwrap(), r#""in_sample""#);
+    }
 
     #[test]
     fn crps_point_mass_equals_abs_error() {
@@ -481,7 +570,7 @@ mod tests {
         }).collect();
         let trace = PrequentialTrace {
             schema_version: 1, t0: 0, provenance: Provenance::PlugIn,
-            steps, warnings: vec![],
+            conditioning: Conditioning::InSample, steps, warnings: vec![],
         };
         // 90% interval = PIT in [0.05, 0.95] — 90 of 100 PITs qualify.
         let cov = trace.pit_coverage(0.90);
@@ -583,7 +672,7 @@ mod tests {
         }).collect();
         let trace = PrequentialTrace {
             schema_version: 1, t0: 0, provenance: Provenance::PlugIn,
-            steps, warnings: vec![],
+            conditioning: Conditioning::InSample, steps, warnings: vec![],
         };
         let hist = trace.pit_histogram(10);
         assert_eq!(hist.iter().sum::<usize>(), 50);
