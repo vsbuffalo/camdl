@@ -193,10 +193,7 @@ fn config_label(b: crate::args::types::ForwardBackend, dt: f64) -> String {
     format!("{}-dt{}", b.as_str(), dt)
 }
 
-/// Build a `LevelId` from a name, label, and the level's content hash.
-fn level(name: &str, label: &str, hash: ContentHash) -> LevelId {
-    LevelId { name: name.into(), label: label.into(), hash, schema_version: 1 }
-}
+use crate::fit::cas::level;
 
 /// Resolve a trajectory leaf's identity: its `TrajectoryInput`, the five
 /// factored levels (model/config/params/scenario/seed, in path order), and

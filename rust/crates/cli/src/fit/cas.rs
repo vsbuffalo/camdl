@@ -67,8 +67,33 @@ pub struct FitStageCtx<'a> {
     pub deps: Vec<ArtifactRef>,
 }
 
-fn level(name: &str, label: &str, hash: ContentHash) -> LevelId {
-    LevelId { name: name.into(), label: label.into(), hash, schema_version: 1 }
+/// Schema version stamped into every [`LevelId`]. Identity-bearing — it folds
+/// into every `run_id`, so a bump re-keys all CAS artifacts and must live in
+/// exactly one place.
+pub(crate) const LEVEL_SCHEMA_VERSION: u16 = 1;
+
+/// Build a CAS [`LevelId`] with the canonical schema version. The single
+/// constructor every artifact-kind resolver (`fit`/`pfilter`/`survey`/
+/// `profile`/`sim_ensemble`/`resolve`) routes through.
+pub(crate) fn level(name: &str, label: &str, hash: ContentHash) -> LevelId {
+    LevelId { name: name.into(), label: label.into(), hash, schema_version: LEVEL_SCHEMA_VERSION }
+}
+
+/// Per-stream data digests from **pre-computed** SHA-256 hex hashes, sorted by
+/// name. Validates each is a well-formed 64-hex digest (a loud guard against a
+/// malformed hand-supplied hash). Distinct from [`build_data_digests`], which
+/// reads file *bytes*; this takes hashes the caller already holds.
+pub(crate) fn data_digests(data: &[(String, String)]) -> Result<Vec<DataDigest>, String> {
+    let mut entries: Vec<&(String, String)> = data.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .iter()
+        .map(|(name, sha)| {
+            ContentHash::from_hex(sha)
+                .map(DataDigest)
+                .map_err(|e| format!("data hash for '{}' is not a 64-hex SHA-256: {:?}", name, e))
+        })
+        .collect()
 }
 
 /// Recursively sort object keys → canonical JSON, so the hash is stable

@@ -17,7 +17,7 @@
 
 use runid::float::FiniteF64;
 use runid::inputs::{
-    ArtifactRef, DataDigest, Deps, EngineVersion, ModelDigest, ParamId, ProfileBase,
+    ArtifactRef, Deps, EngineVersion, ModelDigest, ParamId, ProfileBase,
     ProfilePointConfig, ProfileStage, Seed, StartLevel,
 };
 use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
@@ -60,23 +60,7 @@ pub struct ProfilePointCtx<'a> {
     pub deps: Vec<ArtifactRef>,
 }
 
-fn level(name: &str, label: &str, hash: ContentHash) -> LevelId {
-    LevelId { name: name.into(), label: label.into(), hash, schema_version: 1 }
-}
-
-/// Per-stream data digests from profile's SHA-256 hex hashes, sorted by name.
-fn data_digests(data: &[(String, String)]) -> Result<Vec<DataDigest>, String> {
-    let mut entries: Vec<&(String, String)> = data.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries
-        .iter()
-        .map(|(name, sha)| {
-            ContentHash::from_hex(sha)
-                .map(DataDigest)
-                .map_err(|e| format!("data hash for '{}' is not a 64-hex SHA-256: {:?}", name, e))
-        })
-        .collect()
-}
+use crate::fit::cas::{data_digests, level};
 
 /// Resolve a profile-point leaf's identity: the five factored levels and the
 /// `run_id` derived from their hashes.

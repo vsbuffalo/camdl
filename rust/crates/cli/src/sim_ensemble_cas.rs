@@ -72,9 +72,7 @@ pub struct EnsembleCtx<'a> {
     pub cells: &'a [EnsembleCell],
 }
 
-fn level(name: &str, label: &str, hash: ContentHash) -> LevelId {
-    LevelId { name: name.into(), label: label.into(), hash, schema_version: 1 }
-}
+use crate::fit::cas::level;
 
 /// Compact `dt` rendering for the `config` segment label (`1`, `0.5`, …).
 fn fmt_dt(dt: f64) -> String {

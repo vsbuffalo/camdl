@@ -12,7 +12,7 @@
 //! loglik is computed against), keeping the `model` level the pure model IR.
 //! Mirrors [`crate::resolve`] (sim) and [`crate::profile_cas`].
 
-use runid::inputs::{DataDigest, EngineVersion, ModelDigest, Seed};
+use runid::inputs::{EngineVersion, ModelDigest, Seed};
 use runid::{
     run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId,
 };
@@ -54,26 +54,7 @@ pub struct PfilterCtx<'a> {
     pub seed: u64,
 }
 
-fn level(name: &str, label: &str, hash: ContentHash) -> LevelId {
-    LevelId { name: name.into(), label: label.into(), hash, schema_version: 1 }
-}
-
-/// Per-stream data digests from the SHA-256 hex hashes, sorted by name.
-/// Validates that each is a well-formed 64-hex digest (the caller's hashes
-/// come from `ContentHash::digest_bytes`, so this never fails in practice;
-/// it is a loud guard against a malformed hand-supplied hash).
-fn data_digests(data: &[(String, String)]) -> Result<Vec<DataDigest>, String> {
-    let mut entries: Vec<&(String, String)> = data.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries
-        .iter()
-        .map(|(name, sha)| {
-            ContentHash::from_hex(sha)
-                .map(DataDigest)
-                .map_err(|e| format!("data hash for '{}' is not a 64-hex SHA-256: {:?}", name, e))
-        })
-        .collect()
-}
+use crate::fit::cas::{data_digests, level};
 
 /// Resolve a pfilter-eval leaf's identity: the four factored levels and the
 /// `run_id` derived from their hashes.
