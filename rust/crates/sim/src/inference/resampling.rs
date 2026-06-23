@@ -16,17 +16,26 @@ use super::types::normalize_log_weights;
 /// This gives exactly N selected particles with probability proportional
 /// to exp(log_weight).
 pub fn systematic_resample(log_weights: &[f64], rng: &mut StatefulRng) -> Vec<usize> {
-    let n = log_weights.len();
-    if n == 0 { return vec![]; }
-
+    if log_weights.is_empty() { return vec![]; }
     let weights = normalize_log_weights(log_weights);
+    systematic_resample_core(&weights, rng.uniform())
+}
 
-    // Systematic resampling: one uniform draw, evenly spaced thresholds
-    let u = rng.uniform() / n as f64;
+/// Core systematic-resampling loop over **already-normalized** `weights`, given
+/// a base uniform draw `u0 ∈ [0, 1)`: one uniform, evenly-spaced thresholds,
+/// returning exactly `weights.len()` selected indices.
+///
+/// Shared by the rng-driven [`systematic_resample`] and the correlated PF's
+/// `systematic_resample_fixed_u` (which supplies a *fixed* `u0` for
+/// common-random-numbers coupling across paired runs) so the two selection
+/// loops can never drift apart.
+pub(crate) fn systematic_resample_core(weights: &[f64], u0: f64) -> Vec<usize> {
+    let n = weights.len();
+    if n == 0 { return vec![]; }
+    let u = u0 / n as f64;
     let mut indices = Vec::with_capacity(n);
     let mut cumsum = 0.0;
     let mut j = 0;
-
     for i in 0..n {
         let threshold = u + i as f64 / n as f64;
         while j < n - 1 && cumsum + weights[j] < threshold {
@@ -35,7 +44,6 @@ pub fn systematic_resample(log_weights: &[f64], rng: &mut StatefulRng) -> Vec<us
         }
         indices.push(j);
     }
-
     indices
 }
 

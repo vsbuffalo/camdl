@@ -558,9 +558,9 @@ pub fn bootstrap_filter_correlated(
                 // Systematic resample with sorted weights and correlated uniform.
         // Im15 in 2026-04-19 inference review: previously a
         // `_resample_rng` was constructed here and never read —
-        // `sorted_systematic_resample` takes the correlated
+        // `systematic_resample_fixed_u` takes the correlated
         // `base_uniform` directly and needs no RNG. Deleted.
-        let indices = sorted_systematic_resample(&sorted_weights, base_uniform);
+        let indices = systematic_resample_fixed_u(&sorted_weights, base_uniform);
 
         // Map sorted indices back to original particle indices
         for (i, &sorted_idx) in indices.iter().enumerate() {
@@ -599,26 +599,13 @@ pub fn bootstrap_filter_correlated(
     })
 }
 
-/// Systematic resampling with a fixed base uniform (for correlation).
-fn sorted_systematic_resample(log_weights: &[f64], base_uniform: f64) -> Vec<usize> {
-    let n = log_weights.len();
-    if n == 0 { return vec![]; }
-
+/// Systematic resampling with a **fixed** base uniform (correlated-PF CRN
+/// coupling) rather than a fresh rng draw. Thin wrapper over the shared
+/// [`super::resampling::systematic_resample_core`] — the selection loop is
+/// identical to [`super::resampling::systematic_resample`]; only the source of
+/// the base uniform differs.
+fn systematic_resample_fixed_u(log_weights: &[f64], base_uniform: f64) -> Vec<usize> {
+    if log_weights.is_empty() { return vec![]; }
     let weights = normalize_log_weights(log_weights);
-
-    let u = base_uniform / n as f64;
-    let mut indices = Vec::with_capacity(n);
-    let mut cumsum = 0.0;
-    let mut j = 0;
-
-    for i in 0..n {
-        let threshold = u + i as f64 / n as f64;
-        while j < n - 1 && cumsum + weights[j] < threshold {
-            cumsum += weights[j];
-            j += 1;
-        }
-        indices.push(j);
-    }
-
-    indices
+    super::resampling::systematic_resample_core(&weights, base_uniform)
 }
