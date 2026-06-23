@@ -164,6 +164,25 @@ pub struct Snapshot {
 }
 
 /// The full time series produced by a simulation run.
+///
+/// **Initial-row convention (load-bearing for any consumer that differences
+/// state against flows).** Every writer of a `(state, flows)` trajectory MUST
+/// emit the initial-condition row first: a snapshot at `t_start` carrying the
+/// initial state and **zeroed** flows (no interval precedes `t_start`).
+/// Subsequent rows carry the flows accumulated over the interval ending at
+/// their time. This is exactly what makes the aggregate identity
+/// `Σ flow_<tr> == −Δcompartment` hold over the whole path for a compartment
+/// whose only dynamics are transitions (no events/balance touching it): the
+/// first interval's flow gets its state decrement recorded against the true
+/// initial value, not a post-first-substep one.
+///
+/// The three forward backends (`chain_binomial`, `gillespie`, `ode`) honour
+/// this via the `if output_due_at { push t_start row; reset flows }` prologue
+/// before their integration loop; the PGAS smoother honours it by prepending
+/// the row in `PGASTrajectory::to_trajectory`. Dropping the `t_start` row is a
+/// silent-wrong bug (gh#270): the per-step delta still reconciles, but the
+/// aggregate is off by exactly the first interval's flow — invisible to a
+/// per-step check, caught by `tests/trajectory_flow_reconciliation.rs`.
 #[derive(Debug, Clone)]
 pub struct Trajectory {
     pub snapshots: Vec<Snapshot>,

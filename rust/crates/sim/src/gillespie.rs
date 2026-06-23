@@ -191,7 +191,9 @@ pub fn run_gillespie_with_observer(
     let mut traj = Trajectory::new();
     let mut current_flows = FlowVec::new(n_transitions);
 
-    // Record initial state
+    // Record initial state. Initial-row convention (see `Trajectory` docs):
+    // the t_start snapshot carries zeroed flows so `Σ flow == −Δstate`
+    // reconciles over the whole path (gh#270).
     if schedule.output_due_at(&cursor, t) {
         traj.push(Snapshot {
             t,

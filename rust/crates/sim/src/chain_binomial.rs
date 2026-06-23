@@ -217,6 +217,9 @@ pub fn run_chain_binomial_with_observer(
     // t_start + s*dt. See docs/dev/proposals/2026-06-05-substep-time-sdt-convention.md.
     let mut s: u64 = 0;
 
+    // Initial-row convention (see `Trajectory` docs): emit the t_start
+    // snapshot with zeroed flows before the loop, so `Σ flow == −Δstate`
+    // reconciles over the whole path (gh#270).
     if schedule.output_due_at(&cursor, t) {
         traj.push(Snapshot {
             t, int_state: int_s.clone(), real_state: real_s.clone(), flows: Flows::Int(current_flows.counts.clone()),

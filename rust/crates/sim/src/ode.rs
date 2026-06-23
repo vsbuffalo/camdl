@@ -600,7 +600,9 @@ pub fn run_ode(
     let snapshot_flows = |flow: &[f64]| Flows::Real(flow.to_vec());
     let mut t = cfg.t_start;
 
-    // Record initial snapshot
+    // Record initial snapshot. Initial-row convention (see `Trajectory` docs):
+    // the t_start snapshot carries zeroed flows so `Σ flow == −Δstate`
+    // reconciles over the whole path (gh#270).
     if schedule.output_due_at(&cursor, t) {
         let (is, rs) = to_states(&state.int, &state.real);
         traj.push(Snapshot {
