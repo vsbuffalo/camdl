@@ -19,11 +19,19 @@ use crate::compiled_model::CompiledModel;
 use crate::rng::StatefulRng;
 use crate::error::SimError;
 use crate::inference::obs_loglik::{poisson_logpmf, binom_logpmf};
+use crate::inference::numerics::BINOM_PROB_EPS;
 use crate::inference::particle_filter::Observation;
 use crate::inference::resampling::systematic_resample;
 use crate::inference::pmmh::Prior;
 use crate::inference::prior::Density;
-use crate::inference::types::{EstimatedParam, RESAMPLE_RNG_STREAM, init_particle_rngs, restore_z_values};
+use crate::inference::types::{EstimatedParam, PROB_FRACTION_EPS, RESAMPLE_RNG_STREAM, init_particle_rngs, restore_z_values};
+
+/// Process-noise variance floor below which an overdispersed transition is
+/// treated as carrying no gamma multiplier. MUST match between the PGAS
+/// log-density (`density`) and its gradient (`pgas_grad`): a divergence
+/// desyncs the value path's gamma index from the gradient's, corrupting the
+/// trajectory's energy.
+pub(crate) const OVERDISP_SIGMA_SQ_FLOOR: f64 = 1e-30;
 use crate::propensity::{eval_propensities, EvalCtx};
 use crate::resolved_expr::eval_resolved;
 use crate::schedule::{Cursor, Schedule, StepPolicy};
@@ -729,7 +737,7 @@ fn exit_and_split_log_density(
     // gh#audit-H3: stable (p, q) primitive with the clamped variant
     // (PGAS hot path needs strict-interior p for the binomial density
     // / NUTS gradient).
-    let (p_total, _q) = super::numerics::prob_q_from_rate_dt_clamped(total_rate, dt, 1e-15);
+    let (p_total, _q) = super::numerics::prob_q_from_rate_dt_clamped(total_rate, dt, BINOM_PROB_EPS);
     let binom_total = binom_logpmf(n_exit, n_src as u64, p_total);
 
     if !binom_total.is_finite() {
@@ -747,7 +755,7 @@ fn exit_and_split_log_density(
         if k == n_competing - 1 {
             if flows[tr_idx] != remaining { return f64::NEG_INFINITY; }
         } else if remaining > 0 && rate_remaining > 0.0 {
-            let p_split = (eff_rate / rate_remaining).clamp(1e-15, 1.0 - 1e-15);
+            let p_split = (eff_rate / rate_remaining).clamp(BINOM_PROB_EPS, 1.0 - BINOM_PROB_EPS);
             log_p += binom_logpmf(flows[tr_idx], remaining, p_split);
             remaining -= flows[tr_idx];
             rate_remaining -= eff_rate;
@@ -905,7 +913,7 @@ pub fn complete_data_loglik(
     if !ivp_mappings.is_empty() {
         for ivp in ivp_mappings {
             let count = trajectory.initial_counts[ivp.compartment_idx] as u64;
-            let frac = params[ivp.model_param_idx].clamp(1e-10, 1.0 - 1e-10);
+            let frac = params[ivp.model_param_idx].clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
             let patch_pop = patch_population(model, &trajectory.initial_counts, ivp.compartment_idx);
             let this_ivp_ll = binom_logpmf(count, patch_pop as u64, frac);
             if !this_ivp_ll.is_finite() {
@@ -1019,7 +1027,7 @@ pub fn complete_data_loglik(
                     }
                     if let Some(ref resolved_od) = model.resolved.overdispersion[tr_idx] {
                         let sigma_sq = eval_resolved(resolved_od, &ctx);
-                        if gamma_idx_local < rec.gammas.len() && sigma_sq > 1e-30 {
+                        if gamma_idx_local < rec.gammas.len() && sigma_sq > OVERDISP_SIGMA_SQ_FLOOR {
                             let g = rec.gammas[gamma_idx_local];
                             let shape = dt_s / sigma_sq;
                             let scale = sigma_sq / dt_s;
@@ -1291,7 +1299,7 @@ pub fn csmc_as(
                 let mut c = init_int.counts.clone();
                 // Draw stochastic initial state for IVP compartments
                 for (k, ivp) in ivp_mappings.iter().enumerate() {
-                    let frac = params[ivp.model_param_idx].clamp(1e-10, 1.0 - 1e-10);
+                    let frac = params[ivp.model_param_idx].clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
                     let patch_n = ivp_patch_pops[k] as u64;
                     c[ivp.compartment_idx] = rngs[j].binomial(patch_n, frac) as i64;
                 }

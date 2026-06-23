@@ -16,7 +16,9 @@ use crate::propensity::{eval_propensities, EvalCtx};
 use crate::resolved_expr::{eval_resolved, eval_resolved_deriv, ResolvedExpr};
 use crate::state::{IntState, RealState};
 use crate::inference::obs_loglik::{binom_logpmf, digamma, gamma_multiplier_log_density};
-use crate::inference::pgas::{PGASTrajectory, IVPMapping};
+use crate::inference::numerics::BINOM_PROB_EPS;
+use crate::inference::types::PROB_FRACTION_EPS;
+use crate::inference::pgas::{PGASTrajectory, IVPMapping, OVERDISP_SIGMA_SQ_FLOOR};
 use crate::inference::particle_filter::Observation;
 
 /// Build a run-specific rate_grads table with estimated-param indices.
@@ -161,7 +163,7 @@ pub fn log_transition_density_grad(
         // Total exits: Binom(n_exit; n_src, p_total).
         //
         // Im17 in 2026-04-19 inference review: the clamp to
-        // [1e-15, 1-1e-15] keeps `dbinom_dp` finite (otherwise
+        // [BINOM_PROB_EPS, 1-BINOM_PROB_EPS] keeps `dbinom_dp` finite (otherwise
         // 1/0 → NaN) at the cost of accuracy right at the
         // boundary — the gradient becomes ~±1e15 and NUTS
         // divergences are expected there. Without the clamp the
@@ -173,7 +175,7 @@ pub fn log_transition_density_grad(
         // (n-k)/q gradient term but the current code computes
         // (n-k)/(1-p), which we keep — the clamp at least avoids the
         // worst cancellation).
-        let (p_total, _q) = super::numerics::prob_q_from_rate_dt_clamped(total_rate, dt, 1e-15);
+        let (p_total, _q) = super::numerics::prob_q_from_rate_dt_clamped(total_rate, dt, BINOM_PROB_EPS);
         let n_exit: u64 = probs.iter().map(|&(tr_idx, _, _)| flows[tr_idx]).sum();
         log_p += binom_logpmf(n_exit, n_src as u64, p_total);
 
@@ -203,7 +205,7 @@ pub fn log_transition_density_grad(
                 }
                 // Last category: no density contribution (remainder)
             } else if remaining > 0 && rate_remaining > 0.0 {
-                let p_split = (eff_rate / rate_remaining).clamp(1e-15, 1.0 - 1e-15);
+                let p_split = (eff_rate / rate_remaining).clamp(BINOM_PROB_EPS, 1.0 - BINOM_PROB_EPS);
                 let flow_k = flows[tr_idx];
                 log_p += binom_logpmf(flow_k, remaining, p_split);
 
@@ -347,7 +349,7 @@ fn gamma_density_value_and_grad_substep(
             }
             if let Some(ref resolved_od) = model.resolved.overdispersion[tr_idx] {
                 let sigma_sq = eval_resolved(resolved_od, &ctx);
-                if gamma_idx_local < gammas.len() && sigma_sq > 1e-30 {
+                if gamma_idx_local < gammas.len() && sigma_sq > OVERDISP_SIGMA_SQ_FLOOR {
                     let g = gammas[gamma_idx_local];
                     let shape = dt / sigma_sq;
                     let scale = sigma_sq / dt;
@@ -432,7 +434,7 @@ pub fn complete_data_loglik_grad(
     if !ivp_mappings.is_empty() {
         for ivp in ivp_mappings {
             let count = trajectory.initial_counts[ivp.compartment_idx] as u64;
-            let frac = params[ivp.model_param_idx].clamp(1e-10, 1.0 - 1e-10);
+            let frac = params[ivp.model_param_idx].clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
             let patch_pop = super::pgas::patch_population(model, &trajectory.initial_counts, ivp.compartment_idx);
             log_p += binom_logpmf(count, patch_pop as u64, frac);
 

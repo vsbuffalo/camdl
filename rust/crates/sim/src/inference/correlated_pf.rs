@@ -132,6 +132,11 @@ pub fn phi(x: f64) -> f64 {
 /// keeps the "empty leading window" judgement bit-consistent with the walk.
 const LEADING_WINDOW_EPS: f64 = 1e-10;
 
+/// Interior clamp on the correlated base uniform so resampling thresholds stay
+/// strictly inside (0, 1). Distinct in concept from `PROB_FRACTION_EPS` (a
+/// probability clamp) despite the shared magnitude.
+const BASE_UNIFORM_EPS: f64 = 1e-10;
+
 /// Substeps-per-window the CPM pre-drawn-noise arrays are sized for, derived
 /// from the first non-trivial spacing `obs(1) - obs(0)` (or `obs(0) - t_start`
 /// for a single observation).
@@ -548,7 +553,7 @@ pub fn bootstrap_filter_correlated(
         }
 
         // Resampling using correlated uniform
-        let base_uniform = phi(randoms.resample_noise[obs_idx]).clamp(1e-10, 1.0 - 1e-10);
+        let base_uniform = phi(randoms.resample_noise[obs_idx]).clamp(BASE_UNIFORM_EPS, 1.0 - BASE_UNIFORM_EPS);
 
         // Build sorted weights for resampling
         let sorted_weights: Vec<f64> = sort_order.iter()

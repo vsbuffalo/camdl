@@ -70,7 +70,7 @@ impl EstimatedParam {
         match &self.transform {
             Transform::Log { lo, hi } => x.clamp(*lo, *hi).max(LOG_PROB_FLOOR).ln(),
             Transform::Logit { lo, hi } => {
-                let p = ((x - lo) / (hi - lo)).clamp(1e-10, 1.0 - 1e-10);
+                let p = ((x - lo) / (hi - lo)).clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
                 (p / (1.0 - p)).ln()
             }
             Transform::None => x,
@@ -143,7 +143,7 @@ impl EstimatedParam {
             Transform::Log { .. } => natural_sd / current_value.max(LOG_PROB_FLOOR),
             Transform::Logit { lo, hi } => {
                 let range = hi - lo;
-                let p = ((current_value - lo) / range).clamp(1e-10, 1.0 - 1e-10);
+                let p = ((current_value - lo) / range).clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
                 natural_sd / (range * p * (1.0 - p))
             }
             Transform::None => natural_sd,
@@ -164,6 +164,14 @@ impl EstimatedParam {
 /// Do NOT reduce below `f64::MIN_POSITIVE` (≈ 5×10⁻³²⁴), which would
 /// produce −∞ and defeat the purpose.
 pub const LOG_PROB_FLOOR: f64 = 1e-300;
+
+/// Interior clamp keeping an IVP / logit-transform probability strictly inside
+/// (0, 1), so the transform and the Binomial(N, p) draw stay finite. Shared by
+/// the logit transform here and the PGAS IVP density/gradient (`pgas.rs`,
+/// `pgas_grad.rs`) — value and gradient MUST use the same value. Distinct in
+/// concept from the correlated-PF base-uniform clamp (`BASE_UNIFORM_EPS`),
+/// which shares the magnitude.
+pub const PROB_FRACTION_EPS: f64 = 1e-10;
 
 /// Reserved stream index for the per-algorithm resampling RNG.
 ///

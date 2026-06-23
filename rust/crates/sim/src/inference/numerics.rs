@@ -43,6 +43,15 @@ pub fn prob_q_from_rate_dt(r: f64, dt: f64) -> (f64, f64) {
     (p, q)
 }
 
+/// Interior clamp for binomial split/exit probabilities so `log(p)` /
+/// `log(1−p)` and their NUTS gradients stay finite. Shared by the PGAS
+/// log-density (`pgas.rs`) and its gradient (`pgas_grad.rs`); they MUST use
+/// the same value — a one-sided change makes the Hamiltonian
+/// non-conservative (energy drift → spurious divergences). Distinct in
+/// *concept* from the `1e-15` rate/step floors (`RATE_EPSILON`,
+/// `MIN_STEP_EPS`) despite the shared magnitude.
+pub const BINOM_PROB_EPS: f64 = 1e-15;
+
 /// Variant that clamps `(p, q)` to a closed interval to avoid
 /// degenerate weights in inference. Some PGAS / NUTS hot paths need
 /// p strictly in (0, 1) (otherwise log(p) or log(q) is -inf and
