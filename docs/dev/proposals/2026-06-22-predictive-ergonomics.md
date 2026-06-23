@@ -523,8 +523,12 @@ Ordered by dependency; early items ship in parallel.
 4. **`camdl fit predict` + the artifact** — `FreeForward × Posterior` only. The
    headline; collapses the twelve scripts. Routes through the existing long
    writer (see dependency). MLE fits error clearly.
-5. **Fold in `one_step` (`plug_in`)** — emit the gh#269 plug-in prequential as
-   `horizon=one_step, treatment=plug_in` rows in the same table.
+5. **Fold in `one_step` (`posterior`)** — emit one-step-ahead rows
+   `horizon=one_step, treatment=posterior` in the same table: re-run the
+   bootstrap filter per posterior draw (reusing the gh#269 prequential recorder
+   for the per-step `y_rep` samples) and pool over the cloud. The plug-in
+   one-step _score_ and its in-sample/optimism labelling live in `camdl compare`
+   (#295), not here — `predict` owns the band, `compare` owns the score.
 6. **`camdl fit latent`** — gated on trajectory coherence (#270/#267).
 7. **Metrics + held-out (#277)** — scored on this artifact.
 

@@ -56,8 +56,19 @@ for the full sequence, the diagnostics table, and the guardrails. In one line:
 
 ```
 check -> simulate (sanity) -> survey -> write fit.toml -> fit run
-      -> fit summary -> read diagnostics -> refine priors -> validate
+      -> fit summary -> read diagnostics -> refine priors
+      -> fit predict (predicted-vs-observed) -> validate
 ```
+
+The predicted-vs-observed step is **one verb, not a hand-rolled pipeline**:
+`camdl fit predict --fit fit.toml --stream <name>` resolves the fit's posterior
+draws and writes a tidy `predictive/<stream>.tsv` (`q05…q95` ribbon + typed
+`horizon`/`treatment`/`rhat_max` columns) and `observed/<stream>.tsv` under the
+run directory. Join the two on `(time, <dims>)` and plot — do not glob the run
+store for `trace.tsv`, re-inject fixed params, shell `simulate --draws`, and
+pivot/quantile by hand; that reconstruction is exactly what this verb owns. Omit
+`--horizon` for all applicable horizons (chain-binomial → `free_forward` +
+`one_step`; ODE → `free_forward`).
 
 Two reflexes it drills (and you should not import elsewhere): a failing
 convergence gate is _information_, not a thing to tune away; and `Â` (IF2
@@ -126,7 +137,8 @@ than guessing: `camdl mre fit fit.toml` bundles the model, its compile-time
 - Run `camdl check`, `camdl simulate`, `camdl survey`, `camdl pfilter`,
   `camdl fit run` (single stage, not committing the fit dir),
   `camdl fit
-  summary`, `camdl list`, `camdl show`, `camdl fit diff`.
+  summary`, `camdl fit predict`, `camdl list`, `camdl show`,
+  `camdl fit diff`.
 - Edit a `.camdl` model file in response to a compile error from the error table
   (typo fix, missing declaration, dim-correction).
 - Edit a `fit.toml` to widen bounds in response to `ParamNearBound`, or add a

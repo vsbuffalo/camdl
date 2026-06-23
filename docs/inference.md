@@ -211,6 +211,17 @@ If 90% of data falls within the 90% prediction interval, the model is
 Systematic prediction bias (always overshooting peaks, always undershooting
 troughs) indicates model misspecification.
 
+The mechanics above are the internal filter view. The user-facing way to get the
+one-step-ahead band that carries full posterior parameter uncertainty is
+`camdl fit predict --fit fit.toml --horizon one_step`: it re-runs the bootstrap
+filter once per posterior draw, samples `ỹ` from the propagated (pre-reweight)
+particles at each observation time, and pools over (particles × draws) into the
+`q05…q95` columns of `predictive/<stream>.tsv` —
+`horizon=one_step,
+treatment=posterior`. This is chain-binomial only (an ODE
+fit's one-step reduces to its free-forward band). See
+[`camdl docs workflow`](workflow.md) §7.
+
 ### What happens at each observation time
 
 ```
@@ -458,12 +469,15 @@ need to compare trajectories to data.
 A fitted stochastic compartmental model gives you three distinct views of the
 data:
 
-1. **Unconditional posterior predictive.** `camdl simulate --replicates
-   N` at
-   the MLE. "What does the fitted model predict a priori?"
+1. **Unconditional posterior predictive.**
+   `camdl fit predict --fit fit.toml --horizon free_forward`. "What does the
+   fitted model predict a priori?" — sampled `y_rep` per posterior draw, pooled
+   into the `predictive/<stream>.tsv` ribbon (averaged over the cloud, not run
+   at a single plug-in point).
 2. **Smoothing over latent.** `camdl pfilter --save-paths N` at the MLE. "What
    does the model think the latent trajectory was, given the data?"
-3. **Raw observations.**
+3. **Raw observations.** `camdl fit predict` writes these to
+   `observed/<stream>.tsv` in the same tidy keys, ready to overlay on (1).
 
 Plot (1) and (2) as ribbons, (3) as points, side by side:
 

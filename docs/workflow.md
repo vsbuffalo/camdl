@@ -32,10 +32,10 @@ camdl simulate model.camdl --params p.toml --obs sim.tsv --seed 1
 `simulate` defaults to the `chain_binomial` backend — the same default `fit`
 uses, so a forward sim of an MLE reproduces the fit's dynamics. Pass
 `--backend gillespie` (exact SSA) or `--backend ode` (deterministic) to switch.
-The same `observations {}`
-block that _scores_ real data in the fit also _samples_ synthetic data here via
-`--obs` — that duality is why the next step is a valid test. Look at `sim.tsv`:
-is the curve epidemiologically reasonable (timing, peak, final size)?
+The same `observations {}` block that _scores_ real data in the fit also
+_samples_ synthetic data here via `--obs` — that duality is why the next step is
+a valid test. Look at `sim.tsv`: is the curve epidemiologically reasonable
+(timing, peak, final size)?
 
 ## 2. Validate the pipeline on synthetic data — necessary, not sufficient
 
@@ -196,13 +196,68 @@ elpd, mechanism and prior sensitivity: `camdl docs concepts`.
 
 ## 7. Validate the fit
 
+### Predicted-vs-observed in one verb: `camdl fit predict`
+
+The workhorse posterior check — overlay the observed data on the fitted model's
+predictive band — is a single verb that reads the fit and writes a tidy,
+plot-ready artifact:
+
+```bash
+camdl fit predict --fit fit.toml --stream onset
+# wrote results/fits/sle-8a3f12b4/predictive/onset.tsv
+# wrote results/fits/sle-8a3f12b4/observed/onset.tsv
+```
+
+`fit predict` resolves the fit's canonical post-warm-up posterior draws,
+forward-simulates each draw through the **real** observation model (sampling
+`y_rep`, not the projected mean, so observation noise is in the band),
+integrates over the cloud by pooling and quantiling, and writes two files under
+the run directory:
+
+- `predictive/<stream>.tsv` —
+  `time | <dims…> | horizon | treatment | rhat_max | ess_min | n_draws | q05 q25 q50 q75 q95`.
+  The `q05…q95` columns are the ribbon; the `horizon` and `treatment` columns
+  make the two predictive axes explicit (so an honestly-wide posterior band is
+  never confused with a narrow plug-in one), and `rhat_max`/`ess_min` carry the
+  fit's own convergence numbers alongside every band.
+- `observed/<stream>.tsv` — `time | <dims…> | value`, the recorded series in the
+  same tidy keys.
+
+A consumer reads both files, joins on `(time, <dims>)`, and plots `observed`
+over the `predictive` ribbon — one facet per stratum, with no run-store, DSL, or
+likelihood knowledge:
+
+```python
+import polars as pl
+pred = pl.read_csv(".../predictive/onset.tsv", separator="\t")
+obs  = pl.read_csv(".../observed/onset.tsv",   separator="\t")
+```
+
+**Two horizons answer two questions** (see
+[`camdl docs diagnosing-fits`](diagnosing-fits.md) §5). Omit `--horizon` to emit
+all applicable for the fit's backend:
+
+- `--horizon free_forward` — the generative check: replay the fitted model from
+  the start, never re-anchored to data. The harshest test, and what exposes
+  generative misspecification. Available on any backend.
+- `--horizon one_step` — the honest short-horizon forecast `p(y_t | y_{1:t-1})`:
+  re-condition on the data each step. Chain-binomial only (an ODE fit's one-step
+  is identical to its free-forward and is refused with a redirect). Pools over a
+  posterior subsample (`--n-draws`, default 200); both horizons stack in the
+  same file, distinguished by the `horizon` column.
+
+`fit predict` refuses an optimizer fit (IF2 / NLopt) with an actionable message
+— such a fit returns one best-fit point, not a distribution, so there is no
+posterior band to draw; get its parameters with
+`camdl fit summary <run>
+--params-only` and run a plug-in
+`camdl simulate --params …` instead.
+
+### Other validation steps
+
 ```bash
 # Prior-predictive — do the priors imply plausible epidemics?
 camdl simulate model.camdl --draws prior --fit fit.toml -n 200 --obs prior_ppc.tsv
-
-# Posterior-predictive — does the fitted model reproduce the data?
-# (feed the fit's posterior draws back through the model)
-camdl simulate model.camdl --draws posterior_draws.tsv --replicates 200 --obs ppc.tsv
 
 # Identifiability — profile a suspect parameter (1D or 2D)
 camdl profile model.camdl --particles 1500 \
@@ -213,6 +268,11 @@ camdl pfilter model.camdl --params mle.toml --data cases.tsv \
     --particles 5000 --save-prequential preq_A
 camdl compare preq_A preq_B
 ```
+
+`camdl compare` ranks models by prequential elpd / CRPS / PIT. Its scores are
+**plug-in and in-sample-optimistic** — computed at a single θ that was fit to
+the whole series — so they are useful for _relative_ comparison but are not a
+leave-future-out forecast score; `compare` prints this caveat on every run.
 
 ## When to stop and ask a human
 

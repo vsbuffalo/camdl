@@ -197,23 +197,32 @@ Three different predictions answer three different questions; using the wrong
 one hides the very misfit you're hunting.
 
 - **Free-forward (unconditional posterior-predictive)** —
-  `camdl simulate
-  --replicates N` at the estimate. Exposes _generative_
-  misspecification: can the model, run forward on its own, produce data like the
-  observations?
-- **One-step-ahead** — the `camdl pfilter --trace` predictive quantiles. The
-  right tool for _timing_ questions (does the model anticipate each next
-  observation?).
+  `camdl fit predict --fit fit.toml --horizon free_forward`. Replays the fitted
+  model from the start, never re-anchored to data, sampling `y_rep` per
+  posterior draw. Exposes _generative_ misspecification: can the model, run
+  forward on its own, produce data like the observations? A drifting transition
+  model produces a band that blows up over time.
+- **One-step-ahead** — `camdl fit predict --fit fit.toml --horizon one_step`.
+  The honest short-horizon forecast `p(y_t | y_{1:t-1})`: re-conditions on the
+  data at every step, so it stays tight **iff** the filter can track the data.
+  The right tool for _timing_ questions (does the model anticipate each next
+  observation?). Chain-binomial only. A model can pass the free-forward check
+  (wide enough to contain the data) yet fail one-step (can't predict next week),
+  and vice versa — which is why both are worth emitting and carry a typed
+  `horizon` column so neither is read as the other.
 - **Conditioned / smoothed path** — `camdl pfilter --save-paths`. This is pulled
   toward the data by construction and will track it even for a misspecified
   model. It **cheats** for the purpose of model-checking: a smoothed ribbon that
   hugs the data is not evidence the model is right.
 
-And beware the **mean** free-forward trajectory in a stochastic model: averaging
-over replicates with jittered epidemic take-offs smears the peak later and lower
-than any single run. For timing, show the quantile ribbon, not the mean. The
-divergence between the unconditional ribbon and the smoothed ribbon _is_ the
-diagnostic — see the "unconditional vs smoothing" plot in
+`fit predict` writes both predictive horizons (stacked in
+`predictive/<stream>.tsv`, keyed by the `horizon` column) and the observed
+series (`observed/<stream>.tsv`) under the run directory, ready to join on
+`(time, <dims>)` and plot — one facet per stratum. Read the predictive band as a
+**quantile ribbon** (`q05…q95`), never a mean: averaging stochastic replicates
+with jittered epidemic take-offs smears the peak later and lower than any single
+run. The divergence between the free-forward ribbon and the smoothed ribbon _is_
+the diagnostic — see the "unconditional vs smoothing" plot in
 [`camdl docs inference`](inference.md).
 
 Separately from _where_ a prediction sits, check whether its **intervals** are

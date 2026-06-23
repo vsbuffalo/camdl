@@ -230,7 +230,74 @@ results/fits/{fit_toml_stem}-{fit_hash[:8]}/
         diagnostics.json   # (sampling stages) ESS, R-hat, acceptance
         logliks.tsv        # (pfilter stages) per-replicate logliks
         chain_{n}/         # per-chain output subdirectory
+  fit.meta.json            # fit-level provenance sidecar (§2.2.1)
+  predictive/<stream>.tsv  # `fit predict` predictive bands (§2.2.2)
+  observed/<stream>.tsv    # `fit predict` observed series (§2.2.2)
 ```
+
+#### 2.2.1 `fit.meta.json` — fit-level sidecar
+
+The fit segment carries a `fit.meta.json` sidecar holding fit-wide provenance
+that has no `RunRecord` of its own: the user `--label`, the resolved per-parameter
+prior sources, the `estimated` / `fixed` parameter roles, data hashes, and a
+machine-readable **observation/dimension schema** under the `schema` key. The
+schema lets a consumer facet any stream and label panels with no DSL parsing:
+
+```json
+{
+  "schema": {
+    "dimensions": { "patch": { "levels": ["Bo", "Bombali"] } },
+    "streams": [
+      {
+        "name": "onset",
+        "index_dims": ["patch"],
+        "value_column": "onset",
+        "value_kind": "count",
+        "likelihood": "neg_binomial"
+      }
+    ]
+  }
+}
+```
+
+`dimensions` maps each indexing dimension to its ordered levels (union over all
+streams). `streams` carries one descriptor per **logical** stream (grouped by the
+`from <label>` data-source key, so a stratified `onset[patch]` is one entry with
+`index_dims = ["patch"]`, never one per expanded leaf): `name`, `index_dims`,
+`value_column` (the scored `~` LHS), `value_kind` (the DSL role — `count` /
+`real` / `probability`; omitted when the model declares no `columns {}` block),
+and `likelihood` (the family tag). It is a pure fold over the same observation
+leaves the particle filter binds, so it cannot disagree with what was fit.
+
+#### 2.2.2 `fit predict` predictive artifact
+
+`camdl fit predict --fit <run>` writes the predicted-vs-observed artifact at a
+flat per-run path — two tidy, plot-ready files per logical stream:
+
+```
+results/fits/<stem>-<hash[:8]>/predictive/<stream>.tsv
+  time | <dims...> | horizon | treatment | rhat_max | ess_min | n_draws | q05 | q25 | q50 | q75 | q95
+
+results/fits/<stem>-<hash[:8]>/observed/<stream>.tsv
+  time | <dims...> | value
+```
+
+- `predictive/<stream>.tsv` — the model's distribution over the observable,
+  summarized as the `q05…q95` quantiles of sampled `y_rep` per `(time, stratum)`.
+  The `horizon` column (`free_forward` / `one_step`) and `treatment` column
+  (`posterior`) make the two predictive axes explicit; `rhat_max` / `ess_min`
+  carry the producing stage's convergence numbers (empty cells when the stage
+  reported none), and `n_draws` the cloud size behind each band. Both horizons,
+  when emitted, stack under one header — distinguished by the `horizon` column,
+  so a new predictive cell is more rows, never new consumer code. A stratified
+  stream is one file with its index dims as key columns.
+- `observed/<stream>.tsv` — the recorded value per `(time, stratum)`, a derived
+  series in the same tidy keys as `predictive`. A hole (a scheduled but
+  unobserved cell) renders as an empty `value`, distinct from an observed zero.
+
+A consumer reads both, joins on `(time, <dims>)`, and plots `observed` over the
+`predictive` ribbon, one facet per stratum — using the `index_dims` from the
+`fit.meta.json` schema, with no run-store, DSL, or likelihood knowledge.
 
 ### 2.3 Sweep Subdirectories
 
@@ -551,6 +618,29 @@ pub enum DrawsSpec {
     },
 }
 ```
+
+#### The `simulate --draws` CLI sources
+
+On the command line, `--draws` accepts four source forms, resolved to a draws
+cloud before simulation:
+
+| `--draws <value>` | Source                                                                                                                                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<file.tsv>`      | A TSV of complete parameter vectors (one row per draw, columns = parameter names).                                                                       |
+| `prior`           | Sample the priors declared in a `fit.toml` (requires `--fit <fit.toml>`).                                                                                |
+| `uniform`         | Space-fill from the model's parameter bounds.                                                                                                            |
+| `posterior`       | Resolve a completed fit's canonical post-warm-up `draws.tsv` — the terminal Bayesian stage's cloud (requires `--fit <fit results dir>`).                 |
+
+`--draws posterior --fit <fit results dir>` reads the same draws the terminal
+PGAS / PMMH / MH stage wrote (burn-in already applied), so a posterior-predictive
+check feeds the fit's own cloud back through the model without re-discarding
+warm-up.
+
+`--draws <file.tsv> --fit <config-or-run>` additionally **backfills** any
+parameter absent from the file's columns from the fit's `[fixed]` block, never
+overwriting a column the file provides — a raw posterior trace tail carries only
+the estimated columns, so this fills the fixed parameters from the fit rather
+than falling back to model defaults.
 
 ### 3.5 Seeds — S layer specification
 

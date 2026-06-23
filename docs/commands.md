@@ -36,18 +36,18 @@ transform. A few commands delegate to the compiler.
 
 ### Read, display, compare
 
-| Command                                             | Does                                                                                               |
-| --------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `list`                                              | Browse cached runs as a table.                                                                     |
-| `show`                                              | Full metadata for one cached run.                                                                  |
-| `cat`                                               | Emit a cached run's trajectory or observations as TSV.                                             |
-| `compare`                                           | Paired prequential comparison (elpd, CRPS, PIT) across fits.                                       |
-| `label`                                             | Set a display label on any run.                                                                    |
-| `fit {status,summary,diff,table,new,where,methods}` | Inspect, summarize, and aggregate fits; scaffold new `fit.toml`s.                                  |
-| `batch status`                                      | Completion of a sweep.                                                                             |
-| `eval`                                              | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation. |
-| `data split`                                        | Split a data TSV into train/holdout.                                                               |
-| `lineage {realize,tree,sojourn,cohort}`             | Offline projections over an event log — transmission tree, dwell times, cohort incidence.          |
+| Command                                                     | Does                                                                                                                                                            |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`                                                      | Browse cached runs as a table.                                                                                                                                  |
+| `show`                                                      | Full metadata for one cached run.                                                                                                                               |
+| `cat`                                                       | Emit a cached run's trajectory or observations as TSV.                                                                                                          |
+| `compare`                                                   | Paired prequential comparison (elpd, CRPS, PIT) across fits. Scores are plug-in + in-sample-optimistic (caveat printed); not a leave-future-out forecast score. |
+| `label`                                                     | Set a display label on any run.                                                                                                                                 |
+| `fit {status,summary,predict,diff,table,new,where,methods}` | Inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                           |
+| `batch status`                                              | Completion of a sweep.                                                                                                                                          |
+| `eval`                                                      | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                              |
+| `data split`                                                | Split a data TSV into train/holdout.                                                                                                                            |
+| `lineage {realize,tree,sojourn,cohort}`                     | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                       |
 
 ### Compiler passthrough
 
@@ -148,7 +148,16 @@ camdl fit run fit.toml                              # all stages, in order
 camdl fit run fit.toml --stage scout                # one stage only
 camdl fit run fit.toml --resume <base-run-id> --stage posterior   # extend a completed run
 camdl fit summary results/fits/<dir>/               # Â / gate verdict / MLE table
+camdl fit predict --fit fit.toml --stream onset     # predicted-vs-observed artifact
 ```
+
+`fit predict` resolves the fit's posterior draws and writes
+`predictive/<stream>.tsv` (the `q05…q95` ribbon, with typed
+`horizon`/`treatment`/`rhat_max` columns) and `observed/<stream>.tsv` under the
+run directory. Join the two on `(time, <dims>)` and plot, one facet per stratum.
+Omit `--horizon` for all applicable horizons (chain-binomial → `free_forward` +
+`one_step`; ODE → `free_forward` only); an optimizer fit (IF2 / NLopt) is
+refused since it has no posterior cloud.
 
 A resumed fit reads the base run read-only and writes a _new_ run keyed on the
 extended length. It is a distinct deterministic artifact — not bit-identical to
@@ -214,7 +223,10 @@ camdl compare results/fits/a/posterior results/fits/b/posterior --baseline a
 
 `compare` reads prequential scores (per-step log-score, CRPS, PIT) written by
 `pfilter` stages within fits (or by `camdl pfilter --save-prequential`) and
-renders a baseline-centered table of out-of-sample fit.
+renders a baseline-centered table. The scores are **plug-in and
+in-sample-optimistic** — computed at a single θ fit to the whole series — so
+they support _relative_ comparison but are not a leave-future-out forecast
+score; `compare` prints this caveat on every run.
 
 ## The boundaries, stated plainly
 
