@@ -332,13 +332,26 @@ impl ParticleSwarm {
     /// produce informative draws — a stronger signal than the
     /// uniform-weight fallback used by `normalize_log_weights`.
     pub fn ess(&self) -> f64 {
-        let max_lw = self.log_weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        if !max_lw.is_finite() { return 0.0; }
-        let sum_w: f64 = self.log_weights.iter().map(|&lw| (lw - max_lw).exp()).sum();
-        let sum_w2: f64 = self.log_weights.iter().map(|&lw| (2.0 * (lw - max_lw)).exp()).sum();
-        if !sum_w.is_finite() || !sum_w2.is_finite() || sum_w2 <= 0.0 { return 0.0; }
-        (sum_w * sum_w) / sum_w2
+        ess_from_log_weights(&self.log_weights)
     }
+}
+
+/// Effective sample size from log-weights: `ESS = (Σw)² / Σw²` on max-shifted
+/// weights. The single source for [`ParticleSwarm::ess`] and IF2's
+/// per-iteration degeneracy watchdog, which holds a `Vec<f64>` of log-weights
+/// rather than a `ParticleSwarm`.
+///
+/// **Degenerate-case contract:** returns 0.0 if the maximum log-weight is
+/// non-finite (every weight is `-∞` or `NaN`-poisoned), or if the post-shift
+/// sum is non-positive or non-finite — a stronger collapse signal than the
+/// uniform-weight fallback used by [`normalize_log_weights`].
+pub fn ess_from_log_weights(log_weights: &[f64]) -> f64 {
+    let max_lw = log_weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if !max_lw.is_finite() { return 0.0; }
+    let sum_w: f64 = log_weights.iter().map(|&lw| (lw - max_lw).exp()).sum();
+    let sum_w2: f64 = log_weights.iter().map(|&lw| (2.0 * (lw - max_lw)).exp()).sum();
+    if !sum_w.is_finite() || !sum_w2.is_finite() || sum_w2 <= 0.0 { return 0.0; }
+    (sum_w * sum_w) / sum_w2
 }
 
 /// Numerically stable log-sum-exp.

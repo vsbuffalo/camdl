@@ -22,7 +22,7 @@ use crate::error::SimError;
 use crate::schedule::Cursor;
 use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error};
 use super::traits::{ProcessModel, ObservationModel};
-use super::types::{ParticleState, log_sum_exp, normalize_log_weights, LOG_PROB_FLOOR, init_particle_rngs};
+use super::types::{ParticleState, log_sum_exp, normalize_log_weights, ess_from_log_weights, LOG_PROB_FLOOR, init_particle_rngs};
 use super::resampling::systematic_resample;
 
 // `Transform` and `EstimatedParam` are defined in `types.rs` (shared by all
@@ -555,33 +555,13 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 }
             }
 
-            // gh#110. Degeneracy watchdog. Compute ESS via the same
-            // formula as `ParticleSwarm::ess()`: ESS = (Σ w)² / Σ w²
-            // on the max-shifted log-weights, with 0.0 returned when
-            // every weight is -∞ or NaN-poisoned. IF2's per-iter PF
-            // loop doesn't use ParticleSwarm directly, so the
-            // computation is inlined here. dead_count = 0 because IF2
-            // does NOT mark per-particle deaths — `process.step`
-            // errors propagate immediately. AllParticlesDead is
-            // therefore unreachable in this loop; ESS collapse or
-            // wall-clock will fire first.
-            let ess_now = {
-                let max_lw = log_weights.iter().cloned()
-                    .fold(f64::NEG_INFINITY, f64::max);
-                if !max_lw.is_finite() {
-                    0.0
-                } else {
-                    let sum_w: f64 = log_weights.iter()
-                        .map(|&lw| (lw - max_lw).exp()).sum();
-                    let sum_w2: f64 = log_weights.iter()
-                        .map(|&lw| (2.0 * (lw - max_lw)).exp()).sum();
-                    if !sum_w.is_finite() || !sum_w2.is_finite() || sum_w2 <= 0.0 {
-                        0.0
-                    } else {
-                        (sum_w * sum_w) / sum_w2
-                    }
-                }
-            };
+            // gh#110 degeneracy watchdog. ESS via the single-sourced
+            // `ess_from_log_weights` (IF2's per-iter PF loop holds a
+            // `Vec<f64>` of log-weights, not a `ParticleSwarm`). dead_count = 0
+            // because IF2 does NOT mark per-particle deaths — `process.step`
+            // errors propagate immediately, so AllParticlesDead is unreachable
+            // here; ESS collapse or wall-clock fires first.
+            let ess_now = ess_from_log_weights(&log_weights);
             ess_history.push(ess_now);
             if let Some(kind) = check_pf_degeneracy(&ess_history, 0, n) {
                 // Statistical pathology (ESS collapse / all dead) → PFDegenerate.
