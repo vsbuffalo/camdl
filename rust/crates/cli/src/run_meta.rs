@@ -340,6 +340,133 @@ impl std::fmt::Display for SurveyEvalMethod {
     }
 }
 
+/// The run's machine-readable observation/dimension schema — a faithful
+/// projection of the model's *expanded* observation structure, emitted into
+/// `fit.meta.json` so a consumer can facet any stream by its index dimensions
+/// and label panels by level name with no DSL parsing.
+///
+/// Derived as a pure fold over the model's observation leaves
+/// ([`ObsSchema::from_model`]). It reads the **same** IR the particle filter
+/// binds, so the schema cannot disagree with what was fit — it is derived
+/// provenance, never a second source of truth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObsSchema {
+    /// Each indexing dimension → its ordered levels (union over all streams).
+    /// `BTreeMap` so the serialized order is deterministic.
+    pub dimensions: std::collections::BTreeMap<String, DimensionLevels>,
+    /// One descriptor per **logical** stream — grouped by the data-source key,
+    /// so a stratified stream `cases[p in patch]` is a single entry carrying
+    /// `index_dims = ["patch"]`, never one entry per expanded leaf.
+    pub streams: Vec<StreamDescriptor>,
+}
+
+/// A dimension's ordered levels (e.g. `patch → [Bo, Bombali, …]`). A struct
+/// rather than a bare `Vec` so the JSON shape (`{"levels": [...]}`) matches the
+/// proposal and leaves room for future per-dimension metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DimensionLevels {
+    pub levels: Vec<String>,
+}
+
+/// One logical observation stream's structure, read straight off the IR record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamDescriptor {
+    /// Logical stream name — the `from <label>` data-source key, stable across
+    /// the expanded leaves of a stratified stream (the expander suffixes the
+    /// leaf `name`, e.g. `cases_Bo`, but every leaf shares this `source`).
+    pub name: String,
+    /// The dimensions this stream is stratified over, in first-appearance
+    /// order. `[]` for a single national series. A consumer facets by these.
+    pub index_dims: Vec<String>,
+    /// The scored value column — the `~` LHS the likelihood scores.
+    pub value_column: String,
+    /// DSL kind of the scored value (`count`/`real`/`probability`/…). Absent
+    /// only when the model predates the explicit `columns {}` block (no
+    /// declared role to read), so a consumer treats `None` as "unspecified".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_kind: Option<String>,
+    /// Likelihood family (`poisson`/`neg_binomial`/…), matching the IR tag.
+    pub likelihood: String,
+}
+
+impl ObsSchema {
+    /// Fold a fully-expanded model's observation leaves into the descriptor.
+    ///
+    /// Groups leaves by their logical `source` key (stable across a stratified
+    /// stream's leaves); collects index dims, value column/kind, and likelihood
+    /// off each IR record. Dimension levels are the union of stratum levels
+    /// seen for that dimension, in first-appearance order. Pure and total — no
+    /// I/O, no failure path.
+    pub fn from_model(model: &ir::Model) -> ObsSchema {
+        Self::from_observations(&model.observations)
+    }
+
+    /// The fold proper — over just the observation leaves the filter binds.
+    /// `from_model` is a thin wrapper; the schema reads nothing else off the
+    /// model, which is exactly why it cannot disagree with what was fit.
+    pub fn from_observations(
+        observations: &[ir::observation::ObservationModel],
+    ) -> ObsSchema {
+        use std::collections::BTreeMap;
+
+        struct Acc {
+            index_dims:   Vec<String>,
+            value_column: String,
+            value_kind:   Option<String>,
+            likelihood:   String,
+        }
+        // First-appearance order of logical streams (declaration order), kept
+        // separately because `acc`'s BTreeMap iteration is name-sorted.
+        let mut order: Vec<String> = Vec::new();
+        let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
+        let mut dims: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        for obs in observations {
+            let value_kind = obs.columns.iter()
+                .find(|c| c.name == obs.scored)
+                .and_then(|c| match &c.role {
+                    ir::observation::ColumnRole::Value(k) => Some(k.as_str().to_string()),
+                    _ => None,
+                });
+            let entry = acc.entry(obs.source.clone()).or_insert_with(|| {
+                order.push(obs.source.clone());
+                Acc {
+                    index_dims:   Vec::new(),
+                    value_column: obs.scored.clone(),
+                    value_kind,
+                    likelihood:   obs.likelihood.name().to_string(),
+                }
+            });
+            for sk in &obs.stratum {
+                if !entry.index_dims.contains(&sk.dim) {
+                    entry.index_dims.push(sk.dim.clone());
+                }
+                let levels = dims.entry(sk.dim.clone()).or_default();
+                if !levels.contains(&sk.level) {
+                    levels.push(sk.level.clone());
+                }
+            }
+        }
+
+        let streams = order.into_iter().map(|src| {
+            let a = acc.remove(&src).expect("source recorded in `order` is in `acc`");
+            StreamDescriptor {
+                name:         src,
+                index_dims:   a.index_dims,
+                value_column: a.value_column,
+                value_kind:   a.value_kind,
+                likelihood:   a.likelihood,
+            }
+        }).collect();
+
+        let dimensions = dims.into_iter()
+            .map(|(d, levels)| (d, DimensionLevels { levels }))
+            .collect();
+
+        ObsSchema { dimensions, streams }
+    }
+}
+
 /// The fit-level provenance sidecar (`fits/{stem}-{h8}/fit.meta.json`). A CAS
 /// fit's fit level is a path segment with no `RunRecord`; this sidecar is the
 /// single authoritative home for the fit-wide attributes that are NOT carried
@@ -380,6 +507,13 @@ pub struct FitSidecar {
     pub resolved_priors: Vec<ResolvedPriorEntry>,
     #[serde(default)]
     pub parameters_provenance: HashMap<String, ParameterProvenance>,
+    /// The run's observation/dimension schema ([`ObsSchema`]) — `streams` ×
+    /// `dimensions` derived from the model's observation leaves. `None` for a
+    /// sidecar written without a model in hand (CLI-only profile fits, test
+    /// fixtures). The parameter *roles* are not re-nested here: `estimated` /
+    /// `fixed` above are the single source of truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<ObsSchema>,
 }
 
 /// Write the fit-level sidecar and archive the producing `fit.toml`
@@ -748,5 +882,164 @@ mod tests {
             "gamma prior source must survive the sidecar round trip");
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ─── ObsSchema: the observation/dimension descriptor fold ──────────────
+
+    use ir::observation::{
+        ColumnRole, Likelihood, NegBinomialLikelihood, ObsColumn, ObservationModel,
+        PoissonLikelihood, Projection, StratumKey,
+    };
+    use ir::parameter::ParamKind;
+
+    fn const_expr() -> ir::expr::Expr {
+        ir::expr::Expr::Const(ir::expr::ConstExpr { value: 0.0 })
+    }
+
+    /// Build one expanded observation leaf. `stratum` is `(dim, level)` pairs;
+    /// `value_kind` is the role of the scored column (None ⇒ no `columns` block).
+    fn leaf(
+        name: &str,
+        source: &str,
+        scored: &str,
+        stratum: &[(&str, &str)],
+        value_kind: Option<ParamKind>,
+        likelihood: Likelihood,
+    ) -> ObservationModel {
+        let columns = match value_kind {
+            Some(k) => vec![ObsColumn { name: scored.to_string(), role: ColumnRole::Value(k) }],
+            None => vec![],
+        };
+        ObservationModel {
+            name: name.to_string(),
+            source: source.to_string(),
+            columns,
+            scored: scored.to_string(),
+            emit_schedule: None,
+            stratum: stratum.iter()
+                .map(|(d, l)| StratumKey { dim: d.to_string(), level: l.to_string() })
+                .collect(),
+            projection: Projection::CumulativeFlow("inc".into()),
+            likelihood,
+        }
+    }
+
+    fn poisson() -> Likelihood {
+        Likelihood::Poisson(PoissonLikelihood { rate: const_expr() })
+    }
+    fn neg_binomial() -> Likelihood {
+        Likelihood::NegBinomial(NegBinomialLikelihood {
+            mean: const_expr(),
+            dispersion: const_expr(),
+        })
+    }
+
+    #[test]
+    fn schema_unstratified_single_stream() {
+        let obs = vec![leaf("cases", "cases", "cases", &[], Some(ParamKind::Count), poisson())];
+        let s = ObsSchema::from_observations(&obs);
+        assert!(s.dimensions.is_empty(), "no strata ⇒ no dimensions");
+        assert_eq!(s.streams.len(), 1);
+        let st = &s.streams[0];
+        assert_eq!(st.name, "cases");
+        assert!(st.index_dims.is_empty(), "a national series has no index dims");
+        assert_eq!(st.value_column, "cases");
+        assert_eq!(st.value_kind.as_deref(), Some("count"));
+        assert_eq!(st.likelihood, "poisson");
+    }
+
+    #[test]
+    fn schema_groups_stratified_leaves_into_one_logical_stream() {
+        // The expander emits one leaf per stratum (`cases_Bo`, `cases_Bombali`)
+        // but every leaf shares `source = "cases"`. The descriptor must fold
+        // them back into ONE stream with `index_dims = [patch]`, never one
+        // descriptor per leaf.
+        let obs = vec![
+            leaf("cases_Bo",      "cases", "cases", &[("patch", "Bo")],      Some(ParamKind::Count), neg_binomial()),
+            leaf("cases_Bombali", "cases", "cases", &[("patch", "Bombali")], Some(ParamKind::Count), neg_binomial()),
+        ];
+        let s = ObsSchema::from_observations(&obs);
+        assert_eq!(s.streams.len(), 1, "stratified leaves collapse to one logical stream");
+        let st = &s.streams[0];
+        assert_eq!(st.name, "cases");
+        assert_eq!(st.index_dims, vec!["patch".to_string()]);
+        assert_eq!(st.likelihood, "neg_binomial");
+        // levels are the union over leaves, in first-appearance order.
+        let patch = s.dimensions.get("patch").expect("patch dimension present");
+        assert_eq!(patch.levels, vec!["Bo".to_string(), "Bombali".to_string()]);
+    }
+
+    #[test]
+    fn schema_two_dim_stream_and_multiple_streams() {
+        // `deaths[patch, age]` plus a separate `onset[patch]` stream. Two
+        // logical streams; `deaths` carries both index dims; dimensions union
+        // levels across BOTH streams (patch appears in each).
+        let obs = vec![
+            leaf("onset_Bo",        "onset",  "onset",  &[("patch", "Bo")],                Some(ParamKind::Count), poisson()),
+            leaf("onset_Kailahun",  "onset",  "onset",  &[("patch", "Kailahun")],          Some(ParamKind::Count), poisson()),
+            leaf("deaths_Bo_old",   "deaths", "deaths", &[("patch", "Bo"), ("age", "old")], Some(ParamKind::Count), neg_binomial()),
+            leaf("deaths_Bo_young", "deaths", "deaths", &[("patch", "Bo"), ("age", "young")], Some(ParamKind::Count), neg_binomial()),
+        ];
+        let s = ObsSchema::from_observations(&obs);
+        // Declaration order preserved: onset before deaths.
+        let names: Vec<&str> = s.streams.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["onset", "deaths"]);
+        let deaths = s.streams.iter().find(|d| d.name == "deaths").unwrap();
+        assert_eq!(deaths.index_dims, vec!["patch".to_string(), "age".to_string()]);
+        let onset = s.streams.iter().find(|d| d.name == "onset").unwrap();
+        assert_eq!(onset.index_dims, vec!["patch".to_string()]);
+        // patch levels union Bo (onset+deaths) and Kailahun (onset only).
+        assert_eq!(
+            s.dimensions.get("patch").unwrap().levels,
+            vec!["Bo".to_string(), "Kailahun".to_string()]
+        );
+        assert_eq!(s.dimensions.get("age").unwrap().levels, vec!["old".to_string(), "young".to_string()]);
+    }
+
+    #[test]
+    fn schema_stream_set_equals_distinct_sources() {
+        // Agreement pin: the descriptor's logical streams are EXACTLY the
+        // distinct `source` keys the filter binds — not the expanded leaf
+        // names. A refactor that grouped by `name` would split `cases` into
+        // `cases_Bo`/`cases_Bombali` and fail here.
+        let obs = vec![
+            leaf("cases_Bo",      "cases",  "cases",  &[("patch", "Bo")],      Some(ParamKind::Count), poisson()),
+            leaf("cases_Bombali", "cases",  "cases",  &[("patch", "Bombali")], Some(ParamKind::Count), poisson()),
+            leaf("hosp",          "hosp",   "hosp",   &[],                     Some(ParamKind::Count), poisson()),
+        ];
+        let s = ObsSchema::from_observations(&obs);
+        let mut got: Vec<String> = s.streams.iter().map(|d| d.name.clone()).collect();
+        got.sort();
+        let want: Vec<String> = obs.iter()
+            .map(|o| o.source.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn schema_value_kind_absent_without_columns_block() {
+        // A model that predates the explicit `columns {}` block has no declared
+        // role for the scored column ⇒ value_kind is None (omitted in JSON),
+        // not a fabricated default.
+        let obs = vec![leaf("cases", "cases", "cases", &[], None, poisson())];
+        let s = ObsSchema::from_observations(&obs);
+        assert_eq!(s.streams[0].value_kind, None);
+        // and it must round-trip with the field omitted entirely.
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("value_kind"), "absent value_kind is omitted, got: {json}");
+    }
+
+    #[test]
+    fn schema_roundtrips_through_serde() {
+        let obs = vec![
+            leaf("cases_Bo",      "cases", "cases", &[("patch", "Bo")],      Some(ParamKind::Count), neg_binomial()),
+            leaf("cases_Bombali", "cases", "cases", &[("patch", "Bombali")], Some(ParamKind::Count), neg_binomial()),
+        ];
+        let s = ObsSchema::from_observations(&obs);
+        let json = serde_json::to_string_pretty(&s).unwrap();
+        let back: ObsSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back, "ObsSchema must survive a JSON round trip unchanged");
     }
 }

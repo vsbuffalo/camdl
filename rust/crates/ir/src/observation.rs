@@ -104,6 +104,23 @@ pub enum Likelihood {
     Bernoulli(BernoulliLikelihood),
 }
 
+impl Likelihood {
+    /// The snake_case family name (`"poisson"`, `"neg_binomial"`, …), matching
+    /// the `serde` variant tag. Used to label a stream's likelihood in the
+    /// machine-readable observation schema without re-deriving the mapping at
+    /// each call site.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Likelihood::Poisson(_)      => "poisson",
+            Likelihood::NegBinomial(_)  => "neg_binomial",
+            Likelihood::Normal(_)       => "normal",
+            Likelihood::Binomial(_)     => "binomial",
+            Likelihood::BetaBinomial(_) => "beta_binomial",
+            Likelihood::Bernoulli(_)    => "bernoulli",
+        }
+    }
+}
+
 // ── Observation schedule ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

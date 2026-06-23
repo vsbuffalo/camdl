@@ -1779,16 +1779,16 @@ fn copy_resume_carryover(base: &std::path::Path, new_leaf: &std::path::Path) -> 
 /// partially-written fit still produces a sidecar `camdl list` can display.
 /// The readable provenance projection is written once per fit segment.
 ///
-/// `model_for_priors` is the compiled IR model used to resolve
-/// per-parameter prior provenance (`fit_toml / model_ir /
-/// flat_explicit`); pass `None` when no model is in scope (`fit
-/// where` doesn't load the IR for a path-only resolution) and the
-/// `resolved_priors` audit will be empty in that case.
+/// `model` is the compiled, expanded IR model. It resolves per-parameter prior
+/// provenance (`fit_toml / model_ir / flat_explicit`) and the observation
+/// schema ([`crate::run_meta::ObsSchema`]); pass `None` when no model is in
+/// scope (`fit where` doesn't load the IR for a path-only resolution), in which
+/// case `resolved_priors` is empty and `schema` is `None`.
 fn build_fit_sidecar(
     config: &config_v2::FitConfigV2,
     fit_path: &str,
     label: Option<String>,
-    model_for_priors: Option<&ir::Model>,
+    model: Option<&ir::Model>,
 ) -> crate::run_meta::FitSidecar {
     // Prefer the pre-compiled IR (set by `cmd_fit_run_v2`); `load_model`
     // re-invokes camdlc when handed a raw `.camdl`. The resolved model identity
@@ -1821,7 +1821,7 @@ fn build_fit_sidecar(
     // any silent flat-fallback by the time we get here, so any
     // entry we emit is one of {fit_toml, model_ir, flat_explicit}.
     let any_bayesian = config.stages.values().any(config_v2::Stage::requires_priors);
-    let resolved_priors: Vec<crate::run_meta::ResolvedPriorEntry> = match model_for_priors {
+    let resolved_priors: Vec<crate::run_meta::ResolvedPriorEntry> = match model {
         Some(model) if any_bayesian => {
             let names: Vec<String> = config.estimate.keys().cloned().collect();
             crate::fit::priors_precedence::resolve_priors_with_precedence(
@@ -1861,6 +1861,10 @@ fn build_fit_sidecar(
         // gh#83/gh#85 step 9: top-level parameter provenance is populated by
         // the fit-finalization layer that owns the resolved-params view.
         parameters_provenance: Default::default(),
+        // The observation/dimension schema — a pure fold over the model's
+        // expanded observation leaves; emitted for every fit (not gated on
+        // Bayesian-ness — an IF2 fit's streams/dims are just as describable).
+        schema: model.map(crate::run_meta::ObsSchema::from_model),
     }
 }
 
