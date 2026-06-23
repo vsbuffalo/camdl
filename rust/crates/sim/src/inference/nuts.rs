@@ -182,6 +182,10 @@ pub struct NUTSStepResult {
     pub divergent: bool,
     /// Mean acceptance probability across the tree (for dual averaging).
     pub mean_accept_prob: f64,
+    /// Initial Hamiltonian energy `H0 = -log_p + KE(p)` at the freshly drawn
+    /// momentum — the per-iteration energy used for E-BFMI diagnostics (matches
+    /// Stan's `energy__`, since momentum is resampled each step).
+    pub energy: f64,
 }
 
 /// One NUTS step: propose all parameters jointly using gradients.
@@ -312,7 +316,7 @@ pub fn nuts_step(
 
     NUTSStepResult {
         params: out_params, log_posterior: out_log_p, accepted,
-        n_leapfrog, tree_depth, divergent, mean_accept_prob,
+        n_leapfrog, tree_depth, divergent, mean_accept_prob, energy: h0,
     }
 }
 

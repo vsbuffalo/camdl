@@ -563,7 +563,9 @@ pub fn run_stage(
                 .map(|s| s.name.clone()).collect();
             let trace_writer = super::trace_writer::TraceWriter::new(
                 &trace_path_str, "sweep", "log_complete_data_ll",
-                &["trajectory_renewal", "transition_ll", "obs_ll"],
+                &["trajectory_renewal", "transition_ll", "obs_ll",
+                  "tree_depth", "n_leapfrog", "step_size", "accept_stat",
+                  "n_divergent", "energy"],
                 &param_names, is_resuming,
             );
 
@@ -613,9 +615,20 @@ pub fn run_stage(
                 let renewal = format!("{:.4}", result.csmc_diag.trajectory_renewal);
                 let transition_ll_str = format!("{:.4}", result.transition_ll);
                 let obs_ll_str = format!("{:.4}", result.obs_ll);
+                // Per-sweep cold-chain NUTS diagnostics (gh#294).
+                let nd = &result.nuts;
+                let tree_depth_str = nd.tree_depth.to_string();
+                let n_leapfrog_str = nd.n_leapfrog.to_string();
+                let step_size_str = format!("{:.6}", nd.step_size);
+                let accept_stat_str = format!("{:.4}", nd.accept_stat);
+                let n_divergent_str = nd.n_divergent.to_string();
+                let energy_str = format!("{:.4}", nd.energy);
                 trace_writer.write_row(
                     sweep, result.log_complete_data_ll, log_posterior,
-                    &[&renewal, &transition_ll_str, &obs_ll_str], &param_vals,
+                    &[&renewal, &transition_ll_str, &obs_ll_str,
+                      &tree_depth_str, &n_leapfrog_str, &step_size_str,
+                      &accept_stat_str, &n_divergent_str, &energy_str],
+                    &param_vals,
                 );
 
                 // Save posterior trajectory sample. The adapter takes
