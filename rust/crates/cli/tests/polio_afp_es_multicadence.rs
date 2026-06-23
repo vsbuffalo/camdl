@@ -288,6 +288,9 @@ fn read_mle_param(mle_toml: &str, key: &str) -> Option<f64> {
 /// reason. R0 (±25%) and rho (±20%) are the robustly identifiable signals; the
 /// θ̂ is content-addressed and seed-pinned, so the check is deterministic.
 #[test]
+#[ignore = "costly: ~85s 4-chain, 2000-particle, 50-iteration IF2 scout recovery \
+            fit — opt-in via `cargo test -- --ignored` (run before releases / in \
+            nightly CI), not in the default `make test` gate"]
 fn synthetic_fit_recovers_params() {
     let bin = skip_if_missing_binary();
     // Absolute toml path: model + data paths inside the toml resolve against the
