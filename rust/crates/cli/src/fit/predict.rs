@@ -62,11 +62,31 @@ pub enum ParamTreatment {
 }
 
 impl ParamTreatment {
+    /// The label without the payload — what the output object carries, so the
+    /// (potentially large) draw cloud never has to be cloned into a `Predictive`.
+    pub fn kind(&self) -> TreatmentKind {
+        match self {
+            ParamTreatment::Posterior(_) => TreatmentKind::Posterior,
+            ParamTreatment::PlugIn { .. } => TreatmentKind::PlugIn,
+        }
+    }
+}
+
+/// The treatment axis as a payload-free label — the value the artifact carries
+/// and renders. Kept separate from [`ParamTreatment`] (which carries the cloud
+/// during dispatch) so a built [`Predictive`] never holds the draw payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreatmentKind {
+    Posterior,
+    PlugIn,
+}
+
+impl TreatmentKind {
     /// The legible value written into the `treatment` artifact column.
     pub fn label(&self) -> &'static str {
         match self {
-            ParamTreatment::Posterior(_) => "posterior",
-            ParamTreatment::PlugIn { .. } => "plug_in",
+            TreatmentKind::Posterior => "posterior",
+            TreatmentKind::PlugIn => "plug_in",
         }
     }
 }
@@ -92,22 +112,72 @@ impl ConvergenceStatus {
             ConvergenceStatus::NotAssessed => String::new(),
         }
     }
+
+    /// The value written into the `ess_min` column — empty when not assessed or
+    /// when no finite ESS was reported (a single-chain / ESS-less summary).
+    pub fn ess_min_cell(&self) -> String {
+        match self {
+            ConvergenceStatus::Reported { ess_min, .. } if ess_min.is_finite() => {
+                // ESS is an effective count; render it cleanly.
+                if ess_min.fract() == 0.0 { format!("{}", *ess_min as i64) } else { format!("{ess_min:.1}") }
+            }
+            _ => String::new(),
+        }
+    }
 }
 
 // ── What a fit produced, resolved by artifact ──────────────────────────────
 
 /// A resolved posterior draws cloud plus the provenance a band needs to label
-/// itself honestly.
+/// itself honestly. The cloud is non-empty **by construction**: the only way to
+/// build one is [`PosteriorDraws::new`], which rejects an empty draw set — so a
+/// `ParamTreatment::Posterior` / `FitResult::Posterior` can never carry a
+/// zero-draw cloud that would quantile to `NaN`.
 #[derive(Debug, Clone)]
 pub struct PosteriorDraws {
     /// One complete parameter vector per draw (estimated + fixed columns).
-    pub draws: Vec<IndexMap<String, f64>>,
+    /// Private: the non-empty invariant lives in [`PosteriorDraws::new`].
+    draws: Vec<IndexMap<String, f64>>,
     /// Bare stage name the cloud came from.
     pub stage: String,
     /// The inference algorithm, when recoverable.
     pub method: Option<FitAlgorithm>,
+    /// The forward simulator the producing stage ran on — the predictive
+    /// replays on the SAME backend the fit used, not a hardcoded default.
+    pub backend: crate::args::types::ForwardBackend,
     /// The stage's convergence summary.
     pub convergence: ConvergenceStatus,
+}
+
+impl PosteriorDraws {
+    /// Build a posterior cloud, rejecting an empty draw set. This is the only
+    /// constructor, so an empty "posterior" band is unrepresentable.
+    pub fn new(
+        draws: Vec<IndexMap<String, f64>>,
+        stage: String,
+        method: Option<FitAlgorithm>,
+        backend: crate::args::types::ForwardBackend,
+        convergence: ConvergenceStatus,
+    ) -> Result<Self, String> {
+        if draws.is_empty() {
+            return Err(format!(
+                "posterior stage '{stage}' has zero draws — cannot build a posterior \
+                 predictive band (check that the stage's draws.tsv is non-empty and \
+                 that burn-in did not discard every sweep)"
+            ));
+        }
+        Ok(PosteriorDraws { draws, stage, method, backend, convergence })
+    }
+
+    /// The draw cloud (read-only).
+    pub fn draws(&self) -> &[IndexMap<String, f64>] {
+        &self.draws
+    }
+
+    /// Number of draws — always ≥ 1.
+    pub fn n_draws(&self) -> usize {
+        self.draws.len()
+    }
 }
 
 /// What a fit actually produced — resolved once, at the boundary, **by
@@ -142,14 +212,19 @@ impl FitResult {
 // ── The output object ──────────────────────────────────────────────────────
 
 /// A predictive object: its horizon, how it treated parameters, its
-/// convergence, and the per-`(time, stratum)` quantile bands. None of the
-/// three axes is optional — you cannot build a `Predictive` without stating
-/// all of them, so none can be guessed downstream.
+/// convergence, and the per-`(time, stratum)` quantile bands. None of the axes
+/// is optional — you cannot build a `Predictive` without stating all of them,
+/// so none can be guessed downstream. It carries the treatment *label* and the
+/// draw *count*, never the draw cloud itself (that stays in the dispatch-time
+/// [`ParamTreatment`]).
 #[derive(Debug, Clone)]
 pub struct Predictive {
     pub horizon: Horizon,
-    pub treatment: ParamTreatment,
+    pub treatment: TreatmentKind,
     pub convergence: ConvergenceStatus,
+    /// How many posterior draws the bands were quantiled over (the `n_draws`
+    /// column) — a consumer reads it as the band's Monte-Carlo resolution.
+    pub n_draws: usize,
     pub streams: Vec<StreamBands>,
 }
 
@@ -210,21 +285,33 @@ pub fn quantile(xs: &[f64], q: f64) -> f64 {
     v[lo] * (1.0 - frac) + v[hi] * frac
 }
 
-/// The full quantile band (`QUANTILE_LEVELS`) of one cell's draws.
-pub fn band(xs: &[f64]) -> Vec<f64> {
-    QUANTILE_LEVELS.iter().map(|(q, _)| quantile(xs, *q)).collect()
+/// The full quantile band (`QUANTILE_LEVELS`) of one cell's draws. Rejects a
+/// non-finite sample (a `NaN`/±∞ `y_rep` is an upstream bug, not a band to
+/// publish) so a quietly-wrong band can never reach the artifact.
+pub fn band(xs: &[f64]) -> Result<Vec<f64>, String> {
+    if xs.iter().any(|x| !x.is_finite()) {
+        return Err(format!(
+            "non-finite predictive sample ({} draws, {} non-finite) — refusing to \
+             quantile a NaN/±∞ y_rep",
+            xs.len(),
+            xs.iter().filter(|x| !x.is_finite()).count(),
+        ));
+    }
+    Ok(QUANTILE_LEVELS.iter().map(|(q, _)| quantile(xs, *q)).collect())
 }
 
 // ── Rendering the tidy artifact ────────────────────────────────────────────
 
 /// Render `predictive/<stream>.tsv`: `time | <dims…> | horizon | treatment |
-/// rhat_max | q05 … q95`. Tidy, plot-ready; the two axes are columns so a new
-/// predictive cell is more rows, never new consumer code.
+/// rhat_max | ess_min | n_draws | q05 … q95`. Tidy, plot-ready; the axes and
+/// the convergence channel are columns so a new predictive cell is more rows,
+/// never new consumer code.
 pub fn render_predictive_tsv(
     stream: &StreamBands,
     horizon: Horizon,
-    treatment: &ParamTreatment,
+    treatment: TreatmentKind,
     convergence: ConvergenceStatus,
+    n_draws: usize,
 ) -> String {
     let mut out = String::new();
     // Header.
@@ -233,7 +320,7 @@ pub fn render_predictive_tsv(
         out.push('\t');
         out.push_str(d);
     }
-    out.push_str("\thorizon\ttreatment\trhat_max");
+    out.push_str("\thorizon\ttreatment\trhat_max\tess_min\tn_draws");
     for (_, label) in QUANTILE_LEVELS {
         out.push('\t');
         out.push_str(label);
@@ -241,6 +328,8 @@ pub fn render_predictive_tsv(
     out.push('\n');
 
     let rhat = convergence.rhat_max_cell();
+    let ess = convergence.ess_min_cell();
+    let n = n_draws.to_string();
     for row in &stream.rows {
         out.push_str(&fmt_time(row.time));
         for dim in &stream.index_dims {
@@ -253,6 +342,10 @@ pub fn render_predictive_tsv(
         out.push_str(treatment.label());
         out.push('\t');
         out.push_str(&rhat);
+        out.push('\t');
+        out.push_str(&ess);
+        out.push('\t');
+        out.push_str(&n);
         for q in &row.quantiles {
             out.push('\t');
             out.push_str(&fmt_value(*q));
@@ -364,21 +457,33 @@ impl FitResult {
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| segment.to_path_buf());
                 let convergence = read_convergence(&stage_dir, pref.method);
-                Ok(FitResult::Posterior(PosteriorDraws {
+                // Replay on the SAME backend the stage ran on; default only when
+                // a bare stage dir was passed (no fit view to read it from).
+                let backend = pref
+                    .backend
+                    .map(crate::args::types::ForwardBackend::from)
+                    .unwrap_or(crate::args::types::ForwardBackend::ChainBinomial);
+                Ok(FitResult::Posterior(PosteriorDraws::new(
                     draws,
-                    stage: pref.stage,
-                    method: pref.method,
+                    pref.stage,
+                    pref.method,
+                    backend,
                     convergence,
-                }))
+                )?))
             }
-            // No cloud: classify as a point-estimate fit if there are stages,
-            // else surface the resolver's "not a fit / no posterior" error.
+            // No cloud: classify as a point-estimate fit. Report the stage the
+            // user asked for (`--stage`), not the terminal one, so the refusal
+            // names the right stage.
             Err(e) => {
                 if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
-                    if let Some(terminal) = view.stages.last() {
+                    let chosen = match stage {
+                        Some(want) => view.stages.iter().find(|s| s.stage == want),
+                        None => view.stages.last(),
+                    };
+                    if let Some(s) = chosen {
                         return Ok(FitResult::PointEstimate {
-                            method: Some(terminal.method),
-                            stage: terminal.stage.clone(),
+                            method: Some(s.method),
+                            stage: s.stage.clone(),
                         });
                     }
                 }
@@ -569,6 +674,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // 2. Resolve the posterior — by artifact. A point-estimate fit is refused.
     let fit_result = FitResult::resolve(&segment, args.stage.as_deref())?;
     let treatment = fit_result.into_treatment();
+    // The label the artifact carries, derived from the treatment before we
+    // unwrap the cloud (v1 only ever reaches `posterior` here, but the label is
+    // read off the treatment, not hardcoded).
+    let treatment_kind = treatment.kind();
     let posterior = match treatment {
         ParamTreatment::Posterior(pd) => pd,
         ParamTreatment::PlugIn { method, stage } => return Err(plugin_refusal(method, &stage)),
@@ -587,7 +696,39 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     --stream (if given) names a real stream".into());
     }
 
-    // 5. Drive the engine over the draws; sample y_rep at the observed times.
+    // 5. Validate the draw schema BEFORE simulating: every draw column must be a
+    // real model parameter (an unknown name is a stale/mis-keyed draw, never
+    // silently dropped), and every model parameter must be covered (so none is
+    // silently defaulted). The cloud is non-empty by construction, so [0] is safe.
+    {
+        use std::collections::HashSet;
+        let model_params: HashSet<&str> =
+            model.parameters.iter().map(|p| p.name.as_str()).collect();
+        let draw_keys: HashSet<&str> =
+            posterior.draws()[0].keys().map(|s| s.as_str()).collect();
+        let mut unknown: Vec<&str> =
+            draw_keys.iter().filter(|k| !model_params.contains(*k)).copied().collect();
+        let mut missing: Vec<&str> =
+            model_params.iter().filter(|p| !draw_keys.contains(*p)).copied().collect();
+        unknown.sort();
+        missing.sort();
+        if !unknown.is_empty() {
+            return Err(format!(
+                "posterior draws contain parameter(s) the model does not declare: {} \
+                 (the draws were produced against a different model)",
+                unknown.join(", ")
+            ));
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "posterior draws do not cover model parameter(s): {} \
+                 (every parameter must be present so none is silently defaulted)",
+                missing.join(", ")
+            ));
+        }
+    }
+
+    // Drive the engine over the draws; sample y_rep at the observed times.
     // The standalone CompiledModel (used by the sink's observation sampler)
     // needs concrete parameter values to compile — an estimated parameter has
     // only a prior in the model. Seed it with the first draw (which carries
@@ -595,7 +736,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // satisfy compilation. The engine compiles its own per-cell model from the
     // draw, independently.
     let mut model_for_obs = model.clone();
-    if let Some(first) = posterior.draws.first() {
+    if let Some(first) = posterior.draws().first() {
         for p in &mut model_for_obs.parameters {
             if let Some(&v) = first.get(&p.name) {
                 p.value = p.value.with_value(v);
@@ -629,11 +770,13 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     let job = crate::sim_job::SimulateJob {
         model: compiled_ir.clone(),
         params_files: vec![],
-        backend: posterior_backend(&model),
+        // Replay on the SAME forward simulator the fit used (chain_binomial / ode),
+        // resolved from the stage — never a hardcoded default.
+        backend: posterior.backend,
         dt,
         integrator: None,
         source: crate::sim_job::ParamSource::Draws {
-            rows: posterior.draws.clone(),
+            rows: posterior.draws().to_vec(),
             replicates: 1,
         },
         // A single no-op baseline scenario, matching `simulate`'s no-`--scenario`
@@ -653,25 +796,28 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     };
     crate::engine::run_job(&job, &mut sink)?;
 
-    // 6. Quantile-reduce and assemble the typed Predictive, then write.
+    // 6. Quantile-reduce and assemble the typed Predictive, then write. The
+    // band carries the treatment LABEL and the draw count, not the cloud.
     let schema = crate::run_meta::read_fit_sidecar(&segment).and_then(|s| s.schema);
     let predictive = assemble_predictive(
         &model,
         &sink,
         &leaves,
         Horizon::FreeForward,
-        ParamTreatment::Posterior(posterior.clone()),
+        treatment_kind,
         posterior.convergence,
+        posterior.n_draws(),
         schema.as_ref(),
-    );
+    )?;
 
     let mut written = Vec::new();
     for stream in &predictive.streams {
         let pred_tsv = render_predictive_tsv(
             stream,
             predictive.horizon,
-            &predictive.treatment,
+            predictive.treatment,
             predictive.convergence,
+            predictive.n_draws,
         );
         written.push(write_tsv(&segment, "predictive", &stream.source, &pred_tsv)?);
     }
@@ -685,7 +831,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         "fit predict: horizon=free_forward treatment=posterior, {} stream(s), \
          {} draws from {} stage '{}'",
         predictive.streams.len(),
-        posterior.draws.len(),
+        posterior.n_draws(),
         method_label,
         posterior.stage,
     );
@@ -700,16 +846,6 @@ fn leaf_matches(o: &ir::observation::ObservationModel, l: &LeafObs) -> bool {
         && o.stratum.iter().all(|sk| {
             l.stratum.iter().any(|(d, lvl)| *d == sk.dim && *lvl == sk.level)
         })
-}
-
-/// The forward backend for the predictive sim: the model's declared backend.
-/// Chain-binomial is the inference default; the model's `simulation` block
-/// names it.
-fn posterior_backend(_model: &ir::Model) -> crate::args::types::ForwardBackend {
-    // The fit ran chain_binomial unless the model is real-valued (ODE). v1
-    // predicts on chain_binomial, matching the dominant inference backend;
-    // an ODE-backed predictive is a follow-up.
-    crate::args::types::ForwardBackend::ChainBinomial
 }
 
 /// Load each (filtered) observation leaf's observed series.
@@ -771,15 +907,17 @@ fn stream_selected(o: &ir::observation::ObservationModel, filter: Option<&str>) 
 
 /// Quantile-reduce the accumulated samples into the typed [`Predictive`],
 /// grouping leaves by logical stream.
+#[allow(clippy::too_many_arguments)]
 fn assemble_predictive(
     model: &ir::Model,
     sink: &PredictiveSink,
     leaves: &[LeafObs],
     horizon: Horizon,
-    treatment: ParamTreatment,
+    treatment: TreatmentKind,
     convergence: ConvergenceStatus,
+    n_draws: usize,
     schema: Option<&ObsSchema>,
-) -> Predictive {
+) -> Result<Predictive, String> {
     // Group leaf indices by logical source, preserving first-appearance order.
     let mut order: Vec<String> = Vec::new();
     let mut by_source: IndexMap<String, Vec<usize>> = IndexMap::new();
@@ -805,17 +943,20 @@ fn assemble_predictive(
             let stratum: Vec<(String, String)> = model.observations[si]
                 .stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
             for (ti, draws_at_t) in sink.samples[si].iter().enumerate() {
+                let quantiles = band(draws_at_t).map_err(|e| {
+                    format!("stream '{source}' at t={}: {e}", sink.leaf_times[si][ti])
+                })?;
                 rows.push(BandRow {
                     time: sink.leaf_times[si][ti],
                     stratum: stratum.clone(),
-                    quantiles: band(draws_at_t),
+                    quantiles,
                 });
             }
         }
         streams.push(StreamBands { source: source.clone(), index_dims, rows });
     }
 
-    Predictive { horizon, treatment, convergence, streams }
+    Ok(Predictive { horizon, treatment, convergence, n_draws, streams })
 }
 
 /// Group the observed leaves into `(source, index_dims, rows)` for the observed
@@ -892,9 +1033,21 @@ mod tests {
     #[test]
     fn band_returns_all_five_levels_in_order() {
         let xs: Vec<f64> = (0..=100).map(|i| i as f64).collect();
-        let b = band(&xs);
+        let b = band(&xs).unwrap();
         assert_eq!(b.len(), 5);
         assert_eq!(b, vec![5.0, 25.0, 50.0, 75.0, 95.0]);
+    }
+
+    #[test]
+    fn band_rejects_non_finite_samples() {
+        // A NaN/±∞ y_rep is an upstream bug, not a band to publish.
+        assert!(band(&[1.0, f64::NAN, 3.0]).is_err());
+        assert!(band(&[1.0, f64::INFINITY]).is_err());
+        assert!(band(&[1.0, 2.0, 3.0]).is_ok());
+    }
+
+    fn cb() -> crate::args::types::ForwardBackend {
+        crate::args::types::ForwardBackend::ChainBinomial
     }
 
     fn stratum(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -913,37 +1066,34 @@ mod tests {
                           quantiles: vec![0.0, 0.0, 1.0, 3.0, 7.0] },
             ],
         };
-        let treatment = ParamTreatment::Posterior(PosteriorDraws {
-            draws: vec![], stage: "pgas".into(), method: Some(FitAlgorithm::Pgas),
-            convergence: ConvergenceStatus::Reported { rhat_max: 1.01, ess_min: 420.0 },
-        });
         let tsv = render_predictive_tsv(
-            &stream, Horizon::FreeForward, &treatment,
-            ConvergenceStatus::Reported { rhat_max: 1.01, ess_min: 420.0 },
+            &stream, Horizon::FreeForward, TreatmentKind::Posterior,
+            ConvergenceStatus::Reported { rhat_max: 1.01, ess_min: 420.0 }, 40,
         );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
-        assert_eq!(lines[0], "time\tpatch\thorizon\ttreatment\trhat_max\tq05\tq25\tq50\tq75\tq95");
-        assert_eq!(lines[1], "7\tBo\tfree_forward\tposterior\t1.0100\t0\t1\t3\t6\t12");
-        assert_eq!(lines[2], "7\tBombali\tfree_forward\tposterior\t1.0100\t0\t0\t1\t3\t7");
+        assert_eq!(lines[0],
+            "time\tpatch\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95");
+        assert_eq!(lines[1], "7\tBo\tfree_forward\tposterior\t1.0100\t420\t40\t0\t1\t3\t6\t12");
+        assert_eq!(lines[2], "7\tBombali\tfree_forward\tposterior\t1.0100\t420\t40\t0\t0\t1\t3\t7");
         assert_eq!(lines.len(), 3, "header + one row per (time, stratum)");
     }
 
     #[test]
-    fn predictive_tsv_national_series_has_no_dim_columns() {
+    fn predictive_tsv_national_series_unassessed_convergence_is_empty() {
         let stream = StreamBands {
             source: "cases".into(),
             index_dims: vec![],
             rows: vec![BandRow { time: 1.0, stratum: vec![], quantiles: vec![1.0, 2.0, 3.0, 4.0, 5.0] }],
         };
-        let treatment = ParamTreatment::Posterior(PosteriorDraws {
-            draws: vec![], stage: "pgas".into(), method: None,
-            convergence: ConvergenceStatus::NotAssessed,
-        });
-        let tsv = render_predictive_tsv(&stream, Horizon::FreeForward, &treatment, ConvergenceStatus::NotAssessed);
+        let tsv = render_predictive_tsv(
+            &stream, Horizon::FreeForward, TreatmentKind::Posterior,
+            ConvergenceStatus::NotAssessed, 12,
+        );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
-        // No dim column; not-assessed rhat is an empty cell, not a fabricated value.
-        assert_eq!(lines[0], "time\thorizon\ttreatment\trhat_max\tq05\tq25\tq50\tq75\tq95");
-        assert_eq!(lines[1], "1\tfree_forward\tposterior\t\t1\t2\t3\t4\t5");
+        // No dim column; not-assessed rhat/ess are empty cells, not fabricated
+        // values; n_draws is still carried.
+        assert_eq!(lines[0], "time\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95");
+        assert_eq!(lines[1], "1\tfree_forward\tposterior\t\t\t12\t1\t2\t3\t4\t5");
     }
 
     #[test]
@@ -964,13 +1114,22 @@ mod tests {
     #[test]
     fn treatment_and_horizon_labels_are_legible() {
         assert_eq!(Horizon::FreeForward.as_str(), "free_forward");
-        let post = ParamTreatment::Posterior(PosteriorDraws {
-            draws: vec![], stage: "s".into(), method: None,
-            convergence: ConvergenceStatus::NotAssessed,
-        });
-        assert_eq!(post.label(), "posterior");
+        assert_eq!(TreatmentKind::Posterior.label(), "posterior");
+        assert_eq!(TreatmentKind::PlugIn.label(), "plug_in");
         let plug = ParamTreatment::PlugIn { method: Some(FitAlgorithm::If2), stage: "scout".into() };
-        assert_eq!(plug.label(), "plug_in");
+        assert_eq!(plug.kind(), TreatmentKind::PlugIn);
+    }
+
+    #[test]
+    fn posterior_draws_new_rejects_empty_cloud() {
+        // #2/#3: an empty posterior cloud is unrepresentable — the only
+        // constructor refuses it, so no NaN band can be built.
+        let r = PosteriorDraws::new(
+            vec![], "pgas".into(), Some(FitAlgorithm::Pgas), cb(),
+            ConvergenceStatus::NotAssessed,
+        );
+        assert!(r.is_err(), "empty cloud must be rejected at construction");
+        assert!(r.unwrap_err().contains("zero draws"));
     }
 
     #[test]
@@ -989,13 +1148,13 @@ mod tests {
 
     #[test]
     fn posterior_fit_maps_to_posterior_treatment() {
-        let pd = PosteriorDraws {
-            draws: vec![IndexMap::from([("beta".to_string(), 0.5)])],
-            stage: "pgas".into(), method: Some(FitAlgorithm::Pgas),
-            convergence: ConvergenceStatus::Reported { rhat_max: 1.02, ess_min: 300.0 },
-        };
+        let pd = PosteriorDraws::new(
+            vec![IndexMap::from([("beta".to_string(), 0.5)])],
+            "pgas".into(), Some(FitAlgorithm::Pgas), cb(),
+            ConvergenceStatus::Reported { rhat_max: 1.02, ess_min: 300.0 },
+        ).unwrap();
         match FitResult::Posterior(pd).into_treatment() {
-            ParamTreatment::Posterior(d) => assert_eq!(d.draws.len(), 1),
+            ParamTreatment::Posterior(d) => assert_eq!(d.n_draws(), 1),
             ParamTreatment::PlugIn { .. } => panic!("a posterior fit must keep its cloud"),
         }
     }

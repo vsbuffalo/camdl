@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::fit::fit_view::FitView;
-use crate::run_meta::FitAlgorithm;
+use crate::run_meta::{FitAlgorithm, InferenceBackend};
 
 /// The terminal (or `--stage`-selected) Bayesian stage that produced a
 /// posterior draws cloud, located within a resolved fit directory.
@@ -30,6 +30,10 @@ pub struct PosteriorDrawsRef {
     /// Informational (the band's label); `None` when a stage dir was passed
     /// directly with no fit-level view to read the method from.
     pub method: Option<FitAlgorithm>,
+    /// The simulation backend the stage ran on (`chain_binomial` / `ode`), so a
+    /// downstream predictive replays on the SAME forward simulator the fit used
+    /// — not a hardcoded default. `None` when a stage dir was passed directly.
+    pub backend: Option<InferenceBackend>,
 }
 
 const DRAWS_FILE: &str = "draws.tsv";
@@ -85,6 +89,7 @@ pub fn resolve_posterior_draws(
                 stage: chosen.stage.clone(),
                 draws_path,
                 method: Some(chosen.method),
+                backend: Some(chosen.backend),
             });
         }
 
@@ -95,6 +100,7 @@ pub fn resolve_posterior_draws(
             stage: chosen.stage.clone(),
             draws_path,
             method: Some(chosen.method),
+            backend: Some(chosen.backend),
         });
     }
 
@@ -111,6 +117,7 @@ pub fn resolve_posterior_draws(
             stage,
             draws_path,
             method: None,
+            backend: None,
         });
     }
 

@@ -165,12 +165,13 @@ thin = 1
     let mut lines = pred_txt.lines();
     let header = lines.next().unwrap();
     assert_eq!(
-        header, "time\thorizon\ttreatment\trhat_max\tq05\tq25\tq50\tq75\tq95",
-        "predictive header carries both axes + convergence + the quantile band"
+        header,
+        "time\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "predictive header carries both axes + convergence (rhat_max, ess_min) + n_draws + band"
     );
     let first = lines.next().expect("at least one predictive row");
     let cols: Vec<&str> = first.split('\t').collect();
-    assert_eq!(cols.len(), 9, "row shape matches header");
+    assert_eq!(cols.len(), 11, "row shape matches header");
     assert_eq!(cols[1], "free_forward", "horizon axis is explicit");
     assert_eq!(cols[2], "posterior", "treatment axis is explicit (not a plug-in)");
     // rhat_max is carried (a finite number), never silently blank for a PGAS fit.
@@ -179,8 +180,14 @@ thin = 1
         "rhat_max carried on the band, got {:?}",
         cols[3]
     );
+    // n_draws is a positive count of the cloud the band was reduced over.
+    assert!(
+        cols[5].parse::<usize>().map(|n| n > 0).unwrap_or(false),
+        "n_draws carried and positive, got {:?}",
+        cols[5]
+    );
     // The quantile band is monotone non-decreasing q05 ≤ q25 ≤ … ≤ q95.
-    let qs: Vec<f64> = cols[4..9].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    let qs: Vec<f64> = cols[6..11].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in qs.windows(2) {
         assert!(w[0] <= w[1], "quantiles must be ordered: {qs:?}");
     }
