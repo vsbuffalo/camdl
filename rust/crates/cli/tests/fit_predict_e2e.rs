@@ -192,6 +192,33 @@ thin = 1
         assert!(w[0] <= w[1], "quantiles must be ordered: {qs:?}");
     }
 
+    // ── default emits BOTH horizons for a chain-binomial fit: the same file
+    // also carries one_step rows (typed `horizon` column distinguishes them).
+    let one_step_rows: Vec<&str> = pred_txt
+        .lines()
+        .filter(|l| l.split('\t').nth(1) == Some("one_step"))
+        .collect();
+    assert!(
+        !one_step_rows.is_empty(),
+        "default predict on a chain-binomial fit must also emit one_step rows; \
+         got only:\n{pred_txt}"
+    );
+    // A one-step row is well-formed: posterior treatment, positive n_draws,
+    // ordered quantile band.
+    let osr: Vec<&str> = one_step_rows[0].split('\t').collect();
+    assert_eq!(osr.len(), 11, "one_step row shape matches header");
+    assert_eq!(osr[1], "one_step", "horizon axis");
+    assert_eq!(osr[2], "posterior", "one-step is a posterior-treatment band");
+    assert!(
+        osr[5].parse::<usize>().map(|n| n > 0).unwrap_or(false),
+        "one_step n_draws carried and positive (the subsample used), got {:?}",
+        osr[5]
+    );
+    let osq: Vec<f64> = osr[6..11].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    for w in osq.windows(2) {
+        assert!(w[0] <= w[1], "one_step quantiles must be ordered: {osq:?}");
+    }
+
     // ── observed/weekly_cases.tsv: the observed half, same time keys ──
     let obs = find_artifact(&results, "observed", "weekly_cases")
         .expect("observed/weekly_cases.tsv must be written");

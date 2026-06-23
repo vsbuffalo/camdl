@@ -121,6 +121,19 @@ impl ForwardBackend {
     }
 }
 
+/// Which predictive horizon `camdl fit predict` emits. ABSENT on the command
+/// line = "all applicable" (the default): a chain-binomial fit emits both
+/// `free_forward` and `one_step`; an ODE fit emits `free_forward` only (its
+/// one-step is identical, so it is simply not applicable — no error). An
+/// explicit `--horizon one_step` on an ODE fit is a hard error with a redirect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum HorizonArg {
+    #[value(name = "free_forward", alias = "free-forward")]
+    FreeForward,
+    #[value(name = "one_step", alias = "one-step")]
+    OneStep,
+}
+
 /// CLI override for the ODE integrator METHOD (gh#166). Method-only by design:
 /// the tolerances are a model property (the `simulate { integrator = rk45 { … } }`
 /// block, where the type forbids orphan tolerances), so there is no `--atol`/

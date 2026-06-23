@@ -1135,6 +1135,19 @@ pub struct FitPredictArgs {
     #[arg(long, value_name = "STAGE")]
     pub stage: Option<String>,
 
+    /// Which predictive horizon(s) to emit. Omitted = all applicable for the
+    /// fit's backend (chain-binomial → `free_forward` + `one_step`; ODE →
+    /// `free_forward` only). `--horizon one_step` on an ODE fit is a hard error.
+    #[arg(long, value_name = "HORIZON")]
+    pub horizon: Option<crate::args::types::HorizonArg>,
+
+    /// Cap the posterior cloud subsample for the one-step horizon (default 200).
+    /// The one-step band pools `draws × particles` samples per cell, so a few
+    /// hundred draws is plenty for q05…q95; a larger cloud is evenly subsampled
+    /// (never silently run at full size). Ignored by the free-forward horizon.
+    #[arg(long, value_name = "N")]
+    pub n_draws: Option<usize>,
+
     /// RNG seed for the y_rep observation sampling (default 1).
     #[arg(long)]
     pub seed: Option<u64>,

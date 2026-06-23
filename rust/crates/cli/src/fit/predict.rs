@@ -23,13 +23,18 @@ use crate::run_meta::{FitAlgorithm, ObsSchema};
 
 // ── The two axes, as types ─────────────────────────────────────────────────
 
-/// What is predicted. v1 emits only `FreeForward`; `OneStepAhead` / `KStep…`
-/// append as the folding lands (gh#269). A single-variant enum today, but it
-/// makes the `horizon` artifact column type-safe and the axis explicit.
+/// What is predicted. The `horizon` artifact column is this axis, typed so a
+/// one-step band is never read as a free-forward one (or vice versa).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Horizon {
-    /// Run the fitted model forward from the start and see what it generates.
+    /// Run the fitted model forward from the start and see what it generates —
+    /// `p(y_t | θ)`, never re-anchored to data. The generative check.
     FreeForward,
+    /// `p(y_t | y_{1:t-1})` — the one-step-ahead posterior predictive: re-run a
+    /// bootstrap filter over the data per posterior draw, sample `ỹ` from the
+    /// propagated (pre-reweight) particles at each observation time, pool over
+    /// (particles × draws). The honest short-horizon forecast object.
+    OneStepAhead,
 }
 
 impl Horizon {
@@ -37,6 +42,7 @@ impl Horizon {
     pub fn as_str(&self) -> &'static str {
         match self {
             Horizon::FreeForward => "free_forward",
+            Horizon::OneStepAhead => "one_step",
         }
     }
 }
@@ -180,6 +186,51 @@ impl PosteriorDraws {
     }
 }
 
+// ── The filterable-fit witness (the one-step horizon's type gate) ───────────
+
+/// Proof that a fit's draws can drive a particle filter — the only constructor
+/// is [`FilterableFit::from_posterior`], which gates on the backend. The
+/// one-step producer takes this BY VALUE/reference, so it is unreachable for a
+/// non-filterable (ODE / Gillespie) fit: the gate is in the type, not a runtime
+/// `if` the caller can forget. Free-forward takes a plain [`PosteriorDraws`] and
+/// runs on any backend; one-step requires this witness.
+pub struct FilterableFit {
+    /// Private — the only way in is `from_posterior`, which proves the backend
+    /// is filterable. [`FilterableFit::draws`] reads it back out.
+    draws: PosteriorDraws,
+}
+
+/// Why a fit's posterior draws cannot drive a particle filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotFilterable {
+    /// ODE: deterministic given θ, so `p(x_t | y_{1:t-1}, θ) = δ(x_t(θ))` and
+    /// the one-step predictive reduces to the observation model at the
+    /// deterministic state — identical to free-forward. A separate one-step band
+    /// would be a relabelled duplicate.
+    Deterministic,
+    /// Gillespie: not an inference backend, so a fit never has Gillespie draws.
+    /// Handled for exhaustiveness only.
+    NotAnInferenceBackend,
+}
+
+impl FilterableFit {
+    /// Construct the witness iff the fit ran on a filterable (chain-binomial)
+    /// backend. ODE / Gillespie are typed out via [`NotFilterable`].
+    pub fn from_posterior(d: PosteriorDraws) -> Result<Self, NotFilterable> {
+        use crate::args::types::ForwardBackend;
+        match d.backend {
+            ForwardBackend::ChainBinomial => Ok(FilterableFit { draws: d }),
+            ForwardBackend::Ode => Err(NotFilterable::Deterministic),
+            ForwardBackend::Gillespie => Err(NotFilterable::NotAnInferenceBackend),
+        }
+    }
+
+    /// The posterior cloud this witness proves is filterable.
+    pub fn draws(&self) -> &PosteriorDraws {
+        &self.draws
+    }
+}
+
 /// What a fit actually produced — resolved once, at the boundary, **by
 /// artifact** (does the chosen stage have a draws cloud?), not by method name.
 #[derive(Debug, Clone)]
@@ -210,23 +261,6 @@ impl FitResult {
 }
 
 // ── The output object ──────────────────────────────────────────────────────
-
-/// A predictive object: its horizon, how it treated parameters, its
-/// convergence, and the per-`(time, stratum)` quantile bands. None of the axes
-/// is optional — you cannot build a `Predictive` without stating all of them,
-/// so none can be guessed downstream. It carries the treatment *label* and the
-/// draw *count*, never the draw cloud itself (that stays in the dispatch-time
-/// [`ParamTreatment`]).
-#[derive(Debug, Clone)]
-pub struct Predictive {
-    pub horizon: Horizon,
-    pub treatment: TreatmentKind,
-    pub convergence: ConvergenceStatus,
-    /// How many posterior draws the bands were quantiled over (the `n_draws`
-    /// column) — a consumer reads it as the band's Monte-Carlo resolution.
-    pub n_draws: usize,
-    pub streams: Vec<StreamBands>,
-}
 
 /// The quantile bands for one logical stream, faceted by its index dimensions.
 #[derive(Debug, Clone)]
@@ -302,21 +336,31 @@ pub fn band(xs: &[f64]) -> Result<Vec<f64>, String> {
 
 // ── Rendering the tidy artifact ────────────────────────────────────────────
 
+/// One horizon's contribution to a `predictive/<stream>.tsv`: its rows, plus the
+/// labels they carry (the horizon axis, the treatment, the convergence, the draw
+/// count). Stacking several of these under one header is how a chain-binomial fit
+/// writes both `free_forward` and `one_step` rows into the same file.
+pub struct PredictiveSection<'a> {
+    pub horizon: Horizon,
+    pub treatment: TreatmentKind,
+    pub convergence: ConvergenceStatus,
+    pub n_draws: usize,
+    pub rows: &'a [BandRow],
+}
+
 /// Render `predictive/<stream>.tsv`: `time | <dims…> | horizon | treatment |
 /// rhat_max | ess_min | n_draws | q05 … q95`. Tidy, plot-ready; the axes and
-/// the convergence channel are columns so a new predictive cell is more rows,
-/// never new consumer code.
-pub fn render_predictive_tsv(
-    stream: &StreamBands,
-    horizon: Horizon,
-    treatment: TreatmentKind,
-    convergence: ConvergenceStatus,
-    n_draws: usize,
+/// the convergence channel are columns so a new predictive cell — a new horizon,
+/// a new treatment — is more rows, never new consumer code. Several
+/// [`PredictiveSection`]s (one per horizon) stack under the single header.
+pub fn render_predictive_tsv_sections(
+    index_dims: &[String],
+    sections: &[PredictiveSection],
 ) -> String {
     let mut out = String::new();
     // Header.
     out.push_str("time");
-    for d in &stream.index_dims {
+    for d in index_dims {
         out.push('\t');
         out.push_str(d);
     }
@@ -327,33 +371,36 @@ pub fn render_predictive_tsv(
     }
     out.push('\n');
 
-    let rhat = convergence.rhat_max_cell();
-    let ess = convergence.ess_min_cell();
-    let n = n_draws.to_string();
-    for row in &stream.rows {
-        out.push_str(&fmt_time(row.time));
-        for dim in &stream.index_dims {
+    for section in sections {
+        let rhat = section.convergence.rhat_max_cell();
+        let ess = section.convergence.ess_min_cell();
+        let n = section.n_draws.to_string();
+        for row in section.rows {
+            out.push_str(&fmt_time(row.time));
+            for dim in index_dims {
+                out.push('\t');
+                out.push_str(level_for(&row.stratum, dim));
+            }
             out.push('\t');
-            out.push_str(level_for(&row.stratum, dim));
-        }
-        out.push('\t');
-        out.push_str(horizon.as_str());
-        out.push('\t');
-        out.push_str(treatment.label());
-        out.push('\t');
-        out.push_str(&rhat);
-        out.push('\t');
-        out.push_str(&ess);
-        out.push('\t');
-        out.push_str(&n);
-        for q in &row.quantiles {
+            out.push_str(section.horizon.as_str());
             out.push('\t');
-            out.push_str(&fmt_value(*q));
+            out.push_str(section.treatment.label());
+            out.push('\t');
+            out.push_str(&rhat);
+            out.push('\t');
+            out.push_str(&ess);
+            out.push('\t');
+            out.push_str(&n);
+            for q in &row.quantiles {
+                out.push('\t');
+                out.push_str(&fmt_value(*q));
+            }
+            out.push('\n');
         }
-        out.push('\n');
     }
     out
 }
+
 
 /// Render `observed/<stream>.tsv`: `time | <dims…> | value`. The observed half
 /// of the panel — a derived series in the same tidy keys as `predictive`, so a
@@ -683,6 +730,29 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         ParamTreatment::PlugIn { method, stage } => return Err(plugin_refusal(method, &stage)),
     };
 
+    // 2b. Resolve which horizon(s) to emit. The one-step horizon is gated by a
+    // backend witness ([`FilterableFit`]); an explicit `--horizon one_step` on a
+    // non-filterable fit is a hard error, while the default ("all applicable")
+    // silently skips it for those backends. `one_step_fit` is `Some` exactly when
+    // the one-step producer will run.
+    use crate::args::types::HorizonArg;
+    let want_free_forward =
+        matches!(args.horizon, None | Some(HorizonArg::FreeForward));
+    let one_step_fit: Option<FilterableFit> = match args.horizon {
+        Some(HorizonArg::FreeForward) => None,
+        Some(HorizonArg::OneStep) => {
+            // EXPLICIT request: a non-filterable fit is a hard error with a redirect.
+            Some(FilterableFit::from_posterior(posterior.clone()).map_err(|why| {
+                one_step_refusal(why, posterior.method, &posterior.stage)
+            })?)
+        }
+        None => {
+            // DEFAULT "all applicable": run one-step where the backend supports
+            // it; for ODE / Gillespie it is simply not applicable (no error).
+            FilterableFit::from_posterior(posterior.clone()).ok()
+        }
+    };
+
     // 3. Compile the model (same recipe the fit runner uses).
     let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.model.camdl)?;
     let (model, _) = crate::util::load_model(&compiled_ir)?;
@@ -728,13 +798,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         }
     }
 
-    // Drive the engine over the draws; sample y_rep at the observed times.
-    // The standalone CompiledModel (used by the sink's observation sampler)
-    // needs concrete parameter values to compile — an estimated parameter has
-    // only a prior in the model. Seed it with the first draw (which carries
-    // every parameter); the sink overrides per draw, so these values only
-    // satisfy compilation. The engine compiles its own per-cell model from the
-    // draw, independently.
+    // The standalone CompiledModel (used by the free-forward sink's observation
+    // sampler AND the one-step filter) needs concrete parameter values to compile
+    // — an estimated parameter has only a prior in the model. Seed it with the
+    // first draw (which carries every parameter); each producer overrides per
+    // draw, so these values only satisfy compilation.
     let mut model_for_obs = model.clone();
     if let Some(first) = posterior.draws().first() {
         for p in &mut model_for_obs.parameters {
@@ -747,79 +815,140 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         sim::CompiledModel::new(model_for_obs)
             .map_err(|e| format!("compiling model for prediction: {e:?}"))?,
     );
-    // Leaf order = model.observations order; map the (possibly filtered) leaves
-    // back onto that order for the sink.
-    let leaf_times: Vec<Vec<f64>> = model
-        .observations
-        .iter()
-        .map(|o| {
-            leaves
-                .iter()
-                .find(|l| leaf_matches(o, l))
-                .map(|l| l.times.clone())
-                .unwrap_or_default()
-        })
-        .collect();
-    let samples_init: Vec<Vec<Vec<f64>>> = leaf_times
-        .iter()
-        .map(|ts| vec![Vec::new(); ts.len()])
-        .collect();
-    let mut sink = PredictiveSink { compiled: compiled.clone(), leaf_times, samples: samples_init };
 
-    let seed = args.seed.unwrap_or(1);
-    let job = crate::sim_job::SimulateJob {
-        model: compiled_ir.clone(),
-        params_files: vec![],
-        // Replay on the SAME forward simulator the fit used (chain_binomial / ode),
-        // resolved from the stage — never a hardcoded default.
-        backend: posterior.backend,
-        dt,
-        integrator: None,
-        source: crate::sim_job::ParamSource::Draws {
-            rows: posterior.draws().to_vec(),
-            replicates: 1,
-        },
-        // A single no-op baseline scenario, matching `simulate`'s no-`--scenario`
-        // path (an empty list would default to a named "baseline" preset lookup).
-        scenarios: vec![crate::sim_job::ScenarioRef::Inline {
-            name: "baseline".to_string(),
-            enable: vec![],
-            disable: vec![],
-            params: IndexMap::new(),
-        }],
-        seeds: crate::sim_job::Seeds::Single(seed),
-        cli_overrides: vec![],
-        set_vec_entries: vec![],
-        table_files: vec![],
-        obs: crate::sim_job::ObsOutput::None,
-        parallel: 1,
-    };
-    crate::engine::run_job(&job, &mut sink)?;
-
-    // 6. Quantile-reduce and assemble the typed Predictive, then write. The
-    // band carries the treatment LABEL and the draw count, not the cloud.
     let schema = crate::run_meta::read_fit_sidecar(&segment).and_then(|s| s.schema);
-    let predictive = assemble_predictive(
-        &model,
-        &sink,
-        &leaves,
-        Horizon::FreeForward,
-        treatment_kind,
-        posterior.convergence,
-        posterior.n_draws(),
-        schema.as_ref(),
-    )?;
+    let seed = args.seed.unwrap_or(1);
 
+    // ── Free-forward horizon: drive the engine over the draws; sample y_rep at
+    // the observed times. Run only when free-forward is requested.
+    let free_forward: Option<Vec<StreamBands>> = if want_free_forward {
+        // Leaf order = model.observations order; map the (possibly filtered)
+        // leaves back onto that order for the sink.
+        let leaf_times: Vec<Vec<f64>> = model
+            .observations
+            .iter()
+            .map(|o| {
+                leaves
+                    .iter()
+                    .find(|l| leaf_matches(o, l))
+                    .map(|l| l.times.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let samples_init: Vec<Vec<Vec<f64>>> = leaf_times
+            .iter()
+            .map(|ts| vec![Vec::new(); ts.len()])
+            .collect();
+        let mut sink =
+            PredictiveSink { compiled: compiled.clone(), leaf_times, samples: samples_init };
+
+        let job = crate::sim_job::SimulateJob {
+            model: compiled_ir.clone(),
+            params_files: vec![],
+            // Replay on the SAME forward simulator the fit used (chain_binomial /
+            // ode), resolved from the stage — never a hardcoded default.
+            backend: posterior.backend,
+            dt,
+            integrator: None,
+            source: crate::sim_job::ParamSource::Draws {
+                rows: posterior.draws().to_vec(),
+                replicates: 1,
+            },
+            // A single no-op baseline scenario, matching `simulate`'s
+            // no-`--scenario` path (an empty list would default to a named
+            // "baseline" preset lookup).
+            scenarios: vec![crate::sim_job::ScenarioRef::Inline {
+                name: "baseline".to_string(),
+                enable: vec![],
+                disable: vec![],
+                params: IndexMap::new(),
+            }],
+            seeds: crate::sim_job::Seeds::Single(seed),
+            cli_overrides: vec![],
+            set_vec_entries: vec![],
+            table_files: vec![],
+            obs: crate::sim_job::ObsOutput::None,
+            parallel: 1,
+        };
+        crate::engine::run_job(&job, &mut sink)?;
+
+        Some(assemble_predictive(&model, &sink, &leaves, schema.as_ref())?)
+    } else {
+        None
+    };
+
+    // ── One-step horizon: per-draw bootstrap filter over the data, pooled. Runs
+    // only when the witness was built (a filterable fit and the horizon wanted).
+    let n_draws_cap = args.n_draws.unwrap_or(DEFAULT_ONE_STEP_DRAWS);
+    let one_step: Option<(Vec<StreamBands>, usize)> = match &one_step_fit {
+        Some(fit) => Some(one_step_bands(
+            compiled.clone(),
+            &model,
+            &config,
+            dt,
+            args.stream.as_deref(),
+            fit,
+            n_draws_cap,
+            seed,
+            schema.as_ref(),
+        )?),
+        None => None,
+    };
+
+    // 6. Write the predictive artifact — both horizons stacked into one file per
+    // logical stream (the typed `horizon` column distinguishes the rows). The
+    // observed half follows.
     let mut written = Vec::new();
-    for stream in &predictive.streams {
-        let pred_tsv = render_predictive_tsv(
-            stream,
-            predictive.horizon,
-            predictive.treatment,
-            predictive.convergence,
-            predictive.n_draws,
-        );
-        written.push(write_tsv(&segment, "predictive", &stream.source, &pred_tsv)?);
+    let one_step_streams: &[StreamBands] = one_step.as_ref().map(|(s, _)| s.as_slice()).unwrap_or(&[]);
+    let one_step_n = one_step.as_ref().map(|(_, n)| *n).unwrap_or(0);
+
+    // Union of source names across both horizons, preserving free-forward order
+    // first, then any one-step-only sources.
+    let mut sources: Vec<String> = Vec::new();
+    if let Some(ff) = &free_forward {
+        for s in ff {
+            if !sources.contains(&s.source) {
+                sources.push(s.source.clone());
+            }
+        }
+    }
+    for s in one_step_streams {
+        if !sources.contains(&s.source) {
+            sources.push(s.source.clone());
+        }
+    }
+
+    for source in &sources {
+        let ff_stream = free_forward.as_ref().and_then(|ff| ff.iter().find(|s| &s.source == source));
+        let os_stream = one_step_streams.iter().find(|s| &s.source == source);
+        // index_dims is the same across horizons (same schema/leaf); take it from
+        // whichever section is present.
+        let index_dims = ff_stream
+            .map(|s| s.index_dims.clone())
+            .or_else(|| os_stream.map(|s| s.index_dims.clone()))
+            .unwrap_or_default();
+
+        let mut sections: Vec<PredictiveSection> = Vec::new();
+        if let Some(s) = ff_stream {
+            sections.push(PredictiveSection {
+                horizon: Horizon::FreeForward,
+                treatment: treatment_kind,
+                convergence: posterior.convergence,
+                n_draws: posterior.n_draws(),
+                rows: &s.rows,
+            });
+        }
+        if let Some(s) = os_stream {
+            sections.push(PredictiveSection {
+                horizon: Horizon::OneStepAhead,
+                treatment: treatment_kind,
+                convergence: posterior.convergence,
+                n_draws: one_step_n,
+                rows: &s.rows,
+            });
+        }
+        let pred_tsv = render_predictive_tsv_sections(&index_dims, &sections);
+        written.push(write_tsv(&segment, "predictive", source, &pred_tsv)?);
     }
     // The observed half, grouped by logical stream.
     for (source, index_dims, rows) in observed_by_stream(&leaves, schema.as_ref()) {
@@ -827,10 +956,18 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         written.push(write_tsv(&segment, "observed", &source, &obs_tsv)?);
     }
     let method_label = posterior.method.map(|m| m.as_str()).unwrap_or("posterior");
+    let mut horizons: Vec<String> = Vec::new();
+    if free_forward.is_some() {
+        horizons.push("free_forward".to_string());
+    }
+    if one_step.is_some() {
+        horizons.push(format!("one_step({one_step_n} draws)"));
+    }
     eprintln!(
-        "fit predict: horizon=free_forward treatment=posterior, {} stream(s), \
+        "fit predict: horizon={} treatment=posterior, {} stream(s), \
          {} draws from {} stage '{}'",
-        predictive.streams.len(),
+        horizons.join("+"),
+        sources.len(),
         posterior.n_draws(),
         method_label,
         posterior.stage,
@@ -905,19 +1042,16 @@ fn stream_selected(o: &ir::observation::ObservationModel, filter: Option<&str>) 
     }
 }
 
-/// Quantile-reduce the accumulated samples into the typed [`Predictive`],
-/// grouping leaves by logical stream.
-#[allow(clippy::too_many_arguments)]
+/// Quantile-reduce the accumulated free-forward samples into per-stream bands,
+/// grouping leaves by logical stream. The horizon/treatment/convergence/n_draws
+/// labels are applied at render time (each [`PredictiveSection`] carries them),
+/// so this returns only the bands.
 fn assemble_predictive(
     model: &ir::Model,
     sink: &PredictiveSink,
     leaves: &[LeafObs],
-    horizon: Horizon,
-    treatment: TreatmentKind,
-    convergence: ConvergenceStatus,
-    n_draws: usize,
     schema: Option<&ObsSchema>,
-) -> Result<Predictive, String> {
+) -> Result<Vec<StreamBands>, String> {
     // Group leaf indices by logical source, preserving first-appearance order.
     let mut order: Vec<String> = Vec::new();
     let mut by_source: IndexMap<String, Vec<usize>> = IndexMap::new();
@@ -956,7 +1090,236 @@ fn assemble_predictive(
         streams.push(StreamBands { source: source.clone(), index_dims, rows });
     }
 
-    Ok(Predictive { horizon, treatment, convergence, n_draws, streams })
+    Ok(streams)
+}
+
+// ── The one-step-ahead posterior predictive producer ───────────────────────
+
+/// Default posterior-cloud subsample for the one-step horizon. The band pools
+/// `draws × n_particles` samples per cell, so a few hundred draws saturate
+/// q05…q95; the full fit cloud at fit-grade N is never run silently.
+const DEFAULT_ONE_STEP_DRAWS: usize = 200;
+
+/// Particle count for the one-step prediction filter. It need not match the
+/// fit's N — the band pools across draws too, and every particle's `ỹ` is
+/// kept (the recorder retains them), so a modest N yields a dense band cheaply.
+const ONE_STEP_N_PARTICLES: usize = 500;
+
+/// Build the one-step-ahead posterior predictive bands: for each (subsampled)
+/// posterior draw θ, run a bootstrap filter over the data with
+/// `record_prequential = true`, capturing the per-particle one-step predictive
+/// samples `ỹ ∼ p(y | x_t, θ)` at each observation time (the particles are
+/// distributed as `p(x_t | y_{1:t-1}, θ)` at that point). Pool over
+/// (particles × draws) per `(stream-leaf, time)`, quantile, and group by logical
+/// source + stratum exactly like the free-forward path. Horizon = one_step.
+///
+/// `n_draws_used` (out) is the subsample count actually filtered, for the
+/// `n_draws` artifact column.
+fn one_step_bands(
+    compiled: std::sync::Arc<sim::CompiledModel>,
+    model: &ir::Model,
+    config: &crate::fit::config_v2::FitConfigV2,
+    dt: f64,
+    stream_filter: Option<&str>,
+    fit: &FilterableFit,
+    n_draws_cap: usize,
+    base_seed: u64,
+    schema: Option<&ObsSchema>,
+) -> Result<(Vec<StreamBands>, usize), String> {
+    use sim::inference::{
+        bootstrap_filter, multi_stream_obs::StreamProjection, multi_stream_obs::StreamSpec,
+        traits::SMCConfig, BoundObs, ChainBinomialProcess, MultiStreamObsModel,
+    };
+
+    // ── Build the filter obs model ONCE. This mirrors `pfilter.rs:386-421` and
+    // `fit::runner::build_obs_model`: it is the THIRD copy of this obs-model
+    // assembly (pfilter.rs, runner, here). Consolidating the three onto a shared
+    // builder is a follow-up — NOT done here (the two existing copies are left
+    // untouched). Each bound leaf reuses `runner::load_observations` for its
+    // cells + cadence, then `StreamProjection::from_ir` + `bind` + the
+    // multi-stream model, the same way the fit's pfilter stage does.
+    let data = config.data_spec().map_err(|e| {
+        format!("this fit has no [data] block to read the observed series from: {e}")
+    })?;
+    let model_obs_names: Vec<String> = model.observations.iter().map(|o| o.name.clone()).collect();
+    let effective = data
+        .effective_observations(&model_obs_names)
+        .map_err(|e| format!("resolving [data.observations]: {e}"))?;
+    let time_opts = crate::caltime_load::TimeOpts {
+        origin: model.origin.as_deref(),
+        time_unit: &model.time_unit,
+        dt,
+        t_start: model.simulation.t_start,
+        format: crate::caltime_load::TimeFormat::Auto,
+    };
+
+    // Bound leaves, in `model.observations` order, so `stream_idx` (the index
+    // into the obs model's `stream_names()`) maps back to its IR leaf here.
+    let mut bound_leaves: Vec<&ir::observation::ObservationModel> = Vec::new();
+    let mut specs: Vec<StreamSpec> = Vec::new();
+    for obs_model in &model.observations {
+        if !stream_selected(obs_model, stream_filter) {
+            continue;
+        }
+        let Some(data_path) = effective.get(&obs_model.source) else {
+            continue; // source not bound to data — skip (a fit-only diagnostic stream)
+        };
+        let siblings: Vec<&ir::observation::ObservationModel> =
+            model.observations.iter().filter(|o| o.source == obs_model.source).collect();
+        let (obs, cells, aux) =
+            crate::fit::runner::load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
+        let projection = StreamProjection::from_ir(&obs_model.projection, &compiled, &obs_model.name)?;
+        let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
+        specs.push(StreamSpec {
+            projection,
+            ir_model: obs_model.clone(),
+            observations: cells,
+            obs_times: times,
+            aux,
+        });
+        bound_leaves.push(obs_model);
+    }
+    if specs.is_empty() {
+        return Err("no observation streams to predict — check that the model's \
+                    observation sources are bound to data in the fit config, and that \
+                    --stream (if given) names a real stream"
+            .into());
+    }
+
+    let (bound, _report) = BoundObs::bind(specs)
+        .map_err(|report| format!("observation data invalid:\n{}", report.render()))?;
+    let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
+        .map_err(|e| format!("observation model construction failed: {e:?}"))?;
+
+    // ── Build the process ONCE.
+    let process = ChainBinomialProcess::new(compiled.clone());
+
+    // ── Subsample the posterior cloud (never silently run the full cloud).
+    let draws = fit.draws().draws();
+    let total = draws.len();
+    let n_used = n_draws_cap.min(total).max(1);
+    let chosen: Vec<&IndexMap<String, f64>> = if n_used >= total {
+        draws.iter().collect()
+    } else {
+        // Evenly-spaced subsample across the cloud.
+        (0..n_used)
+            .map(|i| {
+                let idx = (i * total) / n_used;
+                &draws[idx]
+            })
+            .collect()
+    };
+    if n_used < total {
+        eprintln!(
+            "fit predict: one_step horizon — subsampling {n_used} of {total} posterior \
+             draws (raise with --n-draws)"
+        );
+    }
+
+    let smc_config = SMCConfig {
+        n_particles: ONE_STEP_N_PARTICLES,
+        dt,
+        t_start: compiled.model.simulation.t_start,
+        skip_first_obs_from_loglik: false,
+        record_ancestry: false,
+        record_prequential: true,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+    };
+
+    // ── Pool per (stream_idx, obs_idx): all particle samples across all draws.
+    // `pooled[stream_idx][obs_idx]` accumulates ỹ over (particles × draws); the
+    // stream/time axes come from the FIRST result (identical across draws — same
+    // obs model). NaN entries (a not-scheduled stream at a union time) are
+    // dropped, mirroring the prequential capture's filter.
+    let mut pooled: Vec<Vec<Vec<f64>>> = Vec::new();
+    let mut stream_names: Vec<String> = Vec::new();
+    let mut obs_times: Vec<f64> = Vec::new();
+
+    for (draw_idx, draw) in chosen.iter().enumerate() {
+        // The draw's parameter vector — base defaults overlaid by name (the
+        // survey.rs:722-734 idiom). The cloud is schema-validated upstream, so
+        // every model parameter is present.
+        let mut params = compiled.default_params.clone();
+        for (name, &value) in draw.iter() {
+            if let Some(&idx) = compiled.param_index.get(name.as_str()) {
+                params[idx] = value;
+            }
+        }
+        // Distinct, reproducible per-draw seed: mix the draw index into the base
+        // seed so each filter pass has its own RNG stream and the whole run is
+        // deterministic given `base_seed`.
+        let seed = base_seed ^ (0x9E37_79B9_7F4A_7C15u64.wrapping_mul(draw_idx as u64 + 1));
+        let result = bootstrap_filter(&process, &obs_model, &params, &smc_config, seed)
+            .map_err(|e| format!("one-step filter failed on draw {draw_idx}: {e:?}"))?;
+        let preq = result.prequential.ok_or_else(|| {
+            "one-step filter did not record prequential samples (record_prequential was \
+             requested but the result is empty — internal error)"
+                .to_string()
+        })?;
+
+        if pooled.is_empty() {
+            stream_names = preq.stream_names.clone();
+            obs_times = preq.obs_times.clone();
+            pooled = vec![vec![Vec::new(); obs_times.len()]; stream_names.len()];
+        }
+
+        // `per_stream_samples[obs_idx][stream_idx][particle]`.
+        for (obs_idx, per_stream) in preq.per_stream_samples.iter().enumerate() {
+            for (stream_idx, particles) in per_stream.iter().enumerate() {
+                for &y in particles {
+                    if y.is_finite() {
+                        pooled[stream_idx][obs_idx].push(y);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Group leaves by logical source (first-appearance order), exactly like
+    // `assemble_predictive`, and build one_step BandRows. `stream_names[si]` is
+    // the leaf `obs.name`; map it back to the bound leaf for its source/stratum.
+    let leaf_of_name: std::collections::HashMap<&str, &ir::observation::ObservationModel> =
+        bound_leaves.iter().map(|o| (o.name.as_str(), *o)).collect();
+
+    let mut order: Vec<String> = Vec::new();
+    let mut by_source: IndexMap<String, Vec<usize>> = IndexMap::new();
+    for (si, name) in stream_names.iter().enumerate() {
+        let leaf = leaf_of_name.get(name.as_str()).ok_or_else(|| {
+            format!("one-step: filter stream '{name}' has no matching bound leaf (internal error)")
+        })?;
+        by_source.entry(leaf.source.clone()).or_insert_with(|| {
+            order.push(leaf.source.clone());
+            Vec::new()
+        }).push(si);
+    }
+
+    let mut streams = Vec::new();
+    for source in &order {
+        let leaf_idxs = &by_source[source];
+        let first_leaf = leaf_of_name[stream_names[leaf_idxs[0]].as_str()];
+        let leaf_dims: Vec<String> = first_leaf.stratum.iter().map(|k| k.dim.clone()).collect();
+        let index_dims = index_dims_for(schema, source, &leaf_dims);
+        let mut rows = Vec::new();
+        for &si in leaf_idxs {
+            let leaf = leaf_of_name[stream_names[si].as_str()];
+            let stratum: Vec<(String, String)> =
+                leaf.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
+            for (ti, &t) in obs_times.iter().enumerate() {
+                let cell = &pooled[si][ti];
+                if cell.is_empty() {
+                    // This stream is not scheduled at this union time (all NaN,
+                    // dropped) — emit no row for it (multi-cadence).
+                    continue;
+                }
+                let quantiles = band(cell)
+                    .map_err(|e| format!("stream '{source}' (one_step) at t={t}: {e}"))?;
+                rows.push(BandRow { time: t, stratum: stratum.clone(), quantiles });
+            }
+        }
+        streams.push(StreamBands { source: source.clone(), index_dims, rows });
+    }
+
+    Ok((streams, n_used))
 }
 
 /// Group the observed leaves into `(source, index_dims, rows)` for the observed
@@ -991,6 +1354,30 @@ fn observed_by_stream(
             (s, dims, rows)
         })
         .collect()
+}
+
+/// The actionable refusal for an explicit `--horizon one_step` on a fit whose
+/// backend cannot drive a particle filter. ODE's one-step predictive is
+/// identical to free-forward (deterministic given θ), so the redirect points the
+/// user there rather than emit a relabelled-identical band.
+fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, stage: &str) -> String {
+    let m = method.map(|m| m.as_str()).unwrap_or("posterior");
+    match why {
+        NotFilterable::Deterministic => format!(
+            "stage '{stage}' ({m}) ran on the ODE backend, which is deterministic given \
+             the parameters — its one-step-ahead predictive p(y_t | y_{{1:t-1}}) reduces \
+             to the observation model at the deterministic state, identical to the \
+             free-forward band. There is no separate one-step object to emit.\n  \
+             Use the free-forward horizon instead:\n    \
+             camdl fit predict --fit <run> --horizon free_forward"
+        ),
+        NotFilterable::NotAnInferenceBackend => format!(
+            "stage '{stage}' ({m}) ran on the Gillespie backend, which is not an \
+             inference backend — a fit never produces Gillespie posterior draws, so a \
+             one-step-ahead predictive is not defined. This should not occur; please \
+             report it."
+        ),
+    }
 }
 
 /// The actionable refusal for a point-estimate fit (the proposal's message).
@@ -1054,6 +1441,56 @@ mod tests {
         pairs.iter().map(|(d, l)| (d.to_string(), l.to_string())).collect()
     }
 
+    /// A one-draw posterior cloud on the given backend, for the witness tests.
+    fn posterior_on(backend: crate::args::types::ForwardBackend) -> PosteriorDraws {
+        PosteriorDraws::new(
+            vec![IndexMap::from([("beta".to_string(), 0.5)])],
+            "pgas".into(),
+            Some(FitAlgorithm::Pgas),
+            backend,
+            ConvergenceStatus::NotAssessed,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn one_step_horizon_label_is_legible() {
+        assert_eq!(Horizon::OneStepAhead.as_str(), "one_step");
+        assert_eq!(Horizon::FreeForward.as_str(), "free_forward");
+    }
+
+    #[test]
+    fn filterable_fit_gates_on_backend() {
+        use crate::args::types::ForwardBackend;
+
+        // chain_binomial → the witness constructs (one-step runs).
+        let cb_fit = FilterableFit::from_posterior(posterior_on(ForwardBackend::ChainBinomial));
+        assert!(cb_fit.is_ok(), "a chain-binomial fit is filterable");
+        // The witness carries the cloud back out.
+        assert_eq!(cb_fit.unwrap().draws().n_draws(), 1);
+
+        // ODE → Deterministic (one-step ≡ free-forward; redirect, not a band).
+        assert_eq!(
+            FilterableFit::from_posterior(posterior_on(ForwardBackend::Ode)).err(),
+            Some(NotFilterable::Deterministic),
+            "an ODE fit is not filterable: its one-step is the free-forward band"
+        );
+
+        // Gillespie → NotAnInferenceBackend (exhaustiveness).
+        assert_eq!(
+            FilterableFit::from_posterior(posterior_on(ForwardBackend::Gillespie)).err(),
+            Some(NotFilterable::NotAnInferenceBackend),
+            "Gillespie is not an inference backend"
+        );
+    }
+
+    #[test]
+    fn one_step_refusal_for_ode_redirects_to_free_forward() {
+        let msg = one_step_refusal(NotFilterable::Deterministic, Some(FitAlgorithm::Mh), "posterior");
+        assert!(msg.contains("ODE"), "names the backend: {msg}");
+        assert!(msg.contains("--horizon free_forward"), "redirects to free-forward: {msg}");
+    }
+
     #[test]
     fn predictive_tsv_has_typed_axis_columns_and_one_row_per_cell() {
         let stream = StreamBands {
@@ -1066,9 +1503,15 @@ mod tests {
                           quantiles: vec![0.0, 0.0, 1.0, 3.0, 7.0] },
             ],
         };
-        let tsv = render_predictive_tsv(
-            &stream, Horizon::FreeForward, TreatmentKind::Posterior,
-            ConvergenceStatus::Reported { rhat_max: 1.01, ess_min: 420.0 }, 40,
+        let tsv = render_predictive_tsv_sections(
+            &stream.index_dims,
+            &[PredictiveSection {
+                horizon: Horizon::FreeForward,
+                treatment: TreatmentKind::Posterior,
+                convergence: ConvergenceStatus::Reported { rhat_max: 1.01, ess_min: 420.0 },
+                n_draws: 40,
+                rows: &stream.rows,
+            }],
         );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(lines[0],
@@ -1085,9 +1528,15 @@ mod tests {
             index_dims: vec![],
             rows: vec![BandRow { time: 1.0, stratum: vec![], quantiles: vec![1.0, 2.0, 3.0, 4.0, 5.0] }],
         };
-        let tsv = render_predictive_tsv(
-            &stream, Horizon::FreeForward, TreatmentKind::Posterior,
-            ConvergenceStatus::NotAssessed, 12,
+        let tsv = render_predictive_tsv_sections(
+            &stream.index_dims,
+            &[PredictiveSection {
+                horizon: Horizon::FreeForward,
+                treatment: TreatmentKind::Posterior,
+                convergence: ConvergenceStatus::NotAssessed,
+                n_draws: 12,
+                rows: &stream.rows,
+            }],
         );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         // No dim column; not-assessed rhat/ess are empty cells, not fabricated
