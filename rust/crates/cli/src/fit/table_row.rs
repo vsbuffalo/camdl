@@ -421,26 +421,11 @@ fn parse_iso8601_to_unix(s: &str) -> Option<i64> {
     let hour: u32 = s[11..13].parse().ok()?;
     let minute: u32 = s[14..16].parse().ok()?;
     let second: u32 = s[17..19].parse().ok()?;
-    days_from_civil(year, month, day).map(|days| {
-        days * 86_400
-            + hour as i64 * 3600
-            + minute as i64 * 60
-            + second as i64
-    })
-}
-
-/// Howard Hinnant's `days_from_civil` — proleptic Gregorian, returns
-/// days from 1970-01-01. Used internally; does not allocate.
-fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u32;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era as i64 * 146_097 + doe as i64 - 719_468)
+    let days = ir::caltime::unix_epoch_days(year as i64, month as i64, day as i64);
+    Some(days * 86_400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64)
 }
 
 #[cfg(test)]

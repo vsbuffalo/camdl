@@ -171,6 +171,23 @@ pub fn date_from_rata_die(rd: i64) -> (i64, i64, i64) {
     (y + i64::from(m <= 2), m, d)
 }
 
+/// Day number relative to the **Unix epoch** (1970-01-01 → 0) for a civil
+/// date. This is the framing wall-clock / provenance timestamp parsers use
+/// (run-record `created`/`finished` times, `fit`-listing ages) — *not* model
+/// time, which is the `f64` axis from `origin`. It equals
+/// `rata_die(y, m, d) − rata_die(1970, 1, 1)`, so those parsers share the one
+/// Gregorian arithmetic here instead of re-deriving Hinnant's era formula at
+/// each call site.
+pub fn unix_epoch_days(y: i64, m: i64, d: i64) -> i64 {
+    rata_die(y, m, d) - rata_die(1970, 1, 1)
+}
+
+/// Civil `(year, month, day)` for a Unix-epoch day count — inverse of
+/// [`unix_epoch_days`].
+pub fn civil_from_unix_epoch_days(days: i64) -> (i64, i64, i64) {
+    date_from_rata_die(days + rata_die(1970, 1, 1))
+}
+
 /// Render an internal time back to an ISO date, given `origin` and `time_unit`
 /// (inverse of [`date_to_internal`]). Rounds to the nearest whole day, so the
 /// result is always a bare `YYYY-MM-DD`.
@@ -381,5 +398,38 @@ mod tests {
         let t16 = date_to_internal("2020-03-01", "2020-03-16", "days").unwrap();
         let t17 = date_to_internal("2020-03-01", "2020-03-17", "days").unwrap();
         assert_eq!((t15, t16, t17), (14.0, 15.0, 16.0));
+    }
+
+    /// Consolidation guard (2026-06-22 quality review, finding X-1): the
+    /// wall-clock timestamp parsers (browse/cas/fit_table/table_row + sim
+    /// diagnostic) used to each inline Howard Hinnant's `days_from_civil`
+    /// (epoch 1970). `unix_epoch_days` / `civil_from_unix_epoch_days` route
+    /// that through the canonical `rata_die`; this pins that they reproduce
+    /// the inlined formula exactly and round-trip.
+    #[test]
+    fn unix_epoch_days_matches_inlined_hinnant_and_round_trips() {
+        // Well-known anchors.
+        assert_eq!(unix_epoch_days(1970, 1, 1), 0);
+        assert_eq!(unix_epoch_days(1969, 12, 31), -1);
+        assert_eq!(unix_epoch_days(2000, 1, 1), 10_957);
+        assert_eq!(unix_epoch_days(2020, 1, 1), 18_262);
+
+        // The exact `days_from_civil` formula the fork sites inlined.
+        fn days_from_civil_inlined(y: i64, m: i64, d: i64) -> i64 {
+            let y = if m <= 2 { y - 1 } else { y };
+            let era = if y >= 0 { y } else { y - 399 } / 400;
+            let yoe = y - era * 400;
+            let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+            let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            era * 146_097 + doe - 719_468
+        }
+        for &(y, m, d) in &[
+            (1970, 1, 1), (1969, 12, 31), (1900, 2, 28), (2000, 2, 29),
+            (2020, 1, 1), (2026, 6, 23), (1583, 1, 1), (2099, 12, 31),
+        ] {
+            let days = unix_epoch_days(y, m, d);
+            assert_eq!(days, days_from_civil_inlined(y, m, d), "civil→days {y}-{m}-{d}");
+            assert_eq!(civil_from_unix_epoch_days(days), (y, m, d), "round-trip {y}-{m}-{d}");
+        }
     }
 }

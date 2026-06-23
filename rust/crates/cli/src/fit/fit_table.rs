@@ -275,12 +275,7 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u32;
-    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era as i64 * 146_097 + doe as i64 - 719_468;
+    let days = ir::caltime::unix_epoch_days(year as i64, month as i64, day as i64);
     Some(days * 86_400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64)
 }
 

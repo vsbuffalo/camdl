@@ -1602,20 +1602,10 @@ fn parse_iso8601(s: &str) -> Option<SystemTime> {
     let hour: u32 = s[11..13].parse().ok()?;
     let minute: u32 = s[14..16].parse().ok()?;
     let second: u32 = s[17..19].parse().ok()?;
-    let secs = days_from_civil(year, month, day) * 86400
+    let secs = ir::caltime::unix_epoch_days(year as i64, month as i64, day as i64) * 86400
         + (hour * 3600 + minute * 60 + second) as i64;
     if secs < 0 { return None; }
     Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64))
-}
-
-/// Howard Hinnant's days_from_civil (inverse of the one in cas.rs).
-fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y } as i64;
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u32;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe/4 - yoe/100 + doy;
-    era * 146097 + doe as i64 - 719468
 }
 
 /// Produce a path relative to `base` (usually CWD), falling back to the
