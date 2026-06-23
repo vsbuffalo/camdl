@@ -1408,7 +1408,7 @@ pub fn auto_rw_sd_from_value(_current_value: f64, lower: f64, upper: f64, transf
 /// time-axis callers, where a hole's value is not load-bearing. The cells are
 /// threaded into the obs model so the already hole-correct scoring seam handles
 /// missing values; the placeholder view is never scored.
-fn load_observations(
+pub(crate) fn load_observations(
     path: &str,
     obs_model: &ir::observation::ObservationModel,
     siblings: &[&ir::observation::ObservationModel],

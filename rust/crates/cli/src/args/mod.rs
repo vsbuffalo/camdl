@@ -1101,6 +1101,58 @@ pub struct FitSummaryArgs {
 #[derive(Args)]
 #[command(after_help = colored_help!("\
 Examples:
+  # Write the free-forward posterior predictive for a completed fit
+  camdl fit predict --fit fit.toml
+
+  # Just one stream (logical name or an expanded leaf name)
+  camdl fit predict --fit fit.toml --stream onset
+
+  # Point at a run directory directly (instead of the config)
+  camdl fit predict results/fits/sle-8a3f12b4/
+
+Outputs, under the run directory:
+  predictive/<stream>.tsv   time | <dims...> | horizon | treatment | rhat_max | q05..q95
+  observed/<stream>.tsv     time | <dims...> | value
+Read both, join on (time, <dims>), plot observed over the predictive ribbon."))]
+pub struct FitPredictArgs {
+    /// The fit: a `fit.toml` config (resolved to its unique run) OR a fit
+    /// results directory. A config that maps to several runs errors and lists
+    /// them — pass a run directory to disambiguate.
+    #[arg(long = "fit", value_name = "FIT")]
+    pub fit_flag: Option<PathBuf>,
+
+    /// Positional form of the fit reference (a run directory or config), so
+    /// `camdl fit predict results/fits/<run>/` works like `fit summary`.
+    #[arg(value_name = "FIT", conflicts_with = "fit_flag")]
+    pub fit_pos: Option<PathBuf>,
+
+    /// Restrict to one logical stream. Accepts the logical name (`onset`) or an
+    /// expanded leaf name (`onset_Bo`), which maps up to its logical stream.
+    #[arg(long, value_name = "STREAM")]
+    pub stream: Option<String>,
+
+    /// Use this stage's posterior cloud instead of the terminal one.
+    #[arg(long, value_name = "STAGE")]
+    pub stage: Option<String>,
+
+    /// RNG seed for the y_rep observation sampling (default 1).
+    #[arg(long)]
+    pub seed: Option<u64>,
+}
+
+impl FitPredictArgs {
+    /// The resolved fit reference (`--fit` or the positional form).
+    pub fn fit(&self) -> Result<&PathBuf, String> {
+        self.fit_flag
+            .as_ref()
+            .or(self.fit_pos.as_ref())
+            .ok_or_else(|| "a fit reference is required: `--fit fit.toml` or a run directory".into())
+    }
+}
+
+#[derive(Args)]
+#[command(after_help = colored_help!("\
+Examples:
   # Compare two fit.toml configurations side-by-side
   camdl fit diff fit-a.toml fit-b.toml
 "))]

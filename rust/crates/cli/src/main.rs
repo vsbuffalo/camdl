@@ -337,6 +337,8 @@ pub(crate) enum FitCmd {
     Table(args::FitTableArgs),
     /// Derive a new fit.toml from an existing one
     New(args::FitNewArgs),
+    /// Write the free-forward posterior predictive (predicted-vs-observed) artifact
+    Predict(args::FitPredictArgs),
     /// List supported (algorithm, backend) pairs and their descriptions
     Methods,
 }
@@ -524,6 +526,7 @@ fn main() {
         Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a),
         Command::Fit(FitCmd::Table(a))  => fit::cmd_fit_table(&a),
         Command::Fit(FitCmd::New(a))    => fit::cmd_fit_new(&a),
+        Command::Fit(FitCmd::Predict(a)) => fit::predict::cmd_fit_predict(&a),
         Command::Fit(FitCmd::Methods)   => fit::cmd_fit_methods(),
         Command::Label(a)               => fit::cmd_label(&a),
         Command::Pfilter(a)             => pfilter::cmd_pfilter(&a),
@@ -2586,7 +2589,7 @@ fn write_draws_tsv(path: &str, draws: &[HashMap<String, f64>]) -> Result<(), Str
 /// Load a draws TSV file. Each row is a complete parameter vector.
 /// Column names must match model parameter names.
 /// Returns Vec<HashMap<param_name, value>>.
-fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, String> {
+pub(crate) fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
     let mut lines = content.lines();

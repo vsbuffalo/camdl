@@ -34,6 +34,7 @@ pub mod loglik_eval;
 pub mod methods;
 #[cfg(feature = "ode")]
 pub mod nlopt_stage;
+pub mod predict;  // `camdl fit predict`: free-forward posterior predictive verb + types
 
 /// `camdl fit methods` — print the supported (algorithm, backend) pairs.
 /// Reads from `methods::METHODS`, the single source of truth.
