@@ -249,6 +249,58 @@ fn pgas_trace_loglik_column_names_complete_data() {
         "PGAS trace must NOT use a bare `log_likelihood` (mistaken for the marginal); header was: {header}");
 }
 
+/// gh#294: the PGAS per-sweep trace surfaces the standard cold-chain NUTS
+/// diagnostics (`tree_depth`, `n_leapfrog`, `step_size`, `accept_stat`,
+/// `n_divergent`, `energy`) so the dominant `θ|X` cost is observable. Asserts
+/// both the header names and that a data row carries sane values (a NUTS step
+/// actually ran: n_leapfrog ≥ 1, a positive finite step_size, accept_stat in
+/// [0,1], a finite energy).
+#[test]
+fn pgas_trace_emits_nuts_diagnostics() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("trace_nuts");
+    let (ir, data) = write_fixture(tmp.path());
+    let out = tmp.path().join("results");
+
+    let fit8 = write_fit_toml(tmp.path(), &ir, &data, 8, 1);
+    let r = Command::new(&bin)
+        .arg("fit").arg("run").arg(&fit8).arg("--seed").arg("1")
+        .output().expect("spawn");
+    assert!(r.status.success(), "PGAS run failed: {}", String::from_utf8_lossy(&r.stderr));
+
+    let (_, base_dir, _) = post_leaf(&out, &[]);
+    let trace = base_dir.join("chain_1/trace.tsv");
+    let text = std::fs::read_to_string(&trace).expect("read trace.tsv");
+    let mut lines = text.lines();
+    let header = lines.next().expect("trace has a header line");
+    let cols: Vec<&str> = header.split('\t').collect();
+    for c in ["tree_depth", "n_leapfrog", "step_size", "accept_stat", "n_divergent", "energy"] {
+        assert!(cols.contains(&c),
+            "PGAS trace must carry the `{c}` NUTS column (gh#294); header was: {header}");
+    }
+    let idx = |name: &str| cols.iter().position(|&c| c == name).unwrap();
+    let (i_lf, i_ss, i_as, i_div, i_e) =
+        (idx("n_leapfrog"), idx("step_size"), idx("accept_stat"), idx("n_divergent"), idx("energy"));
+
+    let row = lines.find(|l| !l.trim().is_empty()).expect("trace has a data row");
+    let f: Vec<&str> = row.split('\t').collect();
+    let n_leapfrog: usize = f[i_lf].parse().expect("n_leapfrog parses");
+    let step_size: f64 = f[i_ss].parse().expect("step_size parses");
+    let accept_stat: f64 = f[i_as].parse().expect("accept_stat parses");
+    let n_divergent: usize = f[i_div].parse().expect("n_divergent parses");
+    let energy: f64 = f[i_e].parse().expect("energy parses");
+
+    assert!(n_leapfrog >= 1, "a NUTS step must take ≥1 leapfrog; row was: {row}");
+    assert!(step_size > 0.0 && step_size.is_finite(), "step_size must be positive finite; got {step_size}");
+    assert!((0.0..=1.0).contains(&accept_stat), "accept_stat must be a probability; got {accept_stat}");
+    assert!(n_divergent <= 1, "per-sweep n_divergent is 0 or 1 (one NUTS step); got {n_divergent}");
+    // `energy = H0 = -log_p + KE` is legitimately `+inf` when a sweep starts
+    // from a degenerate (-inf log-posterior) point — a faithful diagnostic, not
+    // a bug. NaN would be the bug.
+    assert!(!energy.is_nan(), "energy must not be NaN; got {energy}");
+}
+
 /// (3): changing an identity field (chains) between base and resume must reject
 /// with a config-hash mismatch — the copied resume_state's identity hash
 /// (chains=1) won't match the new run (chains=2).

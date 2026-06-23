@@ -338,6 +338,29 @@ pub struct PGASSweep {
     pub transition_ll: f64,
     /// Observation component of the complete-data log-likelihood.
     pub obs_ll: f64,
+    /// Per-sweep NUTS diagnostics for the cold chain's `θ|X` update (gh#294).
+    /// Zero on the non-gradient (random-walk MH) proposal path, which takes no
+    /// NUTS step.
+    pub nuts: NutsSweepDiag,
+}
+
+/// Cold-chain NUTS telemetry recorded once per Gibbs sweep — the standard HMC
+/// diagnostic set, surfaced so PGAS geometry/leapfrog cost is observable
+/// (gh#294). All from the cold rung's single `nuts_step` per sweep.
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+pub struct NutsSweepDiag {
+    /// Doublings of the NUTS tree this sweep.
+    pub tree_depth: usize,
+    /// Leapfrog steps taken this sweep.
+    pub n_leapfrog: usize,
+    /// Step size used for this sweep's integration (pre-adaptation update).
+    pub step_size: f64,
+    /// Mean Metropolis acceptance probability across the tree.
+    pub accept_stat: f64,
+    /// Divergent transitions this sweep (0 or 1 — one NUTS step per sweep).
+    pub n_divergent: usize,
+    /// Initial Hamiltonian energy `H0` (for E-BFMI).
+    pub energy: f64,
 }
 
 /// Full PGAS result.
@@ -2277,6 +2300,7 @@ pub fn run_pgas(
         // Cold rung LL components (populated during rung loop)
         let mut cold_transition_ll = 0.0_f64;
         let mut cold_obs_ll = 0.0_f64;
+        let mut cold_nuts = NutsSweepDiag::default();
 
         for rung in 0..n_rungs {
             let beta = betas[rung];
@@ -2356,6 +2380,18 @@ pub fn run_pgas(
                     for t in &mut rungs[rung].total_accepted { *t += 1; }
                 }
                 if rung == 0 {
+                    // Per-sweep cold-chain NUTS telemetry for the trace (gh#294).
+                    // `nuts_config.step_size` is the step actually used this
+                    // sweep (the dual-averaging update below mutates the rung's
+                    // step_size only afterwards).
+                    cold_nuts = NutsSweepDiag {
+                        tree_depth: result.tree_depth,
+                        n_leapfrog: result.n_leapfrog,
+                        step_size: nuts_config.step_size,
+                        accept_stat: result.mean_accept_prob,
+                        n_divergent: usize::from(result.divergent),
+                        energy: result.energy,
+                    };
                     if result.tree_depth >= config.max_tree_depth {
                         n_max_treedepth += 1;
                         if sweep >= config.burn_in {
@@ -2612,6 +2648,7 @@ pub fn run_pgas(
             proposal_sds: cold_proposal_sd,
             transition_ll: cold_transition_ll,
             obs_ll: cold_obs_ll,
+            nuts: cold_nuts,
         };
 
         if let Some(cb) = on_sweep {
