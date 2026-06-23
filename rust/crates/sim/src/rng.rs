@@ -130,7 +130,12 @@ impl StatefulRng {
     }
 }
 
-fn expand_u64_to_seed(v: u64) -> [u8; 32] {
+/// Expand a `u64` seed into the 32 bytes ChaCha8 needs, by repeating and
+/// mixing with distinct multipliers. The single source of truth: the lineage
+/// RNG (`crate::lineage`) calls this too, so its stream's byte layout stays
+/// identical to `StatefulRng`'s — previously guaranteed only by a duplicated
+/// copy plus a comment.
+pub(crate) fn expand_u64_to_seed(v: u64) -> [u8; 32] {
     // Fill 32 bytes from the 8-byte u64 by repeating + mixing
     let b = v.to_le_bytes();
     let b2 = v.wrapping_mul(0x9e3779b97f4a7c15).to_le_bytes();

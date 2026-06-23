@@ -117,7 +117,7 @@ impl LineageRng {
         // consistent, but XOR in the fixed offset first to make the stream
         // disjoint from the simulation stream.
         let mixed = sim_seed ^ LINEAGE_RNG_OFFSET;
-        let seed_bytes = expand_u64_to_seed(mixed.wrapping_add(0xdeadbeef_cafebabe));
+        let seed_bytes = crate::rng::expand_u64_to_seed(mixed.wrapping_add(0xdeadbeef_cafebabe));
         LineageRng(ChaCha8Rng::from_seed(seed_bytes))
     }
 
@@ -135,22 +135,6 @@ impl LineageRng {
         let u = self.uniform();
         ((u * n as f64) as usize).min(n - 1)
     }
-}
-
-/// Same 32-byte seed expansion as `crate::rng::StatefulRng`. Duplicated rather
-/// than exported to keep the lineage stream's derivation self-contained and
-/// auditable next to its XOR offset.
-fn expand_u64_to_seed(v: u64) -> [u8; 32] {
-    let b = v.to_le_bytes();
-    let b2 = v.wrapping_mul(0x9e3779b97f4a7c15).to_le_bytes();
-    let b3 = v.wrapping_mul(0x6c62272e07bb0142).to_le_bytes();
-    let b4 = v.wrapping_mul(0xd800000000000000).to_le_bytes();
-    let mut seed = [0u8; 32];
-    seed[0..8].copy_from_slice(&b);
-    seed[8..16].copy_from_slice(&b2);
-    seed[16..24].copy_from_slice(&b3);
-    seed[24..32].copy_from_slice(&b4);
-    seed
 }
 
 /// Live per-(deme, compartment) identity pools.
