@@ -140,7 +140,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
             ivp: false,
         },
     ];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
         n_particles: 100,
@@ -262,7 +262,7 @@ fn smoke_pgas_nuts_estimates_rho() {
             ivp: false,
         },
     ];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
         n_particles: 100,

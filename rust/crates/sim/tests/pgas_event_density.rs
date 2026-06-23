@@ -407,7 +407,7 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
             rw_sd_auto: false, ivp: false,
         },
     ];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
         n_particles: 50,
@@ -469,7 +469,7 @@ fn exact_alignment_rejected_on_always_active_event_model() {
         transform: Transform::Log { lo: 0.1, hi: 2.0 },
         lower: 0.1, upper: 2.0, rw_sd_auto: false, ivp: false,
     }];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
 
     let config = PGASConfig {

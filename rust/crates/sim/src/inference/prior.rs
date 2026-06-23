@@ -1,13 +1,26 @@
 //! Prior distributions for Bayesian inference.
 //!
-//! The `Prior` enum carries distribution parameters; `log_density` evaluates
-//! log-density at a parameter value; `from_ir` converts from the IR's
-//! serialized form (populated from DSL `~` syntax or fit.toml).
+//! The density math lives in **one** place: [`Density::log_density_env`],
+//! generic over how each distribution parameter is sourced (`ResolveArg`).
+//! A [`Prior`] is that density plus a one-bit capability tag:
+//!
+//! - [`Prior::Fixed`] — parameters are constants known at config time; the
+//!   density evaluates without an environment.
+//! - [`Prior::Hierarchical`] — one or more parameters are expressions over
+//!   *other* parameters (hyperparents), resolved against the current
+//!   parameter values at each evaluation.
+//!
+//! The tag is the type-level marker the inference stack branches on (PGAS
+//! refuses hierarchical leaves until the NUTS gradient lands — gh#175; PMMH
+//! builds a [`ParamEnv`] only when a hierarchical prior is present). It
+//! carries **no** density math of its own — that is the single source of
+//! truth in `Density`, so a hierarchical leaf and an equivalent fixed prior
+//! can never score the same value differently.
 //!
 //! # Parameterization conventions
 //!
-//! - `log_normal(mu, sigma)`: mu and sigma on the **log scale**.
-//!   `log(X) ~ Normal(mu, sigma)`. Median of X is `exp(mu)`.
+//! - `log_normal(mu, sigma)` (→ `TransformedNormal`): mu and sigma on the
+//!   **log scale**. `log(X) ~ Normal(mu, sigma)`. Median of X is `exp(mu)`.
 //! - `half_normal(sigma)`: sigma is the SD of the underlying (unfolded) normal.
 //! - `gamma(shape, rate)`: rate parameterization. `E[X] = shape/rate`.
 //! - `exponential(rate)`: `E[X] = 1/rate`.
@@ -15,199 +28,378 @@
 //! - `normal(mean, sd)`: natural scale.
 //! - `uniform(lower, upper)`: uniform density on [lower, upper].
 
+use crate::inference::hierarchical::{eval_prior_arg, ParamEnv};
 use crate::inference::obs_loglik::{lgamma, normal_cdf};
 
 /// 0.5 · ln(2π), used in Gaussian log-densities.
 const HALF_LN_2PI: f64 = 0.918_938_533_204_672_8;
 
-/// Scale tag for `log_density` and the hierarchical evaluator.
+/// How a distribution parameter is supplied.
 ///
-/// The phantom distinction makes it an explicit function argument whether
-/// callers are passing a natural (θ) or transformed (z = f(θ)) value.
-/// Primary payoff: IC3 Jacobian double-count was a class of bug where
-/// `TransformedNormal` returned a z-scale density while callers also
-/// added `log|dθ/dz|` — this tag documents the contract at every call
-/// site so future contributors can't silently repeat the mistake.
-#[derive(Debug, Clone, Copy)]
-pub enum Scale {
-    /// θ — the natural parameter value (rate, probability, etc.).
-    Natural,
-    /// z = f(θ) — the unconstrained-transform value (e.g. z = ln θ).
-    Transformed,
-}
-
-/// Prior distribution for one estimated parameter.
+/// `Const` is a parameter known at config time; `Expr` is an expression over
+/// hyperparameters resolved against a [`ParamEnv`] at each evaluation. Used by
+/// hierarchical priors; fixed priors use plain `f64` parameters.
 #[derive(Clone, Debug)]
-pub enum Prior {
-    /// Flat (improper) prior — log-density = 0 everywhere within transform bounds.
-    Flat,
-    /// Uniform(lower, upper) on natural scale. Flat within bounds, -inf outside.
-    Uniform { lower: f64, upper: f64 },
-    /// Normal(mean, sd) on the natural scale.
-    Normal { mean: f64, sd: f64 },
-    /// Normal(mean, sd) on the transformed (log/logit) scale.
-    /// This is the "log_normal" when the param uses log transform.
-    TransformedNormal { mean: f64, sd: f64 },
-    /// Half-Normal(sigma): folded normal supported on [0, inf).
-    HalfNormal { sigma: f64 },
-    /// Beta(alpha, beta) on [0, 1]. For probability parameters.
-    Beta { alpha: f64, beta: f64 },
-    /// Gamma(shape, rate). Supported on (0, inf).
-    Gamma { shape: f64, rate: f64 },
-    /// Exponential(rate). Supported on [0, inf).
-    Exponential { rate: f64 },
-    /// Log-Uniform(lower, upper): uniform on the log scale, supported on
-    /// [lower, upper] with `lower, upper > 0`. Density on the natural scale
-    /// is `1 / (θ · (ln upper − ln lower))`. Like `TransformedNormal`, it
-    /// pairs with the `Log` transform; on the z = ln θ scale it is flat.
-    LogUniform { lower: f64, upper: f64 },
-    /// Normal(mean, sd) truncated to [lower, upper]. Natural-scale density.
-    TruncatedNormal { mean: f64, sd: f64, lower: f64, upper: f64 },
-    /// Hierarchical prior: args are expressions that reference other
-    /// parameters (hyperparents). Wave 2 / malaria #3 Gate 3. At each
-    /// log-density call, args are resolved against a
-    /// [`crate::inference::hierarchical::ParamEnv`]. The density
-    /// function lives in the `hierarchical` module; this variant is
-    /// a thin carrier for the IR data.
-    Hierarchical(ir::parameter::HierarchicalPrior),
+pub enum ParamArg {
+    /// A constant parameter value.
+    Const(f64),
+    /// An expression over hyperparameters, resolved against the env.
+    Expr(ir::expr::Expr),
 }
 
-impl Prior {
-    /// Log-density of the prior on the **natural** scale, `log p(θ)`.
-    /// `transformed` is the unconstrained-scale value z where θ = f(z)
-    /// — used by `TransformedNormal`, which evaluates
-    /// `log N(z; mu, sd)` then subtracts `z` (for the Log transform
-    /// Jacobian) so the return is the natural-scale log-density.
-    ///
-    /// IC3 fix (2026-04-19 inference review batch 2/3): previously
-    /// `TransformedNormal` returned the z-scale density
-    /// `log N(z; μ, σ)` while callers (PMMH `pmmh.rs:419-420`,
-    /// PGAS `pgas.rs:1533-1534`) also added `log_jacobian(z) = z`
-    /// on top, double-counting the Jacobian and producing a +σ²
-    /// systematic bias on log-scale posteriors. The fix returns the
-    /// natural-scale density here; callers continue to add
-    /// `log_jacobian(z)` unconditionally to get the z-scale
-    /// density, now correctly.
-    ///
-    /// Precondition: `TransformedNormal` is only meaningful when the
-    /// parameter uses `Transform::Log`. IC4's validator
-    /// (`fit/config.rs::validate_prior_transform_compat`) enforces
-    /// this at fit-config load time.
-    pub fn log_density(&self, natural: f64, transformed: f64) -> f64 {
+/// A distribution parameter resolvable to an `f64`. The single seam that lets
+/// [`Density`]'s formula be written once, generic over its parameter source:
+/// `f64` for fixed priors (identity — ignores the env) and [`ParamArg`] for
+/// hierarchical priors (`Expr` resolves against the env).
+pub trait ResolveArg {
+    /// Resolve to a concrete value against `env`. May return a non-finite
+    /// value (e.g. an unbound hyperparent → `NaN`); the density formula's
+    /// finiteness guards collapse those to `-∞`.
+    fn resolve<E: ParamEnv>(&self, env: &E) -> f64;
+}
+
+impl ResolveArg for f64 {
+    #[inline]
+    fn resolve<E: ParamEnv>(&self, _env: &E) -> f64 {
+        *self
+    }
+}
+
+impl ResolveArg for ParamArg {
+    #[inline]
+    fn resolve<E: ParamEnv>(&self, env: &E) -> f64 {
         match self {
-            Prior::Flat => 0.0,
-            Prior::Uniform { lower, upper } => {
-                if natural < *lower || natural > *upper {
+            ParamArg::Const(c) => *c,
+            ParamArg::Expr(e) => eval_prior_arg(e, env),
+        }
+    }
+}
+
+/// The unconstrained transform a prior family requires for correct inference.
+/// Used by the fit-config validator; the rule is per-family, so it is shared
+/// by fixed and hierarchical priors alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformReq {
+    /// Positive-support families (log_normal, half_normal, gamma, exponential,
+    /// log_uniform) require a `Log` transform.
+    Log,
+    /// The Beta family requires a `Logit` transform.
+    Logit,
+    /// Compatible with any transform (flat, uniform, normal, truncated_normal).
+    Any,
+}
+
+/// Distribution families and the **single source of truth** for prior
+/// log-densities. Generic over the parameter source `P` (`f64` for fixed
+/// priors, [`ParamArg`] for hierarchical ones).
+#[derive(Clone, Debug)]
+pub enum Density<P> {
+    /// Flat (improper) prior — log-density 0 everywhere within transform bounds.
+    Flat,
+    /// Uniform(lower, upper) on the natural scale. Flat within bounds, -inf outside.
+    Uniform { lower: P, upper: P },
+    /// Normal(mean, sd) on the natural scale.
+    Normal { mean: P, sd: P },
+    /// Normal(mean, sd) on the transformed (log) scale — the "log_normal" when
+    /// the parameter uses the Log transform.
+    TransformedNormal { mean: P, sd: P },
+    /// Half-Normal(sigma): folded normal supported on [0, inf).
+    HalfNormal { sigma: P },
+    /// Beta(alpha, beta) on [0, 1]. For probability parameters.
+    Beta { alpha: P, beta: P },
+    /// Gamma(shape, rate). Supported on (0, inf).
+    Gamma { shape: P, rate: P },
+    /// Exponential(rate). Supported on [0, inf).
+    Exponential { rate: P },
+    /// Log-Uniform(lower, upper): uniform on the log scale, supported on
+    /// [lower, upper] with `lower, upper > 0`.
+    LogUniform { lower: P, upper: P },
+    /// Normal(mean, sd) truncated to [lower, upper]. Natural-scale density.
+    TruncatedNormal { mean: P, sd: P, lower: P, upper: P },
+}
+
+impl<P> Density<P> {
+    /// Distribution-family name for diagnostics and transform-compat errors.
+    /// Matches the IR `HierarchicalKind::as_str` / `PriorDist` names.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Density::Flat => "flat",
+            Density::Uniform { .. } => "uniform",
+            Density::Normal { .. } => "normal",
+            Density::TransformedNormal { .. } => "log_normal",
+            Density::HalfNormal { .. } => "half_normal",
+            Density::Beta { .. } => "beta",
+            Density::Gamma { .. } => "gamma",
+            Density::Exponential { .. } => "exponential",
+            Density::LogUniform { .. } => "log_uniform",
+            Density::TruncatedNormal { .. } => "truncated_normal",
+        }
+    }
+
+    /// Which unconstrained transform this family requires (see [`TransformReq`]).
+    /// `truncated_normal` is `Any` — its bounds-vs-support invariant is checked
+    /// separately by the validator, not via the transform.
+    pub fn transform_req(&self) -> TransformReq {
+        match self {
+            Density::TransformedNormal { .. }
+            | Density::HalfNormal { .. }
+            | Density::Gamma { .. }
+            | Density::Exponential { .. }
+            | Density::LogUniform { .. } => TransformReq::Log,
+            Density::Beta { .. } => TransformReq::Logit,
+            Density::Flat
+            | Density::Uniform { .. }
+            | Density::Normal { .. }
+            | Density::TruncatedNormal { .. } => TransformReq::Any,
+        }
+    }
+}
+
+impl<P: ResolveArg> Density<P> {
+    /// Log-density on the **natural** scale, `log p(θ)`, resolving any
+    /// expression-valued parameters against `env` (constant `f64` parameters
+    /// ignore it).
+    ///
+    /// `transformed` is the unconstrained-scale value z where θ = f(z), used
+    /// by `TransformedNormal` and `LogUniform`: each returns the natural-scale
+    /// density (pre-subtracting the Log-transform Jacobian z) so the caller can
+    /// add `log_jacobian(z)` unconditionally to recover the z-scale density.
+    ///
+    /// IC3 fix (2026-04-19 inference review): `TransformedNormal` returns the
+    /// natural-scale density (`log N(z; μ, σ) − z`), not the z-scale density,
+    /// so callers adding `log_jacobian(z) = z` do not double-count the
+    /// Jacobian. Precondition: `TransformedNormal` is only meaningful under
+    /// `Transform::Log` (enforced by `validate_prior_transform_compat`).
+    ///
+    /// Degenerate resolved parameters (non-finite, σ ≤ 0, lower ≥ upper) and
+    /// any non-finite formula result collapse to `-∞` rather than propagating
+    /// `NaN` — defence-in-depth for hierarchical priors whose hyperparents may
+    /// resolve to invalid values at some sampler states.
+    pub fn log_density_env<E: ParamEnv>(&self, natural: f64, transformed: f64, env: &E) -> f64 {
+        // Collapse a NaN / non-finite formula result to -inf (NaN isolation).
+        let finite = |v: f64| if v.is_finite() { v } else { f64::NEG_INFINITY };
+        match self {
+            Density::Flat => 0.0,
+            Density::Uniform { lower, upper } => {
+                let (lo, hi) = (lower.resolve(env), upper.resolve(env));
+                if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+                    return f64::NEG_INFINITY;
+                }
+                if natural < lo || natural > hi {
                     f64::NEG_INFINITY
                 } else {
-                    -((upper - lower).ln())
+                    -((hi - lo).ln())
                 }
             }
-            Prior::Normal { mean, sd } => {
-                let z = (natural - mean) / sd;
+            Density::Normal { mean, sd } => {
+                let (mu, s) = (mean.resolve(env), sd.resolve(env));
+                if !mu.is_finite() || !s.is_finite() || s <= 0.0 {
+                    return f64::NEG_INFINITY;
+                }
                 // Full normal log-density: -0.5 ln(2π) - ln(σ) - 0.5 z²
-                -HALF_LN_2PI - sd.ln() - 0.5 * z * z
+                let z = (natural - mu) / s;
+                finite(-HALF_LN_2PI - s.ln() - 0.5 * z * z)
             }
-            Prior::TransformedNormal { mean, sd } => {
+            Density::TransformedNormal { mean, sd } => {
                 // Log-normal on natural scale:
                 //   log p(θ) = log N(log θ; μ, σ) − log θ
-                // With z = log θ (Log transform) this is
-                //   log N(z; μ, σ) − z
-                // The −z compensates for the Jacobian that the
-                // caller will add back when evaluating on z-scale
-                // (log_jacobian(z) = z for Log transform), recovering
-                // the correct z-scale density log N(z; μ, σ).
-                if natural <= 0.0 { return f64::NEG_INFINITY; }
-                let z_score = (transformed - mean) / sd;
-                -transformed - HALF_LN_2PI - sd.ln() - 0.5 * z_score * z_score
+                // With z = log θ (Log transform) this is log N(z; μ, σ) − z;
+                // the −z compensates for the Jacobian the caller adds back on
+                // the z-scale (log_jacobian(z) = z for the Log transform).
+                let (mu, s) = (mean.resolve(env), sd.resolve(env));
+                if !mu.is_finite() || !s.is_finite() || s <= 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                if natural <= 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                let z_score = (transformed - mu) / s;
+                finite(-transformed - HALF_LN_2PI - s.ln() - 0.5 * z_score * z_score)
             }
-            Prior::HalfNormal { sigma } => {
-                if natural < 0.0 { return f64::NEG_INFINITY; }
-                let z = natural / sigma;
-                // log(2/(sigma * sqrt(2π))) - 0.5 z²
-                // = ln(2) - ln(sigma) - 0.5 * ln(2π) - 0.5 z²
-                std::f64::consts::LN_2 - sigma.ln() - HALF_LN_2PI - 0.5 * z * z
+            Density::HalfNormal { sigma } => {
+                let sg = sigma.resolve(env);
+                if !sg.is_finite() || sg <= 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                if natural < 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                // log(2/(σ√(2π))) − 0.5 z² = ln 2 − ln σ − 0.5 ln(2π) − 0.5 z²
+                let z = natural / sg;
+                finite(std::f64::consts::LN_2 - sg.ln() - HALF_LN_2PI - 0.5 * z * z)
             }
-            Prior::Beta { alpha, beta } => {
-                if natural <= 0.0 || natural >= 1.0 { return f64::NEG_INFINITY; }
-                (alpha - 1.0) * natural.ln() + (beta - 1.0) * (1.0 - natural).ln()
-                    - (lgamma(*alpha) + lgamma(*beta) - lgamma(alpha + beta))
+            Density::Beta { alpha, beta } => {
+                let (a, b) = (alpha.resolve(env), beta.resolve(env));
+                if !a.is_finite() || !b.is_finite() || a <= 0.0 || b <= 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                if natural <= 0.0 || natural >= 1.0 {
+                    return f64::NEG_INFINITY;
+                }
+                finite(
+                    (a - 1.0) * natural.ln() + (b - 1.0) * (1.0 - natural).ln()
+                        - (lgamma(a) + lgamma(b) - lgamma(a + b)),
+                )
             }
-            Prior::Gamma { shape, rate } => {
-                if natural <= 0.0 { return f64::NEG_INFINITY; }
-                // log Gamma(x; k, r) = k*ln(r) + (k-1)*ln(x) - r*x - lgamma(k)
-                shape * rate.ln() + (shape - 1.0) * natural.ln() - rate * natural - lgamma(*shape)
+            Density::Gamma { shape, rate } => {
+                let (k, r) = (shape.resolve(env), rate.resolve(env));
+                if !k.is_finite() || !r.is_finite() || k <= 0.0 || r <= 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                if natural <= 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                // log Gamma(x; k, r) = k·ln r + (k−1)·ln x − r·x − lgamma(k)
+                finite(k * r.ln() + (k - 1.0) * natural.ln() - r * natural - lgamma(k))
             }
-            Prior::Exponential { rate } => {
-                if natural < 0.0 { return f64::NEG_INFINITY; }
-                rate.ln() - rate * natural
+            Density::Exponential { rate } => {
+                let r = rate.resolve(env);
+                if !r.is_finite() || r <= 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                if natural < 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                finite(r.ln() - r * natural)
             }
-            Prior::LogUniform { lower, upper } => {
+            Density::LogUniform { lower, upper } => {
                 // Natural-scale density 1/(θ·(ln U − ln L)) on [L, U]:
                 //   log p(θ) = −ln θ − ln(ln U − ln L).
                 // With z = ln θ (Log transform) the caller adds the Jacobian
                 // +z, giving the flat z-scale density −ln(ln U − ln L).
-                if natural < *lower || natural > *upper { return f64::NEG_INFINITY; }
-                -natural.ln() - (upper.ln() - lower.ln()).ln()
+                let (lo, hi) = (lower.resolve(env), upper.resolve(env));
+                if !lo.is_finite() || !hi.is_finite() || lo <= 0.0 || hi <= lo {
+                    return f64::NEG_INFINITY;
+                }
+                if natural < lo || natural > hi {
+                    return f64::NEG_INFINITY;
+                }
+                finite(-natural.ln() - (hi.ln() - lo.ln()).ln())
             }
-            Prior::TruncatedNormal { mean, sd, lower, upper } => {
+            Density::TruncatedNormal { mean, sd, lower, upper } => {
                 // Truncated normal on the natural scale:
                 //   log p(θ) = log N(θ; μ, σ) − log Z,   θ ∈ [L, U]
                 //   Z = Φ((U−μ)/σ) − Φ((L−μ)/σ)   (constant in θ).
-                if natural < *lower || natural > *upper { return f64::NEG_INFINITY; }
-                let z = (natural - mean) / sd;
-                let log_z = (normal_cdf((upper - mean) / sd)
-                    - normal_cdf((lower - mean) / sd)).ln();
-                -HALF_LN_2PI - sd.ln() - 0.5 * z * z - log_z
+                let (mu, s, lo, hi) =
+                    (mean.resolve(env), sd.resolve(env), lower.resolve(env), upper.resolve(env));
+                if !mu.is_finite() || !s.is_finite() || !lo.is_finite() || !hi.is_finite()
+                    || s <= 0.0 || lo >= hi
+                {
+                    return f64::NEG_INFINITY;
+                }
+                if natural < lo || natural > hi {
+                    return f64::NEG_INFINITY;
+                }
+                let z = (natural - mu) / s;
+                let log_z = (normal_cdf((hi - mu) / s) - normal_cdf((lo - mu) / s)).ln();
+                finite(-HALF_LN_2PI - s.ln() - 0.5 * z * z - log_z)
             }
-            // Hierarchical priors require a `ParamEnv` to resolve their
-            // expression-valued args. Callers without an env (older code
-            // paths: adaptive-proposal bookkeeping, trace display) see
-            // an Hierarchical variant as f64::NEG_INFINITY here — safe
-            // fallback. New callers should use `log_density_env`.
-            Prior::Hierarchical(_) => f64::NEG_INFINITY,
         }
     }
+}
 
-    /// Env-aware log-density. Semantically identical to `log_density`
-    /// for non-hierarchical variants (env is ignored). For
-    /// `Prior::Hierarchical`, resolves arg expressions against `env`.
-    /// Wave 2 / malaria #3 Gate 3.
-    pub fn log_density_env<E: crate::inference::hierarchical::ParamEnv>(
-        &self, natural: f64, transformed: f64, env: &E,
-    ) -> f64 {
+/// Prior distribution for one estimated parameter: a [`Density`] plus a
+/// one-bit capability tag. See the module docs.
+#[derive(Clone, Debug)]
+pub enum Prior {
+    /// Constant-parameter prior; evaluates without an environment.
+    Fixed(Density<f64>),
+    /// Hierarchical prior; parameters are expressions over hyperparents,
+    /// resolved against a [`ParamEnv`]. The inference stack branches on this
+    /// variant (NUTS-gradient eligibility, env construction, chain-init).
+    Hierarchical(Density<ParamArg>),
+}
+
+impl Prior {
+    /// Log-density on the natural scale **without** an environment. Fixed
+    /// priors evaluate directly; a hierarchical prior's hyperparent references
+    /// resolve to `NaN` → `-∞` (the documented env-free fallback). Callers with
+    /// hyperparameter values use [`Prior::log_density_env`].
+    pub fn log_density(&self, natural: f64, transformed: f64) -> f64 {
         match self {
-            Prior::Hierarchical(hp) =>
-                crate::inference::hierarchical::hierarchical_log_density(
-                    hp, natural, transformed, env, Scale::Natural),
-            _ => self.log_density(natural, transformed),
+            Prior::Fixed(d) => d.log_density_env(natural, transformed, &()),
+            Prior::Hierarchical(d) => d.log_density_env(natural, transformed, &()),
         }
     }
 
-    /// Convert from the IR's `PriorDist` representation (serialized from DSL
-    /// `~` syntax or fit.toml structured form).
+    /// Env-aware log-density on the natural scale. For fixed priors the env is
+    /// ignored; for hierarchical priors it resolves the hyperparent references.
+    pub fn log_density_env<E: ParamEnv>(&self, natural: f64, transformed: f64, env: &E) -> f64 {
+        match self {
+            Prior::Fixed(d) => d.log_density_env(natural, transformed, env),
+            Prior::Hierarchical(d) => d.log_density_env(natural, transformed, env),
+        }
+    }
+
+    /// Distribution-family name (for diagnostics / transform-compat errors).
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Prior::Fixed(d) => d.kind_str(),
+            Prior::Hierarchical(d) => d.kind_str(),
+        }
+    }
+
+    /// True if this prior depends on other parameters (a hierarchical leaf).
+    pub fn is_hierarchical(&self) -> bool {
+        matches!(self, Prior::Hierarchical(_))
+    }
+
+    /// Which unconstrained transform this prior's family requires.
+    pub fn transform_req(&self) -> TransformReq {
+        match self {
+            Prior::Fixed(d) => d.transform_req(),
+            Prior::Hierarchical(d) => d.transform_req(),
+        }
+    }
+
+    /// Convert from the IR's `PriorDist` (fixed, constant-parameter priors).
     ///
-    /// The IR uses `LogNormal` as a distribution name; in our runtime it maps
-    /// to `TransformedNormal` (Normal on the log-transformed scale), because
-    /// parameters with log_normal priors use log transforms for inference.
+    /// The IR uses `LogNormal` as a distribution name; it maps to
+    /// `TransformedNormal` (Normal on the log-transformed scale) because
+    /// log_normal parameters use the Log transform for inference. `Fixed`
+    /// (a known value) is not a prior — treated as `Flat` if seen here.
     pub fn from_ir(pd: &ir::parameter::PriorDist) -> Self {
         use ir::parameter::PriorDist;
-        match pd {
-            PriorDist::Uniform(u) => Prior::Uniform { lower: u.lower, upper: u.upper },
-            PriorDist::Normal(p) => Prior::Normal { mean: p.mean, sd: p.sd },
-            PriorDist::LogNormal(p) => Prior::TransformedNormal { mean: p.mu, sd: p.sigma },
-            PriorDist::HalfNormal(p) => Prior::HalfNormal { sigma: p.sigma },
-            PriorDist::Beta(p) => Prior::Beta { alpha: p.alpha, beta: p.beta },
-            PriorDist::Gamma(p) => Prior::Gamma { shape: p.shape, rate: p.rate },
-            PriorDist::Exponential(p) => Prior::Exponential { rate: p.rate },
-            PriorDist::LogUniform(p) => Prior::LogUniform { lower: p.lower, upper: p.upper },
-            PriorDist::TruncatedNormal(p) => Prior::TruncatedNormal {
-                mean: p.mean, sd: p.sd, lower: p.lower, upper: p.upper },
-            // Fixed is not really a prior — it means the param has a known value.
-            // In inference contexts this parameter should be in [fixed], not
-            // [estimate]. Treat as Flat if we see it in a prior slot.
-            PriorDist::Fixed(_) => Prior::Flat,
-        }
+        Prior::Fixed(match pd {
+            PriorDist::Uniform(u) => Density::Uniform { lower: u.lower, upper: u.upper },
+            PriorDist::Normal(p) => Density::Normal { mean: p.mean, sd: p.sd },
+            PriorDist::LogNormal(p) => Density::TransformedNormal { mean: p.mu, sd: p.sigma },
+            PriorDist::HalfNormal(p) => Density::HalfNormal { sigma: p.sigma },
+            PriorDist::Beta(p) => Density::Beta { alpha: p.alpha, beta: p.beta },
+            PriorDist::Gamma(p) => Density::Gamma { shape: p.shape, rate: p.rate },
+            PriorDist::Exponential(p) => Density::Exponential { rate: p.rate },
+            PriorDist::LogUniform(p) => Density::LogUniform { lower: p.lower, upper: p.upper },
+            PriorDist::TruncatedNormal(p) => Density::TruncatedNormal {
+                mean: p.mean,
+                sd: p.sd,
+                lower: p.lower,
+                upper: p.upper,
+            },
+            PriorDist::Fixed(_) => Density::Flat,
+        })
+    }
+
+    /// Convert from the IR's `HierarchicalPrior` (expression-valued parameters
+    /// over hyperparents). A missing required arg becomes a `NaN`-producing
+    /// constant so the density guards collapse to `-∞` (defence-in-depth — the
+    /// compiler validates arg presence; this is the backstop).
+    pub fn from_hierarchical_ir(hp: &ir::parameter::HierarchicalPrior) -> Self {
+        use ir::parameter::HierarchicalKind as K;
+        let arg = |k: &str| -> ParamArg {
+            match hp.args.get(k) {
+                Some(e) => ParamArg::Expr(e.clone()),
+                None => ParamArg::Const(f64::NAN),
+            }
+        };
+        Prior::Hierarchical(match hp.kind {
+            K::Uniform => Density::Uniform { lower: arg("lower"), upper: arg("upper") },
+            K::Normal => Density::Normal { mean: arg("mu"), sd: arg("sigma") },
+            K::LogNormal => Density::TransformedNormal { mean: arg("mu"), sd: arg("sigma") },
+            K::HalfNormal => Density::HalfNormal { sigma: arg("sigma") },
+            K::Beta => Density::Beta { alpha: arg("alpha"), beta: arg("beta") },
+            K::Gamma => Density::Gamma { shape: arg("shape"), rate: arg("rate") },
+            K::Exponential => Density::Exponential { rate: arg("rate") },
+        })
     }
 }
 
@@ -215,17 +407,27 @@ impl Prior {
 mod tests {
     use super::*;
 
-    fn approx_eq(a: f64, b: f64, tol: f64) -> bool { (a - b).abs() < tol }
+    fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() < tol
+    }
+
+    // Convenience constructors keep the fixed-prior tests readable.
+    fn flat() -> Prior {
+        Prior::Fixed(Density::Flat)
+    }
+    fn normal(mean: f64, sd: f64) -> Prior {
+        Prior::Fixed(Density::Normal { mean, sd })
+    }
 
     #[test]
     fn flat_is_zero() {
-        assert_eq!(Prior::Flat.log_density(0.5, 0.5), 0.0);
-        assert_eq!(Prior::Flat.log_density(100.0, -100.0), 0.0);
+        assert_eq!(flat().log_density(0.5, 0.5), 0.0);
+        assert_eq!(flat().log_density(100.0, -100.0), 0.0);
     }
 
     #[test]
     fn uniform_within_bounds() {
-        let p = Prior::Uniform { lower: 0.0, upper: 1.0 };
+        let p = Prior::Fixed(Density::Uniform { lower: 0.0, upper: 1.0 });
         // Inside: log(1/1) = 0
         assert!(approx_eq(p.log_density(0.5, 0.5), 0.0, 1e-10));
         // Outside
@@ -238,27 +440,29 @@ mod tests {
         // IC3 regression: TransformedNormal returns the natural-scale
         // log-density of a log-normal. Numerically integrate on the
         // natural axis and check the density integrates to ~1.
-        // log_normal(mu=0, sigma=1) has density
-        //   p(θ) = 1/(θ·√(2π)) · exp(−(log θ)² / 2) for θ > 0.
-        let p = Prior::TransformedNormal { mean: 0.0, sd: 1.0 };
+        let p = Prior::Fixed(Density::TransformedNormal { mean: 0.0, sd: 1.0 });
         let dx = 0.001;
-        let total: f64 = (1..50_000).map(|i| {
-            let theta = i as f64 * dx;
-            let z = theta.ln();
-            p.log_density(theta, z).exp() * dx
-        }).sum();
-        assert!((total - 1.0).abs() < 1e-3,
-            "log-normal density should integrate to ~1, got {}", total);
+        let total: f64 = (1..50_000)
+            .map(|i| {
+                let theta = i as f64 * dx;
+                let z = theta.ln();
+                p.log_density(theta, z).exp() * dx
+            })
+            .sum();
+        assert!(
+            (total - 1.0).abs() < 1e-3,
+            "log-normal density should integrate to ~1, got {}",
+            total
+        );
     }
 
     #[test]
     fn transformed_normal_plus_jacobian_equals_z_scale_normal() {
         // IC3 regression: for transformed-space MH the density is
         //   log p̃(z) = log p(θ(z)) + log|dθ/dz|
-        // For a log-normal(μ, σ) with Log transform:
-        //   log|dθ/dz| = z, so log p̃(z) = log N(z; μ, σ).
-        // Verify this identity holds with the fixed log_density.
-        let p = Prior::TransformedNormal { mean: 1.0, sd: 0.5 };
+        // For a log-normal(μ, σ) with Log transform log|dθ/dz| = z, so
+        //   log p̃(z) = log N(z; μ, σ). Verify the identity holds.
+        let p = Prior::Fixed(Density::TransformedNormal { mean: 1.0, sd: 0.5 });
         for &z in &[-1.0_f64, 0.0, 0.5, 1.0, 2.0] {
             let theta = z.exp();
             let log_natural = p.log_density(theta, z);
@@ -268,15 +472,19 @@ mod tests {
             };
             let caller_added_jacobian = z; // log_jacobian for Log transform
             let log_z_scale_actual = log_natural + caller_added_jacobian;
-            assert!((log_z_scale_actual - log_z_scale_expected).abs() < 1e-10,
+            assert!(
+                (log_z_scale_actual - log_z_scale_expected).abs() < 1e-10,
                 "at z={}: natural+jacobian={} != z-scale normal={}",
-                z, log_z_scale_actual, log_z_scale_expected);
+                z,
+                log_z_scale_actual,
+                log_z_scale_expected
+            );
         }
     }
 
     #[test]
     fn normal_peak_at_mean() {
-        let p = Prior::Normal { mean: 1.0, sd: 0.5 };
+        let p = normal(1.0, 0.5);
         let at_mean = p.log_density(1.0, 0.0);
         let off = p.log_density(1.5, 0.0);
         assert!(at_mean > off);
@@ -286,28 +494,30 @@ mod tests {
     fn normal_log_density_is_normalized() {
         // N(0, 1) at x=0: -0.5 ln(2π) ≈ -0.9189385
         // N(0, 1) at x=1: -0.5 ln(2π) - 0.5 ≈ -1.4189385
-        let p = Prior::Normal { mean: 0.0, sd: 1.0 };
+        let p = normal(0.0, 1.0);
         assert!(approx_eq(p.log_density(0.0, 0.0), -HALF_LN_2PI, 1e-10));
         assert!(approx_eq(p.log_density(1.0, 0.0), -HALF_LN_2PI - 0.5, 1e-10));
         // Unit integral check via trapezoidal quadrature on the density.
         let dx = 0.001;
-        let total: f64 = (-5000..=5000).map(|i| {
-            let x = i as f64 * dx;
-            p.log_density(x, 0.0).exp() * dx
-        }).sum();
+        let total: f64 = (-5000..=5000)
+            .map(|i| {
+                let x = i as f64 * dx;
+                p.log_density(x, 0.0).exp() * dx
+            })
+            .sum();
         assert!((total - 1.0).abs() < 1e-4, "density should integrate to ~1, got {}", total);
     }
 
     #[test]
     fn half_normal_nonnegative() {
-        let p = Prior::HalfNormal { sigma: 1.0 };
+        let p = Prior::Fixed(Density::HalfNormal { sigma: 1.0 });
         assert_eq!(p.log_density(-0.5, 0.0), f64::NEG_INFINITY);
         assert!(p.log_density(0.5, 0.0).is_finite());
     }
 
     #[test]
     fn gamma_positive() {
-        let p = Prior::Gamma { shape: 2.0, rate: 1.0 };
+        let p = Prior::Fixed(Density::Gamma { shape: 2.0, rate: 1.0 });
         assert_eq!(p.log_density(-0.1, 0.0), f64::NEG_INFINITY);
         assert_eq!(p.log_density(0.0, 0.0), f64::NEG_INFINITY);
         assert!(p.log_density(1.0, 0.0).is_finite());
@@ -317,14 +527,14 @@ mod tests {
 
     #[test]
     fn exponential_decays() {
-        let p = Prior::Exponential { rate: 1.0 };
+        let p = Prior::Fixed(Density::Exponential { rate: 1.0 });
         assert!(p.log_density(0.0, 0.0) > p.log_density(1.0, 0.0));
         assert!(p.log_density(1.0, 0.0) > p.log_density(10.0, 0.0));
     }
 
     #[test]
     fn beta_on_unit_interval() {
-        let p = Prior::Beta { alpha: 2.0, beta: 2.0 };
+        let p = Prior::Fixed(Density::Beta { alpha: 2.0, beta: 2.0 });
         assert_eq!(p.log_density(0.0, 0.0), f64::NEG_INFINITY);
         assert_eq!(p.log_density(1.0, 0.0), f64::NEG_INFINITY);
         // Symmetric Beta(2,2) peak at 0.5
@@ -333,7 +543,7 @@ mod tests {
 
     #[test]
     fn log_uniform_support_and_density() {
-        let p = Prior::LogUniform { lower: 1e-3, upper: 1e0 };
+        let p = Prior::Fixed(Density::LogUniform { lower: 1e-3, upper: 1e0 });
         // Outside support → -inf.
         assert_eq!(p.log_density(5e-4, (5e-4_f64).ln()), f64::NEG_INFINITY);
         assert_eq!(p.log_density(2.0, 2.0_f64.ln()), f64::NEG_INFINITY);
@@ -341,18 +551,23 @@ mod tests {
         let (lo, hi) = (1e-3_f64, 1e0_f64);
         let n = 200_000;
         let dx = (hi - lo) / n as f64;
-        let total: f64 = (0..n).map(|i| {
-            let theta = lo + (i as f64 + 0.5) * dx;
-            p.log_density(theta, theta.ln()).exp() * dx
-        }).sum();
-        assert!((total - 1.0).abs() < 1e-3, "log_uniform density should integrate to ~1, got {}", total);
+        let total: f64 = (0..n)
+            .map(|i| {
+                let theta = lo + (i as f64 + 0.5) * dx;
+                p.log_density(theta, theta.ln()).exp() * dx
+            })
+            .sum();
+        assert!(
+            (total - 1.0).abs() < 1e-3,
+            "log_uniform density should integrate to ~1, got {}",
+            total
+        );
     }
 
     #[test]
     fn log_uniform_flat_on_log_scale() {
         // On the z = ln θ scale the (Jacobian-adjusted) density is constant.
-        // log p(θ) + z must be equal for any two interior points.
-        let p = Prior::LogUniform { lower: 1e-4, upper: 1e2 };
+        let p = Prior::Fixed(Density::LogUniform { lower: 1e-4, upper: 1e2 });
         let pts = [1e-3_f64, 1e-1, 1.0, 50.0];
         let zdens: Vec<f64> = pts.iter().map(|&t| p.log_density(t, t.ln()) + t.ln()).collect();
         for w in zdens.windows(2) {
@@ -362,7 +577,12 @@ mod tests {
 
     #[test]
     fn truncated_normal_support_and_density() {
-        let p = Prior::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 };
+        let p = Prior::Fixed(Density::TruncatedNormal {
+            mean: 0.7,
+            sd: 0.2,
+            lower: 0.3,
+            upper: 1.0,
+        });
         // Outside [lower, upper] → -inf.
         assert_eq!(p.log_density(0.2, 0.0), f64::NEG_INFINITY);
         assert_eq!(p.log_density(1.1, 0.0), f64::NEG_INFINITY);
@@ -370,19 +590,30 @@ mod tests {
         let (lo, hi) = (0.3_f64, 1.0_f64);
         let n = 200_000;
         let dx = (hi - lo) / n as f64;
-        let total: f64 = (0..n).map(|i| {
-            let x = lo + (i as f64 + 0.5) * dx;
-            p.log_density(x, 0.0).exp() * dx
-        }).sum();
-        assert!((total - 1.0).abs() < 1e-3, "truncated_normal density should integrate to ~1, got {}", total);
+        let total: f64 = (0..n)
+            .map(|i| {
+                let x = lo + (i as f64 + 0.5) * dx;
+                p.log_density(x, 0.0).exp() * dx
+            })
+            .sum();
+        assert!(
+            (total - 1.0).abs() < 1e-3,
+            "truncated_normal density should integrate to ~1, got {}",
+            total
+        );
     }
 
     #[test]
     fn truncated_normal_renormalizes_above_untruncated() {
         // Truncation increases the in-support density relative to a plain
         // Normal (mass outside [lo,hi] is redistributed inward).
-        let tn = Prior::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 };
-        let n  = Prior::Normal { mean: 0.7, sd: 0.2 };
+        let tn = Prior::Fixed(Density::TruncatedNormal {
+            mean: 0.7,
+            sd: 0.2,
+            lower: 0.3,
+            upper: 1.0,
+        });
+        let n = normal(0.7, 0.2);
         assert!(tn.log_density(0.7, 0.0) > n.log_density(0.7, 0.0));
     }
 
@@ -391,44 +622,48 @@ mod tests {
         use ir::parameter::*;
         let ir_prior = PriorDist::LogNormal(LogNormalPrior { mu: -1.0, sigma: 0.5 });
         match Prior::from_ir(&ir_prior) {
-            Prior::TransformedNormal { mean, sd } => {
+            Prior::Fixed(Density::TransformedNormal { mean, sd }) => {
                 assert_eq!(mean, -1.0);
                 assert_eq!(sd, 0.5);
             }
-            _ => panic!("expected TransformedNormal"),
+            _ => panic!("expected Fixed(TransformedNormal)"),
         }
 
         let ir_beta = PriorDist::Beta(BetaPrior { alpha: 2.0, beta: 5.0 });
         match Prior::from_ir(&ir_beta) {
-            Prior::Beta { alpha, beta } => {
+            Prior::Fixed(Density::Beta { alpha, beta }) => {
                 assert_eq!(alpha, 2.0);
                 assert_eq!(beta, 5.0);
             }
-            _ => panic!("expected Beta"),
+            _ => panic!("expected Fixed(Beta)"),
         }
 
         let ir_fixed = PriorDist::Fixed(0.5);
-        assert!(matches!(Prior::from_ir(&ir_fixed), Prior::Flat));
+        assert!(matches!(Prior::from_ir(&ir_fixed), Prior::Fixed(Density::Flat)));
 
         let ir_lu = PriorDist::LogUniform(LogUniformPrior { lower: 1e-5, upper: 1e-2 });
         match Prior::from_ir(&ir_lu) {
-            Prior::LogUniform { lower, upper } => {
+            Prior::Fixed(Density::LogUniform { lower, upper }) => {
                 assert_eq!(lower, 1e-5);
                 assert_eq!(upper, 1e-2);
             }
-            _ => panic!("expected LogUniform"),
+            _ => panic!("expected Fixed(LogUniform)"),
         }
 
-        let ir_tn = PriorDist::TruncatedNormal(
-            TruncatedNormalPrior { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 });
+        let ir_tn = PriorDist::TruncatedNormal(TruncatedNormalPrior {
+            mean: 0.7,
+            sd: 0.2,
+            lower: 0.3,
+            upper: 1.0,
+        });
         match Prior::from_ir(&ir_tn) {
-            Prior::TruncatedNormal { mean, sd, lower, upper } => {
+            Prior::Fixed(Density::TruncatedNormal { mean, sd, lower, upper }) => {
                 assert_eq!(mean, 0.7);
                 assert_eq!(sd, 0.2);
                 assert_eq!(lower, 0.3);
                 assert_eq!(upper, 1.0);
             }
-            _ => panic!("expected TruncatedNormal"),
+            _ => panic!("expected Fixed(TruncatedNormal)"),
         }
     }
 }

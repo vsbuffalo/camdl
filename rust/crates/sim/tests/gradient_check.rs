@@ -301,7 +301,7 @@ fn test_nuts_target_gradient_on_z_scale() {
         })
         .collect();
 
-    let priors: Vec<Prior> = if2_params.iter().map(|_| Prior::Flat).collect();
+    let priors: Vec<Prior> = if2_params.iter().map(|_| Prior::Fixed(sim::inference::prior::Density::Flat)).collect();
     let base_params = vec![0.4, 0.1, 1000.0, 10.0];
     let param_names: Vec<String> = if2_params.iter().map(|p| p.name.clone()).collect();
     let d_nuts = if2_params.len();

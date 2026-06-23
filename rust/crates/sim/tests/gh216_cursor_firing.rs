@@ -626,7 +626,7 @@ fn run_pgas_exact(compiled: &Arc<CompiledModel>, obs_times: &[f64], run_id: &str
         transform: Transform::Log { lo: 1e-3, hi: 10.0 },
         lower: 1e-3, upper: 10.0, rw_sd_auto: false, ivp: false,
     }];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let obs_model = pgas_obs_model(compiled, obs_times);
     let observations = pgas_observations(obs_times);
     let config = PGASConfig {

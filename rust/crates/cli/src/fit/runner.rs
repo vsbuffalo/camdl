@@ -12,11 +12,11 @@ use sim::{
     inference::{
         if2::{run_if2_with_progress, IF2Config, EstimatedParam, IF2Result, Observation, Transform},
         pmmh::Prior,
+        prior::{Density, TransformReq},
         diagnostic::{DiagnosticCollector, DiagnosticKind},
     },
     rng::StatefulRng,
 };
-use ir::parameter::HierarchicalKind;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -2727,11 +2727,11 @@ pub fn resolve_prior(
                     let resolved = est.bounds.or_else(|| model.parameters.iter()
                         .find(|p| p.name == name).and_then(|p| p.bounds()));
                     if let Some((lower, upper)) = resolved {
-                        return (Prior::Uniform { lower, upper }, "fit.toml");
+                        return (Prior::Fixed(Density::Uniform { lower, upper }), "fit.toml");
                     }
                 }
                 EstimatePriorSpec::Flat { .. } => {
-                    return (Prior::Flat, "flat (explicit)");
+                    return (Prior::Fixed(Density::Flat), "flat (explicit)");
                 }
             }
         }
@@ -2745,12 +2745,12 @@ pub fn resolve_prior(
         // verbatim — evaluation at each MCMC step resolves references
         // against current hyperparameter values. Wave 2 / #3 Gate 3a.
         if let Some(hp) = ir_param.hierarchical() {
-            return (Prior::Hierarchical(hp.clone()), "model (hierarchical)");
+            return (Prior::from_hierarchical_ir(hp), "model (hierarchical)");
         }
     }
     // 3. fallback. Reached only on the profile path; `camdl fit run`'s
     //    `validate_priors_present` rejects before we get here.
-    (Prior::Flat, "flat (default)")
+    (Prior::Fixed(Density::Flat), "flat (default)")
 }
 
 /// IC4 in the 2026-04-19 inference review batch 3: validate that
@@ -2802,28 +2802,16 @@ pub fn validate_prior_transform_compat(
         let is_log   = matches!(transform, Transform::Log { .. });
         let is_logit = matches!(transform, Transform::Logit { .. });
 
-        let prior_name = match &prior {
-            Prior::TransformedNormal { .. } => "log_normal",
-            Prior::Beta { .. }              => "beta",
-            Prior::HalfNormal { .. }        => "half_normal",
-            Prior::Gamma { .. }             => "gamma",
-            Prior::Exponential { .. }       => "exponential",
-            Prior::Normal { .. }            => "normal",
-            Prior::Uniform { .. }           => "uniform",
-            Prior::LogUniform { .. }        => "log_uniform",
-            Prior::TruncatedNormal { .. }   => "truncated_normal",
-            Prior::Flat                     => "flat",
-            Prior::Hierarchical(h)          => h.kind.as_str(),
-        };
+        let prior_name = prior.kind_str();
         let transform_name = match &transform {
             Transform::Log { .. }   => "Log",
             Transform::Logit { .. } => "Logit",
             Transform::None         => "None",
         };
-        let support_desc = match &prior {
-            Prior::TransformedNormal { .. } => "log_normal",
-            Prior::Beta { .. }              => "beta",
-            _                               => "positive-support",
+        let support_desc = match prior.kind_str() {
+            "log_normal" => "log_normal",
+            "beta"       => "beta",
+            _            => "positive-support",
         };
         let err = |needs: &str| Err(format!(
             "parameter '{}': prior {} is incompatible with transform {}; \
@@ -2833,17 +2821,14 @@ pub fn validate_prior_transform_compat(
             name, prior_name, transform_name, support_desc, needs, source,
         ));
 
-        match prior {
-            Prior::TransformedNormal { .. }
-            | Prior::HalfNormal { .. }
-            | Prior::Gamma { .. }
-            | Prior::Exponential { .. }
-            // log_uniform is uniform on the log scale: it needs the Log
-            // transform, like log_normal.
-            | Prior::LogUniform { .. } => {
+        // Transform compatibility is a per-family rule, identical for fixed and
+        // hierarchical priors — it lives once on `Density::transform_req`.
+        match prior.transform_req() {
+            // log_normal / half_normal / gamma / exponential / log_uniform.
+            TransformReq::Log => {
                 if !is_log { return err("Log"); }
             }
-            Prior::Beta { .. } => {
+            TransformReq::Logit => {
                 if !is_logit { return err("Logit"); }
                 // Beta is on [0, 1]; require logit bounds span that.
                 if let Transform::Logit { lo, hi } = transform {
@@ -2854,55 +2839,39 @@ pub fn validate_prior_transform_compat(
                     }
                 }
             }
-            Prior::Uniform { .. } | Prior::Normal { .. } | Prior::Flat => {
-                // Compatible with any transform.
-            }
-            // truncated_normal is a natural-scale Gaussian truncated to the
-            // parameter's bounds; the bounds equal the transform's [lo, hi]
-            // by construction, so any transform is fine (Log/Logit keep θ in
-            // range automatically; None relies on the −inf-outside density).
-            // INVARIANT: the truncation support must equal the parameter's
-            // resolved inference bounds, else the prior truncates to one
-            // interval while the search box / transform clamp uses another (a
-            // silent disagreement). The DSL bakes them equal from `in [lo,hi]`;
-            // this guards the fit.toml path (explicit 4-field) and the case
-            // where fit.toml overrides `bounds` away from a model-declared
-            // truncated_normal's support.
-            Prior::TruncatedNormal { lower, upper, .. } => {
-                let resolved = estimate.get(name)
-                    .and_then(|e| e.bounds)
-                    .or_else(|| ir_param.bounds());
-                match resolved {
-                    None => return Err(format!(
-                        "parameter '{}': truncated_normal prior requires bounds, but none \
-                         are declared (model `in [lo, hi]` or fit.toml `bounds`).", name)),
-                    Some((lo, hi)) => {
-                        if (lower - lo).abs() > 1e-9 || (upper - hi).abs() > 1e-9 {
-                            return Err(format!(
-                                "parameter '{}': truncated_normal truncation [{}, {}] must \
-                                 equal the parameter's inference bounds [{}, {}] — the \
-                                 prior's support and the search box must be the same \
-                                 interval. The model `~ truncated_normal(mean, sd)` form \
-                                 reads the bounds from `in [lo, hi]` automatically; in \
-                                 fit.toml set the prior's lower/upper to match `bounds`.",
-                                name, lower, upper, lo, hi));
-                        }
+            // flat / uniform / normal / truncated_normal — any transform.
+            TransformReq::Any => {}
+        }
+        // truncated_normal is a natural-scale Gaussian truncated to the
+        // parameter's bounds. INVARIANT: the truncation support MUST equal the
+        // parameter's resolved inference bounds, else the prior truncates to one
+        // interval while the search box / transform clamp uses another (a silent
+        // disagreement). Only fixed priors can be truncated_normal
+        // (HierarchicalKind has no truncated_normal variant). The DSL bakes the
+        // bounds equal from `in [lo,hi]`; this guards the fit.toml path (explicit
+        // 4-field) and the case where fit.toml overrides `bounds` away from a
+        // model-declared truncated_normal's support.
+        if let Prior::Fixed(Density::TruncatedNormal { lower, upper, .. }) = &prior {
+            let resolved = estimate.get(name)
+                .and_then(|e| e.bounds)
+                .or_else(|| ir_param.bounds());
+            match resolved {
+                None => return Err(format!(
+                    "parameter '{}': truncated_normal prior requires bounds, but none \
+                     are declared (model `in [lo, hi]` or fit.toml `bounds`).", name)),
+                Some((lo, hi)) => {
+                    if (lower - lo).abs() > 1e-9 || (upper - hi).abs() > 1e-9 {
+                        return Err(format!(
+                            "parameter '{}': truncated_normal truncation [{}, {}] must \
+                             equal the parameter's inference bounds [{}, {}] — the \
+                             prior's support and the search box must be the same \
+                             interval. The model `~ truncated_normal(mean, sd)` form \
+                             reads the bounds from `in [lo, hi]` automatically; in \
+                             fit.toml set the prior's lower/upper to match `bounds`.",
+                            name, lower, upper, lo, hi));
                     }
                 }
             }
-            // Hierarchical priors carry the same kind as their plain
-            // counterpart. Reuse the same transform compatibility rules.
-            // Wave 2 / #3 Gate 3a.
-            Prior::Hierarchical(ref h) => match h.kind {
-                HierarchicalKind::LogNormal
-                | HierarchicalKind::HalfNormal
-                | HierarchicalKind::Gamma
-                | HierarchicalKind::Exponential => {
-                    if !is_log { return err("Log"); }
-                }
-                HierarchicalKind::Beta => { if !is_logit { return err("Logit"); } }
-                HierarchicalKind::Uniform | HierarchicalKind::Normal => {} // any transform ok
-            },
         }
     }
     Ok(())
@@ -3469,7 +3438,7 @@ mod tests {
         let (p, src) = resolve_prior("beta", &estimate_override, &model);
         assert_eq!(src, "fit.toml", "fit.toml override should take precedence");
         match p {
-            Prior::Normal { mean, sd } => {
+            Prior::Fixed(Density::Normal { mean, sd }) => {
                 assert!((mean - 0.3).abs() < 1e-9);
                 assert!((sd - 0.1).abs() < 1e-9);
             }
@@ -3481,7 +3450,7 @@ mod tests {
         let (p, src) = resolve_prior("beta", &estimate_empty, &model);
         assert_eq!(src, "model", "model IR prior should apply when fit.toml is silent");
         match p {
-            Prior::TransformedNormal { mean, sd } => {
+            Prior::Fixed(Density::TransformedNormal { mean, sd }) => {
                 // LogNormal(mu=-1.0, sigma=0.5) in IR → TransformedNormal on log scale
                 assert!((mean - (-1.0)).abs() < 1e-9);
                 assert!((sd - 0.5).abs() < 1e-9);
@@ -3492,7 +3461,7 @@ mod tests {
         // (3) Flat fallback when neither fit.toml nor IR provide a prior
         let (p, src) = resolve_prior("gamma", &estimate_empty, &model);
         assert_eq!(src, "flat (default)");
-        assert!(matches!(p, Prior::Flat));
+        assert!(matches!(p, Prior::Fixed(Density::Flat)));
     }
 
     /// Minimal single-parameter model for transform-compat tests.
@@ -3546,7 +3515,7 @@ mod tests {
 
         let (prior, src) = resolve_prior("beta", &est, &model);
         match prior {
-            Prior::Uniform { lower, upper } => {
+            Prior::Fixed(Density::Uniform { lower, upper }) => {
                 assert_eq!(lower, 0.05);
                 assert_eq!(upper, 1.0);
             }
@@ -3915,7 +3884,7 @@ dt = 1.0
         let (p, src) = resolve_prior("beta", &empty, &model);
         assert_eq!(src, "model", "beta's IR prior should be picked up");
         match p {
-            Prior::TransformedNormal { mean, sd } => {
+            Prior::Fixed(Density::TransformedNormal { mean, sd }) => {
                 assert!((mean - (-1.0)).abs() < 1e-9, "mean {}", mean);
                 assert!((sd - 0.5).abs() < 1e-9, "sd {}", sd);
             }
@@ -3925,13 +3894,13 @@ dt = 1.0
         // gamma: HalfNormal round-trip
         let (p, src) = resolve_prior("gamma", &empty, &model);
         assert_eq!(src, "model");
-        assert!(matches!(p, Prior::HalfNormal { .. }), "gamma: {:?}", p);
+        assert!(matches!(p, Prior::Fixed(Density::HalfNormal { .. })), "gamma: {:?}", p);
 
         // rho: Beta round-trip
         let (p, src) = resolve_prior("rho", &empty, &model);
         assert_eq!(src, "model");
         match p {
-            Prior::Beta { alpha, beta } => {
+            Prior::Fixed(Density::Beta { alpha, beta }) => {
                 assert!((alpha - 2.0).abs() < 1e-9);
                 assert!((beta - 5.0).abs() < 1e-9);
             }
@@ -3941,7 +3910,7 @@ dt = 1.0
         // I0: Exponential round-trip
         let (p, src) = resolve_prior("I0", &empty, &model);
         assert_eq!(src, "model");
-        assert!(matches!(p, Prior::Exponential { .. }), "I0: {:?}", p);
+        assert!(matches!(p, Prior::Fixed(Density::Exponential { .. })), "I0: {:?}", p);
     }
 
     /// End-to-end: fit.toml [estimate] prior overrides the model IR prior.
@@ -3968,7 +3937,7 @@ dt = 1.0
         let (p, src) = resolve_prior("beta", &estimate, &model);
         assert_eq!(src, "fit.toml", "override should take precedence");
         match p {
-            Prior::Normal { mean, sd } => {
+            Prior::Fixed(Density::Normal { mean, sd }) => {
                 assert_eq!(mean, 0.25); assert_eq!(sd, 0.05);
             }
             other => panic!("override should be Normal(0.25, 0.05), got {:?}", other),
@@ -3977,7 +3946,7 @@ dt = 1.0
         // gamma is not overridden → still uses the IR's HalfNormal.
         let (p, src) = resolve_prior("gamma", &estimate, &model);
         assert_eq!(src, "model");
-        assert!(matches!(p, Prior::HalfNormal { .. }));
+        assert!(matches!(p, Prior::Fixed(Density::HalfNormal { .. })));
     }
 
     /// Replaces the v1-era `parse_prior_covers_all_distributions` +
@@ -3991,19 +3960,19 @@ dt = 1.0
             HalfNormalPrior, GammaPrior, ExponentialPrior,
         };
         match Prior::from_ir(&PriorDist::LogNormal(LogNormalPrior { mu: 1.5, sigma: 0.4 })) {
-            Prior::TransformedNormal { mean, sd } => {
+            Prior::Fixed(Density::TransformedNormal { mean, sd }) => {
                 assert_eq!(mean, 1.5); assert_eq!(sd, 0.4);
             }
             other => panic!("LogNormal: {:?}", other),
         }
         match Prior::from_ir(&PriorDist::Normal(NormalPrior { mean: 0.3, sd: 0.1 })) {
-            Prior::Normal { mean, sd } => {
+            Prior::Fixed(Density::Normal { mean, sd }) => {
                 assert_eq!(mean, 0.3); assert_eq!(sd, 0.1);
             }
             other => panic!("Normal: {:?}", other),
         }
         match Prior::from_ir(&PriorDist::Beta(BetaPrior { alpha: 2.0, beta: 5.0 })) {
-            Prior::Beta { alpha, beta } => {
+            Prior::Fixed(Density::Beta { alpha, beta }) => {
                 assert_eq!(alpha, 2.0); assert_eq!(beta, 5.0);
             }
             other => panic!("Beta: {:?}", other),
@@ -4011,23 +3980,23 @@ dt = 1.0
         // Uniform now carries explicit bounds (no silent reduction to Flat
         // on missing fields — that v2 behaviour is intentionally removed).
         match Prior::from_ir(&PriorDist::Uniform(UniformPrior { lower: -1.0, upper: 2.0 })) {
-            Prior::Uniform { lower, upper } => {
+            Prior::Fixed(Density::Uniform { lower, upper }) => {
                 assert_eq!(lower, -1.0); assert_eq!(upper, 2.0);
             }
             other => panic!("Uniform: {:?}", other),
         }
         match Prior::from_ir(&PriorDist::HalfNormal(HalfNormalPrior { sigma: 0.3 })) {
-            Prior::HalfNormal { sigma } => assert_eq!(sigma, 0.3),
+            Prior::Fixed(Density::HalfNormal { sigma }) => assert_eq!(sigma, 0.3),
             other => panic!("HalfNormal: {:?}", other),
         }
         match Prior::from_ir(&PriorDist::Gamma(GammaPrior { shape: 3.0, rate: 0.5 })) {
-            Prior::Gamma { shape, rate } => {
+            Prior::Fixed(Density::Gamma { shape, rate }) => {
                 assert_eq!(shape, 3.0); assert_eq!(rate, 0.5);
             }
             other => panic!("Gamma: {:?}", other),
         }
         match Prior::from_ir(&PriorDist::Exponential(ExponentialPrior { rate: 2.5 })) {
-            Prior::Exponential { rate } => assert_eq!(rate, 2.5),
+            Prior::Fixed(Density::Exponential { rate }) => assert_eq!(rate, 2.5),
             other => panic!("Exponential: {:?}", other),
         }
     }

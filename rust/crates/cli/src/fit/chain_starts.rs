@@ -33,7 +33,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use sim::inference::prior::Prior;
+use sim::inference::prior::{Prior, Density};
 use sim::rng::StatefulRng;
 
 use crate::params_resolver::ResolvedParameters;
@@ -503,23 +503,23 @@ fn draw_from_prior(
 fn sample_prior_natural(prior: &Prior, rng: &mut StatefulRng, base: Option<f64>) -> f64 {
     use std::f64::consts::PI;
     match prior {
-        Prior::Flat => base.unwrap_or(0.0),
-        Prior::Uniform { lower, upper } => {
+        Prior::Fixed(Density::Flat) => base.unwrap_or(0.0),
+        Prior::Fixed(Density::Uniform { lower, upper }) => {
             lower + rng.uniform() * (upper - lower)
         }
-        Prior::Normal { mean, sd } => {
+        Prior::Fixed(Density::Normal { mean, sd }) => {
             mean + sd * rng.normal()
         }
-        Prior::TransformedNormal { mean, sd } => {
+        Prior::Fixed(Density::TransformedNormal { mean, sd }) => {
             // Log-normal: Normal(mu, sigma) on the log scale.
             let z = mean + sd * rng.normal();
             z.exp()
         }
-        Prior::HalfNormal { sigma } => {
+        Prior::Fixed(Density::HalfNormal { sigma }) => {
             // |Normal(0, sigma)|.
             (sigma * rng.normal()).abs()
         }
-        Prior::Beta { alpha, beta } => {
+        Prior::Fixed(Density::Beta { alpha, beta }) => {
             // Beta(α, β) = X / (X + Y), X ~ Gamma(α, 1), Y ~ Gamma(β, 1).
             // StatefulRng.gamma_multiplier returns a Gamma(α, 1) factor
             // when called with (σ² = 1/α, dt = 1) — it's tuned for the
@@ -530,19 +530,19 @@ fn sample_prior_natural(prior: &Prior, rng: &mut StatefulRng, base: Option<f64>)
             let y = sample_gamma_shape_rate(rng, *beta,  1.0);
             x / (x + y)
         }
-        Prior::Gamma { shape, rate } => {
+        Prior::Fixed(Density::Gamma { shape, rate }) => {
             sample_gamma_shape_rate(rng, *shape, *rate)
         }
-        Prior::Exponential { rate } => {
+        Prior::Fixed(Density::Exponential { rate }) => {
             // Inverse-CDF: -ln(U) / rate.
             -(1.0 - rng.uniform()).ln() / rate
         }
-        Prior::LogUniform { lower, upper } => {
+        Prior::Fixed(Density::LogUniform { lower, upper }) => {
             // Uniform on the log scale, exponentiated.
             let (ll, lu) = (lower.ln(), upper.ln());
             (ll + rng.uniform() * (lu - ll)).exp()
         }
-        Prior::TruncatedNormal { mean, sd, lower, upper } => {
+        Prior::Fixed(Density::TruncatedNormal { mean, sd, lower, upper }) => {
             // Exact inverse-CDF draw inside [lower, upper] — no rejection.
             use sim::inference::{normal_cdf, normal_quantile};
             let a = normal_cdf((lower - mean) / sd);

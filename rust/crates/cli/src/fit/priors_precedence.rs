@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(resolved[0].source, PriorSource::FitToml,
             "fit-toml prior must beat model-IR prior");
         match &resolved[0].prior {
-            Prior::Normal { mean, sd } => {
+            Prior::Fixed(sim::inference::prior::Density::Normal { mean, sd }) => {
                 assert!((mean - 0.3).abs() < 1e-12);
                 assert!((sd - 0.1).abs() < 1e-12);
             }
@@ -363,7 +363,7 @@ mod tests {
             "model-IR prior must apply when fit-toml is silent");
         match &resolved[0].prior {
             // LogNormal in IR → TransformedNormal in runtime
-            Prior::TransformedNormal { mean, sd } => {
+            Prior::Fixed(sim::inference::prior::Density::TransformedNormal { mean, sd }) => {
                 assert!((mean - (-2.0)).abs() < 1e-12);
                 assert!((sd - 0.4).abs() < 1e-12);
             }
@@ -383,7 +383,7 @@ mod tests {
             &["gamma".to_string()], &estimate, &model,
         );
         assert_eq!(resolved[0].source, PriorSource::FlatFallback);
-        assert!(matches!(resolved[0].prior, Prior::Flat));
+        assert!(matches!(resolved[0].prior, Prior::Fixed(sim::inference::prior::Density::Flat)));
 
         // No fit toml supplied → "no --fit toml supplied" branch.
         let warning = format_flat_fallback_warning(&resolved, false)

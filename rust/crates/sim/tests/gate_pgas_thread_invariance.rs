@@ -130,7 +130,7 @@ fn run_once() -> PGASResult {
         rw_sd_auto: false,
         ivp: false,
     }];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
         n_particles: N_PARTICLES,

@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use ir::expr::Expr;
 use ir::parameter::{HierarchicalKind, HierarchicalPrior};
 use sim::inference::hierarchical::NamedParams;
-use sim::inference::prior::{Prior, Scale};
+use sim::inference::prior::{Prior, Density};
 
 fn make_hier(kind: HierarchicalKind, args: &[(&str, Expr)]) -> HierarchicalPrior {
     HierarchicalPrior {
@@ -34,7 +34,7 @@ fn make_hier(kind: HierarchicalKind, args: &[(&str, Expr)]) -> HierarchicalPrior
 /// analytically-expected amount.
 #[test]
 fn test_prior_hierarchical_env_propagation() {
-    let prior = Prior::Hierarchical(make_hier(HierarchicalKind::Normal, &[
+    let prior = Prior::from_hierarchical_ir(&make_hier(HierarchicalKind::Normal, &[
         ("mu",    Expr::param("mu_h")),
         ("sigma", Expr::param("sigma_h")),
     ]));
@@ -64,7 +64,7 @@ fn test_prior_hierarchical_env_propagation() {
 /// posterior (−∞) rather than a silently-wrong one.
 #[test]
 fn test_prior_hierarchical_env_less_returns_neg_inf() {
-    let prior = Prior::Hierarchical(make_hier(HierarchicalKind::Normal, &[
+    let prior = Prior::from_hierarchical_ir(&make_hier(HierarchicalKind::Normal, &[
         ("mu", Expr::param("mu_h")),
         ("sigma", Expr::const_(1.0)),
     ]));
@@ -82,13 +82,13 @@ fn test_plain_priors_ignore_env() {
     let env = NamedParams { names: &names, values: &values };
 
     for prior in [
-        Prior::Flat,
-        Prior::Uniform { lower: -1.0, upper: 2.0 },
-        Prior::Normal { mean: 0.0, sd: 1.0 },
-        Prior::HalfNormal { sigma: 1.0 },
-        Prior::Beta { alpha: 2.0, beta: 3.0 },
-        Prior::Gamma { shape: 2.0, rate: 1.0 },
-        Prior::Exponential { rate: 0.5 },
+        Prior::Fixed(Density::Flat),
+        Prior::Fixed(Density::Uniform { lower: -1.0, upper: 2.0 }),
+        Prior::Fixed(Density::Normal { mean: 0.0, sd: 1.0 }),
+        Prior::Fixed(Density::HalfNormal { sigma: 1.0 }),
+        Prior::Fixed(Density::Beta { alpha: 2.0, beta: 3.0 }),
+        Prior::Fixed(Density::Gamma { shape: 2.0, rate: 1.0 }),
+        Prior::Fixed(Density::Exponential { rate: 0.5 }),
     ] {
         let without = prior.log_density(0.5, 0.5);
         let with    = prior.log_density_env(0.5, 0.5, &env);
@@ -101,7 +101,7 @@ fn test_plain_priors_ignore_env() {
 /// but verifying it composes correctly at the Prior level.
 #[test]
 fn test_prior_hierarchical_missing_hyperparent_neg_inf() {
-    let prior = Prior::Hierarchical(make_hier(HierarchicalKind::Normal, &[
+    let prior = Prior::from_hierarchical_ir(&make_hier(HierarchicalKind::Normal, &[
         ("mu",    Expr::param("mu_missing")),
         ("sigma", Expr::const_(1.0)),
     ]));
@@ -109,15 +109,4 @@ fn test_prior_hierarchical_missing_hyperparent_neg_inf() {
     let values: [f64; 0]   = [];
     let env = NamedParams { names: &names, values: &values };
     assert_eq!(prior.log_density_env(0.0, 0.0, &env), f64::NEG_INFINITY);
-}
-
-/// Plumbing check 5: Scale enum round-trips through the call path and
-/// the phantom-type doc contract holds.
-#[test]
-fn test_scale_phantom_smoke() {
-    // Just instantiate both variants to confirm they're constructible
-    // from external code. The phantom isn't enforced by the compiler
-    // yet; this smoke-tests the public API shape.
-    let _n = Scale::Natural;
-    let _t = Scale::Transformed;
 }

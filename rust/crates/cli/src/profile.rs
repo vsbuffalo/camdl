@@ -1887,7 +1887,7 @@ mod tests {
     /// wa_weak seed-timing model.
     #[test]
     fn focal_log_prior_offset_matches_gh118_forensic_table() {
-        use sim::inference::prior::Prior;
+        use sim::inference::prior::{Prior, Density};
 
         // From gh#118: model has two focal params
         //   tau:    instant ~ uniform(lower=-86, upper=0); pinned at -5
@@ -1904,10 +1904,10 @@ mod tests {
             lower: 1.0, upper: 1000.0,
             rw_sd_auto: false, ivp: false,
         };
-        let tau_prior = Prior::Uniform { lower: -86.0, upper: 0.0 };
-        let n_seed_prior = Prior::TransformedNormal {
+        let tau_prior = Prior::Fixed(Density::Uniform { lower: -86.0, upper: 0.0 });
+        let n_seed_prior = Prior::Fixed(Density::TransformedNormal {
             mean: 5.0_f64.ln(), sd: 1.0,
-        };
+        });
 
         let offset = compute_focal_log_prior_offset(
             &[tau_spec, n_seed_spec],
@@ -1941,7 +1941,7 @@ mod tests {
     /// the emitted mle.toml), not a spuriously finite number.
     #[test]
     fn focal_log_prior_offset_out_of_support_is_neg_infinity() {
-        use sim::inference::prior::Prior;
+        use sim::inference::prior::{Prior, Density};
 
         let spec = EstimatedParam {
             name: "tau".into(), index: 0, initial: -100.0, rw_sd: 0.0,
@@ -1949,7 +1949,7 @@ mod tests {
             lower: -86.0, upper: 0.0,
             rw_sd_auto: false, ivp: false,
         };
-        let prior = Prior::Uniform { lower: -86.0, upper: 0.0 };
+        let prior = Prior::Fixed(Density::Uniform { lower: -86.0, upper: 0.0 });
         let offset = compute_focal_log_prior_offset(
             &[spec], &[prior], &[-100.0],
         );

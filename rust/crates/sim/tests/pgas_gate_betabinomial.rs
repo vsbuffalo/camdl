@@ -195,7 +195,7 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
             ivp: false,
         },
     ];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
         n_particles: 50,
@@ -291,7 +291,7 @@ fn gh76_pgas_refuses_parametric_derived_projection_param() {
             ivp: false,
         },
     ];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
         n_particles: 50,

@@ -149,7 +149,7 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
         "sigma".into(),
         ir::expr::Expr::Param(ir::expr::ParamExpr { param: "beta_sd".into() }),
     );
-    let priors = vec![Prior::Hierarchical(ir::parameter::HierarchicalPrior {
+    let priors = vec![Prior::from_hierarchical_ir(&ir::parameter::HierarchicalPrior {
         kind: ir::parameter::HierarchicalKind::Normal,
         args,
         pool_over: String::new(),

@@ -173,7 +173,7 @@ fn test_pmmh_posterior_covers_truth() {
     let eval_loglik = make_eval_loglik(compiled.clone(), n_particles);
 
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Normal { mean: 0.01, sd: 0.01 }];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Normal { mean: 0.01, sd: 0.01 })];
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
@@ -217,7 +217,7 @@ fn test_pmmh_determinism() {
     let eval_loglik = make_eval_loglik(compiled.clone(), n_particles);
 
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
@@ -250,7 +250,7 @@ fn test_pmmh_acceptance_rate() {
     let eval_loglik = make_eval_loglik(compiled.clone(), n_particles);
 
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
@@ -280,7 +280,7 @@ fn test_pmmh_flat_prior_finds_near_mle() {
     let eval_loglik = make_eval_loglik(compiled.clone(), n_particles);
 
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
@@ -310,7 +310,7 @@ fn test_pmmh_adaptive_improves_acceptance() {
     let eval_loglik = make_eval_loglik(compiled.clone(), n_particles);
 
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let base_params = compiled.default_params.clone();
 
     // Deliberately bad initial proposal: 10× too wide
@@ -370,7 +370,7 @@ fn test_pmmh_different_seeds_differ() {
     let eval_loglik = make_eval_loglik(compiled.clone(), n_particles);
 
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
@@ -512,7 +512,7 @@ fn cpm_accepts_uniform_single_obs() {
 #[test]
 fn pmmh_surfaces_structural_eval_error() {
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Normal { mean: 0.01, sd: 0.01 }];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Normal { mean: 0.01, sd: 0.01 })];
     let base_params = vec![0.01];
     let config = PMMHConfig {
         n_steps: 50, n_particles: 10, dt: 1.0, proposal_sd: vec![0.2],
@@ -540,7 +540,7 @@ fn pmmh_surfaces_structural_eval_error() {
 #[test]
 fn pmmh_tolerates_ruled_out_neg_inf() {
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Normal { mean: 0.01, sd: 0.01 }];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Normal { mean: 0.01, sd: 0.01 })];
     let base_params = vec![0.01];
     let config = PMMHConfig {
         n_steps: 50, n_particles: 10, dt: 1.0, proposal_sd: vec![0.2],

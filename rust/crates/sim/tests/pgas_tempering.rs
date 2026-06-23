@@ -154,7 +154,7 @@ fn test_single_rung_deterministic() {
     let (compiled, base_params) = pure_death_model();
     let obs = observations();
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let obs_m = obs_model(&compiled);
 
     let config = PGASConfig {
@@ -205,7 +205,7 @@ fn test_two_rungs_no_panic() {
     let (compiled, base_params) = pure_death_model();
     let obs = observations();
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let obs_m = obs_model(&compiled);
 
     let config = PGASConfig {
@@ -238,7 +238,7 @@ fn test_four_rungs_runs() {
     let (compiled, base_params) = pure_death_model();
     let obs = observations();
     let if2_params = vec![mu_param()];
-    let priors = vec![Prior::Flat];
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let obs_m = obs_model(&compiled);
 
     let config = PGASConfig {

@@ -22,6 +22,7 @@ use crate::inference::obs_loglik::{poisson_logpmf, binom_logpmf};
 use crate::inference::particle_filter::Observation;
 use crate::inference::resampling::systematic_resample;
 use crate::inference::pmmh::Prior;
+use crate::inference::prior::Density;
 use crate::inference::types::{EstimatedParam, RESAMPLE_RNG_STREAM, init_particle_rngs, restore_z_values};
 use crate::propensity::{eval_propensities, EvalCtx};
 use crate::resolved_expr::eval_resolved;
@@ -1744,47 +1745,57 @@ fn prior_log_density_and_grad_z(
     prior: &Prior, param: &EstimatedParam, theta: f64, z: f64,
 ) -> (f64, f64) {
     let lp = prior.log_density(theta, z);
-    let dlp_dz = match prior {
-        Prior::Flat => 0.0,
-        Prior::Uniform { lower, upper } => {
+    let density = match prior {
+        // Hierarchical priors need an env-aware density AND gradient to
+        // drive NUTS correctly. PGAS+NUTS with hierarchical leaves is
+        // tracked as Gate 3b — needs env threaded through this function
+        // signature. For Gate 3a (PMMH + hierarchical), PMMH does not
+        // call this function, and `run_pgas` refuses hierarchical priors up
+        // front (gh#175), so this arm is a defensive -inf.
+        Prior::Hierarchical(_) => return (f64::NEG_INFINITY, 0.0),
+        Prior::Fixed(d) => d,
+    };
+    let dlp_dz = match density {
+        Density::Flat => 0.0,
+        Density::Uniform { lower, upper } => {
             if theta < *lower || theta > *upper { return (lp, 0.0); }
             0.0 // flat density → zero gradient inside support
         }
-        Prior::Normal { mean, sd } => {
+        Density::Normal { mean, sd } => {
             let dlp_dtheta = -(theta - mean) / (sd * sd);
             dlp_dtheta * param.transform_deriv(z)
         }
-        Prior::TransformedNormal { mean, sd } => {
+        Density::TransformedNormal { mean, sd } => {
             // d/dz of the NATURAL-scale log-normal density log p(θ(z)).
             // log_density returns log N(z; μ, σ) − z (it pre-subtracts the
             // Log Jacobian z), so its z-derivative is −(z−μ)/σ² − 1. The
             // caller adds jacobian_grad = +1, recovering d/dz log N(z) =
             // −(z−μ)/σ². Omitting the −1 here left the NUTS gradient for
             // log_normal priors off by +1 (uncovered: the only FD gradient
-            // test used Prior::Flat).
+            // test used a flat prior).
             -(z - mean) / (sd * sd) - 1.0
         }
-        Prior::HalfNormal { sigma } => {
+        Density::HalfNormal { sigma } => {
             if theta < 0.0 { return (lp, 0.0); }
             let dlp_dtheta = -theta / (sigma * sigma);
             dlp_dtheta * param.transform_deriv(z)
         }
-        Prior::Beta { alpha, beta } => {
+        Density::Beta { alpha, beta } => {
             if theta <= 0.0 || theta >= 1.0 { return (lp, 0.0); }
             let dlp_dtheta = (alpha - 1.0) / theta - (beta - 1.0) / (1.0 - theta);
             dlp_dtheta * param.transform_deriv(z)
         }
-        Prior::Gamma { shape, rate } => {
+        Density::Gamma { shape, rate } => {
             if theta <= 0.0 { return (lp, 0.0); }
             let dlp_dtheta = (shape - 1.0) / theta - rate;
             dlp_dtheta * param.transform_deriv(z)
         }
-        Prior::Exponential { rate } => {
+        Density::Exponential { rate } => {
             if theta < 0.0 { return (lp, 0.0); }
             let dlp_dtheta = -rate;
             dlp_dtheta * param.transform_deriv(z)
         }
-        Prior::LogUniform { lower, upper } => {
+        Density::LogUniform { lower, upper } => {
             if theta < *lower || theta > *upper { return (lp, 0.0); }
             // d/dθ[−ln θ − const] = −1/θ; chain to z. With the Log transform
             // this is −1, which the caller's jacobian_grad (+1) cancels → the
@@ -1792,20 +1803,13 @@ fn prior_log_density_and_grad_z(
             let dlp_dtheta = -1.0 / theta;
             dlp_dtheta * param.transform_deriv(z)
         }
-        Prior::TruncatedNormal { mean, sd, lower, upper } => {
+        Density::TruncatedNormal { mean, sd, lower, upper } => {
             if theta < *lower || theta > *upper { return (lp, 0.0); }
             // The normalizer Z is constant in θ, so only the Gaussian kernel
             // contributes: d/dθ[−0.5((θ−μ)/σ)²] = −(θ−μ)/σ².
             let dlp_dtheta = -(theta - mean) / (sd * sd);
             dlp_dtheta * param.transform_deriv(z)
         }
-        // Hierarchical priors need an env-aware density AND gradient to
-        // drive NUTS correctly. PGAS+NUTS with hierarchical leaves is
-        // tracked as Gate 3b — needs env threaded through this function
-        // signature. For Gate 3a (PMMH + hierarchical), PMMH does not
-        // call this function. Until 3b lands: model compiles + PMMH
-        // works + NUTS on hierarchical coords is disabled-by-infinity.
-        Prior::Hierarchical(_) => return (f64::NEG_INFINITY, 0.0),
     };
     (lp, dlp_dz)
 }
@@ -3156,7 +3160,7 @@ mod prior_grad_tests {
         // caller adds jacobian_grad = +1 unconditionally and log_density
         // pre-subtracts the -z Jacobian — leaving the gradient off by +1.
         let p = log_param(1e-4, 1e2);
-        assert_grad_matches_fd(&Prior::TransformedNormal { mean: 1.0, sd: 0.5 },
+        assert_grad_matches_fd(&Prior::Fixed(Density::TransformedNormal { mean: 1.0, sd: 0.5 }),
             &p, &[-1.0, 0.0, 0.7, 1.5]);
     }
 
@@ -3164,11 +3168,11 @@ mod prior_grad_tests {
     fn natural_scale_priors_grad_matches_fd() {
         // These arms already follow the natural-density convention; lock them.
         let lp = log_param(1e-4, 1e2);
-        assert_grad_matches_fd(&Prior::HalfNormal { sigma: 1.0 }, &lp, &[-1.0, 0.0, 1.0]);
-        assert_grad_matches_fd(&Prior::Gamma { shape: 2.0, rate: 1.5 }, &lp, &[-1.0, 0.0, 1.0]);
-        assert_grad_matches_fd(&Prior::Exponential { rate: 0.7 }, &lp, &[-1.0, 0.0, 1.0]);
+        assert_grad_matches_fd(&Prior::Fixed(Density::HalfNormal { sigma: 1.0 }), &lp, &[-1.0, 0.0, 1.0]);
+        assert_grad_matches_fd(&Prior::Fixed(Density::Gamma { shape: 2.0, rate: 1.5 }), &lp, &[-1.0, 0.0, 1.0]);
+        assert_grad_matches_fd(&Prior::Fixed(Density::Exponential { rate: 0.7 }), &lp, &[-1.0, 0.0, 1.0]);
         let ip = identity_param(-5.0, 5.0);
-        assert_grad_matches_fd(&Prior::Normal { mean: 0.3, sd: 0.8 }, &ip, &[-1.0, 0.0, 1.0]);
+        assert_grad_matches_fd(&Prior::Fixed(Density::Normal { mean: 0.3, sd: 0.8 }), &ip, &[-1.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -3176,10 +3180,10 @@ mod prior_grad_tests {
         // On the Log transform the z-scale density is flat → gradient 0.
         let p = log_param(1e-5, 1e-2);
         let zs = [(1e-4_f64).ln(), (1e-3_f64).ln(), (5e-3_f64).ln()];
-        assert_grad_matches_fd(&Prior::LogUniform { lower: 1e-5, upper: 1e-2 }, &p, &zs);
+        assert_grad_matches_fd(&Prior::Fixed(Density::LogUniform { lower: 1e-5, upper: 1e-2 }), &p, &zs);
         // And it really is flat (gradient ≈ 0 everywhere interior).
         for &z in &zs {
-            assert!(target_grad(&Prior::LogUniform { lower: 1e-5, upper: 1e-2 }, &p, z).abs() < 1e-9);
+            assert!(target_grad(&Prior::Fixed(Density::LogUniform { lower: 1e-5, upper: 1e-2 }), &p, z).abs() < 1e-9);
         }
     }
 
@@ -3188,7 +3192,7 @@ mod prior_grad_tests {
         // Identity transform, bounds = truncation support.
         let ip = identity_param(0.3, 1.0);
         assert_grad_matches_fd(
-            &Prior::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 },
+            &Prior::Fixed(Density::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 }),
             &ip, &[0.4, 0.7, 0.95]);
         // Logit transform onto [0.3, 1.0] — bounds equal truncation support.
         let lp = EstimatedParam {
@@ -3197,7 +3201,7 @@ mod prior_grad_tests {
             lower: 0.3, upper: 1.0, rw_sd_auto: false, ivp: false,
         };
         assert_grad_matches_fd(
-            &Prior::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 },
+            &Prior::Fixed(Density::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 }),
             &lp, &[-1.0, 0.0, 1.0]);
     }
 }

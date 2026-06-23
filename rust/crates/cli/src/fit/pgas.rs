@@ -11,6 +11,7 @@ use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::Prior,
+    prior::Density,
     pgas::{PGASConfig, ChainResumeState, run_pgas, PGASSweep, PGASTrajectory},
     diagnostic::{DiagnosticCollector, DiagnosticKind},
 };
@@ -216,52 +217,65 @@ pub fn run_stage(
     crate::util::print_observations_summary(&config.model);
 
     // Report priors
-    let any_non_flat = priors.iter().any(|p| !matches!(p, Prior::Flat));
+    let any_non_flat = priors.iter().any(|p| !matches!(p, Prior::Fixed(Density::Flat)));
     if any_non_flat {
         eprintln!("  priors:");
         for (spec, prior) in config.estimated_params.iter().zip(&priors) {
             match prior {
-                Prior::Flat => {},
-                Prior::Uniform { lower, upper } => {
+                Prior::Fixed(Density::Flat) => {},
+                Prior::Fixed(Density::Uniform { lower, upper }) => {
                     eprintln!("    {:12} Uniform({:.4}, {:.4})", spec.name, lower, upper);
                 }
-                Prior::Normal { mean, sd } => {
+                Prior::Fixed(Density::Normal { mean, sd }) => {
                     eprintln!("    {:12} Normal({:.4}, {:.4})", spec.name, mean, sd);
                 }
-                Prior::TransformedNormal { mean, sd } => {
+                Prior::Fixed(Density::TransformedNormal { mean, sd }) => {
                     eprintln!("    {:12} LogNormal(mu={:.4}, sigma={:.4}) → median={:.1}",
                         spec.name, mean, sd, mean.exp());
                 }
-                Prior::HalfNormal { sigma } => {
+                Prior::Fixed(Density::HalfNormal { sigma }) => {
                     eprintln!("    {:12} HalfNormal(sigma={:.4})", spec.name, sigma);
                 }
-                Prior::Beta { alpha, beta } => {
+                Prior::Fixed(Density::Beta { alpha, beta }) => {
                     let mode = if *alpha > 1.0 && *beta > 1.0 {
                         (alpha - 1.0) / (alpha + beta - 2.0)
                     } else { 0.5 };
                     eprintln!("    {:12} Beta({:.2}, {:.2}) → mode={:.3}",
                         spec.name, alpha, beta, mode);
                 }
-                Prior::Gamma { shape, rate } => {
+                Prior::Fixed(Density::Gamma { shape, rate }) => {
                     eprintln!("    {:12} Gamma(shape={:.4}, rate={:.4})",
                         spec.name, shape, rate);
                 }
-                Prior::Exponential { rate } => {
+                Prior::Fixed(Density::Exponential { rate }) => {
                     eprintln!("    {:12} Exponential(rate={:.4})", spec.name, rate);
                 }
-                Prior::LogUniform { lower, upper } => {
+                Prior::Fixed(Density::LogUniform { lower, upper }) => {
                     eprintln!("    {:12} LogUniform({:.4e}, {:.4e})", spec.name, lower, upper);
                 }
-                Prior::TruncatedNormal { mean, sd, lower, upper } => {
+                Prior::Fixed(Density::TruncatedNormal { mean, sd, lower, upper }) => {
                     eprintln!("    {:12} TruncatedNormal(mean={:.4}, sd={:.4}) on [{:.4}, {:.4}]",
                         spec.name, mean, sd, lower, upper);
                 }
-                Prior::Hierarchical(h) => {
-                    let parents: Vec<String> = h.args.values()
-                        .filter_map(|e| if let ir::expr::Expr::Param(p) = e { Some(p.param.clone()) } else { None })
-                        .collect();
-                    eprintln!("    {:12} Hierarchical {}(...) | pool_over={} | parents=[{}]",
-                        spec.name, h.kind, h.pool_over, parents.join(", "));
+                Prior::Hierarchical(d) => {
+                    // The full hierarchical metadata (pool_over, named args) lives
+                    // in the IR; the runtime Prior carries only the resolved
+                    // density shape, so read the display detail from the model.
+                    let ir_h = config.model.parameters.iter()
+                        .find(|p| p.name == spec.name)
+                        .and_then(|p| p.hierarchical());
+                    match ir_h {
+                        Some(h) => {
+                            let parents: Vec<String> = h.args.values()
+                                .filter_map(|e| if let ir::expr::Expr::Param(p) = e {
+                                    Some(p.param.clone())
+                                } else { None })
+                                .collect();
+                            eprintln!("    {:12} Hierarchical {}(...) | pool_over={} | parents=[{}]",
+                                spec.name, h.kind, h.pool_over, parents.join(", "));
+                        }
+                        None => eprintln!("    {:12} Hierarchical {}(...)", spec.name, d.kind_str()),
+                    }
                 }
             }
         }
