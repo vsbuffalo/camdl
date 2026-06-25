@@ -1033,13 +1033,43 @@ let doc_of_json j =
   let s key = match member_opt key j with Some (`String v) -> Some v | _ -> None in
   { text = s "text"; symbol = s "symbol"; reference = s "ref" }
 
+(* The doc dictionary, serialized as `{ category: { name: doc, … }, … }`.
+   Empty categories are omitted; an entirely-empty index serializes to `{}`,
+   and the envelope omits the `docs` key altogether (see envelope_to_json). *)
+let doc_index_to_json (di : doc_index) : Yojson.Safe.t =
+  let category name entries =
+    if entries = [] then []
+    else [(name, obj (List.map (fun (k, d) -> (k, doc_to_json d)) entries))]
+  in
+  obj (
+    category "parameters"   di.di_parameters @
+    category "compartments" di.di_compartments @
+    category "transitions"  di.di_transitions @
+    category "observations" di.di_observations @
+    category "dimensions"   di.di_dimensions)
+
+let doc_index_of_json j : doc_index =
+  let category name = match member_opt name j with
+    | Some (`Assoc kvs) -> List.map (fun (k, v) -> (k, doc_of_json v)) kvs
+    | _ -> []
+  in
+  { di_parameters   = category "parameters";
+    di_compartments = category "compartments";
+    di_transitions  = category "transitions";
+    di_observations = category "observations";
+    di_dimensions   = category "dimensions"; }
+
+let doc_index_is_empty (di : doc_index) : bool =
+  di.di_parameters = [] && di.di_compartments = [] && di.di_transitions = []
+  && di.di_observations = [] && di.di_dimensions = []
+
 let parameter_to_json (p : parameter) : Yojson.Safe.t =
-  obj ([
+  obj [
     ("name",       str p.name);
     ("value",      param_value_to_json p.value);
     ("param_kind", match p.param_kind with None -> null | Some k -> str (param_kind_name k));
     ("param_dim",  match p.param_dim  with None -> null | Some (p_exp, t_exp) -> arr [int p_exp; int t_exp]);
-  ] @ (match p.doc with None -> [] | Some d -> [("doc", doc_to_json d)]))
+  ]
 
 let parameter_of_json j =
   { name       = as_string (member "name" j);
@@ -1054,7 +1084,6 @@ let parameter_of_json j =
     param_dim  = (match member_opt "param_dim" j with
       | Some (`List [p; t]) -> Some (as_int p, as_int t)
       | _ -> None);
-    doc        = (match member_opt "doc" j with Some (`Assoc _ as d) -> Some (doc_of_json d) | _ -> None);
   }
 
 (* ── Initial conditions ──────────────────────────────────────────────────── *)
@@ -1317,6 +1346,9 @@ let model_of_json (j : Yojson.Safe.t) : model =
       (match member_opt "identity_tracked_compartments" j with
        | None | Some `Null -> []
        | Some v -> List.map as_string (as_list v));
+    (* The doc dictionary lives at the envelope level, not the model body;
+       `model_of_envelope_json` reads it and overrides this default. *)
+    doc_index          = empty_doc_index;
   }
 
 (* gh#audit-C8. IR schema version baked at build time from `ir/VERSION`
@@ -1335,11 +1367,12 @@ let validated_by = "ocaml-compiler-v" ^ ir_version
    (rust/crates/ir/src/lib.rs) requires the wrapper and rejects
    mismatched ir_version with IrError::VersionMismatch. *)
 let envelope_to_json (m : model) : Yojson.Safe.t =
-  obj [
+  obj ([
     ("ir_version",   str ir_version);
     ("validated_by", str validated_by);
     ("model",        model_to_json m);
-  ]
+  ] @ (if doc_index_is_empty m.doc_index then []
+       else [("docs", doc_index_to_json m.doc_index)]))
 
 (* gh#audit-C8. Parse an envelope and verify the version handshake.
    On mismatch returns Error with a hint pointing the user at the
@@ -1348,7 +1381,15 @@ let model_of_envelope_json (j : Yojson.Safe.t) : (model, string) result =
   match member_opt "ir_version" j with
   | Some (`String v) when v = ir_version ->
       (match member_opt "model" j with
-       | Some mj -> (try Ok (model_of_json mj) with DeserError msg -> Error msg)
+       | Some mj ->
+         (try
+            let m = model_of_json mj in
+            let doc_index = match member_opt "docs" j with
+              | Some dj -> doc_index_of_json dj
+              | None    -> empty_doc_index
+            in
+            Ok { m with doc_index }
+          with DeserError msg -> Error msg)
        | None -> Error "IR envelope missing `model` field")
   | Some (`String v) ->
       Error (Printf.sprintf

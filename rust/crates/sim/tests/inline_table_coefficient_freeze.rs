@@ -28,7 +28,7 @@ use sim::{
 };
 
 fn fixed(name: &str, value: f64) -> Parameter {
-    Parameter { name: name.into(), value: ParamValue::Fixed { value }, param_kind: None, param_dim: None, doc: None }
+    Parameter { name: name.into(), value: ParamValue::Fixed { value }, param_kind: None, param_dim: None }
 }
 
 fn table_lookup(table: &str, index: f64) -> Expr {

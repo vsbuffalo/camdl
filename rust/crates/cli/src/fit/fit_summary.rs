@@ -215,12 +215,11 @@ fn load_documented_params(fit_dir: &Path) -> Vec<(String, ir::parameter::DocBloc
                 .find_map(|(_, rec)| rec.provenance.source_paths.first().cloned())
         });
     let Some(model_path) = model_path else { return Vec::new() };
-    match crate::util::load_model(&model_path) {
-        Ok((m, _)) => m
-            .parameters
-            .iter()
-            .filter_map(|p| p.doc.clone().map(|d| (p.name.clone(), d)))
-            .collect(),
+    match crate::util::load_model_docs(&model_path) {
+        // The envelope dictionary keys by base parameter name (`R0`, not
+        // `R0_urban`), so a stratified family shows once — `BTreeMap` order is
+        // deterministic.
+        Ok(docs) => docs.parameters.into_iter().collect(),
         Err(_) => Vec::new(),
     }
 }

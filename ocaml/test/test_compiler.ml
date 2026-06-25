@@ -7445,34 +7445,26 @@ init { S = 1000  I = 10 }
 simulate { from = 0 'days to = 90 'days }
 |}
 
-(* The same source with every `#'` doc line removed — the undocumented twin. *)
-let strip_doc_lines src =
-  String.split_on_char '\n' src
-  |> List.filter (fun line ->
-       let t = String.trim line in
-       not (String.length t >= 2 && t.[0] = '#' && t.[1] = '\''))
-  |> String.concat "\n"
-
 let test_doc_comment_compiles () =
   let _ : Ir.model = compile_expect_ok doc_model_src in
   ()
 
 let test_doc_param_reaches_ir () =
-  (* Stage 3: parameter docs DO reach the IR (for Rust consumers like the fit
-     report). The @symbol/@ref tags land on each IR parameter, including every
-     expanded leaf of an indexed param. *)
+  (* Parameter docs reach the model's envelope doc dictionary (the single doc
+     home, read by Rust consumers). Keyed by BASE name (`R0`, not `R0_urban`):
+     a stratified family shares one entry. *)
   let m = compile_expect_ok doc_model_src in
-  let find n = List.find_opt (fun (p : Ir.parameter) -> p.name = n) m.parameters in
-  (match find "R0_urban" with
-   | Some { doc = Some d; _ } ->
-     Alcotest.(check (option string)) "R0 @symbol reaches the IR leaf"
+  let find n = List.assoc_opt n m.doc_index.di_parameters in
+  (match find "R0" with
+   | Some d ->
+     Alcotest.(check (option string)) "R0 @symbol in the doc dictionary"
        (Some "R_naught") d.symbol
-   | _ -> Alcotest.fail "R0_urban carries no doc in the IR");
+   | None -> Alcotest.fail "R0 missing from the doc dictionary");
   (match find "gamma" with
-   | Some { doc = Some d; _ } ->
-     Alcotest.(check (option string)) "gamma @ref reaches the IR"
+   | Some d ->
+     Alcotest.(check (option string)) "gamma @ref in the doc dictionary"
        (Some "Anderson and May 1991") d.reference
-   | _ -> Alcotest.fail "gamma carries no doc in the IR")
+   | None -> Alcotest.fail "gamma missing from the doc dictionary")
 
 let test_doc_dangling_rejected () =
   (* a `#'` that precedes no declaration (sits before `}`) is a hard parse
@@ -7552,16 +7544,16 @@ let test_doc_inspect_dimension () =
   Alcotest.(check bool) "dimension doc present in summary" true
     (contains_substring ~needle:"spatial patches under surveillance" out)
 
-(* compartment / transition / observation docs do NOT reach the IR — only
-   parameter docs do (Stage 3). A model documented only on those declarations
-   serializes identically to its stripped twin. *)
-let test_doc_nonparam_ir_neutral () =
-  let m_doc  = compile_expect_ok doc_obs_src in
-  let m_bare = compile_expect_ok (strip_doc_lines doc_obs_src) in
-  Alcotest.(check string)
-    "non-parameter docs do not change the IR"
-    (Serde.model_to_string m_bare)
-    (Serde.model_to_string m_doc)
+(* compartment / transition / observation docs reach the model's doc dictionary
+   (the single envelope-level doc home), keyed by base declaration name. *)
+let test_doc_nonparam_reaches_ir () =
+  let m = compile_expect_ok doc_obs_src in
+  Alcotest.(check bool) "compartment doc in the dictionary" true
+    (List.mem_assoc "S" m.doc_index.di_compartments);
+  Alcotest.(check bool) "transition doc in the dictionary" true
+    (List.mem_assoc "infection" m.doc_index.di_transitions);
+  Alcotest.(check bool) "observation doc in the dictionary" true
+    (List.mem_assoc "cases" m.doc_index.di_observations)
 
 let () =
   Alcotest.run "compiler" [
@@ -7574,7 +7566,7 @@ let () =
       Alcotest.test_case "inspect --compartments shows doc prose"     `Quick test_doc_inspect_compartments;
       Alcotest.test_case "inspect --transitions shows doc prose"      `Quick test_doc_inspect_transition;
       Alcotest.test_case "inspect --summary shows dimension doc"      `Quick test_doc_inspect_dimension;
-      Alcotest.test_case "non-parameter docs are IR-neutral"         `Quick test_doc_nonparam_ir_neutral;
+      Alcotest.test_case "non-parameter docs reach the dictionary"   `Quick test_doc_nonparam_reaches_ir;
     ];
     "quadratic_coupling_warning", [
       Alcotest.test_case "W104 on per-(p,q) transition" `Quick test_w104_perpair_warns;

@@ -70,7 +70,7 @@ fn div(a: Expr, b: Expr) -> Expr {
     Expr::BinOp(BinOpWrap { bin_op: BinOpExpr { op: BinOp::Div, left: Box::new(a), right: Box::new(b) } })
 }
 fn param(name: &str, value: f64) -> Parameter {
-    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value: value }, param_kind: None, param_dim: None, doc: None }
+    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value: value }, param_kind: None, param_dim: None }
 }
 fn transition(name: &str, sto: Vec<StoichiometryEntry>, rate: Expr) -> Transition {
     Transition {

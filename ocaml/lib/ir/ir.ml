@@ -496,12 +496,33 @@ type doc = {
   reference: string option;   (* @ref — citation for the definition *)
 }
 
+(* The model's `#'` documentation dictionary: base declaration name → doc, by
+   category. Built once from the source declarations and serialized at the IR
+   *envelope* level (not the model body) — it is presentation metadata, outside
+   the content-addressed [run_id], and the single home for every entity's doc.
+   A downstream consumer (a sidecar, a plot, a report) labels any output column
+   by joining its name against this index. *)
+type doc_index = {
+  di_parameters:   (string * doc) list;
+  di_compartments: (string * doc) list;
+  di_transitions:  (string * doc) list;
+  di_observations: (string * doc) list;
+  di_dimensions:   (string * doc) list;
+}
+
+let empty_doc_index = {
+  di_parameters = []; di_compartments = []; di_transitions = [];
+  di_observations = []; di_dimensions = [];
+}
+
 type parameter = {
   name:          string;
   value:         param_value;
   param_kind:    param_kind option;  (* DSL type keyword; see [param_kind] above *)
   param_dim:     (int * int) option;  (* explicit dimension annotation: (P exponent, T exponent) *)
-  doc:           doc option;          (* `#'` parameter documentation (presentation only) *)
+  (* Parameter `#'` documentation lives in the model's [doc_index] (serialized at
+     the envelope level), not here — it is presentation metadata, kept out of the
+     computational record and out of [run_id]. *)
 }
 
 (* Accessors recovering the former flat [parameter] fields from [value].
@@ -646,4 +667,7 @@ type model = {
      in that case the lineage subsystem is statically inert. Cached
      here so the runtime does not recompute it. *)
   identity_tracked_compartments: string list;
+  (* `#'` documentation dictionary (presentation metadata). Serialized at the
+     envelope level, never in the model body, so it stays outside [run_id]. *)
+  doc_index:          doc_index;
 }

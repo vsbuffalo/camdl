@@ -317,11 +317,9 @@ pub struct Parameter {
     /// `None` = no annotation (dimension inferred by compiler).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub param_dim:     Option<(i32, i32)>,
-    /// `#'` documentation block (`@symbol` / `@ref` + prose) carried from the
-    /// DSL for presentation — e.g. the fit report's parameter table. Excluded
-    /// from the content-addressed `run_id`. `None` = undocumented.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub doc:           Option<DocBlock>,
+    // Parameter `#'` documentation lives in the model's envelope-level
+    // [`crate::ModelDocs`] dictionary, not here — presentation metadata kept off
+    // the computational record and out of `run_id`.
 }
 
 impl Parameter {
@@ -375,23 +373,12 @@ mod doc_tests {
     }
 
     #[test]
-    fn absent_doc_is_omitted_from_parameter_json() {
-        let p = Parameter {
-            name: "beta".into(),
-            value: ParamValue::Required,
-            param_kind: None,
-            param_dim: None,
-            doc: None,
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        assert!(!json.contains("\"doc\""), "undocumented param must omit doc: {json}");
-        // A documented param round-trips its doc.
-        let p2 = Parameter {
-            doc: Some(DocBlock { text: Some("x".into()), symbol: None, reference: None }),
-            ..p
-        };
-        let back: Parameter = serde_json::from_str(&serde_json::to_string(&p2).unwrap()).unwrap();
-        assert_eq!(p2.doc, back.doc);
+    fn doc_block_omits_empty_fields() {
+        // A symbol-only block serializes just `symbol` (omit-when-None), the
+        // shape the envelope doc dictionary relies on.
+        let d = DocBlock { text: None, symbol: Some("β".into()), reference: None };
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, r#"{"symbol":"β"}"#);
     }
 }
 

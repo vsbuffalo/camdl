@@ -11,7 +11,7 @@ pub mod time_func;
 pub mod transition;
 pub mod validate;
 
-pub use envelope::{IrEnvelope, IrError, IR_VERSION};
+pub use envelope::{IrEnvelope, IrError, ModelDocs, IR_VERSION};
 pub use model::Model;
 
 /// Deserialise a `Model` from a JSON string. gh#audit-C8: enforces
@@ -22,6 +22,23 @@ pub fn from_str(s: &str) -> Result<Model, IrError> {
     let env: IrEnvelope = serde_json::from_str(s)
         .map_err(|e| IrError::Parse(e.to_string()))?;
     env.into_model_checked()
+}
+
+/// Deserialise the full `IrEnvelope` (model **plus** the envelope-level `docs`
+/// dictionary), enforcing the same version handshake as [`from_str`]. Use this
+/// when you need `#'` documentation (e.g. building the fit sidecar or labelling
+/// plot axes); most callers want [`from_str`], which discards `docs`.
+pub fn envelope_from_str(s: &str) -> Result<IrEnvelope, IrError> {
+    let env: IrEnvelope = serde_json::from_str(s)
+        .map_err(|e| IrError::Parse(e.to_string()))?;
+    let expected = IR_VERSION.trim();
+    if env.ir_version != expected {
+        return Err(IrError::VersionMismatch {
+            expected: expected.to_string(),
+            found:    env.ir_version,
+        });
+    }
+    Ok(env)
 }
 
 /// Deserialise a `Model` from a JSON reader. gh#audit-C8: same

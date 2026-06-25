@@ -96,12 +96,13 @@ let empty_model
     model_structure = None;
     balance;
     identity_tracked_compartments;
+    doc_index = empty_doc_index;
   }
 
 let mk_compartment name : compartment = { name; kind = Integer }
 
 let mk_param ?(kind = None) name : parameter =
-  { name; value = Required; param_kind = kind; param_dim = None; doc = None }
+  { name; value = Required; param_kind = kind; param_dim = None }
 
 let mk_transition ?(stoich = []) ?(metadata = None) name rate : transition =
   { name; stoichiometry = stoich; rate; metadata;

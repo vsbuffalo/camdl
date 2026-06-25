@@ -1866,6 +1866,9 @@ fn build_fit_sidecar(
         // expanded observation leaves; emitted for every fit (not gated on
         // Bayesian-ness — an IF2 fit's streams/dims are just as describable).
         schema: model.map(crate::run_meta::ObsSchema::from_model),
+        // The `#'` doc dictionary (presentation metadata), loaded from the same
+        // compiled IR. Empty when the model documents nothing.
+        docs: crate::util::load_model_docs(model_src).unwrap_or_default(),
     }
 }
 

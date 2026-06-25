@@ -145,8 +145,8 @@ fn build_model(interventions: Vec<Intervention>) -> CompiledModel {
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: vec![
-            Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None, doc: None },
-            Parameter { name: "dummy".into(), value: ir::parameter::ParamValue::Fixed { value: 1.0 }, param_kind: None, param_dim: None, doc: None },
+            Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None },
+            Parameter { name: "dummy".into(), value: ir::parameter::ParamValue::Fixed { value: 1.0 }, param_kind: None, param_dim: None },
         ],
         initial_conditions: InitialConditions::Explicit({
             let mut m = HashMap::new();

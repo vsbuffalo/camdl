@@ -1074,18 +1074,7 @@
             { "type": "null" },
             { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 }
           ]
-        },
-        "doc": { "$ref": "#/definitions/doc_block" }
-      }
-    },
-
-    "doc_block": {
-      "type": "object",
-      "description": "A `#'` declaration doc block. Presentation metadata only — excluded from the content-addressed run_id, and omitted from serialization when empty. Every field is optional.",
-      "properties": {
-        "text":   { "type": "string", "description": "Joined prose description (non-@tag lines)." },
-        "symbol": { "type": "string", "description": "@symbol — display label for plots / reports." },
-        "ref":    { "type": "string", "description": "@ref — citation for the definition." }
+        }
       }
     },
 

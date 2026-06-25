@@ -1051,6 +1051,21 @@ pub fn load_model(path: &str) -> Result<(ir::Model, String), String> {
     Ok((model, json))
 }
 
+/// Load just the model's `#'` documentation dictionary (the envelope-level
+/// `docs`), compiling a `.camdl` via camdlc or reading a `.ir.json`. Empty when
+/// the model documents nothing. Used to build the fit sidecar and the
+/// fit-summary parameter legend.
+pub fn load_model_docs(path: &str) -> Result<ir::ModelDocs, String> {
+    let json = if path.ends_with(".camdl") {
+        run_camdlc(path)?
+    } else {
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?
+    };
+    let env = ir::envelope_from_str(&json)
+        .map_err(|e| format!("IR load error from {}: {}", path, e))?;
+    Ok(env.docs)
+}
+
 /// Delegate a subcommand directly to camdlc, passing through all args.
 /// Used for compile, check, inspect which are purely compiler operations.
 pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
@@ -3815,7 +3830,7 @@ mod tests {
                     (Some(v), None) => ir::parameter::ParamValue::Fixed { value: v },
                     (None, None) => ir::parameter::ParamValue::Required,
                 },
-                param_kind: None, param_dim: None, doc: None,
+                param_kind: None, param_dim: None,
             }],
             initial_conditions: ir::model::InitialConditions::Explicit(HashMap::new()),
             output: ir::model::OutputConfig {
@@ -3933,7 +3948,7 @@ mod tests {
         // Two violations: report both. Saves the user from a
         // fix-rerun-fix loop.
         let mut m = model_with_one_param(Some(5.0), Some((0.0, 1.0)));
-        m.parameters.push(ir::parameter::Parameter { name: "y".into(), value: ir::parameter::ParamValue::Fixed { value: f64::NAN }, param_kind: None, param_dim: None, doc: None });
+        m.parameters.push(ir::parameter::Parameter { name: "y".into(), value: ir::parameter::ParamValue::Fixed { value: f64::NAN }, param_kind: None, param_dim: None });
         let err = validate_parameter_values(&m).unwrap_err();
         assert!(err.contains("'x'"), "x violation missing: {err}");
         assert!(err.contains("'y'"), "y violation missing: {err}");

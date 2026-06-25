@@ -586,7 +586,7 @@ fn build_discretized_normal_seir() -> ir::Model {
     let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");
     model.observations.retain(|o| o.name == "weekly_cases");
 
-    model.parameters.push(Parameter { name: "sigma_obs".to_string(), value: ir::parameter::ParamValue::Estimated { init: Some(8.0), bounds: Some((0.1, 1000.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: Some(ir::parameter::ParamKind::Positive), param_dim: None, doc: None });
+    model.parameters.push(Parameter { name: "sigma_obs".to_string(), value: ir::parameter::ParamValue::Estimated { init: Some(8.0), bounds: Some((0.1, 1000.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: Some(ir::parameter::ParamKind::Positive), param_dim: None });
 
     for om in &mut model.observations {
         use ir::observation::{Likelihood, NormalLikelihood};
@@ -725,7 +725,7 @@ fn build_beta_binomial_seir() -> ir::Model {
     model.observations.retain(|o| o.name == "weekly_cases");
 
     for (name, val) in [("a_obs", 2.0), ("b_obs", 8.0)] {
-        model.parameters.push(Parameter { name: name.to_string(), value: ir::parameter::ParamValue::Estimated { init: Some(val), bounds: Some((0.01, 1000.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: Some(ir::parameter::ParamKind::Positive), param_dim: None, doc: None });
+        model.parameters.push(Parameter { name: name.to_string(), value: ir::parameter::ParamValue::Estimated { init: Some(val), bounds: Some((0.01, 1000.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: Some(ir::parameter::ParamKind::Positive), param_dim: None });
     }
 
     for om in &mut model.observations {

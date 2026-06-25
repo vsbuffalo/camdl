@@ -286,6 +286,7 @@ mod tests {
             resolved_priors: vec![],
             parameters_provenance: HashMap::new(),
             schema: None,
+            docs: Default::default(),
         };
         // No fit.toml on disk → archive step is skipped; the sidecar still writes.
         write_fit_sidecar(seg, Path::new("nonexistent.toml"), &sidecar).unwrap();

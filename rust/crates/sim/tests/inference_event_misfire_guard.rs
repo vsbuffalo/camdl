@@ -109,7 +109,7 @@ fn death_model(event_times: Option<Vec<f64>>) -> CompiledModel {
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: vec![
-            Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.01 }, param_kind: None, param_dim: None, doc: None },
+            Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.01 }, param_kind: None, param_dim: None },
         ],
         initial_conditions: InitialConditions::Explicit({
             let mut m = HashMap::new(); m.insert("N".into(), 100.0); m

@@ -300,7 +300,7 @@ mod tests {
                 transform: ir::parameter::Transform::Identity,
             },
             param_kind: None,
-            param_dim: None, doc: None,
+            param_dim: None,
         }
     }
 

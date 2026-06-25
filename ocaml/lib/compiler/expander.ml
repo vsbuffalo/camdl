@@ -3510,10 +3510,34 @@ let ir_doc_of_ast (d : Ast.doc option) : Ir.doc option =
   Option.map (fun (a : Ast.doc) ->
     { Ir.text = a.Ast.d_text; symbol = a.d_symbol; reference = a.d_ref }) d
 
+(* Fold every source declaration's `#'` doc into the model's doc dictionary,
+   keyed by base declaration name (matching what an author wrote and the logical
+   names ObsSchema groups by). Only documented declarations appear. *)
+let build_doc_index ctx : Ir.doc_index =
+  let collect get_name get_doc decls =
+    List.filter_map (fun d ->
+      match ir_doc_of_ast (get_doc d) with
+      | Some doc -> Some (get_name d, doc)
+      | None     -> None) decls
+  in
+  { Ir.di_parameters =
+      collect (function Ast.PScalar s -> s.pname | Ast.PIndexed i -> i.pname)
+              (function Ast.PScalar s -> s.pdoc  | Ast.PIndexed i -> i.pdoc)
+              ctx.param_decls;
+    Ir.di_compartments =
+      collect (fun (c : Ast.compartment_decl) -> c.cname) (fun c -> c.cdoc) ctx.comp_decls;
+    Ir.di_transitions =
+      collect (fun (t : Ast.transition_decl) -> t.trname) (fun t -> t.trdoc) ctx.orig_transitions;
+    Ir.di_observations =
+      collect (fun (o : Ast.obs_decl) -> o.oname) (fun o -> o.odoc) ctx.obs_decls;
+    Ir.di_dimensions =
+      collect (fun (d : Ast.dimensions_entry) -> d.dename) (fun d -> d.dedoc) ctx.dim_decls;
+  }
+
 let expand_parameters ctx =
   let from_params = List.concat_map (fun pd ->
     match pd with
-    | PScalar { pname; pbounds; pkind; pdim; punit; pprior; ploc; pdoc; _ } ->
+    | PScalar { pname; pbounds; pkind; pdim; punit; pprior; ploc; _ } ->
       let bounds = resolve_bounds ctx pbounds in
       let pk = Some (ir_param_kind_of_ast pkind) in
       let loc = diag_loc_of_ast_ctx ctx ploc in
@@ -3528,9 +3552,8 @@ let expand_parameters ctx =
          Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
          Ir.param_kind = pk;
          Ir.param_dim  = dim;
-         Ir.doc        = ir_doc_of_ast pdoc;
        }]
-    | PIndexed { pname; pdims = [dim]; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; pdoc; _ } ->
+    | PIndexed { pname; pdims = [dim]; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
       let vals = dim_values ctx dim in
       let bounds = resolve_bounds ctx pbounds in
       let pk = Some (ir_param_kind_of_ast pkind) in
@@ -3547,7 +3570,6 @@ let expand_parameters ctx =
           Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
           Ir.param_kind = pk;
           Ir.param_dim  = resolved_dim;
-          Ir.doc        = ir_doc_of_ast pdoc;
         }
       ) vals
     | PIndexed { pname; pdims; _ } ->
@@ -3581,7 +3603,6 @@ let expand_parameters ctx =
              Ir.value      = Ir.Fixed v;
              Ir.param_kind = Some (ir_param_kind_of_ast pk);
              Ir.param_dim  = None;
-             Ir.doc        = None;
            }
     | _ -> None
   ) ctx.let_bindings in
@@ -6661,6 +6682,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
         });
     Ir.identity_tracked_compartments =
       compute_identity_tracked expanded_comps expanded_trs;
+    Ir.doc_index = build_doc_index ctx;
   } in
   (* Fix B: the record above is fully forced here, so every resolve_expr call
      (transitions, ode, observations, balance) has run and ctx.hoisted_rev

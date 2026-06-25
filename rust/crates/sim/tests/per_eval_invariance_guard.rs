@@ -53,7 +53,7 @@ fn model_with_per_eval_bindings(per_eval_bindings: Vec<Binding>) -> Model {
             name: "beta".into(),
             value: ParamValue::Fixed { value: 1.0 },
             param_kind: None,
-            param_dim: None, doc: None,
+            param_dim: None,
         }],
         initial_conditions: InitialConditions::Parameterized(HashMap::new()),
         output: OutputConfig {

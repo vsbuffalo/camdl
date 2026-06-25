@@ -89,6 +89,7 @@ let model_with_bindings bs =
                    integrator = Rk4 };
     presets = []; model_structure = None; balance = None;
     identity_tracked_compartments = [];
+    doc_index = empty_doc_index;
   }
 
 let test_binding_deps_topo () =
