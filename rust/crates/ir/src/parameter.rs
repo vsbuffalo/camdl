@@ -282,6 +282,24 @@ impl ParamValue {
 
 // ── Parameter declaration ─────────────────────────────────────────────────────
 
+/// A `#'` declaration doc block: prose description plus optional `@symbol` /
+/// `@ref` tags, carried from the DSL for presentation (e.g. a fit report's
+/// parameter table). Presentation metadata only — it is **excluded from the
+/// content-addressed `run_id`** (the [`ContentAddressed`] impls do not visit
+/// it) and omitted from serialization when empty. Every field is optional.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DocBlock {
+    /// Joined prose description (the non-`@tag` lines).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text:      Option<String>,
+    /// `@symbol` — display label for plots / reports (e.g. `β`, `R₀`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol:    Option<String>,
+    /// `@ref` — citation for the definition.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Parameter {
     pub name:          String,
@@ -299,6 +317,11 @@ pub struct Parameter {
     /// `None` = no annotation (dimension inferred by compiler).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub param_dim:     Option<(i32, i32)>,
+    /// `#'` documentation block (`@symbol` / `@ref` + prose) carried from the
+    /// DSL for presentation — e.g. the fit report's parameter table. Excluded
+    /// from the content-addressed `run_id`. `None` = undocumented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc:           Option<DocBlock>,
 }
 
 impl Parameter {
@@ -329,6 +352,46 @@ impl Parameter {
     /// The transform (former `transform` field), if `Estimated`.
     pub fn transform(&self) -> Option<Transform> {
         self.value.transform()
+    }
+}
+
+#[cfg(test)]
+mod doc_tests {
+    use super::*;
+
+    #[test]
+    fn doc_block_round_trips_with_ref_rename() {
+        let d = DocBlock {
+            text: Some("transmission rate".into()),
+            symbol: Some("β".into()),
+            reference: Some("Anderson & May 1991".into()),
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        // The `reference` field serializes under the JSON key `ref`.
+        assert!(json.contains("\"ref\":"), "got: {json}");
+        assert!(!json.contains("reference"), "got: {json}");
+        let back: DocBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(d, back);
+    }
+
+    #[test]
+    fn absent_doc_is_omitted_from_parameter_json() {
+        let p = Parameter {
+            name: "beta".into(),
+            value: ParamValue::Required,
+            param_kind: None,
+            param_dim: None,
+            doc: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("\"doc\""), "undocumented param must omit doc: {json}");
+        // A documented param round-trips its doc.
+        let p2 = Parameter {
+            doc: Some(DocBlock { text: Some("x".into()), symbol: None, reference: None }),
+            ..p
+        };
+        let back: Parameter = serde_json::from_str(&serde_json::to_string(&p2).unwrap()).unwrap();
+        assert_eq!(p2.doc, back.doc);
     }
 }
 

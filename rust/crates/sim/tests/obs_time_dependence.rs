@@ -65,7 +65,7 @@ fn model() -> Arc<CompiledModel> {
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: vec![
-            Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.01 }, param_kind: None, param_dim: None },
+            Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.01 }, param_kind: None, param_dim: None, doc: None },
         ],
         initial_conditions: InitialConditions::Explicit({
             let mut h = HashMap::new(); h.insert("N".into(), 100.0); h

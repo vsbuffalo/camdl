@@ -534,6 +534,7 @@ mod tests {
             },
             param_kind: None,
             param_dim:  None,
+            doc:        None,
         }
     }
 

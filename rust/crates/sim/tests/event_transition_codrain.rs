@@ -103,7 +103,7 @@ fn codrain_model() -> CompiledModel {
             name: "r".into(),
             value: ir::parameter::ParamValue::Fixed { value: R },
             param_kind: None,
-            param_dim: None,
+            param_dim: None, doc: None,
         }],
         initial_conditions: InitialConditions::Explicit({
             let mut m = HashMap::new();
@@ -318,7 +318,7 @@ fn inflow_model() -> CompiledModel {
             name: "r".into(),
             value: ir::parameter::ParamValue::Fixed { value: R },
             param_kind: None,
-            param_dim: None,
+            param_dim: None, doc: None,
         }],
         initial_conditions: InitialConditions::Explicit({
             let mut m = HashMap::new();

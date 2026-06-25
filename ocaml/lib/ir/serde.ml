@@ -1021,13 +1021,25 @@ let param_value_of_json j : param_value =
     }
   | _ -> fail "parameter value: \"mode\" must be \"fixed\", \"estimated\", or \"required\""
 
+(* A `#'` doc block. Serialized omit-when-None so an undocumented parameter is
+   byte-identical to before this field existed (golden-neutral). *)
+let doc_to_json (d : doc) : Yojson.Safe.t =
+  obj (
+    (match d.text      with None -> [] | Some t -> [("text",   str t)]) @
+    (match d.symbol    with None -> [] | Some s -> [("symbol", str s)]) @
+    (match d.reference with None -> [] | Some r -> [("ref",    str r)]))
+
+let doc_of_json j =
+  let s key = match member_opt key j with Some (`String v) -> Some v | _ -> None in
+  { text = s "text"; symbol = s "symbol"; reference = s "ref" }
+
 let parameter_to_json (p : parameter) : Yojson.Safe.t =
-  obj [
+  obj ([
     ("name",       str p.name);
     ("value",      param_value_to_json p.value);
     ("param_kind", match p.param_kind with None -> null | Some k -> str (param_kind_name k));
     ("param_dim",  match p.param_dim  with None -> null | Some (p_exp, t_exp) -> arr [int p_exp; int t_exp]);
-  ]
+  ] @ (match p.doc with None -> [] | Some d -> [("doc", doc_to_json d)]))
 
 let parameter_of_json j =
   { name       = as_string (member "name" j);
@@ -1042,6 +1054,7 @@ let parameter_of_json j =
     param_dim  = (match member_opt "param_dim" j with
       | Some (`List [p; t]) -> Some (as_int p, as_int t)
       | _ -> None);
+    doc        = (match member_opt "doc" j with Some (`Assoc _ as d) -> Some (doc_of_json d) | _ -> None);
   }
 
 (* ── Initial conditions ──────────────────────────────────────────────────── *)

@@ -80,7 +80,7 @@ let mk_compartment name : compartment = { name; kind = Integer }
 
 let mk_param ?(kind = None) ?(dim = None) ?(value = None) name : parameter =
   let value = match value with Some v -> Fixed v | None -> Required in
-  { name; value; param_kind = kind; param_dim = dim }
+  { name; value; param_kind = kind; param_dim = dim; doc = None }
 
 let mk_transition ?(stoich = []) name rate : transition =
   { name; stoichiometry = stoich; rate;

@@ -3505,10 +3505,15 @@ let mk_estimated_or_required ~bounds ~prior ~hierarchical : Ir.param_value =
     Ir.Estimated { est_init = None; est_bounds = bounds; est_prior;
                    est_transform = Ir.Identity }
 
+(* Convert an AST `#'` doc block into its IR mirror (presentation metadata). *)
+let ir_doc_of_ast (d : Ast.doc option) : Ir.doc option =
+  Option.map (fun (a : Ast.doc) ->
+    { Ir.text = a.Ast.d_text; symbol = a.d_symbol; reference = a.d_ref }) d
+
 let expand_parameters ctx =
   let from_params = List.concat_map (fun pd ->
     match pd with
-    | PScalar { pname; pbounds; pkind; pdim; punit; pprior; ploc; _ } ->
+    | PScalar { pname; pbounds; pkind; pdim; punit; pprior; ploc; pdoc; _ } ->
       let bounds = resolve_bounds ctx pbounds in
       let pk = Some (ir_param_kind_of_ast pkind) in
       let loc = diag_loc_of_ast_ctx ctx ploc in
@@ -3523,8 +3528,9 @@ let expand_parameters ctx =
          Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
          Ir.param_kind = pk;
          Ir.param_dim  = dim;
+         Ir.doc        = ir_doc_of_ast pdoc;
        }]
-    | PIndexed { pname; pdims = [dim]; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
+    | PIndexed { pname; pdims = [dim]; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; pdoc; _ } ->
       let vals = dim_values ctx dim in
       let bounds = resolve_bounds ctx pbounds in
       let pk = Some (ir_param_kind_of_ast pkind) in
@@ -3541,6 +3547,7 @@ let expand_parameters ctx =
           Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
           Ir.param_kind = pk;
           Ir.param_dim  = resolved_dim;
+          Ir.doc        = ir_doc_of_ast pdoc;
         }
       ) vals
     | PIndexed { pname; pdims; _ } ->
@@ -3574,6 +3581,7 @@ let expand_parameters ctx =
              Ir.value      = Ir.Fixed v;
              Ir.param_kind = Some (ir_param_kind_of_ast pk);
              Ir.param_dim  = None;
+             Ir.doc        = None;
            }
     | _ -> None
   ) ctx.let_bindings in

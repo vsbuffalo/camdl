@@ -3815,7 +3815,7 @@ mod tests {
                     (Some(v), None) => ir::parameter::ParamValue::Fixed { value: v },
                     (None, None) => ir::parameter::ParamValue::Required,
                 },
-                param_kind: None, param_dim: None,
+                param_kind: None, param_dim: None, doc: None,
             }],
             initial_conditions: ir::model::InitialConditions::Explicit(HashMap::new()),
             output: ir::model::OutputConfig {
@@ -3933,7 +3933,7 @@ mod tests {
         // Two violations: report both. Saves the user from a
         // fix-rerun-fix loop.
         let mut m = model_with_one_param(Some(5.0), Some((0.0, 1.0)));
-        m.parameters.push(ir::parameter::Parameter { name: "y".into(), value: ir::parameter::ParamValue::Fixed { value: f64::NAN }, param_kind: None, param_dim: None });
+        m.parameters.push(ir::parameter::Parameter { name: "y".into(), value: ir::parameter::ParamValue::Fixed { value: f64::NAN }, param_kind: None, param_dim: None, doc: None });
         let err = validate_parameter_values(&m).unwrap_err();
         assert!(err.contains("'x'"), "x violation missing: {err}");
         assert!(err.contains("'y'"), "y violation missing: {err}");

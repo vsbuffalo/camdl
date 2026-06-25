@@ -1670,8 +1670,8 @@ mod hole_scoring_tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![
-                Parameter { name: "gamma".into(), value: ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None },
-                Parameter { name: "rho".into(), value: ParamValue::Fixed { value: 0.5 }, param_kind: None, param_dim: None },
+                Parameter { name: "gamma".into(), value: ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None, doc: None },
+                Parameter { name: "rho".into(), value: ParamValue::Fixed { value: 0.5 }, param_kind: None, param_dim: None, doc: None },
             ],
             initial_conditions: InitialConditions::Explicit({
                 let mut h = HashMap::new();

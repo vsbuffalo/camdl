@@ -200,6 +200,31 @@ fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
     }
 }
 
+/// Documented parameters (name + `#'` doc block) recovered from the fit's
+/// model IR, for the parameter legend at the top of the summary. Uses the same
+/// model-path recovery as [`load_calendar_context`]. Empty when the model can't
+/// be located or no parameter carries a `#'` doc — so undocumented fits show no
+/// legend.
+fn load_documented_params(fit_dir: &Path) -> Vec<(String, ir::parameter::DocBlock)> {
+    let model_path = FitView::read(fit_dir)
+        .map(|v| v.model)
+        .filter(|m| !m.is_empty())
+        .or_else(|| {
+            crate::cas_read::walk_records(fit_dir)
+                .into_iter()
+                .find_map(|(_, rec)| rec.provenance.source_paths.first().cloned())
+        });
+    let Some(model_path) = model_path else { return Vec::new() };
+    match crate::util::load_model(&model_path) {
+        Ok((m, _)) => m
+            .parameters
+            .iter()
+            .filter_map(|p| p.doc.clone().map(|d| (p.name.clone(), d)))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// One resolved fit-stage to render: stage name, on-disk directory,
 /// and method (so consumers can pattern-match on `MethodResult` once
 /// the typed payload is loaded).
@@ -287,6 +312,32 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
     let mut had_provenance_failure = false;
 
     print!("{}", fmt.fit_header(dir));
+
+    // Parameter legend from the model's `#'` docs (symbol — description [ref]).
+    // Shown only when the model documents at least one parameter, so it adds no
+    // noise to undocumented fits.
+    let documented = load_documented_params(Path::new(dir));
+    if !documented.is_empty() {
+        println!("\n  parameters");
+        for (name, d) in &documented {
+            let mut line = String::from("    ");
+            if let Some(s) = &d.symbol {
+                line.push_str(s);
+                line.push_str("  ");
+            }
+            line.push_str(name);
+            if let Some(t) = &d.text {
+                line.push_str("  —  ");
+                line.push_str(t);
+            }
+            if let Some(r) = &d.reference {
+                line.push_str("  [");
+                line.push_str(r);
+                line.push(']');
+            }
+            println!("{}", line);
+        }
+    }
 
     let mut prev_loglik: Option<f64> = None;
     let mut prev_stage_name: Option<String> = None;

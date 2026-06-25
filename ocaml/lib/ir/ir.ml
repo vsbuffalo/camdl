@@ -487,11 +487,21 @@ type param_value =
     }
   | Required
 
+(* A `#'` doc block carried into the IR for non-OCaml consumers (e.g. a fit
+   report's parameter table). Presentation metadata only: excluded from the
+   content-addressed [run_id], and omitted from serialization when empty. *)
+type doc = {
+  text:      string option;   (* joined prose description *)
+  symbol:    string option;   (* @symbol — display label for plots / reports *)
+  reference: string option;   (* @ref — citation for the definition *)
+}
+
 type parameter = {
   name:          string;
   value:         param_value;
   param_kind:    param_kind option;  (* DSL type keyword; see [param_kind] above *)
   param_dim:     (int * int) option;  (* explicit dimension annotation: (P exponent, T exponent) *)
+  doc:           doc option;          (* `#'` parameter documentation (presentation only) *)
 }
 
 (* Accessors recovering the former flat [parameter] fields from [value].

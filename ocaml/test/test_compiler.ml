@@ -7329,10 +7329,14 @@ simulate { from = 0 'days to = 90 'days }
    orthogonal to docs). *)
 let doc_obs_src = {|
 time_unit = 'days
-compartments { S, I, R }
+compartments {
+  #' susceptible
+  S, I, R
+}
 let N = S + I + R
 parameters { beta : rate in [0.001,1.0]  gamma : rate in [0.01,0.5]  rho : probability in [0.1,0.9] }
 transitions {
+  #' force of infection
   infection : S --> I @ beta * S * I / N
   recovery  : I --> R @ gamma * I
 }
@@ -7360,13 +7364,22 @@ let test_doc_comment_compiles () =
   let _ : Ir.model = compile_expect_ok doc_model_src in
   ()
 
-let test_doc_ir_neutral () =
-  let m_doc  = compile_expect_ok doc_model_src in
-  let m_bare = compile_expect_ok (strip_doc_lines doc_model_src) in
-  Alcotest.(check string)
-    "documented model serializes identically to its undocumented twin"
-    (Serde.model_to_string m_bare)
-    (Serde.model_to_string m_doc)
+let test_doc_param_reaches_ir () =
+  (* Stage 3: parameter docs DO reach the IR (for Rust consumers like the fit
+     report). The @symbol/@ref tags land on each IR parameter, including every
+     expanded leaf of an indexed param. *)
+  let m = compile_expect_ok doc_model_src in
+  let find n = List.find_opt (fun (p : Ir.parameter) -> p.name = n) m.parameters in
+  (match find "R0_urban" with
+   | Some { doc = Some d; _ } ->
+     Alcotest.(check (option string)) "R0 @symbol reaches the IR leaf"
+       (Some "R_naught") d.symbol
+   | _ -> Alcotest.fail "R0_urban carries no doc in the IR");
+  (match find "gamma" with
+   | Some { doc = Some d; _ } ->
+     Alcotest.(check (option string)) "gamma @ref reaches the IR"
+       (Some "Anderson and May 1991") d.reference
+   | _ -> Alcotest.fail "gamma carries no doc in the IR")
 
 let test_doc_dangling_rejected () =
   (* a `#'` that precedes no declaration (sits before `}`) is a hard parse
@@ -7446,13 +7459,14 @@ let test_doc_inspect_dimension () =
   Alcotest.(check bool) "dimension doc present in summary" true
     (contains_substring ~needle:"spatial patches under surveillance" out)
 
-(* `#'` on an observation stream parses and is IR-neutral (the doc rides the
-   AST, not the IR). *)
-let test_doc_obs_ir_neutral () =
+(* compartment / transition / observation docs do NOT reach the IR — only
+   parameter docs do (Stage 3). A model documented only on those declarations
+   serializes identically to its stripped twin. *)
+let test_doc_nonparam_ir_neutral () =
   let m_doc  = compile_expect_ok doc_obs_src in
   let m_bare = compile_expect_ok (strip_doc_lines doc_obs_src) in
   Alcotest.(check string)
-    "documented obs stream serializes identically to its undocumented twin"
+    "non-parameter docs do not change the IR"
     (Serde.model_to_string m_bare)
     (Serde.model_to_string m_doc)
 
@@ -7460,14 +7474,14 @@ let () =
   Alcotest.run "compiler" [
     "declaration_doc_comments", [
       Alcotest.test_case "documented model compiles"                  `Quick test_doc_comment_compiles;
-      Alcotest.test_case "#' docs are IR-neutral (doc vs stripped twin)" `Quick test_doc_ir_neutral;
+      Alcotest.test_case "parameter docs reach the IR (@symbol/@ref)" `Quick test_doc_param_reaches_ir;
       Alcotest.test_case "dangling #' is a hard error (E001)"         `Quick test_doc_dangling_rejected;
       Alcotest.test_case "refused doc tag (@default) is E111"         `Quick test_doc_refused_tag;
       Alcotest.test_case "inspect --parameters shows doc prose + tags" `Quick test_doc_inspect_parameters;
       Alcotest.test_case "inspect --compartments shows doc prose"     `Quick test_doc_inspect_compartments;
       Alcotest.test_case "inspect --transitions shows doc prose"      `Quick test_doc_inspect_transition;
       Alcotest.test_case "inspect --summary shows dimension doc"      `Quick test_doc_inspect_dimension;
-      Alcotest.test_case "#' on observation stream is IR-neutral"     `Quick test_doc_obs_ir_neutral;
+      Alcotest.test_case "non-parameter docs are IR-neutral"         `Quick test_doc_nonparam_ir_neutral;
     ];
     "quadratic_coupling_warning", [
       Alcotest.test_case "W104 on per-(p,q) transition" `Quick test_w104_perpair_warns;
