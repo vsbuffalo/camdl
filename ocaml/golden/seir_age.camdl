@@ -12,8 +12,14 @@ stratify(by = age)
 let N_local[a in age] = S[a] + E[a] + I[a] + R[a]
 
 parameters {
+  #' transmission rate (per infectious contact)
+  #' @symbol β
   beta  : rate in [0.001, 0.5]
+  #' progression rate E→I; the mean latent period is 1/sigma
+  #' @symbol σ
   sigma : rate in [0.01, 1.0]
+  #' recovery rate I→R; the mean infectious period is 1/gamma
+  #' @symbol γ
   gamma : rate in [0.01, 1.0]
 }
 

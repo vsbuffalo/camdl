@@ -6,10 +6,10 @@
 {"name":"infection","stoichiometry":[["S",-1],["I",1]],"rate":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"bin_op":{"op":"div","left":{"pop":"I"},"right":{"binding_ref":"N"}}}}},"metadata":{"origin_kind":"transmission","source_compartment":"S","dest_compartment":"I"},"rate_grad":{"beta":{"bin_op":{"op":"mul","left":{"pop":"S"},"right":{"bin_op":{"op":"div","left":{"pop":"I"},"right":{"binding_ref":"N"}}}}}}},
 {"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"gamma":{"pop":"I"}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[],"parameters":[
-{"name":"beta","value":{"mode":"estimated","bounds":[0.001,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"gamma","value":{"mode":"estimated","bounds":[0.001,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"N0","value":{"mode":"estimated","bounds":[100.0,100000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
-{"name":"I0","value":{"mode":"estimated","bounds":[1.0,1000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
+{"name":"beta","value":{"mode":"estimated","bounds":[0.001,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null,"doc":{"text":"per-capita transmission rate (contact rate × per-contact transmission probability)","symbol":"β"}},
+{"name":"gamma","value":{"mode":"estimated","bounds":[0.001,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null,"doc":{"text":"recovery rate; the mean infectious period is 1/gamma","symbol":"γ"}},
+{"name":"N0","value":{"mode":"estimated","bounds":[100.0,100000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null,"doc":{"text":"total population size"}},
+{"name":"I0","value":{"mode":"estimated","bounds":[1.0,1000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null,"doc":{"text":"initial number infectious"}}
 ],"initial_conditions":{"parameterized":{"S":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}},"I":{"param":"I0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":80.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"default  (R0 ≈ 3)","params":{"beta":0.3,"gamma":0.1,"N0":1000.0,"I0":10.0},"enable":[],"disable":[],"t_end":80.0},
 {"name":"high_r0","label":"high R0  (R0 = 5)","params":{"beta":0.5,"gamma":0.1,"N0":1000.0,"I0":5.0},"enable":[],"disable":[],"t_end":80.0}
