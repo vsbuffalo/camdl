@@ -442,6 +442,9 @@ pub fn piecewise_value(breakpoints: &[f64], values: &[f64], t: f64) -> f64 {
 /// the knot range.
 #[inline]
 pub fn interpolated_value(times: &[f64], values: &[f64], t: f64) -> f64 {
+    // Compiled forcings are guaranteed aligned and non-empty at construction
+    // (`CompiledModel::new`, gh#308); this total-on-empty guard only protects
+    // the pub helper called directly with arbitrary arrays.
     if times.is_empty() || values.is_empty() { return 0.0; }
     if t <= times[0] { return values[0]; }
     if t >= *times.last().unwrap() { return *values.last().unwrap(); }
@@ -458,6 +461,8 @@ pub fn interpolated_value(times: &[f64], values: &[f64], t: f64) -> f64 {
 /// pomp's `covariate_table(order = "constant")`.
 #[inline]
 pub fn constant_value(times: &[f64], values: &[f64], t: f64) -> f64 {
+    // See `interpolated_value`: empty/mismatched knots are rejected at
+    // construction; this guard only covers direct callers of the pub helper.
     if times.is_empty() || values.is_empty() { return 0.0; }
     if t <= times[0] { return values[0]; }
     if t >= *times.last().unwrap() { return *values.last().unwrap(); }

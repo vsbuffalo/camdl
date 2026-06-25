@@ -937,6 +937,24 @@ impl CompiledModel {
                         .collect();
                     let ts = times?;
                     let vs = vals?;
+                    // The knot arrays must be aligned and non-empty: a length
+                    // mismatch mis-pairs times with values, and zero knots makes
+                    // every lookup return 0 — silently zeroing any rate that
+                    // multiplies through the forcing (gh#308). Every IR producer
+                    // funnels through here, so this is the one place the
+                    // invariant is enforced for all of them.
+                    if ts.len() != vs.len() {
+                        return Err(SimError::Validation(format!(
+                            "interpolated forcing '{}': {} knot times but {} values \
+                             (the time and value columns must have equal length)",
+                            tf.name, ts.len(), vs.len())));
+                    }
+                    if ts.is_empty() {
+                        return Err(SimError::Validation(format!(
+                            "interpolated forcing '{}': no knots (need at least one \
+                             time/value pair to interpolate)",
+                            tf.name)));
+                    }
                     match i.method {
                         ir::time_func::InterpMethod::Spline =>
                             CompiledTimeFuncKind::CubicSpline(CubicSpline::new(&ts, &vs)),
@@ -1475,6 +1493,64 @@ mod tests {
         assert!(
             CompiledModel::new(model).is_ok(),
             "a model with only well-keyed rate_grad entries must compile"
+        );
+    }
+
+    /// gh#308: a malformed `Interpolated` forcing — `times` and `values` of
+    /// unequal length — is rejected at the IR→compiled boundary, not stored and
+    /// silently mis-evaluated. The OCaml loader now keeps the arrays aligned,
+    /// but `CompiledModel::new` is the single chokepoint every IR producer
+    /// (file-backed forcing, inline forcing, hand-written IR) funnels through,
+    /// so the length invariant is enforced here for all of them.
+    #[test]
+    fn interpolated_mismatched_knot_lengths_rejected() {
+        use ir::expr::ConstExpr;
+        use ir::time_func::{InterpMethod, Interpolated, TimeFuncKind, TimeFunction};
+        let konst = |v: f64| Expr::Const(ConstExpr { value: v });
+        let mut model = load_with_params("sir_basic");
+        model.time_functions.push(TimeFunction {
+            name: "bad_forcing".to_string(),
+            kind: TimeFuncKind::Interpolated(Interpolated {
+                times: vec![konst(0.0), konst(1.0)],
+                values: vec![konst(10.0)], // one short
+                method: InterpMethod::Linear,
+            }),
+            dim: (1, 0),
+        });
+        let msg = match CompiledModel::new(model) {
+            Ok(_) => panic!("mismatched interpolation knots must be rejected"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(
+            msg.contains("bad_forcing") && msg.contains("knot"),
+            "error must name the forcing and the knot mismatch, got: {msg}"
+        );
+    }
+
+    /// gh#308: an `Interpolated` forcing with zero knots interpolates to 0 at
+    /// every time (`interpolated_value` returns 0 on an empty array), silently
+    /// zeroing any rate that multiplies through it — the exact silent-wrong this
+    /// PR removes. Reject it at construction instead.
+    #[test]
+    fn interpolated_empty_knots_rejected() {
+        use ir::time_func::{InterpMethod, Interpolated, TimeFuncKind, TimeFunction};
+        let mut model = load_with_params("sir_basic");
+        model.time_functions.push(TimeFunction {
+            name: "empty_forcing".to_string(),
+            kind: TimeFuncKind::Interpolated(Interpolated {
+                times: vec![],
+                values: vec![],
+                method: InterpMethod::Linear,
+            }),
+            dim: (1, 0),
+        });
+        let msg = match CompiledModel::new(model) {
+            Ok(_) => panic!("empty interpolation knots must be rejected"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(
+            msg.contains("empty_forcing"),
+            "error must name the forcing with no knots, got: {msg}"
         );
     }
 
