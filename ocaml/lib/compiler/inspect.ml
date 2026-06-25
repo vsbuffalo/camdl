@@ -289,7 +289,14 @@ let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
         if j > 0 then Fmt.pf ppf ", ";
         Fmt.pf ppf "%s" v
       ) vs;
-      Fmt.pf ppf "]"
+      Fmt.pf ppf "]";
+      (* Append the dimension's `#'` doc text, if any (dims are not in the IR,
+         so the summary is their surfacing point). *)
+      (match List.find_opt (fun (de : dimensions_entry) -> de.dename = sd.sdim)
+               ctx.Expander.dim_decls with
+       | Some { dedoc = Some { d_text = Some t; _ }; _ } ->
+         Term_style.dim_style Fmt.string ppf (Printf.sprintf "  # %s" t)
+       | _ -> ())
     ) strats;
   Fmt.pf ppf "@\n";
   (* Observations *)
@@ -711,6 +718,7 @@ let run_transitions ppf (model : Ir.model) ctx (pattern : string option) ~ascii 
        | Some _ when List.length matching <> List.length all_expanded ->
          Fmt.pf ppf " (%d matching)" (List.length matching)
        | _ -> ());
+      (match orig_tr.trdoc with Some d -> render_doc ppf d | None -> ());
       Fmt.pf ppf "@\n";
       (* Render with truncation *)
       let render_tr (t : Ir.transition) =

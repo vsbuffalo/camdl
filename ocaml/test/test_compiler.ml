@@ -7293,7 +7293,10 @@ let test_reactive_unknown_action_target_rejected () =
 
 let doc_model_src = {|
 time_unit = 'days
-dimensions { patch = [urban, rural] }
+dimensions {
+  #' spatial patches under surveillance
+  patch = [urban, rural]
+}
 compartments {
   #' fully susceptible
   S,
@@ -7313,10 +7316,35 @@ parameters {
   beta : rate in [0.001, 2.0]
 }
 transitions {
+  #' force of infection, per patch
   infection[p in patch] : S[p] --> I[p] @ R0[p] * gamma * S[p] * I[p] / N[p]
   recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
 }
 init { S[p in patch] = 1000  I[p in patch] = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+(* A non-stratified model with a documented observation stream — exercises `#'`
+   on an `observations { }` declaration (a stratified obs needs a dim column,
+   orthogonal to docs). *)
+let doc_obs_src = {|
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters { beta : rate in [0.001,1.0]  gamma : rate in [0.01,0.5]  rho : probability in [0.1,0.9] }
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  #' weekly reported cases (Poisson reporting)
+  cases {
+    columns   { time : time, cases : count }
+    projected = incidence(infection)
+    cases     ~ poisson(rate = rho * projected)
+  }
+}
+init { S = 1000  I = 10 }
 simulate { from = 0 'days to = 90 'days }
 |}
 
@@ -7364,7 +7392,9 @@ let doc_inspect_output view =
   let ppf = Format.formatter_of_buffer buf in
   (match view with
    | `Params       -> Inspect.run_parameters   ppf detail.model detail.ctx
-   | `Compartments -> Inspect.run_compartments ppf detail.model detail.ctx);
+   | `Compartments -> Inspect.run_compartments ppf detail.model detail.ctx
+   | `Transitions  -> Inspect.run_transitions  ppf detail.model detail.ctx None ~ascii:true
+   | `Summary      -> Inspect.run_summary       ppf detail.model detail.ctx detail.summary);
   Format.pp_print_flush ppf ();
   Buffer.contents buf
 
@@ -7406,6 +7436,26 @@ let test_doc_inspect_compartments () =
   Alcotest.(check bool) "second compartment doc present" true
     (contains_substring ~needle:"infectious and shedding" out)
 
+let test_doc_inspect_transition () =
+  let out = doc_inspect_output `Transitions in
+  Alcotest.(check bool) "transition doc present" true
+    (contains_substring ~needle:"force of infection, per patch" out)
+
+let test_doc_inspect_dimension () =
+  let out = doc_inspect_output `Summary in
+  Alcotest.(check bool) "dimension doc present in summary" true
+    (contains_substring ~needle:"spatial patches under surveillance" out)
+
+(* `#'` on an observation stream parses and is IR-neutral (the doc rides the
+   AST, not the IR). *)
+let test_doc_obs_ir_neutral () =
+  let m_doc  = compile_expect_ok doc_obs_src in
+  let m_bare = compile_expect_ok (strip_doc_lines doc_obs_src) in
+  Alcotest.(check string)
+    "documented obs stream serializes identically to its undocumented twin"
+    (Serde.model_to_string m_bare)
+    (Serde.model_to_string m_doc)
+
 let () =
   Alcotest.run "compiler" [
     "declaration_doc_comments", [
@@ -7415,6 +7465,9 @@ let () =
       Alcotest.test_case "refused doc tag (@default) is E111"         `Quick test_doc_refused_tag;
       Alcotest.test_case "inspect --parameters shows doc prose + tags" `Quick test_doc_inspect_parameters;
       Alcotest.test_case "inspect --compartments shows doc prose"     `Quick test_doc_inspect_compartments;
+      Alcotest.test_case "inspect --transitions shows doc prose"      `Quick test_doc_inspect_transition;
+      Alcotest.test_case "inspect --summary shows dimension doc"      `Quick test_doc_inspect_dimension;
+      Alcotest.test_case "#' on observation stream is IR-neutral"     `Quick test_doc_obs_ir_neutral;
     ];
     "quadratic_coupling_warning", [
       Alcotest.test_case "W104 on per-(p,q) transition" `Quick test_w104_perpair_warns;

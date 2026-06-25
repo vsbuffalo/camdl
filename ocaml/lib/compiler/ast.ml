@@ -166,6 +166,7 @@ type transition_decl = {
      linear-in-parents (E601) and emits per-pool weight expressions
      into the IR. *)
   trlineage : bool;
+  trdoc     : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
   trloc     : loc;
 }
 
@@ -258,6 +259,7 @@ type obs_decl = {
      `simulate --obs` writes synthetic rows. Optional and never consulted by
      the fit path (the data file's `time` column drives there). *)
   oschedule   : schedule_core option;
+  odoc        : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
   oloc        : loc;
 }
 
@@ -377,6 +379,7 @@ type dim_source =
 type dimensions_entry = {
   dename : string;
   desrc  : dim_source;
+  dedoc  : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
 }
 
 type balance_decl = { bcomp: string; bexpr: expr }
