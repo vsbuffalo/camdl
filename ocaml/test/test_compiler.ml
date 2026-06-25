@@ -7376,8 +7376,206 @@ let test_reactive_unknown_action_target_rejected () =
        \  action = transfer(fraction = cov, from = S, to = Nowhere)\n\
        }")
 
+(* ── Declaration doc comments (#') ────────────────────────────────────────
+   `#'` doc comments attach prose to the following compartment / parameter
+   declaration. The prose lives on the AST only (it never reaches the IR) and
+   surfaces in `camdlc inspect`. Tests: a documented model compiles; the docs
+   are IR-neutral (documented vs a stripped twin → byte-identical IR); a
+   dangling `#'` is a hard error; and `inspect` renders the prose, including
+   sharing one doc across an indexed param's expanded leaves. *)
+
+let doc_model_src = {|
+time_unit = 'days
+dimensions {
+  #' spatial patches under surveillance
+  patch = [urban, rural]
+}
+compartments {
+  #' fully susceptible
+  S,
+  #' infectious and shedding
+  I,
+  R
+}
+stratify(by = patch)
+let N[p in patch] = S[p] + I[p] + R[p]
+parameters {
+  #' basic reproduction number (per patch)
+  #' @symbol R_naught
+  R0[patch] : positive in [1.0, 6.0]
+  #' mean infectious period is 1/gamma
+  #' @ref Anderson and May 1991
+  gamma : rate in [0.01, 0.5]
+  beta : rate in [0.001, 2.0]
+}
+transitions {
+  #' force of infection, per patch
+  infection[p in patch] : S[p] --> I[p] @ R0[p] * gamma * S[p] * I[p] / N[p]
+  recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
+}
+init { S[p in patch] = 1000  I[p in patch] = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+(* A non-stratified model with a documented observation stream — exercises `#'`
+   on an `observations { }` declaration (a stratified obs needs a dim column,
+   orthogonal to docs). *)
+let doc_obs_src = {|
+time_unit = 'days
+compartments {
+  #' susceptible
+  S, I, R
+}
+let N = S + I + R
+parameters { beta : rate in [0.001,1.0]  gamma : rate in [0.01,0.5]  rho : probability in [0.1,0.9] }
+transitions {
+  #' force of infection
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  #' weekly reported cases (Poisson reporting)
+  cases {
+    columns   { time : time, cases : count }
+    projected = incidence(infection)
+    cases     ~ poisson(rate = rho * projected)
+  }
+}
+init { S = 1000  I = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+(* The same source with every `#'` doc line removed — the undocumented twin. *)
+let strip_doc_lines src =
+  String.split_on_char '\n' src
+  |> List.filter (fun line ->
+       let t = String.trim line in
+       not (String.length t >= 2 && t.[0] = '#' && t.[1] = '\''))
+  |> String.concat "\n"
+
+let test_doc_comment_compiles () =
+  let _ : Ir.model = compile_expect_ok doc_model_src in
+  ()
+
+let test_doc_param_reaches_ir () =
+  (* Stage 3: parameter docs DO reach the IR (for Rust consumers like the fit
+     report). The @symbol/@ref tags land on each IR parameter, including every
+     expanded leaf of an indexed param. *)
+  let m = compile_expect_ok doc_model_src in
+  let find n = List.find_opt (fun (p : Ir.parameter) -> p.name = n) m.parameters in
+  (match find "R0_urban" with
+   | Some { doc = Some d; _ } ->
+     Alcotest.(check (option string)) "R0 @symbol reaches the IR leaf"
+       (Some "R_naught") d.symbol
+   | _ -> Alcotest.fail "R0_urban carries no doc in the IR");
+  (match find "gamma" with
+   | Some { doc = Some d; _ } ->
+     Alcotest.(check (option string)) "gamma @ref reaches the IR"
+       (Some "Anderson and May 1991") d.reference
+   | _ -> Alcotest.fail "gamma carries no doc in the IR")
+
+let test_doc_dangling_rejected () =
+  (* a `#'` that precedes no declaration (sits before `}`) is a hard parse
+     error — rejected, never silently accepted (no loose semantics). *)
+  compile_expect_error_code ~code:"E001" ~contains:""
+    {|
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  beta : rate
+  #' orphan doc with no declaration after it
+}
+simulate { from = 0 'days to = 5 'days }
+|}
+
+let doc_inspect_output view =
+  let detail =
+    match Compiler.compile_detail_result ~name:"doc_inspect" doc_model_src with
+    | Ok d -> d
+    | Error e -> Alcotest.failf "detail compile failed: %s" e
+  in
+  let buf = Buffer.create 512 in
+  let ppf = Format.formatter_of_buffer buf in
+  (match view with
+   | `Params       -> Inspect.run_parameters   ppf detail.model detail.ctx
+   | `Compartments -> Inspect.run_compartments ppf detail.model detail.ctx
+   | `Transitions  -> Inspect.run_transitions  ppf detail.model detail.ctx None ~ascii:true
+   | `Summary      -> Inspect.run_summary       ppf detail.model detail.ctx detail.summary);
+  Format.pp_print_flush ppf ();
+  Buffer.contents buf
+
+let test_doc_inspect_parameters () =
+  let out = doc_inspect_output `Params in
+  Alcotest.(check bool) "scalar param doc prose present" true
+    (contains_substring ~needle:"mean infectious period is 1/gamma" out);
+  (* The indexed param's single doc rides every expanded leaf (R0_urban,
+     R0_rural), mirroring shared bounds. *)
+  Alcotest.(check bool) "indexed param doc present" true
+    (contains_substring ~needle:"basic reproduction number (per patch)" out);
+  (* @symbol and @ref tags are split out and rendered. *)
+  Alcotest.(check bool) "@symbol rendered" true
+    (contains_substring ~needle:"R_naught" out);
+  Alcotest.(check bool) "@ref rendered" true
+    (contains_substring ~needle:"Anderson and May 1991" out)
+
+let test_doc_refused_tag () =
+  (* A number-bearing tag (@default/@plausible/@fixed) is a hard E111 that
+     names the --params TOML migration; only @symbol/@ref are recognized. *)
+  compile_expect_error_code ~code:"E111" ~contains:"@symbol"
+    {|
+time_unit = 'days
+compartments { S, I }
+parameters {
+  #' transmission rate
+  #' @default 0.3
+  beta : rate
+}
+transitions { infection : S --> I @ beta * S }
+init { S = 100 }
+simulate { from = 0 'days to = 5 'days }
+|}
+
+let test_doc_inspect_compartments () =
+  let out = doc_inspect_output `Compartments in
+  Alcotest.(check bool) "compartment doc prose present" true
+    (contains_substring ~needle:"fully susceptible" out);
+  Alcotest.(check bool) "second compartment doc present" true
+    (contains_substring ~needle:"infectious and shedding" out)
+
+let test_doc_inspect_transition () =
+  let out = doc_inspect_output `Transitions in
+  Alcotest.(check bool) "transition doc present" true
+    (contains_substring ~needle:"force of infection, per patch" out)
+
+let test_doc_inspect_dimension () =
+  let out = doc_inspect_output `Summary in
+  Alcotest.(check bool) "dimension doc present in summary" true
+    (contains_substring ~needle:"spatial patches under surveillance" out)
+
+(* compartment / transition / observation docs do NOT reach the IR — only
+   parameter docs do (Stage 3). A model documented only on those declarations
+   serializes identically to its stripped twin. *)
+let test_doc_nonparam_ir_neutral () =
+  let m_doc  = compile_expect_ok doc_obs_src in
+  let m_bare = compile_expect_ok (strip_doc_lines doc_obs_src) in
+  Alcotest.(check string)
+    "non-parameter docs do not change the IR"
+    (Serde.model_to_string m_bare)
+    (Serde.model_to_string m_doc)
+
 let () =
   Alcotest.run "compiler" [
+    "declaration_doc_comments", [
+      Alcotest.test_case "documented model compiles"                  `Quick test_doc_comment_compiles;
+      Alcotest.test_case "parameter docs reach the IR (@symbol/@ref)" `Quick test_doc_param_reaches_ir;
+      Alcotest.test_case "dangling #' is a hard error (E001)"         `Quick test_doc_dangling_rejected;
+      Alcotest.test_case "refused doc tag (@default) is E111"         `Quick test_doc_refused_tag;
+      Alcotest.test_case "inspect --parameters shows doc prose + tags" `Quick test_doc_inspect_parameters;
+      Alcotest.test_case "inspect --compartments shows doc prose"     `Quick test_doc_inspect_compartments;
+      Alcotest.test_case "inspect --transitions shows doc prose"      `Quick test_doc_inspect_transition;
+      Alcotest.test_case "inspect --summary shows dimension doc"      `Quick test_doc_inspect_dimension;
+      Alcotest.test_case "non-parameter docs are IR-neutral"         `Quick test_doc_nonparam_ir_neutral;
+    ];
     "quadratic_coupling_warning", [
       Alcotest.test_case "W104 on per-(p,q) transition" `Quick test_w104_perpair_warns;
       Alcotest.test_case "no W104 on summed-rate form" `Quick test_w104_summed_no_warn;

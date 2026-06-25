@@ -62,7 +62,7 @@ fn int_comp(name: &str) -> Compartment {
 }
 
 fn param(name: &str, value: f64) -> Parameter {
-    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value: value }, param_kind: None, param_dim: None }
+    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value: value }, param_kind: None, param_dim: None, doc: None }
 }
 
 // ── gh#127 (#12): runtime out-of-range table lookup returns Err, never panics ──

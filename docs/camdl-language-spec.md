@@ -30,20 +30,23 @@ Two shapes are both first-class:
 - A **structural skeleton** that declares parameter names, kinds, and dimensions
   only; values are supplied externally via TOML, CLI flags, or inference
   engines. Useful for "model under inference" / library-style work.
-- A **self-contained reproducible model** that declares parameters and their
-  default values, default priors, a `baseline` scenario, even an `init` block —
-  so the file can be handed to a colleague (or shipped in a paper supplement)
-  and run end-to-end with no auxiliary inputs. This is the preferred form for
-  distribution and for the canonical examples shipped with camdl.
+- A **self-contained reproducible model** that, on top of that skeleton, bundles
+  the rest of what it takes to read and run the file: `~` prior declarations, an
+  `init { ... }` block for initial states, and a `baseline` scenario whose
+  `set = { ... }` block supplies concrete parameter values — the one in-file way
+  to give a parameter a value. So the file can be handed to a colleague (or
+  shipped in a paper supplement) and run end-to-end. This is the preferred form
+  for distribution and for the canonical examples shipped with camdl.
 
-Both shapes coexist because external configuration always overrides values
-declared inside the file. The precedence chain is fixed (see `docs/inference.md`
-for the full ordering on the inference side and `camdl-run-spec.md` for forward
-simulation): `fit.toml` / `--param` / CLI arguments take precedence over
-`params.toml` (loaded at compile time), which takes precedence over
-`set = { ... }` inside scenarios, which takes precedence over defaults declared
-in `parameters { ... }`, `let`, or `init { ... }`. The seed is always a CLI
-argument.
+**Parameter values are never declared in the `parameters { ... }` block** — it
+carries names, kinds, dimensions, and optional priors only (§4, §4.2). Concrete
+values live elsewhere: a `params.toml` / `[fixed]` block, a CLI override
+(`--param`, `--set`), or — the only in-file form — a named scenario's
+`set = { ... }`. External configuration overrides in-file presets; the
+precedence chain is fixed (see `camdl-run-spec.md` §1.3 for forward simulation
+and `docs/inference.md` for inference). For a simulation's parameters, highest
+precedence first: `--param` CLI flags, then scenario `set = { ... }`, then sweep
+points, then the `params.toml` base values. The seed is always a CLI argument.
 
 What this design preserves — and what the IR's hash discipline enforces — is
 that _structural_ model identity (compartments, transitions, observation
@@ -501,9 +504,9 @@ parameters {
 }
 ```
 
-Parameters are **declared** here. Default values may optionally be specified in
-the model file. Concrete values for inference are supplied externally via CLI
-flags or inference engines.
+Parameters are **declared** here — names, kinds, and dimensions only. Concrete
+values are **never** specified in the model file; they are supplied externally
+via CLI flags, a `--params` TOML, or inference engines (§4.2).
 
 ### 4.1 Parameter Types
 
@@ -619,8 +622,9 @@ Two restrictions keep the surface honest:
 
 ### 4.2 External parameter values
 
-Parameter values are **never** specified inside `.camdl` files. The model file
-declares names and types only; concrete values are supplied at runtime:
+Parameter values are **never** specified in the `parameters { ... }` block. The
+block declares names and types only; concrete values are supplied at runtime — a
+named scenario's `set = { ... }` block is the one in-file exception:
 
 ```bash
 # Single flat TOML file

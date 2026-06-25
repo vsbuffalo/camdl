@@ -45,7 +45,7 @@ fn model_with_forcing(kind: TimeFuncKind) -> Model {
             name: "v".into(),
             value: ParamValue::Fixed { value: 1.0 },
             param_kind: None,
-            param_dim: None,
+            param_dim: None, doc: None,
         }],
         initial_conditions: InitialConditions::Parameterized(HashMap::new()),
         output: OutputConfig {

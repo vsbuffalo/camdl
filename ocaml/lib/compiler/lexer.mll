@@ -151,6 +151,14 @@ rule token = parse
      comment alternatives: a bare `#` at end-of-line, or `#` followed
      by a non-`[` character then arbitrary rest-of-line. *)
   | "#["              { HASH_LBRACKET }
+  (* Doc comment: `#'` followed by the rest of the line is a roxygen-style
+     documentation line that ATTACHES to the following declaration (it is not
+     discarded like an ordinary `#` comment). This rule MUST precede the comment
+     rules below: a `#' …` line also matches the line-comment rule (its char
+     class `[^'\n' '[']` includes `'`) to the same length, and ocamllex breaks a
+     longest-match tie by source order — earliest wins. Placed after `#[` so the
+     attribute opener still wins for `#[…]`. *)
+  | "#'" ([^'\n']* as body)   { DOC (String.trim body) }
   | '#'                       { token lexbuf }   (* lone `#` (e.g. end of line) *)
   | '#' [^'\n' '['] [^'\n']*  { token lexbuf }   (* line comment, first char not `[` *)
 

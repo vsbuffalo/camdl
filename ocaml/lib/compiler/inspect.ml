@@ -121,6 +121,23 @@ let glob_match pattern s =
         check s rest
   end
 
+(* Render a parsed `#'` doc block inline after a declaration: the prose as
+   `# …`, then the @symbol (in parameter colour) and @ref (bracketed), each
+   shown only if present. Shared by the parameter / compartment / transition
+   listings. *)
+let render_doc ppf (d : Ast.doc) =
+  (match d.d_text with
+   | Some t ->
+     Term_style.dim_style Fmt.string ppf "   # ";
+     Term_style.dim_style Fmt.string ppf t
+   | None -> ());
+  (match d.d_symbol with
+   | Some s -> Fmt.pf ppf "  "; Term_style.param Fmt.string ppf s
+   | None -> ());
+  (match d.d_ref with
+   | Some r -> Term_style.dim_style Fmt.string ppf (Printf.sprintf "  [%s]" r)
+   | None -> ())
+
 (* ── --summary ───────────────────────────────────────────────────────────── *)
 
 let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
@@ -272,7 +289,14 @@ let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
         if j > 0 then Fmt.pf ppf ", ";
         Fmt.pf ppf "%s" v
       ) vs;
-      Fmt.pf ppf "]"
+      Fmt.pf ppf "]";
+      (* Append the dimension's `#'` doc text, if any (dims are not in the IR,
+         so the summary is their surfacing point). *)
+      (match List.find_opt (fun (de : dimensions_entry) -> de.dename = sd.sdim)
+               ctx.Expander.dim_decls with
+       | Some { dedoc = Some { d_text = Some t; _ }; _ } ->
+         Term_style.dim_style Fmt.string ppf (Printf.sprintf "  # %s" t)
+       | _ -> ())
     ) strats;
   Fmt.pf ppf "@\n";
   (* Observations *)
@@ -546,6 +570,7 @@ let run_compartments ppf (model : Ir.model) ctx =
         Pp_expr.pp_pop ~mode:Pp_expr.Dsl ~split ppf c.name
       ) expanded
     ) ppf ();
+    (match cd.cdoc with Some d -> render_doc ppf d | None -> ());
     Fmt.pf ppf "@\n"
   ) ctx.comp_decls;
   Fmt.pf ppf "@\n";
@@ -587,6 +612,22 @@ let run_parameters ppf (model : Ir.model) (ctx : Expander.context) =
     | Some (Ast.PIndexed pd) -> pkind_str pd.pkind
     | None -> "?"
   in
+  (* Doc comment for a parameter, looked up from its source declaration
+     (scalar by name, indexed by `name_`-prefix). An indexed param's leaves
+     all share the one declaration's doc, mirroring shared bounds. *)
+  let doc_of (p : Ir.parameter) =
+    match List.find_opt (fun pd ->
+        match pd with
+        | Ast.PScalar s -> s.pname = p.name
+        | Ast.PIndexed ix ->
+          let prefix = ix.pname ^ "_" in
+          String.length p.name > String.length prefix &&
+          String.sub p.name 0 (String.length prefix) = prefix
+      ) ctx.Expander.param_decls with
+    | Some (Ast.PScalar pd)  -> pd.pdoc
+    | Some (Ast.PIndexed pd) -> pd.pdoc
+    | None -> None
+  in
   let kind_order = ["rate"; "probability"; "positive"; "count"; "real"] in
   List.iter (fun kind ->
     let ps = List.filter (fun p -> kind_of p = kind) model.parameters in
@@ -618,6 +659,7 @@ let run_parameters ppf (model : Ir.model) (ctx : Expander.context) =
            if h.hpool_over <> "" then
              Fmt.pf ppf " [pool=%s]" h.hpool_over
          | None -> ());
+        (match doc_of p with Some d -> render_doc ppf d | None -> ());
         Fmt.pf ppf "@\n"
       ) ps;
       Fmt.pf ppf "@\n"
@@ -676,6 +718,7 @@ let run_transitions ppf (model : Ir.model) ctx (pattern : string option) ~ascii 
        | Some _ when List.length matching <> List.length all_expanded ->
          Fmt.pf ppf " (%d matching)" (List.length matching)
        | _ -> ());
+      (match orig_tr.trdoc with Some d -> render_doc ppf d | None -> ());
       Fmt.pf ppf "@\n";
       (* Render with truncation *)
       let render_tr (t : Ir.transition) =

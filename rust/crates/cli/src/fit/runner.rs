@@ -2989,9 +2989,9 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![
-                Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.3), bounds: Some((0.01, 2.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None },
-                Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.1), bounds: Some((0.01, 1.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None },
-                Parameter { name: "N0".into(), value: ir::parameter::ParamValue::Estimated { init: Some(1000.0), bounds: Some((100.0, 100000.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None },
+                Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.3), bounds: Some((0.01, 2.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None, doc: None },
+                Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.1), bounds: Some((0.01, 1.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None, doc: None },
+                Parameter { name: "N0".into(), value: ir::parameter::ParamValue::Estimated { init: Some(1000.0), bounds: Some((100.0, 100000.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None, doc: None },
             ],
             initial_conditions: InitialConditions::Explicit({
                 let mut m = HashMap::new();
@@ -3163,7 +3163,7 @@ mod tests {
             observations: vec![],
             bindings: vec![],
             per_eval_bindings: vec![],
-            parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.0), bounds: Some((0.0, 10.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None }],
+            parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.0), bounds: Some((0.0, 10.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None, doc: None }],
             initial_conditions: InitialConditions::Explicit({
                 let mut m = HashMap::new(); m.insert("S".into(), 100.0); m
             }),
@@ -3267,7 +3267,7 @@ mod tests {
             observations: vec![],
             bindings: vec![],
             per_eval_bindings: vec![],
-            parameters: vec![Parameter { name: "R0".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.0), bounds: Some((1.0, 200.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None }],
+            parameters: vec![Parameter { name: "R0".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.0), bounds: Some((1.0, 200.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None, doc: None }],
             initial_conditions: InitialConditions::Explicit({
                 let mut m = HashMap::new(); m.insert("S".into(), 100.0); m
             }),
@@ -3399,8 +3399,8 @@ mod tests {
         use crate::fit::config_v2::EstimateSpecV2;
         use indexmap::IndexMap;
 
-        let beta_with_ir_prior = Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: None, bounds: Some((0.01, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::LogNormal(LogNormalPrior { mu: -1.0, sigma: 0.5 })), transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None };
-        let gamma_no_prior = Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Estimated { init: None, bounds: Some((0.05, 1.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None };
+        let beta_with_ir_prior = Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: None, bounds: Some((0.01, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::LogNormal(LogNormalPrior { mu: -1.0, sigma: 0.5 })), transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None, doc: None };
+        let gamma_no_prior = Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Estimated { init: None, bounds: Some((0.05, 1.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None, doc: None };
         let model = ir::Model {
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
@@ -3503,7 +3503,7 @@ mod tests {
             value: ParamValue::Estimated {
                 init: None, bounds: None, prior: PriorSpec::Flat,
                 transform: IrTransform::Identity },
-            param_kind: Some(ParamKind::Rate), param_dim: None,
+            param_kind: Some(ParamKind::Rate), param_dim: None, doc: None,
         };
         let model = model_with_param(p);
         let mut est: IndexMap<String, EstimateSpecV2> = IndexMap::new();
@@ -3550,7 +3550,7 @@ mod tests {
                     LogUniformPrior { lower: 1e-5, upper: 1e-2 })),
                 transform: IrTransform::Identity,
             },
-            param_kind: Some(ParamKind::Rate), param_dim: None,
+            param_kind: Some(ParamKind::Rate), param_dim: None, doc: None,
         };
         let model = model_with_param(p);
         let mut est: IndexMap<String, EstimateSpecV2> = IndexMap::new();
@@ -3587,7 +3587,7 @@ mod tests {
             value: ParamValue::Estimated {
                 init: None, bounds: Some((0.3, 1.0)),
                 prior: PriorSpec::Flat, transform: IrTransform::Identity },
-            param_kind: Some(ParamKind::Probability), param_dim: None,
+            param_kind: Some(ParamKind::Probability), param_dim: None, doc: None,
         };
         let model = model_with_param(p);
         let est_tn = |lo: f64, hi: f64, blo: f64, bhi: f64| {
@@ -4120,7 +4120,7 @@ dt = 1.0
             observations: vec![],
             bindings: vec![],
             per_eval_bindings: vec![],
-            parameters: vec![Parameter { name: name.into(), value: ir::parameter::ParamValue::Estimated { init: Some((lo + hi) * 0.5), bounds: Some((lo, hi)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: kind, param_dim: None }],
+            parameters: vec![Parameter { name: name.into(), value: ir::parameter::ParamValue::Estimated { init: Some((lo + hi) * 0.5), bounds: Some((lo, hi)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: kind, param_dim: None, doc: None }],
             initial_conditions: InitialConditions::Explicit({
                 let mut m = HashMap::new(); m.insert("S".into(), 1.0); m
             }),
@@ -4325,7 +4325,7 @@ dt = 1.0
         // unconstrained real remains Transform::None (no regression for
         // genuinely-unbounded params).
         use ir::parameter::Parameter;
-        let real_param = Parameter { name: "tau".into(), value: ir::parameter::ParamValue::Fixed { value: 0.0 }, param_kind: Some(ir::parameter::ParamKind::Real), param_dim: None };
+        let real_param = Parameter { name: "tau".into(), value: ir::parameter::ParamValue::Fixed { value: 0.0 }, param_kind: Some(ir::parameter::ParamKind::Real), param_dim: None, doc: None };
         let instant_param = Parameter {
             param_kind: Some(ir::parameter::ParamKind::Instant), ..real_param.clone()
         };
@@ -4623,7 +4623,7 @@ dt = 1.0
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![
-                Parameter { name: "dummy".into(), value: ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None },
+                Parameter { name: "dummy".into(), value: ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None, doc: None },
             ],
             initial_conditions: InitialConditions::Explicit({
                 let mut h = HashMap::new();

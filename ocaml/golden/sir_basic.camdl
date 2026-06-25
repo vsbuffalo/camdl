@@ -6,9 +6,15 @@ compartments { S, I, R }
 let N = S + I + R
 
 parameters {
+  #' per-capita transmission rate (contact rate × per-contact transmission probability)
+  #' @symbol β
   beta  : rate     in [0.001, 2.0]
+  #' recovery rate; the mean infectious period is 1/gamma
+  #' @symbol γ
   gamma : rate     in [0.001, 1.0]
+  #' total population size
   N0    : count    in [100, 100000]
+  #' initial number infectious
   I0    : count    in [1, 1000]
 }
 

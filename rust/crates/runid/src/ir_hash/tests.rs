@@ -17,7 +17,7 @@ use ir::observation::{
     Likelihood, ObservationModel, ObservationSchedule, PoissonLikelihood, Projection, RegularSchedule,
 };
 use ir::ode_equation::OdeEquation;
-use ir::parameter::{Parameter, PriorDist, Transform, UniformPrior};
+use ir::parameter::{DocBlock, Parameter, PriorDist, Transform, UniformPrior};
 use ir::table::{OobPolicy, Table, TableSource};
 use ir::time_func::{Sinusoidal, TimeFuncKind, TimeFunction};
 use ir::transition::{DrawMethod, StoichiometryEntry, Transition, TransitionMetadata};
@@ -140,7 +140,7 @@ fn representative_model() -> Model {
                 ),
             }),
         }],
-        parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.5), bounds: Some((0.0, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::Uniform(UniformPrior { lower: 0.0, upper: 2.0 })), transform: Transform::Log }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: Some((0, -1)) }],
+        parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.5), bounds: Some((0.0, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::Uniform(UniformPrior { lower: 0.0, upper: 2.0 })), transform: Transform::Log }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: Some((0, -1)), doc: None }],
         bindings: vec![Binding {
             name: "N".into(),
             expr: Expr::pop_sum(vec!["S".into(), "I".into(), "R".into()]),
@@ -328,6 +328,27 @@ fn changing_a_field_changes_the_hash() {
     let mut m_out = representative_model();
     m_out.output.times = OutputSchedule::AtTimes(vec![1.0, 2.0, 3.0]);
     assert_ne!(base, m_out.content_hash(), "output schedule change must matter");
+}
+
+/// A `#'` parameter doc is presentation metadata, NOT identity: adding or
+/// editing it must leave `run_id` byte-identical. The `ContentAddressed` impl
+/// for `Parameter` deliberately does not visit `doc`; this pins that so a
+/// future "hash all fields" refactor can't silently re-key every documented
+/// model's runs.
+#[test]
+fn parameter_doc_does_not_change_run_id() {
+    let base = representative_model().content_hash();
+    let mut m_doc = representative_model();
+    m_doc.parameters[0].doc = Some(DocBlock {
+        text: Some("per-capita transmission rate".into()),
+        symbol: Some("β".into()),
+        reference: Some("Anderson & May 1991".into()),
+    });
+    assert_eq!(
+        base,
+        m_doc.content_hash(),
+        "a parameter doc is presentation, not identity — run_id must not move"
+    );
 }
 
 /// Run-id stability: every `Projection` variant has a PERMANENT hash index.

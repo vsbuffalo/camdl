@@ -59,7 +59,7 @@
         ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test" s);
       LikPoisson args
 
-  let build_obs_decl name ibs src kvs ~sp ~ep =
+  let build_obs_decl name ibs src kvs ~doc ~sp ~ep =
     let cols  = ref None in
     let sched = ref None in
     let proj  = ref None in
@@ -74,8 +74,42 @@
     { oname = name; oindices = ibs;
       osource = src; ocolumns = !cols;
       omeasurement = !meas; oprojection = !proj;
-      oschedule = !sched;
+      oschedule = !sched; odoc = doc;
       oloc = Parser_errors.ast_loc_of ~sp ~ep }
+
+  (* Split a `#'` doc block (the lines after each `#'`, trimmed) into prose
+     description + recognized tags. A line whose first non-space character is
+     `@` is a tag line: `@symbol <text>` / `@ref <text>`. Any other `@tag`
+     (e.g. `@default`, `@plausible`, `@fixed`) is rejected (E111) — a
+     parameter's value/bounds/prior live in the --params TOML, not the model.
+     Non-`@` lines are joined into the prose description. *)
+  let parse_doc_block ~sp ~ep (lines : string list) : Ast.doc =
+    let texts = ref [] and symbol = ref None and reference = ref None in
+    List.iter (fun line ->
+      let t = String.trim line in
+      if t = "" then ()
+      else if t.[0] = '@' then begin
+        let (tag, value) = match String.index_opt t ' ' with
+          | Some i -> (String.sub t 0 i,
+                       String.trim (String.sub t i (String.length t - i)))
+          | None   -> (t, "")
+        in
+        match tag with
+        | "@symbol" -> symbol := Some value
+        | "@ref"    -> reference := Some value
+        | other ->
+          Parser_errors.push_error ~sp ~ep ~code:"E111"
+            ~msg:(Printf.sprintf
+              "unknown doc tag '%s': a parameter's value, bounds, and prior \
+               belong in the --params TOML / fit.toml, not the model — the only \
+               recognized `#'` tags are @symbol and @ref" other)
+      end
+      else texts := t :: !texts
+    ) lines;
+    { Ast.d_text = (match List.rev !texts with [] -> None
+                                              | xs -> Some (String.concat " " xs));
+      d_symbol = !symbol;
+      d_ref = !reference }
 %}
 
 (* ── Literals & identifiers ────────────────────────────────────────────── *)
@@ -84,6 +118,7 @@
 %token <float>  FLOAT
 %token <string> STRING
 %token <string> UNIT_IDENT   (* 'days, 'per_day, etc. *)
+%token <string> DOC          (* #' doc-comment line (text after #', trimmed) *)
 
 (* ── Punctuation ────────────────────────────────────────────────────────── *)
 %token ARROW       (* --> *)
@@ -208,15 +243,24 @@ unit_lit:
         ~msg:(Printf.sprintf "unknown unit '%s': expected one of 'days, 'weeks, 'months, 'years, 'per_day, 'per_week, 'per_month, 'per_year, 'count, 'ratio" s);
       Days }
 
+(* Optional leading doc-comment block: zero or more `#'` lines immediately
+   preceding a declaration, joined into one prose string. Mirrors the
+   leading-optional shape of `lineage_attr_opt`. A `#'` block that does NOT
+   precede a documentable declaration leaves stray DOC tokens and surfaces as a
+   parse error (E001) — it is rejected, never silently accepted. *)
+doc_opt:
+  | (* empty *)             { None }
+  | ds = nonempty_list(DOC) { Some (parse_doc_block ~sp:$startpos ~ep:$endpos ds) }
+
 (* ── Compartment block ──────────────────────────────────────────────────── *)
 
 compartment_list:
   | cs = separated_list(COMMA, compartment_decl) { cs }
 
 compartment_decl:
-  | name = IDENT kind = compartment_kind_opt
-      { { cname = name; ckind = kind;
-          cloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | d = doc_opt name = IDENT kind = compartment_kind_opt
+      { { cname = name; ckind = kind; cdoc = d;
+          cloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 compartment_kind_opt:
   | (* empty *)  { Integer }
@@ -230,37 +274,37 @@ param_list:
 
 param_decl:
   (* scalar, no bounds, no prior *)
-  | name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
-      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None;
-                  ploc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | d = doc_opt name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
+      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
+                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, no bounds, with prior *)
-  | name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
-      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr;
-                  ploc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | d = doc_opt name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
+      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
+                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, with bounds, no prior *)
-  | name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
-      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None;
-                  ploc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | d = doc_opt name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
+      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
+                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, with bounds, with prior *)
-  | name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
-      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr;
-                  ploc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | d = doc_opt name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
+      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
+                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, no prior *)
-  | name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None;
-                   ploc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
+      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
+                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, with prior *)
-  | name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr;
-                   ploc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
+                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, no prior *)
-  | name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None;
-                   ploc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
+      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
+                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, with prior *)
-  | name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr;
-                   ploc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
+                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 prior_clause:
   (* plain prior: ~ normal(mu = 0, sigma = 1) *)
@@ -420,13 +464,13 @@ transition_decl:
      the transition or inline immediately before it — camdl has no
      statement separators, so both forms are the same production and
      produce identical IR. *)
-  | lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list AT rate = expr guard = where_clause_opt
+  | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list AT rate = expr guard = where_clause_opt
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
-          trrate = rate; trguard = guard; trlineage = lin;
+          trrate = rate; trguard = guard; trlineage = lin; trdoc = d;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* block form: [#[lineage]] name[...] : srcs --> dsts { rate = ...; where ... } *)
-  | lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list LBRACE tbody = transition_body RBRACE
+  | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list LBRACE tbody = transition_body RBRACE
       { let (rate_opt, guard) = tbody in
         (* A block-form transition with no `rate = …` (and no `@ …`) is a
            hard error, not a silent zero-rate transition. Pushing a
@@ -445,13 +489,13 @@ transition_decl:
         in
         { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
-          trrate = rate; trguard = guard; trlineage = lin;
+          trrate = rate; trguard = guard; trlineage = lin; trdoc = d;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
-  (* branching: [#[lineage]] name[...] : srcs --> { D1 : w1, ... } @ rate where guard *)
-  | lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW LBRACE branches = separated_nonempty_list(COMMA, branch_entry) RBRACE AT rate = expr guard = where_clause_opt
+  (* branching: [#'][#[lineage]] name[...] : srcs --> { D1 : w1, ... } @ rate where guard *)
+  | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW LBRACE branches = separated_nonempty_list(COMMA, branch_entry) RBRACE AT rate = expr guard = where_clause_opt
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstBranch branches;
-          trrate = rate; trguard = guard; trlineage = lin;
+          trrate = rate; trguard = guard; trlineage = lin; trdoc = d;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* Optional transition attribute. Only `#[lineage]` is recognized in
@@ -562,19 +606,19 @@ obs_list:
    The old `name : { ... }` form is rejected by [obs_decl_colon] below with a
    migration diagnostic. *)
 obs_decl:
-  | name = IDENT ibs = index_bindings_opt src = obs_source_opt LBRACE obs_kvs = list(obs_kv) RBRACE
-      { build_obs_decl name ibs src obs_kvs ~sp:$startpos ~ep:$endpos }
+  | d = doc_opt name = IDENT ibs = index_bindings_opt src = obs_source_opt LBRACE obs_kvs = list(obs_kv) RBRACE
+      { build_obs_decl name ibs src obs_kvs ~doc:d ~sp:$startpos ~ep:$endpos }
   (* Migration: the stream header colon was dropped (2026-06-10 §9). Reject
      `name : { ... }` with a diagnostic that names the rewrite, not a bare
      E001. *)
-  | name = IDENT ibs = index_bindings_opt src = obs_source_opt COLON LBRACE obs_kvs = list(obs_kv) RBRACE
+  | d = doc_opt name = IDENT ibs = index_bindings_opt src = obs_source_opt COLON LBRACE obs_kvs = list(obs_kv) RBRACE
       { Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
           ~code:"E270"
           ~msg:(Printf.sprintf
             "observation '%s': the stream-header colon was removed" name)
           ~hint:(Printf.sprintf
             "write `%s { ... }` (no colon) — see `camdl docs language-changes`" name);
-        build_obs_decl name ibs src obs_kvs ~sp:$startpos ~ep:$endpos }
+        build_obs_decl name ibs src obs_kvs ~doc:d ~sp:$startpos ~ep:$endpos }
 
 obs_source_opt:
   | (* empty *)        { None }
@@ -997,7 +1041,7 @@ timepoint_decl:
 (* ── Dimensions ─────────────────────────────────────────────────────────── *)
 
 dim_entry:
-  | name = IDENT EQ src = dim_source_expr { { dename = name; desrc = src } }
+  | d = doc_opt name = IDENT EQ src = dim_source_expr { { dename = name; desrc = src; dedoc = d } }
 
 dim_source_expr:
   | LBRACKET vs = separated_list(COMMA, IDENT) RBRACKET

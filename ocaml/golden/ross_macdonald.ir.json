@@ -16,18 +16,18 @@
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[
 {"name":"slide_positivity","source":"slide_positivity","columns":[{"name":"time","role":"time"},{"name":"slide_positivity","role":{"value":"count"}}],"scored":"slide_positivity","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":365.0}},"projection":{"current_pop":"I_h"},"likelihood":{"binomial":{"n":{"param":"N_tested"},"p":{"bin_op":{"op":"add","left":{"bin_op":{"op":"mul","left":{"param":"rho_sens"},"right":{"bin_op":{"op":"div","left":{"projected":null},"right":{"binding_ref":"H"}}}}},"right":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"sub","left":{"const":1.0},"right":{"param":"rho_spec"}}},"right":{"bin_op":{"op":"sub","left":{"const":1.0},"right":{"bin_op":{"op":"div","left":{"projected":null},"right":{"binding_ref":"H"}}}}}}}}}}}}
 ],"parameters":[
-{"name":"a","value":{"mode":"estimated","bounds":[0.1,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"b_h","value":{"mode":"estimated","bounds":[0.05,0.8],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null},
-{"name":"b_v","value":{"mode":"estimated","bounds":[0.05,0.5],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null},
-{"name":"r","value":{"mode":"estimated","bounds":[0.005,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"sigma_v","value":{"mode":"estimated","bounds":[0.05,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"mu_v","value":{"mode":"estimated","bounds":[0.01,0.3],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"rho_sens","value":{"mode":"estimated","bounds":[0.5,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null},
-{"name":"rho_spec","value":{"mode":"estimated","bounds":[0.5,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null},
-{"name":"H0","value":{"mode":"estimated","bounds":[100.0,100000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
-{"name":"M0","value":{"mode":"estimated","bounds":[100.0,1000000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
-{"name":"I_h0","value":{"mode":"estimated","bounds":[1.0,10000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
-{"name":"N_tested","value":{"mode":"estimated","bounds":[10.0,10000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
+{"name":"a","value":{"mode":"estimated","bounds":[0.1,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null,"doc":{"text":"human-biting rate per mosquito","symbol":"a"}},
+{"name":"b_h","value":{"mode":"estimated","bounds":[0.05,0.8],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null,"doc":{"text":"P(host infection | infectious bite on a susceptible host)","symbol":"b_h"}},
+{"name":"b_v","value":{"mode":"estimated","bounds":[0.05,0.5],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null,"doc":{"text":"P(mosquito infection | bite on an infectious host)","symbol":"b_v"}},
+{"name":"r","value":{"mode":"estimated","bounds":[0.005,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null,"doc":{"text":"host recovery rate","symbol":"r"}},
+{"name":"sigma_v","value":{"mode":"estimated","bounds":[0.05,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null,"doc":{"text":"EIP completion rate (1 / mean extrinsic incubation period)","symbol":"σ_v"}},
+{"name":"mu_v","value":{"mode":"estimated","bounds":[0.01,0.3],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null,"doc":{"text":"mosquito mortality rate","symbol":"μ_v"}},
+{"name":"rho_sens","value":{"mode":"estimated","bounds":[0.5,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null,"doc":{"text":"slide-microscopy sensitivity"}},
+{"name":"rho_spec","value":{"mode":"estimated","bounds":[0.5,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null,"doc":{"text":"slide-microscopy specificity"}},
+{"name":"H0","value":{"mode":"estimated","bounds":[100.0,100000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null,"doc":{"text":"initial host population size"}},
+{"name":"M0","value":{"mode":"estimated","bounds":[100.0,1000000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null,"doc":{"text":"initial mosquito population size"}},
+{"name":"I_h0","value":{"mode":"estimated","bounds":[1.0,10000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null,"doc":{"text":"initial number of infectious hosts"}},
+{"name":"N_tested","value":{"mode":"estimated","bounds":[10.0,10000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null,"doc":{"text":"number of slides examined per survey"}}
 ],"initial_conditions":{"parameterized":{"S_h":{"bin_op":{"op":"sub","left":{"param":"H0"},"right":{"param":"I_h0"}}},"I_h":{"param":"I_h0"},"S_v":{"param":"M0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":365.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":365.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"endemic transmission","params":{"a":0.3,"b_h":0.2,"b_v":0.1,"r":0.05,"sigma_v":0.1,"mu_v":0.1,"rho_sens":0.85,"rho_spec":0.95,"H0":1000.0,"M0":5000.0,"I_h0":10.0,"N_tested":200.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S_h":[],"I_h":[],"S_v":[],"E_v":[],"I_v":[]},"base_compartments":["S_h","I_h","S_v","E_v","I_v"],"transmission_transitions":["bite","infect_v"],"infectious_compartments":["I_v","I_h"]},"bindings":[
