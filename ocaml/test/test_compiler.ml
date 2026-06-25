@@ -7305,8 +7305,10 @@ stratify(by = patch)
 let N[p in patch] = S[p] + I[p] + R[p]
 parameters {
   #' basic reproduction number (per patch)
+  #' @symbol R_naught
   R0[patch] : positive in [1.0, 6.0]
   #' mean infectious period is 1/gamma
+  #' @ref Anderson and May 1991
   gamma : rate in [0.01, 0.5]
   beta : rate in [0.001, 2.0]
 }
@@ -7373,7 +7375,29 @@ let test_doc_inspect_parameters () =
   (* The indexed param's single doc rides every expanded leaf (R0_urban,
      R0_rural), mirroring shared bounds. *)
   Alcotest.(check bool) "indexed param doc present" true
-    (contains_substring ~needle:"basic reproduction number (per patch)" out)
+    (contains_substring ~needle:"basic reproduction number (per patch)" out);
+  (* @symbol and @ref tags are split out and rendered. *)
+  Alcotest.(check bool) "@symbol rendered" true
+    (contains_substring ~needle:"R_naught" out);
+  Alcotest.(check bool) "@ref rendered" true
+    (contains_substring ~needle:"Anderson and May 1991" out)
+
+let test_doc_refused_tag () =
+  (* A number-bearing tag (@default/@plausible/@fixed) is a hard E111 that
+     names the --params TOML migration; only @symbol/@ref are recognized. *)
+  compile_expect_error_code ~code:"E111" ~contains:"@symbol"
+    {|
+time_unit = 'days
+compartments { S, I }
+parameters {
+  #' transmission rate
+  #' @default 0.3
+  beta : rate
+}
+transitions { infection : S --> I @ beta * S }
+init { S = 100 }
+simulate { from = 0 'days to = 5 'days }
+|}
 
 let test_doc_inspect_compartments () =
   let out = doc_inspect_output `Compartments in
@@ -7388,7 +7412,8 @@ let () =
       Alcotest.test_case "documented model compiles"                  `Quick test_doc_comment_compiles;
       Alcotest.test_case "#' docs are IR-neutral (doc vs stripped twin)" `Quick test_doc_ir_neutral;
       Alcotest.test_case "dangling #' is a hard error (E001)"         `Quick test_doc_dangling_rejected;
-      Alcotest.test_case "inspect --parameters shows doc prose"       `Quick test_doc_inspect_parameters;
+      Alcotest.test_case "refused doc tag (@default) is E111"         `Quick test_doc_refused_tag;
+      Alcotest.test_case "inspect --parameters shows doc prose + tags" `Quick test_doc_inspect_parameters;
       Alcotest.test_case "inspect --compartments shows doc prose"     `Quick test_doc_inspect_compartments;
     ];
     "quadratic_coupling_warning", [

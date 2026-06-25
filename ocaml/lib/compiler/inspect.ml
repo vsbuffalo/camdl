@@ -121,6 +121,23 @@ let glob_match pattern s =
         check s rest
   end
 
+(* Render a parsed `#'` doc block inline after a declaration: the prose as
+   `# …`, then the @symbol (in parameter colour) and @ref (bracketed), each
+   shown only if present. Shared by the parameter / compartment / transition
+   listings. *)
+let render_doc ppf (d : Ast.doc) =
+  (match d.d_text with
+   | Some t ->
+     Term_style.dim_style Fmt.string ppf "   # ";
+     Term_style.dim_style Fmt.string ppf t
+   | None -> ());
+  (match d.d_symbol with
+   | Some s -> Fmt.pf ppf "  "; Term_style.param Fmt.string ppf s
+   | None -> ());
+  (match d.d_ref with
+   | Some r -> Term_style.dim_style Fmt.string ppf (Printf.sprintf "  [%s]" r)
+   | None -> ())
+
 (* ── --summary ───────────────────────────────────────────────────────────── *)
 
 let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
@@ -546,11 +563,7 @@ let run_compartments ppf (model : Ir.model) ctx =
         Pp_expr.pp_pop ~mode:Pp_expr.Dsl ~split ppf c.name
       ) expanded
     ) ppf ();
-    (match cd.cdoc with
-     | Some d when d <> "" ->
-       Term_style.dim_style Fmt.string ppf "   # ";
-       Term_style.dim_style Fmt.string ppf d
-     | _ -> ());
+    (match cd.cdoc with Some d -> render_doc ppf d | None -> ());
     Fmt.pf ppf "@\n"
   ) ctx.comp_decls;
   Fmt.pf ppf "@\n";
@@ -639,11 +652,7 @@ let run_parameters ppf (model : Ir.model) (ctx : Expander.context) =
            if h.hpool_over <> "" then
              Fmt.pf ppf " [pool=%s]" h.hpool_over
          | None -> ());
-        (match doc_of p with
-         | Some d when d <> "" ->
-           Term_style.dim_style Fmt.string ppf "   # ";
-           Term_style.dim_style Fmt.string ppf d
-         | _ -> ());
+        (match doc_of p with Some d -> render_doc ppf d | None -> ());
         Fmt.pf ppf "@\n"
       ) ps;
       Fmt.pf ppf "@\n"

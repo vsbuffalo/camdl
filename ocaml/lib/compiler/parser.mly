@@ -76,6 +76,40 @@
       omeasurement = !meas; oprojection = !proj;
       oschedule = !sched;
       oloc = Parser_errors.ast_loc_of ~sp ~ep }
+
+  (* Split a `#'` doc block (the lines after each `#'`, trimmed) into prose
+     description + recognized tags. A line whose first non-space character is
+     `@` is a tag line: `@symbol <text>` / `@ref <text>`. Any other `@tag`
+     (e.g. `@default`, `@plausible`, `@fixed`) is rejected (E111) — a
+     parameter's value/bounds/prior live in the --params TOML, not the model.
+     Non-`@` lines are joined into the prose description. *)
+  let parse_doc_block ~sp ~ep (lines : string list) : Ast.doc =
+    let texts = ref [] and symbol = ref None and reference = ref None in
+    List.iter (fun line ->
+      let t = String.trim line in
+      if t = "" then ()
+      else if t.[0] = '@' then begin
+        let (tag, value) = match String.index_opt t ' ' with
+          | Some i -> (String.sub t 0 i,
+                       String.trim (String.sub t i (String.length t - i)))
+          | None   -> (t, "")
+        in
+        match tag with
+        | "@symbol" -> symbol := Some value
+        | "@ref"    -> reference := Some value
+        | other ->
+          Parser_errors.push_error ~sp ~ep ~code:"E111"
+            ~msg:(Printf.sprintf
+              "unknown doc tag '%s': a parameter's value, bounds, and prior \
+               belong in the --params TOML / fit.toml, not the model — the only \
+               recognized `#'` tags are @symbol and @ref" other)
+      end
+      else texts := t :: !texts
+    ) lines;
+    { Ast.d_text = (match List.rev !texts with [] -> None
+                                              | xs -> Some (String.concat " " xs));
+      d_symbol = !symbol;
+      d_ref = !reference }
 %}
 
 (* ── Literals & identifiers ────────────────────────────────────────────── *)
@@ -216,7 +250,7 @@ unit_lit:
    parse error (E001) — it is rejected, never silently accepted. *)
 doc_opt:
   | (* empty *)             { None }
-  | ds = nonempty_list(DOC) { Some (String.concat " " ds) }
+  | ds = nonempty_list(DOC) { Some (parse_doc_block ~sp:$startpos ~ep:$endpos ds) }
 
 (* ── Compartment block ──────────────────────────────────────────────────── *)
 
