@@ -142,6 +142,26 @@ Values supplied at runtime via `--params file.toml` or `--param beta=0.3`.
 Parameters are the model's degrees of freedom — what you sweep, fit, or hold
 fixed across analyses.
 
+**Document them with `#'`.** A name and kind alone (`beta : rate`) rarely says
+what a parameter _means_. A `#'` doc comment on the line above attaches a short
+description that shows up in `camdl inspect` and travels with the model:
+
+```camdl
+parameters {
+  #' per-capita transmission rate (contact rate × per-contact prob)
+  beta  : rate
+  #' mean infectious period is 1/gamma
+  gamma : rate
+}
+```
+
+This is recommended, not required — an unannotated model compiles fine — and
+it's a graded habit worth building: annotate **parameters** first (they're the
+easiest to forget and carry the most hidden meaning), then the non-obvious
+**compartments**, and more as you want a self-describing model. The `#'`
+describes what a parameter _is_; its _value_ still lives in a `--params` TOML,
+never in the model.
+
 ### Let bindings: compile-time inlining
 
 ```camdl
@@ -499,19 +519,19 @@ scenarios {
 
 ## Quick reference
 
-| Concern            | Syntax                                          | Notes                         |
-| ------------------ | ----------------------------------------------- | ----------------------------- |
-| Compartments       | `compartments { S, I, R }`                      | what exists                   |
-| Dimensions         | `dimensions { age = [...] }` + `stratify(by=X)` | Cartesian product             |
-| Derived quantities | `let N = S + I + R`                             | inlined at compile time       |
-| Parameters         | `parameters { beta : rate }`                    | external, supplied at runtime |
-| Tables             | `tables { C : age × age = [...] }`              | fixed data arrays             |
+| Concern            | Syntax                                          | Notes                             |
+| ------------------ | ----------------------------------------------- | --------------------------------- |
+| Compartments       | `compartments { S, I, R }`                      | what exists                       |
+| Dimensions         | `dimensions { age = [...] }` + `stratify(by=X)` | Cartesian product                 |
+| Derived quantities | `let N = S + I + R`                             | inlined at compile time           |
+| Parameters         | `parameters { beta : rate }`                    | external, supplied at runtime     |
+| Tables             | `tables { C : age × age = [...] }`              | fixed data arrays                 |
 | Continuous flow    | `src --> dst @ propensity`                      | Gillespie / chain-binomial events |
-| Scheduled events   | `transfer(...) at [times]`                      | interventions, discrete       |
-| Observations       | `incidence(...)`, likelihood                    | inference + synthetic data    |
-| Initial state      | `init { S = expr }`                             | override-by-source-order      |
-| Scenarios          | `enable`, `set`, `scale`, `compose`             | counterfactual selection      |
-| Time range         | `simulate { from, to }`                         | defaults, overridable         |
+| Scheduled events   | `transfer(...) at [times]`                      | interventions, discrete           |
+| Observations       | `incidence(...)`, likelihood                    | inference + synthetic data        |
+| Initial state      | `init { S = expr }`                             | override-by-source-order          |
+| Scenarios          | `enable`, `set`, `scale`, `compose`             | counterfactual selection          |
+| Time range         | `simulate { from, to }`                         | defaults, overridable             |
 
 ---
 

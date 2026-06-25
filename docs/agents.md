@@ -221,6 +221,33 @@ with `camdl fit summary` for context.
 
 ## Idioms / anti-idioms
 
+**Annotate your parameters with `#'` doc comments.** A name and kind
+(`beta : rate`) tells the next reader almost nothing about what the parameter
+_is_ — and parameters are the easiest part of a model to leave unexplained. Put
+a one-line `#'` doc comment directly above each one:
+
+```camdl
+parameters {
+  #' per-capita transmission rate (contact rate × per-contact prob)
+  beta : rate
+  #' mean infectious period is 1/gamma
+  gamma : rate
+}
+```
+
+It surfaces in `camdl inspect --parameters`, travels with the model, and costs
+one line. This is a strong recommendation, not a requirement — an unannotated
+model compiles fine — but **when you author or edit a model, default to
+documenting at least its parameters.** They carry the largest information
+deficit (an `S`/`I`/`R` usually explains itself; `beta`, `rho`, `k` do not) and
+are the easiest to forget. Annotation is a graded style: **parameters always** →
+then the non-obvious **compartments** (an environmental reservoir `W`, distinct
+latent stages) → broader declarations by request (parameters and compartments
+are what `#'` attaches to today). The `#'` says what a parameter _means_; its
+_value_ still belongs in a `--params` TOML, never the model — `#'` is the right
+home for the intent that otherwise leaks into a `# FIXED = 0.3` comment (which
+does nothing, drifts from the real value, and is exactly what `#'` replaces).
+
 **Backend choice for fits.** Use `chain_binomial` — the production fit backend.
 Gillespie is for forward-simulation sanity checks, not fits (too slow).
 
