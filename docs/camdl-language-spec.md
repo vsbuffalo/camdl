@@ -1266,6 +1266,14 @@ which silently went wrong for `interpolated` (data-file values are always
 literal constants → dimensionless) and caused E300 dim-check failures on correct
 models. The required-literal design eliminates that class of bug at parse time.
 
+For file-backed `interpolated` forcings, the `time_col` is the model's internal
+time axis. Cells may be bare numbers (already in the model `time_unit`) or — in
+anchored mode — ISO dates (`YYYY-MM-DD`), which the compiler resolves to internal
+time via `origin` + `time_unit` at expand time, the same rule observation-data
+time columns and `instant`/`duration` table cells follow (see
+[`docs/dates.md`](dates.md)). A date-valued `time_col` in an unanchored model
+(no `origin`) is a hard error (E209), never a silent fall-through to zero.
+
 Unit-literal choices for forcings in practice:
 
 - **`'ratio`** — dimensionless multiplier around 1.0. Most seasonal forcings

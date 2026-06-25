@@ -4670,6 +4670,99 @@ let test_sinusoidal_count_dim () =
   | [tf] -> Alcotest.(check (pair int int)) "'count → (1,0)" (1, 0) tf.Ir.dim
   | _ -> Alcotest.fail "expected one time_function"
 
+(* ── gh#308 — file-backed interpolated forcing with an ISO-date time_col ──────
+   A `data = "..."` interpolated forcing whose time_col holds ISO dates must
+   auto-convert them to internal time via the model's origin + time_unit, the
+   same rule observation-data time columns and instant/duration tables follow.
+   Pre-fix the loader parsed the time cell with `float_of_string_opt` only, so a
+   date cell silently dropped the row's time while keeping its value — leaving
+   an empty times array against a full values array, which the runtime
+   interpolated to 0.0 everywhere (silent-wrong). *)
+let extract_interpolated_times (m : Ir.model) name =
+  let tf = List.find (fun (t : Ir.time_function) -> t.Ir.name = name) m.Ir.time_functions in
+  match tf.Ir.kind with
+  | Ir.Interpolated i ->
+    List.map (function
+      | Ir.Const f -> f
+      | _ -> Alcotest.fail "interpolated time knot is not a constant")
+      i.Ir.times
+  | _ -> Alcotest.failf "forcing %s is not interpolated" name
+
+let test_interpolated_iso_date_time_col () =
+  let tmp = Filename.temp_file "camdl_forcing_iso" ".tsv" in
+  let oc = open_out tmp in
+  output_string oc "time\tvalue\n";
+  output_string oc "2016-01-31\t100\n";
+  output_string oc "2016-12-31\t200\n";
+  output_string oc "2017-12-31\t300\n";
+  close_out oc;
+  let src = Printf.sprintf {|
+    time_unit = 'days
+    origin    = date("2016-01-01")
+    compartments { S }
+    parameters { dummy : rate }
+    forcing {
+      eff : interpolated 'count { data = "%s"  time_col = time  value_col = value  method = "linear" }
+    }
+    transitions { drain : S --> @ dummy * eff * S }
+    init { S = 100 }
+    simulate { from = date("2016-01-01")  to = date("2018-01-01") }
+  |} tmp in
+  let m = compile_expect_ok src in
+  Sys.remove tmp;
+  (* 2016-01-01 origin: Jan 31 → 30, Dec 31 → 365 (2016 leap), 2017-12-31 → 730. *)
+  Alcotest.(check (list (float 1e-6))) "ISO dates resolve to day-offsets"
+    [30.; 365.; 730.] (extract_interpolated_times m "eff")
+
+(** A numeric time_col is unchanged — day-offsets pass straight through. *)
+let test_interpolated_numeric_time_col () =
+  let tmp = Filename.temp_file "camdl_forcing_num" ".tsv" in
+  let oc = open_out tmp in
+  output_string oc "day\tvalue\n";
+  output_string oc "30\t100\n";
+  output_string oc "365\t200\n";
+  output_string oc "730\t300\n";
+  close_out oc;
+  let src = Printf.sprintf {|
+    time_unit = 'days
+    origin    = date("2016-01-01")
+    compartments { S }
+    parameters { dummy : rate }
+    forcing {
+      eff : interpolated 'count { data = "%s"  time_col = day  value_col = value  method = "linear" }
+    }
+    transitions { drain : S --> @ dummy * eff * S }
+    init { S = 100 }
+    simulate { from = date("2016-01-01")  to = date("2018-01-01") }
+  |} tmp in
+  let m = compile_expect_ok src in
+  Sys.remove tmp;
+  Alcotest.(check (list (float 1e-6))) "numeric day-offsets pass through"
+    [30.; 365.; 730.] (extract_interpolated_times m "eff")
+
+(** An ISO-date time_col with no model origin is a hard error (E209), not a
+    silent fall-through to 0. *)
+let test_interpolated_iso_date_no_origin_errors () =
+  let tmp = Filename.temp_file "camdl_forcing_iso_noorigin" ".tsv" in
+  let oc = open_out tmp in
+  output_string oc "time\tvalue\n";
+  output_string oc "2016-01-31\t100\n";
+  output_string oc "2016-12-31\t200\n";
+  close_out oc;
+  let src = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S }
+    parameters { dummy : rate }
+    forcing {
+      eff : interpolated 'count { data = "%s"  time_col = time  value_col = value  method = "linear" }
+    }
+    transitions { drain : S --> @ dummy * eff * S }
+    init { S = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} tmp in
+  compile_expect_error_code ~code:"E209" ~contains:"origin" src;
+  Sys.remove tmp
+
 (** Forcing decl without a unit literal now fails at parse time. *)
 let test_forcing_without_unit_errors () =
   (* GH #8: every forcing declaration MUST carry a tier-3 unit
@@ -7690,6 +7783,9 @@ let () =
       Alcotest.test_case "'per_day → dim (0,-1)"                     `Quick test_sinusoidal_per_day_dim;
       Alcotest.test_case "'ratio → dim (0,0)"                        `Quick test_sinusoidal_ratio_dim;
       Alcotest.test_case "'count → dim (1,0)"                        `Quick test_sinusoidal_count_dim;
+      Alcotest.test_case "gh#308 interpolated ISO-date time_col → day-offsets" `Quick test_interpolated_iso_date_time_col;
+      Alcotest.test_case "gh#308 interpolated numeric time_col passes through"  `Quick test_interpolated_numeric_time_col;
+      Alcotest.test_case "gh#308 interpolated ISO-date time_col w/o origin errors (E209)" `Quick test_interpolated_iso_date_no_origin_errors;
       Alcotest.test_case "forcing without unit literal is an error" `Quick test_forcing_without_unit_errors;
       Alcotest.test_case "comma in scenario set{} block hints newline separator" `Quick test_scenario_set_comma_separator_hint;
     ];

@@ -4075,16 +4075,64 @@ let load_interpolated_for_level ctx path ~key_col ~key_val ~time_col ~value_col 
     time_ci  := find_col time_col;
     value_ci := find_col value_col
   in
-  let on_row _row_num cols =
+  (* A forcing's time_col is internal time. A bare number is taken directly; an
+     ISO date (YYYY-MM-DD) resolves via the model's origin + time_unit — the
+     same rule observation-data time columns and instant/duration tables follow
+     (docs/dates.md, "The one rule"). A failure is a located E209, never a
+     silent drop: dropping the time while keeping the value desynced the two
+     arrays and the runtime then interpolated to 0 everywhere (gh#308). *)
+  let parse_time_cell row_num cell =
+    match float_of_string_opt cell with
+    | Some t -> Some t
+    | None ->
+      (match parse_iso_date cell, ctx.origin with
+       | Ok _, Some origin_str ->
+         (try Some (parse_date_to_float origin_str cell ctx.time_unit)
+          with Failure msg | Invalid_argument msg ->
+            Diagnostics.error ctx.diags ~code:"E209" ~loc:Diagnostics.no_loc
+              ~message:(Printf.sprintf
+                "%s row %d: time_col cell '%s' is not a number or resolvable ISO date (%s)"
+                path row_num cell msg)
+              ();
+            None)
+       | Ok _, None ->
+         Diagnostics.error ctx.diags ~code:"E209" ~loc:Diagnostics.no_loc
+           ~message:(Printf.sprintf
+             "%s row %d: time_col has date cell '%s' but the model declares no origin"
+             path row_num cell)
+           ~hint:"add a top-level `origin = date(\"YYYY-MM-DD\")`, or use numeric \
+                  day-offsets in the time column"
+           ();
+         None
+       | Error why, _ ->
+         Diagnostics.error ctx.diags ~code:"E209" ~loc:Diagnostics.no_loc
+           ~message:(Printf.sprintf
+             "%s row %d: time_col cell '%s' is neither a number nor an ISO date (%s)"
+             path row_num cell why)
+           ();
+         None)
+  in
+  let parse_value_cell row_num cell =
+    match float_of_string_opt cell with
+    | Some v -> Some v
+    | None ->
+      Diagnostics.error ctx.diags ~code:"E209" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "%s row %d: value_col cell '%s' is not a number" path row_num cell)
+        ();
+      None
+  in
+  let on_row row_num cols =
     let get i = String.trim (try List.nth cols i with _ -> "") in
-    if !key_ci < 0 || get !key_ci = key_val then begin
-      (match float_of_string_opt (get !time_ci) with
-       | Some t -> times  := t :: !times
-       | None   -> ());
-      (match float_of_string_opt (get !value_ci) with
-       | Some v -> values := v :: !values
-       | None   -> ())
-    end
+    if !key_ci < 0 || get !key_ci = key_val then
+      (* Push time and value together so a parse failure cannot desync the two
+         arrays — a diagnostic has already been emitted, which fails the compile. *)
+      match parse_time_cell row_num (get !time_ci),
+            parse_value_cell row_num (get !value_ci) with
+      | Some t, Some v ->
+        times  := t :: !times;
+        values := v :: !values
+      | _ -> ()
   in
   let on_done () = (List.rev !times, List.rev !values) in
   match read_csv_rows ctx path ~on_header ~on_row ~on_done with
