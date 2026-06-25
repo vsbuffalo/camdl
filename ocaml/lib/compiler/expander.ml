@@ -3508,7 +3508,7 @@ let mk_estimated_or_required ~bounds ~prior ~hierarchical : Ir.param_value =
 let expand_parameters ctx =
   let from_params = List.concat_map (fun pd ->
     match pd with
-    | PScalar { pname; pbounds; pkind; pdim; punit; pprior; ploc } ->
+    | PScalar { pname; pbounds; pkind; pdim; punit; pprior; ploc; _ } ->
       let bounds = resolve_bounds ctx pbounds in
       let pk = Some (ir_param_kind_of_ast pkind) in
       let loc = diag_loc_of_ast_ctx ctx ploc in
@@ -3524,7 +3524,7 @@ let expand_parameters ctx =
          Ir.param_kind = pk;
          Ir.param_dim  = dim;
        }]
-    | PIndexed { pname; pdims = [dim]; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc } ->
+    | PIndexed { pname; pdims = [dim]; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
       let vals = dim_values ctx dim in
       let bounds = resolve_bounds ctx pbounds in
       let pk = Some (ir_param_kind_of_ast pkind) in

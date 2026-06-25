@@ -546,6 +546,11 @@ let run_compartments ppf (model : Ir.model) ctx =
         Pp_expr.pp_pop ~mode:Pp_expr.Dsl ~split ppf c.name
       ) expanded
     ) ppf ();
+    (match cd.cdoc with
+     | Some d when d <> "" ->
+       Term_style.dim_style Fmt.string ppf "   # ";
+       Term_style.dim_style Fmt.string ppf d
+     | _ -> ());
     Fmt.pf ppf "@\n"
   ) ctx.comp_decls;
   Fmt.pf ppf "@\n";
@@ -587,6 +592,22 @@ let run_parameters ppf (model : Ir.model) (ctx : Expander.context) =
     | Some (Ast.PIndexed pd) -> pkind_str pd.pkind
     | None -> "?"
   in
+  (* Doc comment for a parameter, looked up from its source declaration
+     (scalar by name, indexed by `name_`-prefix). An indexed param's leaves
+     all share the one declaration's doc, mirroring shared bounds. *)
+  let doc_of (p : Ir.parameter) =
+    match List.find_opt (fun pd ->
+        match pd with
+        | Ast.PScalar s -> s.pname = p.name
+        | Ast.PIndexed ix ->
+          let prefix = ix.pname ^ "_" in
+          String.length p.name > String.length prefix &&
+          String.sub p.name 0 (String.length prefix) = prefix
+      ) ctx.Expander.param_decls with
+    | Some (Ast.PScalar pd)  -> pd.pdoc
+    | Some (Ast.PIndexed pd) -> pd.pdoc
+    | None -> None
+  in
   let kind_order = ["rate"; "probability"; "positive"; "count"; "real"] in
   List.iter (fun kind ->
     let ps = List.filter (fun p -> kind_of p = kind) model.parameters in
@@ -618,6 +639,11 @@ let run_parameters ppf (model : Ir.model) (ctx : Expander.context) =
            if h.hpool_over <> "" then
              Fmt.pf ppf " [pool=%s]" h.hpool_over
          | None -> ());
+        (match doc_of p with
+         | Some d when d <> "" ->
+           Term_style.dim_style Fmt.string ppf "   # ";
+           Term_style.dim_style Fmt.string ppf d
+         | _ -> ());
         Fmt.pf ppf "@\n"
       ) ps;
       Fmt.pf ppf "@\n"

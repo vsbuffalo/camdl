@@ -82,7 +82,11 @@ and expr =
 
 type compartment_kind = Integer | Real
 
-type compartment_decl = { cname: string; ckind: compartment_kind; cloc: loc }
+(* [cdoc] is the joined prose of any `#'` doc comment block immediately
+   preceding the declaration (None when undocumented). It is non-semantic
+   metadata — it never reaches the IR or affects compilation; it surfaces in
+   `camdlc inspect`. *)
+type compartment_decl = { cname: string; ckind: compartment_kind; cdoc: string option; cloc: loc }
 
 (* Parameter kinds. The two time kinds (PInstant, PDuration) both carry
    dimension [T] for dimcheck (2026-05-22 calendar-time §6.7): an instant is
@@ -109,8 +113,8 @@ type prior_spec = {
    scale is always the model time unit). A unit on any other kind, or together
    with a bracket [pdim], is a semantic error (E281 / E282). *)
 type param_decl =
-  | PScalar  of { pname: string; pkind: param_type; pdim: dim_annotation option; punit: unit_lit option; pbounds: (expr * expr) option; pprior: prior_spec option; ploc: loc }
-  | PIndexed of { pname: string; pdims: string list; pkind: param_type; pdim: dim_annotation option; punit: unit_lit option; pbounds: (expr * expr) option; pprior: prior_spec option; ploc: loc }
+  | PScalar  of { pname: string; pkind: param_type; pdim: dim_annotation option; punit: unit_lit option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: string option; ploc: loc }
+  | PIndexed of { pname: string; pdims: string list; pkind: param_type; pdim: dim_annotation option; punit: unit_lit option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: string option; ploc: loc }
 
 (** Table dimension entry: bare dim name, or dim + unit *)
 type table_dim_entry =

@@ -7283,8 +7283,114 @@ let test_reactive_unknown_action_target_rejected () =
        \  action = transfer(fraction = cov, from = S, to = Nowhere)\n\
        }")
 
+(* ── Declaration doc comments (#') ────────────────────────────────────────
+   `#'` doc comments attach prose to the following compartment / parameter
+   declaration. The prose lives on the AST only (it never reaches the IR) and
+   surfaces in `camdlc inspect`. Tests: a documented model compiles; the docs
+   are IR-neutral (documented vs a stripped twin → byte-identical IR); a
+   dangling `#'` is a hard error; and `inspect` renders the prose, including
+   sharing one doc across an indexed param's expanded leaves. *)
+
+let doc_model_src = {|
+time_unit = 'days
+dimensions { patch = [urban, rural] }
+compartments {
+  #' fully susceptible
+  S,
+  #' infectious and shedding
+  I,
+  R
+}
+stratify(by = patch)
+let N[p in patch] = S[p] + I[p] + R[p]
+parameters {
+  #' basic reproduction number (per patch)
+  R0[patch] : positive in [1.0, 6.0]
+  #' mean infectious period is 1/gamma
+  gamma : rate in [0.01, 0.5]
+  beta : rate in [0.001, 2.0]
+}
+transitions {
+  infection[p in patch] : S[p] --> I[p] @ R0[p] * gamma * S[p] * I[p] / N[p]
+  recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
+}
+init { S[p in patch] = 1000  I[p in patch] = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+(* The same source with every `#'` doc line removed — the undocumented twin. *)
+let strip_doc_lines src =
+  String.split_on_char '\n' src
+  |> List.filter (fun line ->
+       let t = String.trim line in
+       not (String.length t >= 2 && t.[0] = '#' && t.[1] = '\''))
+  |> String.concat "\n"
+
+let test_doc_comment_compiles () =
+  let _ : Ir.model = compile_expect_ok doc_model_src in
+  ()
+
+let test_doc_ir_neutral () =
+  let m_doc  = compile_expect_ok doc_model_src in
+  let m_bare = compile_expect_ok (strip_doc_lines doc_model_src) in
+  Alcotest.(check string)
+    "documented model serializes identically to its undocumented twin"
+    (Serde.model_to_string m_bare)
+    (Serde.model_to_string m_doc)
+
+let test_doc_dangling_rejected () =
+  (* a `#'` that precedes no declaration (sits before `}`) is a hard parse
+     error — rejected, never silently accepted (no loose semantics). *)
+  compile_expect_error_code ~code:"E001" ~contains:""
+    {|
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  beta : rate
+  #' orphan doc with no declaration after it
+}
+simulate { from = 0 'days to = 5 'days }
+|}
+
+let doc_inspect_output view =
+  let detail =
+    match Compiler.compile_detail_result ~name:"doc_inspect" doc_model_src with
+    | Ok d -> d
+    | Error e -> Alcotest.failf "detail compile failed: %s" e
+  in
+  let buf = Buffer.create 512 in
+  let ppf = Format.formatter_of_buffer buf in
+  (match view with
+   | `Params       -> Inspect.run_parameters   ppf detail.model detail.ctx
+   | `Compartments -> Inspect.run_compartments ppf detail.model detail.ctx);
+  Format.pp_print_flush ppf ();
+  Buffer.contents buf
+
+let test_doc_inspect_parameters () =
+  let out = doc_inspect_output `Params in
+  Alcotest.(check bool) "scalar param doc prose present" true
+    (contains_substring ~needle:"mean infectious period is 1/gamma" out);
+  (* The indexed param's single doc rides every expanded leaf (R0_urban,
+     R0_rural), mirroring shared bounds. *)
+  Alcotest.(check bool) "indexed param doc present" true
+    (contains_substring ~needle:"basic reproduction number (per patch)" out)
+
+let test_doc_inspect_compartments () =
+  let out = doc_inspect_output `Compartments in
+  Alcotest.(check bool) "compartment doc prose present" true
+    (contains_substring ~needle:"fully susceptible" out);
+  Alcotest.(check bool) "second compartment doc present" true
+    (contains_substring ~needle:"infectious and shedding" out)
+
 let () =
   Alcotest.run "compiler" [
+    "declaration_doc_comments", [
+      Alcotest.test_case "documented model compiles"                  `Quick test_doc_comment_compiles;
+      Alcotest.test_case "#' docs are IR-neutral (doc vs stripped twin)" `Quick test_doc_ir_neutral;
+      Alcotest.test_case "dangling #' is a hard error (E001)"         `Quick test_doc_dangling_rejected;
+      Alcotest.test_case "inspect --parameters shows doc prose"       `Quick test_doc_inspect_parameters;
+      Alcotest.test_case "inspect --compartments shows doc prose"     `Quick test_doc_inspect_compartments;
+    ];
     "quadratic_coupling_warning", [
       Alcotest.test_case "W104 on per-(p,q) transition" `Quick test_w104_perpair_warns;
       Alcotest.test_case "no W104 on summed-rate form" `Quick test_w104_summed_no_warn;
