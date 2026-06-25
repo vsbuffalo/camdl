@@ -501,9 +501,9 @@ parameters {
 }
 ```
 
-Parameters are **declared** here. Default values may optionally be specified in
-the model file. Concrete values for inference are supplied externally via CLI
-flags or inference engines.
+Parameters are **declared** here — names, kinds, and dimensions only. Concrete
+values are **never** specified in the model file; they are supplied externally
+via CLI flags, a `--params` TOML, or inference engines (§4.2).
 
 ### 4.1 Parameter Types
 
