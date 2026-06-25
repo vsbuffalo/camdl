@@ -1,7 +1,7 @@
 ---
 status: draft
 date: 2026-06-24
-implemented: Stage 0 (spec fix) + Stage 1 (#' prose on parameters + compartments, OCaml-only, surfaced in `inspect`). Stages 1b/2/3 pending.
+implemented: All stages landed. Stage 0 (spec fixes) · Stage 1 (#' prose on params + compartments, in `inspect`) · Stage 1b (extend to dimensions/transitions/observations) · Stage 2 (@symbol/@ref tags + E111 refused-tag guard) · Stage 3 (parameter docs in the IR + `camdl fit summary` legend). Two recorded deviations: Stage 3 scoped to PARAMETER docs in the IR only (the only Rust consumer — the fit summary — shows parameters; other decls stay AST/inspect-only until a consumer needs them), and NO `ir/VERSION` bump (the field is additive, omit-when-None, and the Rust IR has no `deny_unknown_fields`, so it is forward-compatible and every golden stays byte-identical; bumping would have cascaded a version-line rewrite across all goldens for no compatibility gain).
 ---
 
 # Declaration Doc Comments (`#'`) and Parameter Annotation
