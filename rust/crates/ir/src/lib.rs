@@ -6,6 +6,7 @@ pub mod model;
 pub mod observation;
 pub mod ode_equation;
 pub mod parameter;
+pub mod quantity;
 pub mod table;
 pub mod time_func;
 pub mod transition;

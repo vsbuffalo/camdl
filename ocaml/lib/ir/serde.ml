@@ -898,6 +898,169 @@ let observation_model_of_json j =
     likelihood    = likelihood_of_json  (member "likelihood" j);
   }
 
+(* ── Generated quantities ─────────────────────────────────────────────────────
+   Mirror of rust/crates/ir/src/quantity.rs. Externally-tagged single-key
+   objects throughout; `state` reuses the shared expr encoding, reduction
+   arithmetic reuses the shared bin_op/un_op encoding, and stratum reuses
+   stratum_key_to_json (omitted when empty, like observation_model). *)
+
+let qref_to_json (q : qref) : Yojson.Safe.t =
+  obj (
+    [("name", str q.qref_name)]
+    @ (match q.qref_stratum with
+       | [] -> []
+       | ss -> [("stratum", arr (List.map stratum_key_to_json ss))])
+  )
+
+let qref_of_json j : qref =
+  { qref_name    = as_string (member "name" j);
+    qref_stratum = (match member_opt "stratum" j with
+                    | Some `Null | None -> []
+                    | Some s -> List.map stratum_key_of_json (as_list s)); }
+
+let rec scalar_expr_to_json (se : scalar_expr) : Yojson.Safe.t =
+  match se with
+  | SConst v -> obj [("const", flt v)]
+  | SParam p -> obj [("param", str p)]
+  | SQRef  q -> obj [("q_ref", qref_to_json q)]
+  | SUnOp { op; arg } ->
+    obj [("un_op", obj [
+      ("op",  str (un_op_str op));
+      ("arg", scalar_expr_to_json arg);
+    ])]
+  | SBinOp { op; left; right } ->
+    obj [("bin_op", obj [
+      ("op",    str (bin_op_str op));
+      ("left",  scalar_expr_to_json left);
+      ("right", scalar_expr_to_json right);
+    ])]
+  | SCond { pred; then_; else_ } ->
+    obj [("cond", obj [
+      ("pred", scalar_expr_to_json pred);
+      ("then", scalar_expr_to_json then_);
+      ("else", scalar_expr_to_json else_);
+    ])]
+
+let rec scalar_expr_of_json j : scalar_expr =
+  match j with
+  | `Assoc [("const", v)] -> SConst (as_float v)
+  | `Assoc [("param", v)] -> SParam (as_string v)
+  | `Assoc [("q_ref", v)] -> SQRef (qref_of_json v)
+  | `Assoc [("un_op", v)] ->
+    SUnOp { op  = un_op_of_str (as_string (member "op" v));
+            arg = scalar_expr_of_json (member "arg" v); }
+  | `Assoc [("bin_op", v)] ->
+    SBinOp { op    = bin_op_of_str (as_string (member "op" v));
+             left  = scalar_expr_of_json (member "left" v);
+             right = scalar_expr_of_json (member "right" v); }
+  | `Assoc [("cond", v)] ->
+    SCond { pred  = scalar_expr_of_json (member "pred" v);
+            then_ = scalar_expr_of_json (member "then" v);
+            else_ = scalar_expr_of_json (member "else" v); }
+  | _ -> fail "scalar_expr must be a single-key object \
+               (const/param/q_ref/un_op/bin_op/cond)"
+
+let value_reduce_to_json (v : value_reduce) : Yojson.Safe.t =
+  match v with
+  | VFinal -> str "final"
+  | VMax   -> str "max"
+  | VMin   -> str "min"
+  | VMean  -> str "mean"
+  | VCountAbove e -> obj [("count_above", expr_to_json e)]
+  | VCountBelow e -> obj [("count_below", expr_to_json e)]
+
+let value_reduce_of_json j : value_reduce =
+  match j with
+  | `String "final" -> VFinal
+  | `String "max"   -> VMax
+  | `String "min"   -> VMin
+  | `String "mean"  -> VMean
+  | `Assoc [("count_above", e)] -> VCountAbove (expr_of_json e)
+  | `Assoc [("count_below", e)] -> VCountBelow (expr_of_json e)
+  | _ -> fail "unknown value_reduce \
+               (expected final/max/min/mean or count_above/count_below)"
+
+let time_reduce_to_json (t : time_reduce) : Yojson.Safe.t =
+  match t with
+  | TimeOfMax    -> str "time_of_max"
+  | TimeOfMin    -> str "time_of_min"
+  | FirstAbove e -> obj [("first_above", expr_to_json e)]
+  | FirstBelow e -> obj [("first_below", expr_to_json e)]
+  | LastAbove  e -> obj [("last_above",  expr_to_json e)]
+  | LastBelow  e -> obj [("last_below",  expr_to_json e)]
+
+let time_reduce_of_json j : time_reduce =
+  match j with
+  | `String "time_of_max" -> TimeOfMax
+  | `String "time_of_min" -> TimeOfMin
+  | `Assoc [("first_above", e)] -> FirstAbove (expr_of_json e)
+  | `Assoc [("first_below", e)] -> FirstBelow (expr_of_json e)
+  | `Assoc [("last_above",  e)] -> LastAbove  (expr_of_json e)
+  | `Assoc [("last_below",  e)] -> LastBelow  (expr_of_json e)
+  | _ -> fail "unknown time_reduce \
+               (expected time_of_max/time_of_min or first_/last_above/below)"
+
+let temporal_reduce_to_json (r : temporal_reduce) : Yojson.Safe.t =
+  match r with
+  | RValue v  -> obj [("value", value_reduce_to_json v)]
+  | RTime  t  -> obj [("time",  time_reduce_to_json t)]
+  | RIntegral -> str "integral"
+
+let temporal_reduce_of_json j : temporal_reduce =
+  match j with
+  | `String "integral"    -> RIntegral
+  | `Assoc [("value", v)] -> RValue (value_reduce_of_json v)
+  | `Assoc [("time",  t)] -> RTime  (time_reduce_of_json t)
+  | _ -> fail "temporal_reduce must be \"integral\" or {\"value\":..}/{\"time\":..}"
+
+let quantity_source_to_json (s : quantity_source) : Yojson.Safe.t =
+  match s with
+  | QSState e -> obj [("state", expr_to_json e)]
+
+let quantity_source_of_json j : quantity_source =
+  match j with
+  | `Assoc [("state", e)] -> QSState (expr_of_json e)
+  | _ -> fail "quantity_source must be {\"state\": expr}"
+
+let quantity_body_to_json (b : quantity_body) : Yojson.Safe.t =
+  match b with
+  | QBReduced { source; reduce } ->
+    obj [("reduced", obj (
+      [("source", quantity_source_to_json source)]
+      @ (match reduce with
+         | None   -> []
+         | Some r -> [("reduce", temporal_reduce_to_json r)])
+    ))]
+  | QBDerived se -> obj [("derived", scalar_expr_to_json se)]
+
+let quantity_body_of_json j : quantity_body =
+  match j with
+  | `Assoc [("reduced", v)] ->
+    QBReduced {
+      source = quantity_source_of_json (member "source" v);
+      reduce = (match member_opt "reduce" v with
+                | Some `Null | None -> None
+                | Some r -> Some (temporal_reduce_of_json r));
+    }
+  | `Assoc [("derived", se)] -> QBDerived (scalar_expr_of_json se)
+  | _ -> fail "quantity_body must be {\"reduced\":..} or {\"derived\":..}"
+
+let quantity_to_json (q : quantity) : Yojson.Safe.t =
+  obj (
+    [("name", str q.q_name)]
+    @ (match q.q_stratum with
+       | [] -> []
+       | ss -> [("stratum", arr (List.map stratum_key_to_json ss))])
+    @ [("body", quantity_body_to_json q.q_body)]
+  )
+
+let quantity_of_json j : quantity =
+  { q_name    = as_string (member "name" j);
+    q_stratum = (match member_opt "stratum" j with
+                 | Some `Null | None -> []
+                 | Some s -> List.map stratum_key_of_json (as_list s));
+    q_body    = quantity_body_of_json (member "body" j); }
+
 (* ── Parameters ──────────────────────────────────────────────────────────── *)
 
 let prior_dist_to_json (p : prior_dist) : Yojson.Safe.t =
@@ -1306,6 +1469,9 @@ let model_to_json (m : model) : Yojson.Safe.t =
     @ (match m.per_eval_bindings with
        | [] -> []
        | bs -> [("per_eval_bindings", arr (List.map binding_to_json bs))])
+    @ (match m.quantities with
+       | [] -> []
+       | qs -> [("quantities", arr (List.map quantity_to_json qs))])
   )
 
 let model_of_json (j : Yojson.Safe.t) : model =
@@ -1349,6 +1515,8 @@ let model_of_json (j : Yojson.Safe.t) : model =
     (* The doc dictionary lives at the envelope level, not the model body;
        `model_of_envelope_json` reads it and overrides this default. *)
     doc_index          = empty_doc_index;
+    quantities         = (match member_opt "quantities" j with
+                          | Some (`List v) -> List.map quantity_of_json v | _ -> []);
   }
 
 (* gh#audit-C8. IR schema version baked at build time from `ir/VERSION`

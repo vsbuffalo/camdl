@@ -3001,7 +3001,7 @@ mod tests {
             }),
             output: OutputConfig { times: OutputSchedule::AtTimes(vec![0.0, 80.0]), format: "tsv".into(), trajectory: true, observations: false },
             simulation: SimulationConfig { t_start: 0.0, t_end: 80.0, time_semantics: "continuous".into(), dt: Some(1.0), rng_seed: Some(42), integrator: Default::default() },
-            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
         };
 
         let compiled = CompiledModel::new(model).unwrap();
@@ -3176,7 +3176,7 @@ mod tests {
                 dt: Some(1.0), rng_seed: Some(42),
                 integrator: Default::default(),
             },
-            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
         };
         let compiled = CompiledModel::new(model).unwrap();
 
@@ -3280,7 +3280,7 @@ mod tests {
                 dt: Some(1.0), rng_seed: Some(42),
                 integrator: Default::default(),
             },
-            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
         };
         let compiled = CompiledModel::new(model).unwrap();
 
@@ -3419,7 +3419,7 @@ mod tests {
                 dt: None, rng_seed: None,
                 integrator: Default::default(),
             },
-            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
         };
 
         let est_with_normal = |name: &str, mean: f64, sd: f64| {
@@ -3483,7 +3483,7 @@ mod tests {
                 dt: None, rng_seed: None, integrator: Default::default(),
             },
             presets: vec![], model_structure: None, balance: None,
-            identity_tracked_compartments: vec![],
+            identity_tracked_compartments: vec![], quantities: vec![],
         }
     }
 
@@ -4133,7 +4133,7 @@ dt = 1.0
                 dt: Some(1.0), rng_seed: Some(42),
                 integrator: Default::default(),
             },
-            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
         };
         let compiled = sim::CompiledModel::new(model.clone()).expect("compile");
         (model, compiled)
@@ -4642,7 +4642,7 @@ dt = 1.0
                 integrator: Default::default(),
             },
             presets: vec![],
-            model_structure: None, balance: None, identity_tracked_compartments: vec![],
+            model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
         };
         let compiled = Arc::new(CompiledModel::new(m).unwrap());
         let params = compiled.default_params.clone();

@@ -3628,7 +3628,7 @@ mod tests {
                 integrator: Default::default(),
             },
             interventions: ivs,
-            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
+            presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
         }
     }
 
@@ -3847,7 +3847,7 @@ mod tests {
             presets: Vec::new(),
             model_structure: None,
             balance: None,
-            identity_tracked_compartments: vec![],
+            identity_tracked_compartments: vec![], quantities: vec![],
         }
     }
 

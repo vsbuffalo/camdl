@@ -157,7 +157,7 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
         presets: vec![],
         model_structure: None,
         balance: None,
-        identity_tracked_compartments: vec![],
+        identity_tracked_compartments: vec![], quantities: vec![],
     };
     let compiled = Arc::new(CompiledModel::new(m).unwrap());
     let inf = compiled.model.transitions.iter().position(|t| t.name == "infection").unwrap();

@@ -154,7 +154,7 @@ fn pathological_sir_model() -> (CompiledModel, Vec<f64>) {
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
     };
     let compiled = CompiledModel::new(model).unwrap();
     let params = compiled.default_params.clone();
@@ -383,7 +383,7 @@ fn healthy_sir_model() -> (CompiledModel, Vec<f64>) {
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
     };
     let compiled = CompiledModel::new(model).unwrap();
     let params = compiled.default_params.clone();

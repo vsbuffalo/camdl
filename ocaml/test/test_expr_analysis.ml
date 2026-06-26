@@ -90,6 +90,7 @@ let model_with_bindings bs =
     presets = []; model_structure = None; balance = None;
     identity_tracked_compartments = [];
     doc_index = empty_doc_index;
+    quantities = [];
   }
 
 let test_binding_deps_topo () =

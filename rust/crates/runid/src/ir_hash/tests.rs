@@ -186,7 +186,7 @@ fn representative_model() -> Model {
             infectious_compartments: vec!["I".into()],
         }),
         balance: Some(BalanceSpec { target: "R".into(), expr: Expr::pop("R") }),
-        identity_tracked_compartments: vec![],
+        identity_tracked_compartments: vec![], quantities: vec![],
     }
 }
 
@@ -230,6 +230,34 @@ fn ir_per_eval_bindings_changes_hash() {
         m.content_hash(),
         "a non-empty per_eval_bindings must change the model hash (else flipping LICM \
          on would collide run_id with the off-form)"
+    );
+}
+
+/// Inverse polarity of `ir_per_eval_bindings_changes_hash`: a non-empty
+/// `quantities` must NOT change the model hash. Quantities (proposal 2026-06-25)
+/// are derived reports, deliberately excluded from `Model::hash_into` — the one
+/// Model field outside the run-id walk — so adding a `quantities {}` block must
+/// never re-key a model's sim/fit. This pins that the field is genuinely absent
+/// from the hash; a future refactor that re-adds the walk line (e.g. a
+/// derive-based `ContentAddressed`) would trip this.
+#[test]
+fn ir_quantities_excluded_from_hash() {
+    use ir::quantity::{Quantity, QuantityBody, QuantitySource, TemporalReduce, ValueReduce};
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    m.quantities.push(Quantity {
+        name: "peak".into(),
+        stratum: vec![],
+        body: QuantityBody::Reduced {
+            source: QuantitySource::State(Expr::pop("I")),
+            reduce: Some(TemporalReduce::Value(ValueReduce::Max)),
+        },
+    });
+    assert_eq!(
+        base,
+        m.content_hash(),
+        "a non-empty quantities must NOT change the model hash (quantities are \
+         non-identity derived reports, excluded from Model::hash_into)"
     );
 }
 

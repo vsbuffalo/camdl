@@ -204,6 +204,93 @@ let expr_serde_test () =
   Alcotest.(check bool) "PerEvalRef nested in a BinOp round-trips" true
     (roundtrips (BinOp { op = Mul; left = PerEvalRef "__licm_1"; right = Param "beta" }))
 
+(* proposal 2026-06-25: generated quantities appear in no golden model — the
+   frontend does not yet emit them — so the golden round-trip above never
+   exercises their serde. Assert it directly (mirroring the Rust
+   `round_trips_*` + `pins_wire_tags` coverage): a Reduced State quantity, a
+   Derived reduction-arithmetic quantity, and the exact pinned wire shapes. *)
+let quantity_serde_test () =
+  let open Ir in
+  let roundtrips (q : quantity) =
+    Serde.quantity_of_json (Serde.quantity_to_json q) = q in
+  (* Reduced State, scalar: peak_prevalence = max(I / N). *)
+  let peak = {
+    q_name = "peak_prevalence";
+    q_stratum = [];
+    q_body = QBReduced {
+      source = QSState (BinOp { op = Div; left = Pop "I"; right = Pop "N" });
+      reduce = Some (RValue VMax);
+    };
+  } in
+  (* Reduced State, series (reduce = None) with an Expr-threshold time reduction
+     in a sibling, plus an Integral — exercise every TemporalReduce arm. *)
+  let series = {
+    q_name = "prevalence"; q_stratum = [];
+    q_body = QBReduced {
+      source = QSState (BinOp { op = Div; left = Pop "I"; right = Pop "N" });
+      reduce = None };
+  } in
+  let onset = {
+    q_name = "takeoff_time"; q_stratum = [];
+    q_body = QBReduced {
+      source = QSState (Pop "I_total");
+      reduce = Some (RTime (FirstAbove (Param "i_thresh"))) };
+  } in
+  let person_days = {
+    q_name = "person_days_inf"; q_stratum = [];
+    q_body = QBReduced { source = QSState (Pop "I"); reduce = Some RIntegral };
+  } in
+  let counts = {
+    q_name = "positive_months";
+    q_stratum = [("patch", "p1")];
+    q_body = QBReduced {
+      source = QSState (Pop "I_p1");
+      reduce = Some (RValue (VCountAbove (Param "i_thresh"))) };
+  } in
+  (* Derived reduction arithmetic with a stratified QRef, abs UnOp, Sub BinOp,
+     and a Cond — exercise every ScalarExpr arm. *)
+  let dur = {
+    q_name = "outbreak_dur";
+    q_stratum = [("patch", "p1")];
+    q_body = QBDerived (SUnOp {
+      op = Abs;
+      arg = SBinOp {
+        op = Sub;
+        left = SQRef { qref_name = "fadeout_time";
+                       qref_stratum = [("patch", "p1")] };
+        right = SCond {
+          pred  = SConst 1.0;
+          then_ = SQRef { qref_name = "takeoff_time"; qref_stratum = [] };
+          else_ = SParam "t0" };
+      };
+    });
+  } in
+  List.iter (fun (label, q) ->
+    Alcotest.(check bool) (label ^ " round-trips") true (roundtrips q))
+    [ ("Reduced State max(I/N)", peak);
+      ("Reduced State series",   series);
+      ("Reduced State first_above", onset);
+      ("Reduced State integral", person_days);
+      ("Reduced State count_above (stratified)", counts);
+      ("Derived reduction arithmetic", dur) ];
+  (* Pin the exact on-wire shape the Rust serde fixes (quantity.rs pins_wire_tags). *)
+  let pin_q = {
+    q_name = "p"; q_stratum = [];
+    q_body = QBReduced {
+      source = QSState (Pop "I");
+      reduce = Some (RTime TimeOfMax) };
+  } in
+  Alcotest.(check string) "pinned reduced/time_of_max wire"
+    {|{"name":"p","body":{"reduced":{"source":{"state":{"pop":"I"}},"reduce":{"time":"time_of_max"}}}}|}
+    (Yojson.Safe.to_string (Serde.quantity_to_json pin_q));
+  let pin_d = {
+    q_name = "d"; q_stratum = [];
+    q_body = QBDerived (SConst 2.5);
+  } in
+  Alcotest.(check string) "pinned derived/const wire"
+    {|{"name":"d","body":{"derived":{"const":2.5}}}|}
+    (Yojson.Safe.to_string (Serde.quantity_to_json pin_d))
+
 let () =
   let tests =
     List.map (fun name ->
@@ -219,6 +306,7 @@ let () =
     Alcotest.test_case "prior_spec single slot" `Quick prior_spec_single_slot_test;
     Alcotest.test_case "integrator serde (rk45 round-trip + strict)" `Quick integrator_serde_test;
     Alcotest.test_case "expr serde (PerEvalRef round-trips)" `Quick expr_serde_test;
+    Alcotest.test_case "quantity serde (round-trip + pinned wire)" `Quick quantity_serde_test;
   ] in
   Alcotest.run "IR round-trip" [
     ("golden", tests);

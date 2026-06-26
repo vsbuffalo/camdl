@@ -81,7 +81,7 @@ fn pure_death_model() -> (Arc<CompiledModel>, Vec<f64>) {
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
     };
 
     let compiled = Arc::new(CompiledModel::new(model).unwrap());

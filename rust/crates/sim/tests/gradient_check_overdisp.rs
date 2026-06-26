@@ -489,7 +489,7 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
             dt: Some(1.0), rng_seed: Some(7),
             integrator: Default::default(),
         },
-        presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![],
+        presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
     };
     let compiled = Arc::new(CompiledModel::new(m).unwrap());
     let (params, _names) = build_params_and_names(&compiled);

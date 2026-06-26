@@ -6717,6 +6717,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
     Ir.identity_tracked_compartments =
       compute_identity_tracked expanded_comps expanded_trs;
     Ir.doc_index = build_doc_index ctx;
+    Ir.quantities = [];
   } in
   (* Fix B: the record above is fully forced here, so every resolve_expr call
      (transitions, ode, observations, balance) has run and ctx.hoisted_rev

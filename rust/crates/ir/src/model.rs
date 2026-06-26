@@ -6,6 +6,7 @@ use crate::{
     observation::ObservationModel,
     ode_equation::OdeEquation,
     parameter::Parameter,
+    quantity::Quantity,
     table::Table,
     time_func::TimeFunction,
     transition::Transition,
@@ -208,6 +209,14 @@ pub struct Model {
     /// statically inert. Cached here so the runtime does not recompute it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_tracked_compartments: Vec<String>,
+    /// Generated quantities (proposal 2026-06-25): named reductions of what a
+    /// simulation produces — derived reports, NOT scored data. `default`/
+    /// `skip_serializing_if` so a model with no `quantities {}` block is
+    /// byte-identical (the field is omitted), and **excluded from
+    /// `Model::hash_into`** — a quantity is non-identity and must never re-key a
+    /// sim/fit (the one Model field deliberately outside the run-id walk).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quantities: Vec<Quantity>,
 }
 
 /// A model-level shared binding (Fix B): a named value (e.g. N[l], I_agg[l],

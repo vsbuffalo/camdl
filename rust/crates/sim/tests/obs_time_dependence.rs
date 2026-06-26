@@ -80,7 +80,7 @@ fn model() -> Arc<CompiledModel> {
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
     };
     Arc::new(CompiledModel::new(m).unwrap())
 }

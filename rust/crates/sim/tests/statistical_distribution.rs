@@ -241,7 +241,7 @@ fn test_overdispersion_variance_chain_binomial() {
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
     };
 
     let compiled = CompiledModel::new(model).unwrap();
@@ -331,7 +331,7 @@ fn test_fraction_transfer_edge_cases() {
                 integrator: Default::default(),
             },
             presets: vec![],
-            model_structure: None, balance: None, identity_tracked_compartments: vec![],
+            model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
         };
         let compiled = CompiledModel::new(model).unwrap();
         let params = compiled.default_params.clone();

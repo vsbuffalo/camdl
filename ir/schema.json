@@ -110,6 +110,12 @@
       "description": "Compartments whose individuals carry tracked IDs (individual-sampling layer). Forward-reachable closure from `#[lineage]` event destinations and parent pools. Absent/empty when no `#[lineage]` annotations exist.",
       "type": "array",
       "items": { "type": "string" }
+    },
+
+    "quantities": {
+      "comment": "Generated quantities (proposal 2026-06-25): named, non-scored reductions of simulation output — the non-scored twin of an observation. Reporting-only, fully expanded (one leaf per stratum cell). Omitted when empty.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/quantity" }
     }
   },
 
@@ -1173,6 +1179,205 @@
           }
         }
       }
+    },
+
+    "quantity": {
+      "type": "object",
+      "required": ["name", "body"],
+      "properties": {
+        "name": { "type": "string" },
+        "stratum": {
+          "type": "array",
+          "default": [],
+          "items": { "$ref": "#/definitions/stratum_key" }
+        },
+        "body": { "$ref": "#/definitions/quantity_body" }
+      },
+      "additionalProperties": false
+    },
+
+    "quantity_body": {
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["reduced"],
+          "properties": {
+            "reduced": {
+              "type": "object",
+              "required": ["source"],
+              "properties": {
+                "source": { "$ref": "#/definitions/quantity_source" },
+                "reduce": { "$ref": "#/definitions/temporal_reduce" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["derived"],
+          "properties": {
+            "derived": { "$ref": "#/definitions/scalar_expr" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "quantity_source": {
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["state"],
+          "properties": { "state": { "$ref": "#/definitions/expr" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "temporal_reduce": {
+      "oneOf": [
+        { "type": "string", "enum": ["integral"] },
+        {
+          "type": "object",
+          "required": ["value"],
+          "properties": { "value": { "$ref": "#/definitions/value_reduce" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["time"],
+          "properties": { "time": { "$ref": "#/definitions/time_reduce" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "value_reduce": {
+      "oneOf": [
+        { "type": "string", "enum": ["final", "max", "min", "mean"] },
+        {
+          "type": "object",
+          "required": ["count_above"],
+          "properties": { "count_above": { "$ref": "#/definitions/expr" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["count_below"],
+          "properties": { "count_below": { "$ref": "#/definitions/expr" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "time_reduce": {
+      "oneOf": [
+        { "type": "string", "enum": ["time_of_max", "time_of_min"] },
+        {
+          "type": "object",
+          "required": ["first_above"],
+          "properties": { "first_above": { "$ref": "#/definitions/expr" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["first_below"],
+          "properties": { "first_below": { "$ref": "#/definitions/expr" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["last_above"],
+          "properties": { "last_above": { "$ref": "#/definitions/expr" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["last_below"],
+          "properties": { "last_below": { "$ref": "#/definitions/expr" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "qref": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "stratum": {
+          "type": "array",
+          "default": [],
+          "items": { "$ref": "#/definitions/stratum_key" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "scalar_expr": {
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["const"],
+          "properties": { "const": { "type": "number" } },
+          "additionalProperties": false
+        },
+        {
+          "required": ["param"],
+          "properties": { "param": { "type": "string" } },
+          "additionalProperties": false
+        },
+        {
+          "required": ["q_ref"],
+          "properties": { "q_ref": { "$ref": "#/definitions/qref" } },
+          "additionalProperties": false
+        },
+        {
+          "required": ["un_op"],
+          "properties": {
+            "un_op": {
+              "type": "object",
+              "required": ["op", "arg"],
+              "properties": {
+                "op": { "type": "string", "enum": ["neg", "exp", "log", "sqrt", "abs", "floor", "ceil", "sin", "cos", "tanh"] },
+                "arg": { "$ref": "#/definitions/scalar_expr" }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["bin_op"],
+          "properties": {
+            "bin_op": {
+              "type": "object",
+              "required": ["op", "left", "right"],
+              "properties": {
+                "op": { "type": "string", "enum": ["add", "sub", "mul", "div", "pow", "mod", "min", "max", "eq", "neq", "lt", "gt", "le", "ge"] },
+                "left": { "$ref": "#/definitions/scalar_expr" },
+                "right": { "$ref": "#/definitions/scalar_expr" }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["cond"],
+          "properties": {
+            "cond": {
+              "type": "object",
+              "required": ["pred", "then", "else"],
+              "properties": {
+                "pred": { "$ref": "#/definitions/scalar_expr" },
+                "then": { "$ref": "#/definitions/scalar_expr" },
+                "else": { "$ref": "#/definitions/scalar_expr" }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     }
   }
 }

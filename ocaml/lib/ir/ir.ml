@@ -633,6 +633,78 @@ type binding = {
   bexpr: expr;
 }
 
+(* ── Generated quantities (proposal 2026-06-25) ──────────────────────────────
+   Named reductions of what a simulation produces — the non-scored twin of an
+   observation. Mirror of rust/crates/ir/src/quantity.rs; the wire format is
+   pinned there. Stratum is (dim, level) pairs, identical to observation_model.
+   A quantity's *state expression* reuses the shared [expr]; reduction
+   arithmetic uses the dedicated [scalar_expr] ADT (the trigger_expr precedent)
+   so a reduced scalar can never appear in a propensity, and a rate leaf can
+   never appear in reduction arithmetic. *)
+
+(* A reference to an earlier *scalar* quantity, carrying the stratum it resolves
+   in (populated per-cell by the expander, like stratified observations).
+   `qref_stratum` is omitted on the wire when empty. *)
+type qref = {
+  qref_name:    string;
+  qref_stratum: (string * string) list;  (* (dim, level) cells *)
+}
+
+(* Reduction-arithmetic expression: closed, total, scalar-valued. Externally
+   tagged single-key objects; `op` reuses the shared bin_op/un_op encoding. *)
+type scalar_expr =
+  | SConst of float
+  | SParam of string
+  | SQRef  of qref
+  | SUnOp  of { op : un_op;  arg : scalar_expr }
+  | SBinOp of { op : bin_op; left : scalar_expr; right : scalar_expr }
+  | SCond  of { pred : scalar_expr; then_ : scalar_expr; else_ : scalar_expr }
+
+(* A reduction whose result has the same dimension as the series. *)
+type value_reduce =
+  | VFinal
+  | VMax
+  | VMin
+  | VMean
+  | VCountAbove of expr
+  | VCountBelow of expr
+
+(* A reduction whose result is a *time* (dimension T). *)
+type time_reduce =
+  | TimeOfMax
+  | TimeOfMin
+  | FirstAbove of expr
+  | FirstBelow of expr
+  | LastAbove  of expr
+  | LastBelow  of expr
+
+(* A reduction over *time*: Value preserves the series dimension, Time yields a
+   time, Integral the trapezoidal area (person-time). *)
+type temporal_reduce =
+  | RValue of value_reduce
+  | RTime  of time_reduce
+  | RIntegral
+
+(* What a Reduced quantity folds over. Externally tagged; the v1.1
+   `Observation { stream }` variant appends additively. *)
+type quantity_source =
+  | QSState of expr
+
+(* Either a reduction of a source series, or reduction arithmetic over earlier
+   scalar quantities. `reduce = None` ⇒ a series; Some ⇒ a scalar. *)
+type quantity_body =
+  | QBReduced of { source : quantity_source; reduce : temporal_reduce option }
+  | QBDerived of scalar_expr
+
+(* The non-scored twin of an observation_model: a named reduction of a
+   simulation output, with no likelihood. Stratified quantities are fully
+   expanded (one leaf per cell, tagged with `q_stratum`). *)
+type quantity = {
+  q_name:    string;
+  q_stratum: (string * string) list;  (* (dim, level) cells; omitted when empty *)
+  q_body:    quantity_body;
+}
+
 type model = {
   name:               string;
   version:            string;
@@ -670,4 +742,8 @@ type model = {
   (* `#'` documentation dictionary (presentation metadata). Serialized at the
      envelope level, never in the model body, so it stays outside [run_id]. *)
   doc_index:          doc_index;
+  (* Generated quantities (proposal 2026-06-25): named, non-scored reductions of
+     simulation output. Reporting-only, fully expanded. Empty by default; the
+     frontend does not yet produce these. *)
+  quantities: quantity list;
 }
