@@ -79,6 +79,11 @@ and expr =
   | EFuncCall of string * (string * expr) list  (* fname(kw=v,...) *)
   | EList   of expr list                     (* [1.0, 2.0] or [[...],[...]] *)
   | ERange  of expr * expr                   (* 7:100 — range literal, only in [...] *)
+  (* observations.<stream> — the v1.1 generated-quantity observation source
+     (proposal 2026-06-25). Meaningful ONLY inside a `quantities { }` body, where
+     the classifier lowers it to Ir.QSObservation; anywhere else resolve_expr
+     rejects it (E290). *)
+  | EObsAccess of string * loc
 
 type compartment_kind = Integer | Real
 

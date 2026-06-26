@@ -127,6 +127,7 @@
 %token EQ          (* = *)
 %token COLON       (* : *)
 %token COMMA       (* , *)
+%token DOT         (* . — observations.<stream> accessor (v1.1 quantities) *)
 %token LBRACE RBRACE
 %token LBRACKET RBRACKET
 %token LPAREN RPAREN
@@ -1149,6 +1150,19 @@ atom_expr:
             end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
         in
         EIdent (name, l) }
+  (* observations.<stream> — the v1.1 generated-quantity observation source.
+     `observations` is the OBSERVATIONS keyword; the classifier lowers this to
+     Ir.QSObservation. Valid only inside a `quantities { }` body. *)
+  | OBSERVATIONS DOT stream = IDENT
+      { let l =
+          let open Lexing in
+          { file     = $startpos.pos_fname;
+            line     = $startpos.pos_lnum;
+            col      = $startpos.pos_cnum - $startpos.pos_bol + 1;
+            end_line = $endpos.pos_lnum;
+            end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
+        in
+        EObsAccess (stream, l) }
   (* `origin` as a referenceable identifier — Phase 2 of the
      2026-05-22 typed-time proposal §1.1. The ORIGIN keyword is
      consumed by the top-level `origin = date("...")` declaration

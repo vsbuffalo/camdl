@@ -79,6 +79,66 @@ let stratified_src = {|
     }
   |}
 
+(* SIR-ish model WITH an unstratified observation stream `afp`, so the v1.1
+   `observations.afp` source resolves; `body` is spliced into the quantities
+   block. *)
+let model_obs_with body =
+  Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, E, I, R, D, N }
+    parameters {
+      beta  : rate
+      gamma : rate
+      rho   : probability
+    }
+    transitions {
+      infection : S --> I @ beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    observations {
+      afp {
+        columns       { time : time, afp : count }
+        projected     = incidence(infection)
+        emit_schedule = every 1 'days
+        afp           ~ poisson(rate = rho * projected)
+      }
+    }
+    init { S = 990  I = 10  N = 1000 }
+    simulate { from = 0 'days  to = 100 'days }
+    quantities {
+%s
+    }
+  |} body
+
+(* A model with a STRATIFIED observation stream `afp[p in patch]` — v1.1 defers
+   stratified observation sources, so reducing `observations.afp` is E289. *)
+let stratified_obs_src body =
+  Printf.sprintf {|
+    time_unit = 'days
+    dimensions { patch = [p0, p1] }
+    compartments { S, I }
+    stratify(by = patch)
+    parameters { beta : rate  gamma : rate  rho : probability }
+    let N[l in patch] = S[l] + I[l]
+    transitions {
+      infection[l in patch] : S[l] --> I[l] @ beta * S[l] * I[l] / N[l]
+      recovery[l in patch]  : I[l] --> S[l] @ gamma * I[l]
+    }
+    observations {
+      afp[p in patch] {
+        columns       { time : time, patch : dim, afp : count }
+        projected     = incidence(infection[p])
+        emit_schedule = every 1 'days
+        afp           ~ poisson(rate = rho * projected)
+      }
+    }
+    init { S_p0 = 990  I_p0 = 10 }
+    simulate { from = 0 'days  to = 100 'days }
+    quantities {
+%s
+    }
+  |} body
+
 (* ── Accessors ───────────────────────────────────────────────────────────── *)
 
 let find_q (m : Ir.model) name =
@@ -185,6 +245,73 @@ let test_derived () =
     Alcotest.(check string) "dur right QRef" "takeoff" r.qref_name
   | _ -> Alcotest.failf "dur: expected QBDerived(SBinOp Sub (SQRef fadeout)(SQRef takeoff))"
 
+(* ── v1.1 observation source: observations.<stream> ──────────────────────── *)
+
+(* A bare `observations.afp` body → series over the simulated y_sim. *)
+let test_obs_series () =
+  let m = compile_ok (model_obs_with "      afp_series = observations.afp") in
+  match (find_q m "afp_series").q_body with
+  | Ir.QBReduced { source = Ir.QSObservation "afp"; reduce = None } -> ()
+  | _ -> Alcotest.failf "afp_series: expected QBReduced{QSObservation afp, reduce=None}"
+
+(* `max(observations.afp)` → a value reduction over y_sim. *)
+let test_obs_max () =
+  let m = compile_ok (model_obs_with "      peak_afp = max(observations.afp)") in
+  match (find_q m "peak_afp").q_body with
+  | Ir.QBReduced { source = Ir.QSObservation "afp"; reduce = Some (Ir.RValue Ir.VMax) } -> ()
+  | _ -> Alcotest.failf "peak_afp: expected QBReduced{QSObservation afp, Some(RValue VMax)}"
+
+(* `first_above(observations.afp, 0)` → a time reduction over y_sim; threshold
+   resolves as an ordinary (state-allowed) expr. *)
+let test_obs_first_above () =
+  let m = compile_ok (model_obs_with "      first_afp = first_above(observations.afp, 0)") in
+  match (find_q m "first_afp").q_body with
+  | Ir.QBReduced { source = Ir.QSObservation "afp";
+                   reduce = Some (Ir.RTime (Ir.FirstAbove (Ir.Const 0.0))) } -> ()
+  | _ ->
+    Alcotest.failf
+      "first_afp: expected QBReduced{QSObservation afp, Some(RTime FirstAbove(Const 0))}"
+
+(* ── v1.1 observation-source diagnostics ─────────────────────────────────── *)
+
+(* An undeclared observation stream → E289. *)
+let test_e289_obs_undeclared () =
+  compile_expect_error_code ~code:"E289" ~contains:"no observation stream"
+    (model_obs_with "      bad = max(observations.nope)")
+
+(* A stratified observation source is deferred in v1.1 → E289. *)
+let test_e289_obs_stratified () =
+  compile_expect_error_code ~code:"E289" ~contains:"stratified observation"
+    (stratified_obs_src "      peak_afp = max(observations.afp)")
+
+(* An observation source mixed into arithmetic → E289. *)
+let test_e289_obs_mixed () =
+  compile_expect_error_code ~code:"E289" ~contains:"observation source"
+    (model_obs_with "      bad = observations.afp + 1")
+
+(* `observations.afp` used in a transition rate → E290 (only valid in a
+   quantities block). *)
+let test_e290_obs_in_rate () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { gamma : rate  rho : probability }
+    transitions {
+      recovery : I --> R @ gamma * observations.afp
+    }
+    observations {
+      afp {
+        columns       { time : time, afp : count }
+        projected     = incidence(recovery)
+        emit_schedule = every 1 'days
+        afp           ~ poisson(rate = rho * projected)
+      }
+    }
+    init { S = 990  I = 10 }
+    simulate { from = 0 'days  to = 100 'days }
+  |} in
+  compile_expect_error_code ~code:"E290" ~contains:"observations.afp" src
+
 (* ── Diagnostics ─────────────────────────────────────────────────────────── *)
 
 (* A temporal reduction in a transition rate → E290. *)
@@ -243,11 +370,20 @@ let () =
     "derived", [
       Alcotest.test_case "dur = fadeout - takeoff → QBDerived SBinOp Sub" `Quick test_derived;
     ];
+    "obs_source", [
+      Alcotest.test_case "observations.afp → QSObservation series" `Quick test_obs_series;
+      Alcotest.test_case "max(observations.afp) → QSObservation RValue VMax" `Quick test_obs_max;
+      Alcotest.test_case "first_above(observations.afp, 0) → QSObservation RTime FirstAbove" `Quick test_obs_first_above;
+    ];
     "diagnostics", [
       Alcotest.test_case "E290 reduction in a transition rate" `Quick test_e290_reduction_in_rate;
       Alcotest.test_case "E288 dt in a quantity body" `Quick test_e288_dt_in_quantity;
       Alcotest.test_case "E289 total(x) deferred" `Quick test_e289_total;
       Alcotest.test_case "E289 forward QRef" `Quick test_e289_forward_qref;
       Alcotest.test_case "E289 QRef to a series quantity" `Quick test_e289_qref_to_series;
+      Alcotest.test_case "E289 undeclared observation stream" `Quick test_e289_obs_undeclared;
+      Alcotest.test_case "E289 stratified observation source" `Quick test_e289_obs_stratified;
+      Alcotest.test_case "E289 observation source mixed into arithmetic" `Quick test_e289_obs_mixed;
+      Alcotest.test_case "E290 observations.afp in a transition rate" `Quick test_e290_obs_in_rate;
     ];
   ]

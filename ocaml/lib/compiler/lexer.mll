@@ -214,7 +214,7 @@ rule token = parse
   | '='     { EQ }
   | ':'     { COLON }
   | ','     { COMMA }
-  | '.'     { raise (LexError ("unexpected character: '.'")) }
+  | '.'     { DOT }
   | '{'     { LBRACE }
   | '}'     { RBRACE }
   | '['     { LBRACKET }

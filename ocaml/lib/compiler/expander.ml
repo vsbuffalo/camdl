@@ -1876,6 +1876,7 @@ let rec body_refs_param_or_let ctx (e : expr) : bool =
   | EFuncCall (_, args) -> List.exists (fun (_, e) -> body_refs_param_or_let ctx e) args
   | EList es            -> List.exists (body_refs_param_or_let ctx) es
   | ERange (lo, hi)     -> body_refs_param_or_let ctx lo || body_refs_param_or_let ctx hi
+  | EObsAccess _        -> false
 
 (* Every index-position variable in the body must be bound by the let's own
    declared indices or an enclosing `sum`; otherwise the resolved body depends
@@ -1901,6 +1902,7 @@ let free_index_var_clean (lb : let_binding) : bool =
     | EFuncCall (_, args) -> List.for_all (fun (_, e) -> ok bound e) args
     | EList es            -> List.for_all (ok bound) es
     | ERange (lo, hi)     -> ok bound lo && ok bound hi
+    | EObsAccess _        -> true
   in
   ok declared lb.lbody
 
@@ -2588,6 +2590,19 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     Diagnostics.error ctx.diags ~code:"E271" ~loc:Diagnostics.no_loc
       ~message:"range expression not allowed in a scalar expression"
       ~hint:"ranges are only valid inside `periodic on = [...]`"
+      ();
+    Ir.Const 0.0
+  | EObsAccess (stream, l) ->
+    (* proposal 2026-06-25 (v1.1): `observations.<stream>` reads the simulated
+       observation series and is valid ONLY inside a `quantities { }` block (the
+       quantity classifier lowers it to Ir.QSObservation, never through
+       resolve_expr). Reaching here means one appeared in a rate / binding /
+       other per-instant expression. *)
+    Diagnostics.error ctx.diags ~code:"E290" ~loc:(diag_loc_of_ast_ctx ctx l)
+      ~message:(Printf.sprintf
+        "observations.%s is only valid in a quantities block" stream)
+      ~hint:"the simulated observation series has no value in a rate or other \
+             per-instant expression; reduce it inside `quantities { }`"
       ();
     Ir.Const 0.0
 
@@ -5133,7 +5148,7 @@ let expand_observations ctx =
           | ESum (_, _, _, e) -> names_of e
           | EList es -> List.concat_map names_of es
           | ERange (a, b) -> names_of a @ names_of b
-          | EConst _ | EUnit _ -> []
+          | EConst _ | EUnit _ | EObsAccess _ -> []
         in
         match meas_v.om_lik with
         | LikNegBinomial k | LikPoisson k | LikNormal k
@@ -5511,7 +5526,7 @@ let classify_quantity_body ctx env
     | ESum (_, _, _, e) -> find_dt e
     | EList es -> List.find_map find_dt es
     | ERange (a, b) -> (match find_dt a with Some l -> Some l | None -> find_dt b)
-    | EConst _ | EUnit _ | EIdent _ -> None
+    | EConst _ | EUnit _ | EIdent _ | EObsAccess _ -> None
   in
   let check_dt e =
     match find_dt e with
@@ -5538,22 +5553,79 @@ let classify_quantity_body ctx env
     | ESum (_, _, _, e) -> refs_quantity e
     | EList es -> List.exists refs_quantity es
     | ERange (a, b) -> refs_quantity a || refs_quantity b
-    | EConst _ | EUnit _ -> false
+    | EConst _ | EUnit _ | EObsAccess _ -> false
+  in
+  (* Does an expression contain an `observations.<stream>` access anywhere? An
+     EObsAccess is meaningful ONLY as the whole quantity body or as the SOLE
+     argument of a temporal reduction; nested in arithmetic, mixed with state,
+     or used as a Derived/QRef operand it is malformed (E289). *)
+  let rec contains_obs_access = function
+    | EObsAccess _ -> true
+    | EIndex (_, items, _) ->
+      List.exists (function IPosn e | INamed (_, e) -> contains_obs_access e) items
+    | EBinOp (_, a, b) -> contains_obs_access a || contains_obs_access b
+    | EUnOp (_, x) -> contains_obs_access x
+    | ECond (p, a, b) ->
+      contains_obs_access p || contains_obs_access a || contains_obs_access b
+    | EFuncCall (_, args) -> List.exists (fun (_, e) -> contains_obs_access e) args
+    | ESum (_, _, _, e) -> contains_obs_access e
+    | EList es -> List.exists contains_obs_access es
+    | ERange (a, b) -> contains_obs_access a || contains_obs_access b
+    | EConst _ | EUnit _ | EIdent _ -> false
+  in
+  (* Validate an `observations.<stream>` source at compile time: the stream must
+     name a DECLARED observation, and (v1.1) it must be unstratified. Emits a
+     located E289 and returns false on failure. *)
+  let check_obs_stream stream sloc : bool =
+    let loc = diag_loc_of_ast_ctx ctx sloc in
+    match List.find_opt (fun (o : obs_decl) -> o.oname = stream) ctx.obs_decls with
+    | None ->
+      Diagnostics.error ctx.diags ~code:"E289" ~loc
+        ~message:(Printf.sprintf
+          "observations.%s: no observation stream '%s' is declared" stream stream)
+        ~hint:"reference a stream named in the `observations { }` block"
+        ();
+      false
+    | Some o when o.oindices <> [] ->
+      Diagnostics.error ctx.diags ~code:"E289" ~loc
+        ~message:(Printf.sprintf
+          "observations.%s: a stratified observation source is not supported in \
+           v1.1; reference an unstratified stream" stream)
+        ~hint:"reduce an unstratified observation stream (no `[idx in dim]` \
+               bindings on its declaration)"
+        ();
+      false
+    | Some _ -> true
   in
   (* A temporal reduction folds a per-instant State series `inner`. The inner is
      resolved as an ordinary State expr; it must not itself reference a reduced
      scalar quantity (a reduction-on-a-reduction is malformed → E289). *)
   let reduced_state reduce inner =
-    if refs_quantity inner then
-      err ~hint:"a temporal reduction folds a per-instant series; a reduced \
-                 scalar is already collapsed — combine scalars with arithmetic \
-                 (e.g. `a - b`) instead"
-        "cannot apply a temporal reduction to a reduced scalar quantity"
-    else if not (check_dt inner) then None
-    else
-      Some (Ir.QBReduced { source = Ir.QSState (resolve_expr ctx env inner);
-                           reduce = Some reduce },
-            QShScalar)
+    match inner with
+    | EObsAccess (stream, sloc) ->
+      (* v1.1: reduce the simulated observation series y_sim of `stream`. The
+         reduction wraps a QSObservation source exactly as it wraps a State one. *)
+      if check_obs_stream stream sloc then
+        Some (Ir.QBReduced { source = Ir.QSObservation stream;
+                             reduce = Some reduce },
+              QShScalar)
+      else None
+    | _ when contains_obs_access inner ->
+      err ~hint:"reduce a bare `observations.<stream>`; an observation source \
+                 cannot be combined with arithmetic or latent state"
+        "an observation source must be reduced on its own, not mixed into an \
+         expression"
+    | _ ->
+      if refs_quantity inner then
+        err ~hint:"a temporal reduction folds a per-instant series; a reduced \
+                   scalar is already collapsed — combine scalars with arithmetic \
+                   (e.g. `a - b`) instead"
+          "cannot apply a temporal reduction to a reduced scalar quantity"
+      else if not (check_dt inner) then None
+      else
+        Some (Ir.QBReduced { source = Ir.QSState (resolve_expr ctx env inner);
+                             reduce = Some reduce },
+              QShScalar)
   in
   (* Build a reduction-arithmetic ScalarExpr: leaves are prior scalar QRefs,
      params, or consts. A series QRef, forward QRef, cross-stratum QRef, or a
@@ -5630,22 +5702,42 @@ let classify_quantity_body ctx env
       err (Printf.sprintf
         "function '%s' is not allowed in reduction arithmetic; combine reduced \
          scalar quantities with +, -, *, / and comparisons only" fn)
+    | EObsAccess (stream, _) ->
+      err ~hint:"reduce a bare `observations.<stream>` (e.g. `max(observations.\
+                 stream)`); an observation source is not a scalar operand"
+        (Printf.sprintf
+          "observations.%s cannot appear in reduction arithmetic" stream)
     | ESum _ | EList _ | ERange _ ->
       err "this form is not allowed in reduction arithmetic"
   in
   let classify_non_reduction body =
-    if refs_quantity body then
-      (* Reduction arithmetic → Derived (a ScalarExpr over prior scalars). *)
-      (match build_scalar_expr body with
-       | Some se -> Some (Ir.QBDerived se, QShScalar)
-       | None -> None)
-    else
-      (* A bare State series (e.g. `prevalence = I / N`). *)
-      if not (check_dt body) then None
-      else
-        Some (Ir.QBReduced { source = Ir.QSState (resolve_expr ctx env body);
-                             reduce = None },
+    match body with
+    | EObsAccess (stream, sloc) ->
+      (* v1.1: a bare `observations.<stream>` body is the simulated observation
+         series itself (no reduction). *)
+      if check_obs_stream stream sloc then
+        Some (Ir.QBReduced { source = Ir.QSObservation stream; reduce = None },
               QShSeries)
+      else None
+    | _ when contains_obs_access body ->
+      err ~hint:"reference a bare `observations.<stream>`, optionally wrapped in \
+                 a single temporal reduction; it cannot be combined with latent \
+                 state, arithmetic, or another quantity"
+        "an observation source cannot be combined with state, arithmetic, or a \
+         quantity reference"
+    | _ ->
+      if refs_quantity body then
+        (* Reduction arithmetic → Derived (a ScalarExpr over prior scalars). *)
+        (match build_scalar_expr body with
+         | Some se -> Some (Ir.QBDerived se, QShScalar)
+         | None -> None)
+      else
+        (* A bare State series (e.g. `prevalence = I / N`). *)
+        if not (check_dt body) then None
+        else
+          Some (Ir.QBReduced { source = Ir.QSState (resolve_expr ctx env body);
+                               reduce = None },
+                QShSeries)
   in
   let wrong_arity fn expected =
     err (Printf.sprintf "reduction '%s' takes %s" fn expected)
@@ -5802,6 +5894,7 @@ let rec collect_param_refs known_params acc = function
   | ERange (lo, hi) ->
     let a = collect_param_refs known_params acc lo in
     collect_param_refs known_params a hi
+  | EObsAccess _ -> acc
 
 (** Check hierarchical prior reference graph for self-references and
     cycles. Wave 2 / malaria #3 Gate 2 — risks C1, C2. Legitimate deep
@@ -5940,6 +6033,7 @@ let check_no_shadowing ctx =
     | EFuncCall (_, args) -> List.iter (fun (_, e) -> walk decl bound e) args
     | EList es            -> List.iter (walk decl bound) es
     | ERange (lo, hi)     -> walk decl bound lo; walk decl bound hi
+    | EObsAccess _        -> ()
   in
   List.iter (fun (tr : transition_decl) ->
     let decl = Printf.sprintf "transition '%s'" tr.trname in
@@ -6013,6 +6107,7 @@ let check_quadratic_coupling ctx =
     | EFuncCall (_, args) -> List.exists (fun (_, e) -> mentions v e) args
     | EList es -> List.exists (mentions v) es
     | ERange (lo, hi) -> mentions v lo || mentions v hi
+    | EObsAccess _ -> false
   and guard_mentions v = function
     | GEq (a, b) | GNeq (a, b) -> a = v || b = v
     | GTab (_, idxs, _, operand) ->

@@ -186,6 +186,7 @@ let rec classify env (e : expr) : tclass =
   | ECond (_, a, b) -> lub_dur (classify env a) (classify env b)
   | ESum (_, _, _, body) -> classify env body
   | EList _ | ERange _ -> TOther
+  | EObsAccess _ -> TOther
 
 (* ── Sink walk: Rule 1 at Instant ± Duration nodes ──────────────────── *)
 
@@ -230,6 +231,7 @@ and walk_subexprs env ~on_hit (e : expr) : unit =
   | EList items -> List.iter (walk_rule1 env ~on_hit) items
   | ERange (a, b) ->
     walk_rule1 env ~on_hit a; walk_rule1 env ~on_hit b
+  | EObsAccess _ -> ()
 
 (* ── Public diagnostic hints ────────────────────────────────────────── *)
 
