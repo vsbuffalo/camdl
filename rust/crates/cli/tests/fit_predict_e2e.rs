@@ -66,6 +66,7 @@ quantities {
   onset      = first_above(I / N, 0.01)   # time scalar (right-censorable)
   onset2     = first_above(I / N, 0.02)   # time scalar
   spread     = onset2 - onset             # Derived over Time scalars; censorable
+  peak_obs   = max(observations.weekly_cases)   # v1.1: reduce the per-draw y_sim
 }
 
 simulate {
@@ -279,6 +280,27 @@ thin = 1
     let krow: Vec<&str> = klines.next().expect("a peak row").split('\t').collect();
     assert_eq!(krow.len(), 6, "value-scalar row shape matches header");
 
+    // ── quantities/peak_obs.tsv: an observation-source value scalar ──────────
+    // `max(observations.weekly_cases)` reduces the per-draw y_sim — same banded
+    // value-scalar shape as a state reduction (a Value reduction never censors),
+    // and the band must be finite (the obs series was materialized, not empty).
+    let peakobsf = find_artifact(&results, "quantities", "peak_obs")
+        .expect("quantities/peak_obs.tsv must be written");
+    let po_txt = std::fs::read_to_string(&peakobsf).unwrap();
+    let mut polines = po_txt.lines();
+    assert_eq!(
+        polines.next().unwrap(),
+        "n_draws\tq05\tq25\tq50\tq75\tq95",
+        "obs value-scalar header: banded columns, no censoring trio"
+    );
+    let porow: Vec<&str> = polines.next().expect("a peak_obs row").split('\t').collect();
+    assert_eq!(porow.len(), 6, "obs value-scalar row shape matches header");
+    let q50: f64 = porow[3].parse().expect("peak_obs q50 parses");
+    assert!(
+        q50.is_finite() && q50 > 0.0,
+        "peak_obs median must be a finite positive count (y_sim materialized), got {q50}"
+    );
+
     // ── quantities/onset.tsv: a time scalar (censorable → the censoring trio) ──
     let onsetf = find_artifact(&results, "quantities", "onset")
         .expect("quantities/onset.tsv must be written");
@@ -319,6 +341,9 @@ thin = 1
     assert_eq!(lookup("onset")["shape"], "scalar");
     assert_eq!(lookup("onset")["reduce"], "first_above");
     assert!(lookup("onset")["censoring"].is_object(), "a time reduction records right-censoring");
+    assert_eq!(lookup("peak_obs")["shape"], "scalar");
+    assert_eq!(lookup("peak_obs")["reduce"], "max");
+    assert!(lookup("peak_obs")["censoring"].is_null(), "an obs value reduction is not censorable");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

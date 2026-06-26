@@ -5713,11 +5713,21 @@ let classify_quantity_body ctx env
   let classify_non_reduction body =
     match body with
     | EObsAccess (stream, sloc) ->
-      (* v1.1: a bare `observations.<stream>` body is the simulated observation
-         series itself (no reduction). *)
+      (* v1.1: an observation source must be reduced. A bare observation SERIES
+         has its own observation-time axis (the stream's `emit_schedule`/fit
+         leaves), distinct from the trajectory snapshot grid, so it cannot be
+         rendered against the same time column as a state series. Reduce it.
+         (`check_obs_stream` first, so a typo'd/stratified stream gets the more
+         specific diagnostic.) *)
       if check_obs_stream stream sloc then
-        Some (Ir.QBReduced { source = Ir.QSObservation stream; reduce = None },
-              QShSeries)
+        err ~hint:(Printf.sprintf
+          "wrap it in a temporal reduction, e.g. `max(observations.%s)`, \
+           `integral(observations.%s)`, or `first_above(observations.%s, threshold)`"
+          stream stream stream)
+          (Printf.sprintf
+            "observations.%s: a bare observation series is not supported in v1.1; an \
+             observation source must be reduced (it has its own observation-time axis)"
+            stream)
       else None
     | _ when contains_obs_access body ->
       err ~hint:"reference a bare `observations.<stream>`, optionally wrapped in \

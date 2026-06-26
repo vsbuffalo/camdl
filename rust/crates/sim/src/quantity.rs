@@ -63,10 +63,9 @@ enum QProgram {
 /// the run published, never a fresh draw. `None` to `eval_draw` (or a missing
 /// stream) yields an empty series for an `Observation` source.
 pub struct ObsSeriesSet {
-    /// The observation / emit times — the series axis for an `Observation` source.
-    pub times: Vec<f64>,
-    /// Stream name → per-time `y_sim` values (length == `times`).
-    pub streams: std::collections::HashMap<String, Vec<f64>>,
+    /// Stream name → its `(obs times, per-time y_sim values)` (both same length).
+    /// Per-stream times: streams may have different observation cadences.
+    pub streams: std::collections::HashMap<String, (Vec<f64>, Vec<f64>)>,
 }
 
 enum RReduce {
@@ -165,6 +164,32 @@ impl QuantityEvaluator {
         Ok(QuantityEvaluator { programs })
     }
 
+    /// Whether any quantity reduces an `observations.<stream>` source — the cue
+    /// for a caller to materialize the per-draw [`ObsSeriesSet`] before calling
+    /// `eval_draw`. `false` ⇒ pass `None` and skip obs materialization entirely.
+    pub fn references_observations(&self) -> bool {
+        self.programs.iter().any(|p| {
+            matches!(p, QProgram::Reduced { source: QSource::Observation(_), .. })
+        })
+    }
+
+    /// The distinct stream names reduced by `observations.<stream>` quantities
+    /// (sorted, deduped). A caller materializes exactly these — a stream not in
+    /// this list needs no `y_sim` for the run's quantities.
+    pub fn obs_streams(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self
+            .programs
+            .iter()
+            .filter_map(|p| match p {
+                QProgram::Reduced { source: QSource::Observation(s), .. } => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     /// Fold every quantity over ONE draw: `params` is the draw's resolved param
     /// vector, `traj` the finished trajectory, `obs` the already-drawn `y_sim`
     /// series (v1.1; `None` for a state-only model). Pure; results are in the same
@@ -195,12 +220,11 @@ impl QuantityEvaluator {
                     QSource::Observation(stream) => {
                         // The SAME y_sim the run published; an unmaterialized stream
                         // yields an empty series (a scalar then censors / is NaN).
-                        let (series, otimes): (Vec<f64>, Vec<f64>) = match obs
-                            .and_then(|o| o.streams.get(stream).map(|s| (s.clone(), o.times.clone())))
-                        {
-                            Some(st) => st,
-                            None => (Vec::new(), Vec::new()),
-                        };
+                        let (otimes, series): (Vec<f64>, Vec<f64>) =
+                            match obs.and_then(|o| o.streams.get(stream)) {
+                                Some((t, v)) => (t.clone(), v.clone()),
+                                None => (Vec::new(), Vec::new()),
+                            };
                         match reduce {
                             None => QuantityResult::Series(series),
                             Some(red) => {

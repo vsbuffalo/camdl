@@ -1477,6 +1477,56 @@ struct SimQuantities {
     times: Vec<f64>,
 }
 
+/// Materialize the per-draw `y_sim` for the streams an `observations.<stream>`
+/// quantity reduces. Samples every schedule-bearing stream in DECLARATION order
+/// with the cell's `obs_seed` — the same RNG walk `simulate --obs` performs — so
+/// the quantity reduces exactly the draws `--obs` would emit (no redraw). A
+/// referenced stream that is fit-only (no `emit_schedule`) is a hard error.
+fn materialize_obs_for_quantities(
+    referenced: &[&str],
+    model: &ir::Model,
+    traj: &sim::Trajectory,
+    compiled: &std::sync::Arc<sim::CompiledModel>,
+    params: &[f64],
+    obs_seed: u64,
+) -> Result<sim::quantity::ObsSeriesSet, String> {
+    let mut obs_rng = sim::rng::StatefulRng::new(obs_seed);
+    let mut out: std::collections::HashMap<String, (Vec<f64>, Vec<f64>)> =
+        std::collections::HashMap::new();
+    for obs_ir in &model.observations {
+        let times = match &obs_ir.emit_schedule {
+            Some(s) => obs_schedule_times(s),
+            None => continue, // fit-only — consumes no RNG, mirroring `--obs`
+        };
+        let sampler =
+            sim::inference::obs_model::compile_obs_sample_pf(obs_ir, compiled.clone(), params);
+        let projected = project_all_obs_times(traj, obs_ir, model, &times);
+        let mut vals = Vec::with_capacity(times.len());
+        for (ti, &t) in times.iter().enumerate() {
+            let snap = snap_at(traj, t);
+            vals.push(sampler(projected[ti], t, &snap.int_state.counts, &mut obs_rng));
+        }
+        out.insert(obs_ir.name.clone(), (times, vals));
+    }
+    for &name in referenced {
+        if !out.contains_key(name) {
+            return Err(if model.observations.iter().any(|o| o.name == name) {
+                format!(
+                    "quantity reduces observations.{name}, but stream '{name}' is fit-only \
+                     (no `emit_schedule`); add `emit_schedule = every N 'unit` to generate \
+                     y_sim for the quantity"
+                )
+            } else {
+                format!(
+                    "quantity reduces observations.{name}, but no observation stream \
+                     named '{name}' is declared"
+                )
+            });
+        }
+    }
+    Ok(sim::quantity::ObsSeriesSet { streams: out })
+}
+
 impl SimQuantities {
     /// Fold one cell's trajectory into its quantity values, compiling the
     /// evaluator on the first call. The per-cell parameter vector is read by
@@ -1504,7 +1554,23 @@ impl SimQuantities {
                 }
             }
         }
-        let results = eval.eval_draw(&params, &cell.traj, compiled, None);
+        // `observations.<stream>` quantities reduce the per-draw y_sim — sampled
+        // here with the cell's obs_seed (the same draws `--obs` would emit). Only
+        // built when a quantity actually references an observation stream.
+        let obs_streams = eval.obs_streams();
+        let obs_set = if obs_streams.is_empty() {
+            None
+        } else {
+            Some(materialize_obs_for_quantities(
+                &obs_streams,
+                &cell.model,
+                &cell.traj,
+                compiled,
+                &params,
+                cell.spec.obs_seed,
+            )?)
+        };
+        let results = eval.eval_draw(&params, &cell.traj, compiled, obs_set.as_ref());
         if self.times.is_empty() {
             self.times = cell.traj.snapshots.iter().map(|s| s.t).collect();
         }

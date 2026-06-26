@@ -676,6 +676,15 @@ impl crate::engine::RunSink for PredictiveSink {
                 params[idx] = *value;
             }
         }
+        // Capture the per-draw y_sim per stream for `observations.<stream>`
+        // quantities — the SAME draws the predictive output uses, no redraw.
+        // Skip the capture entirely when only state quantities are present.
+        let want_obs = self
+            .quant_eval
+            .as_ref()
+            .is_some_and(|e| e.references_observations());
+        let mut obs_set =
+            sim::quantity::ObsSeriesSet { streams: std::collections::HashMap::new() };
         let mut obs_rng = sim::rng::StatefulRng::new(cell.spec.obs_seed);
         for (si, obs_ir) in model.observations.iter().enumerate() {
             let times = &self.leaf_times[si];
@@ -688,17 +697,28 @@ impl crate::engine::RunSink for PredictiveSink {
                 &params,
             );
             let projected = crate::project_all_obs_times(&cell.traj, obs_ir, model, times);
+            let mut stream_vals: Vec<f64> =
+                if want_obs { Vec::with_capacity(times.len()) } else { Vec::new() };
             for (ti, &t) in times.iter().enumerate() {
                 let snap = crate::snap_at(&cell.traj, t);
                 let y = sampler(projected[ti], t, &snap.int_state.counts, &mut obs_rng);
                 self.samples[si][ti].push(y);
+                if want_obs {
+                    stream_vals.push(y);
+                }
+            }
+            if want_obs {
+                // Key by the stream's declared `name` — what `observations.<name>`
+                // in the DSL references (v1.1 is unstratified, so name == base).
+                obs_set.streams.insert(obs_ir.name.clone(), (times.clone(), stream_vals));
             }
         }
 
-        // Generated quantities: fold this draw's trajectory into its per-quantity
-        // values, using the SAME resolved params as the obs sampling above.
+        // Generated quantities: fold this draw's trajectory + the just-drawn y_sim
+        // into its per-quantity values, using the SAME resolved params + draws as
+        // the predictive output above.
         if let Some(eval) = &self.quant_eval {
-            let results = eval.eval_draw(&params, &cell.traj, &self.compiled, None);
+            let results = eval.eval_draw(&params, &cell.traj, &self.compiled, Some(&obs_set));
             if self.quant_times.is_empty() {
                 self.quant_times = cell.traj.snapshots.iter().map(|s| s.t).collect();
             }

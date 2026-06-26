@@ -247,12 +247,11 @@ let test_derived () =
 
 (* ── v1.1 observation source: observations.<stream> ──────────────────────── *)
 
-(* A bare `observations.afp` body → series over the simulated y_sim. *)
-let test_obs_series () =
-  let m = compile_ok (model_obs_with "      afp_series = observations.afp") in
-  match (find_q m "afp_series").q_body with
-  | Ir.QBReduced { source = Ir.QSObservation "afp"; reduce = None } -> ()
-  | _ -> Alcotest.failf "afp_series: expected QBReduced{QSObservation afp, reduce=None}"
+(* A bare `observations.afp` body (no reduction) is rejected in v1.1 → E289: an
+   observation series has its own observation-time axis and must be reduced. *)
+let test_obs_bare_series_rejected () =
+  compile_expect_error_code ~code:"E289" ~contains:"must be reduced"
+    (model_obs_with "      afp_series = observations.afp")
 
 (* `max(observations.afp)` → a value reduction over y_sim. *)
 let test_obs_max () =
@@ -371,7 +370,8 @@ let () =
       Alcotest.test_case "dur = fadeout - takeoff → QBDerived SBinOp Sub" `Quick test_derived;
     ];
     "obs_source", [
-      Alcotest.test_case "observations.afp → QSObservation series" `Quick test_obs_series;
+      Alcotest.test_case "bare observations.afp series rejected (E289)" `Quick
+        test_obs_bare_series_rejected;
       Alcotest.test_case "max(observations.afp) → QSObservation RValue VMax" `Quick test_obs_max;
       Alcotest.test_case "first_above(observations.afp, 0) → QSObservation RTime FirstAbove" `Quick test_obs_first_above;
     ];
