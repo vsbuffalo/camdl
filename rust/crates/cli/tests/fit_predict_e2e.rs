@@ -60,6 +60,14 @@ observations {
   }
 }
 
+quantities {
+  prevalence = I / N                  # series  (one value per snapshot)
+  peak       = max(I / N)             # value scalar (no censoring)
+  onset      = first_above(I / N, 0.01)   # time scalar (right-censorable)
+  onset2     = first_above(I / N, 0.02)   # time scalar
+  spread     = onset2 - onset             # Derived over Time scalars; censorable
+}
+
 simulate {
   from = 0 'days
   to   = 80 'days
@@ -111,6 +119,18 @@ fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(&fits).ok()?;
     for e in entries.flatten() {
         let p = e.path().join(sub).join(format!("{stream}.tsv"));
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Find a file written directly into the fit segment (e.g. `quantities.json`).
+fn find_segment_file(root: &Path, file: &str) -> Option<PathBuf> {
+    let fits = root.join("fits");
+    for e in std::fs::read_dir(&fits).ok()?.flatten() {
+        let p = e.path().join(file);
         if p.is_file() {
             return Some(p);
         }
@@ -228,6 +248,77 @@ thin = 1
     // The observed value at t=28 is the planted peak, 1303.
     let peak = obs_txt.lines().find(|l| l.starts_with("28\t"));
     assert_eq!(peak, Some("28\t1303"), "observed series is the recorded data");
+
+    // ── quantities/prevalence.tsv: a series (time + banded columns, no dims) ──
+    let prev = find_artifact(&results, "quantities", "prevalence")
+        .expect("quantities/prevalence.tsv must be written");
+    let prev_txt = std::fs::read_to_string(&prev).unwrap();
+    let mut plines = prev_txt.lines();
+    assert_eq!(
+        plines.next().unwrap(),
+        "time\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "series quantity header: time + banded columns"
+    );
+    let prow: Vec<&str> = plines.next().expect("at least one prevalence row").split('\t').collect();
+    assert_eq!(prow.len(), 7, "series row shape matches header");
+    let pq: Vec<f64> = prow[2..7].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    for w in pq.windows(2) {
+        assert!(w[0] <= w[1], "prevalence quantiles ordered: {pq:?}");
+    }
+
+    // ── quantities/peak.tsv: a value scalar (banded, NO censoring trio) ──
+    let peakf = find_artifact(&results, "quantities", "peak")
+        .expect("quantities/peak.tsv must be written");
+    let peak_txt = std::fs::read_to_string(&peakf).unwrap();
+    let mut klines = peak_txt.lines();
+    assert_eq!(
+        klines.next().unwrap(),
+        "n_draws\tq05\tq25\tq50\tq75\tq95",
+        "value-scalar header: banded columns, no time, no censoring"
+    );
+    let krow: Vec<&str> = klines.next().expect("a peak row").split('\t').collect();
+    assert_eq!(krow.len(), 6, "value-scalar row shape matches header");
+
+    // ── quantities/onset.tsv: a time scalar (censorable → the censoring trio) ──
+    let onsetf = find_artifact(&results, "quantities", "onset")
+        .expect("quantities/onset.tsv must be written");
+    let onset_txt = std::fs::read_to_string(&onsetf).unwrap();
+    let mut olines2 = onset_txt.lines();
+    assert_eq!(
+        olines2.next().unwrap(),
+        "n_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
+        "censorable scalar header carries the censoring trio"
+    );
+    let orow: Vec<&str> = olines2.next().expect("an onset row").split('\t').collect();
+    assert_eq!(orow.len(), 9, "censorable row shape matches header");
+
+    // ── quantities/spread.tsv: a Derived over Time scalars inherits censoring ──
+    // `spread = onset2 - onset` propagates a censored endpoint, so it must carry
+    // the censoring trio (not silently drop censored draws under a plain header).
+    let spreadf = find_artifact(&results, "quantities", "spread")
+        .expect("quantities/spread.tsv must be written");
+    let spread_txt = std::fs::read_to_string(&spreadf).unwrap();
+    assert_eq!(
+        spread_txt.lines().next().unwrap(),
+        "n_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
+        "a Derived transitively referencing a Time scalar inherits the censoring trio"
+    );
+
+    // ── quantities.json: lists all three logical quantities, typed ──
+    let manifest = find_segment_file(&results, "quantities.json")
+        .expect("quantities.json manifest must be written");
+    let mtxt = std::fs::read_to_string(&manifest).unwrap();
+    let mjson: serde_json::Value = serde_json::from_str(&mtxt).unwrap();
+    assert_eq!(mjson["schema"], "camdl.quantities/v1", "manifest schema tag");
+    let qs = mjson["quantities"].as_array().expect("quantities array");
+    let lookup = |n: &str| qs.iter().find(|q| q["name"] == n).unwrap_or_else(|| panic!("manifest missing {n}"));
+    assert_eq!(lookup("prevalence")["shape"], "series");
+    assert_eq!(lookup("peak")["shape"], "scalar");
+    assert_eq!(lookup("peak")["reduce"], "max");
+    assert!(lookup("peak")["censoring"].is_null(), "a value reduction is not censorable");
+    assert_eq!(lookup("onset")["shape"], "scalar");
+    assert_eq!(lookup("onset")["reduce"], "first_above");
+    assert!(lookup("onset")["censoring"].is_object(), "a time reduction records right-censoring");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
