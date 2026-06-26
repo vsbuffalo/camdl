@@ -1,301 +1,665 @@
 # Generated quantities
 
-Status: **Proposed** — implementable as specified. No `ir/VERSION` bump, no
-golden regeneration (quantities are a non-identity reporting section).
-
-Splits the quantities half out of the combined
-`2026-06-24-generated-quantities-and-counterfactuals.md` (now superseded); the
-counterfactual half is `2026-06-25-counterfactual-contrasts.md`. Also supersedes
-`2026-06-04-output-trajectory-customization.md` Phase 2.
+Status: **Proposed** — implementable as specified. Supersedes:
+`2026-06-04-output-trajectory-customization.md` Phase 2; splits the quantities
+half out of `2026-06-24-generated-quantities-and-counterfactuals.md` (the
+counterfactual half is `2026-06-25-counterfactual-contrasts.md`). IR contract:
+one additive optional field on `Model`; `ir/VERSION` 0.19 → 0.20.
 
 ## Summary
 
 A camdl user cannot yet ask the model to _report a derived quantity_ —
 cumulative incidence, attack rate, peak prevalence, time to peak. Today the only
-way to compute a function of state is to smuggle it in as a _scored_ observation
-stream (the expander requires a likelihood, `E266`), which forces the author to
-pretend a reported quantity is data.
+way to compute a function of a trajectory is to smuggle it in as a _scored_
+observation stream (the expander requires a likelihood, `E266`), which forces
+the author to pretend a reported quantity is data.
 
-This adds a `quantities {}` block: named reductions of a trajectory to reported
-summaries. A quantity is the **non-scored twin of an observation** — it reuses
-the projection machinery, minus the likelihood — and is valuable across the
-whole workflow, not just post-hoc:
+This adds a `quantities {}` block: **named reductions of what a simulation
+produces**, emitted on every run and banded over draws. A quantity is the
+**non-scored twin of an observation** — it reuses the projection machinery,
+minus the likelihood. **v1 reduces latent state** (`prevalence = I / N`,
+`peak = max(I)`, `attack_rate = final((N0 - S) / N0)`,
+`time_to_peak =
+time_of_max(I)`); **v1.1 adds the simulated observation series**
+as a second source on the same seam.
 
-- on the **observed data** → summary statistics (peak timing, final size) to
-  elicit/adjust priors _before_ fitting;
-- on **prior-predictive** simulations → prior-predictive checks;
-- on **posterior** draws → reporting (attack rate, peak, cumulative incidence,
-  with uncertainty bands).
-
-Nothing here touches the inference kernels, and the shared `Expr` type stays
+The core is one pure evaluator (`sim::quantity`) fed per draw by the run loop.
+v1 evaluates **only on the paths that run every cell fresh** (`simulate`,
+`fit predict`), so the trajectory is always in hand; a disk-replay source (a
+standalone command, `batch run`, cache-hit reuse) is a named follow-up. Nothing
+here touches the inference kernels, and the shared per-instant `Expr` type stays
 closed.
 
-## The seam: define vs serialize
+## Scope: per-simulation reporting, not preconditioning
 
-camdl already separates _defining_ a computed-from-state quantity from
-_serializing_ it. An `ObservationModel` is computed from state and written to a
-file, yet it is **defined** in `observations {}` (`model.rs:180`) while
-`output {}` only carries the serialization switch
-(`output { observations = true }`). A generated quantity is the non-scored twin
-of an `ObservationModel`, so it gets its own definition block beside
-`observations {}`, not a sub-block of `output {}`.
+A `quantities {}` block reports functions of a **simulation**. It deliberately
+does **not** cover the preconditioning workflow — extracting a feature vector
+`s(y_obs)` from the _observed data_, comparing it to `s(y_sim)`, retaining a
+particle bank, hashing a feature set. That is a distinct purpose with a distinct
+command, **deferred to a future preconditioning proposal**, which will own the
+**observed-data realization** of a stream, a data-only feature command, the
+`s(y_obs)` ↔ `s(y_sim)` comparison and its hole-mask / MAR semantics, and
+preconditioning-artifact identity.
 
-## Stocks, not flow accumulators
+Increments, sharing one seam:
 
-The common cumulative quantities are an **absorbing stock** read directly off
-state: `total_deaths = final(D)` (`D` absorbing), `(N0 - S)` (cumulative
-incidence when `S` is monotone). A compartment count is a lifetime running stock
-(`CurrentPop`, never reset). v1 admits only the non-flow projections; a lifetime
-_flow_ accumulator (`cumulative(flow)`, for flows captured by no stock — SIRS
-waning, reinfections) is a named follow-up. This deliberately avoids the
-observation `CumulativeFlow` projection, which accumulates over a reporting
-interval and **resets on the cadence** (`observation.rs:32`) — the opposite of a
-lifetime total; reusing it by ambient context would be an illegal second meaning
-of one IR value (`temporal_kind()` is derived-single-source by design,
-`observation.rs:23`).
+- **v1** — latent-state quantities, evaluated **live** on the always-fresh paths
+  (`simulate`, `simulate --draws`, `fit predict`). Every quantity is a pure fold
+  over the trajectory. No RNG, no observation sampling, no disk replay.
+- **v1.1** — the simulated observation source (`observations.<stream>`): reduces
+  the same `y_sim` the run already drew (never a fresh draw). Adds observation
+  materialization and a split materialization-grid rule. Purely additive on the
+  v1 seam.
+- **follow-up (disk source)** — a standalone `camdl quantities <run>` command,
+  `batch run` quantities, and cache-hit reuse. All require a `TSV → Trajectory`
+  reader that does not exist today (and a resolution of the lossy `traj.tsv`
+  view-column / `--no-flows` interaction), so they are explicitly out of v1.
+- **deferred** — the observed-data realization and the preconditioning command.
 
-## Types
+## Architecture: the per-draw seam
+
+The whole feature is one pure evaluator behind a per-draw fan-out. The pure
+evaluator lives in **`sim`** (a new `sim::quantity` module): it needs
+`Trajectory` and `CompiledModel`/`ResolvedExpr` (both in `sim`) and the quantity
+IR (in `ir`, which `sim` depends on). Banding, the per-draw hook, and all IO
+stay in `cli`. (There is no `observe` crate — the projection/likelihood
+machinery is `sim::inference`; the `cli → io → observe → sim → ir` line in
+CLAUDE.md is stale.)
 
 ```rust
-/// The non-scored twin of an ObservationModel: a derived function of state, no
-/// likelihood. A named reduction of a trajectory to a reported summary.
+// sim::quantity — pure: no RNG, no file IO, no inference coupling.
+pub struct QuantityEvaluator { /* per-leaf resolved programs (ResolvedExpr) + topo order */ }
+
+impl QuantityEvaluator {
+    /// Resolve each (already strata-expanded) quantity leaf's `Expr`/thresholds to
+    /// `ResolvedExpr` ONCE against the compiled model (name → slot). `Derived`
+    /// `QRef`s resolve to indices into earlier leaves' values (topological).
+    pub fn new(quantities: &[ir::Quantity], compiled: &sim::CompiledModel)
+        -> Result<Self, String>;
+
+    /// Fold every quantity over ONE draw: the resolved param vector + the
+    /// trajectory (v1.1 also passes the materialized obs series). Pure.
+    pub fn eval_draw(&self, params: &[f64], traj: &sim::Trajectory)
+        -> Result<PerDrawValues, String>;
+}
+```
+
+```rust
+// cli — accumulates per-draw values, bands in finish. Retains only DERIVED
+// values, never the trajectories.
+struct QuantityConsumer {
+    eval:   QuantityEvaluator,
+    source: ParamSourceKind,                 // fixed-params → point; draws → band
+    scalar: HashMap<QName, Vec<QuantityDrawValue>>,   // one per draw
+    series: HashMap<(QName, usize), Vec<f64>>,        // one per draw, per output time
+}
+```
+
+The live source drives `push_draw` from inside the sink's `merge_cell` (below);
+the disk source (follow-up) reconstructs `(params, traj)` from persisted
+artifacts. Both feed the **same** evaluator/consumer; only the source differs.
+
+### Where the live hook sits, and the two sinks
+
+`run_job` is the single engine; output is a pluggable `RunSink`
+(`engine.rs:121`) whose `merge_cell(cell: &CellResult)` is called **once per
+cell that runs**, in canonical order (`engine.rs:243`), with the full trajectory
+in hand (`CellResult.traj`, `engine.rs:92`). The quantity consumer is driven
+from inside `merge_cell`, **composed alongside** the existing accumulator — not
+after the final (pooled/banded) sink (the draw boundary is gone there:
+`PredictiveSink.samples[stream][time]`, `predict.rs:684`; a scalar like
+`max(I/N)` cannot be recovered from `q05…q95`), and not as a second `RunSink`
+(which would re-sample obs).
+
+The two v1 sinks are **asymmetric** and need two small integrations:
+
+- **`PredictiveSink` (`fit predict`)** already holds `Arc<CompiledModel>` and
+  builds the draw's resolved params (`predict.rs:649`/`:663-668`) — wire the
+  consumer directly.
+- **The simulate `SimSink`/`CasSink`** holds only `ir::Model` + a param map, no
+  compiled model. It must **compile once at sink construction** (the IR is fixed
+  across cells in a run) to build the `QuantityEvaluator`, then per draw resolve
+  params (defaults + `cell.spec.point_overrides`) and call `push_draw`. (One
+  compile, not per draw — do not recompile in the loop.)
+
+**v1 evaluates only on always-fresh paths.** `simulate` never skips a cell —
+`should_run` is not overridden; "every planned cell runs … cache hits are
+handled idempotently" (`main.rs:1347`) — so `cell.traj` is always present in
+`merge_cell`. `fit predict` replays every draw (overwrite-in-place). So the live
+hook always has a trajectory. The one path that _skips_ — `batch run`'s
+`CasSink` (`should_run → false → on_skip`, no `merge_cell`, no traj,
+`batch.rs:1091`) — is **not** a v1 quantities path; it needs the disk source
+(follow-up). Listing `batch run` as a v1 quantities path would be a silent
+matrix gap, so it is explicitly excluded.
+
+**Memory.** The consumer retains per-draw derived values, not trajectories — but
+a **stratified series** quantity expands to one leaf per cell, so the true cost
+is `Σ_q stratum(q) × times × draws`. At national scale (≈774 cells × ~200 times
+× 1000 draws ≈ 1.2 GB for one stratified series) this is the **same order as the
+predictive band's `samples[leaf][time]`**, not negligible. Acceptable (the
+predictive path already pays it) but documented; a streaming-quantile sketch is
+a follow-up if it bites.
+
+## Types and the flow
+
+Rust types (the `ir` crate) are canonical; OCaml `ir.ml` + `serde.ml` mirror
+them.
+
+```rust
+/// The non-scored twin of an ObservationModel: a named reduction of a simulation
+/// output to a reported summary, no likelihood. Reporting-only, non-identity.
 pub struct Quantity {
-    pub name:       String,
-    pub strata:     Vec<StratumKey>,        // empty = whole-pop; reuses obs strata
-    pub projection: StockProjection,        // the three non-flow variants only
-    pub reduce:     Option<TemporalReduce>, // None = a series; Some = a scalar
+    pub name:    String,
+    pub stratum: Vec<StratumKey>,   // post-expansion (dim, level) tag; like ObservationModel.stratum
+    pub body:    QuantityBody,
+}
+
+#[serde(rename_all = "snake_case")]   // externally tagged
+pub enum QuantityBody {
+    Reduced { source: QuantitySource, reduce: Option<TemporalReduce> },
+    Derived(ScalarExpr),
+}
+
+#[serde(rename_all = "snake_case")]   // externally tagged — see "additivity" below
+pub enum QuantitySource {
+    /// Latent truth: a quantity-validated `Expr` evaluated against each snapshot.
+    State(Expr),
+    // v1.1 ADDS, additively:  Observation { stream: String },
 }
 ```
 
-### `StockProjection` — flow projections are unrepresentable, not runtime-checked
+`stratum` is the only stratification field (the IR is fully-expanded:
+`prevalence[p in patch]` becomes one leaf per cell tagged with `stratum`,
+exactly as `ObservationModel` carries only `stratum: Vec<StratumKey>`,
+`observation.rs:200`, and **no index-binding field** — there is no IR
+`IndexBinding`).
+
+**Additivity (load-bearing).** `QuantitySource` (and `QuantityBody`,
+`TemporalReduce` and its inner enums) **must be externally tagged**, never
+`#[serde(untagged)]`. External tagging makes `State` serialize
+`{"state": <expr>}` and stay byte-identical when v1.1 appends `Observation`, and
+keeps a parse error from being swallowed by untagged trial-deserialization. The
+single-variant `QuantitySource` in v1 is therefore not a stub — it fixes the
+wrapper shape now so v1.1 is a pure additive variant (no golden churn, no run-id
+move). A cross-language round-trip test pins the tag (the OCaml `serde.ml` is
+hand-written — no derive to lean on).
+
+### The state expression is a validated `Expr`, enforced in `ir::validate`
+
+A quantity's state expression is a **plain `Expr`**, restricted to a **validated
+subset** — not a newtype with a constructor invariant (a newtype-over-`Expr`
+deserializes transparently and would bypass the check; the OCaml IR has no
+private-constructor newtype). The subset is enforced in **one seam**:
+`ir::validate::check_expr` (`validate.rs:369`), which already runs on **every
+load** before simulation (`util.rs:1039`, the structural-integrity battery),
+already deep-walks, and already carries a per-context allow flag
+(`allow_projected`) — the exact mechanism. Add a **quantity context** that:
+
+- **rejects four leaves anywhere in the tree** — `Dt`, `Projected`,
+  `ObsColumnRef`, `PerEvalRef` (meaningless in a quantity read at output
+  cadence) — recursing through every compound variant **including
+  `UncheckedDim.inner`** (the `unchecked(…)` escape is DSL-reachable and wraps
+  an arbitrary `Expr`), `Reduce`'s vec, and `TableLookup` indices;
+- **checks `BindingRef` transitively** — a `BindingRef` leaf is allowed (the
+  hoisted `N[l]`/`I_agg[l]` aggregates appear in `I[p]/N[p]`), but its
+  referenced `Binding` body (`model.bindings`, available to `validate`) must
+  itself be quantity-clean; a single memoized pass over the topo-ordered
+  bindings suffices. (This closes the smuggle a constructor-only check cannot:
+  `binding_ref:"B"` where `B`'s body is `{dt:null}`, reachable even from DSL via
+  a hoist-eligible `let bad = I*dt`.)
+
+A flow accumulator is genuinely unrepresentable: `Expr` has no flow leaf
+(`expr.rs:235-253`); flows are reachable only via the
+`Projection::CumulativeFlow` _variant_, which `State` does not use. So
+`CurrentPop`/`CurrentPopSum` are just `Pop`/`PopSum`.
+
+**Diagnostics.** The OCaml expander emits the friendly, **located** `E288` for a
+direct forbidden leaf a user typed (`dt` in a quantity body — threaded from the
+`EIdent` location; note most expander expression diagnostics are `no_loc`, so
+this requires AST-level interception, not a walk over the resolved IR).
+`ir::validate` is the authoritative backstop for hand-authored IR and the
+transitive case (decl-level, span-less — the IR carries no spans). **LICM must
+not process quantity bodies** (else it would hoist a subexpression into a
+`PerEvalRef` the loader then rejects).
+
+### `TemporalReduce` — result kind typed
 
 ```rust
-/// The subset of Projection a v1 quantity may use — no flow accumulators, so the
-/// reset/differencing hazard cannot arise. Constructed from a Projection by a
-/// fallible parse that rejects the two flow variants at the boundary.
-pub enum StockProjection {
-    CurrentPop(String),
-    CurrentPopSum(Vec<String>),
-    DerivedExpr(Expr),       // arithmetic over state: I/N, (N0 - S)/N0
-}
-```
-
-A `Quantity` carrying a `StockProjection` _cannot_ hold `CumulativeFlow` — the
-restriction is in the type, not a check (the "make illegal states
-unrepresentable" rule, against reusing the full 5-variant `Projection` and
-validating at runtime).
-
-### `TemporalReduce` — result kind is typed, not underdetermined
-
-A flat reduction enum would let `argmax` (returns a _time_) and `max` (returns a
-_value_) share one shape, leaving the output dimension a function of the runtime
-variant. Split so the result kind is in the type:
-
-```rust
+#[serde(rename_all = "snake_case")]
 pub enum TemporalReduce {
-    Value(ValueReduce),    // result has dim(series):  final, max, min, mean
-    Time(TimeReduce),      // result has dim T:         time_of_max, time_of_min
-    Integral,              // result has dim(series)·T: area under the curve
+    Value(ValueReduce),    // result has dim(series)
+    Time(TimeReduce),      // result has dim T
+    Integral,              // result has dim(series)·T
 }
-pub enum ValueReduce { Final, Max, Min, Mean }
-pub enum TimeReduce  { ArgMax, ArgMin }
+#[serde(rename_all = "snake_case")]
+pub enum ValueReduce {
+    Final, Max, Min, Mean,
+    CountAbove(Expr), CountBelow(Expr),   // # crossings (e.g. positive months)
+}
+#[serde(rename_all = "snake_case")]
+pub enum TimeReduce {
+    ArgMax, ArgMin,                       // time_of_max / time_of_min
+    FirstAbove(Expr), FirstBelow(Expr),   // onset / first detection
+    LastAbove(Expr),  LastBelow(Expr),    // elimination / fade-out
+}
 ```
 
-`None` reduce → a **series** (one value per output time). `Some` → a **scalar**
-(the series reduced over time). This is the third reduction axis (over _time_),
-intentionally distinct from `ObsReducer` (`intervention.rs:90`, folds a trigger
-window) and the n-ary `Reduce` (`expr.rs`, sums over _strata_ at one instant) —
-neither is temporal.
+`None` reduce → a **series** (one value per snapshot); `Some` → a **scalar**.
+Thresholds are a quantity-validated `Expr` (state is always available in v1's
+trajectory contexts), so `first_above(I, 0.1 * N)` is well-defined. `Final`
+reads the endpoint, `Integral` is the time-weighted area (person-days,
+`dim(series)·T`; well-defined for integer compartments, forward-compatible with
+real-valued projections).
 
-**Resolution.** v1 reductions fold over the **output-cadence snapshots**
-`fit
-predict` already produces. A `peak`/`time_of_max` between output times can
-be missed at a coarse `every`, so a fine default cadence is documented for
-peak-sensitive quantities, and a resolution-honest **substep fold is a named
-fast-follow** (a streaming reducer in the forward step loop, orthogonal to
-everything else). Reading the _endpoint_ (`final`, stocks, totals) is
-cadence-invariant and exact regardless.
+**No `total`/`sum` in v1.** A `Σ` over the series is meaningful only for a
+**per-interval flow** (incidence → cumulative); summing a _stock_ over snapshots
+is cadence-dependent nonsense, and v1 has no flow source (`Expr` has no flow
+leaf). `Total` ships with the flow/observation source (follow-up), not v1.
 
-### Model — a non-identity section (no re-key)
+### Censoring is data, not a NaN
+
+A `Time` reduction can fail to fire — `first_above(I_total, i_thresh)` on a draw
+that never crosses (common at low transmission). That is **right-censoring**,
+distinct from a non-finite arithmetic result:
+
+```rust
+pub enum QuantityDrawValue { Value(f64), Censored(Censoring) }
+pub enum Censoring { Right { bound: f64, reason: &'static str } }   // v1: this case only
+
+/// Banding partitions per-draw values, then dispatches. Series quantities never
+/// censor (their per-draw payload is `Vec<f64>`); only `Time` SCALARS can.
+pub enum BandResult {
+    Banded { bands: Vec<f64>, n_value: usize, n_censored: usize },   // p_censored derived
+    AllCensored { n_draws: usize },                                   // q* = NA
+}
+fn band_with_censoring(vals: &[QuantityDrawValue]) -> BandResult;     // partitions, never calls band(&[])
+```
+
+- **Never a `NaN` sentinel.** A non-firing `Time` reduction →
+  `Censored(Right { bound: window_end, .. })`.
+- **Non-finite arithmetic is a different thing.** A `Value` reduction yielding
+  `NaN`/±∞ (e.g. `0/0`) is a bug / undefined → a hard error, **not** `Censored`
+  (keep `band`'s non-finite rejection, `predict.rs:326`).
+- **Band only the finite set.** `band_with_censoring` partitions to the
+  `Value(f64)`s and calls the existing `band(&[f64])` (`predict.rs:325`) — no
+  new banding entry point. The all-censored case returns `AllCensored` (never
+  `band(&[])`, which silently returns `vec![NaN;5]`, `predict.rs:307`).
+- **Quantiles are conditional on the event occurring in the window** — the
+  manifest records this; a survival (Kaplan–Meier) summary is a follow-up.
+
+`CountAbove`/`CountBelow` never censor (a non-crossing series counts `0`);
+`Max`/`Min`/`Mean`/`Final`/`Integral` are always defined.
+
+### `ScalarExpr` — reduction arithmetic, `Expr` left closed
+
+Differences/ratios of reduced scalars (outbreak duration `last - first`,
+indicators) combine **scalar** quantities, in a small closed language distinct
+from `Expr`. This **is** genuinely structural — a `ScalarExpr` cannot hold a
+state/rate leaf by construction:
+
+```rust
+#[serde(rename_all = "snake_case")]   // externally tagged (the TriggerExpr precedent, serde.ml:637)
+pub enum ScalarExpr {
+    Const(f64), Param(String), QRef(QRef),
+    UnOp  { op: UnOp,  arg: Box<ScalarExpr> },
+    BinOp { op: BinOp, left: Box<ScalarExpr>, right: Box<ScalarExpr> },
+    Cond  { pred: Box<ScalarExpr>, then: Box<ScalarExpr>, else_: Box<ScalarExpr> },
+}
+pub struct QRef { pub name: String, pub stratum: Vec<StratumKey> }   // carries its resolved cell
+```
+
+Externally tagged → derived serde suffices (no hand-written deserializer; trees
+are tiny). A `Derived` may `QRef` only **scalar** quantities declared earlier (a
+`QRef` to a series quantity, or a forward `QRef`, is `E289`; cycle detection
+follows `check_hierarchical_cycles`, `expander.ml:5409` — there is no shareable
+bindings-topo helper, as `let` bindings _allow_ forward refs). A stratified
+`Derived` may only `QRef` scalars of **matching** strata.
+
+### The flow
+
+```
+DSL  quantities { name[idx]? = qexpr }     (parser.mly: IDENT index_bindings_opt EQ expr)
+  ▼  expander (mirrors expand_observations ORDER): cartesian_product od.oindices OUTER,
+  │     classify+resolve body INNER with per-cell env →
+  │       compartment / state arith → State(Expr)            [E288 on a forbidden leaf]
+  │       prior scalar quantity     → QRef{name, stratum=cell} [E289 on mix/forward/series]
+  │     (a reduction name used in a rate → E290)
+  │   → one expanded Quantity leaf per cell, stratum tagged (hoisted stratum_of_bindings)
+IR   Model.quantities : Vec<Quantity>      (additive, skip_serializing_if empty,
+  │                                          EXCLUDED from Model::hash_into; validated by
+  │                                          ir::validate quantity context on every load)
+  ▼  serde.ml (`| [] -> []` omit pattern)  ⇄  rust/crates/ir  (schema.json + ir/VERSION 0.20)
+RUN  per draw (live, always-fresh path): merge_cell → resolve params →
+  │     QuantityEvaluator::eval_draw(params, traj) → QuantityConsumer.push_draw →
+  │     finish() → band_with_censoring → quantities/<name>.tsv (sidecar) + manifest
+```
+
+### Model — a non-identity section
 
 ```rust
 pub struct Model {
     // …existing…
-    pub quantities: Vec<Quantity>,   // skip_serializing_if empty
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quantities: Vec<Quantity>,
 }
 ```
 
-**Run-identity:** quantities do not change the simulation or the fit — they are
-derived reports. So the field is **excluded from `Model::hash_into`** (the
-hand-written run-id walk, `ir_hash.rs`), exactly the control the hand-written
-hash exists to give. Combined with `skip_serializing_if` empty, an existing
-model is **byte-identical** in both its serialized IR and its `run_id` — so **no
-`ir/VERSION` bump and no golden regeneration**. A model that adds quantities
-keeps the same fit `run_id`; the quantities re-key only the _predict-time_
-output that reports them.
-
-## DSL surface
+## DSL surface (v1)
 
 ```
 compartments { S, E, I, R, D }
 
 quantities {
-  prevalence       = I / N                  # series   (DerivedExpr)
-  attack_rate      = final((N0 - S) / N0)   # scalar   (stock-derived)
-  total_deaths     = final(D)               # scalar   (absorbing stock)
-  peak_prevalence  = max(I / N)             # scalar   (value reduction)
-  time_to_peak     = time_of_max(I)         # scalar   (time reduction → a time)
-  person_days_inf  = integral(I)            # scalar   (dim P·T)
+  prevalence       = I / N                  # series
+  attack_rate      = final((N0 - S) / N0)   # scalar (absorbing-stock proxy)
+  total_deaths     = final(D)               # scalar (absorbing stock)
+  peak_prevalence  = max(I / N)             # scalar (value reduction)
+  time_to_peak     = time_of_max(I)         # scalar (time reduction → a time)
+  takeoff_time     = first_above(I_total, i_thresh)   # onset
+  fadeout_time     = last_above(I_total, 0)           # elimination timing
+  outbreak_dur     = fadeout_time - takeoff_time      # reduction arithmetic
+  positive_months  = count_above(I_total, i_thresh)   # # months above threshold
+  person_days_inf  = integral(I)            # scalar (dim P·T)
 }
-```
 
-Stratified, reusing the observation stratum form:
-
-```
-quantities {
+quantities {                                # stratified
   prevalence[p in patch]  = I[p] / N[p]
-  attack_rate[p in patch] = final((N0[p] - S[p]) / N0[p])
+  peak_time[p in patch]   = time_of_max(I[p])
 }
 ```
 
-Grammar additions: a `quantities {}` top-level block (one new keyword + a
-`name = expr` body, the shape of `ode_list`); the reductions `final`, `max`,
-`min`, `mean`, `time_of_max`, `time_of_min`, `integral` as **reserved names**
-legal only inside `quantities {}`. They lex as ordinary `EFuncCall`, so a
-reduction name used in a transition rate parses and is rejected at expansion
-with a **dedicated diagnostic** (`E2xx`: "temporal reduction `max` is only valid
-in `quantities {}`; a rate is evaluated per substep"), not the generic `E100`;
-reserved against collision with a `forcing {}` function of the same name.
+**Grammar.** A `quantities {}` top-level block (one new keyword). A decl is
+`IDENT
+index_bindings_opt EQ expr` — the shared `index_bindings_opt` rule (used
+by `obs_decl`/interventions) supplies `[p in patch]`; the body is an `expr`.
+`stratum_of_bindings` (`expander.ml:5343`, today a closure inside
+`expand_observations`) is hoisted to a shared helper.
 
-## Evaluation — three trajectory sources
+**Reduction names** (`final`, `max`, `min`, `mean`, `count_above`,
+`count_below`, `time_of_max`, `time_of_min`, `first_above`, `first_below`,
+`last_above`, `last_below`, `integral`) are **not lexer keywords** — they lex as
+`IDENT` and dispatch **by name in the quantity classifier** (the
+`incidence`/`prevalence`/ `observed`/`sum_observed` pattern,
+`expander.ml:2431`). `max`/`min` stay **binary pointwise** everywhere
+(`expander.ml:2472`, arity `E101`); inside `quantities {}` the classifier
+intercepts the **unary** `max(series)` form _before_ delegating to
+`resolve_expr` (a 2-arg `max` of two state sub-expressions stays pointwise).
 
-A quantity is evaluated by replaying/reading a trajectory and folding its
-reduction.
+**Body classification** is a **net-new** quantity-aware classifier with its own
+symbol table (not the projection disambiguator). It rejects mixed forms with
+pointed diagnostics. **New diagnostics** (E280–E287 taken; E288–E290 free):
 
-- **`camdl fit predict <fit>`** → over each posterior draw, banded into
-  `quantities/<name>.tsv` (the reporting use). Reuses the #298 draw-replay loop.
-- **`camdl simulate --draws <prior>`** → over prior-predictive draws → prior
-  checks.
-- **`camdl simulate`** at fixed params / **over the observed data** → a point
-  summary (data summary statistics for prior elicitation). Reducing the observed
-  data uses the same reduction over an observed series rather than a simulated
-  one — the pre-conditioning path.
+- `E288` — a forbidden leaf (`dt`/`projected`/aux/per-eval) in a quantity body.
+- `E289` — a malformed quantity body: a compartment-minus-quantity mix, a
+  reduction on a `Derived` scalar, a forward / series / cross-stratum `QRef`; a
+  name colliding with a compartment / param / observation / binding / earlier
+  quantity.
+- `E290` — a temporal reduction used outside `quantities {}` (e.g. in a rate).
 
-`fit predict` with an empty `quantities {}` writes no quantity files (not an
-error); quantities band over **all** posterior draws.
+## Evaluation
 
-## Expressivity — worked surveillance questions
+v1 evaluates on the paths that run every cell fresh; the standalone command,
+`batch run`, and cache-hit reuse are the disk-source follow-up.
 
-Two v1 idioms carry most real questions: `time_of_max` of a step function yields
-any **threshold-crossing time** (the step is 0 before the crossing, 1 after, and
-`time_of_max` returns the first time the max is hit), and the **band over draws
-is the distribution**. Against eleven polio-surveillance questions:
+| Context (CLI)                   | v1 (state)       | v1.1 (`observations.*`) |
+| ------------------------------- | ---------------- | ----------------------- |
+| `simulate` (fixed params)       | ✓ point          | ✓ point                 |
+| `simulate --draws prior`        | ✓ band           | ✓ band                  |
+| `fit predict <fit>` (posterior) | ✓ band           | ✓ band                  |
+| `batch run`, `camdl quantities` | follow-up (disk) | follow-up               |
 
-**Direct v1** (`i_thresh` a declared `count` param; `I_total` the patch sum):
+**Point vs band is keyed by the param-source kind, not the draw count.** A
+fixed-params `simulate` → one realization → a **point** value (a `value`
+column). A draws/posterior source → bands (a 1-draw posterior still bands,
+degenerate). The consumer threads `ParamSourceKind` to `finish()`.
 
-```
-quantities {
-  peak_month     = time_of_max(I_total)                                   # Time reduction → a date when anchored
-  takeoff_time   = time_of_max(if I_total > i_thresh then 1.0 else 0.0)   # first threshold crossing
-  outbreak_size  = final(N0 - S)                                          # final size; the band IS the size distribution
-  peak_time[p in patch] = time_of_max(I[p])                              # per-patch timing (raw material below)
-}
-```
+**Resolution.** State reductions fold over the **output-cadence snapshots**; a
+`max`/`time_of_max` between snapshots can be missed at a coarse `every` (a fine
+default cadence is documented; a substep fold is a fast-follow). `mean` is an
+unweighted average over snapshots (cadence-sensitive, unlike time-weighted
+`integral`) — documented. Endpoints (`final`) are cadence-invariant.
 
-— so peak month, epidemic takeoff timing, the outbreak-size distribution, and
-per-patch timing are clean v1. Every "when does X first happen" is
-`time_of_max(if … then 1 else 0)`.
+## Run-identity, schema, and output identity
 
-**v1 endpoints + one downstream step.** Silent-circulation duration,
-ES-before-AFP lead time, and extinction probability each reduce to v1 quantities
-plus a trivial post-step on the banded TSVs:
+**Run-identity.** `run_id` is the **struct walk** (`Model::content_hash` →
+`hash_into`, `ir_hash.rs:1053`), and `quantities` is **excluded from that walk**
+(the implementer must _not_ add `self.quantities.hash_into(h)`) — a deliberate
+exception (`per_eval_bindings` is hashed, `ir_hash.rs:1075`), because a quantity
+is a derived report and must never re-key a sim/fit. An **inverse-polarity pin
+test** asserts a non-empty `quantities` does **not** change
+`Model::content_hash` (the opposite of `ir_per_eval_bindings_changes_hash`,
+`runid/src/ir_hash/tests.rs:221`), backed by the `model_golden_hash` tripwire
+(adding the walk line moves the golden, even for an empty `Vec`).
 
-```
-quantities {
-  introduction_time = time_of_max(if I_total > 0 then 1.0 else 0.0)   # silent circulation =
-  detection_time    = time_of_max(if afp     > 0 then 1.0 else 0.0)   #   detection − introduction
-  es_first  = time_of_max(if es  > 0 then 1.0 else 0.0)               # ES lead = afp_first − es_first
-  afp_first = time_of_max(if afp > 0 then 1.0 else 0.0)
-  peak_prev = max(I_total)                                            # P(extinct) = fraction with peak_prev < threshold
-}
-```
+**The `ir/VERSION` bump re-keys all run_ids.** The run_id "model" level is
+`ModelDigest::content_hash()`, which folds an unskipped `ir_version`
+(`inputs.rs`, `resolve.rs:223`, `fit/cas.rs:347`) — so 0.19 → 0.20 re-keys every
+run_id, exactly as every prior schema bump did (masked in practice because the
+volatile `engine` git hash already re-keys per build). Only the
+quantities-block-addition is non-re-keying.
 
-The differences / tail-fractions are one-liners on the output today; inline once
-reduction arithmetic lands (roadmap below).
+**Schema.** `ir/schema.json` gains the optional `quantities` definition (plus
+the new shapes), `ir/VERSION` → 0.20, OCaml (`ir.ml` + `serde.ml`) and Rust `ir`
+update atomically. The field is omitted when empty via the OCaml `| [] -> []`
+pattern (`serde.ml:1264`), so no existing golden gains a key or shifts a field —
+the diff is the **two version strings** per file (`ir_version`;
+`validated_by =
+"ocaml-compiler-v" ^ ir_version`, `serde.ml:1318`) in both
+`ir/golden/` and `ocaml/golden/`, regenerated by `make update-golden`;
+`ir/expected/*.tsv` are unaffected.
 
-**Cross-patch statistics.** Spatial ordering and synchrony give the per-patch
-`peak_time[p]` in v1; the ordering (argsort over patches) and the spread
-(variance over patches) are reductions over **strata**, not time — downstream
-today, a new cross-stratum axis as a follow-up.
+**Output identity.** Quantities must **not** be written into the `run_id`-keyed
+CAS leaf — two models differing only in their `quantities {}` block share a
+`run_id`, so leaf bytes would depend on something outside the key (a
+clobber/stale bug). v1 writes `quantities/<name>.tsv` as a **regenerated
+sidecar**:
 
-**New machinery.** Number of distinct waves and inter-wave gaps need **peak
-detection** (count local maxima above a prominence); persistence after SIAs
-needs a **windowed** quantity (`max(I) over [last_sia, end]`). Genuine
-follow-ups.
+- `fit predict` → a `quantities/` subdir of the fit segment (beside
+  `predictive/`/`observed/`, `predict.rs:951`).
+- `simulate` has **no default user output directory** (the CAS leaf is the
+  system of record; `-o` is a single loose file). So a quantities run
+  **requires** an output directory (`--out-dir` / an explicit dir), else a hard
+  error; quantities land in `<out-dir>/quantities/`.
 
-The v1 primitives cover ~7 of the eleven fully or as banded raw-material; the
-misses cluster into exactly the follow-ups below, ordered by value.
+A content-addressed _report identity_ (`report_id` over `run_id` + the canonical
+quantities IR + evaluator/schema/quantile/censoring versions) and report caching
+are the **target-state** for the disk-source follow-up — recorded, deferred from
+v1; v1 regenerates, never caches.
 
 ## Dimensional checking
 
-Each quantity's projection expression runs through the existing `dimcheck` (a
-lone quantity needs no cross-quantity comparison, so no stored dimension is
-required — that is a contrast concern, deferred to the counterfactual proposal).
-The reduction's output dimension is derived: `Value` preserves `dim(series)`;
-`Time` (`time_of_max`) yields `T`; `Integral` yields `dim(series)·T` (the
-`dim·T` algebra already exists, `dimcheck.ml:17`). A series whose expression is
-dimensionally ill-formed is rejected as today.
+Each quantity `Expr` runs through the existing `dimcheck`
+(`dim_vec = [|p_exp; t_exp|]`, `ocaml/lib/ir/dimcheck.ml`). The reduction's
+output dim is derived: `Value` preserves `dim(series)`; `Time` → `T = [|0;1|]`;
+`Integral` → `dim(series)·T`. A threshold is dim-checked against the series dim.
+`ScalarExpr` typechecks in topological order. The manifest **unit** string is
+rendered by a new `(p_exp, t_exp) + model.time_unit → String` function (none
+exists today): `[0,0]→
+"dimensionless"`, `[1,0]→ "count"`,
+`[0,1]→ the model's time unit` (e.g. `"day"`), `[1,1]→ "count·<time_unit>"`,
+etc.
 
 ## Output format
 
-TSV, **one file per quantity** (`quantities/<name>.tsv`), **long/tidy keyed by
-stratum level**, bands reusing `fit predict`'s `q05 q25 q50 q75 q95` over draws.
-One-per is required: a _series_ quantity has a `time` column, a _scalar_ does
-not.
+TSV, **one file per logical quantity** (`quantities/<name>.tsv`), long/tidy
+keyed by stratum level. The header is a deterministic function
+`header(shape, stratified, censorable, banded)`:
+
+- columns =
+  `[time?] [<stratum dims>…] [value | (n_draws [n_value n_censored
+  p_censored] q05 q25 q50 q75 q95)]`
+- `time` present iff **series**; stratum-dim columns iff **stratified**; the
+  censoring trio present iff a **censorable** (`Time`) scalar; `value` (single
+  column) iff a **point** (fixed-params) run, else the banded columns.
+- **Series never censor** (only `Time` scalars do), so the censoring trio never
+  coexists with a `time` column.
 
 ```
-# series quantity, stratified     quantities/prevalence.tsv
+# series, stratified, banded         quantities/prevalence.tsv
 time   patch    n_draws  q05 q25 q50 q75 q95
 
-# scalar quantity, stratified     quantities/total_deaths.tsv   (no time axis)
-patch  n_draws  q05 q25 q50 q75 q95
+# Time scalar, stratified, banded     quantities/peak_time.tsv
+patch  n_draws  n_value  n_censored  p_censored  q05 q25 q50 q75 q95   # q* = NA if all_censored
+
+# scalar, point (fixed-params run)     quantities/peak_prevalence.tsv
+value
 ```
 
-A `quantities.json` manifest lists each entry's name, shape (series|scalar),
-strata, reduction, and **unit**. Resolved spec points: `time_of_max` returns the
-**first** argmax on ties; a `Time` reduction's value is a duration-from-origin
-in an unanchored model and is rendered as a **date** in an anchored model (the
-manifest records which); a quantity name that collides with a
-compartment/param/observation is a duplicate-name error.
+A `quantities.json` manifest — **one entry per logical quantity** (carrying its
+`index_dims`, not a single resolved cell, to match the one-file-per-quantity
+TSV):
 
-## Staging and follow-up roadmap
+```json
+{
+  "schema": "camdl.quantities/v1",
+  "quantities": [
+    {
+      "name": "peak_prevalence",
+      "shape": "scalar",
+      "source": "state",
+      "index_dims": [],
+      "reduce": "max",
+      "unit": "dimensionless",
+      "censoring": null
+    },
+    {
+      "name": "peak_time",
+      "shape": "scalar",
+      "source": "state",
+      "index_dims": ["patch"],
+      "reduce": "time_of_max",
+      "unit": "day",
+      "anchored_as": "date",
+      "censoring": { "kind": "right", "conditional_quantiles": true }
+    },
+    {
+      "name": "prevalence",
+      "shape": "series",
+      "source": "state",
+      "index_dims": ["patch"],
+      "reduce": null,
+      "unit": "dimensionless",
+      "censoring": null
+    }
+  ]
+}
+```
 
-**v1.** The `quantities {}` block, `StockProjection`, typed `TemporalReduce`,
-whole-horizon output-cadence reductions, evaluation over data / prior-predictive
-/ posterior, the manifest. No re-key.
+`time_of_max`/`first_above` return the **first** time on ties (`last_above` the
+last); a `Time` value is a duration-from-origin in an unanchored model, rendered
+as a **date** when anchored (the manifest records which).
 
-Follow-ups, ordered by how many real questions each unlocks (from the
-walkthrough):
+## Worked surveillance questions (v1, state)
 
-1. **Reduction arithmetic** — difference/ratio of two reductions and `Cond` on a
-   reduced scalar. Unlocks silent-circulation duration, ES-AFP lead, and inline
-   extinction indicators. Cheapest, highest leverage — do first.
-2. **Cross-stratum reductions** — rank / variance / correlation over strata (a
-   new axis complementing over-time). Unlocks spatial ordering and synchrony.
-3. **Waveform reductions** — peak counting with a prominence threshold. Unlocks
-   number-of-waves and inter-wave gaps. Genuinely new, non-trivial.
-4. **Substep recorder** — resolution-honest `max` / `time_of_max` / `integral`
-   (orthogonal; sharpens every timing/peak quantity).
-5. **Windowed quantities** — `over [X, Y]` with instant endpoints. Unlocks
-   after-SIA persistence; shared with the counterfactual proposal.
-6. **Flow `cumulative`** + flow arithmetic; `at_time(series, t)`.
+```
+quantities {
+  peak_month     = time_of_max(I_total)                  # latent peak timing
+  takeoff_time   = first_above(I_total, i_thresh)        # epidemic onset
+  fadeout_time   = last_above(I_total, 0)                # elimination timing
+  outbreak_dur   = fadeout_time - takeoff_time           # duration (arithmetic)
+  positive_mos   = count_above(I_total, i_thresh)        # # months above threshold
+  outbreak_size  = final(N0 - S)                         # the band IS the size distribution
+  peak_time[p in patch] = time_of_max(I[p])             # per-patch timing
+}
+```
+
+Out of v1 (honestly): **the simulated reported signal** (first _detected_ case)
+is the v1.1 observation source; **comparing to observed data** (`s(y_obs)`) is
+the deferred preconditioning proposal; **post-SIA persistence** (windowed),
+**spatial synchrony** (cross-stratum), and **latent cumulative incidence** (flow
+counters, which also unlock `total`) are follow-ups.
+
+## Staging
+
+- **v1.** The `quantities {}` block; `State(Expr)` source (validated subset in
+  `ir::validate`); typed `TemporalReduce` (minus `Total`) with the censoring
+  policy; reduction arithmetic (`ScalarExpr`/`QRef`); stratified output; the
+  `QuantityEvaluator` (`sim`) + the per-draw hook in `PredictiveSink` and the
+  simulate sink (live, always-fresh paths only); the sidecar output + manifest.
+  `ir/VERSION` 0.20; quantities excluded from `run_id`.
+- **v1.1.** The `observations.<stream>` source: `materialize_observations`
+  factored out of `PredictiveSink::merge_cell` (`predict.rs:670-685`) and fed to
+  both the predictive accumulator and the quantity consumer (the SAME `y_sim`,
+  drawn once in canonical order — never skip streams, never redraw); the
+  **split** materialization-grid rule — compile-time `E289` for an
+  **undeclared** stream (decidable), and a **runtime** check for a
+  **declared-but-unmaterialized** stream located in each command's
+  materialization path (which streams a run materializes is runtime: predict's
+  fit-leaf times, `simulate --obs`'s emit schedule; the compiler cannot know
+  it). The DSL accessor is `OBSERVATIONS DOT IDENT` (a new `DOT` token;
+  `observations` is a keyword); verify no menhir conflict at implementation.
+
+Then, ordered by value:
+
+1. **Disk source** — a `TSV → Trajectory` reader (resolving the lossy `traj.tsv`
+   view-column / `--no-flows` interaction), then the standalone
+   `camdl quantities
+   <model> <run>` command, `batch run` quantities (via
+   `on_skip` + disk load), and cache-hit reuse; with the content-addressed
+   `report_id`.
+2. **Windowed quantities** — `over [X, Y]` (post-SIA persistence, seasonal
+   burden).
+3. **Cross-stratum reductions** — rank / variance / correlation over strata.
+4. **Flow / event `cumulative`** (+ `total`) — a lifetime latent flow
+   accumulator.
+5. **Substep recorder** — resolution-honest `max`/`time_of_max`/`integral`.
+6. **Waveform reductions** — peak counting with a prominence threshold.
+7. **Survival summaries** — Kaplan–Meier for heavily right-censored `Time`
+   quantities.
+
+**Deferred to a preconditioning proposal:** the observed-data realization; a
+data-only feature command; the `s(y_obs)` ↔ `s(y_sim)` comparison;
+preconditioning identity.
 
 ## Decisions recorded
 
-- Separate `quantities {}` block (the define/serialize seam).
-- Restricted `StockProjection` (flow projections unrepresentable in v1).
-- Reduction result kind typed (`Value`/`Time`/`Integral`).
-- Quantities are a **non-identity reporting section** — no `run_id` re-key, no
-  golden regeneration.
-- Reductions are quantity-scoped, enforced by a dedicated diagnostic.
-- Output-cadence reductions in v1; substep recorder a fast-follow.
+- The seam is a per-draw `(params, traj)` → pure `QuantityEvaluator` (in
+  **`sim`**, resolving `Expr`→`ResolvedExpr` once against the compiled model) →
+  cli `QuantityConsumer` that bands in `finish`. **v1 evaluates only on the
+  always-fresh paths** (`simulate`, `fit predict`); the disk-replay source (a
+  standalone command, `batch run`, cache-hit reuse) is a follow-up — it needs a
+  `TSV → Trajectory` reader that does not exist today.
+- The live hook sits **inside `merge_cell`, composed alongside** the existing
+  accumulator — not after the pooled/banded sink, not as a second `RunSink`. The
+  two sinks are asymmetric: `PredictiveSink` has the compiled model + resolved
+  params; the simulate sink compiles once at construction and resolves params
+  per draw.
+- **v1 = latent state; v1.1 = the `observations.<stream>` source** (additive on
+  the seam, reducing the same `y_sim`); observed-data + preconditioning are a
+  separate proposal.
+- A quantity's state expression is a **plain `Expr`, validated to a subset in
+  the existing `ir::validate::check_expr`** (quantity context: a deep walk
+  rejecting `Dt`/`Projected`/`ObsColumnRef`/`PerEvalRef` incl.
+  `UncheckedDim.inner`, and a **transitive `BindingRef`** check over
+  `model.bindings`) — not a newtype constructor (which serde bypasses and OCaml
+  can't express). The OCaml expander gives the friendly located `E288`;
+  `ir::validate` is the authoritative backstop. LICM skips quantity bodies.
+  `ScalarExpr`, by contrast, **is** structural.
+- Enums (`QuantityBody`/`QuantitySource`/`TemporalReduce`/`ScalarExpr`) are
+  **externally tagged**, never `untagged`, so v1.1's `Observation` variant is
+  purely additive (byte-stable goldens, no run-id move); a round-trip test pins
+  it.
+- Censoring is **data** (`Value | Censored`, never a `NaN`); non-finite
+  arithmetic is an error; `band_with_censoring` partitions then reuses
+  `band(&[f64])`, types the all-censored case, and never calls `band(&[])`.
+  Series never censor.
+- `Total`/`sum` deferred to the flow source (summing a stock is
+  cadence-nonsense); `Integral` retained; `last_above`/`count_above` (+ below)
+  added.
+- **Run-identity:** `quantities` excluded from `Model::hash_into`
+  (inverse-polarity pin test); the `ir/VERSION` 0.19 → 0.20 bump re-keys all
+  run_ids via `ModelDigest.ir_version` (every schema bump does); goldens
+  regenerate the two version strings only (in `ir/golden/` and `ocaml/golden/`),
+  no structural diff.
+- **Output identity:** quantities are a regenerated sidecar, **not** in the CAS
+  leaf; `fit predict` → the fit segment's `quantities/`, `simulate` → a required
+  `--out-dir`/`quantities/` (no default user dir); `report_id` + report caching
+  is the deferred disk-source target-state.
+- Output: header is a function of `(shape, stratified, censorable, banded)`; the
+  manifest is one entry per logical quantity with `index_dims`; the `unit`
+  string has a specified `(p_exp,t_exp)+time_unit` renderer; point-vs-band is
+  keyed by param-source kind.
+- DSL: reduction names dispatch by name (not lexer keywords); `max`/`min` stay
+  binary; new diagnostics `E288`/`E289`/`E290`; the expander expands strata
+  OUTER / resolves bodies+QRefs INNER per-cell (mirroring
+  `expand_observations`).
