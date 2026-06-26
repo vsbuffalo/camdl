@@ -25,6 +25,7 @@ type context = {
   mutable balance_decl    : balance_decl option;
   mutable event_decls     : intervention_decl list;
   mutable reactive_decls  : reactive_decl list;   (* gh#204 *)
+  mutable quantity_decls  : quantity_decl list;   (* proposal 2026-06-25 *)
   mutable diags           : Diagnostics.t;  (* collected errors/warnings *)
   mutable reads           : (string * string) list;
   (* (as-written, resolved) external data files opened during expansion, in
@@ -101,6 +102,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   balance_decl         = None;
   event_decls          = [];
   reactive_decls       = [];
+  quantity_decls       = [];
   diags                = Diagnostics.create ();
   reads                = [];
   source_dir;
@@ -748,6 +750,7 @@ let collect_declarations ctx decls =
     | DBalance bd        -> ctx.balance_decl <- Some bd
     | DEvents evs        -> ctx.event_decls <- List.rev_append evs ctx.event_decls
     | DReactiveInterventions rxs -> ctx.reactive_decls <- List.rev_append rxs ctx.reactive_decls
+    | DQuantities qs     -> ctx.quantity_decls <- List.rev_append qs ctx.quantity_decls
   ) decls;
   (* Reverse all accumulated lists to restore declaration order *)
   ctx.dim_decls      <- List.rev ctx.dim_decls;
@@ -764,6 +767,7 @@ let collect_declarations ctx decls =
   ctx.table_decls    <- List.rev ctx.table_decls;
   ctx.scenario_decls <- List.rev ctx.scenario_decls;
   ctx.event_decls    <- List.rev ctx.event_decls;
+  ctx.quantity_decls <- List.rev ctx.quantity_decls;
   ctx.orig_transitions <- ctx.transitions
 
 (* ── Dimensions pass ─────────────────────────────────────────────────────── *)
@@ -2022,6 +2026,21 @@ let rec eval_guard ctx env = function
   | GAnd (g1, g2) -> eval_guard ctx env g1 && eval_guard ctx env g2
   | GOr  (g1, g2) -> eval_guard ctx env g1 || eval_guard ctx env g2
 
+(* v1 generated-quantity temporal-reduction names (proposal 2026-06-25). These
+   are NOT lexer keywords — they lex as IDENT and dispatch by name in the
+   quantity classifier. `max`/`min` are deliberately ABSENT: they stay binary
+   pointwise operators everywhere (resolve_expr lowers a 2-arg `max`/`min` to
+   Ir.BinOp Max/Min); a UNARY `max`/`min` is intercepted as a reduction inside
+   the classifier only. The classifier dispatches on this set; resolve_expr uses
+   it to reject a reduction name that leaked into a rate / binding (E290). *)
+let temporal_reduction_names =
+  [ "final"; "mean"; "integral";
+    "count_above"; "count_below";
+    "time_of_max"; "time_of_min";
+    "first_above"; "first_below"; "last_above"; "last_below" ]
+
+let is_temporal_reduction_name n = List.mem n temporal_reduction_names
+
 let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
   match e with
   | EConst f     -> Ir.Const f
@@ -2476,6 +2495,21 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
              cannot appear in a transition rate or other model expression"
       ();
     Ir.Const 0.0
+  | EFuncCall (name, _) when is_temporal_reduction_name name ->
+    (* proposal 2026-06-25: temporal reductions fold a whole trajectory and are
+       valid ONLY inside a `quantities { }` block (lowered by the quantity
+       classifier, never through resolve_expr). Reaching here means one appeared
+       in a rate / binding / other per-instant expression. (max/min are exempt —
+       they are legitimate binary operators everywhere.) *)
+    Diagnostics.error ctx.diags ~code:"E290" ~loc:Diagnostics.no_loc
+      ~message:(Printf.sprintf
+        "'%s(...)' is a temporal reduction, valid only inside a `quantities { }` block"
+        name)
+      ~hint:"a temporal reduction (final, max, time_of_max, integral, …) folds a \
+             whole trajectory; it has no meaning in a rate or other per-instant \
+             expression"
+      ();
+    Ir.Const 0.0
   | EFuncCall (fname, args) ->
     (* Built-in math functions → Ir.UnOp *)
     let builtin_un_op = match fname with
@@ -2778,6 +2812,22 @@ let name_parts_from_bindings ibs env =
     | IBind (v, _)      -> List.assoc_opt v env
     | IConsec (v, _, _) -> List.assoc_opt v env
     | IComp v           -> List.assoc_opt v env
+  ) ibs
+
+(** Structured (dimension, level) selector for one expanded leaf — the by-name
+    routing key shared by stratified observations (§4.2) and generated
+    quantities. Parallels [name_parts_from_bindings] but keeps the dimension
+    name alongside the level. Only [IBind]/[IConsec] carry a dimension; [IComp]
+    (iterate over compartments) contributes no stratum pair. An unstratified
+    binding list yields []. *)
+let stratum_of_bindings ibs env : (string * string) list =
+  List.filter_map (fun ib ->
+    match ib with
+    | IBind (v, d) | IConsec (v, _, d) ->
+      (match List.assoc_opt v env with
+       | Some level -> Some (d, level)
+       | None -> None)
+    | IComp _ -> None
   ) ibs
 
 (** Transition-name expander — the incidence analogue of
@@ -5390,21 +5440,9 @@ let expand_observations ctx =
       else od.oname ^ "_" ^ String.concat "_" parts
     in
     (* Structured (dimension, level) selector for this expanded leaf — the
-       by-name routing key the Rust long-form loader uses (§4.2). Parallels
-       [name_parts_from_bindings] but keeps the dimension name alongside the
-       level. Only [IBind]/[IConsec] carry a dimension; [IComp] (iterate over
-       compartments) has none, so it contributes no stratum pair. An
+       by-name routing key the Rust long-form loader uses (§4.2). Shared
+       top-level [stratum_of_bindings] (also used by generated quantities). An
        unstratified stream ([od.oindices = []]) yields []. *)
-    let stratum_of_bindings ibs env : (string * string) list =
-      List.filter_map (fun ib ->
-        match ib with
-        | IBind (v, d) | IConsec (v, _, d) ->
-          (match List.assoc_opt v env with
-           | Some level -> Some (d, level)
-           | None -> None)
-        | IComp _ -> None
-      ) ibs
-    in
     let stratum = stratum_of_bindings od.oindices env in
     (* `from <label>` data-source key; defaults to the (unexpanded) stream
        name — every expanded leaf of a stratified stream shares the source. *)
@@ -5427,6 +5465,313 @@ let expand_observations ctx =
     }
     ) combos
   ) ctx.obs_decls
+
+(* ── Generated quantities (proposal 2026-06-25) ───────────────────────────────
+   The quantity classifier: per cell, decide whether a body is a temporal
+   reduction, a bare series, or reduction arithmetic over earlier scalar
+   quantities, and lower it to an [Ir.quantity_body]. Strata expand OUTER (like
+   observations); the body is classified+resolved INNER with the per-cell env.
+
+   A quantity name never enters ordinary name resolution, so a reference to a
+   prior quantity in a body would otherwise hit E100 — the classifier detects
+   quantity references up front (via [all_q_names]) and routes them through
+   [ScalarExpr]/[QRef] instead. *)
+
+type quantity_shape = QShScalar | QShSeries
+
+(* Classify one cell of a quantity declaration. [cell_stratum] is this cell's
+   (dim, level) tag; [all_q_names] is every quantity NAME in the file (for
+   forward-reference detection); [declared] is the list of already-expanded
+   PRIOR quantity leaves as (name, stratum, shape). Returns the lowered body and
+   its shape, or [None] after emitting a diagnostic. *)
+let classify_quantity_body ctx env
+    (cell_stratum : (string * string) list)
+    (all_q_names : string list)
+    (declared : (string * (string * string) list * quantity_shape) list)
+    (body : expr) (qd_loc : Diagnostics.loc)
+    : (Ir.quantity_body * quantity_shape) option =
+  let err ?hint msg =
+    Diagnostics.error ctx.diags ~code:"E289" ~loc:qd_loc ~message:msg ?hint ();
+    None
+  in
+  (* Located E288 for a directly-typed `dt` leaf anywhere in a State body — `dt`
+     is the integrator step, meaningless when a quantity is read at output
+     cadence. (ir::validate is the authoritative backstop for the transitive
+     case; here we give the friendly located diagnostic for the direct case.) *)
+  let rec find_dt = function
+    | EIdent ("dt", l) -> Some l
+    | EBinOp (_, a, b) -> (match find_dt a with Some l -> Some l | None -> find_dt b)
+    | EUnOp (_, x) -> find_dt x
+    | ECond (p, a, b) ->
+      (match find_dt p with Some l -> Some l
+       | None -> (match find_dt a with Some l -> Some l | None -> find_dt b))
+    | EFuncCall (_, args) -> List.find_map (fun (_, e) -> find_dt e) args
+    | EIndex (_, items, _) ->
+      List.find_map (function IPosn e | INamed (_, e) -> find_dt e) items
+    | ESum (_, _, _, e) -> find_dt e
+    | EList es -> List.find_map find_dt es
+    | ERange (a, b) -> (match find_dt a with Some l -> Some l | None -> find_dt b)
+    | EConst _ | EUnit _ | EIdent _ -> None
+  in
+  let check_dt e =
+    match find_dt e with
+    | Some l ->
+      Diagnostics.error ctx.diags ~code:"E288" ~loc:(diag_loc_of_ast_ctx ctx l)
+        ~message:"`dt` is only valid in a rate, not a quantity"
+        ~hint:"a quantity is read at output cadence, where the integrator step \
+               `dt` has no value"
+        ();
+      false
+    | None -> true
+  in
+  (* Does an expression reference any quantity name (prior OR forward)? Drives
+     the State-vs-Derived split and rejects a reduction applied to a scalar. *)
+  let rec refs_quantity = function
+    | EIdent (n, _) -> List.mem n all_q_names
+    | EIndex (n, items, _) ->
+      List.mem n all_q_names
+      || List.exists (function IPosn e | INamed (_, e) -> refs_quantity e) items
+    | EBinOp (_, a, b) -> refs_quantity a || refs_quantity b
+    | EUnOp (_, x) -> refs_quantity x
+    | ECond (p, a, b) -> refs_quantity p || refs_quantity a || refs_quantity b
+    | EFuncCall (_, args) -> List.exists (fun (_, e) -> refs_quantity e) args
+    | ESum (_, _, _, e) -> refs_quantity e
+    | EList es -> List.exists refs_quantity es
+    | ERange (a, b) -> refs_quantity a || refs_quantity b
+    | EConst _ | EUnit _ -> false
+  in
+  (* A temporal reduction folds a per-instant State series `inner`. The inner is
+     resolved as an ordinary State expr; it must not itself reference a reduced
+     scalar quantity (a reduction-on-a-reduction is malformed → E289). *)
+  let reduced_state reduce inner =
+    if refs_quantity inner then
+      err ~hint:"a temporal reduction folds a per-instant series; a reduced \
+                 scalar is already collapsed — combine scalars with arithmetic \
+                 (e.g. `a - b`) instead"
+        "cannot apply a temporal reduction to a reduced scalar quantity"
+    else if not (check_dt inner) then None
+    else
+      Some (Ir.QBReduced { source = Ir.QSState (resolve_expr ctx env inner);
+                           reduce = Some reduce },
+            QShScalar)
+  in
+  (* Build a reduction-arithmetic ScalarExpr: leaves are prior scalar QRefs,
+     params, or consts. A series QRef, forward QRef, cross-stratum QRef, or a
+     mixed-in compartment is E289. *)
+  let scalar_leaf name =
+    let matches = List.filter (fun (n, _, _) -> n = name) declared in
+    if matches <> [] then
+      (match List.find_opt (fun (_, s, _) -> s = cell_stratum) matches with
+       | Some (_, _, QShScalar) ->
+         Some (Ir.SQRef { Ir.qref_name = name; Ir.qref_stratum = cell_stratum })
+       | Some (_, _, QShSeries) ->
+         err (Printf.sprintf
+           "quantity '%s' is a series (one value per snapshot); only reduced \
+            scalars combine in reduction arithmetic" name)
+       | None ->
+         if List.exists (fun (_, _, sh) -> sh = QShSeries) matches then
+           err (Printf.sprintf
+             "quantity '%s' is a series; only reduced scalars combine in \
+              reduction arithmetic" name)
+         else
+           err (Printf.sprintf
+             "quantity '%s' is declared at a different stratum; reduction \
+              arithmetic may only reference scalars of the same stratum" name))
+    else if List.mem name all_q_names then
+      err (Printf.sprintf
+        "quantity '%s' is used before it is declared; reduction arithmetic may \
+         only reference quantities declared earlier" name)
+    else if Hashtbl.mem ctx.scalar_param_tbl name
+            || is_expanded_indexed_param_name ctx name then
+      Some (Ir.SParam name)
+    else if Hashtbl.mem ctx.comp_tbl name || Hashtbl.mem ctx.expanded_comp_tbl name then
+      err (Printf.sprintf
+        "cannot combine compartment '%s' with reduced scalar quantities; a \
+         per-instant state value and a whole-trajectory scalar have different \
+         shapes" name)
+    else
+      err (Printf.sprintf "unknown name '%s' in reduction arithmetic" name)
+  in
+  let rec build_scalar_expr e : Ir.scalar_expr option =
+    match e with
+    | EConst f -> Some (Ir.SConst f)
+    | EUnit (f, u) -> Some (Ir.SConst (unit_to_model_time ctx f u))
+    | EIdent (name, _) -> scalar_leaf name
+    | EIndex (name, items, _) ->
+      if List.mem name all_q_names then begin
+        (* Indexed prior-scalar QRef. Pragmatic check: the explicit index levels
+           must all belong to this cell's stratum (cross-stratum is rejected);
+           the QRef then carries the cell stratum. *)
+        let levels = List.map (index_item_to_str env) items in
+        let cell_levels = List.map snd cell_stratum in
+        if List.for_all (fun lv -> List.mem lv cell_levels) levels then
+          scalar_leaf name
+        else
+          err (Printf.sprintf
+            "quantity '%s' is referenced at a different stratum; reduction \
+             arithmetic may only reference scalars of the same stratum" name)
+      end else
+        err (Printf.sprintf "cannot index '%s' in reduction arithmetic" name)
+    | EBinOp (op, a, b) ->
+      (match build_scalar_expr a, build_scalar_expr b with
+       | Some sa, Some sb ->
+         Some (Ir.SBinOp { op = ir_bin_op op; left = sa; right = sb })
+       | _ -> None)
+    | EUnOp (op, x) ->
+      (match build_scalar_expr x with
+       | Some sx -> Some (Ir.SUnOp { op = ir_un_op op; arg = sx })
+       | None -> None)
+    | ECond (p, a, b) ->
+      (match build_scalar_expr p, build_scalar_expr a, build_scalar_expr b with
+       | Some sp, Some sa, Some sb ->
+         Some (Ir.SCond { pred = sp; then_ = sa; else_ = sb })
+       | _ -> None)
+    | EFuncCall (fn, _) ->
+      err (Printf.sprintf
+        "function '%s' is not allowed in reduction arithmetic; combine reduced \
+         scalar quantities with +, -, *, / and comparisons only" fn)
+    | ESum _ | EList _ | ERange _ ->
+      err "this form is not allowed in reduction arithmetic"
+  in
+  let classify_non_reduction body =
+    if refs_quantity body then
+      (* Reduction arithmetic → Derived (a ScalarExpr over prior scalars). *)
+      (match build_scalar_expr body with
+       | Some se -> Some (Ir.QBDerived se, QShScalar)
+       | None -> None)
+    else
+      (* A bare State series (e.g. `prevalence = I / N`). *)
+      if not (check_dt body) then None
+      else
+        Some (Ir.QBReduced { source = Ir.QSState (resolve_expr ctx env body);
+                             reduce = None },
+              QShSeries)
+  in
+  let wrong_arity fn expected =
+    err (Printf.sprintf "reduction '%s' takes %s" fn expected)
+  in
+  match body with
+  | EFuncCall (("total" | "sum") as fn, _) ->
+    err ~hint:"summing a stock over snapshots is cadence-dependent; cumulative \
+               sums arrive with the flow source in a later increment"
+      (Printf.sprintf "`%s(...)` is not available in v1 quantities" fn)
+  | EFuncCall (fn, args)
+    when is_temporal_reduction_name fn || fn = "max" || fn = "min" ->
+    let one = (match args with [("", x)] -> Some x | _ -> None) in
+    let two = (match args with [("", a); ("", b)] -> Some (a, b) | _ -> None) in
+    (match fn with
+     | "final" ->
+       (match one with Some x -> reduced_state (Ir.RValue Ir.VFinal) x
+        | None -> wrong_arity fn "one argument, e.g. final(D)")
+     | "mean" ->
+       (match one with Some x -> reduced_state (Ir.RValue Ir.VMean) x
+        | None -> wrong_arity fn "one argument, e.g. mean(I)")
+     | "integral" ->
+       (match one with Some x -> reduced_state Ir.RIntegral x
+        | None -> wrong_arity fn "one argument, e.g. integral(I)")
+     | "time_of_max" ->
+       (match one with Some x -> reduced_state (Ir.RTime Ir.TimeOfMax) x
+        | None -> wrong_arity fn "one argument, e.g. time_of_max(I)")
+     | "time_of_min" ->
+       (match one with Some x -> reduced_state (Ir.RTime Ir.TimeOfMin) x
+        | None -> wrong_arity fn "one argument, e.g. time_of_min(I)")
+     | "max" ->
+       (* unary max → temporal VMax; binary max(a,b) is pointwise → State. *)
+       (match one with Some x -> reduced_state (Ir.RValue Ir.VMax) x
+        | None -> classify_non_reduction body)
+     | "min" ->
+       (match one with Some x -> reduced_state (Ir.RValue Ir.VMin) x
+        | None -> classify_non_reduction body)
+     | "count_above" ->
+       (match two with
+        | Some (x, th) ->
+          reduced_state (Ir.RValue (Ir.VCountAbove (resolve_expr ctx env th))) x
+        | None -> wrong_arity fn "two arguments, e.g. count_above(I, thresh)")
+     | "count_below" ->
+       (match two with
+        | Some (x, th) ->
+          reduced_state (Ir.RValue (Ir.VCountBelow (resolve_expr ctx env th))) x
+        | None -> wrong_arity fn "two arguments, e.g. count_below(I, thresh)")
+     | "first_above" ->
+       (match two with
+        | Some (x, th) ->
+          reduced_state (Ir.RTime (Ir.FirstAbove (resolve_expr ctx env th))) x
+        | None -> wrong_arity fn "two arguments, e.g. first_above(I, thresh)")
+     | "first_below" ->
+       (match two with
+        | Some (x, th) ->
+          reduced_state (Ir.RTime (Ir.FirstBelow (resolve_expr ctx env th))) x
+        | None -> wrong_arity fn "two arguments, e.g. first_below(I, thresh)")
+     | "last_above" ->
+       (match two with
+        | Some (x, th) ->
+          reduced_state (Ir.RTime (Ir.LastAbove (resolve_expr ctx env th))) x
+        | None -> wrong_arity fn "two arguments, e.g. last_above(I, thresh)")
+     | "last_below" ->
+       (match two with
+        | Some (x, th) ->
+          reduced_state (Ir.RTime (Ir.LastBelow (resolve_expr ctx env th))) x
+        | None -> wrong_arity fn "two arguments, e.g. last_below(I, thresh)")
+     | _ -> classify_non_reduction body)
+  | _ -> classify_non_reduction body
+
+(* Expand the `quantities { }` blocks into fully-expanded [Ir.quantity] leaves.
+   Strata expand OUTER (cartesian_product over the decl's index bindings);
+   the body is classified INNER per cell. A declaration's own cells are
+   registered as PRIOR only AFTER the whole declaration is expanded, so a
+   stratified decl's sibling cells are not visible to one another's QRefs. *)
+let expand_quantities ctx =
+  let all_q_names =
+    List.map (fun (qd : quantity_decl) -> qd.qd_name) ctx.quantity_decls in
+  let seen = Hashtbl.create 16 in   (* base names declared so far (collision) *)
+  let declared
+    : (string * (string * string) list * quantity_shape) list ref = ref [] in
+  List.concat_map (fun (qd : quantity_decl) ->
+    let qd_loc = diag_loc_of_ast_ctx ctx qd.qd_loc in
+    let name = qd.qd_name in
+    let collision =
+      if Hashtbl.mem ctx.comp_tbl name || Hashtbl.mem ctx.expanded_comp_tbl name
+      then Some "compartment"
+      else if Hashtbl.mem ctx.scalar_param_tbl name
+              || is_expanded_indexed_param_name ctx name
+              || is_indexed_param ctx name
+      then Some "parameter"
+      else if Hashtbl.mem ctx.let_tbl name then Some "let binding"
+      else if Hashtbl.mem ctx.func_tbl name then Some "forcing function"
+      else if List.exists (fun (o : obs_decl) -> o.oname = name) ctx.obs_decls
+      then Some "observation stream"
+      else if Hashtbl.mem seen name then Some "earlier quantity"
+      else None
+    in
+    match collision with
+    | Some kind ->
+      Diagnostics.error ctx.diags ~code:"E289" ~loc:qd_loc
+        ~message:(Printf.sprintf
+          "quantity '%s' collides with a %s of the same name" name kind)
+        ~hint:"rename the quantity so its reported name is unambiguous"
+        ();
+      []
+    | None ->
+      Hashtbl.add seen name ();
+      let combos = cartesian_product qd.qd_indices ctx in
+      (* Classify each cell; defer registering into [declared] until the whole
+         declaration is done (sibling cells are not prior to one another). *)
+      let cells = List.filter_map (fun env ->
+        let cell_stratum = stratum_of_bindings qd.qd_indices env in
+        match
+          classify_quantity_body ctx env cell_stratum all_q_names !declared
+            qd.qd_body qd_loc
+        with
+        | Some (q_body, shape) ->
+          Some ({ Ir.q_name = name; Ir.q_stratum = cell_stratum; Ir.q_body },
+                shape)
+        | None -> None
+      ) combos in
+      List.iter (fun ((leaf : Ir.quantity), shape) ->
+        declared := (leaf.Ir.q_name, leaf.Ir.q_stratum, shape) :: !declared
+      ) cells;
+      List.map fst cells
+  ) ctx.quantity_decls
 
 (* ── Hierarchical-prior cycle / self-reference check ─────────────────────── *)
 
@@ -6717,7 +7062,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
     Ir.identity_tracked_compartments =
       compute_identity_tracked expanded_comps expanded_trs;
     Ir.doc_index = build_doc_index ctx;
-    Ir.quantities = [];
+    Ir.quantities         = expand_quantities ctx;
   } in
   (* Fix B: the record above is fully forced here, so every resolve_expr call
      (transitions, ode, observations, balance) has run and ctx.hoisted_rev

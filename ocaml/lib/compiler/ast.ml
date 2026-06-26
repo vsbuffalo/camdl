@@ -311,6 +311,17 @@ type reactive_decl = {
 
 type ode_decl = { ocomp: string; oderiv: expr }
 
+(* A generated-quantity declaration (proposal 2026-06-25): `name [idx]? = body`.
+   The body is a plain [expr]; the expander's quantity classifier decides
+   whether it is a temporal reduction, a series, or reduction arithmetic over
+   earlier scalar quantities (it is not resolved as an ordinary rate expr). *)
+type quantity_decl = {
+  qd_name    : string;
+  qd_indices : index_binding list;   (* [] for an unstratified quantity *)
+  qd_body    : expr;
+  qd_loc     : loc;
+}
+
 type func_decl = {
   fname    : string;
   findices : index_binding list;
@@ -407,3 +418,4 @@ type declaration =
   | DLet          of let_binding
   | DScenarios    of scenario_decl list
   | DBalance      of balance_decl
+  | DQuantities   of quantity_decl list   (* proposal 2026-06-25 *)

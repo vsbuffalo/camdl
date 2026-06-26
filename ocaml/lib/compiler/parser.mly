@@ -145,6 +145,7 @@
 %token INSTANT DURATION
 %token AND OR NOT IF THEN ELSE EVERY UNTIL AT_KW FORMAT DESCRIPTION NULL TRANSFER LIKELIHOOD ORIGIN BALANCE EVENTS ADD AT_DAY
 %token COLUMNS EMIT_SCHEDULE
+%token QUANTITIES   (* proposal 2026-06-25: generated quantities *)
 %token REACTIVE_INTERVENTIONS WHEN ACTION   (* gh#204 *)
 %token PIPE
 
@@ -196,6 +197,8 @@ declaration:
       { DTransitions trs }
   | OBSERVATIONS LBRACE obs = obs_list RBRACE
       { DObservations obs }
+  | QUANTITIES LBRACE qs = quantity_list RBRACE
+      { DQuantities qs }
   | INTERVENTIONS LBRACE ivs = intervention_list RBRACE
       { DInterventions ivs }
   | EVENTS LBRACE evs = intervention_list RBRACE
@@ -890,6 +893,20 @@ ode_list:
 ode_decl:
   | comp = IDENT EQ e = expr
       { { ocomp = comp; oderiv = e } }
+
+(* ── Quantities block (proposal 2026-06-25) ──────────────────────────────────
+   A decl is `IDENT index_bindings_opt EQ expr` — the same shape as an ODE
+   equation plus the shared `[p in dim]` index bindings. The body is a plain
+   `expr`; the expander's quantity classifier (not `resolve_expr`) decides what
+   it means. Reduction function names (`final`, `max`, `time_of_max`, …) are NOT
+   keywords; they lex as IDENT and dispatch by name in the classifier. *)
+quantity_list:
+  | qs = list(quantity_decl) { qs }
+
+quantity_decl:
+  | name = IDENT ibs = index_bindings_opt EQ body = expr
+      { { qd_name = name; qd_indices = ibs; qd_body = body;
+          qd_loc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Output block ────────────────────────────────────────────────────────── *)
 
