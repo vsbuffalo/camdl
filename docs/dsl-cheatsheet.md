@@ -207,6 +207,40 @@ Every forcing declaration carries a **tier-3 unit literal** between the kind
 keyword and the block (`sinusoidal 'ratio`, `interpolated 'count`, etc.). This
 is required per GH #8.
 
+## Generated quantities — `quantities {}`
+
+Report derived summaries of a run — the non-scored twin of an observation (no
+likelihood, never re-keys the fit). Each entry is `name [idx]? = body`:
+
+```
+quantities {
+  prevalence      = I / N                        # series (one value per output time)
+  attack_rate     = final((N0 - S) / N0)         # scalar
+  peak_prevalence = max(I / N)                    # value reduction
+  time_to_peak    = time_of_max(I)                # → a time (a date in an anchored model)
+  takeoff         = first_above(I_total, i_thr)   # threshold crossing
+  fadeout         = last_above(I_total, 0)
+  outbreak_dur    = fadeout - takeoff             # reduction arithmetic over scalars
+  person_days     = integral(I)                   # ∫ over time (dim P·T)
+  peak_time[p in patch] = time_of_max(I[p])      # stratified
+}
+```
+
+Reductions (valid **only** inside `quantities {}`): `final`, `max`, `min`,
+`mean`, `count_above|below(x, thr)`, `time_of_max|min`,
+`first|last_above|below(x, thr)`, `integral`. A quantity with no reduction is a
+**series**; one with a reduction is a **scalar**. `max(a, b)` / `min(a, b)` stay
+the binary operators everywhere — only a **unary** `max(x)` in a quantity is the
+peak reduction. Reduction arithmetic (`a - b`) combines earlier **scalar**
+quantities. (`total`/`sum` and an `observations.<stream>` source are not in v1.)
+
+Output: one `quantities/<name>.tsv` per quantity (banded `q05…q95` over draws) +
+a `quantities.json` manifest — from `fit predict` (in the fit segment) and
+`simulate --quantities-out <dir>` (a point `value` for a single run). A `time`
+reduction that never crosses is **right-censored** (reported via
+`n_value`/`n_censored`, not faked). Quantities are non-identity: adding a
+`quantities {}` block never changes a model's `run_id`.
+
 ## Common diagnostics
 
 The compiler issues E-codes with source locations and fix-hints.
@@ -281,15 +315,22 @@ before assuming the language doesn't do something — it usually does.
 
 ## Recent and incoming changes
 
-- **`reactive_interventions {}`** (gh#204) — state/observation-triggered policies:
+- **`quantities {}`** (2026-06-25) — generated quantities: named, non-scored
+  reductions of a run (peak, time-to-peak, attack rate, integral, …) reported as
+  `quantities/<name>.tsv` from `fit predict` / `simulate --quantities-out`. New
+  reserved word: `quantities`; the reduction names (`final`, `time_of_max`,
+  `first_above`, `integral`, …) are valid only inside the block (using one in a
+  rate is **E290**). See the section above.
+- **`reactive_interventions {}`** (gh#204) — state/observation-triggered
+  policies:
   `name : when sum_observed(stream, window = D) >= thr { action = transfer(..);
-  after = ..; once = ..; cooldown = .. }`. The `when` predicate
-  reads observed data via `observed(stream)` / `sum_observed(stream, window = ..)`
-  (never latent state — using `observed()` in a rate is **E278**). New reserved
-  words: `reactive_interventions`, `when`, `action`. Forward **chain-binomial**
-  runs the agenda (firings recorded in `reactive_log.tsv`); inference and
-  Gillespie/ODE stop an active policy with a `REACTIVE_INTERVENTIONS` capability
-  error. See spec §13.9.
+  after = ..; once = ..; cooldown = .. }`.
+  The `when` predicate reads observed data via `observed(stream)` /
+  `sum_observed(stream, window = ..)` (never latent state — using `observed()`
+  in a rate is **E278**). New reserved words: `reactive_interventions`, `when`,
+  `action`. Forward **chain-binomial** runs the agenda (firings recorded in
+  `reactive_log.tsv`); inference and Gillespie/ODE stop an active policy with a
+  `REACTIVE_INTERVENTIONS` capability error. See spec §13.9.
 
 For things this cheatsheet may lag on, check:
 

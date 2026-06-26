@@ -1,6 +1,12 @@
 # Generated quantities
 
-Status: **Proposed** — implementable as specified. Supersedes:
+Status: **Implemented (v1)** — latent-state quantities, emitted by `fit predict`
+and `simulate`. Landed across `b4afe561` (IR types + schema, `ir/VERSION` 0.20),
+`5ec3f0a5` (validate legality), `6c9c2c12` (OCaml frontend), `609d5ac5` (sim
+evaluator), `3cde2c36` (fit predict output), `54cdc037` (simulate output +
+shared rendering). The observation source (v1.1), the standalone/disk command,
+windowed / cross-stratum / flow reductions, and the dim→unit renderer remain the
+staged follow-ups below. Supersedes:
 `2026-06-04-output-trajectory-customization.md` Phase 2; splits the quantities
 half out of `2026-06-24-generated-quantities-and-counterfactuals.md` (the
 counterfactual half is `2026-06-25-counterfactual-contrasts.md`). IR contract:

@@ -333,6 +333,35 @@ surface.
 
 ---
 
+## Reporting derived quantities
+
+A `quantities {}` block reports summaries of a run without pretending they are
+data — the non-scored twin of an observation. You no longer have to smuggle a
+peak or an attack rate through a fake scored stream.
+
+```
+quantities {
+  prevalence      = I / N                       # a series (one value per output time)
+  attack_rate     = final((N0 - S) / N0)        # a scalar
+  peak_prevalence = max(I / N)
+  time_to_peak    = time_of_max(I)              # a time — rendered as a date in an anchored model
+  takeoff         = first_above(I_total, i_thr) # the first time I_total exceeds i_thr
+  outbreak_dur    = last_above(I_total, 0) - takeoff   # arithmetic over reduced scalars
+}
+```
+
+A quantity with no reduction is a **series**; a reduction (`final`, `max`,
+`mean`, `time_of_max`, `first_above`, `integral`, `count_above`, …) collapses it
+to a **scalar**. They run wherever a simulation does — over prior-predictive
+draws (`simulate --draws`), over a fitted posterior (`fit predict`), banded into
+`quantities/<name>.tsv` with a `quantities.json` manifest. A timing question
+that never resolves (an outbreak that never takes off in a given draw) is
+reported as **right-censored**, not as a fabricated time. Because they are
+derived reports, adding or changing a `quantities {}` block never re-keys a
+model's `run_id`.
+
+---
+
 ## Inspect without simulating
 
 `camdl dev eval` evaluates time-dependent expressions at a grid without running a
