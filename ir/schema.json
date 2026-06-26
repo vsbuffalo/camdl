@@ -1231,6 +1231,19 @@
           "required": ["state"],
           "properties": { "state": { "$ref": "#/definitions/expr" } },
           "additionalProperties": false
+        },
+        {
+          "comment": "v1.1: observations.<stream> — reduces the simulated observation series (y_sim).",
+          "required": ["observation"],
+          "properties": {
+            "observation": {
+              "type": "object",
+              "required": ["stream"],
+              "properties": { "stream": { "type": "string" } },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       ]
     },

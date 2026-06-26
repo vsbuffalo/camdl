@@ -265,6 +265,13 @@ let quantity_serde_test () =
       };
     });
   } in
+  (* v1.1: an observation-source quantity (reduces the simulated y_sim). *)
+  let obs = {
+    q_name = "first_afp"; q_stratum = [];
+    q_body = QBReduced {
+      source = QSObservation "afp";
+      reduce = Some (RTime (FirstAbove (Const 0.0))) };
+  } in
   List.iter (fun (label, q) ->
     Alcotest.(check bool) (label ^ " round-trips") true (roundtrips q))
     [ ("Reduced State max(I/N)", peak);
@@ -272,7 +279,11 @@ let quantity_serde_test () =
       ("Reduced State first_above", onset);
       ("Reduced State integral", person_days);
       ("Reduced State count_above (stratified)", counts);
+      ("Reduced Observation first_above", obs);
       ("Derived reduction arithmetic", dur) ];
+  Alcotest.(check string) "observation source wire"
+    {|{"observation":{"stream":"afp"}}|}
+    (Yojson.Safe.to_string (Serde.quantity_source_to_json (QSObservation "afp")));
   (* Pin the exact on-wire shape the Rust serde fixes (quantity.rs pins_wire_tags). *)
   let pin_q = {
     q_name = "p"; q_stratum = [];

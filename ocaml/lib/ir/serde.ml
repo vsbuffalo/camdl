@@ -1015,12 +1015,14 @@ let temporal_reduce_of_json j : temporal_reduce =
 
 let quantity_source_to_json (s : quantity_source) : Yojson.Safe.t =
   match s with
-  | QSState e -> obj [("state", expr_to_json e)]
+  | QSState e        -> obj [("state", expr_to_json e)]
+  | QSObservation st -> obj [("observation", obj [("stream", str st)])]
 
 let quantity_source_of_json j : quantity_source =
   match j with
-  | `Assoc [("state", e)] -> QSState (expr_of_json e)
-  | _ -> fail "quantity_source must be {\"state\": expr}"
+  | `Assoc [("state", e)]       -> QSState (expr_of_json e)
+  | `Assoc [("observation", v)] -> QSObservation (as_string (member "stream" v))
+  | _ -> fail "quantity_source must be {\"state\": expr} or {\"observation\": {\"stream\": ..}}"
 
 let quantity_body_to_json (b : quantity_body) : Yojson.Safe.t =
   match b with

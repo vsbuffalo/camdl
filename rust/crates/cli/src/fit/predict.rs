@@ -698,7 +698,7 @@ impl crate::engine::RunSink for PredictiveSink {
         // Generated quantities: fold this draw's trajectory into its per-quantity
         // values, using the SAME resolved params as the obs sampling above.
         if let Some(eval) = &self.quant_eval {
-            let results = eval.eval_draw(&params, &cell.traj, &self.compiled);
+            let results = eval.eval_draw(&params, &cell.traj, &self.compiled, None);
             if self.quant_times.is_empty() {
                 self.quant_times = cell.traj.snapshots.iter().map(|s| s.t).collect();
             }

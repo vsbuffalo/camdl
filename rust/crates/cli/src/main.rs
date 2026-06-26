@@ -1504,7 +1504,7 @@ impl SimQuantities {
                 }
             }
         }
-        let results = eval.eval_draw(&params, &cell.traj, compiled);
+        let results = eval.eval_draw(&params, &cell.traj, compiled, None);
         if self.times.is_empty() {
             self.times = cell.traj.snapshots.iter().map(|s| s.t).collect();
         }

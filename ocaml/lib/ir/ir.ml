@@ -689,6 +689,7 @@ type temporal_reduce =
    `Observation { stream }` variant appends additively. *)
 type quantity_source =
   | QSState of expr
+  | QSObservation of string   (* v1.1: observations.<stream> — reduces y_sim *)
 
 (* Either a reduction of a source series, or reduction arithmetic over earlier
    scalar quantities. `reduce = None` ⇒ a series; Some ⇒ a scalar. *)

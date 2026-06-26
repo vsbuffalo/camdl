@@ -60,8 +60,12 @@ pub enum QuantitySource {
     /// Latent truth: a quantity-validated `Expr` evaluated against each
     /// trajectory snapshot. `I`, `I / N`, `if I > thresh then 1 else 0`.
     State(Expr),
-    // v1.1 ADDS, additively:
-    // Observation { stream: String },
+    /// The simulated observation series of a declared stream (`observations.afp`):
+    /// the measurement draw the run already produced — `y_sim` — reduced like any
+    /// other series. v1.1. The reduction folds over the stream's per-obs-time
+    /// values; the stream must be declared (`E289` otherwise) and materialized by
+    /// the run (a runtime check in each command's materialization path).
+    Observation { stream: String },
 }
 
 // ── Temporal reductions ─────────────────────────────────────────────────────────
@@ -285,6 +289,25 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&d).unwrap(),
             r#"{"name":"d","body":{"derived":{"const":2.5}}}"#
+        );
+    }
+
+    #[test]
+    fn round_trips_observation_source() {
+        // v1.1: `first_above(observations.afp, 0)` — an Observation source.
+        let q = Quantity {
+            name: "first_afp".into(),
+            stratum: vec![],
+            body: QuantityBody::Reduced {
+                source: QuantitySource::Observation { stream: "afp".into() },
+                reduce: Some(TemporalReduce::Time(TimeReduce::FirstAbove(Expr::const_(0.0)))),
+            },
+        };
+        rt_quantity(&q);
+        // The externally-tagged wire shape the OCaml serde must match.
+        assert_eq!(
+            serde_json::to_string(&QuantitySource::Observation { stream: "afp".into() }).unwrap(),
+            r#"{"observation":{"stream":"afp"}}"#
         );
     }
 }

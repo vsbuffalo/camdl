@@ -390,8 +390,13 @@ fn quantity_state_exprs(body: &QuantityBody) -> Vec<&Expr> {
     let mut out = Vec::new();
     match body {
         QuantityBody::Reduced { source, reduce } => {
-            let QuantitySource::State(e) = source;
-            out.push(e);
+            // A `State` source is a state expr (name-checked + legality-checked);
+            // an `Observation` source reduces `y_sim`, not a state expr — nothing
+            // to check here (its stream ref is validated separately). Reduction
+            // thresholds below are state exprs in either case.
+            if let QuantitySource::State(e) = source {
+                out.push(e);
+            }
             if let Some(r) = reduce {
                 match r {
                     TemporalReduce::Value(ValueReduce::CountAbove(t))
