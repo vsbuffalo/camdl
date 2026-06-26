@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::{
     expr::Expr,
     model::{CompartmentKind, Model},
+    quantity::{QuantityBody, QuantitySource, TemporalReduce, TimeReduce, ValueReduce},
 };
 
 #[derive(Debug, Error)]
@@ -78,6 +79,12 @@ pub enum ValidationError {
              (got {value}); a fractional value would be silently truncated. Round it to a \
              whole count, or declare the compartment real if fractional state is intended")]
     InitialValueNotInteger { compartment: String, value: f64 },
+
+    #[error("quantity '{quantity}' uses '{leaf}', which is only meaningful inside a \
+             transition rate or a likelihood, not in a quantity (a quantity is read at \
+             output cadence over a finished trajectory). Reachable directly or via a \
+             referenced binding; remove it from the quantity (and any binding it reaches)")]
+    QuantityForbiddenLeaf { quantity: String, leaf: String },
 }
 
 pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
@@ -350,10 +357,119 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
         }
     }
 
+    // ── Generated quantities: state-expression legality (proposal 2026-06-25) ──
+    // A quantity's state expression is the shared `Expr` restricted to a
+    // validated subset. Name-resolution reuses `check_expr` (above); the
+    // forbidden-leaf + transitive-`BindingRef` legality is enforced HERE, at the
+    // load boundary, because a constructor-only check over the quantity `Expr`
+    // alone cannot see a forbidden leaf reached through a binding body. (LICM does
+    // not process quantity bodies, so a `PerEvalRef` never appears legitimately.)
+    if !model.quantities.is_empty() {
+        let bindings_map: std::collections::HashMap<&str, &Expr> =
+            model.bindings.iter().map(|b| (b.name.as_str(), &b.expr)).collect();
+        for q in &model.quantities {
+            for e in quantity_state_exprs(&q.body) {
+                check_expr(e, &ctx, false, &mut errors);
+                let mut seen: HashSet<&str> = HashSet::new();
+                check_quantity_legal(e, &bindings_map, &q.name, &mut errors, &mut seen);
+            }
+        }
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
     Ok(())
+}
+
+/// Collect every state `Expr` a quantity body evaluates against latent state: the
+/// `State` source expr plus any reduction-threshold expr. `Derived` reduction
+/// arithmetic has no state `Expr` (its leaves are `QRef`/param/const), so it
+/// contributes none.
+fn quantity_state_exprs(body: &QuantityBody) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    match body {
+        QuantityBody::Reduced { source, reduce } => {
+            let QuantitySource::State(e) = source;
+            out.push(e);
+            if let Some(r) = reduce {
+                match r {
+                    TemporalReduce::Value(ValueReduce::CountAbove(t))
+                    | TemporalReduce::Value(ValueReduce::CountBelow(t)) => out.push(t),
+                    TemporalReduce::Time(TimeReduce::FirstAbove(t))
+                    | TemporalReduce::Time(TimeReduce::FirstBelow(t))
+                    | TemporalReduce::Time(TimeReduce::LastAbove(t))
+                    | TemporalReduce::Time(TimeReduce::LastBelow(t)) => out.push(t),
+                    _ => {}
+                }
+            }
+        }
+        QuantityBody::Derived(_) => {}
+    }
+    out
+}
+
+/// Reject the four leaves meaningless in a quantity (read at output cadence over a
+/// finished trajectory) — `Dt`/`Projected`/`ObsColumnRef`/`PerEvalRef` — anywhere
+/// in the tree, recursing transitively through `BindingRef` over `model.bindings`
+/// so a forbidden leaf cannot be smuggled in via a binding body. `seen` guards a
+/// (malformed) binding cycle. Name-resolution is `check_expr`'s job, not this.
+fn check_quantity_legal<'a>(
+    expr: &'a Expr,
+    bindings: &std::collections::HashMap<&'a str, &'a Expr>,
+    quantity: &str,
+    errors: &mut Vec<ValidationError>,
+    seen: &mut HashSet<&'a str>,
+) {
+    fn forbid(errors: &mut Vec<ValidationError>, quantity: &str, leaf: &str) {
+        errors.push(ValidationError::QuantityForbiddenLeaf {
+            quantity: quantity.to_string(),
+            leaf: leaf.to_string(),
+        });
+    }
+    match expr {
+        Expr::Dt(_) => forbid(errors, quantity, "dt"),
+        Expr::Projected(_) => forbid(errors, quantity, "projected"),
+        Expr::ObsColumnRef(_) => forbid(errors, quantity, "obs_column_ref"),
+        Expr::PerEvalRef(_) => forbid(errors, quantity, "per_eval_ref"),
+        Expr::Const(_) | Expr::Time(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
+        | Expr::TimeFunc(_) => {}
+        Expr::BinOp(w) => {
+            check_quantity_legal(&w.bin_op.left, bindings, quantity, errors, seen);
+            check_quantity_legal(&w.bin_op.right, bindings, quantity, errors, seen);
+        }
+        Expr::UnOp(w) => check_quantity_legal(&w.un_op.arg, bindings, quantity, errors, seen),
+        Expr::Cond(w) => {
+            check_quantity_legal(&w.cond.pred, bindings, quantity, errors, seen);
+            check_quantity_legal(&w.cond.then, bindings, quantity, errors, seen);
+            check_quantity_legal(&w.cond.else_, bindings, quantity, errors, seen);
+        }
+        Expr::TableLookup(w) => {
+            for idx in &w.table_lookup.indices {
+                check_quantity_legal(idx, bindings, quantity, errors, seen);
+            }
+        }
+        Expr::UncheckedDim(w) => {
+            check_quantity_legal(&w.unchecked_dim.inner, bindings, quantity, errors, seen);
+        }
+        Expr::Reduce(w) => {
+            for t in &w.reduce {
+                check_quantity_legal(t, bindings, quantity, errors, seen);
+            }
+        }
+        Expr::BindingRef(w) => {
+            let name = w.binding_ref.as_str();
+            if let Some(&body) = bindings.get(name) {
+                // Insert→recurse→remove: bounds a malformed cycle without barring
+                // a binding legitimately reached via two paths in the DAG.
+                if seen.insert(name) {
+                    check_quantity_legal(body, bindings, quantity, errors, seen);
+                    seen.remove(name);
+                }
+            }
+            // Unknown binding name → resolved/errored at CompiledModel::new.
+        }
+    }
 }
 
 struct RefCtx<'a> {
@@ -1035,5 +1151,131 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "no golden .ir.json files found under {dir}");
+    }
+
+    // ── Generated quantities: state-expression legality (proposal 2026-06-25) ──
+    use crate::quantity::{
+        Quantity, QuantityBody, QuantitySource, TemporalReduce, ValueReduce, TimeReduce,
+    };
+    use crate::model::Binding;
+
+    /// A quantity whose State expr DIRECTLY contains a forbidden leaf (`dt` — the
+    /// integrator step is meaningless in a quantity read at output cadence) must
+    /// be rejected at the load boundary.
+    #[test]
+    fn quantity_state_expr_with_dt_is_rejected() {
+        let mut m = load_sir();
+        m.quantities.push(Quantity {
+            name: "bad".into(),
+            stratum: vec![],
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(Expr::bin_op(
+                    crate::expr::BinOp::Mul, Expr::pop("I"), Expr::dt())),
+                reduce: None,
+            },
+        });
+        let errs = validate(&m).expect_err("a quantity with `dt` must be rejected");
+        assert!(errs.iter().any(|e| matches!(e,
+            ValidationError::QuantityForbiddenLeaf { quantity, leaf }
+                if quantity == "bad" && leaf == "dt")),
+            "expected QuantityForbiddenLeaf(bad, dt), got: {:?}", errs);
+    }
+
+    /// The round-2 smuggle: a quantity's State expr is a `BindingRef` to a model
+    /// binding whose BODY contains a forbidden leaf. A constructor-only check over
+    /// the quantity Expr alone cannot see this; the validate context recurses
+    /// transitively over `model.bindings`. (`dt` is legal in a binding used by a
+    /// rate, so the binding itself validates — only the quantity reaching it is
+    /// illegal.)
+    #[test]
+    fn quantity_binding_ref_to_forbidden_leaf_is_rejected_transitively() {
+        let mut m = load_sir();
+        m.bindings.push(Binding {
+            name: "poison".into(),
+            expr: Expr::bin_op(crate::expr::BinOp::Mul, Expr::pop("I"), Expr::dt()),
+        });
+        m.quantities.push(Quantity {
+            name: "smuggle".into(),
+            stratum: vec![],
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(Expr::binding_ref("poison")),
+                reduce: None,
+            },
+        });
+        let errs = validate(&m)
+            .expect_err("a quantity reaching `dt` via a binding must be rejected");
+        assert!(errs.iter().any(|e| matches!(e,
+            ValidationError::QuantityForbiddenLeaf { quantity, leaf }
+                if quantity == "smuggle" && leaf == "dt")),
+            "expected transitive QuantityForbiddenLeaf(smuggle, dt), got: {:?}", errs);
+    }
+
+    /// A forbidden leaf hidden inside a reduction THRESHOLD must also be caught
+    /// (the deep walk covers thresholds, not just the source expr).
+    #[test]
+    fn quantity_reduction_threshold_forbidden_leaf_rejected() {
+        let mut m = load_sir();
+        m.quantities.push(Quantity {
+            name: "thr".into(),
+            stratum: vec![],
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(Expr::pop("I")),
+                reduce: Some(TemporalReduce::Time(TimeReduce::FirstAbove(
+                    Expr::Projected(crate::expr::ProjectedExpr { projected: () })))),
+            },
+        });
+        let errs = validate(&m).expect_err("a threshold with `projected` must be rejected");
+        assert!(errs.iter().any(|e| matches!(e,
+            ValidationError::QuantityForbiddenLeaf { quantity, leaf }
+                if quantity == "thr" && leaf == "projected")),
+            "expected QuantityForbiddenLeaf(thr, projected), got: {:?}", errs);
+    }
+
+    /// A clean quantity (state arithmetic + a `BindingRef` to a clean binding +
+    /// a param threshold) must VALIDATE — the context must not over-reject.
+    #[test]
+    fn clean_quantity_validates() {
+        let mut m = load_sir();
+        m.bindings.push(Binding {
+            name: "Ntot".into(),
+            expr: Expr::pop_sum(vec!["S".into(), "I".into(), "R".into()]),
+        });
+        m.quantities.push(Quantity {
+            name: "prev".into(),
+            stratum: vec![],
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(Expr::bin_op(
+                    crate::expr::BinOp::Div, Expr::pop("I"), Expr::binding_ref("Ntot"))),
+                reduce: Some(TemporalReduce::Value(ValueReduce::Max)),
+            },
+        });
+        m.quantities.push(Quantity {
+            name: "onset".into(),
+            stratum: vec![],
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(Expr::pop("I")),
+                reduce: Some(TemporalReduce::Time(TimeReduce::FirstAbove(Expr::param("beta")))),
+            },
+        });
+        validate(&m).expect("a clean quantity must validate");
+    }
+
+    /// A quantity referencing an unknown compartment must still be name-checked
+    /// (the existing `check_expr` runs on quantity exprs too).
+    #[test]
+    fn quantity_unknown_compartment_is_rejected() {
+        let mut m = load_sir();
+        m.quantities.push(Quantity {
+            name: "q".into(),
+            stratum: vec![],
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(Expr::pop("Q")), // not declared
+                reduce: None,
+            },
+        });
+        let errs = validate(&m).expect_err("unknown compartment in a quantity must be rejected");
+        assert!(errs.iter().any(|e| matches!(e,
+            ValidationError::UnknownCompartment(c) if c == "Q")),
+            "expected UnknownCompartment(Q), got: {:?}", errs);
     }
 }
