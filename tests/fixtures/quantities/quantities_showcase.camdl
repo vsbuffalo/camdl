@@ -1,0 +1,86 @@
+# Generated-quantities showcase fixture (proposal 2026-06-25).
+#
+# One model exercising the WHOLE quantities surface: a state series (plain +
+# stratified), every value reduction (final/max/min/mean/count_above/below),
+# every time reduction (time_of_max/min, first/last_above/below), an integral,
+# reduction arithmetic (Derived), a state-dependent threshold, a never-firing
+# (censored) timing, and the v1.1 `observations.<stream>` source.
+#
+# Simulated deterministically (chain_binomial, seed 1, scenario `baseline`) by
+# `quantities_surface.rs`, which validates every quantity against an INDEPENDENT
+# recomputation from the emitted trajectory + obs. The committed IR
+# (`ir/quantities_showcase.ir.json`) pins the serialized shape cross-language.
+
+time_unit = 'days
+
+dimensions { patch = [a, b] }
+compartments { S, I, R }
+stratify(by = patch)
+
+parameters {
+  gamma     : positive    in [0.01, 1.0]
+  N[patch]  : positive    in [100, 100000]
+  R0[patch] : positive    in [0.5, 10.0]
+  thr       : count       in [1, 100000]
+  rho       : probability in [0.0, 1.0]      # reporting fraction (obs)
+  k         : real        in [0.1, 100.0]    # NegBinomial dispersion (obs)
+}
+
+let beta[p in patch] = R0[p] * gamma
+let I_total = sum(p in patch, I[p])
+let N_tot   = sum(p in patch, S[p] + I[p] + R[p])
+
+transitions {
+  infection[p in patch] : S[p] --> I[p] @ beta[p] * S[p] * I[p] / (S[p] + I[p] + R[p])
+  recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
+}
+
+init {
+  S[a] = 990  I[a] = 10  R[a] = 0
+  S[b] = 980  I[b] = 20  R[b] = 0
+}
+
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    projected     = prevalence(I[a])
+    emit_schedule = every 14 'days
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+quantities {
+  prevalence[p in patch] = I[p] / (S[p] + I[p] + R[p])
+  total_prev             = I_total / N_tot
+  peak_prev   = max(I_total / N_tot)
+  trough_prev = min(I_total / N_tot)
+  mean_prev   = mean(I_total / N_tot)
+  final_R[p in patch] = final(R[p])
+  high_days   = count_above(I_total, thr)
+  low_days    = count_below(I_total, thr)
+  person_days = integral(I_total)
+  peak_t   = time_of_max(I_total)
+  trough_t = time_of_min(I_total)
+  onset    = first_above(I_total, thr)
+  fadeout  = last_above(I_total, thr)
+  first_lo = first_below(I_total, thr)
+  last_lo  = last_below(I_total, thr)
+  big_t    = first_above(I_total, 0.5 * N_tot)
+  never    = first_above(I_total, 9000000)
+  outbreak_dur = fadeout - onset
+  half_dur     = outbreak_dur / 2
+
+  # v1.1 observation source — reduce the simulated y_sim of `cases`
+  peak_cases  = max(observations.cases)
+  total_cases = integral(observations.cases)
+  cases_onset = first_above(observations.cases, thr)
+}
+
+simulate { from = 0  to = 200 }
+
+scenarios {
+  baseline {
+    label = "showcase"
+    set = { gamma = 0.1  N[a] = 1000  N[b] = 1000  R0[a] = 2.5  R0[b] = 1.8  thr = 50  rho = 0.5  k = 10.0 }
+  }
+}
