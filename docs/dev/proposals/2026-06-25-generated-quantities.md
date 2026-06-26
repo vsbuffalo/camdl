@@ -1,16 +1,19 @@
 # Generated quantities
 
-Status: **Implemented (v1)** — latent-state quantities, emitted by `fit predict`
-and `simulate`. Landed across `b4afe561` (IR types + schema, `ir/VERSION` 0.20),
-`5ec3f0a5` (validate legality), `6c9c2c12` (OCaml frontend), `609d5ac5` (sim
-evaluator), `3cde2c36` (fit predict output), `54cdc037` (simulate output +
-shared rendering). The observation source (v1.1), the standalone/disk command,
-windowed / cross-stratum / flow reductions, and the dim→unit renderer remain the
-staged follow-ups below. Supersedes:
-`2026-06-04-output-trajectory-customization.md` Phase 2; splits the quantities
-half out of `2026-06-24-generated-quantities-and-counterfactuals.md` (the
-counterfactual half is `2026-06-25-counterfactual-contrasts.md`). IR contract:
-one additive optional field on `Model`; `ir/VERSION` 0.19 → 0.20.
+Status: **Implemented (v1.1)** — latent-state quantities and the simulated
+observation source, emitted by `fit predict` and `simulate`. v1 landed across
+`b4afe561` (IR types + schema, `ir/VERSION` 0.20), `5ec3f0a5` (validate
+legality), `6c9c2c12` (OCaml frontend), `609d5ac5` (sim evaluator), `3cde2c36`
+(fit predict output), `54cdc037` (simulate output + shared rendering). v1.1 (the
+`observations.<stream>` reduction source) landed across `7b0511eb` (IR variant +
+evaluator), `d9dfb553` (OCaml frontend), `d52d54ac` (cli `y_sim`
+materialization + bare-series `E289`). The standalone/disk command, windowed /
+cross-stratum / flow reductions, and the dim→unit renderer remain the staged
+follow-ups below. Supersedes: `2026-06-04-output-trajectory-customization.md`
+Phase 2; splits the quantities half out of
+`2026-06-24-generated-quantities-and-counterfactuals.md` (the counterfactual
+half is `2026-06-25-counterfactual-contrasts.md`). IR contract: one additive
+optional field on `Model`; `ir/VERSION` 0.19 → 0.20.
 
 ## Summary
 
@@ -52,10 +55,14 @@ Increments, sharing one seam:
 - **v1** — latent-state quantities, evaluated **live** on the always-fresh paths
   (`simulate`, `simulate --draws`, `fit predict`). Every quantity is a pure fold
   over the trajectory. No RNG, no observation sampling, no disk replay.
-- **v1.1** — the simulated observation source (`observations.<stream>`): reduces
-  the same `y_sim` the run already drew (never a fresh draw). Adds observation
-  materialization and a split materialization-grid rule. Purely additive on the
-  v1 seam.
+- **v1.1** — the simulated observation source (`observations.<stream>`): a
+  **reduction** over the same `y_sim` the run already drew (never a fresh draw).
+  A bare observation series is rejected (`E289`): an observation series lives on
+  the stream's own observation-time axis (its `emit_schedule` / fit leaves),
+  distinct from the trajectory snapshot grid, so it cannot be rendered against
+  the same time column as a state series — reduce it (`max`, `integral`,
+  `first_above`, …). Adds observation materialization and a split
+  materialization-grid rule. Purely additive on the v1 seam.
 - **follow-up (disk source)** — a standalone `camdl quantities <run>` command,
   `batch run` quantities, and cache-hit reuse. All require a `TSV → Trajectory`
   reader that does not exist today (and a resolution of the lossy `traj.tsv`
@@ -583,17 +590,35 @@ counters, which also unlock `total`) are follow-ups.
   `QuantityEvaluator` (`sim`) + the per-draw hook in `PredictiveSink` and the
   simulate sink (live, always-fresh paths only); the sidecar output + manifest.
   `ir/VERSION` 0.20; quantities excluded from `run_id`.
-- **v1.1.** The `observations.<stream>` source: `materialize_observations`
-  factored out of `PredictiveSink::merge_cell` (`predict.rs:670-685`) and fed to
-  both the predictive accumulator and the quantity consumer (the SAME `y_sim`,
-  drawn once in canonical order — never skip streams, never redraw); the
-  **split** materialization-grid rule — compile-time `E289` for an
-  **undeclared** stream (decidable), and a **runtime** check for a
-  **declared-but-unmaterialized** stream located in each command's
-  materialization path (which streams a run materializes is runtime: predict's
-  fit-leaf times, `simulate --obs`'s emit schedule; the compiler cannot know
-  it). The DSL accessor is `OBSERVATIONS DOT IDENT` (a new `DOT` token;
-  `observations` is a keyword); verify no menhir conflict at implementation.
+- **v1.1.** The `observations.<stream>` source. The DSL accessor is
+  `OBSERVATIONS DOT IDENT` (a new `DOT` token; `observations` is already a block
+  keyword) lowering to AST `EObsAccess`; the expander classifier admits it only
+  as the operand of a single temporal reduction (`max(observations.afp)`,
+  `integral(observations.afp)`, `first_above(observations.afp, thr)` …) — a bare
+  series, an obs source mixed with state/arithmetic, or a stratified obs source
+  is `E289`. It lowers to `QuantitySource::Observation { stream }`, an additive
+  IR variant under the existing `QuantitySource` wrapper (no golden churn, no
+  run-id re-key beyond the `ir/VERSION` bump).
+
+  The evaluator (`sim`) reduces the per-draw `y_sim` the run already drew — the
+  SAME draw, never a fresh one. `eval_draw` takes an `Option<&ObsSeriesSet>`
+  (stream name → its `(obs times, y_sim values)`); a `QSource::Observation`
+  folds its stream's series at the stream's obs times (thresholds for a Time
+  reduction evaluate at the snapshot nearest each obs time). Two materialization
+  sites feed it the SAME draws their command publishes, in canonical declaration
+  order (no skipped streams, no redraw): `PredictiveSink::merge_cell` captures
+  the `y_sim` it already samples for the posterior-predictive bands;
+  `simulate`'s `materialize_obs_for_quantities` samples every schedule-bearing
+  stream with the cell's `obs_seed` — the same RNG walk `simulate --obs`
+  performs. `references_observations()` / `obs_streams()` on the evaluator let a
+  caller skip materialization entirely when only state quantities are present.
+
+  The **split** materialization-grid rule: compile-time `E289` for an
+  **undeclared** stream (decidable), and a located **runtime** error for a
+  referenced stream that cannot be materialized in this command (a fit-only
+  stream with no `emit_schedule` under `simulate`) — which streams a run
+  materializes is runtime (predict's fit-leaf times, `simulate`'s emit schedule;
+  the compiler cannot know it).
 
 Then, ordered by value:
 

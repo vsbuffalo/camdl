@@ -223,16 +223,24 @@ quantities {
   outbreak_dur    = fadeout - takeoff             # reduction arithmetic over scalars
   person_days     = integral(I)                   # ∫ over time (dim P·T)
   peak_time[p in patch] = time_of_max(I[p])      # stratified
+  peak_reported   = max(observations.cases)       # reduce the simulated y_sim
 }
 ```
 
 Reductions (valid **only** inside `quantities {}`): `final`, `max`, `min`,
 `mean`, `count_above|below(x, thr)`, `time_of_max|min`,
-`first|last_above|below(x, thr)`, `integral`. A quantity with no reduction is a
-**series**; one with a reduction is a **scalar**. `max(a, b)` / `min(a, b)` stay
-the binary operators everywhere — only a **unary** `max(x)` in a quantity is the
-peak reduction. Reduction arithmetic (`a - b`) combines earlier **scalar**
-quantities. (`total`/`sum` and an `observations.<stream>` source are not in v1.)
+`first|last_above|below(x, thr)`, `integral`. A state quantity with no reduction
+is a **series**; one with a reduction is a **scalar**. `max(a, b)` / `min(a, b)`
+stay the binary operators everywhere — only a **unary** `max(x)` in a quantity
+is the peak reduction. Reduction arithmetic (`a - b`) combines earlier
+**scalar** quantities.
+
+`observations.<stream>` reduces the simulated observation series (`y_sim`) a run
+already drew — the _same_ draws `--obs` / the posterior predictive publish,
+never a fresh one — for a declared stream. It must be **reduced** (it lives on
+the stream's own observation-time axis): a bare `observations.<stream>` series,
+or one mixed with state/arithmetic, is `E289`. (`total`/`sum`, a _stratified_
+obs source, and a disk-replay `quantities` command are not in v1.1.)
 
 Output: one `quantities/<name>.tsv` per quantity (banded `q05…q95` over draws) +
 a `quantities.json` manifest — from `fit predict` (in the fit segment) and
