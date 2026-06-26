@@ -598,6 +598,16 @@ pub struct SimulateArgs {
     #[arg(long)]
     pub dates: bool,
 
+    /// Emit the model's `quantities {}` block to this directory as
+    /// `<dir>/quantities/<name>.tsv` + `<dir>/quantities.json`. A single
+    /// fixed-params run writes a bare `value` per leaf (point mode); a
+    /// `--draws`/`--replicates`/`--seeds` run writes banded quantiles. Quantities
+    /// are a regenerated sidecar — never part of the content-addressed run
+    /// identity. Without this flag, a model that declares quantities prints a
+    /// note and skips them (not a hard error).
+    #[arg(long, value_name = "DIR")]
+    pub quantities_out: Option<PathBuf>,
+
     /// Print resolved run plan without simulating
     #[arg(long)]
     pub dry_run: bool,

@@ -439,7 +439,7 @@ fn level_for<'a>(stratum: &'a [(String, String)], dim: &str) -> &'a str {
 }
 
 /// Format a time: integral times as integers (`7`), else minimal decimal.
-fn fmt_time(t: f64) -> String {
+pub(crate) fn fmt_time(t: f64) -> String {
     if t.fract() == 0.0 && t.abs() < 1e15 {
         format!("{}", t as i64)
     } else {
@@ -450,7 +450,7 @@ fn fmt_time(t: f64) -> String {
 /// Format a value: integral values as integers (count data reads cleanly),
 /// else a decimal trimmed to ≤6 places (so an interpolated count quantile is
 /// `204.9`, not `204.89999999999995`).
-fn fmt_value(v: f64) -> String {
+pub(crate) fn fmt_value(v: f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e15 {
         format!("{}", v as i64)
     } else {
@@ -469,313 +469,6 @@ pub fn write_tsv(dir: &Path, sub: &str, stream: &str, content: &str) -> Result<P
     f.write_all(content.as_bytes())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(path)
-}
-
-// ── Generated quantities: banding + rendering ──────────────────────────────
-
-/// A scalar quantity leaf's banding result: either a real band over the finite
-/// per-draw values (carrying the censored count), or every draw censored (no
-/// band — `q*` rendered empty). Series quantities never reach here.
-#[derive(Debug, Clone, PartialEq)]
-enum BandResult {
-    Banded { bands: Vec<f64>, n_value: usize, n_censored: usize },
-    AllCensored { n_draws: usize },
-}
-
-/// Partition a scalar quantity's per-draw values into the finite set and the
-/// censored count, band the finite set (reusing [`band`], which rejects a
-/// non-finite value so a `NaN`/±∞ arithmetic result surfaces as an error rather
-/// than a published band), and report the counts. The all-censored case returns
-/// [`BandResult::AllCensored`] instead of calling `band(&[])`.
-fn band_with_censoring(vals: &[sim::quantity::QuantityDrawValue]) -> Result<BandResult, String> {
-    use sim::quantity::QuantityDrawValue;
-    let mut finite: Vec<f64> = Vec::new();
-    let mut n_censored = 0usize;
-    for v in vals {
-        match v {
-            QuantityDrawValue::Value(x) => finite.push(*x),
-            QuantityDrawValue::Censored => n_censored += 1,
-        }
-    }
-    if finite.is_empty() {
-        Ok(BandResult::AllCensored { n_draws: n_censored })
-    } else {
-        let bands = band(&finite)?;
-        Ok(BandResult::Banded { bands, n_value: finite.len(), n_censored })
-    }
-}
-
-/// A quantity leaf's output shape — a function of its IR body, so the TSV header
-/// is deterministic (never data-dependent). A reduction-less `Reduced` is a
-/// series; a `Time` reduction is a censorable scalar; any other reduction or a
-/// `Derived` is a plain scalar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QShape {
-    Series,
-    ScalarPlain,
-    ScalarCensorable,
-}
-
-impl QShape {
-    fn of(body: &ir::quantity::QuantityBody) -> QShape {
-        use ir::quantity::{QuantityBody, TemporalReduce};
-        match body {
-            QuantityBody::Reduced { reduce: None, .. } => QShape::Series,
-            QuantityBody::Reduced { reduce: Some(TemporalReduce::Time(_)), .. } => {
-                QShape::ScalarCensorable
-            }
-            QuantityBody::Reduced { reduce: Some(_), .. } => QShape::ScalarPlain,
-            QuantityBody::Derived(_) => QShape::ScalarPlain,
-        }
-    }
-    fn is_series(self) -> bool {
-        matches!(self, QShape::Series)
-    }
-    fn manifest_shape(self) -> &'static str {
-        if self.is_series() { "series" } else { "scalar" }
-    }
-}
-
-/// The reduction's manifest name (the IR temporal reduction → its DSL spelling).
-fn reduce_name(r: &ir::quantity::TemporalReduce) -> &'static str {
-    use ir::quantity::{TemporalReduce, TimeReduce, ValueReduce};
-    match r {
-        TemporalReduce::Value(ValueReduce::Final) => "final",
-        TemporalReduce::Value(ValueReduce::Max) => "max",
-        TemporalReduce::Value(ValueReduce::Min) => "min",
-        TemporalReduce::Value(ValueReduce::Mean) => "mean",
-        TemporalReduce::Value(ValueReduce::CountAbove(_)) => "count_above",
-        TemporalReduce::Value(ValueReduce::CountBelow(_)) => "count_below",
-        TemporalReduce::Time(TimeReduce::TimeOfMax) => "time_of_max",
-        TemporalReduce::Time(TimeReduce::TimeOfMin) => "time_of_min",
-        TemporalReduce::Time(TimeReduce::FirstAbove(_)) => "first_above",
-        TemporalReduce::Time(TimeReduce::FirstBelow(_)) => "first_below",
-        TemporalReduce::Time(TimeReduce::LastAbove(_)) => "last_above",
-        TemporalReduce::Time(TimeReduce::LastBelow(_)) => "last_below",
-        TemporalReduce::Integral => "integral",
-    }
-}
-
-/// The TSV header — a deterministic function of `(shape, stratified)`. `fit
-/// predict` is always banded, so every shape carries `n_draws` + the quantile
-/// columns; a series prepends `time`; a stratified leaf inserts its `<dims…>`; a
-/// censorable scalar inserts the censoring trio.
-fn quantity_header(shape: QShape, dims: &[String]) -> String {
-    let mut cols: Vec<String> = Vec::new();
-    if shape.is_series() {
-        cols.push("time".to_string());
-    }
-    cols.extend(dims.iter().cloned());
-    cols.push("n_draws".to_string());
-    if shape == QShape::ScalarCensorable {
-        cols.push("n_value".to_string());
-        cols.push("n_censored".to_string());
-        cols.push("p_censored".to_string());
-    }
-    for (_, label) in QUANTILE_LEVELS {
-        cols.push((*label).to_string());
-    }
-    cols.join("\t")
-}
-
-/// Band the accumulated per-draw quantity values into one tidy TSV per logical
-/// quantity plus a `quantities.json` manifest. Leaves are grouped by base `name`
-/// (a stratified quantity expands to one leaf per cell); within a group each
-/// scalar leaf is a row and each series leaf a rowset (one row per snapshot time).
-/// A series' time axis is the trajectory snapshot grid (every draw shares it).
-/// Names of scalar quantities a `ScalarExpr` references via `QRef`.
-fn collect_qrefs(se: &ir::quantity::ScalarExpr, out: &mut Vec<String>) {
-    use ir::quantity::ScalarExpr::*;
-    match se {
-        Const(_) | Param(_) => {}
-        QRef(q) => out.push(q.name.clone()),
-        UnOp { arg, .. } => collect_qrefs(arg, out),
-        BinOp { left, right, .. } => {
-            collect_qrefs(left, out);
-            collect_qrefs(right, out);
-        }
-        Cond { pred, then, else_ } => {
-            collect_qrefs(pred, out);
-            collect_qrefs(then, out);
-            collect_qrefs(else_, out);
-        }
-    }
-}
-
-fn render_quantities(
-    quantities: &[ir::quantity::Quantity],
-    quant_draws: &[Vec<sim::quantity::QuantityResult>],
-    snapshot_times: &[f64],
-) -> Result<(Vec<(String, String)>, String), String> {
-    use ir::quantity::{QuantityBody, TemporalReduce};
-    use sim::quantity::{QuantityDrawValue, QuantityResult};
-
-    let n_draws = quant_draws.len();
-
-    // Group leaf indices by base name, first-appearance order.
-    let mut order: Vec<String> = Vec::new();
-    let mut groups: IndexMap<String, Vec<usize>> = IndexMap::new();
-    for (gi, q) in quantities.iter().enumerate() {
-        groups
-            .entry(q.name.clone())
-            .or_insert_with(|| {
-                order.push(q.name.clone());
-                Vec::new()
-            })
-            .push(gi);
-    }
-
-    // Transitive censorability: a quantity is censorable if it is a `Time`
-    // reduction, OR a `Derived` whose reduction arithmetic references (via QRef)
-    // a censorable quantity. So `outbreak_dur = fadeout - takeoff` (a Derived
-    // over two `first_above`/`last_above` scalars) reports n_censored when an
-    // operand never fired, rather than silently dropping those draws under a
-    // plain-scalar header. QRefs are backward, so one ordered pass suffices.
-    let mut censorable: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for q in quantities {
-        let is_cens = match &q.body {
-            QuantityBody::Reduced { reduce: Some(TemporalReduce::Time(_)), .. } => true,
-            QuantityBody::Derived(se) => {
-                let mut refs = Vec::new();
-                collect_qrefs(se, &mut refs);
-                refs.iter().any(|n| censorable.contains(n))
-            }
-            _ => false,
-        };
-        if is_cens {
-            censorable.insert(q.name.clone());
-        }
-    }
-
-    let mut outputs: Vec<(String, String)> = Vec::new();
-    let mut manifest_entries: Vec<serde_json::Value> = Vec::new();
-
-    for name in &order {
-        let leaf_idxs = &groups[name];
-        let first = &quantities[leaf_idxs[0]];
-        // A Derived that transitively references a Time scalar is censorable.
-        let shape = match QShape::of(&first.body) {
-            QShape::ScalarPlain
-                if matches!(first.body, QuantityBody::Derived(_)) && censorable.contains(name) =>
-            {
-                QShape::ScalarCensorable
-            }
-            s => s,
-        };
-        let dims: Vec<String> = first.stratum.iter().map(|k| k.dim.clone()).collect();
-
-        let mut out = String::new();
-        out.push_str(&quantity_header(shape, &dims));
-        out.push('\n');
-
-        for &gi in leaf_idxs {
-            let levels: Vec<String> =
-                quantities[gi].stratum.iter().map(|k| k.level.clone()).collect();
-            if shape.is_series() {
-                // Validate the series shape/length once for this leaf.
-                for (di, draw) in quant_draws.iter().enumerate() {
-                    match draw.get(gi) {
-                        Some(QuantityResult::Series(v)) if v.len() == snapshot_times.len() => {}
-                        Some(QuantityResult::Series(v)) => {
-                            return Err(format!(
-                                "quantity '{name}': draw {di} has a series of length {} but the \
-                                 trajectory has {} snapshots",
-                                v.len(),
-                                snapshot_times.len()
-                            ))
-                        }
-                        _ => return Err(format!("quantity '{name}': expected a series value")),
-                    }
-                }
-                for (ti, &t) in snapshot_times.iter().enumerate() {
-                    let col: Vec<f64> = quant_draws
-                        .iter()
-                        .map(|draw| match &draw[gi] {
-                            QuantityResult::Series(v) => v[ti],
-                            QuantityResult::Scalar(_) => f64::NAN,
-                        })
-                        .collect();
-                    let bands = band(&col)
-                        .map_err(|e| format!("quantity '{name}' at t={}: {e}", fmt_time(t)))?;
-                    let mut cells: Vec<String> = Vec::with_capacity(2 + levels.len() + bands.len());
-                    cells.push(fmt_time(t));
-                    cells.extend(levels.iter().cloned());
-                    cells.push(n_draws.to_string());
-                    cells.extend(bands.iter().map(|b| fmt_value(*b)));
-                    out.push_str(&cells.join("\t"));
-                    out.push('\n');
-                }
-            } else {
-                let vals: Vec<QuantityDrawValue> = quant_draws
-                    .iter()
-                    .map(|draw| match &draw[gi] {
-                        QuantityResult::Scalar(v) => *v,
-                        QuantityResult::Series(_) => QuantityDrawValue::Value(f64::NAN),
-                    })
-                    .collect();
-                let (n_value, n_censored, bands_opt) =
-                    match band_with_censoring(&vals).map_err(|e| format!("quantity '{name}': {e}"))? {
-                        BandResult::Banded { bands, n_value, n_censored } => {
-                            (n_value, n_censored, Some(bands))
-                        }
-                        BandResult::AllCensored { n_draws: nd } => (0usize, nd, None),
-                    };
-                let total = n_value + n_censored;
-                let mut cells: Vec<String> = Vec::new();
-                cells.extend(levels.iter().cloned());
-                cells.push(total.to_string());
-                if shape == QShape::ScalarCensorable {
-                    cells.push(n_value.to_string());
-                    cells.push(n_censored.to_string());
-                    let p = if total > 0 { n_censored as f64 / total as f64 } else { 0.0 };
-                    cells.push(fmt_value(p));
-                }
-                match &bands_opt {
-                    Some(bands) => cells.extend(bands.iter().map(|b| fmt_value(*b))),
-                    None => cells.extend(QUANTILE_LEVELS.iter().map(|_| String::new())),
-                }
-                out.push_str(&cells.join("\t"));
-                out.push('\n');
-            }
-        }
-
-        // Manifest entry for this logical quantity (one per group).
-        let source = match &first.body {
-            ir::quantity::QuantityBody::Reduced { .. } => "state",
-            ir::quantity::QuantityBody::Derived(_) => "derived",
-        };
-        let reduce_val: serde_json::Value = match &first.body {
-            ir::quantity::QuantityBody::Reduced { reduce: Some(r), .. } => {
-                serde_json::Value::String(reduce_name(r).to_string())
-            }
-            _ => serde_json::Value::Null,
-        };
-        let censoring: serde_json::Value = if shape == QShape::ScalarCensorable {
-            serde_json::json!({ "kind": "right", "conditional_quantiles": true })
-        } else {
-            serde_json::Value::Null
-        };
-        manifest_entries.push(serde_json::json!({
-            "name": name,
-            "shape": shape.manifest_shape(),
-            "source": source,
-            "index_dims": dims,
-            "reduce": reduce_val,
-            // The dim → unit renderer is a later phase; the field is present now.
-            "unit": serde_json::Value::Null,
-            "censoring": censoring,
-        }));
-
-        outputs.push((name.clone(), out));
-    }
-
-    let manifest = serde_json::json!({
-        "schema": "camdl.quantities/v1",
-        "quantities": manifest_entries,
-    });
-    let manifest_str = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| format!("serializing quantities manifest: {e}"))?;
-    Ok((outputs, manifest_str))
 }
 
 // ── Schema lookup: leaf → (logical stream, index dims) ─────────────────────
@@ -1222,8 +915,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
 
         // Band the accumulated per-draw quantity values into sidecars + a manifest.
         if !model.quantities.is_empty() {
-            let (outs, manifest) =
-                render_quantities(&model.quantities, &sink.quant_draws, &sink.quant_times)?;
+            let (outs, manifest) = crate::quantity_output::render_quantities(
+                &model.quantities,
+                &sink.quant_draws,
+                &sink.quant_times,
+                crate::quantity_output::Mode::Banded,
+            )?;
             quantity_outputs = outs;
             quantity_manifest = Some(manifest);
         }
@@ -1974,51 +1671,6 @@ mod tests {
             ParamTreatment::Posterior(d) => assert_eq!(d.n_draws(), 1),
             ParamTreatment::PlugIn { .. } => panic!("a posterior fit must keep its cloud"),
         }
-    }
-
-    #[test]
-    fn band_with_censoring_partitions_finite_and_censored() {
-        use sim::quantity::QuantityDrawValue::{Censored, Value};
-        // Mixed finite + censored: band the finite set, report both counts.
-        let vals = vec![Value(1.0), Value(2.0), Censored, Value(3.0), Censored];
-        match band_with_censoring(&vals).unwrap() {
-            BandResult::Banded { bands, n_value, n_censored } => {
-                assert_eq!(n_value, 3, "three finite draws banded");
-                assert_eq!(n_censored, 2, "two censored draws counted, not banded");
-                assert_eq!(bands.len(), 5, "five quantile levels");
-                assert_eq!(bands[2], 2.0, "median of {{1,2,3}} is 2");
-            }
-            other => panic!("expected Banded, got {other:?}"),
-        }
-        // All censored: no band (never band(&[])), the draw count carried.
-        match band_with_censoring(&[Censored, Censored, Censored]).unwrap() {
-            BandResult::AllCensored { n_draws } => assert_eq!(n_draws, 3),
-            other => panic!("expected AllCensored, got {other:?}"),
-        }
-        // A NaN `Value` is a non-finite arithmetic result, not censoring → a hard
-        // error (the reused `band` rejects it).
-        assert!(band_with_censoring(&[Value(1.0), Value(f64::NAN)]).is_err());
-    }
-
-    #[test]
-    fn quantity_header_is_a_function_of_shape_and_dims() {
-        assert_eq!(
-            quantity_header(QShape::Series, &[]),
-            "time\tn_draws\tq05\tq25\tq50\tq75\tq95"
-        );
-        assert_eq!(
-            quantity_header(QShape::Series, &["patch".to_string()]),
-            "time\tpatch\tn_draws\tq05\tq25\tq50\tq75\tq95"
-        );
-        assert_eq!(
-            quantity_header(QShape::ScalarPlain, &[]),
-            "n_draws\tq05\tq25\tq50\tq75\tq95"
-        );
-        // The censoring trio sits between n_draws and the quantiles, after the dims.
-        assert_eq!(
-            quantity_header(QShape::ScalarCensorable, &["patch".to_string()]),
-            "patch\tn_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95"
-        );
     }
 
     #[test]
