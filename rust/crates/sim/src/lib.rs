@@ -6,6 +6,7 @@ pub mod compiled_model;
 pub mod periodic_bspline;  // gh#59 v2 — de Boor evaluator
 pub mod propensity;
 pub mod resolved_expr;
+pub mod quantity;  // generated-quantities evaluator (proposal 2026-06-25)
 pub mod flat_eval;
 pub mod eval_stats;
 pub mod boundary_times;
