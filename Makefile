@@ -113,7 +113,7 @@ dev-camdlc: build-ocaml
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: test-ocaml check-reactive-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
+test: test-ocaml check-reactive-golden check-quantities-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
 
 # Inner-loop gate: the whole Rust workspace (unit + integration + doctests) via
 # `cargo test`. Deliberately SKIPS the slow cross-language / doc phases
@@ -228,7 +228,7 @@ test-install:
 
 # ── Golden file management ────────────────────────────────────────────────────
 
-.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden
+.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden
 
 # Recompile all DSL fixtures → ocaml/golden/*.ir.json
 update-ocaml-golden: build-ocaml
@@ -239,7 +239,7 @@ update-ocaml-golden: build-ocaml
 		$(CAMDLC) "$$src" > "$$out"; \
 	done
 
-update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden
+update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden
 
 # Recompile the corner-case fixtures (params baked via --set) →
 # tests/fixtures/corner_cases/ir/*.ir.json. These pin the off-grid /
@@ -301,6 +301,35 @@ check-reactive-golden: build-ocaml
 	done; \
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
 	echo "  reactive goldens in sync"
+
+# Recompile the generated-quantities showcase fixture →
+# tests/fixtures/quantities/ir/*.ir.json. Compile-only: pins the IR SHAPE of
+# every quantity variant (state/observation source, value/time reductions,
+# integral, Derived, stratified expansion), deserialised cross-language by the
+# `rust/crates/ir quantities_golden` test. The quantity OUTPUT values are pinned
+# separately by `quantities_surface.rs`. Re-run after a schema/grammar change.
+QUANTITIES_DIR := tests/fixtures/quantities
+update-quantities-golden: build-ocaml
+	@echo "Recompiling quantities fixtures..."
+	@mkdir -p $(QUANTITIES_DIR)/ir
+	@$(CAMDLC) $(QUANTITIES_DIR)/quantities_showcase.camdl -o $(QUANTITIES_DIR)/ir/quantities_showcase.ir.json
+
+# Drift gate: the showcase .camdl must still compile BYTE-FOR-BYTE to its
+# committed .ir.json. `update-quantities-golden` regenerates; this FAILS if
+# source and golden diverged. Runs in `make test`.
+.PHONY: check-quantities-golden
+check-quantities-golden: build-ocaml
+	@echo "Checking quantities goldens match their .camdl..."
+	@fail=0; for src in quantities_showcase; do \
+	  $(CAMDLC) $(QUANTITIES_DIR)/$$src.camdl -o $(QUANTITIES_DIR)/ir/$$src.ir.json.tmp; \
+	  if ! diff -q $(QUANTITIES_DIR)/ir/$$src.ir.json $(QUANTITIES_DIR)/ir/$$src.ir.json.tmp >/dev/null 2>&1; then \
+	    echo "  DRIFT: $$src.camdl no longer compiles to the committed .ir.json — run: make update-quantities-golden"; \
+	    fail=1; \
+	  fi; \
+	  rm -f $(QUANTITIES_DIR)/ir/$$src.ir.json.tmp; \
+	done; \
+	if [ $$fail -ne 0 ]; then exit 1; fi; \
+	echo "  quantities goldens in sync"
 
 # ── Release / changelog ───────────────────────────────────────────────────────
 
