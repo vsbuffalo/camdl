@@ -35,7 +35,7 @@ fn model_with_forcing(kind: TimeFuncKind) -> Model {
         compartments: vec![Compartment { name: "S".into(), kind: CompartmentKind::Integer }],
         transitions: vec![],
         ode_equations: vec![],
-        time_functions: vec![TimeFunction { name: "f".into(), kind, dim: (0, 0) }],
+        time_functions: vec![TimeFunction { name: "f".into(), kind, dim: (0, 0), lag: None }],
         tables: vec![],
         interventions: vec![],
         observations: vec![],

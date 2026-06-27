@@ -700,6 +700,11 @@ impl ContentAddressed for TimeFunction {
         h.write_str(&self.name);
         self.kind.hash_into(h);
         self.dim.hash_into(h);
+        // gh#314: lag is identity — two models that differ only by a forcing's
+        // evaluation-time shift produce different trajectories and must re-key.
+        // The Option impl tags presence, so `None` (no lag) stays distinct from
+        // any `Some(lag)`.
+        self.lag.hash_into(h);
     }
 }
 

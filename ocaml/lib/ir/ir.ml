@@ -168,6 +168,13 @@ type time_function = {
      factor to stored values so runtime interpolation returns values
      in the model's `time_unit`. GH #8. *)
   dim:  int * int;
+  (* gh#314: optional evaluation-time shift. When [Some lag], every forcing
+     kind is evaluated at [t − lag] instead of [t] via one shared shift.
+     [lag] is a duration expression already rescaled to the model's
+     `time_unit` (a literal like `10 'days`, or a `Param` reference — the
+     lag-as-parameter case is a primary motivation). [None] ⇒ no shift,
+     byte-identical to a forcing declared without `lag`. *)
+  lag:  expr option;
 }
 
 (* ── Tables ──────────────────────────────────────────────────────────────────── *)

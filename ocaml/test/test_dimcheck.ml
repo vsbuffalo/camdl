@@ -486,6 +486,46 @@ let test_balance_wrong_dim () =
   let r = Dimcheck.check_model m in
   Alcotest.(check bool) "E305 balance wrong dim" true (has_error "E305" r)
 
+(* gh#314: a forcing's `lag` must be a duration (dimension T). *)
+let lag_forcing lag : time_function =
+  { name = "vc";
+    kind = Sinusoidal {
+      amplitude = const 1.0; period = const 365.0;
+      phase = const 0.0; baseline = const 1.0 };
+    dim = (0, 0);   (* 'ratio *)
+    lag }
+
+let test_lag_duration_param_ok () =
+  (* lag = tau, tau : duration → dimension T → no E309 *)
+  let m = empty_model
+    ~compartments:[mk_compartment "S"]
+    ~parameters:[mk_param ~kind:(Some Ir.Duration) "tau"]
+    ~time_functions:[lag_forcing (Some (param "tau"))]
+    () in
+  let r = Dimcheck.check_model m in
+  Alcotest.(check bool) "duration lag param ok" true (no_errors r)
+
+let test_lag_literal_duration_ok () =
+  (* lag = 10 'days, expander-lowered to UncheckedDim{dim_t=1} → dimension T *)
+  let m = empty_model
+    ~compartments:[mk_compartment "S"]
+    ~time_functions:[lag_forcing
+      (Some (UncheckedDim { inner = const 10.0; dim_p = 0; dim_t = 1;
+                            reason = "unit literal 'days" }))]
+    () in
+  let r = Dimcheck.check_model m in
+  Alcotest.(check bool) "literal duration lag ok" true (no_errors r)
+
+let test_lag_rate_param_rejected () =
+  (* lag = beta, beta : rate → dimension T^-1, NOT a duration → E309 *)
+  let m = empty_model
+    ~compartments:[mk_compartment "S"]
+    ~parameters:[mk_param ~kind:(Some Ir.Rate) "beta"]
+    ~time_functions:[lag_forcing (Some (param "beta"))]
+    () in
+  let r = Dimcheck.check_model m in
+  Alcotest.(check bool) "E309 rate lag rejected" true (has_error "E309" r)
+
 let test_ode_derivative_correct () =
   (* d(V)/dt = -decay * V → T^-1 * P = P*T^-1 *)
   let m = empty_model
@@ -1206,6 +1246,11 @@ let () =
       Alcotest.test_case "balance wrong dim"        `Quick test_balance_wrong_dim;
       Alcotest.test_case "ODE derivative correct"   `Quick test_ode_derivative_correct;
       Alcotest.test_case "ODE derivative wrong"     `Quick test_ode_derivative_wrong;
+    ];
+    "forcing_lag", [
+      Alcotest.test_case "gh#314 duration param lag ok"  `Quick test_lag_duration_param_ok;
+      Alcotest.test_case "gh#314 literal duration lag ok" `Quick test_lag_literal_duration_ok;
+      Alcotest.test_case "gh#314 E309 rate lag rejected" `Quick test_lag_rate_param_rejected;
     ];
     "undetermined", [
       Alcotest.test_case "underdetermined info"     `Quick test_underdetermined_emits_info;

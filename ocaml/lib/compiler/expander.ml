@@ -4635,7 +4635,19 @@ let expand_time_function_one ctx fname (env : (string * string) list) fkind (fun
       Ir.PeriodicSpline { ps with Ir.coefs = List.map scale_expr ps.coefs }
   in
   let dim = unit_lit_to_dim funit in
-  { Ir.name = fname; Ir.kind; Ir.dim }
+  (* gh#314: optional `lag = <duration>` — an evaluation-time shift applied
+     uniformly to every forcing kind (the runtime evaluates the forcing at
+     `t − lag`). The kwarg value is resolved like any other forcing argument,
+     so a unit-annotated literal (`10 'days`) is rescaled into the model's
+     `time_unit` by `resolve_expr` (via `EUnit`/`unit_to_model_time`), and a
+     bare parameter reference (`lag = tau`) is preserved as `Param`. Absent
+     ⇒ `None` ⇒ no shift. The dim-checker validates that `lag` carries a time
+     dimension. *)
+  let lag = match List.assoc_opt "lag" fargs with
+    | None   -> None
+    | Some e -> Some (resolve_expr ctx env e)
+  in
+  { Ir.name = fname; Ir.kind; Ir.dim; Ir.lag }
 
 (** Expand ODE equations from the DSL's `ode { X = expr }` blocks into
     IR `ode_equation` records.

@@ -427,7 +427,11 @@
       "required": ["name", "kind"],
       "properties": {
         "name": { "type": "string" },
-        "kind": { "$ref": "#/definitions/time_func_kind" }
+        "kind": { "$ref": "#/definitions/time_func_kind" },
+        "lag": {
+          "$ref": "#/definitions/expr",
+          "description": "Optional gh#314 evaluation-time shift: the forcing is evaluated at t − lag instead of t. A duration expression in the model's time_unit (a literal like 10 'days, or a parameter reference). Absent ⇒ no shift (identity)."
+        }
       }
     },
 

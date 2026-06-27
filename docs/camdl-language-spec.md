@@ -224,6 +224,7 @@ Additional checks:
 - **E305**: balance expression must have dimension P
 - **E306**: ODE derivative must have dimension P·T⁻¹
 - **E308**: overdispersion σ² must be dimensionless
+- **E309**: forcing `lag` must be a duration (dimension T)
 
 Disable with `--no-dim-check` if a false positive is encountered (and file a
 bug).
@@ -1229,6 +1230,47 @@ produce an error.
 
 `periodic` is primarily useful in v0.2 reporting pipelines for day-of-week
 effects on case reporting.
+
+### Lagged forcing (`lag`)
+
+A forcing often drives the dynamics with a delay: a vectorial-capacity series
+shapes transmission only after the mosquito and incubation pipeline, an
+intervention's covariate bites days after it is recorded. Declare that delay
+once, on the forcing definition, with an optional `lag`:
+
+```camdl
+forcing {
+  C : interpolated 'per_day {
+    data      = "vectorial_capacity.tsv"
+    time_col  = t
+    value_col = C
+    lag       = 10 'days        # evaluate C at t − 10 days
+  }
+}
+```
+
+The forcing is then used exactly as any other — `C` or `C(t)` — and resolves to
+`C(t − lag)`. `lag` is a property of the forcing as a whole, uniform across all
+kinds (`interpolated`, `piecewise`, `periodic`, `sinusoidal`, `fourier`,
+`periodic_spline`): every kind is evaluated at the single shifted time.
+
+- **`lag` is a duration** in the model's `time_unit`, unit-aware exactly like
+  `period = 365 'days`. It must carry the time dimension; a non-duration `lag`
+  (a rate, a count) is a hard error (**E309**).
+- **`lag` may reference a parameter** (`lag = tau` where `tau : duration`) — the
+  delay can itself be inferred. This is a primary motivation for the feature.
+- **`lag = 0` is the identity**, and a forcing declared without `lag` behaves
+  exactly as before — no shift.
+- The semantics are a **point (Dirac) delay**: the evaluation time is shifted by
+  the lag. Distributed-lag kernels (smearing the forcing over a window) are out
+  of scope.
+
+A fitted `lag` (an estimated parameter in `lag = tau`) has **no gradient-based
+estimation path today**: the compiler emits no `∂forcing/∂lag`, so a `lag`
+parameter is rejected under gradient-based PGAS+NUTS with a diagnostic pointing
+to the gradient-free estimators. Estimate a `lag` parameter with **IF2** or the
+**bootstrap particle filter** (or PGAS with `--no-nuts`); a fixed (literal or
+non-estimated) `lag` works under every method.
 
 ### Seasonal forcing and dimensional analysis
 

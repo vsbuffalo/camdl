@@ -199,6 +199,20 @@ pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>
             collect(&p.period, &mut periodic_coeff);
             p.values.iter().for_each(|e| collect(e, &mut periodic_coeff));
         }
+        // gh#314: a `lag` parameter (`lag = tau`) is a forcing-internal
+        // coefficient with NO emitted gradient. The compiler's autodiff
+        // differentiates a `TimeFunc` only w.r.t. its kind's coefficients
+        // (`forcing_coeff_exprs` in `autodiff.ml`), never w.r.t. the
+        // evaluation-time shift, so ∂forcing/∂lag is an identically-zero
+        // dynamics gradient. Like a Periodic step value, this holds even when
+        // the same param also drives a rate body: the emitted body gradient is
+        // real but omits the forcing's lag contribution, so NUTS would sample
+        // against an incomplete gradient. Flag it unconditionally (no body / no
+        // `has_grad` escape) so a lag-as-NUTS-target fit is rejected loudly
+        // rather than silently mis-estimated.
+        if let Some(lag) = &tf.lag {
+            collect(lag, &mut periodic_coeff);
+        }
     }
 
     // Parameters the compiler emitted a derivative for (any transition) — these
@@ -227,13 +241,14 @@ pub fn nuts_guard_error(offenders: &[String]) -> String {
     format!(
         "NUTS cannot estimate parameter(s) [{}]: each drives a forcing or \
          inline-table coefficient whose gradient is not yet emitted (a periodic \
-         step value, or an inline-table value via a non-constant index — \
-         gh#215), so NUTS would sample against an incomplete gradient and \
-         silently mis-estimate them. These parameters now evaluate live, so \
-         estimate them with IF2 or the bootstrap particle filter (gradient-free), \
-         or run PGAS with --no-nuts. To estimate under NUTS, express the \
-         seasonality as a sinusoidal or fourier forcing (whose coefficients have \
-         analytic gradients).",
+         step value, an inline-table value via a non-constant index — gh#215 — \
+         or a forcing `lag`, whose ∂forcing/∂lag is not emitted — gh#314), so \
+         NUTS would sample against an incomplete gradient and silently \
+         mis-estimate them. These parameters still evaluate live, so estimate \
+         them with IF2 or the bootstrap particle filter (gradient-free), or run \
+         PGAS with --no-nuts. To estimate seasonality under NUTS, express it as a \
+         sinusoidal or fourier forcing (whose coefficients have analytic \
+         gradients); a fitted `lag` has no gradient-based path today.",
         offenders.join(", ")
     )
 }
@@ -298,6 +313,7 @@ mod tests {
                 baseline: Expr::const_(1.0),
             }),
             dim: (0, 0),
+            lag: None,
         }
     }
 
@@ -387,6 +403,7 @@ mod tests {
                 values: vec![Expr::param("wpeak"), Expr::const_(1.0)],
             }),
             dim: (0, 0),
+            lag: None,
         }];
         // `wpeak` also appears directly in a rate, with a (partial) rate_grad
         // entry for that body appearance — but it misses the forcing part.
@@ -405,6 +422,48 @@ mod tests {
         assert_eq!(coefficient_only_estimated(&m, &estimated), vec!["wpeak".to_string()],
             "a periodic-coeff param has no emitted forcing gradient; NUTS must be \
              blocked even though it also appears in a rate body");
+    }
+
+    /// gh#314: a `lag` parameter has NO emitted gradient — the compiler's
+    /// autodiff differentiates a `TimeFunc` only w.r.t. its kind's coefficients,
+    /// never the evaluation-time shift, so ∂forcing/∂lag is an identically-zero
+    /// dynamics gradient. NUTS must be blocked. Like a Periodic step value, this
+    /// holds even when the lag param ALSO drives a rate body (the emitted body
+    /// gradient omits the forcing's lag contribution).
+    #[test]
+    fn flags_lag_param_even_when_in_a_rate_body() {
+        let mut m = base_model();
+        let mut tf = sinusoidal_forcing(Expr::const_(0.3));
+        tf.lag = Some(Expr::param("tau"));
+        m.time_functions = vec![tf];
+        // `tau` also appears directly in a rate, with a (partial) rate_grad
+        // entry for that body appearance — but it misses the forcing's lag part.
+        let mut rate_grad = HashMap::new();
+        rate_grad.insert("tau".to_string(), Expr::pop("S"));
+        m.transitions = vec![ir::transition::Transition {
+            name: "decay".into(),
+            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
+            rate: Expr::bin_op(ir::expr::BinOp::Mul, Expr::param("tau"), Expr::pop("S")),
+            metadata: None,
+            draw_method: ir::transition::DrawMethod::Poisson,
+            rate_grad,
+            lineage: None,
+        }];
+        let estimated: HashSet<String> = ["tau".to_string()].into_iter().collect();
+        assert_eq!(coefficient_only_estimated(&m, &estimated), vec!["tau".to_string()],
+            "a lag param has no emitted forcing gradient; NUTS must be blocked \
+             even though it also appears in a rate body");
+    }
+
+    /// gh#314: a non-estimated lag parameter (e.g. a fixed delay) is not flagged.
+    #[test]
+    fn does_not_flag_unestimated_lag_param() {
+        let mut m = base_model();
+        let mut tf = sinusoidal_forcing(Expr::const_(0.3));
+        tf.lag = Some(Expr::param("tau"));
+        m.time_functions = vec![tf];
+        let estimated: HashSet<String> = HashSet::new();
+        assert!(coefficient_only_estimated(&m, &estimated).is_empty());
     }
 
     /// An inline-table value parameter, used nowhere else, is flagged.

@@ -600,7 +600,17 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
         }
 
         ResolvedExpr::TimeFunc(idx) => {
-            eval_forcing(&ctx.model.time_func_cache[*idx].kind, ctx.t, ctx)
+            // gh#314: apply the optional evaluation-time shift, uniform across
+            // every forcing kind. This is the compiled/inference hot path
+            // (PGAS/IF2/PF/ODE), so the shift MUST be here too — not only on the
+            // AST `eval_expr` path — or a lagged forcing is silently unshifted
+            // during inference. `lag` is already in model time units.
+            let tf = &ctx.model.time_func_cache[*idx];
+            let t_eff = match &tf.lag {
+                Some(lag) => ctx.t - eval_resolved(lag, ctx),
+                None => ctx.t,
+            };
+            eval_forcing(&tf.kind, t_eff, ctx)
         }
 
         ResolvedExpr::TableLookup { table_idx, oob, table_len, index } => {

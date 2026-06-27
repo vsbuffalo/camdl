@@ -138,6 +138,13 @@ impl CubicSpline {
 #[derive(Debug, Clone)]
 pub struct CompiledTimeFunc {
     pub kind: CompiledTimeFuncKind,
+    /// gh#314: optional evaluation-time shift. When `Some(lag)`, the forcing is
+    /// evaluated at `t − eval_resolved(lag)` instead of `t` — a single shift
+    /// applied uniformly across every `CompiledTimeFuncKind`. `lag` is a live
+    /// coefficient (resolved like a forcing coefficient: a constant, a `Param`,
+    /// or arithmetic over them), already in model time units, so the subtraction
+    /// is direct. `None` ⇒ no shift.
+    pub lag: Option<ResolvedExpr>,
 }
 
 /// Recursively collect integer compartment local indices referenced in an expression.
@@ -1018,7 +1025,18 @@ impl CompiledModel {
                     }
                 }
             };
-            time_func_cache.push(CompiledTimeFunc { kind });
+            // gh#314: resolve the optional lag into a live coefficient. It uses
+            // the same `resolve_coeff` path as Sinusoidal/Periodic/Fourier
+            // coefficients — a constant, a `Param`, or arithmetic over them —
+            // so a lag-as-parameter is resolved to a `ResolvedExpr::Param` and
+            // evaluated per-call. Structural data (interpolation knots, piecewise
+            // grids) is never a valid lag, so `resolve_coeff` is the right (and
+            // only) seam.
+            let lag = match &tf.lag {
+                None => None,
+                Some(e) => Some(resolve_coeff(e, &param_index)?),
+            };
+            time_func_cache.push(CompiledTimeFunc { kind, lag });
         }
 
         // Precompute fire **times** (continuous, dt-invariant) for all
@@ -1516,6 +1534,7 @@ mod tests {
                 method: InterpMethod::Linear,
             }),
             dim: (1, 0),
+            lag: None,
         });
         let msg = match CompiledModel::new(model) {
             Ok(_) => panic!("mismatched interpolation knots must be rejected"),
@@ -1543,6 +1562,7 @@ mod tests {
                 method: InterpMethod::Linear,
             }),
             dim: (1, 0),
+            lag: None,
         });
         let msg = match CompiledModel::new(model) {
             Ok(_) => panic!("empty interpolation knots must be rejected"),

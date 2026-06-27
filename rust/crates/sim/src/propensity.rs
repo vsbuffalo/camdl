@@ -218,7 +218,15 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
             let idx = ctx.model.time_func_index.get(w.time_func.name.as_str())
                 .copied()
                 .ok_or_else(|| SimError::UnknownTimeFunction(w.time_func.name.clone()))?;
-            Ok(eval_forcing(&ctx.model.time_func_cache[idx].kind, ctx.t, ctx))
+            let tf = &ctx.model.time_func_cache[idx];
+            // gh#314: a single evaluation-time shift, uniform across every
+            // forcing kind. `lag` is already in model time units, so `t − lag`
+            // is a direct subtraction. Absent lag ⇒ `ctx.t` unchanged.
+            let t_eff = match &tf.lag {
+                Some(lag) => ctx.t - eval_resolved(lag, ctx),
+                None => ctx.t,
+            };
+            Ok(eval_forcing(&tf.kind, t_eff, ctx))
         }
 
         Expr::TableLookup(w) => {

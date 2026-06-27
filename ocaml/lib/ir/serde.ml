@@ -429,18 +429,23 @@ let time_func_kind_of_json j =
 
 let time_function_to_json (tf : time_function) : Yojson.Safe.t =
   let (p, t) = tf.dim in
-  obj [
-    ("name", str tf.name);
-    ("kind", time_func_kind_to_json tf.kind);
-    ("dim",  arr [int p; int t]);
-  ]
+  (* gh#314: [lag] is omitted when [None] so a forcing without a lag
+     serializes byte-identically to the pre-gh#314 wire format. *)
+  obj (
+    [ ("name", str tf.name);
+      ("kind", time_func_kind_to_json tf.kind);
+      ("dim",  arr [int p; int t]); ]
+    @ opt_field "lag" expr_to_json tf.lag)
 
 let time_function_of_json j =
   { name = as_string (member "name" j);
     kind = time_func_kind_of_json (member "kind" j);
     dim  = (match member "dim" j with
             | `List [p; t] -> (as_int p, as_int t)
-            | _ -> fail "time_function.dim must be a two-element [P, T] array"); }
+            | _ -> fail "time_function.dim must be a two-element [P, T] array");
+    lag  = (match member_opt "lag" j with
+            | Some `Null | None -> None
+            | Some v            -> Some (expr_of_json v)); }
 
 (* ── Table ───────────────────────────────────────────────────────────────── *)
 

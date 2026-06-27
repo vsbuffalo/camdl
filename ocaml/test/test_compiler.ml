@@ -2483,7 +2483,7 @@ let test_fourier_autodiff_emitted () =
      cos term, so a nonzero entry must be emitted. *)
   let f : Ir.fourier =
     { period = Ir.Const 365.0; harmonics = [ (Ir.Param "a1", Ir.Const 0.0) ] } in
-  let tf : Ir.time_function = { name = "f"; kind = Ir.Fourier f; dim = (0, 0) } in
+  let tf : Ir.time_function = { name = "f"; kind = Ir.Fourier f; dim = (0, 0); lag = None } in
   let rate = Ir.TimeFunc "f" in
   match Autodiff.differentiate_rate rate [ "a1" ] [ tf ] [] with
   | Error msg -> Alcotest.failf "Fourier differentiate errored: %s" msg
@@ -2501,7 +2501,7 @@ let test_periodic_forcing_coeff_omitted () =
      simulation and gradient-free IF2/PF). *)
   let p : Ir.periodic =
     { period = Ir.Const 7.0; values = [ Ir.Param "v0"; Ir.Const 1.0 ] } in
-  let tf : Ir.time_function = { name = "g"; kind = Ir.Periodic p; dim = (0, 0) } in
+  let tf : Ir.time_function = { name = "g"; kind = Ir.Periodic p; dim = (0, 0); lag = None } in
   let rate = Ir.TimeFunc "g" in
   match Autodiff.differentiate_rate rate [ "v0" ] [ tf ] [] with
   | Error msg -> Alcotest.failf
@@ -2521,7 +2521,7 @@ let test_structural_forcing_coeff_errors () =
   let i : Ir.interpolated =
     { times = [ Ir.Const 0.0; Ir.Const 1.0 ];
       values = [ Ir.Param "knot0"; Ir.Const 1.0 ]; method_ = "linear" } in
-  let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0) } in
+  let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0); lag = None } in
   let rate = Ir.TimeFunc "g" in
   match Autodiff.differentiate_rate rate [ "knot0" ] [ tf ] [] with
   | Ok _ -> Alcotest.failf "expected a structural compile error for a param in an interpolation knot"
@@ -2635,6 +2635,110 @@ let test_sinusoidal_time_func () =
         | Ir.Const v -> Alcotest.(check (float 1e-9)) "baseline" 1.0 v
         | _ -> Alcotest.fail "expected Ir.Const for baseline")
      | _ -> Alcotest.fail "expected Sinusoidal kind")
+
+(* gh#314: a forcing without `lag` lands `None` on the time_function record;
+   absent lag is byte-identical to today. *)
+let test_forcing_without_lag_is_none () =
+  let src = {|
+    compartments { S, I, R }
+    parameters {
+      gamma : rate
+      N0    : count
+      I0    : count
+    }
+    forcing {
+      seasonal : sinusoidal 'ratio {
+        amplitude = 0.3
+        period    = 365.0
+        phase     = 0.0
+        baseline  = 1.0
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ seasonal(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 365 'days }
+  |} in
+  let m = compile_expect_ok src in
+  let tf = List.hd m.Ir.time_functions in
+  Alcotest.(check bool) "no lag ⇒ None" true (tf.Ir.lag = None)
+
+(* gh#314: `lag = 10 'days` lands `Some (duration in model time_unit)` on the
+   time_function record. The literal is unit-scaled exactly like `period`, so
+   with time_unit = 'days it is Const 10.0 (wrapped in UncheckedDim for the
+   time dimension). *)
+let test_forcing_with_literal_lag () =
+  let src = {|
+    compartments { S, I, R }
+    parameters {
+      gamma : rate
+      N0    : count
+      I0    : count
+    }
+    forcing {
+      vc : interpolated 'ratio {
+        times  = [0.0, 10.0, 20.0]
+        values = [1.0, 2.0, 3.0]
+        method = "linear"
+        lag    = 10 'days
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ vc(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 365 'days }
+  |} in
+  let m = compile_expect_ok src in
+  let tf = List.hd m.Ir.time_functions in
+  (* lag is a time-dimensioned duration; the scalar is in model time units. *)
+  let rec const_of = function
+    | Ir.Const v -> v
+    | Ir.UncheckedDim u -> const_of u.Ir.inner
+    | _ -> Alcotest.fail "expected a constant (possibly UncheckedDim-wrapped) lag"
+  in
+  (match tf.Ir.lag with
+   | Some e -> Alcotest.(check (float 1e-9)) "lag = 10 days" 10.0 (const_of e)
+   | None   -> Alcotest.fail "expected Some lag")
+
+(* gh#314: `lag = n` where n is a parameter lands `Some (Param "n")` — the
+   lag-as-parameter case (a primary motivation). *)
+let test_forcing_with_param_lag () =
+  let src = {|
+    compartments { S, I, R }
+    parameters {
+      gamma : rate
+      tau   : duration
+      N0    : count
+      I0    : count
+    }
+    forcing {
+      vc : interpolated 'ratio {
+        times  = [0.0, 10.0, 20.0]
+        values = [1.0, 2.0, 3.0]
+        method = "linear"
+        lag    = tau
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ vc(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 365 'days }
+  |} in
+  let m = compile_expect_ok src in
+  let tf = List.hd m.Ir.time_functions in
+  (match tf.Ir.lag with
+   | Some (Ir.Param "tau") -> ()
+   | Some _ -> Alcotest.fail "expected lag = Param tau"
+   | None   -> Alcotest.fail "expected Some lag")
 
 let rec expr_contains_time_func name = function
   | Ir.TimeFunc n        -> n = name
@@ -7995,6 +8099,9 @@ let () =
       Alcotest.test_case "param arg preserved in time func"      `Quick test_time_func_param_arg;
       Alcotest.test_case "bare func name resolves to Ir.TimeFunc" `Quick test_bare_func_name_in_rate;
       Alcotest.test_case "unknown func call emits E100"          `Quick test_unknown_func_call_e100;
+      Alcotest.test_case "gh#314 forcing without lag ⇒ None"     `Quick test_forcing_without_lag_is_none;
+      Alcotest.test_case "gh#314 lag = 10 'days ⇒ Some 10.0"     `Quick test_forcing_with_literal_lag;
+      Alcotest.test_case "gh#314 lag = tau ⇒ Some (Param tau)"   `Quick test_forcing_with_param_lag;
     ];
     "read_long", [
       Alcotest.test_case "1D array from TSV file"            `Quick test_read_long_1d;

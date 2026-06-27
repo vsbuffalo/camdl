@@ -266,6 +266,7 @@ The compiler issues E-codes with source locations and fix-hints.
 | E305 | dim      | balance expression must have dimension P                                                   |
 | E306 | dim      | ODE derivative must have dimension P·T⁻¹                                                   |
 | E308 | dim      | overdispersion σ² must be dimensionless                                                    |
+| E309 | dim      | forcing `lag` must be a duration (dimension T)                                             |
 | E320 | time     | `time_unit = 'months/'years` with `origin` declared                                        |
 | E321 | time     | `Instant ± Calendar`-duration (`date(...) + 6 'months`)                                    |
 | E322 | time     | calendar cadence in anchored recurring schedule (`every = 1 'months`)                      |

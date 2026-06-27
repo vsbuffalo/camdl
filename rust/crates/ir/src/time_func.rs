@@ -83,4 +83,12 @@ pub struct TimeFunction {
     /// declaration, so the dim-checker can use this authoritatively
     /// without falling back on value-based inference.
     pub dim: (i32, i32),
+    /// gh#314: optional evaluation-time shift. When `Some(lag)`, every
+    /// forcing kind is evaluated at `t − lag` instead of `t` via one
+    /// shared shift. `lag` is a duration expression already rescaled to
+    /// the model's `time_unit` (a literal, or a `Param` reference — the
+    /// lag-as-parameter case is a primary motivation). `None` ⇒ no shift,
+    /// byte-identical to a forcing declared without `lag`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag: Option<Expr>,
 }

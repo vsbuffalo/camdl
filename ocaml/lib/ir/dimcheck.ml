@@ -927,6 +927,28 @@ let check_model (m : model) : result =
   (* Initialize time function dims *)
   init_tf_dims st m.time_functions;
 
+  (* gh#314: a forcing's optional `lag` is a duration — it is SUBTRACTED from
+     the evaluation time (`t − lag`), so it must carry the time dimension [T].
+     A non-duration lag (a rate `'per_day`, a count, a dimensionless literal)
+     is a model bug: subtracting it from `t` is meaningless. Validate it the
+     same way `period`/`phase` are durations, with its own code (E309) so the
+     diagnostic points at the forcing, not at an arithmetic site. *)
+  List.iter (fun (tf : time_function) ->
+    match tf.lag with
+    | None -> ()
+    | Some lag_e ->
+      st.subject <- None;
+      let ctx = Printf.sprintf "forcing '%s' lag" tf.name in
+      let d = infer st ~ctx lag_e in
+      constrain_known st ~code:"E309"
+        ~message:(Printf.sprintf
+          "forcing '%s': `lag` must be a duration (dimension T); it is \
+           subtracted from the evaluation time. Use a duration literal \
+           (e.g. `lag = 10 'days`) or a parameter declared `: duration`."
+          tf.name)
+        d (make 0 1)
+  ) m.time_functions;
+
   (* Fix B: precompute each shared binding's dim in declaration (topological)
      order, so a BindingRef in a rate infers the body's dim. Bindings are
      param-free, so their dim is fully determined here and stable across the

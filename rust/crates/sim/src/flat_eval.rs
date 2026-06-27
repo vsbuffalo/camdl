@@ -452,7 +452,15 @@ unsafe fn run(
             Op::Dt => push!(ctx.dt),
             Op::Projected => push!(ctx.projected.unwrap_or(0.0)),
             Op::TimeFunc(idx) => {
-                let v = eval_forcing(&ctx.model.time_func_cache[*idx as usize].kind, ctx.t, ctx);
+                // gh#314: apply the same evaluation-time shift as the standard
+                // path (`propensity::eval_expr`'s `Expr::TimeFunc` arm) so the
+                // flat-bytecode path stays byte-identical for lagged forcings.
+                let tf = &ctx.model.time_func_cache[*idx as usize];
+                let t_eff = match &tf.lag {
+                    Some(lag) => ctx.t - eval_resolved(lag, ctx),
+                    None => ctx.t,
+                };
+                let v = eval_forcing(&tf.kind, t_eff, ctx);
                 push!(v);
             }
             Op::IntPopSum(idx) => {

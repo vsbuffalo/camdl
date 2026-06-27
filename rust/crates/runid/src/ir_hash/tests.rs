@@ -95,6 +95,7 @@ fn representative_model() -> Model {
                 baseline: Expr::const_(1.0),
             }),
             dim: (0, 0),
+            lag: None,
         }],
         tables: vec![Table {
             name: "contact".into(),
@@ -207,7 +208,11 @@ fn model_golden_hash() {
     // `per_eval_bindings`. The empty Vec's length prefix shifts every model hash,
     // so the GOLDEN moves once at the schema bump even with the pass default-off
     // (a deliberate, version-bumped re-key — see the proposal's "Run identity").
-    const GOLDEN: &str = "59495f07d5f08e29f3ae4925a5a6bccc3c266ccb822eb1af1da2add3153a053a";
+    // gh#314 (ir/VERSION -> 0.20): `TimeFunction::hash_into` now folds the
+    // optional `lag`. The representative model carries a forcing, so its
+    // `Option<Expr>` presence tag (`None` -> one byte) shifts the model hash —
+    // another deliberate, version-bumped re-key (forcing lag is run identity).
+    const GOLDEN: &str = "e2b203863a860b1d34e04be33851251701046e138a782b5efbf4abc15bfd5cac";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -294,6 +299,31 @@ fn ir_contrasts_excluded_from_hash() {
         m.content_hash(),
         "a non-empty contrasts must NOT change the model hash (contrasts are \
          non-identity derived reports, excluded from Model::hash_into)"
+    );
+}
+
+/// gh#314: a forcing `lag` is run identity. Two models that differ only by a
+/// forcing's evaluation-time shift produce different trajectories, so they must
+/// re-key. This pins that `TimeFunction::lag` is actually folded into the hash
+/// (an absent vs present lag, and two distinct lag values, all hash distinctly).
+#[test]
+fn ir_forcing_lag_changes_hash() {
+    let base = representative_model().content_hash();
+
+    let mut m_lag = representative_model();
+    m_lag.time_functions[0].lag = Some(Expr::const_(10.0));
+    assert_ne!(
+        base,
+        m_lag.content_hash(),
+        "adding a forcing lag must change the model hash (lag is run identity)"
+    );
+
+    let mut m_lag2 = representative_model();
+    m_lag2.time_functions[0].lag = Some(Expr::const_(20.0));
+    assert_ne!(
+        m_lag.content_hash(),
+        m_lag2.content_hash(),
+        "two distinct lag values must hash distinctly"
     );
 }
 
