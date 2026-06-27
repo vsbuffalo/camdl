@@ -149,6 +149,7 @@
 %token QUANTITIES   (* proposal 2026-06-25: generated quantities *)
 %token CONTRASTS   (* counterfactual contrasts, proposal 2026-06-25 *)
 %token REACTIVE_INTERVENTIONS WHEN ACTION   (* gh#204 *)
+%token VIA   (* staged-residence dwell-law clause (2026-06-26 §3) *)
 %token PIPE
 
 %token EOF
@@ -474,36 +475,65 @@ transition_decl:
   | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list AT rate = expr guard = where_clause_opt
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
-          trrate = rate; trguard = guard; trlineage = lin; trdoc = d;
+          trdyn = Rate rate; trguard = guard; trlineage = lin; trdoc = d;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
-  (* block form: [#[lineage]] name[...] : srcs --> dsts { rate = ...; where ... } *)
+  (* inline staged residence: [#[lineage]] name[...] : srcs --> dst via LAW(args)
+     where guard.  `via` REPLACES the `@ rate` clause — a transition is `@ rate`
+     XOR `via law`, never both (staged-residence proposal §3). The dwell law is
+     stored as a raw via_call; Phase-2 lowering builds the typed via_spec. *)
+  | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list VIA law = via_call guard = where_clause_opt
+      { { trname = name; trindices = ibs;
+          trsrc = srcs; trdst = DstSum dsts;
+          trdyn = Via law; trguard = guard; trlineage = lin; trdoc = d;
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  (* block form: [#[lineage]] name[...] : srcs --> dsts { rate = ... | via = ...; where ... } *)
   | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list LBRACE tbody = transition_body RBRACE
-      { let (rate_opt, guard) = tbody in
-        (* A block-form transition with no `rate = …` (and no `@ …`) is a
-           hard error, not a silent zero-rate transition. Pushing a
-           diagnostic and substituting a placeholder rate lets parsing
-           continue so the user sees all errors at once. *)
-        let rate = match rate_opt with
-          | Some e -> e
-          | None ->
+      { let (rate_opt, via_opt, guard) = tbody in
+        (* A block-form transition carries EITHER `rate = …` OR `via = …`, never
+           both and never neither (the `@`-XOR-`via` rule, in brace form). Each
+           illegal case is a hard error; on error we substitute a placeholder
+           `Rate (EConst 0.0)` so parsing continues and the user sees every
+           error at once. *)
+        let trdyn = match rate_opt, via_opt with
+          | Some e, None  -> Rate e
+          | None,   Some v -> Via v
+          | Some _, Some _ ->
+            Parser_errors.push_error_hint ~sp:$startpos(name) ~ep:$endpos(name)
+              ~code:"E112"
+              ~msg:(Printf.sprintf
+                "transition '%s' has both `rate =` and `via =`" name)
+              ~hint:"a transition is either an ordinary `rate = <expr>` \
+                     exponential OR a staged residence `via = <law>(...)` — \
+                     not both; remove one";
+            Rate (EConst 0.0)
+          | None,   None ->
             Parser_errors.push_error_hint ~sp:$startpos(name) ~ep:$endpos(name)
               ~code:"E213"
               ~msg:(Printf.sprintf
                 "transition '%s' is missing a rate" name)
-              ~hint:"add `rate = <expr>` inside the block, or use the \
-                     inline form `... --> ... @ <expr>`";
-            EConst 0.0
+              ~hint:"add `rate = <expr>` inside the block (or `via = <law>(...)` \
+                     for a staged residence), or use the inline form \
+                     `... --> ... @ <expr>`";
+            Rate (EConst 0.0)
         in
         { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
-          trrate = rate; trguard = guard; trlineage = lin; trdoc = d;
+          trdyn; trguard = guard; trlineage = lin; trdoc = d;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* branching: [#'][#[lineage]] name[...] : srcs --> { D1 : w1, ... } @ rate where guard *)
   | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW LBRACE branches = separated_nonempty_list(COMMA, branch_entry) RBRACE AT rate = expr guard = where_clause_opt
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstBranch branches;
-          trrate = rate; trguard = guard; trlineage = lin; trdoc = d;
+          trdyn = Rate rate; trguard = guard; trlineage = lin; trdoc = d;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+
+(* A dwell-law call: `LAW(k1 = e1, k2 = e2, …)`. Reuses the same parenthesised
+   keyword-argument machinery as distribution / function calls (`kw_expr`),
+   stored as the raw `(name, kwargs)` via_call. The typed via_spec is built in
+   Phase-2 lowering, not here. *)
+via_call:
+  | name = IDENT LPAREN args = separated_list(COMMA, kw_expr) RPAREN
+      { (name, args) }
 
 (* Optional transition attribute. Only `#[lineage]` is recognized in
    v1. An unknown attribute name (e.g. `#[transmission]`) is a hard
@@ -551,20 +581,24 @@ let_shape_opt:
 
 transition_body:
   | kvs = list(transition_body_entry)
-      { (* `rate` is `expr option`: `None` means no `rate = …` entry was
-           given. The block-form production (above) turns that `None` into
-           a hard E213 diagnostic — a missing rate must NOT silently
-           default to a zero-rate (never-firing) transition. *)
+      { (* `rate`/`via` are options: `None` for both means no dynamics entry
+           was given. The block-form production (above) resolves rate XOR via —
+           neither is a hard E213, both is a hard E112 — so a missing/ambiguous
+           dynamics must NOT silently default to a zero-rate transition. A
+           repeated `rate =` (or `via =`) keeps the LAST occurrence. *)
         let rate  = ref None in
+        let via   = ref None in
         let guard = ref None in
         List.iter (function
           | `Rate e  -> rate := Some e
+          | `Via v   -> via := Some v
           | `Guard g -> guard := Some g
         ) kvs;
-        (!rate, !guard) }
+        (!rate, !via, !guard) }
 
 transition_body_entry:
   | RATE EQ e = expr { `Rate e }
+  | VIA EQ law = via_call { `Via law }
   | WHERE g = guard_expr { `Guard g }
 
 guard_expr:

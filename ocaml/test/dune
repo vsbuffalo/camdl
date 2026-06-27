@@ -35,6 +35,13 @@
  (modules test_contrasts)
  (libraries compiler ir alcotest yojson))
 
+; Phase-1 staged-residence `via` clause: parser + AST + the expansion
+; placeholder. Pure frontend — no IR/golden surface.
+(test
+ (name test_via)
+ (modules test_via)
+ (libraries compiler ir alcotest))
+
 ; Cross-language calendar-time golden (gh#98). Reads ir/golden/caltime.tsv
 ; (the same file rust/crates/ir/tests/caltime_golden.rs reads) by resolving
 ; the repo root at runtime — the TSV lives outside the ocaml dune root and

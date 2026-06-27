@@ -67,6 +67,7 @@
       "tables",        TABLES;
       "forcing",       FORCING;
       "transitions",   TRANSITIONS;
+      "via",           VIA;                               (* staged-residence dwell-law clause *)
       "observations",  OBSERVATIONS;
       "quantities",    QUANTITIES;
       "contrasts",     CONTRASTS;                         (* counterfactual contrasts *)

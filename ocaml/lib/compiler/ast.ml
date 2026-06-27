@@ -168,12 +168,29 @@ type destination_form =
   | DstSum    of stoich_ref list
   | DstBranch of (stoich_ref * expr) list
 
+(* A raw, untyped dwell-law call parsed off a `via` clause (staged-residence
+   proposal, 2026-06-26 §3). The pair is the law name and its keyword arguments
+   exactly as written — e.g. `erlang(stages = 3, mean = 7 'days)` parses to
+   `("erlang", [("stages", ...); ("mean", ...)])`. The typed `via_spec`
+   (stages/mean/rate extraction + validation) is built in the EXPANDER's Phase-2
+   lowering, not here; Phase 1 stores the call verbatim. *)
+type via_call = string * (string * expr) list
+
+(* A transition's dynamics: EITHER an ordinary `@ rate` (exponential, the rate
+   IS the propensity) OR a `via law(...)` staged residence (the law supplies the
+   per-stage rate). Never both, never neither — the `@`-XOR-`via` rule. Encoding
+   it as a sum type makes the illegal "both rate and via" / "neither" states
+   unrepresentable: every reader pattern-matches and cannot forget the via case. *)
+type trans_dynamics =
+  | Rate of expr        (* ordinary exponential transition: `@ rate` *)
+  | Via  of via_call    (* staged residence: `via law(...)` (lowered in Phase 2) *)
+
 type transition_decl = {
   trname    : string;
   trindices : index_binding list;
   trsrc     : stoich_ref list;
   trdst     : destination_form;
-  trrate    : expr;
+  trdyn     : trans_dynamics;   (* `@ rate` (Rate) XOR `via law(...)` (Via) *)
   trguard   : guard option;
   (* `#[lineage]` attribute (individual-sampling layer, 2026-05-19
      proposal). True ⇒ this transition has parent-child lineage
@@ -186,6 +203,16 @@ type transition_decl = {
   trdoc     : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
   trloc     : loc;
 }
+
+(* Sub-expressions a transition's dynamics carry, for variable / let-reference
+   analysis that does not care whether the dynamics is a rate or a via law. A
+   `Rate` carries its one rate expr; a `Via` carries its law's keyword-argument
+   exprs (`stages`, `mean`, `rate`, …). Readers that walk "the exprs of a
+   transition" use this instead of reaching into `trdyn`. *)
+let trans_dynamics_exprs (d : trans_dynamics) : expr list =
+  match d with
+  | Rate e        -> [e]
+  | Via (_, args) -> List.map snd args
 
 type let_binding = {
   lname    : string;

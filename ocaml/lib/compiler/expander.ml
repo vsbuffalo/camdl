@@ -3003,6 +3003,30 @@ let expand_transitions_counted ctx =
       if not pass_guard then (incr filtered; incr tr_filtered; [])
       else begin
         let src_names = List.map (resolve_stoich_ref ctx env) tr.trsrc in
+        (* A `via law(...)` staged-residence transition has no `@ rate`: its
+           rate is synthesized by the Phase-2 lowering (stage the source, emit
+           the chain, scale each per-stage rate). That lowering is not yet
+           implemented, so a `via` transition reaching expansion is a clean,
+           located "not yet implemented" error (E243) — NOT a crash and NOT a
+           silent rate-0 transition. We substitute a placeholder rate so the
+           rest of expansion runs and reports any further diagnostics; the E243
+           blocks a successful compile. *)
+        let rate_expr =
+          match tr.trdyn with
+          | Rate e -> e
+          | Via (law_name, _) ->
+            Diagnostics.error ctx.diags
+              ~code:"E243"
+              ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
+              ~message:(Printf.sprintf
+                "transition '%s': staged-residence `via %s(...)` lowering is \
+                 not yet implemented" tr.trname law_name)
+              ~hint:"the `via` clause is parsed but its compartment-staging \
+                     lowering has not landed yet; express the staged residence \
+                     manually with sub-stage compartments for now"
+              ();
+            EConst 0.0
+        in
         (* Extract rate wrappers: overdispersed(rate, σ²) or
            deterministic(rate). Mismatched arg shapes are a hard
            error (reported as C1 in the 2026-04-19 review) — before
@@ -3029,21 +3053,21 @@ let expand_transitions_counted ctx =
                else ""))
             ()
         in
-        let raw_rate, draw_method = match tr.trrate with
+        let raw_rate, draw_method = match rate_expr with
           | EFuncCall ("overdispersed", [("", inner); ("", var)]) ->
             let resolved_var = normalize_expr (resolve_expr ctx env var) in
             (inner, Ir.DrawOverdispersed resolved_var)
           | EFuncCall ("overdispersed", args) ->
             validate_draw_shape "overdispersed" args 2
               "overdispersed(rate, sigma_squared)";
-            (tr.trrate, Ir.DrawPoisson)
+            (rate_expr, Ir.DrawPoisson)
           | EFuncCall ("deterministic", [("", inner)]) ->
             (inner, Ir.DrawDeterministic)
           | EFuncCall ("deterministic", args) ->
             validate_draw_shape "deterministic" args 1
               "deterministic(rate)";
-            (tr.trrate, Ir.DrawPoisson)
-          | _ -> (tr.trrate, Ir.DrawPoisson)
+            (rate_expr, Ir.DrawPoisson)
+          | _ -> (rate_expr, Ir.DrawPoisson)
         in
         (* Build one IR transition given resolved destinations and a
            (possibly weight-scaled) raw rate. `name_suffix` gets
@@ -6255,7 +6279,7 @@ let check_no_shadowing ctx =
   List.iter (fun (tr : transition_decl) ->
     let decl = Printf.sprintf "transition '%s'" tr.trname in
     let seed = loop_vars_of_indices tr.trindices in
-    walk decl seed tr.trrate;
+    List.iter (walk decl seed) (trans_dynamics_exprs tr.trdyn);
     match tr.trdst with
     | DstBranch branches -> List.iter (fun (_, w) -> walk decl seed w) branches
     | DstSum _ -> ()
@@ -6349,7 +6373,8 @@ let check_quadratic_coupling ctx =
          | DstBranch brs -> List.concat_map (fun (r, _) -> stoich_ref_vars r) brs)
     in
     let offending = List.exists (fun (v, d) ->
-      count_dim d >= 2 && not (List.mem v stoich_vars) && mentions v tr.trrate
+      count_dim d >= 2 && not (List.mem v stoich_vars)
+      && List.exists (mentions v) (trans_dynamics_exprs tr.trdyn)
     ) dims in
     if offending then
       Diagnostics.warning ctx.diags ~code:"W105" ~loc:Diagnostics.no_loc
@@ -6492,8 +6517,10 @@ let check_surface_time_typing ctx =
 
   (* ── transition rates ───────────────────────────────────────────────── *)
   List.iter (fun (tr : transition_decl) ->
-    walk_expr_rule1 ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
-      ~context:(Printf.sprintf "transition '%s'" tr.trname) tr.trrate
+    List.iter
+      (walk_expr_rule1 ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
+         ~context:(Printf.sprintf "transition '%s'" tr.trname))
+      (trans_dynamics_exprs tr.trdyn)
   ) ctx.transitions;
 
   (* ── ODE derivatives ────────────────────────────────────────────────── *)

@@ -835,7 +835,13 @@ let run_transition_rate ppf (model : Ir.model) ctx name =
        String.sub t.name 0 (String.length orig.trname) = orig.trname &&
        t.name.[String.length orig.trname] = '_')
     ) ctx.Expander.orig_transitions with
-    | Some orig -> orig.trrate
+    | Some orig ->
+      (* For a `via law(...)` transition there is no single rate expr; reuse the
+         func-call walk by reconstructing the law as an EFuncCall over its args
+         so any let-bindings referenced in `stages`/`mean`/`rate` still surface. *)
+      (match orig.trdyn with
+       | Rate e             -> e
+       | Via (name, args)   -> EFuncCall (name, args))
     | None -> EConst 0.0
     in
     let refs = collect_let_refs_ast ctx ast_rate in
@@ -1037,7 +1043,8 @@ let run_let ppf ctx name =
         | ERange (a, b) -> expr_refs_name a || expr_refs_name b
         | _ -> false
       in
-      if expr_refs_name orig_tr.trrate then Some orig_tr.trname else None
+      if List.exists expr_refs_name (trans_dynamics_exprs orig_tr.trdyn)
+      then Some orig_tr.trname else None
     ) ctx.Expander.orig_transitions in
     if refs <> [] then (
       Fmt.pf ppf "  ";
