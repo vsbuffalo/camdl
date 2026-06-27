@@ -59,11 +59,13 @@ mean `τ`, variance `τ²/k`, CV `1/√k`.
 
 Critically, **the sub-stages are visible** — they are an ordinary stratification
 of the compartment. So a bare reference to the compartment in any rate
-automatically sums over its stages, exactly as a bare age-stratified name sums
-over age today (`R[a]` with strata `[age, immunity]` already means
-`R[a,natural] + R[a,immunity]`; `expander.ml:2560`, spec §5.1). This is the
-whole game: because the stages are a sub-stratification, the force of infection,
-population total, and observations all see the right thing for free.
+automatically sums over its stages, exactly as a bare stratified name sums over
+its strata today (a bare `E` stratified by `latent_stage` already means
+`E_e1 + E_e2 + E_e3` in rate position; `expander.ml:2560`, spec §5.1). This is
+the whole game: a bare-name force of infection, population total, or observation
+sees the right thing for free. (An age-specific reference like `I[a]` is the one
+case the pass handles itself — it rewrites it into the explicit stage-sum, since
+the general "index some dims, sum the rest" notation is being declined; §7.)
 
 This visibility distinction is the load-bearing one. A _latent_ period and an
 _infectious_ period are the **same** staged construction (Wearing-Rohani-Keeling
@@ -267,8 +269,12 @@ autodiff) applies unchanged. Concretely, for
 3. Redirect every existing inflow to `E` so it lands in `E_1` (the require-full-
    index rule already rejects a bare staged destination, so this is the only
    legal target).
-4. Leave every _rate-position_ reference to `E` alone — the bare-name sum rule
-   turns it into `PopSum([E_1…E_k])` automatically.
+4. Rewrite rate-position references to `E` to sum over its stages: a **bare**
+   `E` is left alone (the bare-name rule turns it into `PopSum([E_1…E_k])`
+   automatically), and a **partially-indexed** `E[a]` (in a stratified model) is
+   rewritten by the pass into the explicit stage-sum `E[a]_1 + … + E[a]_k`. The
+   pass owns this because it created the stages; it does not rely on the
+   declined general partial-index rule.
 
 `hyper_erlang` additionally branches the entry: the inflow to the staged
 compartment becomes a `DstBranch` into each branch's first stage
@@ -307,18 +313,18 @@ Continuous-_shape_ fitting (non-integer gamma) is what the deferred
 
 ## 7. Interactions and scope boundaries
 
-- **Stratification — depends on a separately-tracked bug fix.** Staging is a
-  sub-stratification, so a staged _and_ age/space-stratified compartment (`I`
-  with dims `[age, stage]`) must support partial indexing — `I[a]` summing over
-  the stage dimension. That "omit a dimension → sum over it" rule is
-  **specified** (spec §5.1/§5.3, with `E[a]` over `latent_stage` as the literal
-  example) but **unimplemented** (`expander.ml:2161` concatenates only the
-  supplied index → E100; the prevalence path emits a dangling `CurrentPop`
-  caught only at Rust runtime). This is a pre-existing doc-vs-code bug,
-  **tracked and fixed separately**; every realistic (stratified) staged model
-  depends on it, so this feature lands _after_ that fix. The fix is bounded —
-  teach the `EIndex` compartment branch and `prevalence_projection` to consult
-  `comp_dims` and emit `PopSum` / `CurrentPopSum` over the omitted dims.
+- **Stratification — the staging pass owns stage-summing; no external
+  dependency.** A staged _and_ age/space-stratified compartment is referenced
+  two ways, both handled without the general partial-index notation (`I[a]`
+  summing an omitted dimension), which is being **declined** as too subtle and
+  removed from the spec. A **bare** `I` sums all dims including stages via the
+  existing `PopSum` rule (for free). A **partially-indexed** reference to a
+  staged compartment — `I[a]` in an age-specific force of infection — is
+  **rewritten by the staging pass** into an explicit sum over that compartment's
+  stage cells (the pass created the stages, so the rewrite is mechanical and
+  runs before general resolution would reject the partial index). So
+  staged∧stratified models work by the feature's own lowering, not by a general
+  "omit a dimension → sum" rule.
 - **`balance {}`.** A bare staged name sums correctly in a conservation
   expression (same resolver), so `balance` composes — no hard error needed (this
   is a genuine improvement over the hidden-pipeline design, which would have
@@ -346,12 +352,13 @@ its tier green. The per-law distributional validations live in the **expensive
 `tests/external/` tier** (CI + `make test`, skipped by `make test-fast`) — the
 same tier as the `he2010` pomp-oracle.
 
-**T0 — partial-dimension summing** (the separately-tracked prerequisite bug;
-these are its acceptance tests, not part of this feature's own work). `I[a]`
-over a compartment with `[age, stage]` (or any two dims) sums the omitted
-dimension in rates, observations, and balance; the dangling-`CurrentPop` runtime
-error is gone; the spec §5.3 worked example compiles and simulates. The
-staged-residence tiers below assume this has landed.
+**T0 — stage-summing rewrite** (part of the staging lowering, Phase 2). For a
+staged _and_ age-stratified compartment, a bare reference sums all stages (via
+`PopSum`) and a partially-indexed reference (`I[a]` in an age-specific FOI) is
+rewritten by the pass into the explicit stage-sum — verified at the AST level
+and end-to-end (the age-structured staged SEIR simulates, with the FOI summing
+each age's stages). This is the feature's own machinery, independent of the
+declined general partial-index notation.
 
 **T1 — lowering correctness (IR-level).** Anchor:
 `onset : E --> I via
@@ -399,20 +406,21 @@ Spec doc-tests compile.
 
 ## 9. Phasing and implementation plan
 
-**Prerequisite (tracked and landed separately, not part of this feature's
-work):** the partial-dimension-summing bug fix (spec §5.1/§5.3 omit-a-dimension
-rule in the `EIndex` compartment branch and `prevalence_projection`) → **T0**.
-This feature builds on it; the phases below assume it is in.
+Each phase lands with its test tier green before the next.
 
-Each phase then lands with its test tier green before the next.
-
-1. **AST + parser.** `trvia : via_call option`, the `via law(...)` clause, the
-   `via` ⊻ `@` rule, the `via` keyword. Parser stores the raw call. → **T6**
-   (parse, round-trip, golden-neutrality).
-2. **Erlang staging.** The AST→AST pre-pass: stage the source compartment as a
-   sub-dimension, emit the chain + exit, redirect inflow to stage 1, scale the
-   rate; build the typed `via_spec` with `pos_int` + `mean` XOR `rate` +
-   collision checks. → **T1**, then **T2/T3**, **T4**.
+1. **AST + parser.** `trvia : via_call option`, the inline
+   `SRC --> DST via
+   LAW(...)` clause (single destination, no `@`), the block
+   `via = LAW(...)` entry, the `via` ⊻ `@` rule, the `via` keyword. Parser
+   stores the raw call. (The per-branch-destination / no-arrow `hyper_erlang`
+   form is deferred to Phase 4.) → **T6** (parse, round-trip,
+   golden-neutrality).
+2. **Erlang staging.** The AST→AST pre-pass: stage the source compartment, emit
+   the chain + exit, redirect inflow to stage 1, scale the rate, and **rewrite
+   references to the staged compartment to sum over its stages** (bare via
+   `PopSum`, partial via the pass's explicit stage-sum); build the typed
+   `via_spec` with `pos_int` + `mean` XOR `rate` + collision checks. →
+   **T0/T1**, then **T2/T3**, **T4**.
 3. **Validation.** Dimchecks; `mean` XOR `rate`; `via` ⊻ `@`; the single-exit
    invariant; stage-name collision. → **T5**.
 4. **Hyper-Erlang.** Branched entry (`DstBranch` weighting) into parallel
