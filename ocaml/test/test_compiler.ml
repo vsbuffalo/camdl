@@ -7858,6 +7858,7 @@ let () =
       Alcotest.test_case "sir_five_age"   `Quick (test_golden "sir_five_age");
       Alcotest.test_case "seir_erlang"        `Quick (test_golden "seir_erlang");
       Alcotest.test_case "seir_erlang_staged" `Quick (test_golden "seir_erlang_staged");
+      Alcotest.test_case "seir_erlang_via"    `Quick (test_golden "seir_erlang_via");
       Alcotest.test_case "sir_coupling"       `Quick (test_golden "sir_coupling");
       Alcotest.test_case "sir_two_patch"      `Quick (test_golden "sir_two_patch");
       Alcotest.test_case "sir_spatial_where"  `Quick (test_golden "sir_spatial_where");

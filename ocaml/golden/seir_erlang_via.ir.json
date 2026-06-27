@@ -1,0 +1,20 @@
+{"ir_version":"0.20","validated_by":"ocaml-compiler-v0.20","model":{"name":"seir_erlang_via","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"name":"S","kind":"integer"},
+{"name":"E_s1","kind":"integer"},
+{"name":"E_s2","kind":"integer"},
+{"name":"E_s3","kind":"integer"},
+{"name":"I","kind":"integer"},
+{"name":"R","kind":"integer"}
+],"transitions":[
+{"name":"infection","stoichiometry":[["S",-1],["E_s1",1]],"rate":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"pop":"I"}}},"right":{"pop_sum":["S","E_s1","E_s2","E_s3","I","R"]}}},"metadata":{"origin_kind":"transmission","source_compartment":"S","dest_compartment":"E_s1"},"rate_grad":{"beta":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"pop":"S"},"right":{"pop":"I"}}},"right":{"pop_sum":["S","E_s1","E_s2","E_s3","I","R"]}}},"right":{"bin_op":{"op":"mul","left":{"pop_sum":["S","E_s1","E_s2","E_s3","I","R"]},"right":{"pop_sum":["S","E_s1","E_s2","E_s3","I","R"]}}}}}}},
+{"name":"onset_stage_s1","stoichiometry":[["E_s1",-1],["E_s2",1]],"rate":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"const":3.0},"right":{"param":"sigma"}}},"right":{"pop":"E_s1"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"E_s1","dest_compartment":"E_s2"},"rate_grad":{"sigma":{"bin_op":{"op":"mul","left":{"const":3.0},"right":{"pop":"E_s1"}}}}},
+{"name":"onset_stage_s2","stoichiometry":[["E_s2",-1],["E_s3",1]],"rate":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"const":3.0},"right":{"param":"sigma"}}},"right":{"pop":"E_s2"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"E_s2","dest_compartment":"E_s3"},"rate_grad":{"sigma":{"bin_op":{"op":"mul","left":{"const":3.0},"right":{"pop":"E_s2"}}}}},
+{"name":"onset","stoichiometry":[["E_s3",-1],["I",1]],"rate":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"const":3.0},"right":{"param":"sigma"}}},"right":{"pop":"E_s3"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"E_s3","dest_compartment":"I"},"rate_grad":{"sigma":{"bin_op":{"op":"mul","left":{"const":3.0},"right":{"pop":"E_s3"}}}}},
+{"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"gamma":{"pop":"I"}}}
+],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[],"parameters":[
+{"name":"beta","value":{"mode":"estimated","bounds":[0.001,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
+{"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
+{"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null}
+],"initial_conditions":{"explicit":{"S":990.0,"E_s1":5.0,"I":5.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":160.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":160.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+{"name":"baseline","label":"default  (latent ≈ 5d)","params":{"beta":0.3,"sigma":0.2,"gamma":0.1},"enable":[],"disable":[],"t_end":160.0}
+],"model_structure":{"dimensions":[{"name":"__onset_stage","values":["s1","s2","s3"]}],"compartment_dims":{"S":[],"E":["__onset_stage"],"I":[],"R":[]},"base_compartments":["S","E","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]}}}

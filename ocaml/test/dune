@@ -35,12 +35,23 @@
  (modules test_contrasts)
  (libraries compiler ir alcotest yojson))
 
-; Phase-1 staged-residence `via` clause: parser + AST + the expansion
-; placeholder. Pure frontend — no IR/golden surface.
+; Staged-residence `via` clause: parser + AST surface (`@`-XOR-`via`, block /
+; inline forms). Erlang now lowers (Phase 2); only an unsupported law (e.g.
+; hyper_erlang) still hits the E243 diagnostic.
 (test
  (name test_via)
  (modules test_via)
  (libraries compiler ir alcotest))
+
+; Phase-2 staged-residence `via erlang(...)` lowering. The T1 anchor pins the
+; desugar against the trusted hand-written `seir_erlang.camdl` golden (IR-level,
+; modulo stage names); plus stage-rate, inflow/init redirect, bare-name summing,
+; two-staged-residences, and the validation E-codes.
+(test
+ (name test_via_lowering)
+ (modules test_via_lowering)
+ (libraries compiler ir alcotest yojson)
+ (deps (source_tree ../golden)))
 
 ; Cross-language calendar-time golden (gh#98). Reads ir/golden/caltime.tsv
 ; (the same file rust/crates/ir/tests/caltime_golden.rs reads) by resolving

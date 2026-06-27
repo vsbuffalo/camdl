@@ -176,6 +176,41 @@ type destination_form =
    lowering, not here; Phase 1 stores the call verbatim. *)
 type via_call = string * (string * expr) list
 
+(* A compile-time positive integer (the `stages` count of a staged residence).
+   The only way to build one is [pos_int_of_float], which rejects anything that
+   is not a positive whole-number literal — so a `Pos_int.t` in hand is a proof
+   that `stages` is a usable stage count, and no downstream code re-checks. This
+   is "parse, don't validate" at the via-spec boundary: the smart constructor is
+   the single seam where the invariant is established (staged-residence proposal
+   §3, "`stages` is a compile-time pos_int"). *)
+module Pos_int : sig
+  type t
+  val of_float : float -> (t, string) result   (* error message on failure *)
+  val to_int   : t -> int
+end = struct
+  type t = int
+  let of_float f =
+    if Float.is_integer f && f >= 1.0 then Ok (int_of_float f)
+    else if not (Float.is_integer f) then
+      Error (Printf.sprintf "must be a whole number, got %g" f)
+    else
+      Error (Printf.sprintf "must be at least 1, got %g" f)
+  let to_int t = t
+end
+
+(* The mean-or-rate of a staged residence: EXACTLY one is supplied. Encoding the
+   XOR as a sum type makes "both" and "neither" unrepresentable in the typed
+   spec — the validation that exactly one keyword is present happens once, at the
+   point that builds this value. `Mean τ` ⇒ per-stage rate `k/τ`; `Rate ρ` ⇒
+   per-stage rate `k·ρ`. Both are expressions and may reference parameters. *)
+type mean_spec = Mean of expr | Rate of expr
+
+(* A typed, validated dwell law (the EXPANDER's view of a `via_call`). Phase 2
+   ships the Erlang law only; `hyper_erlang` (a finite mixture, per-branch
+   destinations) is Phase 4 and is not representable here yet. *)
+type via_spec =
+  | Erlang of { stages : Pos_int.t; mean : mean_spec }
+
 (* A transition's dynamics: EITHER an ordinary `@ rate` (exponential, the rate
    IS the propensity) OR a `via law(...)` staged residence (the law supplies the
    per-stage rate). Never both, never neither — the `@`-XOR-`via` rule. Encoding

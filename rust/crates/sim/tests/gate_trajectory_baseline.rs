@@ -168,6 +168,12 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("seir_defines_patch", "chain_binomial", 0x35818731f63a2b8b),
     ("seir_erlang", "gillespie", 0x9678d01f75671b6f),
     ("seir_erlang", "chain_binomial", 0x08b695ddf690d3f0),
+    // seir_erlang_via: the `via erlang(...)` clause desugars to exactly
+    // seir_erlang's manual staged chain, so its trajectory is BYTE-IDENTICAL to
+    // seir_erlang under every backend (same hashes below) — an end-to-end
+    // confirmation that the staging lowering changes nothing dynamical.
+    ("seir_erlang_via", "gillespie", 0x9678d01f75671b6f),
+    ("seir_erlang_via", "chain_binomial", 0x08b695ddf690d3f0),
     ("seir_erlang_staged", "gillespie", 0xee741459747732f2),
     ("seir_erlang_staged", "chain_binomial", 0xd5463d6b91a7545d),
     ("seir_observations", "gillespie", 0x1512c82543641dbc),
@@ -231,6 +237,7 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("seir_defines_adj", "ode", 0xb6b63bd987b59e8c),
     ("seir_defines_patch", "ode", 0xdb957d113668b48e),
     ("seir_erlang", "ode", 0xaabb48fd40c23438),
+    ("seir_erlang_via", "ode", 0xaabb48fd40c23438),   // == seir_erlang (desugars identically)
     ("seir_erlang_staged", "ode", 0xe60a8e49be37e706),
     ("seir_observations", "ode", 0x93753fb7da6c81e5),
     ("seir_seasonal_patch", "ode", 0x3184c3472b16c420),
@@ -311,6 +318,7 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("seir_defines_adj", 0x34100c3629bb7053),
     ("seir_defines_patch", 0xcfaedfa885954f5f),
     ("seir_erlang", 0xd67553e482930e56),
+    ("seir_erlang_via", 0xd67553e482930e56),   // == seir_erlang (desugars identically)
     ("seir_erlang_staged", 0x9d71c13925516443),
     ("seir_observations", 0xd98853739e669231),
     ("seir_seasonal_importation", 0x674f33759aab5fb8),

@@ -782,6 +782,303 @@ let collect_declarations ctx decls =
   ctx.contrast_decls <- List.rev ctx.contrast_decls;
   ctx.orig_transitions <- ctx.transitions
 
+(* ── Staged-residence (`via`) lowering pre-pass ──────────────────────────────
+
+   A `via law(...)` transition desugars to EXACTLY the manual stratified-
+   `consecutive` staging a user writes today (the committed golden
+   `ocaml/golden/seir_erlang.camdl` is the target form). This pass runs on the
+   raw AST in [ctx] AFTER [collect_declarations] and BEFORE [resolve_dimensions]
+   / [check_declaration_names], so every downstream phase (stratification,
+   `consecutive` expansion, the bare-name `PopSum` rule, the require-full-index
+   stoichiometry rule, autodiff) sees ordinary compartments + transitions and
+   runs unchanged. `via` adds zero new IR algebra — it is a macro over existing
+   AST nodes (staged-residence proposal, 2026-06-26 §5).
+
+   Phase 2 ships the Erlang law, non-age only:
+   - Erlang only; `hyper_erlang` (Phase 4) and any unknown law → E243.
+   - Bare references to the staged source sum over stages for free (PopSum).
+     The age-stratified PARTIAL-index rewrite (`I[a]` in an age FOI) is deferred
+     (proposal §7); staging an already-stratified compartment is rejected here. *)
+
+(* Build the typed, validated [via_spec] from the raw [via_call]. Each failure
+   is a located diagnostic naming the transition; on the error path we return
+   [None] so the caller skips the rewrite (the compile aborts at phase end). *)
+let via_spec_of_call ctx (tr : transition_decl) ((law, args) : via_call)
+    : via_spec option =
+  let err ~code ~message ?hint () =
+    Diagnostics.error ctx.diags ~code
+      ~loc:(diag_loc_of_ast_ctx ctx tr.trloc) ~message ?hint ();
+    None
+  in
+  match law with
+  | "erlang" ->
+    (* Reject any keyword that is not `stages` / `mean` / `rate` — a `weight`
+       or a misspelling must not be silently dropped (no loose semantics). *)
+    let unknown =
+      List.filter (fun (k, _) ->
+        not (List.mem k [ "stages"; "mean"; "rate" ])) args
+    in
+    (match unknown with
+     | (k, _) :: _ ->
+       err ~code:"E247"
+         ~message:(Printf.sprintf
+           "transition '%s': erlang(...) has no keyword '%s'" tr.trname k)
+         ~hint:"erlang takes `stages` and exactly one of `mean` / `rate`" ()
+     | [] ->
+       (* stages: a positive-integer literal (a pos_int, checked at construction). *)
+       let stages_res =
+         match List.assoc_opt "stages" args with
+         | None ->
+           err ~code:"E244"
+             ~message:(Printf.sprintf
+               "transition '%s': erlang(...) requires `stages = <positive integer>`"
+               tr.trname)
+             ~hint:"e.g. erlang(stages = 3, mean = 7 'days)" ()
+         | Some (EConst f) ->
+           (match Pos_int.of_float f with
+            | Ok pi -> Some pi
+            | Error why ->
+              err ~code:"E244"
+                ~message:(Printf.sprintf
+                  "transition '%s': erlang `stages` %s" tr.trname why)
+                ~hint:"`stages` is the number of sub-stages (model structure), \
+                       a fixed positive integer — not a fittable parameter" ())
+         | Some _ ->
+           err ~code:"E244"
+             ~message:(Printf.sprintf
+               "transition '%s': erlang `stages` must be a positive-integer \
+                literal" tr.trname)
+             ~hint:"`stages` sets how many compartments exist; it cannot be a \
+                    parameter or an expression" ()
+       in
+       (* mean XOR rate: exactly one present. *)
+       let mean_res =
+         match List.assoc_opt "mean" args, List.assoc_opt "rate" args with
+         | Some m, None -> Some (Mean m)
+         | None, Some r -> Some (Rate r)
+         | Some _, Some _ ->
+           err ~code:"E245"
+             ~message:(Printf.sprintf
+               "transition '%s': erlang(...) sets both `mean` and `rate`; \
+                give exactly one" tr.trname)
+             ~hint:"`rate` is 1/`mean` — pick the one you have" ()
+         | None, None ->
+           err ~code:"E245"
+             ~message:(Printf.sprintf
+               "transition '%s': erlang(...) sets neither `mean` nor `rate`; \
+                give exactly one" tr.trname)
+             ~hint:"e.g. erlang(stages = 3, mean = 7 'days) or \
+                    erlang(stages = 3, rate = sigma)" ()
+       in
+       (match stages_res, mean_res with
+        | Some stages, Some mean -> Some (Erlang { stages; mean })
+        | _ -> None))
+  | _ ->
+    (* `hyper_erlang` (Phase 4) and any other law are not yet lowered. *)
+    err ~code:"E243"
+      ~message:(Printf.sprintf
+        "transition '%s': staged-residence `via %s(...)` is not yet supported"
+        tr.trname law)
+      ~hint:"Phase 2 ships `erlang(stages, mean | rate)`; `hyper_erlang` and \
+             other laws are not implemented yet — express the residence with \
+             manual sub-stage compartments for now" ()
+
+(* The single-exit invariant (proposal §3): a staged compartment must be drained
+   by EXACTLY ONE transition. A second draining transition (another `via`, or an
+   ordinary `@` exit racing with the dwell) is the competing-exit case (§7),
+   rejected with a diagnostic naming the compartment. A transition drains a
+   compartment when that compartment is a source with no matching destination
+   appearance (so a within-compartment self-loop does not count). *)
+let drains_compartment (tr : transition_decl) (comp : string) : bool =
+  let is_src = List.exists (fun (c, _) -> c = comp) tr.trsrc in
+  let is_dst = match tr.trdst with
+    | DstSum refs        -> List.exists (fun (c, _) -> c = comp) refs
+    | DstBranch branches -> List.exists (fun ((c, _), _) -> c = comp) branches
+  in
+  is_src && not is_dst
+
+(* Rewrite the destination form so any reference to [from_comp] (with no indices)
+   redirects to `from_comp[stage1]` — the only legal target once the source is
+   staged (the require-full-index rule rejects a bare staged destination). *)
+let redirect_dest_to_stage1 (dst : destination_form) (from_comp : string)
+    (stage1 : string) : destination_form =
+  let redirect ((c, items) : stoich_ref) : stoich_ref =
+    if c = from_comp && items = [] then
+      (c, [ IPosn (EIdent (stage1, dummy_loc)) ])
+    else (c, items)
+  in
+  match dst with
+  | DstSum refs        -> DstSum (List.map redirect refs)
+  | DstBranch branches -> DstBranch (List.map (fun (r, w) -> (redirect r, w)) branches)
+
+(* Lower every `via erlang(...)` transition in [ctx] into the manual staged form.
+   Mutates ctx.dim_decls / ctx.stratifies / ctx.transitions / ctx.init_entries.
+   The original `via` transition is replaced by the consecutive chain + exit, so
+   no `via` transition survives to reach [expand_transitions_counted] (its E243
+   placeholder becomes unreachable). *)
+let lower_via_transitions ctx =
+  (* Collect the `via` transitions and their typed specs first; bail out early
+     if there are none (the common, golden-neutral path: zero AST touched). A
+     spec that fails validation carries [None]: the transition is still REMOVED
+     (so it never reaches E243), but no chain is synthesized — a diagnostic has
+     already fired and the compile aborts at phase end. *)
+  let via_trs =
+    List.filter_map (fun tr ->
+      match tr.trdyn with
+      | Rate _   -> None
+      | Via call -> Some (tr, via_spec_of_call ctx tr call)
+    ) ctx.transitions
+  in
+  if via_trs = [] then ()
+  else begin
+    (* Validate each `via` transition's STRUCTURE: a single, real, NON-stratified
+       source (the partial-index rewrite for already-stratified sources is
+       deferred, proposal §7), drained by exactly this one transition (single-
+       exit, §3). Returns whether it is structurally well-formed; every problem
+       surfaces (a diagnostic fires) even on a transition we then skip. We only
+       SYNTHESIZE the chain for transitions that pass BOTH spec and structure —
+       so a rejected `via` produces just its own diagnostic, never a cascade of
+       follow-on E100/E272/E277 noise from a half-applied stratification. *)
+    let structurally_ok (tr : transition_decl) : bool =
+      let loc = diag_loc_of_ast_ctx ctx tr.trloc in
+      match tr.trsrc with
+      | [ (src, _) ] ->
+        (* A stratify decl applies to `src` when it has no `only` filter, or
+           names `src` in it. *)
+        let already_stratified =
+          List.exists (fun (sd : stratify_decl) ->
+            match sd.sonly with None -> true | Some only -> List.mem src only)
+            ctx.stratifies
+        in
+        if already_stratified then begin
+          Diagnostics.error ctx.diags ~code:"E248" ~loc
+            ~message:(Printf.sprintf
+              "transition '%s': `via` on the already-stratified compartment \
+               '%s' is not supported yet" tr.trname src)
+            ~hint:"staging a stratified compartment (age × stage) is a later \
+                   sub-phase; for now express it with manual sub-stage \
+                   compartments"
+            ();
+          false
+        end else begin
+          (* Single-exit: no OTHER transition may drain this source. *)
+          let other_drainers =
+            List.filter (fun (other : transition_decl) ->
+              other.trname <> tr.trname && drains_compartment other src)
+              ctx.transitions
+          in
+          match other_drainers with
+          | other :: _ ->
+            Diagnostics.error ctx.diags ~code:"E246" ~loc
+              ~message:(Printf.sprintf
+                "compartment '%s' has a staged residence (`via` on '%s') but \
+                 is also drained by transition '%s'" src tr.trname other.trname)
+              ~hint:"a staged compartment must be drained by exactly one `via` \
+                     transition; a second exit racing with the dwell is the \
+                     competing-exit case — express it with manual per-stage \
+                     compartments for now"
+              ();
+            false
+          | [] -> true
+        end
+      | _ ->
+        Diagnostics.error ctx.diags ~code:"E249" ~loc
+          ~message:(Printf.sprintf
+            "transition '%s': `via` requires a single source compartment to \
+             stage" tr.trname)
+          ~hint:"a staged residence stages one compartment; write one source"
+          ();
+        false
+    in
+    (* The transitions we actually lower: both spec-valid and structure-valid.
+       Compute the structural check for every via transition (so all errors
+       surface) but keep only the fully-valid ones for synthesis. *)
+    let to_lower =
+      List.filter_map (fun (tr, spec) ->
+        let struct_ok = structurally_ok tr in
+        match spec with
+        | Some s when struct_ok -> Some (tr, s)
+        | _ -> None
+      ) via_trs
+    in
+
+    (* For each well-formed `via erlang`, synthesize the stage dimension, the
+       stratify entry, the consecutive chain + exit, and redirect inflow/init. We
+       build the SAME AST a user writes manually, so all downstream machinery is
+       identical. Only the fully-valid transitions ([to_lower]) are synthesized;
+       a rejected `via` is removed below without a chain. *)
+    List.iter (fun (tr, spec) ->
+      match tr.trsrc, spec with
+      | [ (src, _) ], Erlang { stages; mean } ->
+        let k = Pos_int.to_int stages in
+        (* Stage levels: a reserved dimension `__<trname>_stage = [s1..sk]`. The
+           `__` prefix keeps it out of the user namespace (collision-free). *)
+        let dim_name = Printf.sprintf "__%s_stage" tr.trname in
+        let stage_levels = List.init k (fun i -> Printf.sprintf "s%d" (i + 1)) in
+        let stage1 = List.hd stage_levels in
+        let stage_last = List.nth stage_levels (k - 1) in
+        (* Per-stage rate COEFFICIENT: `Rate ρ ⇒ k·ρ`, `Mean τ ⇒ k/τ`. *)
+        let k_const = EConst (float_of_int k) in
+        let coeff = match mean with
+          | Rate r -> EBinOp (Mul, k_const, r)
+          | Mean t -> EBinOp (Div, k_const, t)
+        in
+        (* Per-stage propensity `coeff * E[stage]`, where the stage index is a
+           bound var (the chain) or a concrete level (the exit). Matches the
+           hand-written `3 * sigma * E[s]` AST exactly. *)
+        let stage_pop idx_item = EIndex (src, [ idx_item ], dummy_loc) in
+        let stage_rate idx_item = EBinOp (Mul, coeff, stage_pop idx_item) in
+
+        (* 1. Register the stage dimension (picked up by resolve_dimensions). *)
+        ctx.dim_decls <- ctx.dim_decls @ [
+          { dename = dim_name; desrc = DInline stage_levels; dedoc = None } ];
+        (* 2. Stratify the source compartment by the stage dimension. *)
+        ctx.stratifies <- ctx.stratifies @ [ { sdim = dim_name; sonly = Some [ src ] } ];
+
+        (* 3. The consecutive chain: `E[s] --> E[s_next] @ coeff * E[s]`, and the
+              exit `E[last] --> <dst> @ coeff * E[last]`. The chain reuses the
+              existing IConsec machinery; the exit keeps the via transition's
+              name and destination. *)
+        let chain_tr = {
+          trname    = Printf.sprintf "%s_stage" tr.trname;
+          trindices = [ IConsec ("s", "s_next", dim_name) ];
+          trsrc     = [ (src, [ IPosn (EIdent ("s", dummy_loc)) ]) ];
+          trdst     = DstSum [ (src, [ IPosn (EIdent ("s_next", dummy_loc)) ]) ];
+          trdyn     = Rate (stage_rate (IPosn (EIdent ("s", dummy_loc))));
+          trguard   = None;
+          trlineage = false;
+          trdoc     = None;
+          trloc     = tr.trloc;
+        } in
+        let last_item = IPosn (EIdent (stage_last, dummy_loc)) in
+        let exit_tr = {
+          tr with
+          trsrc = [ (src, [ last_item ]) ];
+          trdyn = Rate (stage_rate last_item);
+        } in
+        (* 4. Replace the original `via` transition with [chain; exit], and
+              redirect every OTHER transition whose destination is the staged
+              source to land in stage 1. *)
+        ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
+          if t.trname = tr.trname then [ chain_tr; exit_tr ]
+          else [ { t with trdst = redirect_dest_to_stage1 t.trdst src stage1 } ]
+        ) ctx.transitions;
+        (* 5. Redirect `init { E = … }` (bare, no index) to `E[stage1]`. *)
+        ctx.init_entries <- List.map (fun (ie : init_entry) ->
+          if ie.icomp = src && ie.iindices = [] && ie.ibindings = [] then
+            { ie with iindices = [ IPosn (EIdent (stage1, dummy_loc)) ] }
+          else ie
+        ) ctx.init_entries
+      | _ -> ()  (* unreachable: to_lower only holds single-source Erlang specs *)
+    ) to_lower;
+    (* Drop any `via` transition that survived (a failed spec, or a structurally
+       rejected source) so none reaches [expand_transitions_counted]'s E243
+       placeholder — its diagnostic already fired and the compile aborts at
+       phase end. *)
+    ctx.transitions <- List.filter (fun (t : transition_decl) ->
+      match t.trdyn with Via _ -> false | Rate _ -> true) ctx.transitions
+  end
+
 (* ── Dimensions pass ─────────────────────────────────────────────────────── *)
 
 (** Read unique values from a named column in a file, preserving first-occurrence order.
@@ -3003,14 +3300,12 @@ let expand_transitions_counted ctx =
       if not pass_guard then (incr filtered; incr tr_filtered; [])
       else begin
         let src_names = List.map (resolve_stoich_ref ctx env) tr.trsrc in
-        (* A `via law(...)` staged-residence transition has no `@ rate`: its
-           rate is synthesized by the Phase-2 lowering (stage the source, emit
-           the chain, scale each per-stage rate). That lowering is not yet
-           implemented, so a `via` transition reaching expansion is a clean,
-           located "not yet implemented" error (E243) — NOT a crash and NOT a
-           silent rate-0 transition. We substitute a placeholder rate so the
-           rest of expansion runs and reports any further diagnostics; the E243
-           blocks a successful compile. *)
+        (* By here a `via` transition has been desugared by [lower_via_transitions]
+           (run before this pass), so the dynamics is always an ordinary `@ rate`.
+           A surviving `Via` is a compiler invariant violation, not user error —
+           the lowering should have rewritten or removed it. A located E243 (a
+           hard error) still blocks the compile rather than emitting a silent
+           rate-0 transition; reaching it means the pre-pass missed a case. *)
         let rate_expr =
           match tr.trdyn with
           | Rate e -> e
@@ -3019,11 +3314,10 @@ let expand_transitions_counted ctx =
               ~code:"E243"
               ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
               ~message:(Printf.sprintf
-                "transition '%s': staged-residence `via %s(...)` lowering is \
-                 not yet implemented" tr.trname law_name)
-              ~hint:"the `via` clause is parsed but its compartment-staging \
-                     lowering has not landed yet; express the staged residence \
-                     manually with sub-stage compartments for now"
+                "internal error: transition '%s' still carries `via %s(...)` \
+                 after staged-residence lowering" tr.trname law_name)
+              ~hint:"this is a compiler bug — the `via` lowering pre-pass should \
+                     have rewritten this transition; please report it"
               ();
             EConst 0.0
         in
@@ -7333,6 +7627,15 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
     : Ir.model * context * model_summary =
   let ctx = empty_context ~source_dir ~filename () in
   collect_declarations ctx decls;
+  (* Staged-residence (`via`) lowering — an AST→AST pre-pass that rewrites every
+     `via erlang(...)` transition into the manual stratified-`consecutive` form
+     (stage the source, emit the chain + exit, redirect inflow/init, scale the
+     rate). Runs BEFORE resolve_dimensions / check_declaration_names so the
+     synthesized stage dimension, stratify entry, and chain transitions go
+     through the ordinary stratification + consecutive machinery unchanged. After
+     this pass no `via` transition survives (the E243 placeholder in
+     [expand_transitions_counted] is unreachable). *)
+  lower_via_transitions ctx;
   (* M14 (gh#98): validate origin date up front, before origin_rata_die /
      date() conversion derives values from it. *)
   check_origin ctx;

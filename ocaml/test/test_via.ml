@@ -1,10 +1,10 @@
-(* Phase-1 staged-residence `via` clause: parser + AST tests.
+(* Staged-residence `via` clause: parser + AST surface tests.
 
-   Phase 1 is pure frontend — the `via law(...)` clause parses into a
-   `trdyn = Via via_call`, the `@`-XOR-`via` rule is enforced, and a `via`
-   transition reaching expansion produces a clean "not yet implemented"
-   diagnostic (E243), never a crash or a silent rate-0 transition. No IR /
-   Rust / golden change rides in this phase. *)
+   The `via law(...)` clause parses into a `trdyn = Via via_call` and the
+   `@`-XOR-`via` rule is enforced (both / neither rejected). A well-formed
+   `via erlang(...)` lowers in Phase 2 (its IR-level desugar is pinned by
+   test_via_lowering.ml); an unsupported law (e.g. `hyper_erlang`, Phase 4) is
+   still rejected with a clean located E243. *)
 
 (* Disable dimcheck — these tests exercise parse + AST + the expansion
    placeholder, not dimensional analysis. *)
@@ -145,24 +145,28 @@ let test_block_both_rate_and_via_rejected () =
   in
   compile_expect_error_code ~code:"E112" ~contains:"onset" src
 
-(* ── 4. a `via` transition compiled end-to-end hits the clean E243 ──────── *)
+(* ── 4. a `via erlang(...)` transition now LOWERS (Phase 2) ─────────────── *)
 
-let test_via_compile_not_yet_implemented () =
+(* The Phase-1 E243 "not yet implemented" placeholder is gone: a well-formed
+   `via erlang(...)` now desugars to the staged form and compiles. (The
+   IR-level desugar correctness is pinned by test_via_lowering.ml.) *)
+let test_via_erlang_now_lowers () =
   let src =
     model_with_transition
       "onset : E --> I via erlang(stages = 3, mean = 7 'days)"
   in
-  (* Must be a clean located E243, NOT a crash / failwith / rate-0 misbehavior. *)
-  compile_expect_error_code ~code:"E243" ~contains:"onset" src
+  match Compiler.compile ~name:"test_via" src with
+  | Ok _    -> ()
+  | Error e -> Alcotest.failf "via erlang should lower in Phase 2, got: %s" e
 
-(* The error message must name the not-yet-implemented feature so the user
-   knows it parsed but cannot lower yet. *)
-let test_via_e288_mentions_via () =
+(* E243 survives, repurposed: an UNSUPPORTED law (`hyper_erlang`, Phase 4) is
+   still rejected with a clean located diagnostic naming the transition. *)
+let test_via_unsupported_law_rejected () =
   let src =
     model_with_transition
-      "onset : E --> I via erlang(stages = 3, mean = 7 'days)"
+      "onset : E --> I via hyper_erlang(stages = 3, mean = 7 'days)"
   in
-  compile_expect_error_code ~code:"E243" ~contains:"not yet implemented" src
+  compile_expect_error_code ~code:"E243" ~contains:"not yet supported" src
 
 (* ── golden-neutrality smoke: a plain `@ rate` model still parses to Rate ── *)
 
@@ -191,8 +195,8 @@ let () =
             test_block_neither_rate_nor_via_rejected;
           Alcotest.test_case "block both rate and via rejected (E112)" `Quick
             test_block_both_rate_and_via_rejected ] );
-      ( "lowering-placeholder",
-        [ Alcotest.test_case "via compile → E243 not yet implemented" `Quick
-            test_via_compile_not_yet_implemented;
-          Alcotest.test_case "E243 message names via / not yet implemented"
-            `Quick test_via_e288_mentions_via ] ) ]
+      ( "lowering",
+        [ Alcotest.test_case "via erlang now lowers (Phase 2)" `Quick
+            test_via_erlang_now_lowers;
+          Alcotest.test_case "unsupported law (hyper_erlang) → E243" `Quick
+            test_via_unsupported_law_rejected ] ) ]
