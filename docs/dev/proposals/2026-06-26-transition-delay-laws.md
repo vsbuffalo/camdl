@@ -19,7 +19,7 @@ ways that map onto a small set of distributions:
 
 | Disease             | Dwell time                                                      | Shape                                      | Law                                                                         |
 | ------------------- | --------------------------------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------- |
-| Malaria (Garki/DMT) | human incubation, liver→patency (~fixed 15 d)                   | deterministic                              | `fixed`                                                                     |
+| Malaria (Garki/DMT) | human incubation, liver→patency (~fixed 15 d)                   | deterministic                              | high-`k` `erlang` (interim); exact = conveyor (deferred §7)                 |
 | Malaria             | gametocyte / infectious period                                  | peaked                                     | `erlang`                                                                    |
 | Polio               | incubation → paralysis onset                                    | gamma                                      | `erlang`                                                                    |
 | Polio               | shedding: weeks (typical) vs years (immunodeficient iVDPV)      | bimodal, one endpoint                      | `hyper_erlang`                                                              |
@@ -89,6 +89,19 @@ staged residence (the law supplies the rate, `k/τ` per stage). This is the cris
 resolution of the `@`-ambiguity that dogged the earlier framing: there is no
 "entry force vs residence rate" confusion because a `via` transition has no `@`.
 The force that _fills_ the compartment lives on a separate, ordinary transition.
+The block form mirrors the existing brace body —
+`onset : E --> I { via =
+erlang(...) }` — with `rate` and `via` mutually
+exclusive.
+
+**Single-exit invariant.** A staged compartment must be drained by exactly one
+`via` transition (which may itself branch via `hyper_erlang` — that is one
+transition with multiple endpoints, decided at entry). A staged compartment with
+a _second_ draining transition — another `via`, or an ordinary `@` exit racing
+with the dwell — is the competing-exit case (§7), rejected in v1 with a
+diagnostic that names the compartment and points to the manual per-stage form.
+This keeps the residence law unambiguous: one compartment, one dwell
+distribution.
 
 A worked SEIR with non-exponential latent **and** infectious periods:
 
@@ -149,7 +162,7 @@ and via_call = string * (string * expr) list
 type via_spec =
   | Erlang      of { stages : pos_int; mean : mean_spec }
   | HyperErlang of { branches : hyper_branch list }
-  | Fixed       of { duration : expr; precision : pos_int option }   (* → high-k Erlang, §4 *)
+  (* deferred: Coxian, ApproxGamma, Fixed (conveyor) — §4, §7 *)
 
 and hyper_branch = {
   weight : expr option;          (* None on the LAST branch ⇒ 1 − Σ others *)
@@ -167,7 +180,7 @@ and mean_spec = Mean of expr | Rate of expr   (* exactly one — encodes the XOR
 
 ## 4. The laws
 
-Three laws ship in the first push; they cover the disease table in §1.
+Two laws ship in the first push; they cover the disease table in §1.
 
 **`erlang(stages, mean | rate)`** — the workhorse. Integer-shape gamma. Every
 unimodal latent/incubation/infectious period. `stages = 1` is the ordinary
@@ -176,11 +189,16 @@ is the point of the `k` knob).
 
 **`hyper_erlang(branch(...), …)`** — a finite mixture of Erlangs, branched at
 entry. Each `branch(label, weight, stages, mean | rate, to?)` is a
-self-contained record (no fragile parallel lists). The mixture covers two shapes
-the diseases need:
+self-contained record (no fragile parallel lists). The destination convention:
+the transition's `--> TO` is the default endpoint for every branch; a branch's
+`to` overrides it. So when all branches share an endpoint, write it once on the
+arrow and omit per-branch `to`; when they differ, give each branch a `to` and
+the transition needs no arrow target (a branch with neither `to` nor a
+transition target is a compile error). The mixture covers two shapes the
+diseases need:
 
 - **Same endpoint, different durations** (polio shedding — typical vs
-  prolonged):
+  prolonged): the shared `--> R` is the endpoint.
 
   ```camdl
   clearance : I --> R via hyper_erlang(
@@ -189,8 +207,8 @@ the diseases need:
   )
   ```
 
-- **Different endpoints + durations** (Ebola — fatal vs recover, with `to`). The
-  branches carry destinations, so the transition has no single arrow target:
+- **Different endpoints + durations** (Ebola — fatal vs recover): each branch
+  carries its own `to`, so the transition has no arrow target.
 
   ```camdl
   outcome : I via hyper_erlang(
@@ -208,19 +226,29 @@ the diseases need:
   is implicit (`1 − Σ others`), so the mixture is normalized by construction and
   a _fitted_ weight is always valid.
 
-**`fixed(τ)`** — a near-deterministic delay (malaria incubation; fixed
-treatment/quarantine windows). The Erlang chain cannot be exactly deterministic
-(CV `1/√k`), so v1 lowers `fixed(τ)` to a high-`k` Erlang, with `k` chosen for a
-documented residual CV (default targeting CV ≈ 0.1; `fixed(τ, precision = k)` to
-override). **It is honestly an approximation** — the diagnostic and docs say so
-— and an exact discrete conveyor is a deferred backend (§7).
+**Deferred, with reasons:**
 
-**Deferred, with reasons:** `coxian` / general phase-type (no standard model
-among these four needs unequal-rate chains; Erlang + hyper-Erlang cover them);
-`approx_gamma` non-integer shape (round to the nearest Erlang — standard
-practice); the exact conveyor for `fixed`; and **competing exits during a
-residence** (TB's slow reactivation arm; death-at-constant-hazard throughout an
-infectious period) — §7.
+- **`fixed(τ)` — a deterministic delay — is deferred to the discrete conveyor,
+  not shipped as a phase-type law.** A phase-type chain cannot be exactly
+  deterministic (CV `1/√k`), and a _near_-deterministic delay needs
+  impractically many stages (CV 0.1 ⇒ `k = 100`, multiplied by every stratum).
+  Worse, a `fixed` law that secretly lowered to a high-`k` Erlang would
+  misrepresent the very model that motivates it: the Garki/DMT incubation is a
+  true **delay-line** (a conveyor), which is exact, not a peaked Erlang. So the
+  honest realization is a discrete shift-register conveyor (a separate,
+  discrete-time backend), and that is where a named `fixed` belongs. In v1, a
+  modeller who wants a near-deterministic delay writes a high-`k` `erlang`
+  explicitly, choosing `k` against the visible CV `1/√k` / compartment-count
+  tradeoff.
+- `coxian` / general phase-type — no standard model among these four needs
+  unequal-rate chains; Erlang + hyper-Erlang cover them.
+- `approx_gamma` (non-integer shape) — round to the nearest Erlang (standard
+  practice); a fittable continuous shape needs the deferred phase-type
+  machinery.
+- **Competing exits during a residence** — a hazard that races with the dwell
+  throughout (TB's slow reactivation arm; death at a constant hazard during an
+  infectious period). This is distinct from `hyper_erlang`'s branch-at-entry and
+  is reserved (§7).
 
 ## 5. Lowering
 
@@ -248,7 +276,6 @@ compartment becomes a `DstBranch` into each branch's first stage
 inflow`), and each branch is its own chain exiting to its own `to`.
 (`DstBranch` already lowers a weighted multi-destination transition,
 `expander.ml:3043` — only the weighting is reused; the chain synthesis is new.)
-`fixed` lowers to `erlang` with the chosen `k`.
 
 Because the lowered form is ordinary compartments + transitions, the engine, all
 three backends, and the source-to-source autodiff are untouched — `via` adds
@@ -280,17 +307,18 @@ Continuous-_shape_ fitting (non-integer gamma) is what the deferred
 
 ## 7. Interactions and scope boundaries
 
-- **Stratification (Phase 0 prerequisite).** Staging is a sub-stratification, so
-  a staged _and_ age/space-stratified compartment (`I` with dims `[age, stage]`)
-  must support partial indexing — `I[a]` summing over the stage dimension. That
-  "omit a dimension → sum over it" rule is **specified** (spec §5.1/§5.3, with
-  `E[a]` over `latent_stage` as the literal example) but **unimplemented**
-  (`expander.ml:2161` concatenates only the supplied index → E100; the
-  prevalence path emits a dangling `CurrentPop` caught only at Rust runtime).
-  Every realistic model is stratified, so this is a **prerequisite**, not an
-  edge case — and the fix is bounded (teach the `EIndex` compartment branch and
-  `prevalence_projection` to consult `comp_dims` and emit `PopSum`/
-  `CurrentPopSum` over the omitted dims), and it retires a live doc-vs-code gap.
+- **Stratification — depends on a separately-tracked bug fix.** Staging is a
+  sub-stratification, so a staged _and_ age/space-stratified compartment (`I`
+  with dims `[age, stage]`) must support partial indexing — `I[a]` summing over
+  the stage dimension. That "omit a dimension → sum over it" rule is
+  **specified** (spec §5.1/§5.3, with `E[a]` over `latent_stage` as the literal
+  example) but **unimplemented** (`expander.ml:2161` concatenates only the
+  supplied index → E100; the prevalence path emits a dangling `CurrentPop`
+  caught only at Rust runtime). This is a pre-existing doc-vs-code bug,
+  **tracked and fixed separately**; every realistic (stratified) staged model
+  depends on it, so this feature lands _after_ that fix. The fix is bounded —
+  teach the `EIndex` compartment branch and `prevalence_projection` to consult
+  `comp_dims` and emit `PopSum` / `CurrentPopSum` over the omitted dims.
 - **`balance {}`.** A bare staged name sums correctly in a conservation
   expression (same resolver), so `balance` composes — no hard error needed (this
   is a genuine improvement over the hidden-pipeline design, which would have
@@ -318,10 +346,12 @@ its tier green. The per-law distributional validations live in the **expensive
 `tests/external/` tier** (CI + `make test`, skipped by `make test-fast`) — the
 same tier as the `he2010` pomp-oracle.
 
-**T0 — partial-dimension summing** (the Phase-0 prerequisite). `I[a]` over a
-compartment with `[age, stage]` (or any two dims) sums the omitted dimension in
-rates, observations, and balance; the dangling-`CurrentPop` runtime error is
-gone; the spec §5.3 worked example compiles and simulates.
+**T0 — partial-dimension summing** (the separately-tracked prerequisite bug;
+these are its acceptance tests, not part of this feature's own work). `I[a]`
+over a compartment with `[age, stage]` (or any two dims) sums the omitted
+dimension in rates, observations, and balance; the dangling-`CurrentPop` runtime
+error is gone; the spec §5.3 worked example compiles and simulates. The
+staged-residence tiers below assume this has landed.
 
 **T1 — lowering correctness (IR-level).** Anchor:
 `onset : E --> I via
@@ -343,8 +373,7 @@ committed band (exact `scipy.stats.gamma(a=k, scale=τ/k)` / R
 `pgamma(shape=k, rate=k/τ)` call committed, with the `scale = τ/k` footgun
 noted). `hyper_erlang`: the mixture matches `Σ wᵢ·Erlang(kᵢ, kᵢ/τᵢ)` in mean,
 variance, survival, and — for the per-destination case — the **branch split
-fractions** (Ebola CFR). `fixed`: the realized CV matches `1/√k` for the chosen
-`k`. One fixture per law.
+fractions** (Ebola CFR). One fixture per law.
 
 **T3 — backend × method coverage.** The same staged model runs on all three
 forward backends (stochastic mean → ODE field) and under each inference method
@@ -356,10 +385,10 @@ and a recovery test (simulate known `mean` + `weight`, fit with IF2 and
 PGAS+NUTS, recover within the interval — gradients present and correct, on both
 paths).
 
-**T5 — validation & error quality.** `mean` XOR `rate`; `via` ⊻ `@`;
+**T5 — validation & error quality.** `mean` XOR `rate`; `via` ⊻ `@`; the
+single-exit invariant (a second draining exit → competing-exit rejection);
 non-duration `mean` / non-rate `rate` / non-positive-integer `stages`; a weight
-on the last hyper-Erlang branch; `fixed` precision; each a distinct E-code
-naming the transition.
+on the last hyper-Erlang branch; each a distinct E-code naming the transition.
 
 **T6 — stratified, observed, multi-via, regression.** A staged **and**
 age-stratified `I` (the realistic case, exercising T0): `k × n_age`
@@ -370,12 +399,13 @@ Spec doc-tests compile.
 
 ## 9. Phasing and implementation plan
 
-Each phase lands with its test tier green before the next.
+**Prerequisite (tracked and landed separately, not part of this feature's
+work):** the partial-dimension-summing bug fix (spec §5.1/§5.3 omit-a-dimension
+rule in the `EIndex` compartment branch and `prevalence_projection`) → **T0**.
+This feature builds on it; the phases below assume it is in.
 
-0. **Partial-dimension summing.** Implement the spec §5.1/§5.3 omit-a-dimension
-   rule in the `EIndex` compartment branch and `prevalence_projection` — a
-   bounded fix that staged∧stratified models require and that retires a
-   doc-vs-code gap. → **T0**. (Prerequisite for every realistic staged model.)
+Each phase then lands with its test tier green before the next.
+
 1. **AST + parser.** `trvia : via_call option`, the `via law(...)` clause, the
    `via` ⊻ `@` rule, the `via` keyword. Parser stores the raw call. → **T6**
    (parse, round-trip, golden-neutrality).
@@ -383,14 +413,15 @@ Each phase lands with its test tier green before the next.
    sub-dimension, emit the chain + exit, redirect inflow to stage 1, scale the
    rate; build the typed `via_spec` with `pos_int` + `mean` XOR `rate` +
    collision checks. → **T1**, then **T2/T3**, **T4**.
-3. **Validation + `fixed`.** Dimchecks, `via` ⊻ `@`, `fixed` → high-`k` Erlang
-   with documented CV. → **T5**.
+3. **Validation.** Dimchecks; `mean` XOR `rate`; `via` ⊻ `@`; the single-exit
+   invariant; stage-name collision. → **T5**.
 4. **Hyper-Erlang.** Branched entry (`DstBranch` weighting) into parallel
    chains; per-branch `to`; last-weight-implicit normalization. → **T1/T2/T5**
    repeated, incl. the Ebola per-destination and CFR-split cases.
 5. **Docs.** Spec §5 prose + the `via` examples (the T6 doc-tests); cheatsheet.
 
 Deferred follow-ups (named, not open questions): `coxian`; `approx_gamma`
-(continuous-shape fitting); the exact discrete conveyor for `fixed`; competing
-exits during a residence (TB reactivation; death-during-infectiousness); and the
-measurement-layer reporting-delay convolution (`DelayedFlow`).
+(continuous-shape fitting); the exact discrete conveyor for `fixed` (the true
+deterministic-delay realization); competing exits during a residence (TB
+reactivation; death-during-infectiousness); and the measurement-layer
+reporting-delay convolution (`DelayedFlow`).
