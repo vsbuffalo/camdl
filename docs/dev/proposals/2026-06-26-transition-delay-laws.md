@@ -7,13 +7,12 @@ this proposal
 ## 1. The problem
 
 A compartment's residence time in camdl is exponential: while in `A`, an
-individual leaves at the total exit hazard, memoryless, coefficient of variation
-
-1. Real infectious-disease dwell times are not. The number of "stages" in a
-   latent or infectious period materially changes epidemic speed, peak timing,
-   control thresholds, and the inferred reproduction number from the same data
-   (Wearing, Rohani & Keeling 2005, _PLoS Med_ 2:e174; Lloyd 2001, _Proc. R.
-   Soc. B_ 268:985).
+individual leaves at the total exit hazard — memoryless, with coefficient of
+variation one. Real infectious-disease dwell times are not. The number of
+"stages" in a latent or infectious period materially changes epidemic speed,
+peak timing, control thresholds, and the inferred reproduction number from the
+same data (Wearing, Rohani & Keeling 2005, _PLoS Med_ 2:e174; Lloyd 2001, _Proc.
+R. Soc. B_ 268:985).
 
 The four diseases this is built for each break the exponential assumption, in
 ways that map onto a small set of distributions:
