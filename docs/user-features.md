@@ -367,8 +367,8 @@ a fabricated time. Because they are derived reports, adding or changing a
 
 ## Inspect without simulating
 
-`camdl dev eval` evaluates time-dependent expressions at a grid without running a
-simulation. Useful for verifying forcing curves, covariates, and parameter
+`camdl dev eval` evaluates time-dependent expressions at a grid without running
+a simulation. Useful for verifying forcing curves, covariates, and parameter
 formulas:
 
 ```bash

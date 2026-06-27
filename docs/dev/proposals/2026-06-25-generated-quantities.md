@@ -1,19 +1,15 @@
 # Generated quantities
 
 Status: **Implemented (v1.1)** — latent-state quantities and the simulated
-observation source, emitted by `fit predict` and `simulate`. v1 landed across
-`b4afe561` (IR types + schema, `ir/VERSION` 0.20), `5ec3f0a5` (validate
-legality), `6c9c2c12` (OCaml frontend), `609d5ac5` (sim evaluator), `3cde2c36`
-(fit predict output), `54cdc037` (simulate output + shared rendering). v1.1 (the
-`observations.<stream>` reduction source) landed across `7b0511eb` (IR variant +
-evaluator), `d9dfb553` (OCaml frontend), `d52d54ac` (cli `y_sim`
-materialization + bare-series `E289`). The standalone/disk command, windowed /
-cross-stratum / flow reductions, and the dim→unit renderer remain the staged
-follow-ups below. Supersedes: `2026-06-04-output-trajectory-customization.md`
-Phase 2; splits the quantities half out of
-`2026-06-24-generated-quantities-and-counterfactuals.md` (the counterfactual
-half is `2026-06-25-counterfactual-contrasts.md`). IR contract: one additive
-optional field on `Model`; `ir/VERSION` 0.19 → 0.20.
+observation source (`observations.<stream>`), emitted by `fit predict` and
+`simulate`, with a committed showcase golden (`tests/fixtures/quantities/`)
+pinning both the IR shape and the output values. The standalone/disk command,
+windowed / cross-stratum / flow reductions, and the dim→unit renderer remain the
+staged follow-ups below. Supersedes:
+`2026-06-04-output-trajectory-customization.md` Phase 2; splits the quantities
+half out of `2026-06-24-generated-quantities-and-counterfactuals.md` (the
+counterfactual half is `2026-06-25-counterfactual-contrasts.md`). IR contract:
+one additive optional field on `Model`; `ir/VERSION` 0.19 → 0.20.
 
 ## Summary
 
