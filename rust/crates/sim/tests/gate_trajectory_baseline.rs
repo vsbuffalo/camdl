@@ -154,6 +154,13 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("seir_age_let_projection", "chain_binomial", 0x1ea29e011a7eba67),
     ("seir_age_table_rates", "gillespie", 0xaefb0972f1798fc5),
     ("seir_age_table_rates", "chain_binomial", 0x87d0504d39dc8044),
+    // Age-stratified SEIR with an Erlang-3 INFECTIOUS period via the `via`
+    // clause (Phase 2b): `I` is staged AND age-stratified, the per-age FOI's
+    // `I[b]` is rewritten to sum over stages. Unlike seir_erlang_via, this has
+    // no manually-staged twin in the corpus, so its hashes stand on their own
+    // (the T6 anchor test pins the via↔manual IR isomorphism instead).
+    ("seir_age_erlang_via", "gillespie", 0x656107884de56623),
+    ("seir_age_erlang_via", "chain_binomial", 0xca5ff916a5280453),
     // Joint patch×age stratification (4 patches × 3 ages = 48 compartments,
     // 120 transitions): the only golden exercising the 2-axis cross-product
     // expander + cross-dimension transitions (aging within patch, spatial FOI
@@ -234,6 +241,7 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("seir_age_incidence_sum", "ode", 0x3e30c77d579b38a7),
     ("seir_age_let_projection", "ode", 0x3e30c77d579b38a7),
     ("seir_age_table_rates", "ode", 0x96d4a0f0287ecb7b),
+    ("seir_age_erlang_via", "ode", 0x093aa76b68d31054),
     ("seir_defines_adj", "ode", 0xb6b63bd987b59e8c),
     ("seir_defines_patch", "ode", 0xdb957d113668b48e),
     ("seir_erlang", "ode", 0xaabb48fd40c23438),
@@ -314,6 +322,7 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("seir_age_incidence_sum", 0x310c060d6ceebe19),
     ("seir_age_let_projection", 0x310c060d6ceebe19),
     ("seir_age_table_rates", 0x7740d7f2d7d93a9b),
+    ("seir_age_erlang_via", 0x92b78a5c2fe58b8c),
     ("seir_cross_dim", 0x56539345e82ada6f),
     ("seir_defines_adj", 0x34100c3629bb7053),
     ("seir_defines_patch", 0xcfaedfa885954f5f),

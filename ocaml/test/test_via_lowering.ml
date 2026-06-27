@@ -327,6 +327,167 @@ let test_worked_seir_compiles_clean () =
   Alcotest.(check int) "compartment count" 6 (List.length m.Ir.compartments);
   Alcotest.(check int) "transition count" 5 (List.length m.Ir.transitions)
 
+(* ── T6: staging an ALSO-stratified compartment (age × Erlang stages) ─────── *)
+
+(* A two-age SEIR with an Erlang-3 INFECTIOUS period, written two ways. The
+   manual form stages `I` by hand into `[age, inf_stage]`, summing `I` over its
+   stages EXPLICITLY in the FOI and the per-age total `N_local`; the via form
+   writes `I[a]` and `via erlang(stages = 3, rate = gamma)` and relies on the
+   staging pass to (a) compose the stage dimension onto `I`'s age stratification,
+   (b) thread the age index through the synthesized per-age chain + exit, and
+   (c) rewrite every partial `I[a]` reference into the explicit stage-sum. The
+   anchor (test below) asserts the two lower to the SAME IR modulo stage names. *)
+
+let age_staged_manual_src =
+  "time_unit = 'days\n\
+   compartments { S, E, I, R }\n\
+   dimensions { age = [child, adult]  inf_stage = [g1, g2, g3] }\n\
+   stratify(by = age)\n\
+   stratify(by = inf_stage, only = [I])\n\
+   let N_local[a in age] = S[a] + E[a] + sum(s in inf_stage, I[a, s]) + R[a]\n\
+   parameters {\n\
+  \  beta  : rate in [0.001, 0.5]\n\
+  \  gamma : rate in [0.01, 1.0]\n\
+   }\n\
+   tables { C_age : age \xc3\x97 age = [[12.0, 4.0], [4.0, 8.0]] }\n\
+   transitions {\n\
+  \  infection[a in age] : S[a] --> I[a, g1]\n\
+  \    @ beta * S[a] * sum(b in age, C_age[a, b] * sum(s in inf_stage, I[b, s]) / N_local[b])\n\
+  \  recovery_stage[a in age, (s, s_next) in consecutive(inf_stage)]\n\
+  \    : I[a, s] --> I[a, s_next] @ 3 * gamma * I[a, s]\n\
+  \  recovery[a in age] : I[a, g3] --> R[a] @ 3 * gamma * I[a, g3]\n\
+   }\n\
+   init { S[child] = 4990  S[adult] = 5000  I[child, g1] = 10 }\n\
+   simulate { from = 0 'days  to = 100 'days }\n"
+
+let age_staged_via_src =
+  "time_unit = 'days\n\
+   compartments { S, E, I, R }\n\
+   dimensions { age = [child, adult] }\n\
+   stratify(by = age)\n\
+   let N_local[a in age] = S[a] + E[a] + I[a] + R[a]\n\
+   parameters {\n\
+  \  beta  : rate in [0.001, 0.5]\n\
+  \  gamma : rate in [0.01, 1.0]\n\
+   }\n\
+   tables { C_age : age \xc3\x97 age = [[12.0, 4.0], [4.0, 8.0]] }\n\
+   transitions {\n\
+  \  infection[a in age] : S[a] --> I[a]\n\
+  \    @ beta * S[a] * sum(b in age, C_age[a, b] * I[b] / N_local[b])\n\
+  \  recovery[a in age] : I[a] --> R[a] via erlang(stages = 3, rate = gamma)\n\
+   }\n\
+   init { S[child] = 4990  S[adult] = 5000  I[child] = 10 }\n\
+   simulate { from = 0 'days  to = 100 'days }\n"
+
+(* The load-bearing T6 anchor: the via form's IR equals the manual form's IR,
+   modulo stage names. Identical machinery to the T1 anchor (it reuses
+   [stage_rename_map] — which renames the > 1-cell staged base `I` to a uniform
+   `I_<i>` in compartment-list order — and the same canonical-transition compare),
+   so an isomorphism failure surfaces as a stoichiometry or rate-AST mismatch.
+   Disabling the partial-reference rewrite (`sum_staged_refs`) makes the via FOI
+   reference a non-existent `I_child` cell, which fails to compile (E100) — so
+   this test goes red→green on the rewrite. *)
+let test_t6_anchor_age_staged_via_equals_manual () =
+  let via_m = compile_ok age_staged_via_src in
+  let man_m = compile_ok age_staged_manual_src in
+  let map_via = stage_rename_map via_m in
+  let map_man = stage_rename_map man_m in
+  Alcotest.(check (list string)) "compartments (canonical)"
+    (canon_comps map_man man_m) (canon_comps map_via via_m);
+  Alcotest.(check (list (pair string (float 1e-9)))) "init (canonical)"
+    (canon_init map_man man_m.Ir.initial_conditions)
+    (canon_init map_via via_m.Ir.initial_conditions);
+  let via_canon =
+    List.map (canon_transition map_via) via_m.Ir.transitions |> List.sort compare in
+  let man_canon =
+    List.map (canon_transition map_man) man_m.Ir.transitions |> List.sort compare in
+  if List.length via_canon <> List.length man_canon then
+    Alcotest.failf "transition count: manual %d, via %d"
+      (List.length man_canon) (List.length via_canon);
+  List.iter2 (fun (m_stoich, m_rate) (v_stoich, v_rate) ->
+    if m_stoich <> v_stoich then
+      Alcotest.failf "stoichiometry mismatch:\n manual %s\n via    %s"
+        (String.concat "," (List.map (fun (n,d) -> Printf.sprintf "%s:%d" n d) m_stoich))
+        (String.concat "," (List.map (fun (n,d) -> Printf.sprintf "%s:%d" n d) v_stoich));
+    if m_rate <> v_rate then
+      Alcotest.failf "rate AST mismatch for stoich %s:\n manual %s\n via    %s"
+        (String.concat "," (List.map (fun (n,d) -> Printf.sprintf "%s:%d" n d) m_stoich))
+        (Yojson.Safe.to_string (Serde.expr_to_json m_rate))
+        (Yojson.Safe.to_string (Serde.expr_to_json v_rate))
+  ) man_canon via_canon
+
+(* The per-age FOI references the stage-SUM of each age's I, not a dangling
+   partial `I_child` / `I_adult`. We confirm at the IR level: the infection
+   transition for each age contains a PopSum over exactly that age's three stage
+   cells, and no Pop names a bare per-age `I_<age>` (which would not exist as a
+   compartment after staging). *)
+let test_foi_rewrite_sums_stages_per_age () =
+  let m = compile_ok age_staged_via_src in
+  let comp_names = List.map (fun (c : Ir.compartment) -> c.Ir.name) m.Ir.compartments in
+  (* The staged cells exist; the partial per-age names do NOT. *)
+  List.iter (fun n -> Alcotest.(check bool) (n ^ " exists") true (List.mem n comp_names))
+    [ "I_child_s1"; "I_child_s2"; "I_child_s3"; "I_adult_s1"; "I_adult_s2"; "I_adult_s3" ];
+  Alcotest.(check bool) "no bare per-age I_child compartment" false
+    (List.mem "I_child" comp_names);
+  (* Collect every PopSum / Pop name appearing anywhere in a rate. *)
+  let rec pop_names acc = function
+    | Ir.Pop n     -> n :: acc
+    | Ir.PopSum ns -> ns @ acc
+    | Ir.BinOp b   -> pop_names (pop_names acc b.Ir.left) b.Ir.right
+    | Ir.UnOp u    -> pop_names acc u.Ir.arg
+    | Ir.Cond c    -> pop_names (pop_names (pop_names acc c.Ir.pred) c.Ir.then_) c.Ir.else_
+    | Ir.Reduce ts -> List.fold_left pop_names acc ts
+    | _            -> acc
+  in
+  let rec popsums acc = function
+    | Ir.PopSum ns -> ns :: acc
+    | Ir.BinOp b   -> popsums (popsums acc b.Ir.left) b.Ir.right
+    | Ir.UnOp u    -> popsums acc u.Ir.arg
+    | Ir.Cond c    -> popsums (popsums (popsums acc c.Ir.pred) c.Ir.then_) c.Ir.else_
+    | Ir.Reduce ts -> List.fold_left popsums acc ts
+    | _            -> acc
+  in
+  let infections =
+    List.filter (fun (t : Ir.transition) ->
+      String.length t.Ir.name >= 9 && String.sub t.Ir.name 0 9 = "infection")
+      m.Ir.transitions
+  in
+  Alcotest.(check int) "two age-specific infection transitions" 2
+    (List.length infections);
+  List.iter (fun (t : Ir.transition) ->
+    (* No bare per-age I_<age> Pop survives in the FOI. *)
+    let names = pop_names [] t.Ir.rate in
+    List.iter (fun bad ->
+      Alcotest.(check bool) (Printf.sprintf "%s: no dangling %s" t.Ir.name bad) false
+        (List.mem bad names)) [ "I_child"; "I_adult" ];
+    (* The FOI must sum each age's three I-stages (the b-sum produces per-age
+       PopSums over [I_<age>_s1; _s2; _s3]). *)
+    let sums = popsums [] t.Ir.rate in
+    let sums_age age =
+      List.exists (fun ns ->
+        List.mem (Printf.sprintf "I_%s_s1" age) ns
+        && List.mem (Printf.sprintf "I_%s_s2" age) ns
+        && List.mem (Printf.sprintf "I_%s_s3" age) ns) sums
+    in
+    Alcotest.(check bool) (t.Ir.name ^ ": FOI sums child stages") true (sums_age "child");
+    Alcotest.(check bool) (t.Ir.name ^ ": FOI sums adult stages") true (sums_age "adult")
+  ) infections
+
+(* Inflow + init for a staged-and-stratified compartment land in (age, stage-1).
+   The age-specific infection edge `S[a] --> I[a]` redirects to `I[a, s1]`, and
+   `init I[child] = 10` redirects to `I_child_s1`. *)
+let test_age_inflow_and_init_land_in_stage1 () =
+  let m = compile_ok age_staged_via_src in
+  let inf_child =
+    List.find (fun (t : Ir.transition) -> t.Ir.name = "infection_child") m.Ir.transitions in
+  Alcotest.(check bool) "infection_child --> I_child_s1" true
+    (List.mem ("I_child_s1", 1) inf_child.Ir.stoichiometry);
+  (match m.Ir.initial_conditions with
+   | Ir.Explicit kvs ->
+     Alcotest.(check bool) "init has I_child_s1 = 10" true (List.mem ("I_child_s1", 10.0) kvs);
+     Alcotest.(check bool) "init has no bare I_child" false (List.mem_assoc "I_child" kvs)
+   | _ -> Alcotest.fail "expected explicit init")
+
 let () =
   Alcotest.run "via_lowering"
     [ ( "t1-anchor",
@@ -357,4 +518,11 @@ let () =
             test_err_hyper_erlang_deferred ] );
       ( "end-to-end",
         [ Alcotest.test_case "worked SEIR via form compiles clean" `Quick
-            test_worked_seir_compiles_clean ] ) ]
+            test_worked_seir_compiles_clean ] );
+      ( "t6-stratified",
+        [ Alcotest.test_case "age × staged via ≡ manual (modulo stage names)" `Quick
+            test_t6_anchor_age_staged_via_equals_manual;
+          Alcotest.test_case "FOI rewrite sums each age's stages (no dangling I[a])" `Quick
+            test_foi_rewrite_sums_stages_per_age;
+          Alcotest.test_case "age inflow + init land in (age, stage 1)" `Quick
+            test_age_inflow_and_init_land_in_stage1 ] ) ]

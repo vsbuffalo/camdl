@@ -1,0 +1,73 @@
+# Age-stratified SEIR with an Erlang-3 INFECTIOUS period, expressed with `via`.
+#
+# This is the realistic staged-AND-stratified case (proposal §7, Phase 2b): `I`
+# is already stratified by age, and `via erlang(stages = 3, rate = gamma)` stages
+# it further, composing a stage dimension onto the age axis (`I` becomes
+# I_<age>_s1 … I_<age>_s3). The age-specific force of infection writes `I[b]`
+# (the age index, no stage); the staging pass rewrites it to sum over the stages
+# — `sum(s in stage, I[b, s])` — so each age's three infectious stages all
+# transmit at the same per-contact rate while only the progression through the
+# chain carries the 3*gamma scaling (R0 unchanged, dwell shape changes).
+#
+# Compare with the manual hand-staged form: this lowers to an IR equal — modulo
+# stage names — to a model that declares `inf_stage = [g1, g2, g3]`, stratifies
+# `I` by it, and writes the chain + stage-sum by hand (test_via_lowering.ml T6).
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  age = [child, adult]
+}
+
+stratify(by = age)
+
+let N_local[a in age] = S[a] + E[a] + I[a] + R[a]
+
+parameters {
+  #' transmission rate (per infectious contact)
+  #' @symbol β
+  beta  : rate in [0.001, 0.5]
+  #' progression rate E→I; the mean latent period is 1/sigma
+  #' @symbol σ
+  sigma : rate in [0.01, 1.0]
+  #' recovery rate I→R; the mean infectious period (Erlang-3) is 1/gamma
+  #' @symbol γ
+  gamma : rate in [0.01, 1.0]
+}
+
+tables {
+  C_age : age × age = [[12.0, 4.0], [4.0, 8.0]]
+}
+
+transitions {
+  infection[a in age] : S[a] --> E[a]
+    @ beta * S[a] * sum(b in age, C_age[a, b] * I[b] / N_local[b])
+
+  progression[a in age] : E[a] --> I[a]  @ sigma * E[a]
+
+  recovery[a in age] : I[a] --> R[a]  via erlang(stages = 3, rate = gamma)
+}
+
+init {
+  S[child] = 4990
+  S[adult] = 5000
+  I[child] = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}
+
+scenarios {
+  baseline {
+    label = "default  (infectious ≈ Erlang-3, mean 10d)"
+    simulate { to = 100 'days }
+    set = {
+      beta  = 0.05
+      sigma = 0.2
+      gamma = 0.1
+    }
+  }
+}

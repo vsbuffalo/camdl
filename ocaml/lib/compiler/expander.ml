@@ -794,11 +794,12 @@ let collect_declarations ctx decls =
    runs unchanged. `via` adds zero new IR algebra — it is a macro over existing
    AST nodes (staged-residence proposal, 2026-06-26 §5).
 
-   Phase 2 ships the Erlang law, non-age only:
+   Scope:
    - Erlang only; `hyper_erlang` (Phase 4) and any unknown law → E243.
-   - Bare references to the staged source sum over stages for free (PopSum).
-     The age-stratified PARTIAL-index rewrite (`I[a]` in an age FOI) is deferred
-     (proposal §7); staging an already-stratified compartment is rejected here. *)
+   - The source may itself be stratified (age × stage). A BARE reference to the
+     staged source sums over stages for free (PopSum); a PARTIAL-index reference
+     (`I[a]` in an age FOI) is rewritten by the pass into the explicit stage-sum
+     `sum(__s in __stage, I[a, __s])` (proposal §7, [sum_staged_refs]). *)
 
 (* Build the typed, validated [via_spec] from the raw [via_call]. Each failure
    is a located diagnostic naming the transition; on the error path we return
@@ -897,25 +898,77 @@ let drains_compartment (tr : transition_decl) (comp : string) : bool =
   in
   is_src && not is_dst
 
-(* Rewrite the destination form so any reference to [from_comp] (with no indices)
-   redirects to `from_comp[stage1]` — the only legal target once the source is
-   staged (the require-full-index rule rejects a bare staged destination). *)
+(* Rewrite the destination form so any inflow to [from_comp] lands in its first
+   stage. Once the source is staged, the require-full-index rule rejects a
+   destination that stops one dimension short of the stage axis, so the stage
+   level must be appended. [n_pre] is the number of index positions [from_comp]
+   carried BEFORE staging (0 for an unstratified compartment, 1 for an age-
+   stratified one, …); the stage dimension is appended last, so an inflow ref
+   that already supplies all [n_pre] pre-staging indices gets `stage1` appended:
+   `S --> I` ⇒ `I[s1]`, `S[a] --> I[a]` ⇒ `I[a, s1]`. A reference with fewer than
+   [n_pre] indices is left alone — it is the under-indexed case the existing
+   require-full-index diagnostic already rejects. *)
 let redirect_dest_to_stage1 (dst : destination_form) (from_comp : string)
-    (stage1 : string) : destination_form =
+    (n_pre : int) (stage1 : string) : destination_form =
   let redirect ((c, items) : stoich_ref) : stoich_ref =
-    if c = from_comp && items = [] then
-      (c, [ IPosn (EIdent (stage1, dummy_loc)) ])
+    if c = from_comp && List.length items = n_pre then
+      (c, items @ [ IPosn (EIdent (stage1, dummy_loc)) ])
     else (c, items)
   in
   match dst with
   | DstSum refs        -> DstSum (List.map redirect refs)
   | DstBranch branches -> DstBranch (List.map (fun (r, w) -> (redirect r, w)) branches)
 
+(* Rewrite every RATE-POSITION reference to a now-staged compartment [src] so it
+   sums over the freshly-added stage dimension. After staging, `src` gains a
+   trailing stage axis (`I` → `I[…, stage]`); a reference that supplied all
+   [n_pre] of its pre-staging indices but no stage index is partial and would
+   resolve to a non-existent cell (`I_b` when the cells are `I_b_s1 …`). The pass
+   created the stages, so it owns this rewrite (proposal §7, the declined general
+   partial-index case): `I[b]` ⇒ `sum(__s in __stage, I[b, __s])`. A BARE `src`
+   (`EIdent`, no indices) is left alone — the existing bare-name rule already
+   turns it into a `PopSum` over all cells, stages included. An under-indexed
+   reference (fewer than [n_pre] indices) is also left alone: that is the general
+   partial-index notation, still declined, and keeps its existing diagnostic.
+
+   [sum_var] is a fresh bound variable (collision-free, derived from the reserved
+   [dim_name]) so the synthesized `sum` cannot capture or be captured by a user
+   index. The walk recurses through every expr node, including nested `sum`
+   bodies (the per-age FOI `sum(b in age, … I[b] …)`) and `let` bodies. *)
+let rec sum_staged_refs ~src ~n_pre ~dim_name ~sum_var (e : expr) : expr =
+  let recur = sum_staged_refs ~src ~n_pre ~dim_name ~sum_var in
+  let recur_item = function
+    | IPosn e        -> IPosn (recur e)
+    | INamed (n, e)  -> INamed (n, recur e)
+  in
+  match e with
+  | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> e
+  | EIndex (n, items, l) when n = src && List.length items = n_pre ->
+    (* The partial reference to the staged compartment: append the stage index
+       and wrap in a sum over the stage dimension. Recurse into the existing
+       index exprs first (they may themselves reference the staged compartment,
+       though in practice they are bare loop vars). *)
+    let items' = List.map recur_item items in
+    let staged =
+      EIndex (n, items' @ [ IPosn (EIdent (sum_var, dummy_loc)) ], l)
+    in
+    ESum (sum_var, dim_name, None, staged)
+  | EIndex (n, items, l) -> EIndex (n, List.map recur_item items, l)
+  | EBinOp (op, l, r) -> EBinOp (op, recur l, recur r)
+  | EUnOp (op, e)     -> EUnOp (op, recur e)
+  | ESum (v, d, g, b) -> ESum (v, d, g, recur b)
+  | ECond (p, t, f)   -> ECond (recur p, recur t, recur f)
+  | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, e) -> (k, recur e)) args)
+  | EList es          -> EList (List.map recur es)
+  | ERange (lo, hi)   -> ERange (recur lo, recur hi)
+
 (* Lower every `via erlang(...)` transition in [ctx] into the manual staged form.
-   Mutates ctx.dim_decls / ctx.stratifies / ctx.transitions / ctx.init_entries.
-   The original `via` transition is replaced by the consecutive chain + exit, so
-   no `via` transition survives to reach [expand_transitions_counted] (its E243
-   placeholder becomes unreachable). *)
+   Mutates ctx.dim_decls / ctx.stratifies / ctx.transitions / ctx.init_entries,
+   and — when the staged source is itself stratified — ctx.let_bindings /
+   ctx.obs_decls / ctx.balance_decl, to rewrite partial references to the staged
+   compartment into stage-sums ([sum_staged_refs]). The original `via` transition
+   is replaced by the consecutive chain + exit, so no `via` transition survives to
+   reach [expand_transitions_counted] (its E243 placeholder becomes unreachable). *)
 let lower_via_transitions ctx =
   (* Collect the `via` transitions and their typed specs first; bail out early
      if there are none (the common, golden-neutral path: zero AST touched). A
@@ -931,10 +984,12 @@ let lower_via_transitions ctx =
   in
   if via_trs = [] then ()
   else begin
-    (* Validate each `via` transition's STRUCTURE: a single, real, NON-stratified
-       source (the partial-index rewrite for already-stratified sources is
-       deferred, proposal §7), drained by exactly this one transition (single-
-       exit, §3). Returns whether it is structurally well-formed; every problem
+    (* Validate each `via` transition's STRUCTURE: a single, real source
+       (stratified or not), drained by exactly this one transition (single-exit,
+       §3). A stratified source is staged by COMPOSING the stage dimension onto
+       its existing stratification (age × stage); rate-position references to it
+       are rewritten to sum over the stages by the pass itself (proposal §7).
+       Returns whether the transition is structurally well-formed; every problem
        surfaces (a diagnostic fires) even on a transition we then skip. We only
        SYNTHESIZE the chain for transitions that pass BOTH spec and structure —
        so a rejected `via` produces just its own diagnostic, never a cascade of
@@ -943,24 +998,7 @@ let lower_via_transitions ctx =
       let loc = diag_loc_of_ast_ctx ctx tr.trloc in
       match tr.trsrc with
       | [ (src, _) ] ->
-        (* A stratify decl applies to `src` when it has no `only` filter, or
-           names `src` in it. *)
-        let already_stratified =
-          List.exists (fun (sd : stratify_decl) ->
-            match sd.sonly with None -> true | Some only -> List.mem src only)
-            ctx.stratifies
-        in
-        if already_stratified then begin
-          Diagnostics.error ctx.diags ~code:"E248" ~loc
-            ~message:(Printf.sprintf
-              "transition '%s': `via` on the already-stratified compartment \
-               '%s' is not supported yet" tr.trname src)
-            ~hint:"staging a stratified compartment (age × stage) is a later \
-                   sub-phase; for now express it with manual sub-stage \
-                   compartments"
-            ();
-          false
-        end else begin
+        begin
           (* Single-exit: no OTHER transition may drain this source. *)
           let other_drainers =
             List.filter (fun (other : transition_decl) ->
@@ -1009,43 +1047,71 @@ let lower_via_transitions ctx =
        a rejected `via` is removed below without a chain. *)
     List.iter (fun (tr, spec) ->
       match tr.trsrc, spec with
-      | [ (src, _) ], Erlang { stages; mean } ->
+      | [ (src, src_pre_items) ], Erlang { stages; mean } ->
         let k = Pos_int.to_int stages in
+        (* The source's index positions BEFORE staging: 0 for an unstratified
+           compartment, 1 for an age-stratified one, … Counted here, before the
+           stage dimension is appended to [ctx.stratifies], so it counts only the
+           PRE-existing strata (the same `sonly` filter [comp_dims] applies). The
+           stage axis is appended LAST, so every staged reference to [src] carries
+           `n_pre` inherited indices + the stage. *)
+        let n_pre =
+          List.length (List.filter (fun (sd : stratify_decl) ->
+            match sd.sonly with None -> true | Some only -> List.mem src only)
+            ctx.stratifies)
+        in
+        (* [src_pre_items] (bound by the match) is the via transition's own
+           source indices (e.g. `[a]` from `recovery[a in age] : I[a] --> R[a]`).
+           Inherited by the synthesized chain and exit so each per-stratum
+           residence stays within its stratum; the stage index is appended last. *)
         (* Stage levels: a reserved dimension `__<trname>_stage = [s1..sk]`. The
            `__` prefix keeps it out of the user namespace (collision-free). *)
         let dim_name = Printf.sprintf "__%s_stage" tr.trname in
         let stage_levels = List.init k (fun i -> Printf.sprintf "s%d" (i + 1)) in
         let stage1 = List.hd stage_levels in
         let stage_last = List.nth stage_levels (k - 1) in
+        (* Fresh stage bound-variable names, derived from the reserved (collision-
+           checked) [dim_name] so they cannot capture or be captured by a user
+           index var — even one the via transition itself carries (`a`). Three
+           distinct vars: the chain's `[(s, s_next) in consecutive(...)]` pair and
+           the rewrite's `sum(s in ...)` variable. *)
+        let chain_var      = dim_name ^ "_i" in
+        let chain_var_next = dim_name ^ "_n" in
+        let sum_var        = dim_name ^ "_s" in
         (* Per-stage rate COEFFICIENT: `Rate ρ ⇒ k·ρ`, `Mean τ ⇒ k/τ`. *)
         let k_const = EConst (float_of_int k) in
         let coeff = match mean with
           | Rate r -> EBinOp (Mul, k_const, r)
           | Mean t -> EBinOp (Div, k_const, t)
         in
-        (* Per-stage propensity `coeff * E[stage]`, where the stage index is a
-           bound var (the chain) or a concrete level (the exit). Matches the
-           hand-written `3 * sigma * E[s]` AST exactly. *)
-        let stage_pop idx_item = EIndex (src, [ idx_item ], dummy_loc) in
-        let stage_rate idx_item = EBinOp (Mul, coeff, stage_pop idx_item) in
+        (* Per-stage propensity `coeff * src[<inherited indices>, stage]`, where
+           the stage index is a bound var (the chain) or a concrete level (the
+           exit). For an unstratified source this is exactly the hand-written
+           `3 * sigma * E[s]`; for an age-stratified one, `3 * gamma * I[a, s]`. *)
+        let stage_pop stage_item = EIndex (src, src_pre_items @ [ stage_item ], dummy_loc) in
+        let stage_rate stage_item = EBinOp (Mul, coeff, stage_pop stage_item) in
 
         (* 1. Register the stage dimension (picked up by resolve_dimensions). *)
         ctx.dim_decls <- ctx.dim_decls @ [
           { dename = dim_name; desrc = DInline stage_levels; dedoc = None } ];
-        (* 2. Stratify the source compartment by the stage dimension. *)
+        (* 2. Stratify the source compartment by the stage dimension. This
+              COMPOSES with any existing stratification of [src] (age × stage),
+              since [comp_dims] reads every applicable stratify decl in order. *)
         ctx.stratifies <- ctx.stratifies @ [ { sdim = dim_name; sonly = Some [ src ] } ];
 
-        (* 3. The consecutive chain: `E[s] --> E[s_next] @ coeff * E[s]`, and the
-              exit `E[last] --> <dst> @ coeff * E[last]`. The chain reuses the
-              existing IConsec machinery; the exit keeps the via transition's
-              name and destination. *)
+        (* 3. The consecutive chain and the exit. Both INHERIT the via
+              transition's existing index bindings and source-stoich indices and
+              append the stage; the chain advances the stage within the stratum
+              (`I[a, s] --> I[a, s_next]`), the exit drains the last stage to the
+              original destination (`I[a, s_last] --> R[a]`). For an unstratified
+              source these reduce to the Phase-2 chain `E[s] --> E[s_next]`. *)
         let chain_tr = {
           trname    = Printf.sprintf "%s_stage" tr.trname;
-          trindices = [ IConsec ("s", "s_next", dim_name) ];
-          trsrc     = [ (src, [ IPosn (EIdent ("s", dummy_loc)) ]) ];
-          trdst     = DstSum [ (src, [ IPosn (EIdent ("s_next", dummy_loc)) ]) ];
-          trdyn     = Rate (stage_rate (IPosn (EIdent ("s", dummy_loc))));
-          trguard   = None;
+          trindices = tr.trindices @ [ IConsec (chain_var, chain_var_next, dim_name) ];
+          trsrc     = [ (src, src_pre_items @ [ IPosn (EIdent (chain_var, dummy_loc)) ]) ];
+          trdst     = DstSum [ (src, src_pre_items @ [ IPosn (EIdent (chain_var_next, dummy_loc)) ]) ];
+          trdyn     = Rate (stage_rate (IPosn (EIdent (chain_var, dummy_loc))));
+          trguard   = tr.trguard;
           trlineage = false;
           trdoc     = None;
           trloc     = tr.trloc;
@@ -1053,22 +1119,86 @@ let lower_via_transitions ctx =
         let last_item = IPosn (EIdent (stage_last, dummy_loc)) in
         let exit_tr = {
           tr with
-          trsrc = [ (src, [ last_item ]) ];
+          trsrc = [ (src, src_pre_items @ [ last_item ]) ];
           trdyn = Rate (stage_rate last_item);
+          (* trdst, trindices unchanged: the exit keeps the original destination
+             (`R[a]`) and index bindings (`[a in age]`). *)
         } in
         (* 4. Replace the original `via` transition with [chain; exit], and
               redirect every OTHER transition whose destination is the staged
-              source to land in stage 1. *)
+              source to land in stage 1 (`S[a] --> I[a]` ⇒ `I[a, s1]`). *)
         ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
           if t.trname = tr.trname then [ chain_tr; exit_tr ]
-          else [ { t with trdst = redirect_dest_to_stage1 t.trdst src stage1 } ]
+          else [ { t with trdst = redirect_dest_to_stage1 t.trdst src n_pre stage1 } ]
         ) ctx.transitions;
-        (* 5. Redirect `init { E = … }` (bare, no index) to `E[stage1]`. *)
+        (* 5. Redirect `init { E = … }` / `init { I[a] = … }` (the full pre-staging
+              index, no stage) to land in stage 1. *)
         ctx.init_entries <- List.map (fun (ie : init_entry) ->
-          if ie.icomp = src && ie.iindices = [] && ie.ibindings = [] then
-            { ie with iindices = [ IPosn (EIdent (stage1, dummy_loc)) ] }
+          if ie.icomp = src && ie.ibindings = []
+             && List.length ie.iindices = n_pre then
+            { ie with iindices = ie.iindices @ [ IPosn (EIdent (stage1, dummy_loc)) ] }
           else ie
-        ) ctx.init_entries
+        ) ctx.init_entries;
+        (* 6. The partial-reference rewrite (the crux for a stratified source).
+              Every RATE-POSITION reference to [src] that supplies its `n_pre`
+              pre-staging indices but no stage index — `I[b]` in the per-age FOI,
+              in `let N_local`, in observations, in `balance` — is rewritten to
+              sum over the stages: `I[b]` ⇒ `sum(__s in __stage, I[b, __s])`. A
+              BARE `src` is left alone (the bare-name rule sums all cells via
+              PopSum). The synthesized chain/exit above already carry the full
+              `n_pre + 1` index, so they are immune to this rewrite (the predicate
+              fires only at exactly `n_pre` indices). Runs over every expr-bearing
+              declaration so no reference to the staged compartment escapes. *)
+        let rw e = sum_staged_refs ~src ~n_pre ~dim_name ~sum_var e in
+        let rw_dst = function
+          | DstSum refs ->
+            DstSum (List.map (fun (c, items) ->
+              (c, List.map (function IPosn e -> IPosn (rw e)
+                                   | INamed (n, e) -> INamed (n, rw e)) items)) refs)
+          | DstBranch branches ->
+            DstBranch (List.map (fun (r, w) ->
+              let (c, items) = r in
+              ((c, List.map (function IPosn e -> IPosn (rw e)
+                                    | INamed (n, e) -> INamed (n, rw e)) items), rw w))
+              branches)
+        in
+        let rw_dyn = function
+          | Rate e -> Rate (rw e)
+          | Via _ as v -> v   (* unlowered via transitions keep their raw call *)
+        in
+        ctx.transitions <- List.map (fun (t : transition_decl) ->
+          { t with
+            trsrc = List.map (fun (c, items) ->
+              (c, List.map (function IPosn e -> IPosn (rw e)
+                                   | INamed (n, e) -> INamed (n, rw e)) items)) t.trsrc;
+            trdst = rw_dst t.trdst;
+            trdyn = rw_dyn t.trdyn }
+        ) ctx.transitions;
+        ctx.let_bindings <- List.map (fun (lb : let_binding) ->
+          { lb with lbody = rw lb.lbody }) ctx.let_bindings;
+        ctx.init_entries <- List.map (fun (ie : init_entry) ->
+          { ie with ivalue = rw ie.ivalue }) ctx.init_entries;
+        ctx.balance_decl <- Option.map (fun (bd : balance_decl) ->
+          { bd with bexpr = rw bd.bexpr }) ctx.balance_decl;
+        ctx.obs_decls <- List.map (fun (od : obs_decl) ->
+          let oprojection = match od.oprojection with
+            | Some (ProjDerived e) -> Some (ProjDerived (rw e))
+            | other -> other
+          in
+          let omeasurement = Option.map (fun (om : obs_measurement) ->
+            let rw_kwargs = List.map (fun (key, e) -> (key, rw e)) in
+            let om_lik = match om.om_lik with
+              | LikNegBinomial a  -> LikNegBinomial  (rw_kwargs a)
+              | LikPoisson a      -> LikPoisson      (rw_kwargs a)
+              | LikNormal a       -> LikNormal       (rw_kwargs a)
+              | LikBinomial a     -> LikBinomial     (rw_kwargs a)
+              | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
+              | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
+            in
+            { om with om_lik }) od.omeasurement
+          in
+          { od with oprojection; omeasurement }
+        ) ctx.obs_decls
       | _ -> ()  (* unreachable: to_lower only holds single-source Erlang specs *)
     ) to_lower;
     (* Drop any `via` transition that survived (a failed spec, or a structurally
