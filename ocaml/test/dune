@@ -53,6 +53,18 @@
  (libraries compiler ir alcotest yojson)
  (deps (source_tree ../golden)))
 
+; Phase-4 staged-residence `via hyper_erlang(...)` lowering. A finite mixture of
+; Erlang chains, branched at entry → flat per-branch compartments + parallel
+; chains. The polio (same endpoint) and Ebola (per-branch endpoints, no arrow)
+; anchors pin the entry DstBranch weighting, per-branch destination resolution,
+; and the all-branch reference sum; plus the validation E-codes and the deferred
+; stratified-hyper guard.
+(test
+ (name test_hyper_erlang)
+ (modules test_hyper_erlang)
+ (libraries compiler ir alcotest yojson)
+ (deps (source_tree ../golden)))
+
 ; Cross-language calendar-time golden (gh#98). Reads ir/golden/caltime.tsv
 ; (the same file rust/crates/ir/tests/caltime_golden.rs reads) by resolving
 ; the repo root at runtime — the TSV lives outside the ocaml dune root and
@@ -110,3 +122,4 @@
  (modules test_diagnostics)
  (libraries compiler ir alcotest yojson)
  (deps (source_tree lints) (source_tree ../golden)))
+

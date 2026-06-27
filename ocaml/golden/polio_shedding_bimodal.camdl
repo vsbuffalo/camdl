@@ -1,0 +1,52 @@
+# Polio shedding as a bimodal residence, expressed with `via hyper_erlang`.
+#
+# After infection an individual sheds for either a TYPICAL period (a few weeks,
+# the common case) or a PROLONGED period (immunodeficient iVDPV, much longer).
+# Both arms end in the same place — clearance to R — so the shared `--> R` is the
+# endpoint and only the durations differ. The mixture weight `p` is the typical
+# fraction; the prolonged weight is implicit (1 − p).
+#
+# `via hyper_erlang(...)` lowers to TWO parallel Erlang chains drained out of I:
+# I__typical__1, I__typical__2 (Erlang-2) and I__prolonged__1 (Erlang-1). The
+# entry into I branches weighted p / (1−p) into the two first stages, and the
+# bare `I` in the force of infection sums all of their stages.
+time_unit = 'weeks
+
+compartments { S, I, R }
+
+parameters {
+  beta    : rate        in [0.01, 5.0]
+  p       : probability
+  tau_typ : positive    in [0.5, 12.0]   # typical shedding mean (weeks)
+  tau_pro : positive    in [12.0, 200.0] # prolonged shedding mean (weeks)
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  clearance : I --> R via hyper_erlang(
+    branch(label = typical,   weight = p, stages = 2, mean = tau_typ),
+    branch(label = prolonged,             stages = 1, mean = tau_pro)
+  )
+}
+
+init {
+  S = 990
+  I = 10
+}
+
+simulate {
+  from = 0 'weeks
+  to   = 52 'weeks
+}
+
+scenarios {
+  baseline {
+    label = "bimodal shedding (typical ≈ 4w, prolonged ≈ 100w)"
+    set = {
+      beta    = 0.8
+      p       = 0.9
+      tau_typ = 4.0
+      tau_pro = 100.0
+    }
+  }
+}

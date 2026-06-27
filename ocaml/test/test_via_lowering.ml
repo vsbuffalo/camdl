@@ -315,9 +315,11 @@ let test_err_single_exit_violation () =
   in
   compile_expect_error_code ~code:"E246" ~contains:"death" src
 
-let test_err_hyper_erlang_deferred () =
+let test_err_unsupported_law_deferred () =
+  (* `erlang` and `hyper_erlang` now lower; a still-deferred law (`coxian`)
+     keeps the repurposed E243 "not yet supported" placeholder. *)
   compile_expect_error_code ~code:"E243" ~contains:"not yet supported"
-    (model_with_onset "onset : E --> I via hyper_erlang(stages = 3, rate = sigma)")
+    (model_with_onset "onset : E --> I via coxian(stages = 3, rate = sigma)")
 
 (* ── Worked SEIR via form simulates and is sane (compiles end-to-end) ────── *)
 
@@ -514,8 +516,8 @@ let () =
             test_err_neither_mean_nor_rate;
           Alcotest.test_case "single-exit violation → E246" `Quick
             test_err_single_exit_violation;
-          Alcotest.test_case "hyper_erlang deferred → E243" `Quick
-            test_err_hyper_erlang_deferred ] );
+          Alcotest.test_case "unsupported law (coxian) deferred → E243" `Quick
+            test_err_unsupported_law_deferred ] );
       ( "end-to-end",
         [ Alcotest.test_case "worked SEIR via form compiles clean" `Quick
             test_worked_seir_compiles_clean ] );

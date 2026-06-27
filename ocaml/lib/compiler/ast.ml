@@ -205,11 +205,31 @@ end
    per-stage rate `k·ρ`. Both are expressions and may reference parameters. *)
 type mean_spec = Mean of expr | Rate of expr
 
-(* A typed, validated dwell law (the EXPANDER's view of a `via_call`). Phase 2
-   ships the Erlang law only; `hyper_erlang` (a finite mixture, per-branch
-   destinations) is Phase 4 and is not representable here yet. *)
+(* One arm of a `hyper_erlang` finite mixture (staged-residence proposal §4). A
+   self-contained record per branch (no fragile parallel lists): its mixture
+   [weight], its Erlang [stages]/[mean], an optional per-branch destination
+   [to_] (None ⇒ the transition's arrow target), and a [label] (used for the
+   flat per-branch stage compartment names `<src>__<label>__i`, distinct across
+   branches by construction). The weight is `None` only on the LAST branch ⇒
+   `1 − Σ others`, so the mixture is normalized by construction; a non-last
+   branch missing a weight, or the last branch carrying one, is an error caught
+   when this record is built. *)
+type hyper_branch = {
+  hb_weight : expr option;          (* None on the LAST branch ⇒ 1 − Σ others *)
+  hb_stages : Pos_int.t;
+  hb_mean   : mean_spec;
+  hb_to     : stoich_ref option;    (* per-branch destination; None ⇒ the transition's TO *)
+  hb_label  : string;
+}
+
+(* A typed, validated dwell law (the EXPANDER's view of a `via_call`).
+   - [Erlang] (Phase 2): a single chain.
+   - [HyperErlang] (Phase 4): a finite mixture of Erlang chains, branched at
+     entry. Branches have different lengths, so this lowers to FLAT per-branch
+     compartments + parallel chains, NOT one stage dimension. *)
 type via_spec =
-  | Erlang of { stages : Pos_int.t; mean : mean_spec }
+  | Erlang      of { stages : Pos_int.t; mean : mean_spec }
+  | HyperErlang of { branches : hyper_branch list }
 
 (* A transition's dynamics: EITHER an ordinary `@ rate` (exponential, the rate
    IS the propensity) OR a `via law(...)` staged residence (the law supplies the

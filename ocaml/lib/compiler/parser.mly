@@ -486,6 +486,18 @@ transition_decl:
           trsrc = srcs; trdst = DstSum dsts;
           trdyn = Via law; trguard = guard; trlineage = lin; trdoc = d;
           trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  (* no-arrow staged residence: [#[lineage]] name[...] : srcs via LAW(args)
+     where guard.  A `via` law whose branches carry their own `to =` (the
+     per-destination `hyper_erlang`) needs no arrow target — each branch decides
+     its own endpoint. `trdst = DstSum []` is the "no arrow target" sentinel; the
+     expander resolves each branch's destination (its `to`, else the arrow target
+     — here absent → a compile error if a branch omits both). Staged-residence
+     proposal §4. *)
+  | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list VIA law = via_call guard = where_clause_opt
+      { { trname = name; trindices = ibs;
+          trsrc = srcs; trdst = DstSum [];
+          trdyn = Via law; trguard = guard; trlineage = lin; trdoc = d;
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* block form: [#[lineage]] name[...] : srcs --> dsts { rate = ... | via = ...; where ... } *)
   | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list LBRACE tbody = transition_body RBRACE
       { let (rate_opt, via_opt, guard) = tbody in
@@ -1284,6 +1296,7 @@ kw_arg_name:
   | REAL        { "real" }
   | INTEGER     { "integer" }
   | EVERY       { "every" }  (* date_range(start, end, every = 7 'days) — §4 *)
+  | TO          { "to" }     (* hyper_erlang branch(..., to = D) — staged-residence §4 *)
 
 kw_expr:
   | k = kw_arg_name EQ v = expr { (k, v) }

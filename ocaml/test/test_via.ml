@@ -159,12 +159,14 @@ let test_via_erlang_now_lowers () =
   | Ok _    -> ()
   | Error e -> Alcotest.failf "via erlang should lower in Phase 2, got: %s" e
 
-(* E243 survives, repurposed: an UNSUPPORTED law (`hyper_erlang`, Phase 4) is
-   still rejected with a clean located diagnostic naming the transition. *)
+(* E243 survives, repurposed: an UNSUPPORTED law (`coxian` / `approx_gamma` /
+   `fixed`, all deferred) is still rejected with a clean located diagnostic
+   naming the transition. (`erlang` and `hyper_erlang` now lower; the remaining
+   laws are §4/§7 follow-ups.) *)
 let test_via_unsupported_law_rejected () =
   let src =
     model_with_transition
-      "onset : E --> I via hyper_erlang(stages = 3, mean = 7 'days)"
+      "onset : E --> I via coxian(stages = 3, mean = 7 'days)"
   in
   compile_expect_error_code ~code:"E243" ~contains:"not yet supported" src
 
@@ -198,5 +200,5 @@ let () =
       ( "lowering",
         [ Alcotest.test_case "via erlang now lowers (Phase 2)" `Quick
             test_via_erlang_now_lowers;
-          Alcotest.test_case "unsupported law (hyper_erlang) → E243" `Quick
+          Alcotest.test_case "unsupported law (coxian) → E243" `Quick
             test_via_unsupported_law_rejected ] ) ]

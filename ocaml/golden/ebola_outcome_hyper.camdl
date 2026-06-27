@@ -1,0 +1,54 @@
+# Ebola onset-to-outcome as a CFR-split mixture, via `via hyper_erlang`.
+#
+# After symptom onset (entering I) an individual either DIES (mean ≈ 8 d, a
+# 3-stage gamma) or RECOVERS (mean ≈ 12 d, also 3-stage), with the death arm
+# taken at the case-fatality ratio `cfr`. The two arms have DIFFERENT endpoints
+# (D vs R) and different durations, so each `branch` carries its own `to` and the
+# `outcome` transition has NO arrow target — every branch decides its endpoint.
+#
+# This is NOT two competing exponential exits (which would give coupled,
+# exponential outcome times): the outcome is decided at entry, and each arm runs
+# its own gamma chain to its own destination. `via hyper_erlang(...)` lowers to
+# two parallel Erlang-3 chains drained out of I (I__fatal__* → D, I__recover__*
+# → R); the entry into I branches weighted cfr / (1−cfr), and the force of
+# infection's bare `I` sums all six infectious stages.
+time_unit = 'days
+
+compartments { S, E, I, R, D }
+
+parameters {
+  beta  : rate        in [0.01, 5.0]
+  sigma : rate        in [0.01, 1.0]
+  cfr   : probability
+}
+
+transitions {
+  infection : S --> E @ beta * S * I / (S + E + I + R)
+  onset     : E --> I @ sigma * E
+  outcome   : I via hyper_erlang(
+    branch(label = fatal,   weight = cfr, stages = 3, mean =  8 'days, to = D),
+    branch(label = recover,               stages = 3, mean = 12 'days, to = R)
+  )
+}
+
+init {
+  S = 990
+  E = 0
+  I = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 120 'days
+}
+
+scenarios {
+  baseline {
+    label = "CFR-split outcome (fatal ≈ 8d, recover ≈ 12d, cfr = 0.6)"
+    set = {
+      beta  = 0.4
+      sigma = 0.2
+      cfr   = 0.6
+    }
+  }
+}

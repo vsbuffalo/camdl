@@ -801,6 +801,126 @@ let collect_declarations ctx decls =
      (`I[a]` in an age FOI) is rewritten by the pass into the explicit stage-sum
      `sum(__s in __stage, I[a, __s])` (proposal §7, [sum_staged_refs]). *)
 
+(* A `to = <compartment>` branch destination is written as a bare compartment
+   identifier — `to = D` or `to = D[a]`. Lift it to a [stoich_ref]. Anything
+   else (a number, an arithmetic expr) is rejected: a destination is a
+   compartment, not a value. *)
+let stoich_ref_of_to_expr (e : expr) : (stoich_ref, string) result =
+  match e with
+  | EIdent (n, _)   -> Ok (n, [])
+  | EIndex (n, idx, _) -> Ok (n, idx)
+  | _ -> Error "must be a compartment name (e.g. `to = D` or `to = D[a]`)"
+
+(* Build one validated [hyper_branch] from a `branch(...)` call's keyword args.
+   Mirrors the erlang validation (stages = pos-int; exactly one of mean/rate)
+   plus the branch-only keywords (`label` required; `weight`/`to` optional). An
+   unrecognized keyword is rejected (no loose semantics). Returns [None] (after
+   firing a located diagnostic naming the transition) on any failure; the
+   cross-branch weight/label/count rules are applied by the caller. *)
+let hyper_branch_of_call ctx (tr : transition_decl) (bargs : (string * expr) list)
+    : hyper_branch option =
+  let err ~code ~message ?hint () =
+    Diagnostics.error ctx.diags ~code
+      ~loc:(diag_loc_of_ast_ctx ctx tr.trloc) ~message ?hint ();
+    None
+  in
+  (* A branch label, for diagnostics, before we know it is valid. *)
+  let label_str =
+    match List.assoc_opt "label" bargs with
+    | Some (EIdent (s, _)) -> s
+    | _ -> "<unlabeled>"
+  in
+  let known = [ "label"; "weight"; "stages"; "mean"; "rate"; "to" ] in
+  let unknown = List.filter (fun (k, _) -> not (List.mem k known)) bargs in
+  match unknown with
+  | (k, _) :: _ ->
+    let what = if k = "" then "a positional argument" else Printf.sprintf "keyword '%s'" k in
+    err ~code:"E259"
+      ~message:(Printf.sprintf
+        "transition '%s': hyper_erlang branch '%s' has %s" tr.trname label_str what)
+      ~hint:"a branch takes `label`, `stages`, exactly one of `mean` / `rate`, \
+             and optionally `weight` and `to`" ()
+  | [] ->
+    (* label: a required bare identifier. *)
+    let label_res = match List.assoc_opt "label" bargs with
+      | Some (EIdent (s, _)) -> Some s
+      | Some _ ->
+        err ~code:"E259"
+          ~message:(Printf.sprintf
+            "transition '%s': hyper_erlang branch `label` must be a bare name"
+            tr.trname)
+          ~hint:"e.g. branch(label = fatal, ...)" ()
+      | None ->
+        err ~code:"E259"
+          ~message:(Printf.sprintf
+            "transition '%s': a hyper_erlang branch is missing `label`" tr.trname)
+          ~hint:"every branch needs a distinct `label` (it names the per-branch \
+                 stage compartments)" ()
+    in
+    (* stages: a positive-integer literal (same rule as erlang, E244). *)
+    let stages_res = match List.assoc_opt "stages" bargs with
+      | None ->
+        err ~code:"E244"
+          ~message:(Printf.sprintf
+            "transition '%s': hyper_erlang branch '%s' requires \
+             `stages = <positive integer>`" tr.trname label_str)
+          ~hint:"e.g. branch(label = fatal, stages = 3, mean = 8 'days)" ()
+      | Some (EConst f) ->
+        (match Pos_int.of_float f with
+         | Ok pi -> Some pi
+         | Error why ->
+           err ~code:"E244"
+             ~message:(Printf.sprintf
+               "transition '%s': hyper_erlang branch '%s' `stages` %s"
+               tr.trname label_str why)
+             ~hint:"`stages` is the number of sub-stages (model structure), a \
+                    fixed positive integer — not a fittable parameter" ())
+      | Some _ ->
+        err ~code:"E244"
+          ~message:(Printf.sprintf
+            "transition '%s': hyper_erlang branch '%s' `stages` must be a \
+             positive-integer literal" tr.trname label_str)
+          ~hint:"`stages` sets how many compartments exist; it cannot be a \
+                 parameter or an expression" ()
+    in
+    (* mean XOR rate (same rule as erlang, E245). *)
+    let mean_res =
+      match List.assoc_opt "mean" bargs, List.assoc_opt "rate" bargs with
+      | Some m, None -> Some (Mean m)
+      | None, Some r -> Some (Rate r)
+      | Some _, Some _ ->
+        err ~code:"E245"
+          ~message:(Printf.sprintf
+            "transition '%s': hyper_erlang branch '%s' sets both `mean` and \
+             `rate`; give exactly one" tr.trname label_str)
+          ~hint:"`rate` is 1/`mean` — pick the one you have" ()
+      | None, None ->
+        err ~code:"E245"
+          ~message:(Printf.sprintf
+            "transition '%s': hyper_erlang branch '%s' sets neither `mean` nor \
+             `rate`; give exactly one" tr.trname label_str)
+          ~hint:"e.g. branch(label = fatal, stages = 3, mean = 8 'days)" ()
+    in
+    (* weight: optional (None on the last branch ⇒ implicit). The cross-branch
+       last-only rule is checked by the caller. *)
+    let weight = List.assoc_opt "weight" bargs in
+    (* to: optional per-branch destination, a bare compartment ref. *)
+    let to_res = match List.assoc_opt "to" bargs with
+      | None -> Some None
+      | Some e ->
+        (match stoich_ref_of_to_expr e with
+         | Ok r -> Some (Some r)
+         | Error why ->
+           err ~code:"E257"
+             ~message:(Printf.sprintf
+               "transition '%s': hyper_erlang branch '%s' `to` %s"
+               tr.trname label_str why) ())
+    in
+    (match label_res, stages_res, mean_res, to_res with
+     | Some hb_label, Some hb_stages, Some hb_mean, Some hb_to ->
+       Some { hb_weight = weight; hb_stages; hb_mean; hb_to; hb_label }
+     | _ -> None)
+
 (* Build the typed, validated [via_spec] from the raw [via_call]. Each failure
    is a located diagnostic naming the transition; on the error path we return
    [None] so the caller skips the rewrite (the compile aborts at phase end). *)
@@ -874,15 +994,104 @@ let via_spec_of_call ctx (tr : transition_decl) ((law, args) : via_call)
        (match stages_res, mean_res with
         | Some stages, Some mean -> Some (Erlang { stages; mean })
         | _ -> None))
+  | "hyper_erlang" ->
+    (* A finite mixture of Erlang chains, branched at entry. Every argument must
+       be a `branch(...)` call: the law itself takes NO bare keywords (no loose
+       semantics — `hyper_erlang(stages = 3, ...)` is a mistake, the stages
+       belong on a branch). *)
+    let non_branch =
+      List.filter (fun (k, e) -> match k, e with
+        | "", EFuncCall ("branch", _) -> false
+        | _ -> true) args
+    in
+    (match non_branch with
+     | (k, _) :: _ ->
+       let what = if k = "" then "a non-`branch(...)` argument"
+                  else Printf.sprintf "keyword '%s'" k in
+       err ~code:"E259"
+         ~message:(Printf.sprintf
+           "transition '%s': hyper_erlang(...) takes only `branch(...)` arguments \
+            but has %s" tr.trname what)
+         ~hint:"write hyper_erlang(branch(label = ..., stages = ..., mean = ...), \
+                branch(...)); `stages`/`mean`/`weight`/`to` go on each branch, not \
+                on hyper_erlang itself" ()
+     | [] ->
+       (* Parse each branch independently (each accumulating its own diagnostics),
+          then apply the cross-branch rules (≥ 2 branches, distinct labels, only
+          the LAST branch may omit `weight`). [filter_map] returns only the
+          well-formed branches; a branch error still fires (the compile aborts at
+          phase end), so we never build a HyperErlang from a partially-valid set:
+          if ANY branch failed we return None. *)
+       let branch_calls = List.map snd args in
+       let parsed = List.map (fun e -> match e with
+         | EFuncCall ("branch", bargs) -> hyper_branch_of_call ctx tr bargs
+         | _ -> None  (* unreachable: filtered above *)) branch_calls
+       in
+       if List.exists Option.is_none parsed then None
+       else begin
+         let branches = List.filter_map (fun x -> x) parsed in
+         (* ≥ 2 branches (a 1-branch mixture is an erlang; a 0-branch is empty). *)
+         let enough =
+           if List.length branches >= 2 then true
+           else (ignore (err ~code:"E255"
+             ~message:(Printf.sprintf
+               "transition '%s': hyper_erlang(...) needs at least 2 branches \
+                (a single branch is an ordinary erlang)" tr.trname)
+             ~hint:"use `via erlang(stages = ..., mean = ...)` for a single chain"
+             ()); false)
+         in
+         (* Distinct labels (the per-branch stage compartment names derive from
+            them: `<src>__<label>__i`). *)
+         let labels = List.map (fun b -> b.hb_label) branches in
+         let distinct =
+           if List.length (List.sort_uniq compare labels) = List.length labels
+           then true
+           else (ignore (err ~code:"E258"
+             ~message:(Printf.sprintf
+               "transition '%s': hyper_erlang(...) branches have duplicate labels; \
+                each `branch(label = ...)` must be distinct" tr.trname)
+             ~hint:"the labels name the per-branch stage compartments, so they \
+                    must be unique" ()); false)
+         in
+         (* Only the LAST branch may omit `weight` (⇒ 1 − Σ others). A non-last
+            branch missing `weight`, or the last branch HAVING one, is an error. *)
+         let n = List.length branches in
+         let weight_ok =
+           List.mapi (fun i b ->
+             let is_last = i = n - 1 in
+             match b.hb_weight, is_last with
+             | Some _, false -> true
+             | None,   true  -> true
+             | None,   false ->
+               ignore (err ~code:"E256"
+                 ~message:(Printf.sprintf
+                   "transition '%s': hyper_erlang branch '%s' has no `weight`; \
+                    only the LAST branch may omit it (⇒ 1 − Σ of the others)"
+                   tr.trname b.hb_label)
+                 ~hint:"give every branch but the last an explicit `weight = ...`"
+                 ()); false
+             | Some _, true ->
+               ignore (err ~code:"E256"
+                 ~message:(Printf.sprintf
+                   "transition '%s': the LAST hyper_erlang branch '%s' must NOT \
+                    set `weight` — it is 1 − Σ of the others, so the mixture is \
+                    normalized by construction" tr.trname b.hb_label)
+                 ~hint:"drop `weight` from the last branch" ()); false
+           ) branches |> List.for_all (fun x -> x)
+         in
+         if enough && distinct && weight_ok then Some (HyperErlang { branches })
+         else None
+       end)
   | _ ->
-    (* `hyper_erlang` (Phase 4) and any other law are not yet lowered. *)
+    (* Any other law (`coxian`, `approx_gamma`, `fixed`, …) is not yet lowered. *)
     err ~code:"E243"
       ~message:(Printf.sprintf
         "transition '%s': staged-residence `via %s(...)` is not yet supported"
         tr.trname law)
-      ~hint:"Phase 2 ships `erlang(stages, mean | rate)`; `hyper_erlang` and \
-             other laws are not implemented yet — express the residence with \
-             manual sub-stage compartments for now" ()
+      ~hint:"the laws shipped so far are `erlang(stages, mean | rate)` and \
+             `hyper_erlang(branch(...), ...)`; other laws are not implemented \
+             yet — express the residence with manual sub-stage compartments for \
+             now" ()
 
 (* The single-exit invariant (proposal §3): a staged compartment must be drained
    by EXACTLY ONE transition. A second draining transition (another `via`, or an
@@ -953,6 +1162,39 @@ let rec sum_staged_refs ~src ~n_pre ~dim_name ~sum_var (e : expr) : expr =
       EIndex (n, items' @ [ IPosn (EIdent (sum_var, dummy_loc)) ], l)
     in
     ESum (sum_var, dim_name, None, staged)
+  | EIndex (n, items, l) -> EIndex (n, List.map recur_item items, l)
+  | EBinOp (op, l, r) -> EBinOp (op, recur l, recur r)
+  | EUnOp (op, e)     -> EUnOp (op, recur e)
+  | ESum (v, d, g, b) -> ESum (v, d, g, recur b)
+  | ECond (p, t, f)   -> ECond (recur p, recur t, recur f)
+  | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, e) -> (k, recur e)) args)
+  | EList es          -> EList (List.map recur es)
+  | ERange (lo, hi)   -> ERange (recur lo, recur hi)
+
+(* Rewrite every RATE-POSITION reference to a [src] staged by `hyper_erlang` into
+   an explicit Add-chain over ALL its per-branch flat stage compartments. Unlike
+   erlang (one stage dimension → the bare-name `PopSum` rule sums for free),
+   hyper_erlang generates FLAT per-branch compartments (`I__fatal__1`,
+   `I__recover__1`, …) that are NOT one dimension, so a bare `I` no longer
+   resolves to any compartment and must be summed by name here. [cells] is the
+   ordered list of every per-branch stage compartment created for [src]; the
+   rewrite preserves their order so the Add-chain folds left-to-right (matching
+   the OCaml Add-chain order). Only a BARE `EIdent src` is rewritten — the chain
+   transitions reference the flat cells directly (a different name), and a
+   `src`-indexed reference cannot occur (stratified hyper_erlang is deferred). *)
+let rec sum_hyper_refs ~src ~(cells : string list) (e : expr) : expr =
+  let recur = sum_hyper_refs ~src ~cells in
+  let recur_item = function
+    | IPosn e       -> IPosn (recur e)
+    | INamed (n, e) -> INamed (n, recur e)
+  in
+  match e with
+  | EIdent (n, _) when n = src ->
+    (* The Add-chain `cell_1 + cell_2 + … + cell_m`, left-folded. [cells] is
+       non-empty (every branch has ≥ 1 stage), so [List.tl]/[List.hd] are safe. *)
+    let refs = List.map (fun c -> EIdent (c, dummy_loc)) cells in
+    List.fold_left (fun acc r -> EBinOp (Add, acc, r)) (List.hd refs) (List.tl refs)
+  | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> e
   | EIndex (n, items, l) -> EIndex (n, List.map recur_item items, l)
   | EBinOp (op, l, r) -> EBinOp (op, recur l, recur r)
   | EUnOp (op, e)     -> EUnOp (op, recur e)
@@ -1199,7 +1441,257 @@ let lower_via_transitions ctx =
           in
           { od with oprojection; omeasurement }
         ) ctx.obs_decls
-      | _ -> ()  (* unreachable: to_lower only holds single-source Erlang specs *)
+
+      | [ (src, src_pre_items) ], HyperErlang { branches } ->
+        (* ── hyper_erlang: a finite mixture of Erlang chains, branched at entry ──
+           Unlike erlang, the branches have different lengths, so this is NOT one
+           stage dimension. We generate FLAT per-branch compartments
+           `<src>__<label>__i` and parallel chains, branch the entry into the
+           per-branch first stages (weighted), and sum every bare-`src` reference
+           over all branch stages by name. Stratified hyper_erlang (an age/space-
+           stratified `src`) is DEFERRED — guarded below with E248. *)
+        let loc = diag_loc_of_ast_ctx ctx tr.trloc in
+        (* DEFER stratified hyper_erlang. [src] is stratified iff some stratify
+           decl applies to it; its via transition would also carry `src_pre_items`
+           (the per-stratum index). Either is the deferred case. *)
+        let src_is_stratified =
+          src_pre_items <> []
+          || List.exists (fun (sd : stratify_decl) ->
+               match sd.sonly with None -> true | Some only -> List.mem src only)
+               ctx.stratifies
+        in
+        if src_is_stratified then
+          Diagnostics.error ctx.diags ~code:"E248" ~loc
+            ~message:(Printf.sprintf
+              "transition '%s': `via hyper_erlang(...)` on the stratified \
+               compartment '%s' is not yet supported" tr.trname src)
+            ~hint:"hyper_erlang on a stratified compartment is a later sub-phase; \
+                   for now use it on an unstratified compartment, or express the \
+                   mixture with manual per-stage compartments"
+            ()
+        else begin
+          (* The per-branch weight EXPRESSIONS. Every branch but the last carries
+             an explicit `weight`; the last is `1 − Σ others`, so the mixture is
+             normalized by construction (validation already enforced this). *)
+          let explicit_weights =
+            List.filter_map (fun b -> b.hb_weight) branches in
+          let weight_of_branch (b : hyper_branch) : expr =
+            match b.hb_weight with
+            | Some w -> w
+            | None ->
+              (* last branch: 1 − (w_1 + … + w_{n-1}). *)
+              let sum_others = match explicit_weights with
+                | []      -> EConst 0.0   (* unreachable: ≥ 2 branches, ≥ 1 explicit *)
+                | w :: ws -> List.fold_left (fun a x -> EBinOp (Add, a, x)) w ws
+              in
+              EBinOp (Sub, EConst 1.0, sum_others)
+          in
+          (* The transition's arrow target, if any (the same-endpoint default).
+             None when the no-arrow form was used (`I via hyper_erlang(...)`) —
+             then every branch MUST carry its own `to`. *)
+          let arrow_target : stoich_ref option =
+            match tr.trdst with
+            | DstSum [ r ] -> Some r
+            | DstSum []    -> None
+            | DstSum _ | DstBranch _ -> None  (* multi/branch arrow rejected below per-branch *)
+          in
+          (* Resolve a branch's destination: its own `to`, else the arrow target.
+             Neither → E257 (a compile error; we substitute [src] as a placeholder
+             so synthesis continues and the user sees every error at once). *)
+          let dest_of_branch (b : hyper_branch) : stoich_ref =
+            match b.hb_to, arrow_target with
+            | Some r, _      -> r
+            | None,   Some r -> r
+            | None,   None   ->
+              Diagnostics.error ctx.diags ~code:"E257" ~loc
+                ~message:(Printf.sprintf
+                  "transition '%s': hyper_erlang branch '%s' has no destination — \
+                   it sets no `to` and the transition has no `--> TO` arrow target"
+                  tr.trname b.hb_label)
+                ~hint:"give the branch a `to = <compartment>`, or put a shared \
+                       `--> TO` on the transition arrow"
+                ();
+              (src, [])  (* placeholder; the error aborts the compile *)
+          in
+          (* Per-branch flat stage compartment names: `<src>__<label>__i`. The
+             `__` (double underscore) keeps them clear of single-`_` stratification
+             cells and is collision-checked (these are real comp_decls, so
+             [check_declaration_names] rejects any clash with a user name). *)
+          let branch_cells (b : hyper_branch) : string list =
+            let k = Pos_int.to_int b.hb_stages in
+            List.init k (fun i -> Printf.sprintf "%s__%s__%d" src b.hb_label (i + 1))
+          in
+          (* All per-branch stage cells, in branch order then stage order. The
+             bare-`src` reference sums over exactly these (the Add-chain). *)
+          let all_cells = List.concat_map branch_cells branches in
+
+          (* 1. Register the flat per-branch stage compartments as new comp_decls
+                (the original [src] decl is removed in step 7). They inherit the
+                source compartment's kind (Integer/Real). *)
+          let src_kind =
+            match List.find_opt (fun (cd : compartment_decl) -> cd.cname = src)
+                    ctx.comp_decls with
+            | Some cd -> cd.ckind | None -> Integer
+          in
+          let cell_decls =
+            List.map (fun name ->
+              { cname = name; ckind = src_kind; cdoc = None; cloc = tr.trloc })
+              all_cells
+          in
+          ctx.comp_decls <- ctx.comp_decls @ cell_decls;
+
+          (* 2. Per branch: the chain transitions + the exit. The per-stage rate
+                COEFFICIENT is `Rate ρ ⇒ k·ρ`, `Mean τ ⇒ k/τ` (same shape as
+                erlang, per branch). The chain advances stage i → i+1; the exit
+                drains the last stage to the branch's resolved destination. *)
+          let branch_transitions (b : hyper_branch) : transition_decl list =
+            let k = Pos_int.to_int b.hb_stages in
+            let k_const = EConst (float_of_int k) in
+            let coeff = match b.hb_mean with
+              | Rate r -> EBinOp (Mul, k_const, r)
+              | Mean t -> EBinOp (Div, k_const, t) in
+            let cells = branch_cells b in
+            let cell i = List.nth cells i in
+            let stage_rate name = EBinOp (Mul, coeff, EIdent (name, dummy_loc)) in
+            (* The intra-chain steps `cell_i --> cell_{i+1}`. *)
+            let chain =
+              List.init (k - 1) (fun i ->
+                { trname    = Printf.sprintf "%s_%s_stage%d" tr.trname b.hb_label (i + 1);
+                  trindices = tr.trindices;
+                  trsrc     = [ (cell i, []) ];
+                  trdst     = DstSum [ (cell (i + 1), []) ];
+                  trdyn     = Rate (stage_rate (cell i));
+                  trguard   = tr.trguard;
+                  trlineage = false;
+                  trdoc     = None;
+                  trloc     = tr.trloc })
+            in
+            (* The exit `cell_{k-1} --> dest`. *)
+            let dest = dest_of_branch b in
+            let exit_tr =
+              { trname    = Printf.sprintf "%s_%s_exit" tr.trname b.hb_label;
+                trindices = tr.trindices;
+                trsrc     = [ (cell (k - 1), []) ];
+                trdst     = DstSum [ dest ];
+                trdyn     = Rate (stage_rate (cell (k - 1)));
+                trguard   = tr.trguard;
+                trlineage = false;
+                trdoc     = None;
+                trloc     = tr.trloc }
+            in
+            chain @ [ exit_tr ]
+          in
+          let synthesized = List.concat_map branch_transitions branches in
+
+          (* 3. The weighted entry DstBranch. Every OTHER transition whose
+                destination is [src] is rewritten to branch into the per-branch
+                FIRST stages, weighted: `onset : E --> I @ r` becomes
+                `onset : E --> { I__b1__1 : w_1, I__b2__1 : w_2, … } @ r`. We emit
+                the AST `DstBranch` and let the EXISTING DstBranch lowering scale
+                each branch rate by its weight (expander §expand_transitions). *)
+          let entry_branch : (stoich_ref * expr) list =
+            List.map (fun b ->
+              let first_cell = List.hd (branch_cells b) in
+              ((first_cell, []), weight_of_branch b)) branches
+          in
+          let redirect_entry (dst : destination_form) : destination_form =
+            (* Replace a `DstSum` mention of [src] (the inflow target) with the
+               weighted branch. A transition that does not target [src] is left
+               alone. (An entry that already branches — DstBranch — into [src] is
+               not a pattern these models produce, so it is passed through.) *)
+            match dst with
+            | DstSum refs when List.exists (fun (c, _) -> c = src) refs ->
+              (* Drop the [src] target, keep any sibling targets, splice in the
+                 weighted per-branch first stages. *)
+              let others = List.filter (fun (c, _) -> c <> src) refs in
+              if others = [] then DstBranch entry_branch
+              else
+                (* A multi-destination inflow `--> src + X` cannot also be a clean
+                   weighted branch into src's stages plus X; this is not a model
+                   pattern hyper_erlang targets. Keep the others as weight-1
+                   branches alongside. *)
+                DstBranch (entry_branch
+                           @ List.map (fun r -> (r, EConst 1.0)) others)
+            | other -> other
+          in
+
+          (* 4. Replace the original `via` transition with the synthesized chains,
+                and redirect every OTHER transition's inflow into the staged source
+                to the weighted branch. *)
+          ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
+            if t.trname = tr.trname then synthesized
+            else [ { t with trdst = redirect_entry t.trdst } ]
+          ) ctx.transitions;
+
+          (* 5. Split `init { src = n }` across the branch first-stages by weight:
+                `init { src = n }` ⇒ `init { I__b1__1 = n*w_1, I__b2__1 = n*w_2, … }`.
+                A plain (unindexed, unbound) init on [src] is the only form a
+                hyper-staged unstratified source can carry. *)
+          ctx.init_entries <- List.concat_map (fun (ie : init_entry) ->
+            if ie.icomp = src && ie.ibindings = [] && ie.iindices = [] then
+              List.map (fun b ->
+                { ie with
+                  icomp   = List.hd (branch_cells b);
+                  ivalue  = EBinOp (Mul, ie.ivalue, weight_of_branch b) })
+                branches
+            else [ ie ]
+          ) ctx.init_entries;
+
+          (* 6. Rewrite every bare-`src` rate-position reference into the Add-chain
+                over all branch stage cells (the FOI, lets, balance, observations,
+                and the new init exprs). The synthesized chains reference the flat
+                cells by name, so they are untouched. *)
+          let rw e = sum_hyper_refs ~src ~cells:all_cells e in
+          let rw_items items =
+            List.map (function IPosn e -> IPosn (rw e)
+                             | INamed (n, e) -> INamed (n, rw e)) items in
+          let rw_dst = function
+            | DstSum refs -> DstSum (List.map (fun (c, items) -> (c, rw_items items)) refs)
+            | DstBranch brs ->
+              DstBranch (List.map (fun ((c, items), w) -> ((c, rw_items items), rw w)) brs)
+          in
+          let rw_dyn = function
+            | Rate e -> Rate (rw e)
+            | Via _ as v -> v in
+          ctx.transitions <- List.map (fun (t : transition_decl) ->
+            { t with
+              trsrc = List.map (fun (c, items) -> (c, rw_items items)) t.trsrc;
+              trdst = rw_dst t.trdst;
+              trdyn = rw_dyn t.trdyn }
+          ) ctx.transitions;
+          ctx.let_bindings <- List.map (fun (lb : let_binding) ->
+            { lb with lbody = rw lb.lbody }) ctx.let_bindings;
+          ctx.init_entries <- List.map (fun (ie : init_entry) ->
+            { ie with ivalue = rw ie.ivalue }) ctx.init_entries;
+          ctx.balance_decl <- Option.map (fun (bd : balance_decl) ->
+            { bd with bexpr = rw bd.bexpr }) ctx.balance_decl;
+          ctx.obs_decls <- List.map (fun (od : obs_decl) ->
+            let oprojection = match od.oprojection with
+              | Some (ProjDerived e) -> Some (ProjDerived (rw e))
+              | other -> other in
+            let omeasurement = Option.map (fun (om : obs_measurement) ->
+              let rw_kwargs = List.map (fun (key, e) -> (key, rw e)) in
+              let om_lik = match om.om_lik with
+                | LikNegBinomial a  -> LikNegBinomial  (rw_kwargs a)
+                | LikPoisson a      -> LikPoisson      (rw_kwargs a)
+                | LikNormal a       -> LikNormal       (rw_kwargs a)
+                | LikBinomial a     -> LikBinomial     (rw_kwargs a)
+                | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
+                | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
+              in
+              { om with om_lik }) od.omeasurement in
+            { od with oprojection; omeasurement }
+          ) ctx.obs_decls;
+
+          (* 7. Remove the now-replaced base compartment [src] — its flat per-branch
+                cells carry the whole population, and a surviving bare `src`
+                compartment would shadow the Add-chain (and dangle, since no
+                transition fills it). *)
+          ctx.comp_decls <- List.filter (fun (cd : compartment_decl) ->
+            cd.cname <> src) ctx.comp_decls
+        end
+
+      | _ -> ()  (* unreachable: to_lower only holds single-source via specs *)
     ) to_lower;
     (* Drop any `via` transition that survived (a failed spec, or a structurally
        rejected source) so none reaches [expand_transitions_counted]'s E243

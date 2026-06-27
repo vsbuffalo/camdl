@@ -135,10 +135,27 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("bimolecular", "chain_binomial", 0x54a38d360dcf4c01),
     ("branching_si_symp_asym", "gillespie", 0x325b8b153b1b16d4),
     ("branching_si_symp_asym", "chain_binomial", 0xae1bb55ced8410bd),
+    // Ebola onset-to-outcome as a CFR-split `via hyper_erlang(...)` mixture
+    // (Phase 4, PER-BRANCH endpoints): two parallel Erlang-3 chains drained out
+    // of `I`, the fatal arm exiting to `D` and the recover arm to `R`, the entry
+    // into `I` split `cfr` / `1−cfr`, and the FOI's bare `I` summing all six
+    // infectious stages. No manual twin in the corpus; the hashes stand alone
+    // (the per-branch-destination IR isomorphism is pinned by test_hyper_erlang).
+    ("ebola_outcome_hyper", "gillespie", 0xe0536f62dd9a2ebc),
+    ("ebola_outcome_hyper", "chain_binomial", 0x34833164a6ba99c1),
+    ("ebola_outcome_hyper", "ode", 0x4a7a3a00b5d8d557),
     ("malaria_two_species", "gillespie", 0x5ed03d7812021914),
     ("malaria_two_species", "chain_binomial", 0x132e1d7efc2da7d4),
     ("polio_age", "gillespie", 0x968a5308fde3affb),
     ("polio_age", "chain_binomial", 0x7b8b1e77dbccab4b),
+    // Polio bimodal shedding as a SAME-endpoint `via hyper_erlang(...)` mixture
+    // (Phase 4): an Erlang-2 typical arm and an Erlang-1 prolonged arm, both
+    // draining `I` to the shared `--> R`, the entry split `p` / `1−p`, and the
+    // FOI's bare `I` summing all three stages. Hashes stand alone (the
+    // same-endpoint IR shape is pinned by test_hyper_erlang).
+    ("polio_shedding_bimodal", "gillespie", 0xef5d276a6774bc31),
+    ("polio_shedding_bimodal", "chain_binomial", 0xdd348d9d5a752f05),
+    ("polio_shedding_bimodal", "ode", 0x4b0e6b49f73269b4),
     ("polio_spatial_5", "gillespie", 0x5516309d3eedfda4),
     ("polio_spatial_5", "chain_binomial", 0x3b8831126ad37aeb),
     ("ross_macdonald", "gillespie", 0xb8a901ca29312b3e),
@@ -312,10 +329,12 @@ const BASELINES: &[(&str, &str, u64)] = &[
 const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("bimolecular", 0x1bd688a80a4578f1),
     ("branching_si_symp_asym", 0x35a833278ee1fecc),
+    ("ebola_outcome_hyper", 0xfda4ae754f35311c),
     ("flu_data_forcing", 0xd55c543de04d2062),
     ("malaria_two_species", 0xfd4699acf8596e87),
     ("phenom_mixing_unchecked", 0x46f766b4f10b0138),
     ("polio_age", 0x3feecf44d4f3c67a),
+    ("polio_shedding_bimodal", 0x794dd970f8dd41e2),
     ("polio_spatial_5", 0x14cfd1ded179cc60),
     ("ross_macdonald", 0x3d5f33467f72bafd),
     ("seir_age", 0x310c060d6ceebe19),
