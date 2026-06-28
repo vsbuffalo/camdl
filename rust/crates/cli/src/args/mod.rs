@@ -1070,8 +1070,9 @@ Examples:
   camdl fit summary fit/he2010 --strict
 "))]
 pub struct FitSummaryArgs {
-    /// Fit results directory (e.g. `fit/he2010`)
-    pub fit_dir: PathBuf,
+    /// The fit, by handle: `@label`, a fit-level hash prefix, a fit results
+    /// directory (e.g. `results/fits/he2010-…`), or a `fit.toml` config.
+    pub fit: String,
 
     /// Render only one stage's stanza
     #[arg(long, value_name = "STAGE")]
@@ -1125,16 +1126,17 @@ Outputs, under the run directory:
   observed/<stream>.tsv     time | <dims...> | value
 Read both, join on (time, <dims>), plot observed over the predictive ribbon."))]
 pub struct FitPredictArgs {
-    /// The fit: a `fit.toml` config (resolved to its unique run) OR a fit
-    /// results directory. A config that maps to several runs errors and lists
-    /// them — pass a run directory to disambiguate.
+    /// The fit, by handle: `@label`, a fit-level hash prefix, a fit results
+    /// directory, or a `fit.toml` config (resolved to its unique run). A handle
+    /// that maps to several fits errors and lists them — pass a run directory or
+    /// a longer hash prefix to disambiguate.
     #[arg(long = "fit", value_name = "FIT")]
-    pub fit_flag: Option<PathBuf>,
+    pub fit_flag: Option<String>,
 
-    /// Positional form of the fit reference (a run directory or config), so
-    /// `camdl fit predict results/fits/<run>/` works like `fit summary`.
+    /// Positional form of the fit handle, so `camdl fit predict @jigawa-baseline`
+    /// or `camdl fit predict results/fits/<run>/` works like `fit summary`.
     #[arg(value_name = "FIT", conflicts_with = "fit_flag")]
-    pub fit_pos: Option<PathBuf>,
+    pub fit_pos: Option<String>,
 
     /// Restrict to one logical stream. Accepts the logical name (`onset`) or an
     /// expanded leaf name (`onset_Bo`), which maps up to its logical stream.
@@ -1193,12 +1195,16 @@ pub struct FitPredictArgs {
 pub const AS_FITTED: &str = "as_fitted";
 
 impl FitPredictArgs {
-    /// The resolved fit reference (`--fit` or the positional form).
-    pub fn fit(&self) -> Result<&PathBuf, String> {
+    /// The raw fit handle (`--fit` or the positional form), unparsed.
+    pub fn fit(&self) -> Result<&str, String> {
         self.fit_flag
-            .as_ref()
-            .or(self.fit_pos.as_ref())
-            .ok_or_else(|| "a fit reference is required: `--fit fit.toml` or a run directory".into())
+            .as_deref()
+            .or(self.fit_pos.as_deref())
+            .ok_or_else(|| {
+                "a fit handle is required: `@label`, a hash prefix, a run directory, \
+                 or `--fit fit.toml`"
+                    .into()
+            })
     }
 
     /// Parse the repeatable `--scenario`/`--enable`/`--disable` surface into the

@@ -38,17 +38,22 @@ use std::path::{Path, PathBuf};
 /// retyped; field additions are non-breaking and keep version stable.
 const SCHEMA_VERSION: u32 = 1;
 
-/// Top-level entry point. Reads `args.fit_dir`, walks every
-/// completed fit-stage run, dispatches to the right formatter based
-/// on `--format` and `--params-only`. Exits with code 1 if directory
-/// is missing or empty; with code 1 in `--strict` mode if any IF2
-/// stage's provenance cross-check fails.
+/// Top-level entry point. Resolves `args.fit` (the fit handle) to its segment
+/// directory, walks every completed fit-stage run, and dispatches to the right
+/// formatter based on `--format` and `--params-only`. Exits with code 1 if the
+/// handle does not resolve or the segment is empty; with code 1 in `--strict`
+/// mode if any IF2 stage's provenance cross-check fails.
 pub fn cmd_fit_summary(args: &FitSummaryArgs) {
-    let dir = args.fit_dir.to_string_lossy().into_owned();
-    if !Path::new(&dir).exists() {
-        eprintln!("error: no such fit directory: {}", dir);
-        std::process::exit(1);
-    }
+    // Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) → its
+    // segment directory. summary operates on the directory; it needs no config.
+    let segment = match crate::fit::handle::resolve_fit_segment(&args.fit) {
+        Ok(seg) => seg,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let dir = segment.to_string_lossy().into_owned();
 
     let strict = args.strict || ci_env_set();
 

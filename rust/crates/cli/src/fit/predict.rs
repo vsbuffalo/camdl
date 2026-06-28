@@ -580,75 +580,6 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
         .unwrap_or(ConvergenceStatus::NotAssessed)
 }
 
-// ── Resolving a config to its run segment ──────────────────────────────────
-
-/// Resolve a fit reference to its run segment directory.
-///
-/// A directory is used as the segment directly. A `fit.toml` config is matched
-/// to its run by `fit_toml_hash` (the sha256 the sidecar records) across the
-/// run store — the proposal's "a config resolves to its run; error and list if
-/// it maps to several" rule, without recomputing the CAS identity.
-fn resolve_segment(fit_ref: &Path) -> Result<(PathBuf, crate::fit::config_v2::FitConfigV2), String> {
-    use crate::fit::config_v2::FitConfigV2;
-    if fit_ref.is_dir() {
-        let cfg_path = fit_ref.join("fit.toml.original");
-        let config = FitConfigV2::load(&cfg_path.to_string_lossy()).map_err(|e| {
-            format!(
-                "{} is a fit directory but its archived config could not be read: {e}\n  \
-                 (expected {})",
-                fit_ref.display(),
-                cfg_path.display()
-            )
-        })?;
-        return Ok((fit_ref.to_path_buf(), config));
-    }
-
-    // A config TOML: hash it, match against the run store's sidecars.
-    let bytes = std::fs::read(fit_ref)
-        .map_err(|e| format!("cannot read fit config {}: {e}", fit_ref.display()))?;
-    let toml_hash = crate::hashing::sha256_hex(&bytes);
-    let config = FitConfigV2::load(&fit_ref.to_string_lossy())
-        .map_err(|e| format!("cannot load fit config {}: {e}", fit_ref.display()))?;
-    let cas_root = crate::run_paths::output_root(None, config.output_dir.as_deref());
-    let fits_dir = cas_root.join("fits");
-    let mut matches: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&fits_dir) {
-        for entry in entries.flatten() {
-            let seg = entry.path();
-            if !seg.is_dir() {
-                continue;
-            }
-            if let Some(side) = crate::run_meta::read_fit_sidecar(&seg) {
-                if side.fit_toml_hash == toml_hash {
-                    matches.push(seg);
-                }
-            }
-        }
-    }
-    matches.sort();
-    match matches.len() {
-        0 => Err(format!(
-            "no completed fit found for {} under {}.\n  \
-             Run `camdl fit run {}` first.",
-            fit_ref.display(),
-            fits_dir.display(),
-            fit_ref.display()
-        )),
-        1 => Ok((matches.remove(0), config)),
-        _ => {
-            let list = matches.iter().map(|p| format!("    {}", p.display()))
-                .collect::<Vec<_>>().join("\n");
-            Err(format!(
-                "{} resolves to {} runs:\n{}\n  \
-                 Pass one of these run directories directly.",
-                fit_ref.display(),
-                matches.len(),
-                list
-            ))
-        }
-    }
-}
-
 // ── The engine sink: sample y_rep per draw at the observed cadence ─────────
 
 /// One scenario's accumulated free-forward output: the per-`(leaf, time)`
@@ -817,8 +748,10 @@ struct LeafObs {
 }
 
 fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, String> {
-    // 1. Resolve the run segment + its config.
-    let (segment, config) = resolve_segment(args.fit()?)?;
+    // 1. Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) →
+    //    its segment + config.
+    let crate::fit::handle::ResolvedFit { segment, config } =
+        crate::fit::handle::resolve_fit(args.fit()?).map_err(|e| e.to_string())?;
 
     // 2. Resolve the posterior — by artifact. A point-estimate fit is refused.
     let fit_result = FitResult::resolve(&segment, args.stage.as_deref())?;

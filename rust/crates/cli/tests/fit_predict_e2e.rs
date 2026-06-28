@@ -798,6 +798,135 @@ thin = 1
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// The single fit segment under `results/fits/`.
+fn fit_segment_dir(results: &Path) -> PathBuf {
+    let fits = results.join("fits");
+    std::fs::read_dir(&fits)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .expect("a fit segment")
+}
+
+#[test]
+fn fit_predict_resolves_at_label_and_hash_prefix() {
+    // Phase 1b: a fit referenced by `@label` and by its fit-level hash prefix,
+    // not just a run dir / fit.toml. Both resolve to the same sealed fit.
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_predict_handle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+
+    let pgas = r#"[stages.posterior]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 2
+particles = 200
+sweeps = 60
+burn_in = 20
+thin = 1
+"#;
+    std::fs::write(tmp.join("fit.toml"), fit_toml(pgas, "results")).unwrap();
+
+    let out = run(
+        &bin,
+        &tmp,
+        &["fit", "run", "fit.toml", "--label", "jigawa-baseline", "--seed", "1"],
+    );
+    assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    // The fit-level hash prefix is the suffix of the segment dir name (`stem-<h8>`).
+    let seg = fit_segment_dir(&tmp.join("results"));
+    let name = seg.file_name().unwrap().to_string_lossy().into_owned();
+    let hash8 = name.rsplit('-').next().unwrap().to_string();
+    assert!(hash8.len() >= 8, "segment hash suffix looks like a hash: {name}");
+
+    // (1) Resolve by @label.
+    let out = run(&bin, &tmp, &["fit", "predict", "@jigawa-baseline", "--horizon", "free_forward"]);
+    assert!(
+        out.status.success(),
+        "fit predict @label failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        find_artifact(&tmp.join("results"), "predictive", "weekly_cases").is_some(),
+        "@label resolved to the fit and predicted"
+    );
+
+    // (2) Resolve by hash prefix (positional handle).
+    let out = run(&bin, &tmp, &["fit", "predict", &hash8, "--horizon", "free_forward"]);
+    assert!(
+        out.status.success(),
+        "fit predict <hash> failed for prefix {hash8}:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // (3) An unknown label is a typed not-found error, not a panic.
+    let out = run(&bin, &tmp, &["fit", "predict", "@nope", "--horizon", "free_forward"]);
+    assert!(!out.status.success(), "unknown @label must error");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no fit found for @nope"), "actionable not-found, got: {stderr}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn fit_summary_ambiguous_label_lists_candidates() {
+    // Phase 1b: two distinct fits sharing a label make `@label` ambiguous —
+    // the candidates are listed git-style, never silently resolved to one.
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_handle_ambig_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+
+    // Two fits that differ in config (→ distinct fit-level hashes → two
+    // segments) but carry the SAME label. Cheap IF2 fits: resolution ambiguity
+    // fires before any posterior is touched, so `fit summary` is enough.
+    let if2_a = r#"[stages.scout]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 150
+iterations = 20
+cooling = 0.7
+"#;
+    let if2_b = r#"[stages.scout]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 150
+iterations = 30
+cooling = 0.7
+"#;
+    std::fs::write(tmp.join("a.toml"), fit_toml(if2_a, "results")).unwrap();
+    std::fs::write(tmp.join("b.toml"), fit_toml(if2_b, "results")).unwrap();
+
+    for cfg in ["a.toml", "b.toml"] {
+        let out = run(&bin, &tmp, &["fit", "run", cfg, "--label", "dup", "--seed", "1"]);
+        assert!(out.status.success(), "fit run {cfg} failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    let out = run(&bin, &tmp, &["fit", "summary", "@dup"]);
+    assert!(!out.status.success(), "ambiguous @label must error, not pick one");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("@dup resolves to 2 fits"),
+        "ambiguity is typed and counted, got: {stderr}"
+    );
+    // Both candidate segments are listed.
+    let listed = stderr.matches("results/fits/").count();
+    assert!(listed >= 2, "both candidate segments listed, got: {stderr}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn fit_predict_refuses_an_optimizer_fit() {
     let bin = skip_if_missing_binary();
