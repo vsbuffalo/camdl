@@ -17,8 +17,27 @@
 //!   obs-model / backend preflights, anti-pattern detection beyond T_score,
 //!   stacking, plotting.
 
+use crate::fit::handle::ResolvedFit;
 use serde::Deserialize;
 use sim::inference::prequential::PrequentialTrace;
+use std::path::{Path, PathBuf};
+
+/// Default particle count for auto-deriving a prequential from a fit handle.
+/// Applied uniformly across the compared fits (see [`DeriveSettings`]).
+pub(crate) const DEFAULT_DERIVE_PARTICLES: usize = 1000;
+
+/// Default filter seed for auto-deriving a prequential from a fit handle.
+pub(crate) const DEFAULT_DERIVE_SEED: u64 = 1;
+
+/// Settings applied uniformly to every fit handle whose prequential is
+/// auto-derived, so T_score and the scores stay commensurable across the
+/// compared fits. An explicit `prequential.json` input ignores these (it is
+/// read as-is, at whatever particles/seed produced it).
+#[derive(Debug, Clone, Copy)]
+struct DeriveSettings {
+    particles: usize,
+    seed: u64,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)] // gh#241 G3: reject typo'd compare.toml keys instead of silently dropping
@@ -52,6 +71,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     let baseline: Option<String> = a.baseline.clone();
     let allow_mismatched_horizon = a.allow_mismatched_horizon;
     let positional: Vec<String> = a.paths.clone();
+    let derive = DeriveSettings { particles: a.particles, seed: a.seed };
     let metrics_cli: Option<Vec<String>> = a.metrics.as_ref().map(|s|
         s.split(',').map(|t| t.trim().to_string()).collect());
     let format = match a.format.as_str() {
@@ -101,7 +121,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
 
     // Load traces.
     let rows: Vec<Row> = models.into_iter().map(|m| {
-        let trace = load_trace(&m.path).unwrap_or_else(|e| {
+        let trace = load_trace(&m.path, derive).unwrap_or_else(|e| {
             eprintln!("error loading trace for '{}' at '{}': {}", m.name, m.path, e);
             std::process::exit(1);
         });
@@ -154,25 +174,190 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     }
 }
 
-fn load_trace(path: &str) -> Result<PrequentialTrace, String> {
-    let p = std::path::Path::new(path);
-    // Accept either a path to prequential.json directly or a stage dir
-    // that contains prequential.json.
-    let json_path = if p.is_dir() {
-        p.join("prequential.json")
-    } else {
-        p.to_path_buf()
-    };
-    if !json_path.exists() {
-        return Err(format!(
-            "no prequential.json at '{}' — run `camdl pfilter --save-prequential` or \
-             `camdl fit run` with a pfilter stage to generate one.",
-            json_path.display()));
+/// Resolve a single comparison input to a `PrequentialTrace`. Two paths:
+///
+/// 1. **Explicit prequential** (kept, tried first): a `.json` file that exists,
+///    or a directory holding `prequential.json` — read+parsed as-is. Preserves
+///    `pfilter --save-prequential` and stage-dir inputs; the derive settings do
+///    not touch it.
+/// 2. **Fit handle** (Phase 2a): `@label` / hash prefix / run dir / `fit.toml`.
+///    The prequential is DERIVED by invoking the canonical `camdl pfilter` at
+///    the fit's sealed θ̂ — never by reimplementing the filter (the obs-model
+///    assembly is already triplicated; a fourth copy is forbidden).
+fn load_trace(path: &str, derive: DeriveSettings) -> Result<PrequentialTrace, String> {
+    if let Some(trace) = try_load_explicit_prequential(path)? {
+        return Ok(trace);
     }
+    // Not an explicit prequential → treat as a fit handle and derive.
+    match crate::fit::handle::resolve_fit(path) {
+        Ok(resolved) => derive_prequential(&resolved, derive),
+        Err(resolve_err) => Err(format!(
+            "'{path}' is neither a prequential trace nor a resolvable fit handle.\n  \
+             - as a fit handle: {resolve_err}\n  \
+             - as a prequential path: no prequential.json at '{path}' (or \
+             '{path}/prequential.json') — run `camdl pfilter --save-prequential` \
+             or `camdl fit run` with a pfilter stage to generate one."
+        )),
+    }
+}
+
+/// Try to read `path` as an explicit prequential artifact. Returns `Ok(None)`
+/// (fall through to fit-handle derivation) when it is not one: a non-existent
+/// path, a `@label` / hash prefix, a `.toml`, or a directory with no
+/// `prequential.json`. Only a `.json` file or a `<dir>/prequential.json` is
+/// read — so a `fit.toml` handle is never mis-parsed as a trace.
+fn try_load_explicit_prequential(path: &str) -> Result<Option<PrequentialTrace>, String> {
+    let p = Path::new(path);
+    let json_path = if p.is_dir() {
+        let jp = p.join("prequential.json");
+        if !jp.exists() {
+            return Ok(None);
+        }
+        jp
+    } else if p.extension().map(|e| e.eq_ignore_ascii_case("json")).unwrap_or(false) {
+        if !p.exists() {
+            return Ok(None);
+        }
+        p.to_path_buf()
+    } else {
+        return Ok(None);
+    };
     let text = std::fs::read_to_string(&json_path)
         .map_err(|e| format!("{}: {}", json_path.display(), e))?;
-    serde_json::from_str::<PrequentialTrace>(&text)
-        .map_err(|e| format!("parsing {}: {}", json_path.display(), e))
+    let trace = serde_json::from_str::<PrequentialTrace>(&text)
+        .map_err(|e| format!("parsing {}: {}", json_path.display(), e))?;
+    Ok(Some(trace))
+}
+
+/// Derive a prequential trace from a sealed fit by invoking the canonical
+/// `camdl pfilter` at the fit's winning θ̂. This routes through the one
+/// production filter + obs-model assembly rather than rebuilding it, so a
+/// derived trace can never silently diverge from a hand-run `pfilter`.
+///
+/// Steps: (a) θ̂ from the winning stage as a flat params TOML; (b) the model
+/// (archived IR if present, else the loose source the config names); (c) the
+/// fit's data streams as `--data NAME=PATH`; (d) run `pfilter
+/// --save-prequential` to a temp stem; (e) read back the `{stem}.json` trace.
+/// All temp files live in the system temp dir and are best-effort cleaned up.
+fn derive_prequential(resolved: &ResolvedFit, derive: DeriveSettings) -> Result<PrequentialTrace, String> {
+    let segment = &resolved.segment;
+    let config = &resolved.config;
+
+    // (a) θ̂ — the winning stage's point estimate (terminal stage; `None`).
+    let params_toml = crate::fit::fit_summary::winner_params_toml(segment, None)?;
+
+    // (b) model — prefer the self-contained archived IR (Phase 1a), else the
+    // loose source the config names (recompiled by pfilter). config.model.camdl
+    // is already absolute (resolved against the fit.toml dir at load).
+    let archived = segment.join("model.ir.json");
+    let model_path: PathBuf = if archived.is_file() {
+        archived
+    } else {
+        PathBuf::from(&config.model.camdl)
+    };
+
+    // (c) data — stream → absolute path. The config's data paths were made
+    // absolute (relative to the original fit.toml) at load, so they pass to the
+    // child unchanged.
+    let data = config.data.as_ref().ok_or_else(|| format!(
+        "fit at {} has no [data] block — there are no observations to score, so a \
+         prequential trace cannot be derived.\n  Provide an explicit \
+         prequential.json, or compare fits that bind data.",
+        segment.display()))?;
+    let streams = resolve_streams(data, &model_path)?;
+    if streams.is_empty() {
+        return Err(format!(
+            "fit at {} has a [data] block with no observation streams.",
+            segment.display()));
+    }
+
+    // Temp files: unique per process + fit segment so concurrent compares don't
+    // collide. STEM has no `.` so pfilter's `{stem}.json` / `{stem}.tsv` are
+    // unambiguous.
+    let seg_slug = segment
+        .file_name()
+        .map(|s| s.to_string_lossy().replace(|c: char| !c.is_ascii_alphanumeric(), "_"))
+        .unwrap_or_else(|| "fit".into());
+    let base = std::env::temp_dir()
+        .join(format!("camdl_compare_{}_{}", std::process::id(), seg_slug));
+    let theta_path = base.with_extension("theta.toml");
+    let preq_stem = base.to_string_lossy().into_owned() + "_preq";
+    let preq_json = format!("{preq_stem}.json");
+    let preq_tsv = format!("{preq_stem}.tsv");
+    let cleanup = || {
+        let _ = std::fs::remove_file(&theta_path);
+        let _ = std::fs::remove_file(&preq_json);
+        let _ = std::fs::remove_file(&preq_tsv);
+    };
+
+    if let Err(e) = std::fs::write(&theta_path, &params_toml) {
+        cleanup();
+        return Err(format!("writing temp params {}: {}", theta_path.display(), e));
+    }
+
+    // (d) run the canonical filter.
+    let exe = std::env::current_exe()
+        .map_err(|e| { cleanup(); format!("cannot locate the running camdl binary: {e}") })?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("pfilter")
+        .arg(&model_path)
+        .arg("--params").arg(&theta_path)
+        .arg("--save-prequential").arg(&preq_stem)
+        .arg("--particles").arg(derive.particles.to_string())
+        .arg("--seed").arg(derive.seed.to_string())
+        .env("CAMDL_SKIP_VERSION_CHECK", "1");
+    for (name, abs_path) in &streams {
+        cmd.arg("--data").arg(format!("{name}={abs_path}"));
+    }
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => { cleanup(); return Err(format!("spawning `camdl pfilter`: {e}")); }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code = output.status.code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".into());
+        cleanup();
+        return Err(format!(
+            "deriving prequential via `camdl pfilter` failed (exit {code}) for fit {}:\n{}",
+            segment.display(),
+            stderr.trim()));
+    }
+
+    // (e) read back the trace.
+    let text = match std::fs::read_to_string(&preq_json) {
+        Ok(t) => t,
+        Err(e) => { cleanup(); return Err(format!(
+            "`camdl pfilter` succeeded but its prequential output {preq_json} could not be read: {e}")); }
+    };
+    let trace = serde_json::from_str::<PrequentialTrace>(&text)
+        .map_err(|e| format!("parsing derived prequential {preq_json}: {e}"));
+    cleanup();
+    trace
+}
+
+/// Resolve a fit's `[data]` spec to a stream-name → absolute-path map for
+/// `--data NAME=PATH`. The per-stream `observations` map is used directly; the
+/// single-file shorthand (`file = "..."`) is expanded via the existing
+/// [`DataSpec::effective_observations`] seam, which needs the model's declared
+/// observation-stream names (loaded from `model_path`).
+fn resolve_streams(
+    data: &crate::fit::config_v2::DataSpec,
+    model_path: &Path,
+) -> Result<indexmap::IndexMap<String, String>, String> {
+    if !data.observations.is_empty() {
+        return Ok(data.observations.clone());
+    }
+    if data.file.is_some() {
+        let (model, _) = crate::util::load_model(&model_path.to_string_lossy())
+            .map_err(|e| format!(
+                "loading model {} to expand the single-file [data] shorthand: {e}",
+                model_path.display()))?;
+        let names: Vec<String> = model.observations.iter().map(|o| o.name.clone()).collect();
+        return data.effective_observations(&names);
+    }
+    Err("the fit's [data] block has neither `observations` nor `file`".to_string())
 }
 
 /// Paired Δ = sum_t (a_t − b_t); paired SE = sqrt(T · Var_t(a_t − b_t)).

@@ -2409,8 +2409,9 @@ pub struct ReindexArgs {
 
 /// `camdl compare` — multi-model prequential comparison table.
 ///
-/// Reads prequential.json from ≥2 fit stage dirs (or a compare.toml)
-/// and renders a baseline-centered comparison.
+/// Takes ≥2 prequential.json files / stage dirs (or fit handles, whose
+/// prequential is auto-derived) or a compare.toml, and renders a
+/// baseline-centered comparison.
 /// See docs/dev/proposals/2026-04-20-prequential-evaluation.md §8.
 #[derive(Args)]
 #[command(after_help = colored_help!("\
@@ -2454,12 +2455,19 @@ Examples:
   # Reproducible preset via compare.toml
   camdl compare --config compare.toml
 
+  # Compare two sealed fits by handle — the prequential is auto-derived
+  # at θ̂ via `camdl pfilter` (same particles/seed for both, so the
+  # scores are commensurable). No pre-run pfilter needed.
+  camdl compare @baseline @candidate --particles 2000 --seed 7
+
   # Render despite different T_score across fits (Δ columns → '—')
   camdl compare fits/a/pf fits/b/pf --allow-mismatched-horizon
 "))]
 pub struct CompareArgs {
-    /// Stage directories (or .json paths) to compare — need ≥2 when
-    /// --config is not used
+    /// Models to compare — need ≥2 when --config is not used. Each is
+    /// either a prequential.json (or a stage dir holding one), read
+    /// as-is, OR a fit handle (@label / hash prefix / run dir / fit.toml),
+    /// whose prequential is auto-derived from its sealed θ̂ + data.
     pub paths: Vec<String>,
 
     /// compare.toml with [[model]] entries (baseline/metrics/format
@@ -2482,6 +2490,19 @@ pub struct CompareArgs {
     /// Render even if T_score differs across models (Δ columns → '—')
     #[arg(long)]
     pub allow_mismatched_horizon: bool,
+
+    /// Particle count for any fit handle whose prequential is
+    /// auto-derived. Applied uniformly to every derived fit so T_score
+    /// and scores stay commensurable. Ignored for an explicit
+    /// prequential.json path (read as-is).
+    #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_PARTICLES)]
+    pub particles: usize,
+
+    /// Filter seed for any fit handle whose prequential is auto-derived.
+    /// Applied uniformly across derived fits. Ignored for an explicit
+    /// prequential.json path (read as-is).
+    #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_SEED)]
+    pub seed: u64,
 }
 
 // ─── mre (minimal-reproducible-example bundles) ──────────────────────────────

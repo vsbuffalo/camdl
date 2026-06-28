@@ -1823,6 +1823,20 @@ fn escape_latex(s: &str) -> String {
     }).collect()
 }
 
+/// The winning stage's point estimate (θ̂) as a flat params TOML — the same
+/// payload `fit summary --params-only` prints. A `pub(crate)` seam over
+/// [`discover_stages`] + [`dump_params_only`] so `compare` can derive a
+/// prequential at θ̂ from a sealed fit without touching the private
+/// `ResolvedStage` type. `stage` selects a stage; `None` = the terminal stage.
+pub(crate) fn winner_params_toml(
+    segment: &Path,
+    stage: Option<&str>,
+) -> Result<String, String> {
+    let dir = segment.to_string_lossy();
+    let discovered = discover_stages(segment);
+    dump_params_only(&dir, stage, &discovered)
+}
+
 /// Dump the chosen stage's winner params as a flat TOML, pipeable
 /// into `camdl pfilter --params`. No header, no metadata, no
 /// provenance — just `name = value` lines the standard params loader
