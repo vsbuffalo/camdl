@@ -1375,7 +1375,10 @@ fn run_simulate(a: &args::SimulateArgs) {
                 crate::quantity_output::Mode::Point
             };
             let (outs, manifest) =
-                crate::quantity_output::render_quantities(&q.quantities, &q.draws, &q.times, mode, None)
+                crate::quantity_output::render_quantities(
+                    &q.quantities, &q.draws, &q.times, mode,
+                    crate::quantity_output::DesignCoords::none(),
+                )
                     .unwrap_or_else(|e| {
                         eprintln!("error rendering quantities: {}", e);
                         std::process::exit(1);

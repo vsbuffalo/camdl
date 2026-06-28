@@ -1168,6 +1168,17 @@ pub struct FitPredictArgs {
     #[arg(long, conflicts_with = "scenarios")]
     pub disable: Vec<String>,
 
+    /// Vary a parameter across a grid over the posterior (repeatable →
+    /// multiple swept params → Cartesian). Each `--sweep PARAM=GRID` sets the
+    /// swept parameter to each grid value in turn while the rest of every
+    /// posterior draw propagates; cells are keyed by a leading `sweep:<param>`
+    /// column. `GRID` is a list (`q=0,30,60`), `lin(min,max,n)`, or
+    /// `log10(min,max,n)`. Composes with `--scenario` on DISTINCT parameters; a
+    /// scenario and a sweep on the SAME parameter is a hard error (pin OR vary,
+    /// not both). Free-forward only — the one-step horizon is sweep-agnostic.
+    #[arg(long = "sweep", value_name = "PARAM=GRID")]
+    pub sweep: Vec<crate::args::types::SweepSpec>,
+
     /// Which predictive horizon(s) to emit. Omitted = all applicable for the
     /// fit's backend (chain-binomial → `free_forward` + `one_step`; ODE →
     /// `free_forward` only). `--horizon one_step` on an ODE fit is a hard error.

@@ -27,6 +27,28 @@ pub(crate) enum Mode {
     Point,
 }
 
+/// The `fit predict` design-overlay coordinates a quantity output is tagged
+/// with: the scenario overlay axis ([`DesignCoords::scenario`]) and the sweep
+/// grid coordinate ([`DesignCoords::sweep`], one `(param, value)` per swept
+/// parameter, in sorted-name order). A leading `scenario` column precedes the
+/// `sweep:<param>` columns, which precede everything else.
+///
+/// `simulate` passes [`DesignCoords::none`] (no scenario column, no sweep
+/// columns), keeping its output byte-identical.
+#[derive(Clone, Copy)]
+pub(crate) struct DesignCoords<'a> {
+    pub scenario: Option<&'a str>,
+    pub sweep: &'a [(String, f64)],
+}
+
+impl<'a> DesignCoords<'a> {
+    /// No overlay — the `simulate` path: omit the `scenario` column and any
+    /// `sweep:<param>` columns.
+    pub fn none() -> Self {
+        DesignCoords { scenario: None, sweep: &[] }
+    }
+}
+
 /// A scalar quantity leaf's banding result: either a real band over the finite
 /// per-draw values (carrying the censored count), or every draw censored (no
 /// band — `q*` rendered empty). Series quantities never reach here.
@@ -124,16 +146,37 @@ fn manifest_source(body: &ir::quantity::QuantityBody) -> &'static str {
     }
 }
 
+/// The leading design-overlay columns (`scenario`, then `sweep:<param>` per
+/// swept parameter) shared by the banded and point headers. Empty `coords`
+/// (the `simulate` path) push nothing → a byte-identical header.
+fn push_design_header_cols(cols: &mut Vec<String>, coords: DesignCoords) {
+    if coords.scenario.is_some() {
+        cols.push("scenario".to_string());
+    }
+    for (name, _) in coords.sweep {
+        cols.push(format!("sweep:{name}"));
+    }
+}
+
+/// The leading design-overlay cells (the scenario name, then this cell's swept
+/// values) shared by every banded/point row. Empty `coords` push nothing.
+fn push_design_row_cells(cells: &mut Vec<String>, coords: DesignCoords) {
+    if let Some(s) = coords.scenario {
+        cells.push(s.to_string());
+    }
+    for (_, v) in coords.sweep {
+        cells.push(fmt_value(*v));
+    }
+}
+
 /// The banded TSV header — a deterministic function of `(shape, stratified)`.
 /// Every shape carries `n_draws` + the quantile columns; a series prepends
 /// `time`; a stratified leaf inserts its `<dims…>`; a censorable scalar inserts
-/// the censoring trio. When `scenario_col` is set (the `fit predict` overlay
-/// axis), a leading `scenario` column precedes everything else.
-fn quantity_header(shape: QShape, dims: &[String], scenario_col: bool) -> String {
+/// the censoring trio. The `fit predict` design overlay (`scenario`, then
+/// `sweep:<param>`) leads everything else.
+fn quantity_header(shape: QShape, dims: &[String], coords: DesignCoords) -> String {
     let mut cols: Vec<String> = Vec::new();
-    if scenario_col {
-        cols.push("scenario".to_string());
-    }
+    push_design_header_cols(&mut cols, coords);
     if shape.is_series() {
         cols.push("time".to_string());
     }
@@ -153,11 +196,9 @@ fn quantity_header(shape: QShape, dims: &[String], scenario_col: bool) -> String
 /// The point TSV header — a single realization, so a bare `value` column. A
 /// series prepends `time`; a stratified leaf inserts its `<dims…>`. No `n_draws`,
 /// no quantiles, no censoring trio (a censored `Time` scalar writes `value = NA`).
-fn point_header(shape: QShape, dims: &[String], scenario_col: bool) -> String {
+fn point_header(shape: QShape, dims: &[String], coords: DesignCoords) -> String {
     let mut cols: Vec<String> = Vec::new();
-    if scenario_col {
-        cols.push("scenario".to_string());
-    }
+    push_design_header_cols(&mut cols, coords);
     if shape.is_series() {
         cols.push("time".to_string());
     }
@@ -194,17 +235,19 @@ fn collect_qrefs(se: &ir::quantity::ScalarExpr, out: &mut Vec<String>) {
 /// `mode` selects banded (one column per draw → a quantile band) or point (one
 /// realization → a bare `value`).
 ///
-/// `scenario` is the `fit predict` overlay axis: `Some(name)` prepends a leading
-/// `scenario` column to every TSV header + row and adds a `scenario` field to
-/// every manifest entry (the same way the predictive TSV tags its rows). `None`
-/// (the `simulate --quantities-out` caller, which pools all cells into one band)
-/// omits the column entirely — today's behaviour, unchanged.
+/// `coords` is the `fit predict` design overlay: a `Some` scenario prepends a
+/// leading `scenario` column to every TSV header + row and a `scenario` field to
+/// every manifest entry; a non-empty sweep prepends one `sweep:<param>` column
+/// per swept parameter (after the scenario column) and a `sweep` object to the
+/// manifest entry (the same way the predictive TSV tags its rows). The
+/// `simulate --quantities-out` caller passes [`DesignCoords::none`] (pools all
+/// cells into one band) and omits both — today's behaviour, unchanged.
 pub(crate) fn render_quantities(
     quantities: &[ir::quantity::Quantity],
     quant_draws: &[Vec<sim::quantity::QuantityResult>],
     snapshot_times: &[f64],
     mode: Mode,
-    scenario: Option<&str>,
+    coords: DesignCoords,
 ) -> Result<(Vec<(String, String)>, String), String> {
     use ir::quantity::{QuantityBody, TemporalReduce};
 
@@ -268,11 +311,10 @@ pub(crate) fn render_quantities(
         };
         let dims: Vec<String> = first.stratum.iter().map(|k| k.dim.clone()).collect();
 
-        let scenario_col = scenario.is_some();
         let mut out = String::new();
         match mode {
-            Mode::Banded => out.push_str(&quantity_header(shape, &dims, scenario_col)),
-            Mode::Point => out.push_str(&point_header(shape, &dims, scenario_col)),
+            Mode::Banded => out.push_str(&quantity_header(shape, &dims, coords)),
+            Mode::Point => out.push_str(&point_header(shape, &dims, coords)),
         }
         out.push('\n');
 
@@ -281,10 +323,10 @@ pub(crate) fn render_quantities(
                 quantities[gi].stratum.iter().map(|k| k.level.clone()).collect();
             match mode {
                 Mode::Banded => render_banded_leaf(
-                    name, gi, shape, &levels, n_draws, quant_draws, snapshot_times, scenario, &mut out,
+                    name, gi, shape, &levels, n_draws, quant_draws, snapshot_times, coords, &mut out,
                 )?,
                 Mode::Point => render_point_leaf(
-                    name, gi, shape, &levels, quant_draws, snapshot_times, scenario, &mut out,
+                    name, gi, shape, &levels, quant_draws, snapshot_times, coords, &mut out,
                 )?,
             }
         }
@@ -312,11 +354,22 @@ pub(crate) fn render_quantities(
             "unit": serde_json::Value::Null,
             "censoring": censoring,
         });
-        // The `fit predict` overlay axis: one manifest entry per (quantity,
-        // scenario), tagged so a consumer can group/join by scenario. Omitted for
-        // the simulate path (`None`), keeping its manifest byte-identical.
-        if let Some(name) = scenario {
-            entry["scenario"] = serde_json::Value::String(name.to_string());
+        // The `fit predict` design overlay: one manifest entry per (quantity,
+        // scenario, sweep-cell), tagged so a consumer can group/join by scenario
+        // and sweep coordinate. Omitted for the simulate path (`DesignCoords::none`),
+        // keeping its manifest byte-identical.
+        if let Some(s) = coords.scenario {
+            entry["scenario"] = serde_json::Value::String(s.to_string());
+        }
+        if !coords.sweep.is_empty() {
+            let mut sweep_obj = serde_json::Map::new();
+            for (param, value) in coords.sweep {
+                sweep_obj.insert(
+                    param.clone(),
+                    serde_json::Value::from(*value),
+                );
+            }
+            entry["sweep"] = serde_json::Value::Object(sweep_obj);
         }
         manifest_entries.push(entry);
 
@@ -332,9 +385,9 @@ pub(crate) fn render_quantities(
     Ok((outputs, manifest_str))
 }
 
-/// Banded rendering of one leaf (one column per draw → a quantile band). When
-/// `scenario` is set, every row is prefixed with the scenario name (the
-/// `fit predict` overlay axis).
+/// Banded rendering of one leaf (one column per draw → a quantile band). Every
+/// row is prefixed with the design overlay cells (`scenario`, then this cell's
+/// swept values) — empty `coords` prefix nothing.
 fn render_banded_leaf(
     name: &str,
     gi: usize,
@@ -343,7 +396,7 @@ fn render_banded_leaf(
     n_draws: usize,
     quant_draws: &[Vec<sim::quantity::QuantityResult>],
     snapshot_times: &[f64],
-    scenario: Option<&str>,
+    coords: DesignCoords,
     out: &mut String,
 ) -> Result<(), String> {
     use sim::quantity::{QuantityDrawValue, QuantityResult};
@@ -373,9 +426,7 @@ fn render_banded_leaf(
                 .collect();
             let bands = band(&col).map_err(|e| format!("quantity '{name}' at t={}: {e}", fmt_time(t)))?;
             let mut cells: Vec<String> = Vec::with_capacity(3 + levels.len() + bands.len());
-            if let Some(s) = scenario {
-                cells.push(s.to_string());
-            }
+            push_design_row_cells(&mut cells, coords);
             cells.push(fmt_time(t));
             cells.extend(levels.iter().cloned());
             cells.push(n_draws.to_string());
@@ -398,9 +449,7 @@ fn render_banded_leaf(
             };
         let total = n_value + n_censored;
         let mut cells: Vec<String> = Vec::new();
-        if let Some(s) = scenario {
-            cells.push(s.to_string());
-        }
+        push_design_row_cells(&mut cells, coords);
         cells.extend(levels.iter().cloned());
         cells.push(total.to_string());
         if shape == QShape::ScalarCensorable {
@@ -429,7 +478,7 @@ fn render_point_leaf(
     levels: &[String],
     quant_draws: &[Vec<sim::quantity::QuantityResult>],
     snapshot_times: &[f64],
-    scenario: Option<&str>,
+    coords: DesignCoords,
     out: &mut String,
 ) -> Result<(), String> {
     use sim::quantity::{QuantityDrawValue, QuantityResult};
@@ -458,9 +507,7 @@ fn render_point_leaf(
                 ));
             }
             let mut cells: Vec<String> = Vec::with_capacity(2 + levels.len() + 1);
-            if let Some(s) = scenario {
-                cells.push(s.to_string());
-            }
+            push_design_row_cells(&mut cells, coords);
             cells.push(fmt_time(t));
             cells.extend(levels.iter().cloned());
             cells.push(fmt_value(v));
@@ -483,9 +530,7 @@ fn render_point_leaf(
             QuantityDrawValue::Censored => "NA".to_string(),
         };
         let mut cells: Vec<String> = Vec::with_capacity(levels.len() + 2);
-        if let Some(s) = scenario {
-            cells.push(s.to_string());
-        }
+        push_design_row_cells(&mut cells, coords);
         cells.extend(levels.iter().cloned());
         cells.push(value_cell);
         out.push_str(&cells.join("\t"));
@@ -524,39 +569,50 @@ mod tests {
 
     #[test]
     fn quantity_header_is_a_function_of_shape_and_dims() {
+        let none = DesignCoords::none();
         assert_eq!(
-            quantity_header(QShape::Series, &[], false),
+            quantity_header(QShape::Series, &[], none),
             "time\tn_draws\tq05\tq25\tq50\tq75\tq95"
         );
         assert_eq!(
-            quantity_header(QShape::Series, &["patch".to_string()], false),
+            quantity_header(QShape::Series, &["patch".to_string()], none),
             "time\tpatch\tn_draws\tq05\tq25\tq50\tq75\tq95"
         );
         assert_eq!(
-            quantity_header(QShape::ScalarPlain, &[], false),
+            quantity_header(QShape::ScalarPlain, &[], none),
             "n_draws\tq05\tq25\tq50\tq75\tq95"
         );
         // The censoring trio sits between n_draws and the quantiles, after the dims.
         assert_eq!(
-            quantity_header(QShape::ScalarCensorable, &["patch".to_string()], false),
+            quantity_header(QShape::ScalarCensorable, &["patch".to_string()], none),
             "patch\tn_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95"
         );
         // With the scenario overlay column: it leads everything else.
+        let scen = DesignCoords { scenario: Some("with_sia"), sweep: &[] };
         assert_eq!(
-            quantity_header(QShape::Series, &["patch".to_string()], true),
+            quantity_header(QShape::Series, &["patch".to_string()], scen),
             "scenario\ttime\tpatch\tn_draws\tq05\tq25\tq50\tq75\tq95"
+        );
+        // With a scenario AND a sweep: scenario leads, then one sweep:<param>
+        // column per swept parameter, then the rest.
+        let sweep = [("k".to_string(), 8.0)];
+        let scen_sweep = DesignCoords { scenario: Some("with_sia"), sweep: &sweep };
+        assert_eq!(
+            quantity_header(QShape::Series, &["patch".to_string()], scen_sweep),
+            "scenario\tsweep:k\ttime\tpatch\tn_draws\tq05\tq25\tq50\tq75\tq95"
         );
     }
 
     #[test]
     fn point_header_is_a_bare_value_column() {
+        let none = DesignCoords::none();
         // Series: time + value (no n_draws / quantiles).
-        assert_eq!(point_header(QShape::Series, &[], false), "time\tvalue");
-        assert_eq!(point_header(QShape::Series, &["patch".to_string()], false), "time\tpatch\tvalue");
+        assert_eq!(point_header(QShape::Series, &[], none), "time\tvalue");
+        assert_eq!(point_header(QShape::Series, &["patch".to_string()], none), "time\tpatch\tvalue");
         // Scalar: just value; a censorable scalar gets NO censoring trio (it
         // writes `value = NA` instead).
-        assert_eq!(point_header(QShape::ScalarPlain, &[], false), "value");
-        assert_eq!(point_header(QShape::ScalarCensorable, &["patch".to_string()], false), "patch\tvalue");
+        assert_eq!(point_header(QShape::ScalarPlain, &[], none), "value");
+        assert_eq!(point_header(QShape::ScalarCensorable, &["patch".to_string()], none), "patch\tvalue");
     }
 
     #[test]
@@ -588,7 +644,7 @@ mod tests {
         ]];
         let times = vec![0.0, 7.0];
         let (outs, _manifest) =
-            render_quantities(&quantities, &draws, &times, Mode::Point, None).unwrap();
+            render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords::none()).unwrap();
 
         let prev = &outs.iter().find(|(n, _)| n == "prevalence").unwrap().1;
         let plines: Vec<&str> = prev.trim_end().lines().collect();
@@ -629,7 +685,7 @@ mod tests {
     #[test]
     fn point_mode_rejects_multiple_realizations() {
         let draws: Vec<Vec<sim::quantity::QuantityResult>> = vec![vec![], vec![]];
-        let err = render_quantities(&[], &draws, &[], Mode::Point, None).unwrap_err();
+        let err = render_quantities(&[], &draws, &[], Mode::Point, DesignCoords::none()).unwrap_err();
         assert!(err.contains("exactly one realization"), "got: {err}");
     }
 
@@ -657,7 +713,8 @@ mod tests {
         ];
 
         let (outs, manifest) =
-            render_quantities(&quantities, &draws, &[], Mode::Banded, Some("with_sia")).unwrap();
+            render_quantities(&quantities, &draws, &[], Mode::Banded,
+                DesignCoords { scenario: Some("with_sia"), sweep: &[] }).unwrap();
         let peak = &outs.iter().find(|(n, _)| n == "peak").unwrap().1;
         let lines: Vec<&str> = peak.trim_end().lines().collect();
         assert_eq!(
@@ -673,9 +730,34 @@ mod tests {
         let entry = mjson["quantities"].as_array().unwrap()[0].clone();
         assert_eq!(entry["scenario"], "with_sia", "manifest entry carries the scenario");
 
+        // Scenario + sweep: the sweep:<param> column follows the scenario column,
+        // every row carries this cell's swept value, and the manifest entry gains
+        // a `sweep` object.
+        let sweep = [("k".to_string(), 8.0)];
+        let (outs_sw, manifest_sw) = render_quantities(
+            &quantities, &draws, &[], Mode::Banded,
+            DesignCoords { scenario: Some("with_sia"), sweep: &sweep },
+        )
+        .unwrap();
+        let peak_sw = &outs_sw.iter().find(|(n, _)| n == "peak").unwrap().1;
+        let lines_sw: Vec<&str> = peak_sw.trim_end().lines().collect();
+        assert_eq!(
+            lines_sw[0],
+            "scenario\tsweep:k\tn_draws\tq05\tq25\tq50\tq75\tq95",
+            "sweep:<param> column follows the scenario column"
+        );
+        let row_sw: Vec<&str> = lines_sw[1].split('\t').collect();
+        assert_eq!(row_sw[0], "with_sia", "scenario cell");
+        assert_eq!(row_sw[1], "8", "swept value cell");
+        let mjson_sw: serde_json::Value = serde_json::from_str(&manifest_sw).unwrap();
+        assert_eq!(
+            mjson_sw["quantities"].as_array().unwrap()[0]["sweep"]["k"], 8.0,
+            "manifest entry carries the sweep coordinate"
+        );
+
         // None → no scenario column or field (simulate's byte-identical path).
         let (outs2, manifest2) =
-            render_quantities(&quantities, &draws, &[], Mode::Banded, None).unwrap();
+            render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords::none()).unwrap();
         let peak2 = &outs2.iter().find(|(n, _)| n == "peak").unwrap().1;
         assert_eq!(
             peak2.lines().next().unwrap(),

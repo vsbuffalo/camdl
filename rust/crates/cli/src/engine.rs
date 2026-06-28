@@ -372,41 +372,14 @@ fn check_explicit_draws_scenario_collision(job: &SimulateJob) -> Result<(), Stri
         return Ok(());
     }
 
-    // A scenario's parameter footprint = its `set` keys ∪ its `scale` keys
-    // (both modify a parameter the file may also provide). For a named preset
-    // this is read from the model; for an inline ad-hoc patch, from its params.
-    // The model is loaded once, only when there is something to check.
+    // A scenario's parameter footprint = its `set` ∪ `scale` ∪ composed-preset
+    // keys (the shared `scenario_param_footprint`, also driving `fit predict`'s
+    // scenario×sweep guard — so the two never disagree). The model is loaded
+    // once, now that there is a draws file to check against.
     let scenarios = effective_scenarios(job);
-    // Lazily load the model only if a NAMED preset must be inspected.
-    let mut model_cache: Option<ir::Model> = None;
+    let (model, _) = crate::util::load_model(&job.model)?;
     for scenario in &scenarios {
-        let (scen_name, scen_keys): (String, Vec<String>) = match scenario {
-            ScenarioRef::Inline { name, params, .. } => {
-                (name.clone(), params.keys().cloned().collect())
-            }
-            ScenarioRef::Named(name) => {
-                if model_cache.is_none() {
-                    let (m, _) = crate::util::load_model(&job.model)?;
-                    model_cache = Some(m);
-                }
-                let model = model_cache.as_ref().expect("just loaded");
-                // A name that is not a model preset (e.g. `baseline`) sets
-                // nothing — skip it (no collision possible).
-                if !model.presets.iter().any(|p| p.name == *name) {
-                    continue;
-                }
-                let set_keys: Vec<String> =
-                    crate::params_resolver::resolve_preset_params(model, name)
-                        .map_err(|e| e.to_string())?
-                        .into_keys()
-                        .collect();
-                let preset = model.presets.iter().find(|p| p.name == *name)
-                    .expect("preset exists");
-                let mut keys = set_keys;
-                keys.extend(preset.scale.keys().cloned());
-                (name.clone(), keys)
-            }
-        };
+        let scen_keys = crate::params_resolver::scenario_param_footprint(&model, scenario)?;
         let mut collisions: Vec<&str> = scen_keys.iter()
             .map(|k| k.as_str())
             .filter(|k| file_cols.contains(k))
@@ -422,6 +395,7 @@ fn check_explicit_draws_scenario_collision(job: &SimulateJob) -> Result<(), Stri
                  is ambiguous.\n  \
                  Fix: drop the column(s) [{param_list}] from the draws file, or use a \
                  scenario that does not touch them.",
+                scen_name = scenario.name(),
                 file = file_path.display(),
             ));
         }

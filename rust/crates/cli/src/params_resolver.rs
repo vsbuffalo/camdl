@@ -443,6 +443,46 @@ pub fn resolve_preset_params(
     Ok(params)
 }
 
+/// The set of parameter names a scenario reference touches — its `set` ∪
+/// `scale` ∪ composed-preset keys for a named preset, or its inline `params`
+/// keys for an ad-hoc patch.
+///
+/// Single source of truth for "which parameters does scenario X pin/scale",
+/// shared by the engine's explicit-`--draws` collision guard
+/// ([`crate::engine`]) and `fit predict`'s scenario×sweep collision guard, so
+/// the two guards can never disagree about a scenario's footprint. A `Named`
+/// reference that is not a model preset (e.g. the implicit `baseline`) touches
+/// nothing → an empty set (no collision possible).
+pub fn scenario_param_footprint(
+    model: &ir::Model,
+    scenario: &crate::sim_job::ScenarioRef,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    use crate::sim_job::ScenarioRef;
+    let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    match scenario {
+        // Inline ad-hoc patch: only its `set` params (inline scenarios carry no
+        // `scale`).
+        ScenarioRef::Inline { params, .. } => {
+            keys.extend(params.keys().cloned());
+        }
+        ScenarioRef::Named(name) => {
+            // A name that is not a model preset sets nothing — empty footprint.
+            let Some(preset) = model.presets.iter().find(|p| p.name == *name) else {
+                return Ok(keys);
+            };
+            // `set` ∪ composed-preset keys (`resolve_preset_params` walks the
+            // `compose` chain), then ∪ the parent's `scale` keys.
+            keys.extend(
+                resolve_preset_params(model, name)
+                    .map_err(|e| e.to_string())?
+                    .into_keys(),
+            );
+            keys.extend(preset.scale.keys().cloned());
+        }
+    }
+    Ok(keys)
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 /// Resolve a `ParameterInputs` to a `ResolvedParameters`, walking the
