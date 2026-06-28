@@ -242,6 +242,24 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
         "one peak row per sweep cell, each tagged with its k value; saw {qcells:?}"
     );
 
+    // ── predictive.json: the sweep:k coordinate is named in the join contract ──
+    let pmf = std::fs::read_dir(results.join("fits"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("predictive.json"))
+        .find(|p| p.is_file())
+        .expect("predictive.json must be written");
+    let pjson: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&pmf).unwrap()).unwrap();
+    let wc = pjson["streams"].as_array().unwrap()
+        .iter().find(|s| s["name"] == "weekly_cases").expect("weekly_cases stream entry");
+    let coords: Vec<&str> = wc["coordinates"].as_array().unwrap()
+        .iter().map(|c| c.as_str().unwrap()).collect();
+    assert_eq!(
+        coords, ["scenario", "sweep:k", "time", "horizon", "treatment"],
+        "the manifest names sweep:k as a coordinate, after scenario; saw {coords:?}"
+    );
+
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

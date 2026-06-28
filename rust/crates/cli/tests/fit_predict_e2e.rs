@@ -356,6 +356,32 @@ thin = 1
         "manifest entry tagged with the scenario (no overlay → as_fitted)"
     );
 
+    // ── predictive.json: the per-stream join contract (coordinates vs band) ──
+    let pmf = find_segment_file(&results, "predictive.json")
+        .expect("predictive.json manifest must be written");
+    let pjson: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&pmf).unwrap()).unwrap();
+    assert_eq!(pjson["schema"], "camdl.predictive/v1", "predictive manifest schema tag");
+    let streams = pjson["streams"].as_array().expect("streams array");
+    let wc = streams
+        .iter()
+        .find(|s| s["name"] == "weekly_cases")
+        .expect("manifest lists the weekly_cases stream");
+    assert_eq!(wc["file"], "predictive/weekly_cases.tsv", "stream file path");
+    assert_eq!(wc["value_kind"], "neg_binomial", "value kind = the obs likelihood family");
+    // No --sweep, no dims → coordinates are exactly scenario/time/horizon/treatment,
+    // matching the predictive TSV header's join keys.
+    let coords: Vec<&str> = wc["coordinates"].as_array().unwrap()
+        .iter().map(|c| c.as_str().unwrap()).collect();
+    assert_eq!(coords, ["scenario", "time", "horizon", "treatment"],
+        "coordinate columns name the group-by keys, in header order");
+    let band: Vec<&str> = wc["band"].as_array().unwrap()
+        .iter().map(|c| c.as_str().unwrap()).collect();
+    assert_eq!(band, ["q05", "q25", "q50", "q75", "q95"], "band columns are the quantile labels");
+    let quantiles: Vec<f64> = wc["quantiles"].as_array().unwrap()
+        .iter().map(|q| q.as_f64().unwrap()).collect();
+    assert_eq!(quantiles, [0.05, 0.25, 0.50, 0.75, 0.95], "band quantile levels");
+
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

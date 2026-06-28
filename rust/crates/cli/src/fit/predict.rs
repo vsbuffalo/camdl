@@ -1270,6 +1270,20 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         }
     }
 
+    // The `sweep:<param>` coordinate columns, in the same sorted-name order the
+    // predictive header uses (empty without `--sweep`). Computed once — uniform
+    // across streams.
+    let sweep_col_names: Vec<String> = {
+        let mut names: Vec<String> = args.sweep.iter().map(|s| s.name.clone()).collect();
+        names.sort();
+        names
+    };
+    // `predictive.json`: the per-stream join contract — which columns are
+    // coordinates (group-by keys) vs the band, plus the value kind and the band
+    // quantiles — so a downstream reader joins without reverse-engineering
+    // headers. Net-new sibling of `quantities.json`.
+    let mut predictive_manifest_entries: Vec<serde_json::Value> = Vec::new();
+
     for source in &sources {
         // Each free-forward design cell's StreamBands for this source (in
         // sweep × scenario order), plus the one-step StreamBands (sweep- and
@@ -1322,12 +1336,53 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 rows: &s.rows,
             });
         }
-        // TODO(predictive.json manifest): Phase-3 follow-up — a predictive.json
-        // sidecar describing the (scenario × sweep × horizon) design grid would
-        // attach here, beside the per-stream predictive TSVs.
+        // Record this stream's join contract for `predictive.json`. Coordinate
+        // columns (the group-by keys) in header order: `scenario`, the
+        // `sweep:<param>` columns, `time`, the stratum dims, `horizon`,
+        // `treatment`. The band columns are the quantile labels; `rhat_max` /
+        // `ess_min` / `n_draws` are per-cell diagnostics. `value_kind` is the
+        // observation's likelihood family (the nature of the banded value).
+        let mut coordinates: Vec<String> = vec!["scenario".to_string()];
+        coordinates.extend(sweep_col_names.iter().map(|n| format!("sweep:{n}")));
+        coordinates.push("time".to_string());
+        coordinates.extend(index_dims.iter().cloned());
+        coordinates.push("horizon".to_string());
+        coordinates.push("treatment".to_string());
+        let value_kind = model
+            .observations
+            .iter()
+            .find(|o| &o.name == source || &o.source == source)
+            .map(|o| o.likelihood.name())
+            .unwrap_or("count");
+        predictive_manifest_entries.push(serde_json::json!({
+            "name": source,
+            "file": format!("predictive/{source}.tsv"),
+            "value_kind": value_kind,
+            "coordinates": coordinates,
+            "diagnostics": ["rhat_max", "ess_min", "n_draws"],
+            "band": QUANTILE_LEVELS.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
+            "quantiles": QUANTILE_LEVELS.iter().map(|(q, _)| *q).collect::<Vec<_>>(),
+        }));
+
         let pred_tsv = render_predictive_tsv_sections(&index_dims, &sections);
         written.push(write_tsv(&segment, "predictive", source, &pred_tsv)?);
     }
+    // `predictive.json`: the per-stream join contract beside the predictive
+    // TSVs — a sibling of `quantities.json`, NOT in the run_id-keyed CAS leaf
+    // (regenerated, overwritten in place). Written whenever any predictive
+    // stream was emitted.
+    if !predictive_manifest_entries.is_empty() {
+        let manifest = serde_json::json!({
+            "schema": "camdl.predictive/v1",
+            "streams": predictive_manifest_entries,
+        });
+        let path = segment.join("predictive.json");
+        let text = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("serializing predictive manifest: {e}"))?;
+        std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        written.push(path);
+    }
+
     // The observed half, grouped by logical stream.
     for (source, index_dims, rows) in observed_by_stream(&leaves, schema.as_ref()) {
         let obs_tsv = render_observed_tsv(&index_dims, &rows);
