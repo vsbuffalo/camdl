@@ -855,8 +855,18 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         }
     };
 
-    // 3. Compile the model (same recipe the fit runner uses).
-    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.model.camdl)?;
+    // 3. Resolve the model IR. Prefer the IR archived in the fit leaf at
+    //    `fit run` time (gh#322 — a self-contained, portable run); fall back to
+    //    recompiling the loose `.camdl` recorded in the config only when the
+    //    archive is absent (a run produced before IR archival landed). The
+    //    archived IR is itself a compiled-IR path, so the engine's per-cell
+    //    recompile (`job.model`, below) loads it directly.
+    let archived_ir = segment.join("model.ir.json");
+    let (compiled_ir, _ir_tmp): (String, Option<std::path::PathBuf>) = if archived_ir.is_file() {
+        (archived_ir.to_string_lossy().into_owned(), None)
+    } else {
+        crate::util::resolve_ir_path(&config.model.camdl)?
+    };
     let (model, _) = crate::util::load_model(&compiled_ir)?;
     let dt = model.simulation.dt.unwrap_or(1.0);
 

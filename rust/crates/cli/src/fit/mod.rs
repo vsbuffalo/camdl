@@ -803,6 +803,27 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 ) {
                     eprintln!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e);
                 }
+                // gh#322: archive the compiled base-model IR in the fit segment so
+                // downstream verbs (`fit predict`) are self-contained and the run
+                // is portable — they resolve the model from this archive rather
+                // than recompiling the loose `.camdl`, which may have moved. An
+                // artifact addition, identity-neutral (not a hashed level; mirrors
+                // `batch.rs`'s sibling `model.ir.json`). The base model IR is
+                // structurally identical across sweep cells (a sweep overrides
+                // parameter *values* at resolve time), so one archive per segment.
+                if let Some(ir_src) = config.compiled_ir.as_deref() {
+                    let dest = seg.join("model.ir.json");
+                    match std::fs::read(ir_src) {
+                        Ok(bytes) => {
+                            if let Err(e) = std::fs::write(&dest, &bytes) {
+                                eprintln!("warning: cannot archive model IR {}: {}",
+                                    dest.display(), e);
+                            }
+                        }
+                        Err(e) => eprintln!(
+                            "warning: cannot read compiled IR {} to archive: {}", ir_src, e),
+                    }
+                }
             }
         }
         let store = runid::FsCasStore::new(&cas_root);

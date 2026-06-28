@@ -735,6 +735,70 @@ fn fit_predict_scenario_named_as_fitted_in_model_is_rejected() {
 }
 
 #[test]
+fn fit_predict_is_self_contained_after_loose_camdl_removed() {
+    // gh#322 / Phase 1a: `fit run` archives the compiled IR in the fit leaf, so
+    // `fit predict` resolves the model from that archive — not from the loose
+    // `.camdl`, which may have moved. We DELETE the source `.camdl` after the
+    // fit; predict must still succeed. (Pre-archival this failed: predict
+    // recompiled `config.model.camdl`, now absent — so this is the red→green
+    // for the portability fix.)
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_predict_portable_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+
+    let pgas = r#"[stages.posterior]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 2
+particles = 200
+sweeps = 60
+burn_in = 20
+thin = 1
+"#;
+    std::fs::write(tmp.join("fit.toml"), fit_toml(pgas, "results")).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(
+        out.status.success(),
+        "fit run failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The compiled IR is archived in the fit segment, non-empty.
+    let archive = find_segment_file(&tmp.join("results"), "model.ir.json")
+        .expect("fit run must archive model.ir.json in the fit segment");
+    assert!(
+        std::fs::metadata(&archive).unwrap().len() > 0,
+        "archived model.ir.json is non-empty"
+    );
+
+    // Remove the loose source model — the run must remain self-contained.
+    std::fs::remove_file(tmp.join("model.camdl")).unwrap();
+
+    let out = run(
+        &bin,
+        &tmp,
+        &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"],
+    );
+    assert!(
+        out.status.success(),
+        "fit predict must resolve the model from the archived IR after the loose \
+         .camdl is removed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        find_artifact(&tmp.join("results"), "predictive", "weekly_cases").is_some(),
+        "predictive artifact written from the archived model"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn fit_predict_refuses_an_optimizer_fit() {
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_predict_refuse_{}", std::process::id()));
