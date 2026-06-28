@@ -1342,6 +1342,17 @@ pub struct FitTableArgs {
     /// renders a GitHub-flavoured table; `csv` is downstream-friendly.
     #[arg(long, value_enum, default_value_t = FitTableFormat::Text)]
     pub format: FitTableFormat,
+
+    /// Add a column showing the posterior median of a SCALAR generated
+    /// quantity declared in the fit's model `quantities {}` block (the
+    /// q50 of the no-overlay `as_fitted` row). Repeatable for several
+    /// quantities. Unlike the default read-only table, `--quantity`
+    /// may DERIVE the value on demand: for a fit that has not been
+    /// predicted yet it runs `fit predict --horizon free_forward`,
+    /// populating that fit's `quantities/` outputs. Optimizer fits
+    /// (IF2 / NLopt) have no posterior cloud, so their cell renders `—`.
+    #[arg(long = "quantity", value_name = "NAME")]
+    pub quantities: Vec<String>,
 }
 
 #[derive(Args)]

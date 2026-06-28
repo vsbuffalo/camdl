@@ -100,6 +100,31 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     // Inner filters that key on the loaded TableRow.
     rows.retain(|r| matches_row_filters(r, args));
 
+    // `--quantity <NAME>`: fill each surviving row's posterior-median
+    // cell for each requested scalar quantity. Read-or-derive (mirrors
+    // Phase 2a's prequential derivation): read an existing
+    // `quantities/<NAME>.tsv`, else derive it by spawning `fit predict`
+    // for fits that carry a posterior cloud. The default `fit table`
+    // (no `--quantity`) skips this entirely and stays read-only. We key
+    // the surviving rows back to their segment dirs by `fit_hash` —
+    // filtering/sorting decouples row index from `pre_filtered`.
+    if !args.quantities.is_empty() {
+        let dir_by_hash: std::collections::HashMap<&str, &std::path::Path> = pre_filtered
+            .iter()
+            .map(|e| (e.view.fit_hash.as_str(), e.fit_dir.as_path()))
+            .collect();
+        for r in &mut rows {
+            let Some(fit_dir) = dir_by_hash.get(r.fit_hash.as_str()).copied() else {
+                continue;
+            };
+            for name in &args.quantities {
+                if let Some(median) = resolve_quantity_median(fit_dir, &r.method, name) {
+                    r.quantities.insert(name.clone(), median);
+                }
+            }
+        }
+    }
+
     // delta_ll_vs_best, computed over the surviving rows. PGAS rows
     // (best_loglik = None) are skipped from the max search and keep
     // their delta at 0.0 — there is no scalar likelihood to compare.
@@ -123,10 +148,10 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     }
 
     match args.format {
-        FitTableFormat::Text => print!("{}", render_text(&rows)),
+        FitTableFormat::Text => print!("{}", render_text(&rows, &args.quantities)),
         FitTableFormat::Json => render_json(&rows),
-        FitTableFormat::Md => print!("{}", render_md(&rows)),
-        FitTableFormat::Csv => print!("{}", render_csv(&rows)),
+        FitTableFormat::Md => print!("{}", render_md(&rows, &args.quantities)),
+        FitTableFormat::Csv => print!("{}", render_csv(&rows, &args.quantities)),
     }
 
     // Unlabelled-fits nudge: if ≥ N rows have no label, print a
@@ -279,6 +304,85 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
     Some(days * 86_400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64)
 }
 
+// ── Generated-quantity resolution (`--quantity`) ───────────────────
+
+/// Resolve one scalar generated quantity's posterior median for a
+/// single fit. Read-or-derive, mirroring Phase 2a's prequential
+/// derivation (`compare::derive_prequential`):
+///
+///   1. **Read existing**: if `<fit_dir>/quantities/<name>.tsv` is
+///      present, return the `as_fitted` row's `q50`.
+///   2. **Derive on demand**: else, if the fit carries a posterior
+///      cloud (method `pgas` / `pmmh`), spawn `camdl fit predict
+///      <fit_dir> --horizon free_forward` (the single source of truth
+///      for the simulate-per-draw + quantity-evaluation loop) and
+///      re-read the file.
+///   3. **Not derivable** (optimizer fit, no draws): `None`.
+///
+/// Any failure (predict refused, the model doesn't declare `name`, a
+/// malformed or scalar-less TSV) yields `None` — a single uncomputable
+/// cell renders `—` and never fails the whole table.
+fn resolve_quantity_median(fit_dir: &std::path::Path, method: &str, name: &str) -> Option<f64> {
+    let tsv = fit_dir.join("quantities").join(format!("{name}.tsv"));
+
+    // (1) Fast path: an already-computed quantities TSV.
+    if let Some(median) = read_scalar_quantity_q50(&tsv) {
+        return Some(median);
+    }
+
+    // (2/3) Derive only for methods that carry a posterior cloud. IF2 /
+    // NLopt optimizer fits have no draws, so `fit predict` would refuse
+    // them anyway — skip the spawn and leave the cell absent.
+    if !matches!(method, "pgas" | "pmmh") {
+        return None;
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let output = std::process::Command::new(&exe)
+        .arg("fit")
+        .arg("predict")
+        .arg(fit_dir)
+        .arg("--horizon")
+        .arg("free_forward")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        // predict refused (e.g. the model doesn't declare `name`, or
+        // some other failure) — leave the cell absent, don't abort.
+        return None;
+    }
+    read_scalar_quantity_q50(&tsv)
+}
+
+/// Parse a SCALAR generated-quantity TSV and return the no-overlay
+/// (`as_fitted`) row's `q50` (the posterior median). Columns are
+/// located by header name: a value scalar is
+/// `scenario  n_draws  q05 … q95`, a censorable time scalar inserts
+/// `n_value  n_censored  p_censored` before the quantiles — `q50` is a
+/// named column in both. A *series* quantity carries a `time` column;
+/// that is not a scalar, so we return `None` rather than silently
+/// surface its first time point's median. Returns `None` on an absent
+/// or malformed file, or when there is no `as_fitted` row or no `q50`.
+fn read_scalar_quantity_q50(tsv: &std::path::Path) -> Option<f64> {
+    let text = std::fs::read_to_string(tsv).ok()?;
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next()?.split('\t').collect();
+    // A `time` column means this is a series, not a scalar.
+    if header.iter().any(|c| *c == "time") {
+        return None;
+    }
+    let scen_i = header.iter().position(|c| *c == "scenario")?;
+    let q50_i = header.iter().position(|c| *c == "q50")?;
+    for line in lines {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.get(scen_i).copied() == Some("as_fitted") {
+            return cols.get(q50_i)?.parse::<f64>().ok();
+        }
+    }
+    None
+}
+
 // ── Renderers ──────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
@@ -310,13 +414,18 @@ fn render_json(rows: &[TableRow]) {
     println!("{}", s);
 }
 
-fn render_text(rows: &[TableRow]) -> String {
+fn render_text(rows: &[TableRow], quantities: &[String]) -> String {
     let mut s = String::new();
-    s.push_str(&format!(
-        "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {:>10} {:<13} {:>6}\n",
+    let mut head = format!(
+        "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {:>10} {:<13} {:>6}",
         "fit_id", "label", "stem", "method", "stages", "converged", "best_ll", "ll_type", "age"
-    ));
-    s.push_str(&"-".repeat(110));
+    );
+    for q in quantities {
+        head.push_str(&format!(" {:>12}", truncate(q, 12)));
+    }
+    head.push('\n');
+    s.push_str(&head);
+    s.push_str(&"-".repeat(110 + quantities.len() * 13));
     s.push('\n');
     if rows.is_empty() {
         s.push_str("(no fits matched)\n");
@@ -334,23 +443,40 @@ fn render_text(rows: &[TableRow]) -> String {
         // reader the row carries a complete-data (joint) value (gh#280).
         let ll_type = super::loglik::LoglikType::tag_or_unknown(r.loglik_type);
         let age = format_age(r.age_seconds);
-        s.push_str(&format!(
-            "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {} {:<13} {:>6}\n",
+        let mut line = format!(
+            "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {} {:<13} {:>6}",
             r.fit_id, truncate(label, 22), truncate(&r.stem, 14),
             r.method, truncate(&stages, 6), converged, best, ll_type, age,
-        ));
+        );
+        for q in quantities {
+            let cell = r
+                .quantities
+                .get(q)
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_else(|| "—".to_string());
+            line.push_str(&format!(" {:>12}", cell));
+        }
+        line.push('\n');
+        s.push_str(&line);
     }
     s
 }
 
-fn render_md(rows: &[TableRow]) -> String {
+fn render_md(rows: &[TableRow], quantities: &[String]) -> String {
     let mut s = String::new();
-    s.push_str(
-        "| fit_id | label | stem | method | stages | converged | best_ll | ll_type | age |\n",
-    );
-    s.push_str(
-        "|---|---|---|---|---|---|---|---|---|\n",
-    );
+    let mut head =
+        String::from("| fit_id | label | stem | method | stages | converged | best_ll | ll_type | age |");
+    for q in quantities {
+        head.push_str(&format!(" {} |", q));
+    }
+    head.push('\n');
+    s.push_str(&head);
+    let mut sep = String::from("|---|---|---|---|---|---|---|---|---|");
+    for _ in quantities {
+        sep.push_str("---|");
+    }
+    sep.push('\n');
+    s.push_str(&sep);
     for r in rows {
         let label = r.label.as_deref().unwrap_or("<unlabelled>");
         let stages = r.stages.join("+");
@@ -361,19 +487,36 @@ fn render_md(rows: &[TableRow]) -> String {
             .unwrap_or_else(|| "—".into());
         let ll_type = super::loglik::LoglikType::tag_or_unknown(r.loglik_type);
         let age = format_age(r.age_seconds);
-        s.push_str(&format!(
-            "| `{}` | {} | `{}` | {} | {} | {} | {} | {} | {} |\n",
+        let mut line = format!(
+            "| `{}` | {} | `{}` | {} | {} | {} | {} | {} | {} |",
             r.fit_id, label, r.stem, r.method, stages, converged, best, ll_type, age,
-        ));
+        );
+        for q in quantities {
+            let cell = r
+                .quantities
+                .get(q)
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_else(|| "—".into());
+            line.push_str(&format!(" {} |", cell));
+        }
+        line.push('\n');
+        s.push_str(&line);
     }
     s
 }
 
-fn render_csv(rows: &[TableRow]) -> String {
+fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
     let mut s = String::new();
-    // `loglik_type` is appended last (gh#280): CSV is positional, so a new
-    // column never shifts an existing one out from under a consumer.
-    s.push_str("fit_id,fit_hash,label,stem,model_identity,method,stages,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale,loglik_type\n");
+    // `loglik_type` is appended last (gh#280), then any `--quantity`
+    // columns: CSV is positional, so a new column never shifts an
+    // existing one out from under a consumer.
+    let mut head = String::from("fit_id,fit_hash,label,stem,model_identity,method,stages,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale,loglik_type");
+    for q in quantities {
+        head.push(',');
+        head.push_str(&csv_field(q));
+    }
+    head.push('\n');
+    s.push_str(&head);
     for r in rows {
         let label = csv_field(r.label.as_deref().unwrap_or(""));
         let stages = r.stages.join("+");
@@ -387,8 +530,8 @@ fn render_csv(rows: &[TableRow]) -> String {
             .unwrap_or_default();
         let max_r = r.max_rhat.map(|v| format!("{}", v)).unwrap_or_default();
         let acc = r.acceptance_rate.map(|v| format!("{}", v)).unwrap_or_default();
-        s.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+        let mut line = format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             r.fit_id,
             r.fit_hash,
             label,
@@ -407,7 +550,18 @@ fn render_csv(rows: &[TableRow]) -> String {
             r.created_at,
             r.stale,
             super::loglik::LoglikType::tag_or_unknown(r.loglik_type),
-        ));
+        );
+        for q in quantities {
+            // An absent (uncomputable) cell is an empty field, matching the
+            // existing absent-numeric convention (`best_loglik`, `max_rhat`)
+            // — downstream-friendly, never an em-dash that breaks parsing.
+            line.push(',');
+            if let Some(v) = r.quantities.get(q) {
+                line.push_str(&format!("{:.4}", v));
+            }
+        }
+        line.push('\n');
+        s.push_str(&line);
     }
     s
 }
@@ -519,6 +673,7 @@ mod tests {
             created_at: String::new(),
             stale: false,
             stale_reason: None,
+            quantities: std::collections::BTreeMap::new(),
         }
     }
 
@@ -528,7 +683,7 @@ mod tests {
     /// pre-gh#280 header (no such column).
     #[test]
     fn csv_appends_loglik_type_column() {
-        let csv = render_csv(&[row_with_type(Some(crate::fit::loglik::LoglikType::CompleteData))]);
+        let csv = render_csv(&[row_with_type(Some(crate::fit::loglik::LoglikType::CompleteData))], &[]);
         let header = csv.lines().next().unwrap();
         assert!(header.ends_with(",loglik_type"),
             "loglik_type must be the last (appended) column: {header}");
@@ -540,7 +695,7 @@ mod tests {
         assert!(row.ends_with(",complete_data"),
             "PGAS row's appended column carries the joint tag: {row}");
         // A legacy row with no type renders `unknown`, never inferred.
-        let csv2 = render_csv(&[row_with_type(None)]);
+        let csv2 = render_csv(&[row_with_type(None)], &[]);
         assert!(csv2.lines().nth(1).unwrap().ends_with(",unknown"),
             "absent type renders `unknown`: {csv2}");
     }
@@ -551,7 +706,7 @@ mod tests {
     /// surface.
     #[test]
     fn render_text_zero_rows_says_so() {
-        let s = render_text(&[]);
+        let s = render_text(&[], &[]);
         assert!(s.contains("(no fits matched)"));
     }
 

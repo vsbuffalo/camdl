@@ -1292,6 +1292,7 @@ fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
                 created_at: String::new(),
                 stale: false,
                 stale_reason: None,
+                quantities: BTreeMap::new(),
             }
         }
     }

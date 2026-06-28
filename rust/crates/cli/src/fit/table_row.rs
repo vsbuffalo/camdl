@@ -118,6 +118,19 @@ pub struct TableRow {
     /// Step-7 stale flag. Today always `false`.
     pub stale: bool,
     pub stale_reason: Option<String>,
+    /// Per-fit generated-quantity medians, keyed by quantity name.
+    /// Populated only when `fit table --quantity <NAME>` is requested:
+    /// each entry is the posterior median (q50 of the `as_fitted` row)
+    /// of a scalar quantity from the model's `quantities {}` block,
+    /// read from `<fit_dir>/quantities/<NAME>.tsv` (derived on demand
+    /// via `fit predict` when absent). An uncomputable quantity for a
+    /// row is simply absent from the map. A field addition is
+    /// non-breaking under schema v1 (proposal §3); the
+    /// `skip_serializing_if` empty-map guard keeps the no-quantity case
+    /// byte-identical to the pre-existing serialization (so the
+    /// `summary ⊆ table` parity invariant holds).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub quantities: BTreeMap<String, f64>,
 }
 
 /// Errors building a `TableRow` from a fit_dir.
@@ -225,6 +238,7 @@ pub fn build_row(
         created_at: view.created_at.clone(),
         stale: false,
         stale_reason: None,
+        quantities: BTreeMap::new(),
     })
 }
 
