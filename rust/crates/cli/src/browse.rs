@@ -369,6 +369,7 @@ pub fn cmd_show(a: &crate::args::ShowArgs) {
         Ok(Resolved::Pfilter { leaf, rel_path, created }) => show_pfilter_record(&leaf, &rel_path, created),
         Ok(Resolved::Survey { leaf, rel_path, created }) => show_survey_record(&leaf, &rel_path, created),
         Ok(Resolved::SimEnsemble { leaf, rel_path, created }) => show_sim_ensemble_record(&leaf, &rel_path, created),
+        Ok(Resolved::FitEnvelope { segment, rel_path }) => show_fit_envelope(&segment, &rel_path),
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);
@@ -439,6 +440,68 @@ fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
         rec.provenance.created_at.as_deref().unwrap_or("?"),
         fmt_relative_time(created, SystemTime::now()));
     println!("{}", "engine".bright_black()); println!("  {}", rec.engine_version);
+}
+
+/// Render a fit SEGMENT as its *output envelope*: the fit-level identity (label,
+/// fit hash, declared stages) plus the discoverable output files the fit
+/// produced (predictive / observed / quantities artifacts + top-level
+/// manifests). A read-side projection of the segment directory — there is no
+/// fit-wide `run.json`, so this is the fit's `show` view. Mirrors the visual
+/// style of [`show_fit_record`].
+fn show_fit_envelope(segment: &Path, rel_path: &str) {
+    println!("{}", "path".bright_black()); println!("  {}", rel_path.cyan());
+    println!("{}", "kind".bright_black()); println!("  fit");
+    // Label lives once on the sidecar (never identity-bearing).
+    if let Some(label) = crate::run_meta::read_fit_sidecar(segment)
+        .and_then(|s| s.label)
+    {
+        println!("{}", "label".bright_black()); println!("  {}", label);
+    }
+    // Fit-level hash + declared stages from the folded view (when the segment
+    // holds stage leaves; an output-only / incomplete segment skips these).
+    if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
+        let short = if view.fit_hash.len() >= 8 { &view.fit_hash[..8] } else { &view.fit_hash };
+        println!("{}", "fit".bright_black()); println!("  {}", short.dimmed());
+        if !view.stages_declared.is_empty() {
+            println!("{}", "stages".bright_black());
+            println!("  {}", view.stages_declared.join(", "));
+        }
+    }
+    // Output envelope: the predict/quantities artifacts the fit produced,
+    // grouped by subdir, each as a segment-relative path the user can pass to
+    // `cat --stream`. Absent subdirs are skipped (a not-yet-predicted fit just
+    // shows fewer outputs).
+    println!("{}", "outputs".bright_black());
+    let mut any = false;
+    for sub in ["predictive", "observed", "quantities"] {
+        if let Ok(entries) = std::fs::read_dir(segment.join(sub)) {
+            let mut files: Vec<String> = entries
+                .flatten()
+                .filter_map(|e| {
+                    let p = e.path();
+                    if p.extension().is_some_and(|x| x == "tsv") {
+                        p.file_name().map(|f| format!("{}/{}", sub, f.to_string_lossy()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            files.sort();
+            for f in files {
+                println!("  {}", f);
+                any = true;
+            }
+        }
+    }
+    for manifest in ["predictive.json", "quantities.json", "fit.meta.json"] {
+        if segment.join(manifest).exists() {
+            println!("  {}", manifest);
+            any = true;
+        }
+    }
+    if !any {
+        println!("  {}", "(none — run `camdl fit predict` to generate)".dimmed());
+    }
 }
 
 /// Render a new-format (`RunRecord`) profile-point leaf: the five factored
@@ -775,6 +838,31 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let _ = std::io::stdout().write_all(&bytes);
             return;
         }
+        // Fit ENVELOPE: `--stream <rel>` cats an output file under the segment
+        // (e.g. `predictive/weekly_cases.tsv`); no `--stream` defaults to the
+        // `fit.meta.json` summary record. A bare relative path without an
+        // extension also matches the `.tsv` sibling (so `--stream
+        // predictive/weekly_cases` finds `predictive/weekly_cases.tsv`).
+        Resolved::FitEnvelope { segment, rel_path } => {
+            let rel = a.stream.as_deref().unwrap_or("fit.meta.json");
+            let mut path = segment.join(rel);
+            if !path.exists() && Path::new(rel).extension().is_none() {
+                let with_tsv = segment.join(format!("{}.tsv", rel));
+                if with_tsv.exists() {
+                    path = with_tsv;
+                }
+            }
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| {
+                eprintln!(
+                    "error reading {} in fit {}: {}\n  \
+                     run `camdl show {}` to list the available output streams",
+                    rel, rel_path, e, a.target
+                );
+                std::process::exit(1);
+            });
+            let _ = std::io::stdout().write_all(&bytes);
+            return;
+        }
     }
 }
 
@@ -1038,6 +1126,13 @@ enum Resolved {
     Survey { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
     /// `SimEnsemble` leaf under `ensembles/` (the combined multi-cell TSV).
     SimEnsemble { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
+    /// A fit SEGMENT under `fits/` — the fit's *output envelope*, not a single
+    /// leaf. A fit has no fit-wide `run.json` (its identity is the `fit`-level
+    /// hash carried by every stage leaf + the `fit.meta.json` sidecar), so this
+    /// is a directory projection: it discovers the predict/quantities artifacts
+    /// the fit produced. Reached by `@label`, by the segment dir, or by the
+    /// fit-level hash prefix (the `fit_id` that `fit table`/`list` display).
+    FitEnvelope { segment: PathBuf, rel_path: String },
 }
 
 /// Resolve a user-supplied key to a single new-format leaf. Accepts either a
@@ -1047,8 +1142,56 @@ enum Resolved {
 fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+    // `@label` is UNAMBIGUOUSLY a fit handle (no leaf or sim carries a `@`
+    // sigil), so resolve it to the fit's output envelope before any leaf/hash
+    // logic. Scan `fits/` for a segment whose sidecar label matches.
+    if let crate::fit::handle::FitRef::Label(name) = crate::fit::handle::FitRef::classify(key) {
+        let fits_dir = Path::new(root).join("fits");
+        let mut matches: Vec<PathBuf> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&fits_dir) {
+            for entry in entries.flatten() {
+                let seg = entry.path();
+                if seg.is_dir()
+                    && crate::run_meta::read_fit_sidecar(&seg)
+                        .and_then(|s| s.label)
+                        .as_deref()
+                        == Some(name.as_str())
+                {
+                    matches.push(seg);
+                }
+            }
+        }
+        matches.sort();
+        return match matches.len() {
+            0 => Err(format!("no fit found for @{} under {}", name, fits_dir.display())),
+            1 => {
+                let segment = matches.remove(0);
+                let rel_path = pathdiff_str(&segment, &cwd);
+                Ok(Resolved::FitEnvelope { segment, rel_path })
+            }
+            n => {
+                let mut msg = format!("'@{}' is ambiguous, matches {} fits:\n", name, n);
+                for seg in &matches {
+                    msg.push_str(&format!("  {:<14} {}\n", "fit", pathdiff_str(seg, &cwd)));
+                }
+                msg.push_str("pass a run directory or a longer hash prefix to disambiguate");
+                Err(msg)
+            }
+        };
+    }
+
     // Path form: read the leaf `run.json` (`RunRecord`) directly.
     let as_path = Path::new(key);
+    // A fit SEGMENT directory addressed by path has the `fit.meta.json` sidecar
+    // but no leaf `run.json` (the fit identity is a path segment, not a leaf
+    // record). Project its output envelope. Checked before the `run.json` form.
+    if as_path.is_dir()
+        && as_path.join("fit.meta.json").exists()
+        && !as_path.join("run.json").exists()
+    {
+        let rel_path = pathdiff_str(as_path, &cwd);
+        return Ok(Resolved::FitEnvelope { segment: as_path.to_path_buf(), rel_path });
+    }
     if as_path.is_dir() && as_path.join("run.json").exists() {
         if let Ok(bytes) = std::fs::read(as_path.join("run.json")) {
             if let Ok(rec) = serde_json::from_slice::<runid::RunRecord>(&bytes) {
@@ -1131,8 +1274,29 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
         ensemble_matches.push((leaf, rel, created));
     }
 
+    // Fit ENVELOPES: a fit segment whose fit-level hash (the `fit_id` that
+    // `fit table`/`list` display, NOT a stage-leaf run_id) starts with the
+    // prefix. This resolves the whole fit's output envelope. Folded into the
+    // same 0/1/many resolution below, so a prefix that collides with a stage
+    // leaf (`fit_matches`) surfaces as ambiguous rather than silently picked.
+    let mut fit_envelope_matches: Vec<(PathBuf, String)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(Path::new(root).join("fits")) {
+        for entry in entries.flatten() {
+            let seg = entry.path();
+            if seg.is_dir()
+                && crate::fit::fit_view::FitView::read(&seg)
+                    .map(|v| v.fit_hash.starts_with(hash_prefix))
+                    .unwrap_or(false)
+            {
+                let rel = pathdiff_str(&seg, &cwd);
+                fit_envelope_matches.push((seg, rel));
+            }
+        }
+    }
+
     match sim_matches.len() + fit_matches.len() + profile_matches.len()
-        + pfilter_matches.len() + survey_matches.len() + ensemble_matches.len() {
+        + pfilter_matches.len() + survey_matches.len() + ensemble_matches.len()
+        + fit_envelope_matches.len() {
         0 => Err(format!("no run matches '{}' in {}", key, root)),
         1 => {
             if let Some((leaf, rel_path, created)) = sim_matches.into_iter().next() {
@@ -1145,9 +1309,11 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
                 Ok(Resolved::Pfilter { leaf, rel_path, created })
             } else if let Some((leaf, rel_path, created)) = survey_matches.into_iter().next() {
                 Ok(Resolved::Survey { leaf, rel_path, created })
-            } else {
-                let (leaf, rel_path, created) = ensemble_matches.into_iter().next().unwrap();
+            } else if let Some((leaf, rel_path, created)) = ensemble_matches.into_iter().next() {
                 Ok(Resolved::SimEnsemble { leaf, rel_path, created })
+            } else {
+                let (segment, rel_path) = fit_envelope_matches.into_iter().next().unwrap();
+                Ok(Resolved::FitEnvelope { segment, rel_path })
             }
         }
         n => {
@@ -1169,6 +1335,9 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
             }
             for (_, rel, _) in &ensemble_matches {
                 msg.push_str(&format!("  {:<14} {}\n", "sim_ensemble", rel));
+            }
+            for (_, rel) in &fit_envelope_matches {
+                msg.push_str(&format!("  {:<14} {}\n", "fit", rel));
             }
             msg.push_str("refine by appending /<scenario> and/or /<seed_N>, \
                          or pass a longer hash prefix");
