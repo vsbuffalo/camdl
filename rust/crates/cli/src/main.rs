@@ -2865,6 +2865,15 @@ pub(crate) fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, St
         }
         let mut row = HashMap::new();
         for (col, field) in col_names.iter().zip(fields.iter()) {
+            // gh#322: `chain` / `draw` are the posterior KEY columns (they join
+            // draws.tsv to the smoothed trajectories.tsv), not model parameters.
+            // Strip them here, in the one shared loader, so every downstream
+            // reader — predict's schema validator, the engine's param resolver,
+            // compare's posterior mean — sees a param-only row, unchanged. A
+            // pre-key draws.tsv has no such columns, so it is untouched.
+            if *col == "chain" || *col == "draw" {
+                continue;
+            }
             let val: f64 = field.parse()
                 .map_err(|_| format!(
                     "draws file line {}, column '{}': cannot parse '{}' as number",
@@ -3095,6 +3104,32 @@ mod tests {
         let draws = load_draws_tsv(path.to_str().unwrap()).unwrap();
         assert_eq!(draws.len(), 2);
         assert!((draws[0]["beta"] - 0.3).abs() < 1e-15);
+    }
+
+    #[test]
+    fn draws_tsv_strips_chain_draw_key_columns() {
+        // gh#322: a keyed draws.tsv (leading `chain`/`draw`) loads as PARAM-ONLY
+        // rows — the key columns are stripped in the one shared loader, so
+        // predict's schema validator + the engine never see them as parameters.
+        // (A pre-key, param-only file has no such columns and is unchanged.)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keyed_draws.tsv");
+        std::fs::write(
+            &path,
+            "chain\tdraw\tbeta\tgamma\n0\t20\t0.3\t0.1\n0\t21\t0.5\t0.15\n1\t20\t0.4\t0.12\n",
+        )
+        .unwrap();
+        let draws = load_draws_tsv(path.to_str().unwrap()).unwrap();
+        assert_eq!(draws.len(), 3);
+        assert!(!draws[0].contains_key("chain"), "chain must be stripped");
+        assert!(!draws[0].contains_key("draw"), "draw must be stripped");
+        assert_eq!(
+            draws[0].keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+            ["beta".to_string(), "gamma".to_string()].into_iter().collect(),
+            "only model params survive the strip"
+        );
+        assert!((draws[0]["beta"] - 0.3).abs() < 1e-15);
+        assert!((draws[2]["beta"] - 0.4).abs() < 1e-15);
     }
 
     #[test]

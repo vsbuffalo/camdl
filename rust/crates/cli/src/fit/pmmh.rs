@@ -989,7 +989,11 @@ pub fn run_stage(
             .collect();
         let mut all_names = est_names.clone();
         all_names.extend(fixed_names.iter().cloned());
-        writeln!(f, "{}", all_names.join("\t")).unwrap();
+        // gh#322: leading `chain` `draw` key columns (the shared draws loader
+        // strips them, so existing readers see param-only rows). PMMH/MH save no
+        // latent path, so their fits are `NotSaved` (not forkable) for now and
+        // `draw` is just a within-chain row index — no trajectory to join.
+        writeln!(f, "chain\tdraw\t{}", all_names.join("\t")).unwrap();
 
         let fixed_vals: Vec<f64> = fixed_names.iter().map(|name| {
             config.compiled.param_index.get(name.as_str())
@@ -1011,6 +1015,7 @@ pub fn run_stage(
                     cols.iter().position(|c| c == name).unwrap_or(usize::MAX)
                 }).collect();
 
+                let mut draw_idx = 0usize;
                 for line in lines {
                     if line.trim().is_empty() { continue; }
                     let fields: Vec<&str> = line.split('\t').collect();
@@ -1023,7 +1028,10 @@ pub fn run_stage(
                         }
                     }).collect();
                     vals.extend(fixed_vals.iter().map(|v| format!("{:.17e}", v)));
-                    writeln!(f, "{}", vals.join("\t")).unwrap();
+                    // 0-based `chain`, matching trajectories.tsv's key convention
+                    // (PMMH saves no path today, but keep the key consistent).
+                    writeln!(f, "{}\t{}\t{}", chain_id, draw_idx, vals.join("\t")).unwrap();
+                    draw_idx += 1;
                     n_draws += 1;
                 }
             }

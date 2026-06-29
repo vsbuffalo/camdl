@@ -369,6 +369,13 @@ pub struct LogLikComponents {
 /// Result of one Gibbs sweep.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PGASSweep {
+    /// The 0-based sweep index this draw came from. Carried so the persisted
+    /// posterior (`draws.tsv`) can key each draw `(chain, sweep)` and join to
+    /// the smoothed `trajectories.tsv` (which keys on the same sweep number) —
+    /// the `(θ, X)` pairing. Recorded, not re-derived from burn-in/thin, so the
+    /// key can't drift from the retention rule.
+    /// (gh#322: foundation for the keyed-joint (θ, X) output; wired by the join.)
+    pub sweep: usize,
     pub params: Vec<f64>,
     pub log_complete_data_ll: f64,
     pub accepted: Vec<bool>,
@@ -2684,6 +2691,7 @@ pub fn run_pgas(
             .collect();
 
         let sweep_result = PGASSweep {
+            sweep,
             params: rungs[0].params.clone(),
             log_complete_data_ll: rungs[0].ll,
             accepted: rung_accepted[0].clone(),

@@ -398,6 +398,13 @@ fn posterior_mean_params_toml(draws_path: &Path) -> Result<String, String> {
     out.push_str("# camdl compare: posterior-mean point estimate (θ̂) for the prequential\n");
     out.push_str(&format!("# source: {} ({n} draws)\n\n", draws_path.display()));
     for i in idx {
+        // gh#322: `chain` / `draw` are posterior key columns, not parameters —
+        // never emit them into θ̂ (a `chain = …` line would make `pfilter` reject
+        // an unknown parameter). This parser reads the file directly rather than
+        // via the shared loader, so it strips them itself.
+        if header[i] == "chain" || header[i] == "draw" {
+            continue;
+        }
         out.push_str(&format!(
             "{} = {}\n",
             header[i],

@@ -1015,7 +1015,12 @@ pub fn run_stage(
             .map(|p| p.name.clone())
             .collect();
         all_names.extend(fixed_names.iter().cloned());
-        writeln!(f, "{}", all_names.join("\t")).unwrap();
+        // gh#322: leading `chain` `draw` key columns so each posterior draw is
+        // joinable to its smoothed `trajectories.tsv` path (which keys on the
+        // same (chain, sweep)). The shared draws loader strips these back out, so
+        // every existing reader still sees param-only rows.
+        // (Foundation for the keyed-joint (θ, X) output; wired by the join.)
+        writeln!(f, "chain\tdraw\t{}", all_names.join("\t")).unwrap();
 
         // Fixed values (constant across all draws)
         let fixed_vals: Vec<f64> = fixed_names.iter().map(|name| {
@@ -1025,7 +1030,7 @@ pub fn run_stage(
         }).collect();
 
         let mut n_draws = 0usize;
-        for (_, sweeps, _) in &all_results {
+        for (chain_id, sweeps, _) in &all_results {
             // `sweeps` is ALREADY the post-burn-in, thinned set — the sim-side
             // recorder applies `burn_in` + `thin` when it builds it
             // (`sim/inference/pgas.rs`: `sweep >= burn_in && (sweep - burn_in) %
@@ -1036,12 +1041,19 @@ pub fn run_stage(
             // retained count), and desynced `draws.tsv` from the R̂/ESS computed
             // over the full retained set. See
             // docs/dev/incidents/2026-06-28-pgas-draws-double-thinning.md.
+            //
+            // Each row leads with `(chain, sweep)` — `sweep.sweep` is the draw's
+            // true 0-based sweep index (recorded on the draw, not re-derived), so
+            // it joins to the same (chain, sweep) in `trajectories.tsv`.
             for sweep in sweeps {
                 let mut vals: Vec<String> = config.estimated_params.iter()
                     .map(|spec| format!("{:.17e}", sweep.params[spec.index]))
                     .collect();
                 vals.extend(fixed_vals.iter().map(|v| format!("{:.17e}", v)));
-                writeln!(f, "{}", vals.join("\t")).unwrap();
+                // `chain` is 0-based to MATCH `trajectories.tsv`'s
+                // `PosteriorDraw.chain` (also `chain_id`, 0-based) — the join key.
+                // (The on-disk `chain_N` dir is 1-based; the in-file key is not.)
+                writeln!(f, "{}\t{}\t{}", chain_id, sweep.sweep, vals.join("\t")).unwrap();
                 n_draws += 1;
             }
         }
