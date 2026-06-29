@@ -693,20 +693,37 @@ its existing methods, read them, and either call one or extend one. If you
 genuinely need a new one, the commit must say _why the existing seam could not
 serve_ — that one sentence is the review gate, and its absence is the smell.
 
-### A shared primitive ships wired into its consumers, not as a stub
+### A shared primitive ships wired into a consumer, or as a named step of a committed arc
 
 "Delete dead code on sight" has a mirror image: do not _create_ dead code by
-landing a primitive that nothing calls. A unit-tested function with zero
-production callers is not "ready for adoption" — it is unexercised on every path
-that matters, and its tests are thin evidence (they were written to the same
-mental model the code was, so they confirm the author's intent, not the system's
-behaviour). `Schedule::next_stop` shipped exactly this way — advertised as the
-"single boundary authority," unit-tested, never called — so the centralization
-it was meant to finish stayed half-done, which is the soil the gh#70 / gh#208
-silent-wrong bugs grew from (gh#233). Rule: the change that introduces a shared
-primitive wires at least one real consumer through it, in the same PR. If you
-cannot wire it yet, do not land it yet — an "API for later" with no caller rots
-and misleads the next reader into thinking the consolidation already happened.
+landing a primitive that nothing calls **and that nothing is committed to
+call**. The failure mode is the _speculative_ primitive — landed "in case we
+need it," with no consumer and no plan, often advertised as if the consolidation
+it promises were already done. `Schedule::next_stop` shipped exactly this way —
+advertised as the "single boundary authority," unit-tested, never called, with
+no tracked plan to finish the centralization — so the consolidation stayed
+half-done, which is the soil the gh#70 / gh#208 silent-wrong bugs grew from
+(gh#233). A unit-tested function with zero callers is unexercised on every path
+that matters, and its tests are thin evidence (written to the same mental model
+the code was — they confirm the author's intent, not the system's behaviour).
+
+Two honest ways to land a primitive:
+
+1. **Wired now** — the change routes at least one real consumer through it, in
+   the same PR. The default.
+2. **A named step of a committed arc** — a foundation landed _ahead_ of its
+   consumer is sound engineering, not a stub, when it is an explicit
+   prerequisite of a feature we are committed to shipping: a tracked
+   proposal/issue names the consumer that will wire it, the commit says
+   `foundation for <arc>; wired by
+   <next step>`, and the primitive is
+   exercised by its own tests meanwhile. Building good foundations on the way to
+   a feature is the point — what makes it legitimate is that the consumer is
+   _committed and named_, not _hypothetical_.
+
+What stays prohibited is the orphan: a primitive with no committed consumer, or
+one dressed up as if the work it enables were already complete. If you cannot
+name the consumer or the arc, you do not have one yet — do not land it.
 
 ### Name tolerances and magic numbers once; never inline a bare epsilon
 
