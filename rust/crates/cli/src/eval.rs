@@ -40,7 +40,8 @@ fn resolve_named_expr(model: &ir::Model, compiled: &CompiledModel, name: &str) -
         return Err(format!(
             "expression '{}' references compartment state.\n  \
              Compartment values require a running simulation.\n  \
-             Use 'camdl simulate --trace' instead.", name
+             Run 'camdl simulate <model> -o traj.tsv' instead (writes compartment \
+             and flow_* columns per step).", name
         ));
     }
 
@@ -147,7 +148,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
                 if let Some(comp) = references_compartments(&expr) {
                     eprintln!("error: expression '{}' references compartment '{}'.", name, comp);
                     eprintln!("  Compartment state requires a running simulation.");
-                    eprintln!("  Use 'camdl simulate --trace' instead.");
+                    eprintln!("  Run 'camdl simulate <model> -o traj.tsv' instead (compartment + flow_* columns).");
                     std::process::exit(1);
                 }
                 resolved.push((name.clone(), expr));

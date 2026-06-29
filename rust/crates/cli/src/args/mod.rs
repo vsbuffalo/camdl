@@ -2025,11 +2025,11 @@ pub struct SurveyArgs {
 #[command(after_help = colored_help!("\
 Examples:
   # Evaluate one or more expressions on a time grid
-  camdl eval sir.camdl --params p.toml \\
+  camdl dev eval sir.camdl --params p.toml \\
       --expr \"beta,gamma\" --from 0 --to 730 --every 1
 
   # Inspect a forcing function over time
-  camdl eval sir.camdl --params p.toml \\
+  camdl dev eval sir.camdl --params p.toml \\
       --expr \"seasonal(t)\" --from 0 --to 365
 "))]
 pub struct EvalArgs {
@@ -2416,10 +2416,10 @@ leaves that were removed out of band.
 
 Examples:
   # Rebuild the index for the default ./results store
-  camdl reindex
+  camdl dev reindex
 
   # Rebuild the index for a specific store root
-  camdl reindex /data/runs
+  camdl dev reindex /data/runs
 "))]
 pub struct ReindexArgs {
     /// Root directory to scan (default: ./results)
