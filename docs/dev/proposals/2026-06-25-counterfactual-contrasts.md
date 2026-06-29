@@ -61,16 +61,20 @@ correlated and **decays** — CRN does _not_ cancel the post-fork forward noise.
 The real variance-reduction win is the shared `X_i(T*)` (eliminating latent
 variance at the fork), not forward-noise cancellation.
 
-### Validity per inference method — extend `FilterableFit`, don't fork it
+### Validity per inference method — classified by `LatentPath`
 
 The conditioned fork is valid only for methods that produced a conditionable
-latent state, and that differs by method. camdl already has the witness pattern
-— `FilterableFit` (`predict.rs:197`), whose `NotFilterable::Deterministic` arm
-already encodes "ODE: deterministic given θ → conditioned ≡ free-forward."
-**Extend it** with a conditioned-fork capability rather than standing up a
-parallel `ForkableFit` (the v3 mistake — reach for the existing seam). The
-classification keys on the **artifact** ("does the stage have a `draws.tsv`
-cloud? aligned latent paths?"), _not_ the method name (`predict.rs:234`), so:
+latent state, and that differs by method. Fork-validity is classified by the
+3-state `LatentPath` ADT from
+[`2026-06-28-keyed-joint-param-trajectory-output.md`](2026-06-28-keyed-joint-param-trajectory-output.md)
+§3 — `Deterministic` (ODE, valid: recompute X from θ) / `Sampled` (a stored
+path, valid) / `NotSaved` (a stochastic fit with no saved path, rejected) — and
+a point-estimate fit (no posterior cloud) rejects outright. This keys on the
+latent **artifact**, not the method name. It does **not** extend the
+particle-filter-drive `FilterableFit` witness (`predict.rs:197`): that witness
+_rejects_ ODE as `NotFilterable::Deterministic`, the exact opposite of the
+fork's verdict (ODE is the easy, valid case), so reusing it would overload one
+enum arm with two opposite meanings. The validity table:
 
 | method    | backend        | latent state                 | conditioned fork               |
 | --------- | -------------- | ---------------------------- | ------------------------------ |
@@ -81,8 +85,9 @@ cloud? aligned latent paths?"), _not_ the method name (`predict.rs:234`), so:
 | **NLopt** | ODE            | θ-determined **point**       | **rejected — `PointEstimate`** |
 
 NLopt on ODE is a point estimate (no posterior), so it rejects exactly like IF2
-— the witness must key on posterior-vs-point (the artifact), not on
-`backend == Ode`.
+— the classifier keys on posterior-vs-point (the artifact), not on
+`backend == Ode`. PMMH/PF are `Sampled` once their fits save a latent path, and
+`NotSaved` (rejected) until then.
 
 ### Surface
 
@@ -115,15 +120,15 @@ compare {
 
 ## Prerequisites (the real build — why this is deferred)
 
-1. **Joint, keyed `(θ, X)` fit output.** Today `draws.tsv` is keyless (params
-   only) and `trajectories.tsv` is sweep-keyed and strided by `traj_stride`
-   _independently_ of the `thin` used for `draws.tsv` (`fit/pgas.rs:588` vs
-   `:1031`), so the two are not joinable — there is no `(θ_i, X_i)` pair to
-   read. This needs a common stride + a join key (a fit-pipeline output change).
-   PMMH/PF save **no** latent path today (`fit/pmmh.rs`) — a net-new path
-   writer. _(Also flagged: `draws.tsv` may double-apply burn-in/thin —
-   `fit/pgas.rs:1029` re-thins an already-thinned index; verify with a TDD test,
-   independent of this work.)_
+1. **Joint, keyed `(θ, X)` fit output** — specced in
+   [`2026-06-28-keyed-joint-param-trajectory-output.md`](2026-06-28-keyed-joint-param-trajectory-output.md).
+   `draws.tsv` is keyless and pooled across chains; `trajectories.tsv` is
+   `(chain, draw)`-keyed but strided independently of `draws.tsv`'s `thin`. v1
+   adds a `(chain, draw)` key to `draws.tsv` and inner-joins the **path-saved
+   subset** (a partial join, with the joined count surfaced); a PMMH/PF
+   latent-path writer and full-coverage join are deferred follow-ups there.
+   _(The `draws.tsv` double-apply of burn-in/thin flagged in the original draft
+   was fixed — `docs/dev/incidents/2026-06-28-pgas-draws-double-thinning.md`.)_
 2. **A start-from-state engine seam.** The forward engine always builds initial
    state from the model at `t_start` (`chain_binomial.rs:172`; `SimConfig` has
    no state field). Injecting `X(T*)` and resuming the substep loop at `T*` is
@@ -133,12 +138,30 @@ compare {
 3. **Multi-scenario two-arm replay in `fit predict`.** Today it builds one
    inline baseline (`predict.rs:860`); the paired two-arm replay + the
    differencing reducer + the per-draw contrast band are net-new.
-4. **Extend `FilterableFit`** with the conditioned-fork capability + the
-   `NotForkable::{PointEstimate, PathsNotSaved}` outcomes, keyed on artifact.
+4. **Fork-validity classifier** — the `LatentPath` ADT from prerequisite #1
+   (`Deterministic | Sampled | NotSaved`) + a point-estimate rejection. NOT an
+   extension of `FilterableFit` (the PF-drive witness, which rejects ODE — see
+   "Validity per inference method" above).
 5. **A stored quantity dimension** for the contrast binop-agreement check
    (`no_sia.deaths - with_sia.deaths` requires equal dims) — `dimcheck` does not
-   persist computed dimensions today (`dimcheck.ml`), so this is a small IR-side
-   add.
+   persist computed dimensions today (`dimcheck.ml`). Owned here; see the
+   "IR-side stored quantity dimension" sketch below.
+
+### IR-side stored quantity dimension (prerequisite #5)
+
+The `compare {}` binop `no_sia.deaths - with_sia.deaths` is an arithmetic
+combination of two quantity values, so the dimensional checker must verify the
+two operands agree (both `deaths`, a count) — otherwise a `deaths - rate`
+contrast either silently produces a meaningless number or fails opaquely.
+`dimcheck.ml` checks dimensions during expansion but does not **persist** the
+computed dimension of a declared `quantities {}` entry into the IR. This is a
+small OCaml/IR-side add: carry each quantity's resolved dimension on its IR node
+(an `ir/schema.json` field on the quantity, mirrored OCaml↔Rust), so the Rust
+`compare {}` reducer can check operand-dimension agreement (E-code on mismatch,
+naming both quantities and their dimensions) before differencing. No new unit
+literals or DSL surface — purely persisting a dimension `dimcheck` already
+computes. (Sized as a follow-up alongside the contrast reducer, not a blocker
+for prerequisites #1–#2.)
 
 ## Open follow-ups within this proposal
 

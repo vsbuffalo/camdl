@@ -109,6 +109,47 @@ When `Some`: skip `initial_state`, seed `int_s`/`real_s` from the injection, set
 accumulators, and (if `rng.is_some()`) restore the RNG state instead of seeding
 fresh.
 
+## Corrections from adversarial review (fold before this becomes a spec)
+
+Two silent-wrong findings the draft's hazard list missed, plus scope fixes — to
+resolve when this is specced (prerequisite #2, after the `(θ, X)` output):
+
+- **[P0, silent-wrong] The fork intervention at exactly T\* does not fire under
+  a naive resume.** Interventions fire on the substep _ending_ at their time
+  (`due_effects` is tested at `t_grid + dt`); the resumed loop's first substep
+  (`s = 0`, `t_grid = T*`) tests effects due at `T* + dt`, so an SIA scheduled
+  _at_ T\* is never tested → arm B ≡ arm A → "cases averted" = 0, silently. The
+  spec must decide where the fork intervention fires: apply it to the injected
+  `X_i(T*)` _before_ the loop, schedule it at the first post-fork step, or
+  special-case the resume.
+- **[fix] `fire_steps` are ABSOLUTE — do not re-index.** They are
+  `round(t_fire/dt)`, anchored at time 0, not `t_start` (`time.rs`). With
+  `t_start = T*` and `s = 0`, `t_grid` stays absolute, so the existing fire
+  steps already fire at the right absolute steps and pre-T\* ones auto-vanish
+  (`current_step` only increases). Re-indexing them (hazard #4 as drafted) would
+  _break_ firing.
+- **[P0, silent-wrong] The reactive subsystem is unrepresentable in
+  `StartState`.** `ReactiveAgenda` carries mid-run state a resumed
+  `(int_s, real_s, rng)` cannot reproduce — `obs_history` (windowed-trigger
+  lookback), `last_fired`/`times_fired` (`once`/`cooldown` gating), a `pending`
+  effect heap, and partial `interval_flows` — plus a second RNG stream
+  (`obs_rng`). `chain_binomial` **grants** `REACTIVE_INTERVENTIONS` on the
+  forward path, so reactive models run here. v1 must **capability-gate reactive
+  (and attached observers) out at the seam** with a located error, or capture
+  the agenda; silence is a matrix gap (gh#187 class).
+- **[scope] "Byte-identical" holds for integer-dt only.** Re-anchoring the
+  drift-free clock at `window_start = T*` (vs the continuous run's `t0`)
+  diverges by ULPs for fractional-dt time-inhomogeneous forcing. Scope the
+  splice invariant: _byte-identical for integer-dt; agrees-to-ULP otherwise_.
+- **[scope] The grid constraint is the OUTPUT grid, not the dt grid** — flow
+  accumulators reset only at output emits, so the spliced tail matches the
+  continuous tail only when T\* is an output-emit time. The `++` splice must
+  also resolve the duplicated/disagreeing T\* boundary row (initial-row
+  convention vs the continuous run's accumulated row).
+- **[housekeeping] The per-eval scratch is a non-hazard** (`stage_per_eval`
+  reads no `Time`/`Dt` — verified inert), so it needs no re-seat; say so
+  explicitly.
+
 ## Open questions (intentional — this is a draft)
 
 - **Off-grid T\*.** v1 should require T\* on the dt grid (the substep clock and
