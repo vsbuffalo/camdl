@@ -61,6 +61,36 @@ correlated and **decays** — CRN does _not_ cancel the post-fork forward noise.
 The real variance-reduction win is the shared `X_i(T*)` (eliminating latent
 variance at the fork), not forward-noise cancellation.
 
+### Why the smoothed `X_i(T*)`, not a filtered one
+
+`X_i(T*)` is the fit's **smoothed** latent state — conditioned on the _whole_
+observed series `y_{1:T}`, including data _after_ the fork (PGAS samples the
+joint smoothing distribution `p(θ, X | y_{1:T})`). Using post-`T*` data to set
+the state we fork from looks suspect, so it is worth saying why it is correct —
+and when it would not be.
+
+This surface ships the **retrospective** estimand: "for _this_ outbreak we
+actually observed, how many cases did the SIA avert?" That is a
+**counterfactual** query, and a counterfactual is _defined_ by conditioning on
+the factual evidence (Pearl's abduction → action → prediction: condition the
+latent variables on _all_ the evidence, then `do(no SIA)`, then predict).
+Conditioning the latent state on all of `y_{1:T}` **is** smoothing. The
+post-`T*` data is not the future leaking into the counterfactual: `X_i(T*)` is a
+**pre-fork, shared** quantity — both arms are identical up to `T*` and diverge
+only when the SIA is applied _after_ the fork — so the later observations
+sharpen our estimate of the one true state that existed at `T*`, _through the
+known factual forward model_ (`X(T*) → SIA →
+dynamics → y_{>T*}`). A fast
+post-`T*` decline tells us how many were really infected at `T*`; the smoother
+uses it, a filter (state given `y_{1:T*}` only) throws it away.
+
+Filtering would be correct for a **different** estimand — the _prospective_,
+decision-time question "with only what was knowable at `T*`, how much would an
+SIA be expected to avert?" — which deliberately ignores hindsight. We do not
+ship that one (a user reading the prospective number as the realized one is the
+silent-wrong this proposal exists to avoid). So: retrospective ⇒ smoothing (read
+`X` from the fit's smoothed trajectory, never a re-run filter).
+
 ### Validity per inference method — classified by `LatentPath`
 
 The conditioned fork is valid only for methods that produced a conditionable
