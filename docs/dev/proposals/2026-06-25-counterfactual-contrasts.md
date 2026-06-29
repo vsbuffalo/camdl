@@ -1,10 +1,12 @@
 # Counterfactual contrasts (cases averted)
 
-Status: **Design record — deferred.** The design is converged (three adversarial
-review rounds), but the conditioned fork it requires is a real fit-output +
-engine build, not buildable from today's artifacts. Gated on the prerequisites
-below. It depends on `2026-06-25-generated-quantities.md` (ships first,
-standalone).
+Status: **spec — implement.** The design is converged (three adversarial review
+rounds) and its infrastructure prerequisites are now built: the joint keyed
+`(θ, X)` output (#1), the start-from-state engine seam (#2), and the
+`LatentPath` fork-validity classifier (#4) have landed (gh#322), and generated
+quantities (`2026-06-25-generated-quantities.md`) shipped. What remains to build
+is the DSL `contrasts {}` surface + the two-arm replay reducer (#3) and a stored
+quantity dimension for the contrast binop check (#5).
 
 Splits the counterfactual half out of
 `2026-06-24-generated-quantities-and-counterfactuals.md` (superseded).
@@ -14,7 +16,7 @@ Supersedes `2026-06-04-experiment-compare.md`.
 
 The headline policy number — **cases averted**: how many cases an intervention
 (an SIA) prevented, with full posterior uncertainty, as a banded
-`compare/<name>.tsv`.
+`contrasts/<name>.tsv`.
 
 ## Why not a forward-only version (the deferral rationale)
 
@@ -28,17 +30,17 @@ A counterfactual can be posed two ways, and they answer different questions:
   Answers "for _this_ outbreak we saw, how many did the SIA avert."
 
 "Cases averted" almost always means the **retrospective** question, and a user
-who runs a forward-only `compare` and reads the prospective number as the
+who runs a forward-only `contrasts` and reads the prospective number as the
 realized one has a silent-wrong on a policy headline. So this surface ships
-**only** with the conditioned fork; a forward-only `compare` block is not an
+**only** with the conditioned fork; a forward-only `contrasts` block is not an
 acceptable interim. (The prospective object is recoverable via plain
 `simulate --draws` under two scenarios for users who genuinely want it; it is
 not dressed up as "cases averted".)
 
 ## The design (converged)
 
-`compare` is **forward simulation that reads a fit's output** — it never invokes
-the inference kernels. Per posterior draw `i`:
+The `contrasts {}` block is **forward simulation that reads a fit's output** —
+it never invokes the inference kernels. Per posterior draw `i`:
 
 ```
 read θ_i  and  the fit's inferred latent state X_i(T*) at the fork T*
@@ -126,11 +128,19 @@ interventions { sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 20
 scenarios     { no_sia { disable = [sia] }   with_sia { enable = [sia] } }
 quantities    { deaths = final(D) }
 
-compare {
+contrasts {
   averted = no_sia.deaths - with_sia.deaths   over [origin + 20 'weeks, origin + 52 'weeks]
 }
 ```
 
+Each contrast bands over the forkable posterior subset and is emitted as
+`contrasts/<name>.tsv` (the joined/forkable count surfaced alongside, per the
+`(θ, X)` partial-join contract).
+
+- The block is named **`contrasts {}`**, not `compare {}` — `camdl compare` is
+  already a CLI subcommand (model Δelpd comparison, `compare.rs`); a model block
+  and a CLI verb do not collide at parse time, but `contrasts` is the precise
+  word and avoids the conceptual overload.
 - A **dot** member-access (`no_sia.deaths` = quantity under scenario) — one
   general namespace operator (verified non-breaking: `.5`/`1.5` stay floats,
   `ident.ident` takes a new `DOT` token). v1 restricts to `IDENT DOT IDENT`;
@@ -141,45 +151,51 @@ compare {
   parse). A new **endpoint type check** rejects a bare duration (today
   `at [20 'weeks]` compiles silently — this is new code, reconciled with the
   same `at` loophole).
-- `compare {}` is a block; each entry is
-  `name = <contrast_expr> over [<instant>, <instant>]`, with `over` a new
-  keyword binding looser than arithmetic (a real production with explicit
-  precedence, not asserted). **Name clash to resolve:** `camdl compare` is
-  already a CLI subcommand (model Δelpd comparison, `compare.rs`); the block
-  name overloads it — pick a non-colliding block name or justify the overload.
+- Each entry is `name = <contrast_expr> over [<instant>, <instant>]`, with
+  `over` a new keyword binding looser than arithmetic — a real grammar
+  production with explicit precedence (`over` below the additive/subtractive
+  operators, so `a - b over [..]` parses as `(a - b) over [..]`), not an
+  asserted precedence.
 
-## Prerequisites (the real build — why this is deferred)
+## Prerequisites
 
-1. **Joint, keyed `(θ, X)` fit output** — specced in
-   [`2026-06-28-keyed-joint-param-trajectory-output.md`](2026-06-28-keyed-joint-param-trajectory-output.md).
-   `draws.tsv` is keyless and pooled across chains; `trajectories.tsv` is
-   `(chain, draw)`-keyed but strided independently of `draws.tsv`'s `thin`. v1
-   adds a `(chain, draw)` key to `draws.tsv` and inner-joins the **path-saved
-   subset** (a partial join, with the joined count surfaced); a PMMH/PF
-   latent-path writer and full-coverage join are deferred follow-ups there.
-   _(The `draws.tsv` double-apply of burn-in/thin flagged in the original draft
-   was fixed — `docs/dev/incidents/2026-06-28-pgas-draws-double-thinning.md`.)_
-2. **A start-from-state engine seam.** The forward engine always builds initial
-   state from the model at `t_start` (`chain_binomial.rs:172`; `SimConfig` has
-   no state field). Injecting `X(T*)` and resuming the substep loop at `T*` is
-   **high-risk** — it must re-seat the schedule/cursor (gh#216 firing), the
-   flow-accumulator resets (`chain_binomial.rs:328`), and `t`. Not "moderate";
-   treat as inference-adjacent.
-3. **Multi-scenario two-arm replay in `fit predict`.** Today it builds one
-   inline baseline (`predict.rs:860`); the paired two-arm replay + the
-   differencing reducer + the per-draw contrast band are net-new.
-4. **Fork-validity classifier** — the `LatentPath` ADT from prerequisite #1
-   (`Deterministic | Sampled | NotSaved`) + a point-estimate rejection. NOT an
+Three of the five are built (gh#322); the remaining two — the `contrasts {}`
+surface + reducer (#3) and the stored quantity dimension (#5) — are this
+proposal's build.
+
+1. **[done] Joint, keyed `(θ, X)` fit output** — specced in
+   [`2026-06-28-keyed-joint-param-trajectory-output.md`](2026-06-28-keyed-joint-param-trajectory-output.md),
+   landed. `draws.tsv` carries a leading `(chain, draw)` key inner-joined to the
+   **path-saved subset** of `trajectories.tsv` (a partial join, with the
+   forkable count surfaced via `fit::joint::classify_joint`); the shared loader
+   strips the key so every param-only reader is unchanged. A PMMH/PF latent-path
+   writer and full-coverage join are deferred follow-ups there.
+2. **[done] A start-from-state engine seam** — landed. `chain_binomial`'s
+   `run_chain_binomial_with_observer` resumes from an injected `X(T*)` at
+   `cfg.t_start = T*` via `Resume{ start: Some(StartState{..}) }`: state inject,
+   output-cursor re-seat, fresh/restored RNG, with reactive/off-grid rejections.
+   Validated by the splice invariant. Reads `io::trajectories::read_state_at`
+   for a `Sampled` path; an ODE arm recomputes `X(T*)` from θ.
+3. **[build] The `contrasts {}` surface + two-arm replay reducer.** The DSL
+   block (DOT member-access, `over` keyword, endpoint type check), then the Rust
+   reducer: for each forkable draw, replay arm A and arm B from `X_i(T*)` via
+   the engine seam, difference the quantities, and band over the forkable
+   subset. Today `fit predict` builds one inline baseline (`predict.rs:860`);
+   the paired two-arm replay + differencing + per-draw contrast band are
+   net-new.
+4. **[done] Fork-validity classifier** — the `LatentPath` ADT
+   (`Deterministic | Sampled | NotSaved`) landed in prerequisite #1's
+   `fit::joint`, with a point-estimate (no-posterior) rejection. NOT an
    extension of `FilterableFit` (the PF-drive witness, which rejects ODE — see
    "Validity per inference method" above).
-5. **A stored quantity dimension** for the contrast binop-agreement check
-   (`no_sia.deaths - with_sia.deaths` requires equal dims) — `dimcheck` does not
-   persist computed dimensions today (`dimcheck.ml`). Owned here; see the
-   "IR-side stored quantity dimension" sketch below.
+5. **[build] A stored quantity dimension** for the contrast binop-agreement
+   check (`no_sia.deaths - with_sia.deaths` requires equal dims) — `dimcheck`
+   does not persist computed dimensions today (`dimcheck.ml`). Owned here; see
+   the "IR-side stored quantity dimension" sketch below.
 
 ### IR-side stored quantity dimension (prerequisite #5)
 
-The `compare {}` binop `no_sia.deaths - with_sia.deaths` is an arithmetic
+The `contrasts {}` binop `no_sia.deaths - with_sia.deaths` is an arithmetic
 combination of two quantity values, so the dimensional checker must verify the
 two operands agree (both `deaths`, a count) — otherwise a `deaths - rate`
 contrast either silently produces a meaningless number or fails opaquely.
@@ -187,13 +203,16 @@ contrast either silently produces a meaningless number or fails opaquely.
 computed dimension of a declared `quantities {}` entry into the IR. This is a
 small OCaml/IR-side add: carry each quantity's resolved dimension on its IR node
 (an `ir/schema.json` field on the quantity, mirrored OCaml↔Rust), so the Rust
-`compare {}` reducer can check operand-dimension agreement (E-code on mismatch,
-naming both quantities and their dimensions) before differencing. No new unit
-literals or DSL surface — purely persisting a dimension `dimcheck` already
-computes. (Sized as a follow-up alongside the contrast reducer, not a blocker
-for prerequisites #1–#2.)
+`contrasts {}` reducer can check operand-dimension agreement (E-code on
+mismatch, naming both quantities and their dimensions) before differencing. No
+new unit literals or DSL surface — purely persisting a dimension `dimcheck`
+already computes. (Sized as a follow-up alongside the contrast reducer, not a
+blocker for prerequisites #1–#2.)
 
-## Open follow-ups within this proposal
+## Deferred to a follow-up (explicitly out of v1 scope)
+
+These are named non-goals for v1, not unresolved design questions — v1 ships
+whole-population, single-instant contrasts:
 
 - Stratified contrasts + `a.b[p]` dot chains (v1 is whole-pop).
 - Decoupling the conditioning instant from the accumulation window.
@@ -204,12 +223,16 @@ for prerequisites #1–#2.)
 
 ## Decisions recorded
 
-- Ship only the conditioned fork; no forward-only `compare` (misread risk).
-- `compare` is forward sim that _reads_ the fit's latent `X(T*)`; no re-filter.
-- Validity gated by extending `FilterableFit`, keyed on artifact
-  (posterior-vs-point), not method name or backend axis.
+- Ship only the conditioned fork; no forward-only `contrasts` (misread risk).
+- The `contrasts {}` block is forward sim that _reads_ the fit's latent `X(T*)`;
+  no re-filter.
+- Validity gated by the `LatentPath` ADT (`Deterministic | Sampled | NotSaved`),
+  keyed on the latent **artifact** (posterior-vs-point), not the method name or
+  the backend axis — explicitly NOT an extension of `FilterableFit` (which
+  rejects ODE, the opposite verdict; see "Validity per inference method").
 - CRN's win is the shared `X(T*)`, not post-fork noise cancellation (stated
   honestly).
-- Conditioned-fork prerequisites (joint keyed `(θ, X)` output, start-from-state
-  seam) are named, not buried — this is why the proposal is deferred behind
-  quantities.
+- The infrastructure prerequisites (joint keyed `(θ, X)` output #1,
+  start-from-state seam #2, `LatentPath` classifier #4) are named, not buried,
+  and are now built (gh#322); this proposal builds the surface + reducer (#3)
+  and the stored quantity dimension (#5).
