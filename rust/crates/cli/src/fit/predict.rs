@@ -52,6 +52,13 @@ impl Horizon {
 /// accepts [`ParamTreatment::Posterior`], which can only be constructed from a
 /// real [`PosteriorDraws`] cloud — so a posterior band over a single point is
 /// unrepresentable, and a plug-in band is always explicitly labelled.
+///
+/// This IS the sealed-fit proposal's Phase 4 "can't-drop-uncertainty"
+/// invariant, enforced here by illegal-states-unrepresentable typing rather
+/// than a runtime check. [`PosteriorDraws`] is that proposal's `Ensemble` minus
+/// two additive fields — per-parameter provenance and the latent trajectory —
+/// which the keyed-joint `(θ, X)` output supplies (see
+/// `docs/dev/proposals/2026-06-28-keyed-joint-param-trajectory-output.md`).
 #[derive(Debug, Clone)]
 pub enum ParamTreatment {
     /// Average over the whole posterior cloud — the band carries full
