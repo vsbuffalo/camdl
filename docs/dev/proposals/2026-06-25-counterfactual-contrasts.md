@@ -233,6 +233,56 @@ operand and scopes the reduction window of a reduced one.
 instant. A refinement on top of shape inheritance; _contrasting_ stratified or
 series quantities (whole-vector results) is in v1.
 
+### Parameters in a contrast arm
+
+Each arm is a scenario applied to one posterior draw, then forked from `X_i(T*)`
+— so parameter resolution is the **existing 5-tier chain**
+(`params_resolver.rs`; `docs/camdl-run-spec.md §1.3`), no new mechanism. The
+fitted draw and the scenario sit at adjacent tiers:
+
+- **Tier 3.5** — the fitted draw θ_i (from `draws.tsv`).
+- **Tier 4** — the scenario: `set` _overrides_ the draw (absolute), `scale`
+  _multiplies_ it (`params_resolver.rs:99`).
+
+So for a fitted parameter there are two distinct, well-defined counterfactuals:
+
+- **`scale = { beta = 0.5 }`** → per draw, `θ_i.beta × 0.5` — **preserves the
+  posterior** (every draw perturbed, uncertainty carried through). The clean way
+  to compare the fit against a perturbed-parameter scenario.
+- **`set = { beta = 0.2 }`** → forces an absolute value — `do(β = 0.2)`,
+  **collapsing that parameter's posterior to a point**. Valid, but the fitted
+  uncertainty on β is discarded.
+
+The no-overlay arm — the fitted model with no scenario patch — is **`fitted`**,
+the reserved no-overlay sentinel `camdl fit predict` already emits in its
+`scenario` column (a `scenarios {}` preset named `fitted` is rejected, E291). A
+contrast references it directly; it is not declared:
+
+```
+scenarios { lower_trans { scale = { beta = 0.5 } } }   # only the counterfactual is declared
+contrasts {
+  averted = fitted.quantities.cases - lower_trans.quantities.cases  over [...]
+}
+```
+
+`fitted` is **fit-relative** — it means the no-overlay run of the one fit this
+contrast is computed against (the fit handle is the invocation argument; an
+ambiguous handle is already a hard error). With several fits of a model (PMMH,
+PGAS) you run the contrast against each handle; the fit's identity is the output
+path, not the `scenario` column. Comparing two fits' inferences is a distinct
+object — there is no shared `X(T*)` across fits to fork from — and is out of
+scope for a conditioned contrast.
+
+**Post-fork only.** A scenario's parameter override acts on the **forward
+dynamics from T\***; it does **not** re-infer `X_i(T*)`, the factual shared
+anchor both arms branch from. So a contrast expresses post-fork parameter
+counterfactuals ("transmission halved _after_ the SIA"). A _from-t₀_ parameter
+counterfactual ("β had always been lower," which would change the pre-fork
+epidemic too) is the **prospective** question — `simulate --draws` under two
+scenarios, not a conditioned contrast (where the deferral rationale above
+already sends it). Forcing a pre-fork change onto a frozen `X_i(T*)` would be
+silently incoherent, so it is rejected, not approximated.
+
 ## Prerequisites
 
 Three of the five are built (gh#322); the remaining two — the `contrasts {}`
