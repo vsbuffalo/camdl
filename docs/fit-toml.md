@@ -52,8 +52,8 @@ init_mle  = "scout"               # take this stage's base point from the scout 
 **`[model]`** — `camdl = "path/to/model.camdl"`.
 
 **`[data.observations]`** — one key per observation stream declared in the
-model, each mapped to a TSV path. For out-of-sample validation, add `[holdout]`
-(same shape) or `holdout_after = <time>`.
+model, each mapped to a TSV path. For out-of-sample validation, add
+`[data.holdout]` (same shape) or `holdout_after = <time>` (under `[data]`).
 
 **`[estimate]`** — the parameters to infer. Each value is an inline table:
 

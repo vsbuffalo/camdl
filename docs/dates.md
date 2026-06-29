@@ -237,7 +237,7 @@ camdl pfilter model.camdl --data cases_dated.tsv ...
   from a `2020-02-28` origin is `2020-02-28+0.25d`. This keeps the column
   one-to-one with the timepoint: distinct sub-day rows get distinct labels
   rather than silently coalescing onto the same date (gh#108). The suffix is a
-  fractional-day delta, deliberately *not* the `YYYY-MM-DDTHH:MM` datetime form
+  fractional-day delta, deliberately _not_ the `YYYY-MM-DDTHH:MM` datetime form
   (datetimes are out of scope — see "Not supported (yet)" below); a consumer
   grouping on the date column can split on `+` to recover the calendar day.
 - **`camdl fit summary`** renders `instant`-kind estimands as dates when the
@@ -284,9 +284,9 @@ minutes). Observation data columns and intervention schedules shift the same
 way.
 
 **What survives unchanged.** Any _typed_ position — anything that carries its
-own unit literal — converts correctly. `beta : rate 'per_month` keeps working
-(the expander converts to per-axis-unit). `1 'months` as a duration value keeps
-working (it's an affine span of ≈ 30.44 days regardless of axis).
+own unit literal — converts correctly. `beta : positive 'per_month` keeps
+working (the expander converts to per-axis-unit). `1 'months` as a duration
+value keeps working (it's an affine span of ≈ 30.44 days regardless of axis).
 
 **Before** (unanchored monthly):
 
@@ -295,8 +295,8 @@ time_unit = 'months
 # no origin
 
 parameters {
-  beta  : rate 'per_month
-  gamma : rate 'per_month
+  beta  : positive 'per_month
+  gamma : positive 'per_month
   ...
 }
 
@@ -320,8 +320,8 @@ time_unit = 'days
 origin    = date("1891-01-01")
 
 parameters {
-  beta  : rate 'per_month     # unchanged — expander converts to per-day
-  gamma : rate 'per_month
+  beta  : positive 'per_month # unchanged — expander converts to per-day
+  gamma : positive 'per_month
   ...
 }
 
@@ -362,7 +362,7 @@ unit-literal annotation) is the smallest diff.
 ## Why `'months` is fine in some places and forbidden in others
 
 A natural confusion reading the rules above: `5 'months` works in a table value
-or a parameter bound, `beta : rate 'per_month` works everywhere, but
+or a parameter bound, `beta : positive 'per_month` works everywhere, but
 `date + 6 'months` is a hard error. That looks contradictory. It isn't.
 
 The principle: **a calendar month is unambiguous as a _length_ and unambiguous

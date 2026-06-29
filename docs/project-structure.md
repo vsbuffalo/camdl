@@ -13,7 +13,7 @@ camdl/
 │
 ├── ir/                              # ── The Contract ──
 │   ├── schema.json                  # JSON Schema for the IR format
-│   ├── VERSION                      # Schema version ("0.3")
+│   ├── VERSION                      # Schema version ("0.20")
 │   └── golden/                      # Golden IR files (integration test surface)
 │
 ├── ocaml/                           # ── Frontend: DSL → IR ──
@@ -58,19 +58,24 @@ camdl/
 │   │   │           ├── pgas_grad.rs         # PGAS gradient evaluation
 │   │   │           ├── nuts.rs              # No-U-Turn Sampler (HMC)
 │   │   │           ├── pmmh.rs              # Particle Marginal MH (prefer PGAS, long series)
-│   │   │           ├── dmeasure.rs          # Observation likelihood compilation
+│   │   │           ├── obs_model.rs         # Observation model + likelihood compilation
+│   │   │           ├── multi_stream_obs.rs  # Multi-stream observation binding + scoring
 │   │   │           ├── obs_loglik.rs        # Distribution log-PMFs + gradients
 │   │   │           └── resampling.rs        # Systematic resampling
 │   │   │
-│   │   ├── cli/                     # CLI: camdl simulate/pfilter/if2/fit/profile
+│   │   ├── cli/                     # CLI: camdl simulate/pfilter/fit/profile
 │   │   │   └── src/
 │   │   │       ├── main.rs          # Command dispatch
 │   │   │       └── fit/             # Multi-stage inference workflow
-│   │   │           ├── scout.rs     # Landscape discovery
-│   │   │           ├── refine.rs    # MLE refinement
-│   │   │           ├── validate.rs  # Out-of-sample validation
+│   │   │           ├── runner.rs    # Stage orchestration (camdl fit run)
+│   │   │           ├── nlopt_stage.rs # IF2 / NLopt MLE stages
+│   │   │           ├── pgas.rs      # PGAS posterior sampling (production)
 │   │   │           ├── pmmh.rs      # PMMH posterior sampling
-│   │   │           └── pgas.rs      # PGAS posterior sampling (production)
+│   │   │           ├── predict.rs   # Free-forward posterior predictive
+│   │   │           ├── handle.rs    # Fit-handle resolution (@label / hash / dir)
+│   │   │           ├── fit_summary.rs # Single-fit summary rendering
+│   │   │           ├── fit_table.rs # Cross-fit aggregator
+│   │   │           └── cas.rs       # Content-addressed fit identity
 │   │   │
 │   │   ├── io/                      # TSV read/write
 │   │   └── observe/                 # Observation projection + sampling
@@ -82,7 +87,6 @@ camdl/
 │   ├── compartmental-ir-spec.md     # IR JSON specification
 │   ├── camdl-inference-spec.md      # Inference algorithms
 │   ├── camdl-data-spec.md           # Data contract
-│   ├── camdl-experiment-spec.md     # Experiment system
 │   └── dev/                         # Developer docs
 │       ├── proposals/               # Design proposals (isodate naming)
 │       ├── reviews/                 # Code reviews (closed, isodate naming)

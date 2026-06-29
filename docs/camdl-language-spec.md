@@ -3077,7 +3077,7 @@ compile-time table lookups; there is no `distribute(...)` allocation helper.
 
 ---
 
-## 16. Output
+## 16. Output and Quantities
 
 A simulation writes a **trajectory** — the time series of compartment states,
 sampled on a schedule. With no `output {}` block the default schedule applies;
@@ -3165,6 +3165,96 @@ existing cached sims re-run on next use.) An unknown `--columns` name is a hard
 error that lists the valid columns. (The
 `[design.*]` batch path honors `every` but not `no_flows` / `columns` yet, and
 rejects the latter loudly.)
+
+### 16.4 Derived quantities (`quantities {}`)
+
+`quantities {}` is a top-level block — a sibling of `observations {}` and
+`output {}`, not nested in either — that declares **derived quantities**:
+summaries computed from a run and reported alongside the trajectory, but never
+scored as data. It is the non-scored twin of an observation. Where
+`observations {}` defines what the likelihood _sees_, `quantities {}` defines
+what you want _read back_ — a peak size, an attack rate, the time an outbreak
+takes off — so a summary no longer has to be smuggled through a fake scored
+stream.
+
+<!-- camdl-doctest-preamble: quantities-demo
+compartments { S, I, R }
+parameters {
+  beta  : rate
+  gamma : rate
+  rho   : probability
+  k     : positive
+  N0    : count
+  i_thr : count
+}
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+-->
+
+```camdl preamble=quantities-demo
+quantities {
+  prevalence      = I / N                    # series — one value per output time
+  attack_rate     = final((N0 - S) / N0)     # scalar reduction
+  peak_prevalence = max(I / N)               # scalar — unary max is a peak reduction
+  time_to_peak    = time_of_max(I)           # a time (a date in an anchored model)
+  takeoff         = first_above(I, i_thr)    # first time I exceeds the threshold i_thr
+  fadeout         = last_above(I, 0)         # last time I is above 0
+  outbreak_dur    = fadeout - takeoff        # arithmetic over already-reduced scalars
+  peak_reported   = max(observations.cases)  # reduce a simulated observation stream
+}
+```
+
+Each binding is `name = <expr>`. Whether a quantity is a **series** or a
+**scalar** is determined by the expression, never declared:
+
+- **Series** — an expression over compartment state (with parameters, `time`,
+  tables, forcings) and **no reduction** yields one value per output time
+  (`prevalence` above), on the trajectory's output schedule (§16).
+- **Scalar** — a **reduction** collapses a series to a single number or a single
+  time. The temporal reductions are `final`, `mean`, `integral`,
+  `count_above` / `count_below`, `time_of_max` / `time_of_min`, and
+  `first_above` / `first_below` / `last_above` / `last_below`. In addition, a
+  **unary** `max` / `min` reduces a series to its peak / trough — binary
+  `max(a, b)` / `min(a, b)` stay pointwise operators everywhere else.
+
+**Reducing a simulated observation.** A reduction may fold a simulated
+observation instead of raw state: `max(observations.<stream>)` reduces the same
+`y_sim` the run drew for `<stream>`, never triggering a fresh draw — so the
+quantity and the emitted observation file always agree. An observation source
+**must** be reduced; a bare `observations.<stream>` series is rejected
+(**E289**), because a quantity that re-sampled observations on every read would
+not be reproducible.
+
+**Reduction arithmetic.** Already-reduced scalars combine with `+ - * /` and
+comparisons, as in `outbreak_dur = fadeout - takeoff`. A reduction call may not
+be **nested** inside that arithmetic — `last_above(I, 0) - takeoff` is rejected
+(**E289**); bind the reduction to its own quantity first, then combine the
+names. A reduction name used in a _rate_ or a `let` binding (outside
+`quantities {}`) is rejected (**E290**): a reduction summarizes a whole run and
+is meaningless inside a per-step propensity.
+
+**Censoring.** A timing reduction that never resolves — `first_above` on a draw
+that never crosses the threshold, `time_of_max` on an all-zero series — is
+reported as **right-censored**, not as a fabricated time.
+
+**Where they run, and run identity.** Quantities run wherever a simulation does:
+over prior-predictive draws (`simulate --draws`), over a fitted posterior
+(`fit predict`), and in a plain `simulate`. Banded results land in
+`quantities/<name>.tsv` with a `quantities.json` manifest describing each
+quantity's kind. Because they are _derived reports_ computed from a run rather
+than inputs to it, adding or changing a `quantities {}` block never re-keys a
+model's `run_id`.
 
 ---
 
@@ -3683,8 +3773,10 @@ Options:
   --params     FILE.toml  load parameter values (repeatable, later overrides earlier)
 ```
 
-Output is TSV to stdout: `t`, one column per compartment, `flow_<name>` per
-transition.
+By default `simulate` writes the trajectory to a content-addressed store leaf
+under `./results` (read it back with `camdl cat <id>`); pass `--stdout` to stream
+the TSV to stdout instead, or `-o FILE` to also write a loose TSV mirror. The TSV
+columns are `t`, one column per compartment, and `flow_<name>` per transition.
 
 ### 21.3 Expression Evaluation
 
@@ -4399,6 +4491,7 @@ declaration :=
   | events_block                      # events { ... }
   | ode_block                         # ode { ... }
   | output_block                      # output { ... }
+  | quantities_block                  # quantities { ... }
   | timepoints_block                  # timepoints { ... }
   | init_block                        # init { ... }
   | simulate_block                    # simulate { ... }

@@ -1,9 +1,10 @@
 # Simulation Backends
 
-`compartmental` ships three simulation backends for the same IR model: Gillespie
-(exact SSA), chain-binomial, and ODE (RK4). They all take the same compiled
-model and parameter vector and return the same `Trajectory` type. The choice is
-a tradeoff between fidelity, speed, and what the downstream analysis requires.
+`camdl` ships three simulation backends for the same IR model: Gillespie (exact
+SSA), chain-binomial, and ODE (fixed-step `rk4` or adaptive `rk45`). They all
+take the same compiled model and parameter vector and return the same
+`Trajectory` type. The choice is a tradeoff between fidelity, speed, and what
+the downstream analysis requires.
 
 ```
 camdl simulate model.ir.json --params base.toml --backend gillespie
@@ -230,7 +231,7 @@ The multinomial draw makes chain-binomial bounded by construction:
 
 ---
 
-## ODE (RK4)
+## ODE
 
 **When to use:** large populations where stochasticity is negligible, or for
 fast deterministic exploration of parameter space before running stochastic
@@ -260,6 +261,30 @@ X(t + h) = X(t) + h/6 · (k₁ + 2k₂ + 2k₃ + k₄)
 ```
 
 Global truncation error is O(h⁴).
+
+### Adaptive stepping (`rk45`)
+
+`rk4` is the default, fixed-step integrator. Select the adaptive Dormand–Prince
+RK4(5) integrator when the dynamics are stiff or you would rather control error
+than hand-tune `dt`; it sizes its internal substeps to meet a tolerance:
+
+```bash
+camdl simulate model.camdl --backend ode --integrator rk45
+```
+
+Tolerances are a **model property** — declared in the `simulate {}` block so a
+fit and its forward simulations always share them — and default to
+`atol = 1e-8`, `rtol = 1e-6`:
+
+```
+simulate {
+  integrator = rk45 { atol = 1e-9 rtol = 1e-7 }
+}
+```
+
+(`rk4` takes no tolerances — giving it `atol`/`rtol` is a located **E106**.) An
+`rk45` simulation refuses a model whose rate reads `dt`: with adaptive stepping
+there is no fixed step for `dt` to denote.
 
 ### Implementation details (`ode.rs`)
 

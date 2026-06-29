@@ -55,8 +55,8 @@ Expressions referencing compartment populations:
 ```bash
 camdl dev eval model.ir.json --params p.toml --expr "S"
 # error: expression 'S' references compartment state.
-#   Compartment state requires a running simulation.
-#   Use 'camdl simulate --trace' instead.
+#   Compartment values require a running simulation.
+#   Run 'camdl simulate <model> -o traj.tsv' instead (writes compartment and flow_* columns per step).
 ```
 
 ### Workflow: Comparing Covariates
@@ -76,7 +76,8 @@ camdl dev eval model.ir.json --params p.toml --expr "pop" --from 0 --to 7665 --e
 
 A planned `--trace` flag would emit forcing function values and let binding
 evaluations as additional TSV columns alongside trajectory output. Useful for
-debugging unexpected dynamics by seeing what the simulator computed at each step.
+debugging unexpected dynamics by seeing what the simulator computed at each
+step.
 
 A normal simulation already writes the cumulative `flow_*` columns next to the
 compartment columns; pass `-o` to mirror the trajectory to a file:
@@ -93,5 +94,5 @@ t   S       E     I     R     flow_infection  flow_progression  flow_recovery
 
 The planned `--trace` flag would add the remaining traced columns (forcing
 functions and let bindings, e.g. `school`, `beta_base`). It is **not yet
-implemented**. Until then, use `camdl dev eval` for time-dependent quantities and
-post-hoc trajectory analysis for state-dependent quantities.
+implemented**. Until then, use `camdl dev eval` for time-dependent quantities
+and post-hoc trajectory analysis for state-dependent quantities.

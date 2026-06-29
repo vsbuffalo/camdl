@@ -176,7 +176,7 @@ Compile-time errors (from `camdlc`):
 | `E303` | conflicting dimensions for parameter X                        | Same parameter inferred to be different dims in different transitions | Pick the right dim for the parameter and fix the transition that's wrong.                                                    |
 | `L401` | rate expression `(1 - exp(-rate * 1 'days))` not dt-invariant | Discretization-correction shape that's only correct at dt=1 day       | Use the `dt` primitive: `(1 - exp(-rate * dt))/dt` — invariant across integrator steps.                                      |
 
-Run-time errors from `camdl simulate` / `pfilter` / `if2` / `fit`:
+Run-time errors from `camdl simulate` / `pfilter` / `fit`:
 
 | Error                                                               | What it usually means                                                                                           | What to do                                                                                                                                                                                                                       |
 | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -110,7 +110,7 @@ ability to evaluate transition densities — currently only the chain-binomial
 ### The recommended workflow
 
 ```
-IF2 (scout → refine) → PGAS ([stages.pgas] init = "from_mle", init_mle = "refine")
+IF2 (scout → refine) → PGAS ([stages.pgas] init_mle = "refine")
 ```
 
 IF2 finds the right basin quickly (global exploration via many particles). PGAS
@@ -493,7 +493,8 @@ The second case is pedagogically important and easy to misread. A reader seeing
 alone track the data will conclude "the fit is good." Neither is right. The
 divergence between them _is_ the diagnostic — teach it that way.
 
-Background: `docs/dev/proposals/archive/pre-alpha/2026-04-19-pf-latent-trajectories.md`.
+Background:
+`docs/dev/proposals/archive/pre-alpha/2026-04-19-pf-latent-trajectories.md`.
 
 ---
 
@@ -615,12 +616,13 @@ Note: Bayesian (PGAS, PMMH) outputs continue to use the name `rhat` for their
 own posterior-mixing diagnostics; only the MLE pipeline (scout / refine /
 validate) uses `chain_agreement` / Â.
 
-### Regimes: scout → refine → validate
+### Staging an IF2 fit: scout → refine → validate
 
-The typical MLE workflow is three `[stages.X] algorithm = "if2"` blocks in a
-`fit.toml`, run in order by `camdl fit run`. Each stage warm-starts from an
-earlier one via `init_mle = "<stage>"`. The three regimes differ only in their
-stage knobs:
+A common MLE workflow runs a few `[stages.X] algorithm = "if2"` blocks in a
+`fit.toml` in order (`camdl fit run`), each warm-starting from an earlier one
+via `init_mle = "<stage>"`. Scout, refine, and validate below are a convention —
+the stages are user-named, and the knobs (chains, particles, iterations,
+cooling) are starting points to adapt, not defaults the tool enforces:
 
 **Scout** — 8 chains, 500 particles, 30 iterations, **cooling = 0.70 (mild)**.
 Exploration: chains stay hot enough to wander across basins rather than
@@ -978,7 +980,7 @@ variance, so NUTS takes appropriately-sized steps in every direction.
 
 ```bash
 # From IF2 starting point: declare in fit.toml as
-#   [stages.pgas] init = "from_mle", init_mle = "validate"
+#   [stages.pgas] init_mle = "validate"
 camdl fit run fit.toml --stage pgas
 
 # From random starts (overdispersed initialization):
@@ -992,7 +994,8 @@ camdl fit run fit.toml --stage pgas --no-nuts
 Configuration in `fit.toml`:
 
 ```toml
-[pgas]
+[stages.posterior]
+algorithm = "pgas"
 chains = 4
 sweeps = 10000
 particles = 100
@@ -1194,9 +1197,9 @@ fit.toml + model.camdl + data.tsv
     └── camdl fit run fit.toml
             <fit_dir>/real/fit_<seed>/
               ├── scout/    fit_state.toml      (stage, init = "lhs")
-              ├── refine/   mle_params.toml     (stage, init = "from_mle", init_mle = "scout")
-              ├── validate/ mle_params.toml     (stage, init = "from_mle", init_mle = "refine")
-              └── pgas/     chain_N/trace.tsv   (stage, init = "from_mle", init_mle = "refine")
+              ├── refine/   mle_params.toml     (stage, init_mle = "scout")
+              ├── validate/ mle_params.toml     (stage, init_mle = "refine")
+              └── pgas/     chain_N/trace.tsv   (stage, init_mle = "refine")
 ```
 
 > **v2 layout note.** Stage directories live under
@@ -1208,19 +1211,15 @@ fit.toml + model.camdl + data.tsv
 > `<fit_dir>/` are stale.
 
 Each named block under `[stages.NAME]` in `fit.toml` chains via the
-`init = "from_mle"` + `init_mle = "<prior-stage>"` pair. The default set is
-scout → refine → validate (+ pgas), but users can define any sequence.
+`init_mle = "<prior-stage>"` key. The default set is scout → refine → validate
+(+ pgas), but users can define any sequence.
 
-**Scout** (8 chains, 200 particles, no cooling): random starts across the
-parameter space, MAD-based auto-calibration of rw_sd. Identifies the likelihood
-basin and filters out divergent chains.
-
-**Refine** (4 chains, 1000 particles, cooling=0.95): convergent IF2 from scout's
-best parameters and auto-calibrated rw_sd. Produces an initial MLE.
-
-**Validate** (4 chains, 5000 particles, cooling=0.95): final IF2 + profile
-likelihoods for all estimated parameters + precise pfilter at the MLE for
-log-likelihood and ESS measurement.
+The three stages do different jobs — scout explores for the basin (hot, random
+starts, MAD-calibrated `rw_sd`), refine collapses onto the local MLE from
+scout's best parameters, and validate adds particles and profile likelihoods for
+a publication-quality estimate with a precise pfilter at the MLE. The per-stage
+knobs (chains, particles, iterations, cooling) are detailed in the staging
+section above; treat them as conventions to adapt, not a mandatory recipe.
 
 Each stage reads the previous stage's `fit_state.toml` and writes its own. The
 final output is `mle_params.toml` — a standard params file with provenance
@@ -1231,7 +1230,7 @@ hashing that feeds directly into `camdl simulate` and `camdl batch run`.
 camdl fit run    fit.toml --seed 1
 
 # Re-run a single stage from a prior stage's output
-#   (configured in fit.toml as `[stages.refine] init = "from_mle",
+#   (configured in fit.toml as `[stages.refine]
 #    init_mle = "fit/he2010/real/fit_1/scout/"`)
 camdl fit run    fit.toml --stage refine
 camdl fit run    fit.toml --stage validate
@@ -1288,8 +1287,8 @@ init = "uniform_unconstrained" # this is the default; shown for clarity
 | `uniform`                         | Per-chain uniform random within natural-scale bounds. Chain 0 keeps the seeded start.                                                                                                                                                                                                                                                                                   | Legacy mode. Linear in natural space, so it clumps for `Log`-typed parameters at low chain count. Kept for reproducibility of pre-`lhs` results.                                                            |
 | `single`                          | Every chain at the seeded `[estimate].start` (or its `Transform`-aware uniform fallback when `start` is omitted). Chains differ only by per-chain RNG.                                                                                                                                                                                                                  | See "When `single` is the right choice" below.                                                                                                                                                              |
 
-When a stage uses `init = "from_mle"` + `init_mle = "<prior>"`, every chain
-starts from the prior stage's MLE — that's the intent of the handoff.
+When a stage uses `init_mle = "<prior>"`, every chain starts from the prior
+stage's MLE — that's the intent of the handoff.
 
 **Why `uniform_unconstrained` is the default.** Stan initializes by drawing
 `Uniform(-2, 2)` on the unconstrained (transformed) scale and mapping back into
@@ -1308,9 +1307,8 @@ uniform-random chains by ~80,000 nats) can set `init = "lhs"`.
 
 **When `single` is the right choice.** Four legitimate cases:
 
-1. **Refine stages with `init = "from_mle"` + `init_mle = "<prior>"`** — all
-   chains start from the prior stage's MLE anyway; `single` is redundant but
-   harmless.
+1. **Refine stages with `init_mle = "<prior>"`** — all chains start from the
+   prior stage's MLE anyway; `single` is redundant but harmless.
 2. **Single-chain runs (`chains = 1`)** — there's no per-chain spread to draw,
    so the three modes collapse to the same draw.
 3. **Reproducibility-critical tests** — `single` gives byte-identical chain
@@ -1337,16 +1335,16 @@ RNG provides the spread" behaviour.
 Add a `[holdout]` section to fit.toml with holdout data files:
 
 ```toml
-[data]
+[data.observations]
 weekly_cases = "data/cases_train.tsv"
 
-[holdout]
+[data.holdout]
 weekly_cases = "data/cases_holdout.tsv"
 ```
 
-Scout and refine only see `[data]` — holdout is structurally unreachable during
-parameter estimation. Validate runs the particle filter on train + holdout and
-reports separate logliks:
+Scout and refine only see `[data.observations]` — holdout is structurally
+unreachable during parameter estimation. Validate runs the particle filter on
+train + holdout and reports separate logliks:
 
 ```
 train loglik:   -4200.3 (780 obs)

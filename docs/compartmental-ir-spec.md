@@ -1,6 +1,6 @@
 # Stochastic Compartmental Model IR Specification
 
-**Version:** 0.3-draft **Date:** 2026-03-12
+**Version:** 0.3 **Date:** 2026-06-29
 
 ## 0. Implementation Phases
 
@@ -673,11 +673,22 @@ compute `S₀ = N - I₀`. Real compartments use the same form:
 
 ## 8. Top-Level IR Schema
 
+Every serialized IR file is an **envelope** wrapping the model. The top level is
+`{ir_version, validated_by, model:{…}}`:
+
+- `ir_version` — the IR **schema** version (currently `"0.20"`, tracking
+  `ir/VERSION`). This is the OCaml↔Rust contract version; a mismatch here means
+  the producer and consumer disagree on the wire format.
+- `validated_by` — provenance tag for who produced/validated the IR (e.g.
+  `"ocaml-compiler-v0.20"`, or `"hand-curated-ir-golden"` for curated goldens).
+- `model` — the model object documented below. Note its inner `version` field is
+  the **model author's** own version string, not the schema version.
+
 ```
 model: {
   -- metadata
   name: string,
-  version: string,                     -- IR schema version ("0.3")
+  version: string,                     -- model author's own version string ("0.3"); NOT the IR schema version (that is the envelope's `ir_version`, §8 intro)
   time_unit: string,                   -- declared time unit, e.g. "days"
   description: string | null,
   origin: string | null,               -- ISO date string for calendar offsets, e.g. "2020-01-01"

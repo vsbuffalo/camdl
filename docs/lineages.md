@@ -71,11 +71,11 @@ on the chain-binomial backend that `overdispersed()` requires.
 
 ## Backends and tree accuracy
 
-| Backend                      | Lineage support | Tree accuracy                                                                                                                                                             |
-| ---------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gillespie`                  | exact           | one event at a time — exact attribution; sub-`dt` bias = 0                                                                                                                |
-| `chain_binomial`             | approximate     | _k_ events per step against frozen start-of-step pools; **systematically loses parent→child edges shorter than `dt`**. `realize` reports the sub-`dt` edge-loss fraction. |
-| `ode`                        | rejected        | no individuals — hard error                                                                                                                                               |
+| Backend          | Lineage support | Tree accuracy                                                                                                                                                             |
+| ---------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gillespie`      | exact           | one event at a time — exact attribution; sub-`dt` bias = 0                                                                                                                |
+| `chain_binomial` | approximate     | _k_ events per step against frozen start-of-step pools; **systematically loses parent→child edges shorter than `dt`**. `realize` reports the sub-`dt` edge-loss fraction. |
+| `ode`            | rejected        | no individuals — hard error                                                                                                                                               |
 
 `overdispressed()` models require chain-binomial, so their trees are
 approximate; shrink `--dt` for trustworthy trees, and read the reported sub-`dt`
@@ -197,12 +197,12 @@ Three keys, one expensive step.
 ## Status and roadmap
 
 **Shipped:** the three-layer pipeline (event log → realize → tree/sojourn/
-cohort) across all three stochastic backends; the exact line-list likelihood;
-stratified contact-weighted attribution; overdispersed processes; validation
-against Yule statistics and the SIR structured-coalescent rate
-(`λ = 2f/I² = 2βS/(NI)`); **sampling realism at projection time** —
-all-individuals sampling with pendant tips at sampling (removal) time, `flat`
-and `stratified` (per-deme index) schemes.
+cohort) across both stochastic backends (gillespie and chain-binomial); the
+exact line-list likelihood; stratified contact-weighted attribution;
+overdispersed processes; validation against Yule statistics and the SIR
+structured-coalescent rate (`λ = 2f/I² = 2βS/(NI)`); **sampling realism at
+projection time** — all-individuals sampling with pendant tips at sampling
+(removal) time, `flat` and `stratified` (per-deme index) schemes.
 
 **Coming next / not yet built** (don't rely on these):
 

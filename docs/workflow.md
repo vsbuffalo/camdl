@@ -47,8 +47,8 @@ the world."
 camdl simulate model.camdl --params truth.toml --backend chain_binomial \
     --dt 0.5 --seed 7 --obs synth.tsv
 camdl survey model.camdl --fit fit_synth.toml --render
-camdl fit run fit_synth.toml --seed 0
-camdl fit summary <fit-dir>
+camdl fit run fit_synth.toml --label synth --seed 0
+camdl fit summary @synth
 ```
 
 If θ̂ doesn't recover the truth within its CI, stop — the problem is the pipeline
@@ -119,20 +119,26 @@ sweeps = 300
   `camdl docs fit-toml`.
 
 ```bash
-camdl fit run fit.toml --seed 1
+camdl fit run fit.toml --label baseline --seed 1
 ```
 
-While tuning, run one stage at a time: `camdl fit run fit.toml --stage scout`.
+`--label baseline` names the fit so every downstream verb can refer to it as
+`@baseline` instead of its run directory (see §5). While tuning, run one stage
+at a time: `camdl fit run fit.toml --stage scout`.
 
 ## 5. Read the diagnostics
 
 ```bash
-camdl fit summary <fit-dir>
+camdl fit summary @baseline      # or the run directory `fit run` printed, or a hash prefix
 ```
 
-`camdl fit run` prints the content-addressed run directory it wrote — pass that
-to `fit summary`. Lost it? `camdl list` enumerates every run. The summary prints
-a fixed set of blocks:
+Every fit verb — `fit summary`, `fit predict`, `compare` — takes the same
+**handle**: an `@label`, a fit hash-prefix, the run directory `camdl fit run`
+prints, or the `fit.toml` itself (resolved to its unique run; an ambiguous match
+is listed rather than guessed). A handle beats hunting for a path, and because
+each run archives its own compiled model, the fit stays resolvable even if the
+`.camdl` moved. `camdl list` enumerates every run if you need to look one up.
+The summary prints a fixed set of blocks:
 
 - **best loglik (loglik-eval)** — the MLE _re-scored_ at a high particle count.
   The clean number; IF2's running loglik during optimization is perturbation-
@@ -203,7 +209,7 @@ predictive band — is a single verb that reads the fit and writes a tidy,
 plot-ready artifact:
 
 ```bash
-camdl fit predict --fit fit.toml --stream onset
+camdl fit predict @baseline --stream onset
 # wrote results/fits/sle-8a3f12b4/predictive/onset.tsv
 # wrote results/fits/sle-8a3f12b4/observed/onset.tsv
 ```
@@ -253,6 +259,12 @@ posterior band to draw; get its parameters with
 --params-only` and run a plug-in
 `camdl simulate --params …` instead.
 
+If the model declares a `quantities {}` block, `fit predict` also bands each
+derived quantity (peak size, attack rate, time-to-peak, …) over the same
+posterior draws into `quantities/<name>.tsv` with a `quantities.json` manifest —
+the posterior of a reported summary, not just of the fitted series. See
+[`camdl docs user-features`](user-features.md) ("Reporting derived quantities").
+
 ### Other validation steps
 
 ```bash
@@ -263,16 +275,19 @@ camdl simulate model.camdl --draws prior --fit fit.toml -n 200 --obs prior_ppc.t
 camdl profile model.camdl --particles 1500 \
     --fixed gamma=0.1 --sweep "tau=lin(-60,5,12)" --fit fit.toml
 
-# Model comparison — prequential predictive scoring
-camdl pfilter model.camdl --params mle.toml --data cases.tsv \
-    --particles 5000 --save-prequential preq_A
-camdl compare preq_A preq_B
+# Model comparison — prequential predictive scoring, straight from two fits
+camdl compare @baseline @candidate --particles 2000 --seed 7
 ```
 
-`camdl compare` ranks models by prequential elpd / CRPS / PIT. Its scores are
-**plug-in and in-sample-optimistic** — computed at a single θ that was fit to
-the whole series — so they are useful for _relative_ comparison but are not a
-leave-future-out forecast score; `compare` prints this caveat on every run.
+`camdl compare` ranks models by prequential elpd / CRPS / PIT. Passed two fit
+handles, it **auto-derives** each model's prequential at θ̂ via `pfilter` — the
+same particle count and seed for both, so the scores stay commensurable — so you
+no longer hand-run `pfilter --save-prequential` first. (You still can: an
+explicit `prequential.json` path is read as-is, for a custom filter
+configuration.) Its scores are **plug-in and in-sample-optimistic** — computed
+at a single θ that was fit to the whole series — so they are useful for
+_relative_ comparison but are not a leave-future-out forecast score; `compare`
+prints this caveat on every run.
 
 ## When to stop and ask a human
 

@@ -62,8 +62,8 @@ time_unit = 'days
 origin    = date("2020-02-24")
 
 parameters {
-  beta  : rate 'per_month         # compiler converts to per-day at compile time
-  gamma : rate 'per_month
+  beta  : positive 'per_month     # compiler converts to per-day at compile time
+  gamma : positive 'per_month
   tau   : instant in [date("2020-01-21"), date("2020-04-30")]
                                    # renders as a date in fit summary
 }
@@ -75,8 +75,8 @@ time_unit = 'months
 # no origin — t = 0 has no calendar meaning
 
 parameters {
-  beta  : rate 'per_month
-  gamma : rate 'per_month
+  beta  : positive 'per_month
+  gamma : positive 'per_month
 }
 
 let latent = 1 'months              # affine 30.44 days as a length
@@ -349,7 +349,8 @@ quantities {
   peak_prevalence = max(I / N)
   time_to_peak    = time_of_max(I)              # a time — rendered as a date in an anchored model
   takeoff         = first_above(I_total, i_thr) # the first time I_total exceeds i_thr
-  outbreak_dur    = last_above(I_total, 0) - takeoff   # arithmetic over reduced scalars
+  fadeout         = last_above(I_total, 0)      # the last time I_total is above 0
+  outbreak_dur    = fadeout - takeoff           # arithmetic over reduced scalars
 }
 ```
 
@@ -375,12 +376,14 @@ a simulation. Useful for verifying forcing curves, covariates, and parameter
 formulas:
 
 ```bash
-camdl dev eval model.camdl --params p.toml --expr "school,seas" --from 0 --to 365 --every 1
+camdl dev eval model.camdl --params p.toml --expr "school" --from 0 --to 365 --every 1
 ```
 
-Output is TSV — pipe to a file, load in polars/R, plot. If an expression
-references compartment state, the error message directs you to `--trace`
-instead.
+`dev eval` resolves forcing functions and parameters; `let`-bindings (such as a
+seasonal `seas` term) are not directly evaluable. Output is TSV — pipe to a
+file, load in polars/R, plot. If an expression references compartment state, the
+error message directs you to run `camdl simulate <model> -o traj.tsv` instead
+(which writes compartment and `flow_*` columns per step).
 
 ---
 
@@ -390,9 +393,9 @@ instead.
 just a log-likelihood number:
 
 ```
-time  ll_increment  ESS    pred_mean  pred_q05  pred_q50  pred_q95  observed
-7     -7.84         17.4   42.3       5         31        112       82
-14    -5.37         217.7  51.2       12        45        98        98
+time  ll_increment  ESS    obs_mean  obs_q05  obs_q50  obs_q95  state_mean  state_q05  state_q50  state_q95  observed
+7     -7.84         17.4   42.3      5        31       112      84.1        11         63         220        82
+14    -5.37         217.7  51.2      12       45       98       103.4       25         91         197        98
 ```
 
 See exactly where the model predicts well (data inside the 90% interval) and

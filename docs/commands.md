@@ -221,11 +221,19 @@ ranges. To estimate parameters from data, use `fit`.
 
 ```bash
 camdl compare results/fits/a/posterior results/fits/b/posterior --baseline a
+camdl compare @baseline @candidate
 ```
 
-`compare` reads prequential scores (per-step log-score, CRPS, PIT) written by
-`pfilter` stages within fits (or by `camdl pfilter --save-prequential`) and
-renders a baseline-centered table. The scores are **plug-in and
+`compare` renders a baseline-centered table of prequential scores (per-step
+log-score, CRPS, PIT). Each argument is either an explicit prequential artifact
+— a `prequential.json` (or a stage dir holding one), written by a `pfilter`
+stage within a fit or by `camdl pfilter --save-prequential`, and read **as-is**
+— **or** a fit handle (`@label`, a hash prefix, a run directory, or a
+`fit.toml`), whose prequential is **auto-derived** by re-filtering at the fit's
+sealed θ̂. `--particles` and `--seed` set the filter used for any auto-derived
+handle and are applied **uniformly** across all derived fits, so `T_score` and
+the scores stay commensurable; they are ignored for an explicit
+`prequential.json` (read as-is). The scores are **plug-in and
 in-sample-optimistic** — computed at a single θ fit to the whole series — so
 they support _relative_ comparison but are not a leave-future-out forecast
 score; `compare` prints this caveat on every run.
