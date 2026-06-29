@@ -2835,7 +2835,19 @@ fn write_draws_tsv(path: &str, draws: &[HashMap<String, f64>]) -> Result<(), Str
 /// Load a draws TSV file. Each row is a complete parameter vector.
 /// Column names must match model parameter names.
 /// Returns Vec<HashMap<param_name, value>>.
-pub(crate) fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, String> {
+/// One parsed `draws.tsv` row: the optional `(chain, draw)` posterior key
+/// (gh#322 — the join key to the smoothed `trajectories.tsv`; `None` for a
+/// pre-key, param-only file) plus the model parameters.
+pub(crate) struct KeyedDraw {
+    pub chain: Option<usize>,
+    pub draw: Option<usize>,
+    pub params: HashMap<String, f64>,
+}
+
+/// Parse a `draws.tsv` KEEPING the `(chain, draw)` key. The single parser;
+/// [`load_draws_tsv`] wraps this and drops the key so every param-only reader
+/// (predict's schema validator, the engine, compare) is unchanged.
+pub(crate) fn load_draws_tsv_keyed(path: &str) -> Result<Vec<KeyedDraw>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
     let mut lines = content.lines();
@@ -2863,31 +2875,44 @@ pub(crate) fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, St
                 line_num + 2, col_names.len(), fields.len()
             ));
         }
-        let mut row = HashMap::new();
+        let mut chain: Option<usize> = None;
+        let mut draw: Option<usize> = None;
+        let mut params = HashMap::new();
         for (col, field) in col_names.iter().zip(fields.iter()) {
-            // gh#322: `chain` / `draw` are the posterior KEY columns (they join
-            // draws.tsv to the smoothed trajectories.tsv), not model parameters.
-            // Strip them here, in the one shared loader, so every downstream
-            // reader — predict's schema validator, the engine's param resolver,
-            // compare's posterior mean — sees a param-only row, unchanged. A
-            // pre-key draws.tsv has no such columns, so it is untouched.
-            if *col == "chain" || *col == "draw" {
-                continue;
+            // gh#322: `chain` / `draw` are the posterior KEY columns, not model
+            // parameters — captured as the join key, never inserted as params.
+            match *col {
+                "chain" => {
+                    chain = Some(field.parse().map_err(|_| format!(
+                        "draws file line {}: chain '{}' is not a non-negative integer",
+                        line_num + 2, field))?);
+                }
+                "draw" => {
+                    draw = Some(field.parse().map_err(|_| format!(
+                        "draws file line {}: draw '{}' is not a non-negative integer",
+                        line_num + 2, field))?);
+                }
+                _ => {
+                    let val: f64 = field.parse().map_err(|_| format!(
+                        "draws file line {}, column '{}': cannot parse '{}' as number",
+                        line_num + 2, col, field))?;
+                    params.insert(col.to_string(), val);
+                }
             }
-            let val: f64 = field.parse()
-                .map_err(|_| format!(
-                    "draws file line {}, column '{}': cannot parse '{}' as number",
-                    line_num + 2, col, field
-                ))?;
-            row.insert(col.to_string(), val);
         }
-        draws.push(row);
+        draws.push(KeyedDraw { chain, draw, params });
     }
 
     if draws.is_empty() {
         return Err(format!("draws file has header but no data rows: {}", path));
     }
     Ok(draws)
+}
+
+/// Param-only draw rows — the `(chain, draw)` key (if any) is dropped. Every
+/// reader that treats a row as a parameter vector uses this.
+pub(crate) fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, String> {
+    Ok(load_draws_tsv_keyed(path)?.into_iter().map(|d| d.params).collect())
 }
 
 /// Print a dry run summary: resolved parameters with provenance.

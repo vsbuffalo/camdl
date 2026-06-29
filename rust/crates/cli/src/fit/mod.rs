@@ -35,6 +35,7 @@ pub mod methods;
 #[cfg(feature = "ode")]
 pub mod nlopt_stage;
 pub mod handle;   // gh#322: fit handles (@label / hash / run-dir / fit.toml) → segment
+pub mod joint;    // gh#322: keyed-joint (θ, X) read — LatentPath classifier + join
 pub mod predict;  // `camdl fit predict`: free-forward posterior predictive verb + types
 
 /// `camdl fit methods` — print the supported (algorithm, backend) pairs.

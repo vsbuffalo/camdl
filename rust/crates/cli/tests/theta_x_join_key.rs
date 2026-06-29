@@ -176,6 +176,43 @@ fn draws_tsv_key_joins_to_trajectories() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// step 2: `fit summary` surfaces the keyed-joint forkable count. For this small
+/// fit every retained draw also has a saved trajectory (n_trajectories default
+/// 200 ≥ the ~80 retained draws), so the partial join is full: forkable == total.
+#[test]
+fn fit_summary_reports_forkable_draws() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_thetax_summary_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("fit.toml"), fit_toml()).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let sum = run(&bin, &tmp, &["fit", "summary", "fit.toml"]);
+    assert!(sum.status.success(), "fit summary failed:\nstderr={}", String::from_utf8_lossy(&sum.stderr));
+    let text = String::from_utf8_lossy(&sum.stdout);
+
+    assert!(text.contains("(θ, X) forkability"), "summary must show the forkability section; got:\n{text}");
+    // Parse the `forkable draws: N/M` line and assert the join is full here.
+    let line = text
+        .lines()
+        .find(|l| l.contains("forkable draws:"))
+        .unwrap_or_else(|| panic!("no `forkable draws:` line in:\n{text}"));
+    let frac = line.split("forkable draws:").nth(1).unwrap().trim();
+    let nums: &str = frac.split_whitespace().next().unwrap(); // "N/M"
+    let (n, m) = nums.split_once('/').unwrap_or_else(|| panic!("bad fraction `{nums}`"));
+    let (n, m): (usize, usize) = (n.parse().unwrap(), m.parse().unwrap());
+    assert!(m > 0, "total draws must be > 0");
+    assert_eq!(n, m, "every retained PGAS draw has a saved path here → full join (forkable == total)");
+    assert!(line.contains("(all draws)"), "full join must read `(all draws)`; got: {line}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {

@@ -443,6 +443,22 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
         println!("  (no completed stages found in {})", dir);
     }
 
+    // gh#322: the keyed-joint (θ, X) forkable count — how many posterior draws
+    // pair with a saved smoothed trajectory (or are deterministic, for ODE),
+    // i.e. how many a counterfactual `compare`/contrast could fork. Shown only
+    // for a posterior fit; an optimizer fit has no cloud, so `resolve_joint`
+    // errors and the line is skipped.
+    if let Ok(j) = crate::fit::joint::resolve_joint(dir, args.stage.as_deref()) {
+        println!();
+        println!("  {}", fmt.bold("(θ, X) forkability"));
+        let note = if j.n_forkable == j.n_total {
+            fmt.ok("(all draws)")
+        } else {
+            fmt.dim("(partial — only path-saved draws can be conditioned-forked)")
+        };
+        println!("    forkable draws: {}/{}  {}", j.n_forkable, j.n_total, note);
+    }
+
     if strict && had_provenance_failure {
         eprintln!();
         eprintln!("error: provenance cross-checks failed (--strict).");
