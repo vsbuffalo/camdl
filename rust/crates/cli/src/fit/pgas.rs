@@ -1026,9 +1026,17 @@ pub fn run_stage(
 
         let mut n_draws = 0usize;
         for (_, sweeps, _) in &all_results {
-            for (i, sweep) in sweeps.iter().enumerate() {
-                if i < burn_in { continue; }
-                if !(i - burn_in).is_multiple_of(thin) { continue; }
+            // `sweeps` is ALREADY the post-burn-in, thinned set — the sim-side
+            // recorder applies `burn_in` + `thin` when it builds it
+            // (`sim/inference/pgas.rs`: `sweep >= burn_in && (sweep - burn_in) %
+            // thin == 0`). Write every retained draw. Re-applying burn_in/thin
+            // here (indexing the already-retained list by position) double-
+            // filtered the posterior — it dropped the first `burn_in` retained
+            // draws (half the cloud at thin=1; ALL of it once thin ≥ the
+            // retained count), and desynced `draws.tsv` from the R̂/ESS computed
+            // over the full retained set. See
+            // docs/dev/incidents/2026-06-28-pgas-draws-double-thinning.md.
+            for sweep in sweeps {
                 let mut vals: Vec<String> = config.estimated_params.iter()
                     .map(|spec| format!("{:.17e}", sweep.params[spec.index]))
                     .collect();
