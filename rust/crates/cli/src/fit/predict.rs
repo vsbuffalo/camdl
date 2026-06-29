@@ -289,7 +289,7 @@ struct FreeForwardCell {
     /// This cell's sweep coordinate: `(param, value)` per swept parameter, in
     /// sorted-name order. EMPTY when no `--sweep`.
     sweep: Vec<(String, f64)>,
-    /// The scenario name this cell ran under (`as_fitted` for the no-overlay row).
+    /// The scenario name this cell ran under (`fitted` for the no-overlay row).
     scenario: String,
     /// The banded predictive streams for this cell.
     bands: Vec<StreamBands>,
@@ -364,7 +364,7 @@ pub fn band(xs: &[f64]) -> Result<Vec<f64>, String> {
 /// plus the `one_step` rows into the same file — the `scenario` and `horizon`
 /// columns distinguish them.
 pub struct PredictiveSection<'a> {
-    /// The overlay axis value: a scenario name, or `as_fitted` for the no-overlay
+    /// The overlay axis value: a scenario name, or `fitted` for the no-overlay
     /// (fitted-model) rows. ALWAYS present (the leading column), the way
     /// `horizon`/`treatment` are.
     pub scenario: String,
@@ -883,7 +883,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     let dt = model.simulation.dt.unwrap_or(1.0);
 
     // 3b. Parse the prospective scenario overlay (reusing simulate's ScenarioRef
-    // surface). No `--scenario` → a single `as_fitted` row (the fitted model, no
+    // surface). No `--scenario` → a single `fitted` row (the fitted model, no
     // overlay). Validate each ref against the model's presets up front so an
     // unknown `--scenario NAME` errors with the available presets, BEFORE any
     // simulation runs (the resolver's actionable message).
@@ -1253,7 +1253,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // through the fitted model, so it carries no overlay — applying a counter-
     // factual scenario to a filter over the actual data is ill-defined (you would
     // condition the modified model on data the unmodified model generated). It is
-    // emitted once, tagged `as_fitted`, alongside every scenario's free-forward
+    // emitted once, tagged `fitted`, alongside every scenario's free-forward
     // rows. The `scenario`/`horizon` columns keep the file tidy.
     let mut written = Vec::new();
     let one_step_streams: &[StreamBands] = one_step.as_ref().map(|(s, _)| s.as_slice()).unwrap_or(&[]);
@@ -1331,7 +1331,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         }
         if let Some(s) = os_stream {
             sections.push(PredictiveSection {
-                scenario: crate::args::AS_FITTED.to_string(),
+                scenario: crate::args::FITTED.to_string(),
                 // The one-step horizon is sweep-agnostic (it filters the OBSERVED
                 // data through the fitted model, so a swept-parameter overlay is
                 // ill-defined) — empty sweep ⇒ empty `sweep:<param>` cells.
@@ -1962,7 +1962,7 @@ mod tests {
         let tsv = render_predictive_tsv_sections(
             &stream.index_dims,
             &[PredictiveSection {
-                scenario: "as_fitted".to_string(),
+                scenario: "fitted".to_string(),
                 sweep: Vec::new(),
                 horizon: Horizon::FreeForward,
                 treatment: TreatmentKind::Posterior,
@@ -1974,8 +1974,8 @@ mod tests {
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(lines[0],
             "scenario\ttime\tpatch\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95");
-        assert_eq!(lines[1], "as_fitted\t7\tBo\tfree_forward\tposterior\t1.0100\t420\t40\t0\t1\t3\t6\t12");
-        assert_eq!(lines[2], "as_fitted\t7\tBombali\tfree_forward\tposterior\t1.0100\t420\t40\t0\t0\t1\t3\t7");
+        assert_eq!(lines[1], "fitted\t7\tBo\tfree_forward\tposterior\t1.0100\t420\t40\t0\t1\t3\t6\t12");
+        assert_eq!(lines[2], "fitted\t7\tBombali\tfree_forward\tposterior\t1.0100\t420\t40\t0\t0\t1\t3\t7");
         assert_eq!(lines.len(), 3, "header + one row per (time, stratum)");
     }
 
@@ -1989,7 +1989,7 @@ mod tests {
         let tsv = render_predictive_tsv_sections(
             &stream.index_dims,
             &[PredictiveSection {
-                scenario: "as_fitted".to_string(),
+                scenario: "fitted".to_string(),
                 sweep: Vec::new(),
                 horizon: Horizon::FreeForward,
                 treatment: TreatmentKind::Posterior,
@@ -2002,7 +2002,7 @@ mod tests {
         // No dim column; not-assessed rhat/ess are empty cells, not fabricated
         // values; n_draws is still carried. Scenario leads.
         assert_eq!(lines[0], "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95");
-        assert_eq!(lines[1], "as_fitted\t1\tfree_forward\tposterior\t\t\t12\t1\t2\t3\t4\t5");
+        assert_eq!(lines[1], "fitted\t1\tfree_forward\tposterior\t\t\t12\t1\t2\t3\t4\t5");
     }
 
     #[test]
@@ -2016,7 +2016,7 @@ mod tests {
             &[],
             &[
                 PredictiveSection {
-                    scenario: "as_fitted".to_string(),
+                    scenario: "fitted".to_string(),
                     sweep: vec![("k".to_string(), 8.0)],
                     horizon: Horizon::FreeForward,
                     treatment: TreatmentKind::Posterior,
@@ -2025,7 +2025,7 @@ mod tests {
                     rows: &rows,
                 },
                 PredictiveSection {
-                    scenario: "as_fitted".to_string(),
+                    scenario: "fitted".to_string(),
                     sweep: vec![("k".to_string(), 12.0)],
                     horizon: Horizon::FreeForward,
                     treatment: TreatmentKind::Posterior,
@@ -2034,7 +2034,7 @@ mod tests {
                     rows: &rows,
                 },
                 PredictiveSection {
-                    scenario: "as_fitted".to_string(),
+                    scenario: "fitted".to_string(),
                     sweep: Vec::new(), // one-step is sweep-agnostic
                     horizon: Horizon::OneStepAhead,
                     treatment: TreatmentKind::Posterior,
@@ -2050,10 +2050,10 @@ mod tests {
             "scenario\tsweep:k\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95",
             "sweep:k column follows scenario"
         );
-        assert_eq!(lines[1], "as_fitted\t8\t7\tfree_forward\tposterior\t1.0000\t100\t10\t1\t2\t3\t4\t5");
-        assert_eq!(lines[2], "as_fitted\t12\t7\tfree_forward\tposterior\t1.0000\t100\t10\t1\t2\t3\t4\t5");
+        assert_eq!(lines[1], "fitted\t8\t7\tfree_forward\tposterior\t1.0000\t100\t10\t1\t2\t3\t4\t5");
+        assert_eq!(lines[2], "fitted\t12\t7\tfree_forward\tposterior\t1.0000\t100\t10\t1\t2\t3\t4\t5");
         // One-step row: the sweep:k cell is blank (empty), not a fabricated value.
-        assert_eq!(lines[3], "as_fitted\t\t7\tone_step\tposterior\t1.0000\t100\t10\t1\t2\t3\t4\t5");
+        assert_eq!(lines[3], "fitted\t\t7\tone_step\tposterior\t1.0000\t100\t10\t1\t2\t3\t4\t5");
     }
 
     #[test]

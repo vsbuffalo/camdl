@@ -311,7 +311,7 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 /// derivation (`compare::derive_prequential`):
 ///
 ///   1. **Read existing**: if `<fit_dir>/quantities/<name>.tsv` is
-///      present, return the `as_fitted` row's `q50`.
+///      present, return the `fitted` row's `q50`.
 ///   2. **Derive on demand**: else, if the fit carries a posterior
 ///      cloud (method `pgas` / `pmmh`), spawn `camdl fit predict
 ///      <fit_dir> --horizon free_forward` (the single source of truth
@@ -360,14 +360,14 @@ fn resolve_quantity_median(fit_dir: &std::path::Path, name: &str) -> Option<f64>
 }
 
 /// Parse a SCALAR generated-quantity TSV and return the no-overlay
-/// (`as_fitted`) row's `q50` (the posterior median). Columns are
+/// (`fitted`) row's `q50` (the posterior median). Columns are
 /// located by header name: a value scalar is
 /// `scenario  n_draws  q05 … q95`, a censorable time scalar inserts
 /// `n_value  n_censored  p_censored` before the quantiles — `q50` is a
 /// named column in both. A *series* quantity carries a `time` column;
 /// that is not a scalar, so we return `None` rather than silently
 /// surface its first time point's median. Returns `None` on an absent
-/// or malformed file, or when there is no `as_fitted` row or no `q50`.
+/// or malformed file, or when there is no `fitted` row or no `q50`.
 fn read_scalar_quantity_q50(tsv: &std::path::Path) -> Option<f64> {
     let text = std::fs::read_to_string(tsv).ok()?;
     let mut lines = text.lines();
@@ -380,7 +380,7 @@ fn read_scalar_quantity_q50(tsv: &std::path::Path) -> Option<f64> {
     let q50_i = header.iter().position(|c| *c == "q50")?;
     for line in lines {
         let cols: Vec<&str> = line.split('\t').collect();
-        if cols.get(scen_i).copied() == Some("as_fitted") {
+        if cols.get(scen_i).copied() == Some("fitted") {
             return cols.get(q50_i)?.parse::<f64>().ok();
         }
     }

@@ -334,13 +334,13 @@ pub fn resolve_scenario_ref(
         }
         // Case 3a: an implicit-identity sentinel name — `baseline` (run-spec
         // §3.6: "a single implicit baseline — the absence of any scenario
-        // patch") for `simulate`, or `as_fitted` for `camdl fit predict` (the
+        // patch") for `simulate`, or `fitted` for `camdl fit predict` (the
         // no-overlay row: the fitted model, no scenario applied). Both are
         // always valid even when the model declares no preset by that name:
         // they mean "the model as written, no modifications." Resolves to an
         // empty ad-hoc patch; the empty scenario delta hashes to its real
         // scenario-level digest (the name is the display label only).
-        (false, false) if name == "baseline" || name == "as_fitted" => {
+        (false, false) if name == "baseline" || name == "fitted" => {
             Ok(ResolvedScenario::Adhoc {
                 name: name.to_string(),
                 enable: Vec::new(),
@@ -461,15 +461,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_as_fitted_with_no_presets_is_implicit_identity() {
-        // `as_fitted` is `camdl fit predict`'s no-overlay sentinel: valid on a
+    fn resolve_fitted_with_no_presets_is_implicit_identity() {
+        // `fitted` is `camdl fit predict`'s no-overlay sentinel: valid on a
         // model with no scenarios{} block, resolving to the identity patch (the
         // sibling of `baseline`).
-        let r = resolve_scenario_ref(&ScenarioRef::Named("as_fitted".into()), &[]).unwrap();
+        let r = resolve_scenario_ref(&ScenarioRef::Named("fitted".into()), &[]).unwrap();
         assert_eq!(
             r,
             ResolvedScenario::Adhoc {
-                name: "as_fitted".into(),
+                name: "fitted".into(),
                 enable: vec![],
                 disable: vec![],
                 params: vec![],
@@ -479,7 +479,7 @@ mod tests {
         // no-`--scenario` case).
         let r2 = resolve_scenario_ref(
             &ScenarioRef::Inline {
-                name: "as_fitted".into(),
+                name: "fitted".into(),
                 enable: vec![],
                 disable: vec![],
                 params: IndexMap::new(),

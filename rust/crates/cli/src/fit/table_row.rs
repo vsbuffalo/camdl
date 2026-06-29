@@ -120,7 +120,7 @@ pub struct TableRow {
     pub stale_reason: Option<String>,
     /// Per-fit generated-quantity medians, keyed by quantity name.
     /// Populated only when `fit table --quantity <NAME>` is requested:
-    /// each entry is the posterior median (q50 of the `as_fitted` row)
+    /// each entry is the posterior median (q50 of the `fitted` row)
     /// of a scalar quantity from the model's `quantities {}` block,
     /// read from `<fit_dir>/quantities/<NAME>.tsv` (derived on demand
     /// via `fit predict` when absent). An uncomputable quantity for a

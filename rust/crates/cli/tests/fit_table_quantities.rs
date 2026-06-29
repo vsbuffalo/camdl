@@ -137,8 +137,8 @@ fn csv_cell(csv: &str, column: &str) -> Option<String> {
     row.get(idx).map(|s| s.to_string())
 }
 
-/// The `as_fitted` row's q50 from a scalar quantity TSV (columns by header name).
-fn tsv_as_fitted_q50(tsv: &Path) -> f64 {
+/// The `fitted` row's q50 from a scalar quantity TSV (columns by header name).
+fn tsv_fitted_q50(tsv: &Path) -> f64 {
     let text = std::fs::read_to_string(tsv).unwrap();
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
@@ -146,11 +146,11 @@ fn tsv_as_fitted_q50(tsv: &Path) -> f64 {
     let q50_i = header.iter().position(|c| *c == "q50").unwrap();
     for line in lines {
         let cols: Vec<&str> = line.split('\t').collect();
-        if cols[scen_i] == "as_fitted" {
+        if cols[scen_i] == "fitted" {
             return cols[q50_i].parse::<f64>().unwrap();
         }
     }
-    panic!("no as_fitted row in {}", tsv.display());
+    panic!("no fitted row in {}", tsv.display());
 }
 
 const PGAS: &str = r#"[stages.posterior]
@@ -290,7 +290,7 @@ fn quantity_derives_on_demand_then_reads_existing() {
     let json_peak = rows[0]["quantities"]["peak"]
         .as_f64()
         .expect("quantities.peak present and numeric in the JSON row");
-    let tsv_q50 = tsv_as_fitted_q50(&peak_tsv);
+    let tsv_q50 = tsv_fitted_q50(&peak_tsv);
     assert!(
         (json_peak - tsv_q50).abs() < 1e-9,
         "read path must return the q50 the derive wrote: json={json_peak} tsv={tsv_q50}"

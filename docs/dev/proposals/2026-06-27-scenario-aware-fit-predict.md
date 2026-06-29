@@ -80,26 +80,26 @@ predictive/<stream>.tsv:
   scenario | time | <dims...> | horizon | treatment | rhat_max | q05..q95
 ```
 
-**Decision (resolved): the `scenario` column is ALWAYS present**, value
-`as_fitted` when no `--scenario` is given — exactly as `horizon`/`treatment` are
-always present. Rationale: tidy-data stability (a consumer's join/group key
-doesn't appear/disappear with arity) and consistency with the sibling axes. This
-is a one-time predictive/quantities output-format change (alpha; goldens for
-these artifacts updated in the same commit).
+**Decision (resolved): the `scenario` column is ALWAYS present**, value `fitted`
+when no `--scenario` is given — exactly as `horizon`/`treatment` are always
+present. Rationale: tidy-data stability (a consumer's join/group key doesn't
+appear/disappear with arity) and consistency with the sibling axes. This is a
+one-time predictive/quantities output-format change (alpha; goldens for these
+artifacts updated in the same commit).
 
-**Why `as_fitted`, not `baseline`.** `baseline` is the `simulate` convention for
+**Why `fitted`, not `baseline`.** `baseline` is the `simulate` convention for
 the default-parameter scenario; in `fit predict` the parameters come from the
-**fit**, not a preset, so reusing `baseline` would mislead. `as_fitted` reads as
+**fit**, not a preset, so reusing `baseline` would mislead. `fitted` reads as
 "the fitted model, no overlay" and sits in parallel with the overlay names
-(`as_fitted` / `no_sia` / `with_sia`). The fit's own identity is **not** put in
+(`fitted` / `no_sia` / `with_sia`). The fit's own identity is **not** put in
 this column — it is already captured losslessly in the output path
 (`results/fits/<run-id>/`) and `run.json`; this column is purely the _overlay_
 axis (the fit is common to every row, overlaid or not).
 
-**`as_fitted` is a reserved scenario name.** A `scenarios {}` entry named
-`as_fitted` is rejected with a clear diagnostic (it would collide with the
-no-overlay row's reserved value, making rows ambiguous). The diagnostic names
-the reservation and the fix (rename the scenario).
+**`fitted` is a reserved scenario name.** A `scenarios {}` entry named `fitted`
+is rejected with a clear diagnostic (it would collide with the no-overlay row's
+reserved value, making rows ambiguous). The diagnostic names the reservation and
+the fix (rename the scenario).
 
 ### Paired-seed CRN (free property)
 
@@ -124,7 +124,7 @@ low-variance. No work required; worth documenting for the user.
 
 ## Decisions recorded
 
-- `scenario` column ALWAYS present (no-overlay value `as_fitted`, a reserved
+- `scenario` column ALWAYS present (no-overlay value `fitted`, a reserved
   scenario name). NOT `baseline` (a `simulate` convention) and NOT the run-id
   (already captured in the path + `run.json`; this column is the overlay axis).
   (§Output schema.)
@@ -140,9 +140,9 @@ low-variance. No work required; worth documenting for the user.
 - Output: a two-scenario `fit predict` writes both scenarios' rows to one
   `predictive/<stream>.tsv` and one `quantities/<name>.tsv`, each tagged; the
   manifest carries the `scenario` field; the no-`--scenario` path still emits a
-  single `as_fitted`-tagged file (byte-compatible except the new column).
-- Reserved name: a `scenarios {}` entry named `as_fitted` is a clear
-  compile-time error naming the reservation and the fix.
+  single `fitted`-tagged file (byte-compatible except the new column).
+- Reserved name: a `scenarios {}` entry named `fitted` is a clear compile-time
+  error naming the reservation and the fix.
 - Coupling: two scenarios at the same seed share pre-divergence draws (CRN).
 - Guard: an intervention-toggling scenario without schedule re-seating support
   is a loud error, not a silent baseline replay.

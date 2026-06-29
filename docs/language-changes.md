@@ -13,6 +13,25 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-06-29 — reserved no-overlay scenario sentinel renamed `as_fitted` → `fitted`
+
+**What.** The reserved scenario name for the no-overlay row in
+`camdl fit
+predict` output — the fitted model with no scenario overlay applied,
+the value carried in the leading `scenario` column — is renamed from `as_fitted`
+to `fitted`. The name is reserved: a `scenarios { }` preset may not use it,
+because it would shadow the no-overlay value and make output rows ambiguous.
+
+**Migration.** If you parse `camdl fit predict` output, the no-overlay
+`scenario` column value is now `fitted` (was `as_fitted`). The reservation moves
+with the name: a `scenarios { }` preset may no longer be named `fitted` (rename
+it); a preset named `as_fitted` is no longer reserved.
+
+**Diagnostic.** A `scenarios { }` preset named `fitted` → **E291** ("scenario
+name 'fitted' is reserved"), with a hint to rename the scenario.
+
+---
+
 ## 2026-06-26 — partial dimension omission in a rate read is now an error
 
 **What.** Indexing a compartment with _some but not all_ of its dimensions in a

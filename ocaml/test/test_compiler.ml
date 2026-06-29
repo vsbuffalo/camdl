@@ -2179,15 +2179,15 @@ let test_scenario_enable_known_intervention_compiles () =
     }
   |}) in ()
 
-(* 2026-06-27 scenario-aware fit predict: `as_fitted` is the reserved name for
+(* 2026-06-27 scenario-aware fit predict: `fitted` is the reserved name for
    the no-overlay row in the `scenario` column. A preset by that name would
    shadow the reserved value, so the compiler rejects it (E291) with a
    migration-style diagnostic. *)
-let test_scenario_named_as_fitted_is_reserved_e291 () =
+let test_scenario_named_fitted_is_reserved_e291 () =
   compile_expect_error_code ~code:"E291" ~contains:"reserved"
     (scenario_validation_boilerplate ^ {|
     scenarios {
-      as_fitted { set = { x = 0.3 } }
+      fitted { set = { x = 0.3 } }
     }
   |})
 
@@ -7956,7 +7956,7 @@ let () =
       Alcotest.test_case "E268 scenario set typo"      `Quick test_scenario_set_unknown_param_is_e268;
       Alcotest.test_case "E268 scenario scale typo"    `Quick test_scenario_scale_unknown_param_is_e268;
       Alcotest.test_case "E269 scenario compose typo"  `Quick test_scenario_compose_unknown_scenario_is_e269;
-      Alcotest.test_case "E291 scenario named as_fitted reserved" `Quick test_scenario_named_as_fitted_is_reserved_e291;
+      Alcotest.test_case "E291 scenario named fitted reserved" `Quick test_scenario_named_fitted_is_reserved_e291;
       Alcotest.test_case "scenario enable known name"  `Quick test_scenario_enable_known_intervention_compiles;
       Alcotest.test_case "gh#130 enable expanded instance"  `Quick test_scenario_enable_expanded_instance_compiles;
       Alcotest.test_case "gh#130 disable expanded instance" `Quick test_scenario_disable_expanded_instance_compiles;

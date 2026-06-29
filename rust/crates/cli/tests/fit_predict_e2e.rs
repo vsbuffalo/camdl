@@ -193,7 +193,7 @@ thin = 1
     let first = lines.next().expect("at least one predictive row");
     let cols: Vec<&str> = first.split('\t').collect();
     assert_eq!(cols.len(), 12, "row shape matches header");
-    assert_eq!(cols[0], "as_fitted", "no --scenario → the no-overlay row tagged as_fitted");
+    assert_eq!(cols[0], "fitted", "no --scenario → the no-overlay row tagged fitted");
     assert_eq!(cols[2], "free_forward", "horizon axis is explicit");
     assert_eq!(cols[3], "posterior", "treatment axis is explicit (not a plug-in)");
     // rhat_max is carried (a finite number), never silently blank for a PGAS fit.
@@ -216,7 +216,7 @@ thin = 1
 
     // ── default emits BOTH horizons for a chain-binomial fit: the same file
     // also carries one_step rows (typed `horizon` column distinguishes them).
-    // The one-step rows are scenario-agnostic, tagged `as_fitted`.
+    // The one-step rows are scenario-agnostic, tagged `fitted`.
     let one_step_rows: Vec<&str> = pred_txt
         .lines()
         .filter(|l| l.split('\t').nth(2) == Some("one_step"))
@@ -226,11 +226,11 @@ thin = 1
         "default predict on a chain-binomial fit must also emit one_step rows; \
          got only:\n{pred_txt}"
     );
-    // A one-step row is well-formed: as_fitted scenario, posterior treatment,
+    // A one-step row is well-formed: fitted scenario, posterior treatment,
     // positive n_draws, ordered quantile band.
     let osr: Vec<&str> = one_step_rows[0].split('\t').collect();
     assert_eq!(osr.len(), 12, "one_step row shape matches header");
-    assert_eq!(osr[0], "as_fitted", "one_step is scenario-agnostic (fitted model)");
+    assert_eq!(osr[0], "fitted", "one_step is scenario-agnostic (fitted model)");
     assert_eq!(osr[2], "one_step", "horizon axis");
     assert_eq!(osr[3], "posterior", "one-step is a posterior-treatment band");
     assert!(
@@ -265,7 +265,7 @@ thin = 1
     );
     let prow: Vec<&str> = plines.next().expect("at least one prevalence row").split('\t').collect();
     assert_eq!(prow.len(), 8, "series row shape matches header");
-    assert_eq!(prow[0], "as_fitted", "quantity rows tagged with the scenario");
+    assert_eq!(prow[0], "fitted", "quantity rows tagged with the scenario");
     let pq: Vec<f64> = prow[3..8].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in pq.windows(2) {
         assert!(w[0] <= w[1], "prevalence quantiles ordered: {pq:?}");
@@ -283,7 +283,7 @@ thin = 1
     );
     let krow: Vec<&str> = klines.next().expect("a peak row").split('\t').collect();
     assert_eq!(krow.len(), 7, "value-scalar row shape matches header");
-    assert_eq!(krow[0], "as_fitted", "value scalar tagged with the scenario");
+    assert_eq!(krow[0], "fitted", "value scalar tagged with the scenario");
 
     // ── quantities/peak_obs.tsv: an observation-source value scalar ──────────
     // `max(observations.weekly_cases)` reduces the per-draw y_sim — same banded
@@ -350,10 +350,10 @@ thin = 1
     assert_eq!(lookup("peak_obs")["reduce"], "max");
     assert!(lookup("peak_obs")["censoring"].is_null(), "an obs value reduction is not censorable");
     // Every manifest entry carries the scenario overlay field (no overlay →
-    // `as_fitted`).
+    // `fitted`).
     assert_eq!(
-        lookup("prevalence")["scenario"], "as_fitted",
-        "manifest entry tagged with the scenario (no overlay → as_fitted)"
+        lookup("prevalence")["scenario"], "fitted",
+        "manifest entry tagged with the scenario (no overlay → fitted)"
     );
 
     // ── predictive.json: the per-stream join contract (coordinates vs band) ──
@@ -495,7 +495,7 @@ thin = 1
         "both scenarios' rows are in the one file; saw {scenarios_seen:?}"
     );
     assert!(
-        !scenarios_seen.contains("as_fitted"),
+        !scenarios_seen.contains("fitted"),
         "explicit --scenario suppresses the no-overlay row; saw {scenarios_seen:?}"
     );
 
@@ -667,7 +667,7 @@ thin = 1
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    // BOTH the scale scenario and the no-overlay baseline (as_fitted) in one run.
+    // BOTH the scale scenario and the no-overlay baseline (fitted) in one run.
     let out = run(&bin, &tmp, &[
         "fit", "predict", "--fit", "fit.toml",
         "--horizon", "free_forward",
@@ -685,7 +685,7 @@ thin = 1
         .expect("predictive/weekly_cases.tsv must be written");
     let by_scen = read_q50_by_scenario(&pred);
 
-    // Run a SECOND predict with NO scenario to get the as_fitted baseline (the
+    // Run a SECOND predict with NO scenario to get the fitted baseline (the
     // explicit --scenario above suppresses the no-overlay row).
     let out2 = run(&bin, &tmp, &[
         "fit", "predict", "--fit", "fit.toml",
@@ -699,7 +699,7 @@ thin = 1
     let base_by_scen = read_q50_by_scenario(&base_pred);
 
     let scaled = by_scen.get("double_rho").expect("double_rho rows present");
-    let baseline = base_by_scen.get("as_fitted").expect("as_fitted rows present");
+    let baseline = base_by_scen.get("fitted").expect("fitted rows present");
 
     // Pair times and take the ratio of medians at peak weeks (where the signal
     // is strong, so Poisson/NB noise is a small relative perturbation). Pool the
@@ -732,28 +732,28 @@ thin = 1
 }
 
 #[test]
-fn fit_predict_scenario_named_as_fitted_in_model_is_rejected() {
+fn fit_predict_scenario_named_fitted_in_model_is_rejected() {
     // The reserved-name guard at the compiler boundary: a model `scenarios {}`
-    // preset named `as_fitted` is an E291 error naming the reservation + fix.
+    // preset named `fitted` is an E291 error naming the reservation + fix.
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_predict_reserved_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let bad_model = MODEL_WITH_SCENARIOS.replace(
         "scenarios {\n  low_rho  { set = { rho = 0.3 } }\n  high_rho { set = { rho = 0.8 } }\n}",
-        "scenarios {\n  as_fitted { set = { rho = 0.3 } }\n}",
+        "scenarios {\n  fitted { set = { rho = 0.3 } }\n}",
     );
-    assert!(bad_model.contains("as_fitted { set"), "the substitution applied");
+    assert!(bad_model.contains("fitted { set"), "the substitution applied");
     std::fs::write(tmp.join("model.camdl"), &bad_model).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
     // Compiling the model (via `simulate --dry-run`, which only needs the model)
     // surfaces the E291 reservation diagnostic.
     let out = run(&bin, &tmp, &["simulate", "model.camdl", "--dry-run"]);
-    assert!(!out.status.success(), "a model preset named as_fitted must be rejected");
+    assert!(!out.status.success(), "a model preset named fitted must be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("E291") && stderr.contains("reserved") && stderr.contains("as_fitted"),
+        stderr.contains("E291") && stderr.contains("reserved") && stderr.contains("fitted"),
         "E291 names the reservation and the offending name; got: {stderr}"
     );
 
