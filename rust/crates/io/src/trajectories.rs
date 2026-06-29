@@ -9,7 +9,15 @@
 use std::io::Write;
 use std::path::Path;
 
-use sim::{Flows, Trajectory};
+use sim::{Flows, IntState, RealState, Trajectory};
+
+/// Tolerance for matching a requested fork time T* to a saved snapshot time.
+/// A trajectory is recorded at discrete snapshot times; the conditioned
+/// counterfactual fork requires T* to coincide with one of them — the "saved
+/// cadence contains T*" contract. The match is therefore exact-within-float-
+/// noise; a T* strictly between snapshots is an error, never silently snapped to
+/// a neighbour (which would seed the fork from the wrong latent state).
+pub const SNAPSHOT_TIME_TOL: f64 = 1e-9;
 
 /// Time resolution of a posterior path. PGAS paths are substep resolution;
 /// PF/PMMH paths (a later consolidation step) are observation-step resolution.
@@ -245,12 +253,16 @@ pub fn write_trajectories_tsv(
     let n_inc = columns.incidence.len();
 
     for d in draws {
-        // Validate the incidence sidecar shape once per draw.
-        if !d.incidence.is_empty() && d.incidence.len() != d.path.snapshots.len() {
+        // Validate the incidence sidecar shape once per draw. When the header
+        // declares inc_<stream> columns (n_inc > 0) every snapshot needs a
+        // matching incidence row — otherwise the per-row index below panics on
+        // an empty sidecar; when no inc columns are declared, a provided sidecar
+        // must still match the snapshot count. (n_inc == 0 + empty is fine.)
+        if (n_inc > 0 || !d.incidence.is_empty()) && d.incidence.len() != d.path.snapshots.len() {
             return Err(format!(
                 "trajectories: chain {} draw {}: incidence has {} rows but path \
-                 has {} snapshots",
-                d.chain, d.draw, d.incidence.len(), d.path.snapshots.len()
+                 has {} snapshots ({} inc columns declared)",
+                d.chain, d.draw, d.incidence.len(), d.path.snapshots.len(), n_inc
             ));
         }
         for (s, snap) in d.path.snapshots.iter().enumerate() {
@@ -322,6 +334,88 @@ pub fn write_trajectories_tsv(
     w.flush()
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(())
+}
+
+/// Read the latent state `(IntState, RealState)` at fork time `t_star` for one
+/// `(chain, draw)` from a `trajectories.tsv`. The inverse of
+/// [`write_trajectories_tsv`] for a single snapshot — the step that hands a
+/// saved smoothed path X(T*) to the conditioned counterfactual fork (the
+/// engine seam; gh#322).
+///
+/// Compartment columns are resolved BY NAME from `columns`, in model order, so
+/// the (integer, real) split cannot drift from the writer's layout and the
+/// optional `date` column plus the `flow_*` / `inc_*` columns are skipped
+/// without positional assumptions.
+///
+/// Errors if the file has no row for `(chain, draw)` at a snapshot time within
+/// [`SNAPSHOT_TIME_TOL`] of `t_star` — i.e. the saved cadence does not contain
+/// T*. (`Sampled` paths only; an ODE fit recomputes X(T*) from θ instead.)
+pub fn read_state_at(
+    path: &Path,
+    columns: &TrajColumnSpec,
+    chain: usize,
+    draw: usize,
+    t_star: f64,
+) -> Result<(IntState, RealState), String> {
+    let txt = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
+    let header: Vec<&str> = lines
+        .next()
+        .ok_or_else(|| format!("empty trajectories file: {}", path.display()))?
+        .split('\t')
+        .collect();
+    let col = |name: &str| -> Result<usize, String> {
+        header
+            .iter()
+            .position(|c| *c == name)
+            .ok_or_else(|| format!("trajectories file {} has no `{name}` column", path.display()))
+    };
+    let (ci, di, ti) = (col("chain")?, col("draw")?, col("time")?);
+    let int_idx: Vec<usize> =
+        columns.int_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+    let real_idx: Vec<usize> =
+        columns.real_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        let bad = |what: &str| format!("trajectories file {}: bad {what} field", path.display());
+        let row_chain: usize =
+            f.get(ci).and_then(|s| s.parse().ok()).ok_or_else(|| bad("chain"))?;
+        let row_draw: usize =
+            f.get(di).and_then(|s| s.parse().ok()).ok_or_else(|| bad("draw"))?;
+        if row_chain != chain || row_draw != draw {
+            continue;
+        }
+        let t: f64 = f.get(ti).and_then(|s| s.parse().ok()).ok_or_else(|| bad("time"))?;
+        if (t - t_star).abs() <= SNAPSHOT_TIME_TOL {
+            let counts = int_idx
+                .iter()
+                .map(|&i| {
+                    f.get(i)
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .ok_or_else(|| format!("trajectories file {}: bad integer compartment at column {i}", path.display()))
+                })
+                .collect::<Result<Vec<i64>, _>>()?;
+            let values = real_idx
+                .iter()
+                .map(|&i| {
+                    f.get(i)
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .ok_or_else(|| format!("trajectories file {}: bad real compartment at column {i}", path.display()))
+                })
+                .collect::<Result<Vec<f64>, _>>()?;
+            return Ok((IntState::from_vec(counts), RealState::from_vec(values)));
+        }
+    }
+    Err(format!(
+        "no saved snapshot at t={t_star} for (chain={chain}, draw={draw}) in {} — the fork \
+         time T* must coincide with a saved snapshot time (the saved cadence must contain T*)",
+        path.display()
+    ))
 }
 
 #[cfg(test)]
@@ -398,6 +492,89 @@ mod tests {
     }
 
     #[test]
+    fn read_state_at_round_trips_a_keyed_snapshot() {
+        // Two draws, distinct states at the same times — so a wrong (chain,draw)
+        // or wrong-time match would return the wrong vector, not silently pass.
+        let mut t0 = Trajectory::new();
+        t0.push(snap(0.0, vec![99, 1, 0], vec![0, 0]));
+        t0.push(snap(7.0, vec![80, 15, 5], vec![19, 5]));
+        t0.push(snap(14.0, vec![50, 30, 20], vec![30, 15]));
+        let mut t1 = Trajectory::new();
+        t1.push(snap(0.0, vec![99, 1, 0], vec![0, 0]));
+        t1.push(snap(7.0, vec![70, 20, 10], vec![29, 10]));
+        t1.push(snap(14.0, vec![40, 25, 35], vec![45, 20]));
+        // cols() declares an inc_cases column, so each draw carries a matching
+        // incidence row per snapshot — this also lets the test prove the reader
+        // SKIPS the trailing flow_*/inc_* columns (mapping compartments by name).
+        let draws = vec![
+            PosteriorDraw {
+                chain: 0,
+                draw: 20,
+                path: t0,
+                incidence: vec![vec![0.0], vec![19.0], vec![30.0]],
+            },
+            PosteriorDraw {
+                chain: 1,
+                draw: 21,
+                path: t1,
+                incidence: vec![vec![0.0], vec![29.0], vec![45.0]],
+            },
+        ];
+        let tmp = std::env::temp_dir().join(format!("camdl_io_traj_read_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("trajectories.tsv");
+        write_trajectories_tsv(&path, &draws, &cols(), None, "h", "pgas", Granularity::Substep)
+            .unwrap();
+
+        // (chain=0, draw=20) at T*=7 → that draw's second snapshot.
+        let (int_s, real_s) = read_state_at(&path, &cols(), 0, 20, 7.0).unwrap();
+        assert_eq!(int_s.counts, vec![80, 15, 5]);
+        assert!(real_s.values.is_empty(), "this model has no real compartments");
+
+        // The OTHER draw at the same T* → its OWN state (keying, not first-row).
+        let (int_s2, _) = read_state_at(&path, &cols(), 1, 21, 7.0).unwrap();
+        assert_eq!(int_s2.counts, vec![70, 20, 10]);
+
+        // A T* strictly between snapshots → error (cadence does not contain T*).
+        let err = read_state_at(&path, &cols(), 0, 20, 10.0).unwrap_err();
+        assert!(err.contains("must coincide with a saved snapshot"), "got: {err}");
+
+        // An unknown (chain, draw) → the same not-found error.
+        let err2 = read_state_at(&path, &cols(), 9, 9, 7.0).unwrap_err();
+        assert!(err2.contains("no saved snapshot"), "got: {err2}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_state_at_recovers_real_compartments() {
+        // A real-compartment column round-trips through the {:.6} format.
+        let c = TrajColumnSpec {
+            int_comps: vec!["S".into()],
+            real_comps: vec!["P".into()],
+            flows: vec!["flow_x".into()],
+            incidence: vec![],
+        };
+        let mut t = Trajectory::new();
+        t.push(Snapshot {
+            t: 3.0,
+            int_state: IntState::from_vec(vec![900]),
+            real_state: RealState::from_vec(vec![1.5]),
+            flows: Flows::Int(vec![0]),
+        });
+        let draws = vec![PosteriorDraw { chain: 0, draw: 0, path: t, incidence: vec![] }];
+        let tmp = std::env::temp_dir().join(format!("camdl_io_traj_real_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("t.tsv");
+        write_trajectories_tsv(&path, &draws, &c, None, "h", "pgas", Granularity::Substep).unwrap();
+
+        let (int_s, real_s) = read_state_at(&path, &c, 0, 0, 3.0).unwrap();
+        assert_eq!(int_s.counts, vec![900]);
+        assert_eq!(real_s.values, vec![1.5]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn no_incidence_streams_omits_inc_columns() {
         let c = TrajColumnSpec {
             int_comps: vec!["N".into()],
@@ -421,6 +598,23 @@ mod tests {
         let header = text.lines().nth(1).unwrap();
         assert_eq!(header, "chain\tdraw\ttime\tN\tflow_death");
         assert!(!header.contains("inc_"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn declared_inc_columns_with_empty_incidence_is_a_hard_error() {
+        // cols() declares an inc_cases column (n_inc=1). A draw that provides NO
+        // incidence rows must error cleanly, not panic on an out-of-bounds index
+        // at the per-row write — same contract as the other shape checks.
+        let mut t = Trajectory::new();
+        t.push(snap(0.0, vec![99, 1, 0], vec![0, 0]));
+        let draws = vec![PosteriorDraw { chain: 0, draw: 0, path: t, incidence: vec![] }];
+        let tmp = std::env::temp_dir().join(format!("camdl_io_traj_inc0_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("t.tsv");
+        let err = write_trajectories_tsv(&path, &draws, &cols(), None, "h", "pgas", Granularity::Substep)
+            .unwrap_err();
+        assert!(err.contains("incidence"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
