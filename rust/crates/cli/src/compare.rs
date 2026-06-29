@@ -243,8 +243,13 @@ fn derive_prequential(resolved: &ResolvedFit, derive: DeriveSettings) -> Result<
     let segment = &resolved.segment;
     let config = &resolved.config;
 
-    // (a) θ̂ — the winning stage's point estimate (terminal stage; `None`).
-    let params_toml = crate::fit::fit_summary::winner_params_toml(segment, None)?;
+    // (a) θ̂ — the plug-in point the prequential is scored at. Routed through
+    // the draws-cloud authority (`resolve_posterior_draws`), NOT a per-method
+    // point-estimate file: a Bayesian fit (PGAS/PMMH/MH) writes no
+    // `final_params.toml` — its θ̂ is the posterior MEAN over `draws.tsv`; only
+    // an optimizer fit (IF2/NLopt) has a single winner file. The headline
+    // `compare @pgas_a @pgas_b` workflow used to dead-end on the missing file.
+    let params_toml = point_estimate_params_toml(segment)?;
 
     // (b) model — prefer the self-contained archived IR (Phase 1a), else the
     // loose source the config names (recompiled by pfilter). config.model.camdl
@@ -335,6 +340,71 @@ fn derive_prequential(resolved: &ResolvedFit, derive: DeriveSettings) -> Result<
         .map_err(|e| format!("parsing derived prequential {preq_json}: {e}"));
     cleanup();
     trace
+}
+
+/// θ̂ for the prequential as a flat params TOML, routed through the draws-cloud
+/// authority. A Bayesian fit (its terminal stage wrote a `draws.tsv`) plugs in
+/// the posterior MEAN over the cloud; an optimizer fit (no cloud) plugs in its
+/// winner file (`final_params.toml`, via `winner_params_toml`). This is the
+/// "resolve by artifact, not by method name" rule — the headline `compare
+/// @pgas_a @pgas_b` Bayesian comparison was previously dead-ending on the
+/// IF2-only `final_params.toml`.
+fn point_estimate_params_toml(segment: &Path) -> Result<String, String> {
+    match crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), None) {
+        Ok(pdraws) => posterior_mean_params_toml(&pdraws.draws_path),
+        // No posterior cloud → an optimizer fit; its θ̂ is the single winner.
+        Err(_) => crate::fit::fit_summary::winner_params_toml(segment, None),
+    }
+}
+
+/// The posterior MEAN of every column in a `draws.tsv` as a flat params TOML —
+/// the plug-in point a prequential is scored at for a Bayesian fit. Every model
+/// parameter is a column (estimated + fixed); a fixed column is constant, so its
+/// mean is the fixed value. Columns are emitted in sorted order for determinism.
+fn posterior_mean_params_toml(draws_path: &Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(draws_path)
+        .map_err(|e| format!("reading {}: {e}", draws_path.display()))?;
+    let mut lines = text.lines();
+    let header: Vec<String> = lines
+        .next()
+        .ok_or_else(|| format!("empty draws.tsv at {}", draws_path.display()))?
+        .split('\t')
+        .map(|s| s.to_string())
+        .collect();
+    let mut sums = vec![0.0f64; header.len()];
+    let mut n = 0usize;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != header.len() {
+            return Err(format!("ragged row in {} ({} cols, header has {})",
+                draws_path.display(), fields.len(), header.len()));
+        }
+        for (i, f) in fields.iter().enumerate() {
+            sums[i] += f.parse::<f64>().map_err(|_| {
+                format!("non-numeric draw '{f}' in {}", draws_path.display())
+            })?;
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return Err(format!("no posterior draws in {}", draws_path.display()));
+    }
+    let mut idx: Vec<usize> = (0..header.len()).collect();
+    idx.sort_by(|&a, &b| header[a].cmp(&header[b]));
+    let mut out = String::new();
+    out.push_str("# camdl compare: posterior-mean point estimate (θ̂) for the prequential\n");
+    out.push_str(&format!("# source: {} ({n} draws)\n\n", draws_path.display()));
+    for i in idx {
+        out.push_str(&format!(
+            "{} = {}\n",
+            header[i],
+            crate::fit::runner::format_param_value(sums[i] / n as f64)
+        ));
+    }
+    Ok(out)
 }
 
 /// Resolve a fit's `[data]` spec to a stream-name → absolute-path map for

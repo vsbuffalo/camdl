@@ -163,6 +163,83 @@ fn segment_with_label(results: &Path, label: &str) -> PathBuf {
     panic!("no fit segment labeled {label} under {}", fits.display());
 }
 
+/// A cheap PGAS fit (a posterior cloud — writes `fit_state.toml` + `draws.tsv`,
+/// NO `final_params.toml`). `rho` fixed per-fit for distinct hashes.
+fn pgas_fit_toml(rho: f64) -> String {
+    format!(
+        r#"output_dir = "results"
+
+[model]
+camdl = "model.camdl"
+
+[data.observations]
+weekly_cases = "weekly_cases.tsv"
+
+[estimate]
+beta  = {{ bounds = [0.05, 1.0], start = 0.4 }}
+gamma = {{ bounds = [0.01, 0.5], start = 0.15 }}
+
+[fixed]
+N0  = 10000
+I0  = 10
+rho = {rho}
+k   = 10.0
+
+[stages.posterior]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 2
+particles = 200
+sweeps = 60
+burn_in = 20
+thin = 1
+"#
+    )
+}
+
+#[test]
+fn compare_auto_derives_prequential_from_two_pgas_fits() {
+    // gh#322 review (Blocker 2): the HEADLINE Bayesian comparison. A PGAS fit
+    // writes `fit_state.toml` + `draws.tsv` but NO `final_params.toml`, so the
+    // old derive (winner_params_toml → final_params.toml) dead-ended
+    // file-not-found — `compare @pgas_a @pgas_b`, the whole point of Phase 2a,
+    // failed. Routed through the draws-cloud authority (θ̂ = posterior mean over
+    // draws.tsv), it succeeds.
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_compare_pgas_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("a.toml"), pgas_fit_toml(0.5)).unwrap();
+    std::fs::write(tmp.join("b.toml"), pgas_fit_toml(0.6)).unwrap();
+    for (cfg, label) in [("a.toml", "a"), ("b.toml", "b")] {
+        let out = run(&bin, &tmp, &["fit", "run", cfg, "--label", label, "--seed", "1"]);
+        assert!(
+            out.status.success(),
+            "pgas fit run {cfg} failed:\nstderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300", "--seed", "1"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "compare @a @b on two PGAS fits must succeed (θ̂ = posterior mean, not a \
+         missing final_params.toml):\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(stdout.contains("elpd"), "comparison table has an elpd column:\n{stdout}");
+    assert!(
+        stdout.lines().any(|l| l.trim_start().starts_with("@a"))
+            && stdout.lines().any(|l| l.trim_start().starts_with("@b")),
+        "both PGAS fits appear as rows:\n{stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn compare_auto_derives_prequential_from_two_fit_handles() {
     // (a) `camdl compare @a @b` with NO pre-existing prequential.json: both
