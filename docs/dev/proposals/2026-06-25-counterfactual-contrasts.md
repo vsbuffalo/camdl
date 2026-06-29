@@ -124,28 +124,66 @@ NLopt on ODE is a point estimate (no posterior), so it rejects exactly like IF2
 ### Surface
 
 ```
+observations { reported { columns { time : time, cases : count }
+                          projected = incidence(infection)
+                          cases ~ neg_binomial(mean = rho * projected, r = k) } }
 interventions { sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 20 'weeks] }
 scenarios     { no_sia { disable = [sia] }   with_sia { enable = [sia] } }
-quantities    { deaths = final(D) }
+quantities    { total_deaths = final(D)                       # scalar  (time collapsed)
+                prevalence   = I / N                          # series  (no temporal reduce)
+                cum_reported = integral(observations.reported) }  # scalar  (series reduced)
 
 contrasts {
-  averted = no_sia.deaths - with_sia.deaths   over [origin + 20 'weeks, origin + 52 'weeks]
+  # scalar — total deaths averted over the window
+  deaths_averted   = no_sia.quantities.total_deaths - with_sia.quantities.total_deaths   over [origin + 20 'weeks, origin + 52 'weeks]
+  # series — the averted reported *curve* (a raw obs series; no reducer needed)
+  reported_averted = no_sia.observations.reported   - with_sia.observations.reported     over [origin + 20 'weeks, origin + 52 'weeks]
+  # scalar from a series — reduce inside a named quantity, then contrast it
+  cases_averted    = no_sia.quantities.cum_reported - with_sia.quantities.cum_reported   over [origin + 20 'weeks, origin + 52 'weeks]
 }
 ```
 
-Each contrast bands over the forkable posterior subset and is emitted as
-`contrasts/<name>.tsv` (the joined/forkable count surfaced alongside, per the
-`(θ, X)` partial-join contract).
+A contrast operand is a run-rooted reference (`<scenario>.quantities.<q>` or
+`<scenario>.observations.<stream>`) combined by arithmetic. **Reductions live in
+`quantities {}`, not inside the contrast** (v1 takes no inline reducer in a
+contrast expression): a series operand contrasts directly to an averted series,
+and to collapse it to a scalar you name a quantity (`cum_reported` above) —
+which is exactly what the `quantities {}` block is for.
+
+Each contrast bands over the **forkable** posterior subset (the joined count
+surfaced, per the `(θ, X)` partial-join contract) and is emitted as a tidy/long
+`contrasts/<name>.tsv` keyed by whatever axes the operands carry (`stratum`,
+`time`) with `q05…q95 / mean / n_forkable` columns — the same shape the
+quantities series/stratified emitter produces.
+
+**The namespace is the run, with two uniform sub-namespaces — `quantities` and
+`observations`.** Dot is one operator — "member of a run" — and a run member is
+always `<run>.<quantities|observations>.<name>`. The two sub-namespaces are
+symmetric: neither is special-cased, and a quantity named `observations` (or a
+stream named `deaths`) can never collide with the other namespace.
+
+- In a `contrasts {}` expression the run is _explicit_ (a scenario name):
+  `no_sia.quantities.total_deaths` is the `total_deaths` quantity on the no_sia
+  run; `no_sia.observations.reported` is the no_sia run's simulated `reported`
+  series.
+- In a `quantities {}` recipe the run is _implicit_ (the recipe applies to
+  whatever run evaluates it), so the run prefix drops: `observations.reported`
+  is _this run's_ series, and a bare compartment (`D` in `final(D)`) is _this
+  run's_ state. `observations.reported` is exactly
+  `<this run>.observations.reported` with the run elided.
+
+(`DOT` already exists — `lexer.mll:217` — and `observations.<stream>` already
+uses it via `OBSERVATIONS DOT IDENT`, `parser.mly:1156`; this adds the
+run-prefixed forms `<scenario> DOT observations DOT <stream>` and
+`<scenario> DOT
+quantities DOT <quantity>`, so it is a grammar addition, not a
+new token. `.5`/`1.5` stay floats by maximal munch, so `no_sia.quantities` lexes
+`IDENT DOT QUANTITIES` while a stray `no_sia.5` lexes `IDENT FLOAT`.)
 
 - The block is named **`contrasts {}`**, not `compare {}` — `camdl compare` is
   already a CLI subcommand (model Δelpd comparison, `compare.rs`); a model block
   and a CLI verb do not collide at parse time, but `contrasts` is the precise
   word and avoids the conceptual overload.
-- A **dot** member-access (`no_sia.deaths` = quantity under scenario) — one
-  general namespace operator (verified non-breaking: `.5`/`1.5` stay floats,
-  `ident.ident` takes a new `DOT` token). v1 restricts to `IDENT DOT IDENT`;
-  stratified contrasts (`no_sia.deaths[p]`) and the `patch` output column are a
-  follow-up — **v1 contrasts are whole-population only**.
 - The window's `from` instant is the fork; endpoints are **instants** in the
   existing typed-time system (`origin + 20 'weeks`, `date(...)`; verified to
   parse). A new **endpoint type check** rejects a bare duration (today
@@ -156,6 +194,44 @@ Each contrast bands over the forkable posterior subset and is emitted as
   production with explicit precedence (`over` below the additive/subtractive
   operators, so `a - b over [..]` parses as `(a - b) over [..]`), not an
   asserted precedence.
+- Two cross-context diagnostics (the error-quality bar): `observations.x` used
+  as a _contrast operand_ (it is a run sub-namespace, not a scenario), and
+  `<scenario>.x` used _inside a quantity recipe_ (the run is implicit there),
+  each fail with a located message naming the rule and the fix — not a bare
+  syntax error.
+
+### Shape model — contrasts inherit operand shape
+
+A quantity value already lives on `{time?} × {strata}`: `ir/src/quantity.rs`
+carries `reduce: Option<TemporalReduce>` (`None` ⇒ a series, one value per
+output snapshot; `Some` ⇒ time collapsed to a scalar) and
+`stratum: Vec<StratumKey>` (the IR is fully expanded — one leaf per cell). A
+contrast is **elementwise `armA − armB`, shape-preserving**, banded per draw
+over the forkable subset:
+
+| operand shape   | example                      | contrast result               |
+| --------------- | ---------------------------- | ----------------------------- |
+| scalar          | `final(D)`, unstratified     | one banded number             |
+| series (time)   | `I / N` (no reduce)          | averted **over time** — curve |
+| vector (strata) | `final(D)`, stratified       | averted **by region**         |
+| time × strata   | incidence series, stratified | banded per `(region, time)`   |
+
+Averted-over-time and averted-by-region therefore need **no special syntax** —
+they fall out of contrasting a series / stratified quantity. Two checks guard
+the arithmetic:
+
+- **Shape agreement** — operands must share axes; `series − scalar`, or two
+  differently-stratified operands, is a located error naming both shapes.
+- **Dimension agreement** (prerequisite #5) — `deaths − rate` is rejected,
+  naming both dimensions.
+
+`over [window]` is orthogonal to shape: it clips the time axis of a series
+operand and scopes the reduction window of a reduced one.
+
+**Deferred (the only stratification deferral):** sub-cell / sub-time _selection_
+— `no_sia.quantities.deaths[region = north]`, a `[..]` index picking one cell or
+instant. A refinement on top of shape inheritance; _contrasting_ stratified or
+series quantities (whole-vector results) is in v1.
 
 ## Prerequisites
 
@@ -177,11 +253,13 @@ proposal's build.
    Validated by the splice invariant. Reads `io::trajectories::read_state_at`
    for a `Sampled` path; an ODE arm recomputes `X(T*)` from θ.
 3. **[build] The `contrasts {}` surface + two-arm replay reducer.** The DSL
-   block (DOT member-access, `over` keyword, endpoint type check), then the Rust
-   reducer: for each forkable draw, replay arm A and arm B from `X_i(T*)` via
-   the engine seam, difference the quantities, and band over the forkable
+   block (run-rooted DOT member-access, `over` keyword, endpoint type check),
+   then the Rust reducer: for each forkable draw, replay arm A and arm B from
+   `X_i(T*)` via the engine seam, evaluate the operand quantities on each arm,
+   and difference them **elementwise, preserving shape** (scalar / series /
+   stratified / time × strata — see the shape model), banding over the forkable
    subset. Today `fit predict` builds one inline baseline (`predict.rs:860`);
-   the paired two-arm replay + differencing + per-draw contrast band are
+   the paired two-arm replay + shape-preserving differencing + per-draw band are
    net-new.
 4. **[done] Fork-validity classifier** — the `LatentPath` ADT
    (`Deterministic | Sampled | NotSaved`) landed in prerequisite #1's
@@ -189,32 +267,44 @@ proposal's build.
    extension of `FilterableFit` (the PF-drive witness, which rejects ODE — see
    "Validity per inference method" above).
 5. **[build] A stored quantity dimension** for the contrast binop-agreement
-   check (`no_sia.deaths - with_sia.deaths` requires equal dims) — `dimcheck`
-   does not persist computed dimensions today (`dimcheck.ml`). Owned here; see
-   the "IR-side stored quantity dimension" sketch below.
+   check (`no_sia.quantities.deaths - with_sia.quantities.deaths` requires equal
+   dims) — `dimcheck` does not persist computed dimensions today
+   (`dimcheck.ml`). Owned here; see the "IR-side stored quantity dimension"
+   sketch below. (The companion **shape agreement** check — operands must share
+   `{time?} × {strata}` axes — is a Rust check in the reducer over the evaluated
+   operand shapes, needing no IR change.)
 
 ### IR-side stored quantity dimension (prerequisite #5)
 
-The `contrasts {}` binop `no_sia.deaths - with_sia.deaths` is an arithmetic
-combination of two quantity values, so the dimensional checker must verify the
-two operands agree (both `deaths`, a count) — otherwise a `deaths - rate`
-contrast either silently produces a meaningless number or fails opaquely.
-`dimcheck.ml` checks dimensions during expansion but does not **persist** the
-computed dimension of a declared `quantities {}` entry into the IR. This is a
-small OCaml/IR-side add: carry each quantity's resolved dimension on its IR node
-(an `ir/schema.json` field on the quantity, mirrored OCaml↔Rust), so the Rust
-`contrasts {}` reducer can check operand-dimension agreement (E-code on
-mismatch, naming both quantities and their dimensions) before differencing. No
-new unit literals or DSL surface — purely persisting a dimension `dimcheck`
+The `contrasts {}` binop `no_sia.quantities.deaths - with_sia.quantities.deaths`
+is an arithmetic combination of two quantity values, so the dimensional checker
+must verify the two operands agree (both `deaths`, a count) — otherwise a
+`deaths - rate` contrast either silently produces a meaningless number or fails
+opaquely. `dimcheck.ml` checks dimensions during expansion but does not
+**persist** the computed dimension of a declared `quantities {}` entry into the
+IR. This is a small OCaml/IR-side add: carry each quantity's resolved dimension
+on its IR node (an `ir/schema.json` field on the quantity, mirrored OCaml↔Rust),
+so the Rust `contrasts {}` reducer can check operand-dimension agreement (E-code
+on mismatch, naming both quantities and their dimensions) before differencing.
+No new unit literals or DSL surface — purely persisting a dimension `dimcheck`
 already computes. (Sized as a follow-up alongside the contrast reducer, not a
 blocker for prerequisites #1–#2.)
 
 ## Deferred to a follow-up (explicitly out of v1 scope)
 
-These are named non-goals for v1, not unresolved design questions — v1 ships
-whole-population, single-instant contrasts:
+These are named non-goals for v1, not unresolved design questions. v1 ships
+shape-polymorphic contrasts (scalar / series / stratified / time × strata, by
+shape inheritance); what is deferred is _selection_, not _shape_:
 
-- Stratified contrasts + `a.b[p]` dot chains (v1 is whole-pop).
+- Sub-cell / sub-time **selection** —
+  `no_sia.quantities.deaths[region = north]`, a `[..]` index picking one cell or
+  instant. _Contrasting_ stratified / series quantities (whole-vector results)
+  is in v1; only picking a sub-element is deferred.
+- **Inline reducers in a contrast expression**
+  (`integral(no_sia.observations.reported)`). v1 reduces in `quantities {}` and
+  references the named quantity; a series operand still contrasts directly to an
+  averted series. Adding reducer calls to the contrast-expr grammar is a later
+  convenience, not a v1 need.
 - Decoupling the conditioning instant from the accumulation window.
 - `last_obs`/`first_obs` as named instants — define the resolver's time source
   for multi-stream (ragged) models.
@@ -226,6 +316,20 @@ whole-population, single-instant contrasts:
 - Ship only the conditioned fork; no forward-only `contrasts` (misread risk).
 - The `contrasts {}` block is forward sim that _reads_ the fit's latent `X(T*)`;
   no re-filter.
+- **The namespace root is the run, with two symmetric sub-namespaces**
+  (`quantities`, `observations`). A run member is
+  `<run>.<quantities|observations>.<name>`: explicit run (scenario) in a
+  `contrasts {}` expression (`no_sia.quantities.deaths`,
+  `no_sia.observations.cases`), implicit run in a `quantities {}` recipe
+  (`observations.cases`, the prefix elided). Neither sub-namespace is
+  special-cased; quantity/stream names cannot collide across them. (`DOT`,
+  `QUANTITIES`, `OBSERVATIONS` are existing tokens; this adds productions, not
+  tokens.)
+- **Contrasts are shape-polymorphic — they inherit the operand's shape** (scalar
+  / series / stratified / time × strata) and difference elementwise, banding per
+  draw. Averted-over-time and averted-by-region need no special syntax. Guarded
+  by a shape-agreement check (Rust, in the reducer) and a dimension-agreement
+  check (#5, IR-persisted). Only sub-element _selection_ (`[p]`) is deferred.
 - Validity gated by the `LatentPath` ADT (`Deterministic | Sampled | NotSaved`),
   keyed on the latent **artifact** (posterior-vs-point), not the method name or
   the backend axis — explicitly NOT an extension of `FilterableFit` (which
