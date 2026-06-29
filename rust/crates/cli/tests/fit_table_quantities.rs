@@ -163,6 +163,61 @@ burn_in = 20
 thin = 1
 "#;
 
+// `mh` is the deterministic Metropolis-Hastings — an ODE Bayesian sampler (no
+// particle filter, hence no `particles` key). It writes a posterior `draws.tsv`
+// just like PGAS/PMMH, so the artifact gate must accept it.
+const MH: &str = r#"[stages.posterior]
+algorithm = "mh"
+backend = "ode"
+chains = 2
+iterations = 60
+burn_in = 20
+thin = 1
+"#;
+
+#[test]
+fn quantity_fills_for_mh_fit_not_just_a_method_allowlist() {
+    // gh#322 review (should-fix): the derive gate used a method allowlist
+    // (`pgas|pmmh`) that silently dropped `mh` — a Bayesian sampler that ALSO
+    // writes `draws.tsv`. Routed through the artifact authority
+    // (`resolve_posterior_draws`: does a stage have draws.tsv?), an mh fit's
+    // quantity is DERIVED, not rendered `—`.
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_table_q_mh_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("fit.toml"), fit_toml(MH, "results")).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(
+        out.status.success(),
+        "mh fit run failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = run(
+        &bin,
+        &tmp,
+        &["fit", "table", "results/fits", "--quantity", "peak", "--format", "csv"],
+    );
+    assert!(
+        out.status.success(),
+        "fit table --quantity on an mh fit failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let csv = String::from_utf8_lossy(&out.stdout);
+    let cell = csv_cell(&csv, "peak").expect("a peak cell in the mh fit's row");
+    let peak: f64 = cell.parse().unwrap_or_else(|_| {
+        panic!("an mh fit's `peak` must be DERIVED (a number), not `—`; got {cell:?} in:\n{csv}")
+    });
+    assert!(peak.is_finite() && peak > 0.0, "derived peak finite + positive, got {peak}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn quantity_derives_on_demand_then_reads_existing() {
     let bin = skip_if_missing_binary();

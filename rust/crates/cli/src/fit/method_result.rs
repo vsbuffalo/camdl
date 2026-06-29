@@ -181,7 +181,7 @@ impl std::fmt::Display for MethodResultError {
             MethodResultError::UnknownMethod { method, stage_dir } => write!(
                 f,
                 "unknown fit-stage method `{}` at {} (expected if2, pgas, \
-                 pmmh, nl-sbplx, or nl-bobyqa)",
+                 pmmh, mh, nl-sbplx, or nl-bobyqa)",
                 method,
                 stage_dir.display()
             ),
@@ -201,7 +201,13 @@ impl MethodResult {
         match method {
             "if2" => Ok(MethodResult::If2(If2StageResult::load(stage_dir)?)),
             "pgas" => Ok(MethodResult::Pgas(PgasStageResult::load(stage_dir)?)),
-            "pmmh" => Ok(MethodResult::Pmmh(PmmhStageResult::load(stage_dir)?)),
+            // `mh` (deterministic Metropolis-Hastings) runs through the PMMH
+            // runner and writes the same posterior artifacts (`fit_state.toml`,
+            // `draws.tsv`, acceptance + R̂), so it loads as a Pmmh result. Without
+            // this arm an `mh` fit was dropped from `fit table` / `fit summary`
+            // entirely ("unknown fit-stage method `mh`") — a per-method allowlist
+            // that excluded a method the rest of the system supports.
+            "pmmh" | "mh" => Ok(MethodResult::Pmmh(PmmhStageResult::load(stage_dir)?)),
             "nl-sbplx" | "nl-bobyqa" => Ok(MethodResult::Nlopt(
                 NloptStageResult::load(stage_dir, method)?,
             )),

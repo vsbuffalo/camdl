@@ -118,7 +118,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
                 continue;
             };
             for name in &args.quantities {
-                if let Some(median) = resolve_quantity_median(fit_dir, &r.method, name) {
+                if let Some(median) = resolve_quantity_median(fit_dir, name) {
                     r.quantities.insert(name.clone(), median);
                 }
             }
@@ -322,7 +322,7 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 /// Any failure (predict refused, the model doesn't declare `name`, a
 /// malformed or scalar-less TSV) yields `None` — a single uncomputable
 /// cell renders `—` and never fails the whole table.
-fn resolve_quantity_median(fit_dir: &std::path::Path, method: &str, name: &str) -> Option<f64> {
+fn resolve_quantity_median(fit_dir: &std::path::Path, name: &str) -> Option<f64> {
     let tsv = fit_dir.join("quantities").join(format!("{name}.tsv"));
 
     // (1) Fast path: an already-computed quantities TSV.
@@ -330,10 +330,14 @@ fn resolve_quantity_median(fit_dir: &std::path::Path, method: &str, name: &str) 
         return Some(median);
     }
 
-    // (2/3) Derive only for methods that carry a posterior cloud. IF2 /
-    // NLopt optimizer fits have no draws, so `fit predict` would refuse
-    // them anyway — skip the spawn and leave the cell absent.
-    if !matches!(method, "pgas" | "pmmh") {
+    // (2/3) Derive only for fits that carry a posterior cloud — gated through
+    // the ARTIFACT authority (`resolve_posterior_draws`: does a stage have a
+    // `draws.tsv`?), NOT a per-method allowlist. A method-name check
+    // (`pgas|pmmh`) silently dropped `mh` — an ODE/chain-binomial Bayesian
+    // sampler that also writes `draws.tsv` — rendering `—` for a quantity that
+    // exists. An optimizer fit (IF2/NLopt) has no cloud, so `fit predict` would
+    // refuse it anyway; skip the spawn.
+    if crate::posterior_draws::resolve_posterior_draws(&fit_dir.to_string_lossy(), None).is_err() {
         return None;
     }
 
