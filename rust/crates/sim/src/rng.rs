@@ -3,6 +3,11 @@ use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Poisson, Exp, Gamma, Binomial, StandardNormal};
 
 /// Stateful RNG wrapping ChaCha8. Deterministic given seed.
+///
+/// `Clone` (ChaCha8Rng is `Clone`) is the start-from-state seam's RNG-capture
+/// mechanism (gh#322): a head run clones out its final RNG so a resumed tail can
+/// restore the exact stream position and reproduce a byte-identical continuation.
+#[derive(Clone)]
 pub struct StatefulRng(ChaCha8Rng);
 
 impl StatefulRng {

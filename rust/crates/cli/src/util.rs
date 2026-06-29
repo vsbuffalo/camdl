@@ -2791,6 +2791,7 @@ pub fn simulate_compiled(
             let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 compiled, &params, run.seed, &cfg, None, tick_opt.as_deref_mut(),
+                sim::chain_binomial::Resume::default(),
             )
         }
         ForwardBackend::Ode => {
@@ -2885,6 +2886,7 @@ pub fn run_simulation_event_log(
             let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 &compiled, &params, run.seed, &cfg, Some(&mut recorder), None,
+                sim::chain_binomial::Resume::default(),
             )
         }
         ForwardBackend::Ode => unreachable!("ODE rejected above"),

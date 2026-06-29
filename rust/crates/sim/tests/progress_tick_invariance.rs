@@ -101,13 +101,15 @@ fn chain_binomial_tick_does_not_change_trajectory() {
     let cfg = ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0 };
 
     let traj_none =
-        run_chain_binomial_with_observer(&model, &params, SEED, &cfg, None, None).unwrap();
+        run_chain_binomial_with_observer(&model, &params, SEED, &cfg, None, None, Default::default())
+            .unwrap();
 
     let mut ticks: Vec<f64> = Vec::new();
     let mut tick = |t: f64| ticks.push(t);
-    let traj_ticked =
-        run_chain_binomial_with_observer(&model, &params, SEED, &cfg, None, Some(&mut tick))
-            .unwrap();
+    let traj_ticked = run_chain_binomial_with_observer(
+        &model, &params, SEED, &cfg, None, Some(&mut tick), Default::default(),
+    )
+    .unwrap();
 
     assert_traj_eq(&traj_none, &traj_ticked, "chain_binomial");
     assert!(!ticks.is_empty(), "tick never fired — test is vacuous");

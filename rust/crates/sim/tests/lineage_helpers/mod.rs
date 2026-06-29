@@ -98,8 +98,10 @@ pub fn record_event_log(
         }
         Backend::ChainBinomial { dt } => {
             let cfg = ChainBinomialConfig { t_start: 0.0, t_end, dt };
-            run_chain_binomial_with_observer(&compiled, &params, seed, &cfg, Some(&mut recorder), None)
-                .unwrap()
+            run_chain_binomial_with_observer(
+                &compiled, &params, seed, &cfg, Some(&mut recorder), None, Default::default(),
+            )
+            .unwrap()
         }
     };
     (traj, recorder.into_event_log())

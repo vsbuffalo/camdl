@@ -15,6 +15,31 @@ use crate::{
 
 pub struct ChainBinomialSim;
 
+/// Injected mid-run state for the start-from-state seam (gh#322). The resume
+/// time is `cfg.t_start` (the caller sets it to T*); this carries the compartment
+/// state to seed there.
+pub struct StartState {
+    pub int_s: IntState,
+    pub real_s: RealState,
+    /// `Some` → restore this RNG: the splice-invariant test feeds the head run's
+    /// final RNG here, so the resumed tail is byte-identical to the continuous
+    /// tail. `None` → seed fresh from `seed`: a contrast arm re-rolls its own
+    /// forward noise from the fork (CRN desyncs by design — see the contrasts
+    /// doc). The RNG-restore path is test-only.
+    pub rng: Option<StatefulRng>,
+}
+
+/// Resume controls for [`run_chain_binomial_with_observer`]. `Resume::default()`
+/// is "no resume" — every existing path passes it and is byte-identical to today.
+#[derive(Default)]
+pub struct Resume<'a> {
+    /// The injected fork state, or `None` for a normal run from `initial_state`.
+    pub start: Option<&'a StartState>,
+    /// Splice-invariant test capture: if set, the run writes its FINAL RNG here
+    /// (so a head run can hand its RNG to the resumed tail).
+    pub capture_final_rng: Option<&'a mut StatefulRng>,
+}
+
 /// Minimum rate threshold: transitions with rate ≤ this are treated as
 /// zero-rate (no draws, zero flow required). Used by both `step_one` and
 /// `log_transition_density_substep` — must be identical to avoid simulation/
@@ -138,7 +163,7 @@ pub fn run_chain_binomial(
     seed: u64,
     cfg: &ChainBinomialConfig,
 ) -> Result<Trajectory, SimError> {
-    run_chain_binomial_with_observer(model, params, seed, cfg, None, None)
+    run_chain_binomial_with_observer(model, params, seed, cfg, None, None, Resume::default())
 }
 
 /// Chain-binomial run with an optional [`TransitionObserver`] (individual-
@@ -161,6 +186,11 @@ pub fn run_chain_binomial_with_observer(
     // `None` and `Some(..)` produce byte-identical trajectories. See
     // tests/progress_tick_invariance.rs.
     mut tick: Option<&mut dyn FnMut(f64)>,
+    // gh#322 start-from-state seam: when `resume.start` is `Some`, resume from an
+    // injected `(state)` at `cfg.t_start` (= T*) instead of building the initial
+    // state from the model. `Resume::default()` (every existing path) is
+    // byte-identical to today.
+    resume: Resume<'_>,
 ) -> Result<Trajectory, SimError> {
     // gh#126: reject a non-finite/non-positive dt or a non-finite fire
     // time at the entry point — a RELEASE-build check (the per-conversion
@@ -169,7 +199,13 @@ pub fn run_chain_binomial_with_observer(
     // fires immediately) or feed NaN/±∞ straight into the kernel.
     model.validate_schedule(cfg.dt, params)?;
 
-    let (mut int_s, mut real_s) = model.initial_state(params)?;
+    // gh#322 start-from-state seam: seed the compartment state from the injected
+    // fork state when resuming; otherwise build it from the model. `None` (every
+    // existing path) is byte-identical.
+    let (mut int_s, mut real_s) = match resume.start {
+        Some(ss) => (ss.int_s.clone(), ss.real_s.clone()),
+        None => model.initial_state(params)?,
+    };
     let n_transitions = model.model.transitions.len();
     let n_real = real_s.values.len();
 
@@ -179,7 +215,14 @@ pub fn run_chain_binomial_with_observer(
     // gh#69: also threads `params` for parametric `at [...]` schedules.
     let fire_steps = model.resolve_fire_steps(cfg.dt, params);
 
-    let mut rng = StatefulRng::new(seed);
+    // gh#322 start-from-state seam: restore the injected RNG when one is supplied
+    // (splice-invariant test → byte-identical tail); otherwise seed fresh from
+    // `seed` (a normal run, or a contrast arm re-rolling its forward noise from
+    // the fork). `resume.start = None` falls through to the fresh seed unchanged.
+    let mut rng = match resume.start.and_then(|ss| ss.rng.as_ref()) {
+        Some(r) => r.clone(),
+        None => StatefulRng::new(seed),
+    };
     let mut scratch = StepScratch::new(model);
     let mut flows = vec![0u64; n_transitions];
 
@@ -205,6 +248,35 @@ pub fn run_chain_binomial_with_observer(
         EffectTimes::from_model(model, params)?,
     );
     let mut cursor = Cursor::default();
+
+    // gh#322 start-from-state seam: re-seat the OUTPUT cursor to the T* boundary
+    // and validate that T* lands on the output grid.
+    if resume.start.is_some() {
+        // Advance the output cursor past every output time STRICTLY before T*
+        // via the gh#233 boundary authority — no hand-rolled loop, no parallel
+        // accessor. `until = T* - 2·OUTPUT_EPS` drains outputs `<= T* - OUTPUT_EPS`,
+        // leaving the cursor pointing AT the T* output boundary, so the initial-row
+        // emit below fires for T* with zeroed flows (post-fork incidence starts at
+        // 0 — no extra flow-zeroing needed). The effect/obs cursors are NOT
+        // re-seated: the Snap path reads neither (fire_steps are absolute and
+        // already correct at T* = cfg.t_start; obs is inference-only).
+        schedule.drain_outputs(
+            &mut cursor,
+            cfg.t_start - 2.0 * crate::schedule::OUTPUT_EPS,
+            |_| {},
+        );
+        // T* MUST coincide with an output-emit time: flow accumulators reset only
+        // at output emits, so the spliced tail matches the continuous tail only
+        // when T* is itself an emit. Reject an off-grid T* with a located error —
+        // never a silent snap to a neighbour.
+        if !schedule.output_due_at(&cursor, cfg.t_start) {
+            return Err(SimError::Validation(format!(
+                "start-from-state resume: the resume time T* must coincide with an \
+                 output-emit time (the saved cadence must contain T*); got {}",
+                cfg.t_start
+            )));
+        }
+    }
 
     let mut traj = Trajectory::new();
     let mut current_flows = FlowVec::new(n_transitions);
@@ -237,6 +309,25 @@ pub fn run_chain_binomial_with_observer(
     let mut agenda =
         crate::reactive::ReactiveAgenda::from_model(model).map_err(SimError::Validation)?;
     let mut obs_rng = StatefulRng::new(seed ^ REACTIVE_OBS_SEED_SALT);
+
+    // gh#322 start-from-state seam: reactive interventions (and attached
+    // observers) carry mid-run state — the `ReactiveAgenda`'s `obs_history`,
+    // `once`/`cooldown` gating, the `pending` effect heap, partial interval
+    // flows, and a second `obs_rng` stream — that an injected `(int_s, real_s,
+    // rng)` cannot reconstruct. Reject such a resume at the seam with a located
+    // error rather than forking it silently wrong (gh#187-class matrix gap). The
+    // `agenda` value is reused here (built once above), not re-derived.
+    if resume.start.is_some() && (agenda.is_some() || observer.is_some()) {
+        return Err(SimError::Validation(
+            "start-from-state resume does not support reactive interventions / \
+             attached observers: their mid-run agenda state (observation history, \
+             once/cooldown gating, the pending-effect queue, partial interval \
+             flows, and the surveillance RNG stream) cannot be reconstructed from \
+             an injected (state, rng). Remove the reactive policy / observer, or \
+             run a continuous simulation from t_start."
+                .to_string(),
+        ));
+    }
 
     while t < cfg.t_end {
         // Progress tick: report current time before drawing this step. RNG-free.
@@ -354,6 +445,13 @@ pub fn run_chain_binomial_with_observer(
     // the log is a declared artifact whenever reactive is active.
     if let Some(a) = agenda {
         traj.reactive_log = Some(a.into_firings());
+    }
+
+    // gh#322 start-from-state seam: hand this run's FINAL RNG to the caller. The
+    // splice-invariant test feeds the head run's final RNG into the resumed
+    // tail, which is what makes the spliced continuation byte-identical.
+    if let Some(out) = resume.capture_final_rng {
+        *out = rng.clone();
     }
 
     Ok(traj)
