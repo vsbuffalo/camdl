@@ -2,32 +2,45 @@
 //! reducer that CONSUMES the IR [`ir::contrast::Contrast`] node. Auto-emitted by
 //! `fit predict` when the model declares any `contrasts {}`.
 //!
+//! **The fork is derived, not declared.** A contrast has no `over [..]` window.
+//! From the runs a contrast references, the reducer diffs the arms' live
+//! intervention sets to find the *toggled* intervention, reads its (constant)
+//! fire time, and forks at the **last saved trajectory snapshot strictly before
+//! that fire time** (`fork`). Both arms then run `[fork, run_end]`, where
+//! `run_end` is the model's simulation horizon. This makes "fork at/after the
+//! intervention" unrepresentable.
+//!
 //! Per forkable posterior draw `i`, per `run` referenced in a contrast (a scenario
 //! or the reserved `fitted` no-overlay run):
 //!   1. resolve that arm's θ via the 5-tier resolver
 //!      ([`crate::params_resolver::resolve_parameters`]) — the fitted draw at tier
 //!      3.5, the scenario `set`/`scale` at tier 4 (`fitted` ⇒ no overlay);
-//!   2. fork from the smoothed `X_i(T*)` — chain_binomial reads the saved path with
-//!      [`io::trajectories::read_state_at`] and resumes via
+//!   2. fork from the smoothed `X_i(fork)` — chain_binomial reads the saved path
+//!      with [`io::trajectories::read_state_at`] and resumes via
 //!      [`sim::chain_binomial::Resume`]`{ start: Some(..) }`. CRN: both arms share
-//!      `X_i(T*)` AND the per-draw seed, so the firing substep is byte-identical at
-//!      the fork; post-fork noise desyncs by design;
-//!   3. run `[T*, to]` (the contrast window), evaluate the operand quantities with
-//!      the shared [`sim::quantity::QuantityEvaluator`];
+//!      `X_i(fork)` AND the per-draw seed, so the firing substep is byte-identical
+//!      at the fork; post-fork noise desyncs by design;
+//!   3. run `[fork, run_end]`, evaluate the operand quantities with the shared
+//!      [`sim::quantity::QuantityEvaluator`];
 //!   4. difference elementwise, shape- and dimension-preserving;
 //!   5. band over the forkable subset → `contrasts/<name>.tsv`.
 //!
-//! `T*` is `window.from`; the accumulation window is `[from, to]`. The fork runs
-//! exactly that span, so a series operand's time axis and a reduced operand's
-//! reduction window both scope to `[from, to]` for free.
+//! "Averted by week N" is read off the time-indexed output (or by setting the run
+//! horizon); a decoupled `by <instant>` clause is a later refinement.
+//!
+//! Edge cases are loud-deferred (skip-with-note, never silent): a contrast with no
+//! toggled intervention (parameter-only scenario → gh#327), or one toggled by a
+//! parametric / reactive fire time (no single derivable fork).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use indexmap::{IndexMap, IndexSet};
 
 use ir::contrast::{Contrast, ContrastExpr, RunNamespace};
-use ir::expr::BinOp;
+use ir::expr::{BinOp, Expr, UnOp};
+use ir::intervention::{Intervention, InterventionSchedule};
+use io::trajectories::SNAPSHOT_TIME_TOL;
 use sim::quantity::{QuantityDrawValue, QuantityEvaluator, QuantityResult};
 
 use crate::args::types::ForwardBackend;
@@ -212,14 +225,60 @@ pub fn emit_contrasts(
     let col_spec = io::trajectories::TrajColumnSpec::from_model(model, &[]);
     let dt = model.simulation.dt.unwrap_or(1.0);
 
-    // Per contrast: replay its runs over ITS window for every forkable draw, walk
-    // the body into a per-draw ShapedValue, band over the forkable subset, write.
+    // Both arms simulate to the model's run-end horizon (the same horizon the
+    // predict free-forward path uses). With the fork derived (below), the arm's
+    // trajectory already spans exactly [fork, run_end] — no clipping.
+    let run_end = model.simulation.t_end;
+
+    // The saved snapshot grid the fork must land on. The output cadence is
+    // model-wide, so the first forkable draw's path is representative; a draw that
+    // happens to lack the derived fork errors loudly at `read_state_at`.
+    let (_, snap_chain, snap_draw) = &forkable[0];
+    let snap_traj = stage_dir
+        .join(format!("chain_{}", snap_chain + 1))
+        .join("trajectories.tsv");
+    let snapshot_times = io::trajectories::snapshot_times(&snap_traj, *snap_chain, *snap_draw)?;
+
+    // Per contrast: derive the fork (last saved snapshot before the toggled
+    // intervention fires), replay its runs over [fork, run_end] for every forkable
+    // draw, walk the body into a per-draw ShapedValue, band over the forkable
+    // subset, write.
     let mut written = Vec::new();
     for c in &to_emit {
         let mut runs_c: Vec<String> = Vec::new();
         collect_runs(&c.body, &mut runs_c);
-        let mut shaped: Vec<ShapedValue> = Vec::with_capacity(forkable.len());
 
+        // Derive the fork from the contrast's toggled intervention. The edge cases
+        // (no toggled intervention; a parametric/reactive fire time) are loud
+        // skip-with-note deferrals, never silent mis-forks.
+        let plan = match derive_fork(model, &arms, &runs_c, &snapshot_times) {
+            Ok(p) => p,
+            Err(reason) => {
+                eprintln!("fit predict: skipping contrast '{}' — {reason}", c.name);
+                continue;
+            }
+        };
+        eprintln!(
+            "fit predict: contrast '{}' — fork at t={} (last saved snapshot before '{}' \
+             fires at t={}); arms run [{}, {}].{}",
+            c.name,
+            plan.fork_t,
+            plan.fire_iv,
+            plan.fire_t,
+            plan.fork_t,
+            run_end,
+            if plan.toggled.len() > 1 {
+                format!(
+                    " ({} interventions toggled [{}]; forking before the earliest)",
+                    plan.toggled.len(),
+                    plan.toggled.join(", "),
+                )
+            } else {
+                String::new()
+            },
+        );
+
+        let mut shaped: Vec<ShapedValue> = Vec::with_capacity(forkable.len());
         for (draw_pos, (params_i, chain, draw)) in forkable.iter().enumerate() {
             // CRN: both arms of THIS draw share one seed (run name is NOT mixed in),
             // so the firing substep is byte-identical at the fork.
@@ -228,7 +287,7 @@ pub fn emit_contrasts(
             for run in &runs_c {
                 let res = arms[run].replay(
                     model, run, params_i, &col_spec, &stage_dir, *chain, *draw, dt, arm_seed,
-                    c.window,
+                    plan.fork_t, run_end,
                 )?;
                 draw_results.insert(run.clone(), res);
             }
@@ -279,11 +338,12 @@ impl Arm {
         Ok(Arm { compiled, quant_eval })
     }
 
-    /// Replay this arm for one draw over the contrast window: resolve the draw's θ
-    /// (+ scenario overlay), fork from the smoothed `X_i(T*)` (`T* = window.from`),
-    /// run `[from, to]`, and evaluate every quantity over that span. The reduction
-    /// window and a series' time axis both scope to `[from, to]` because the fork
-    /// runs exactly that span.
+    /// Replay this arm for one draw from the derived fork: resolve the draw's θ
+    /// (+ scenario overlay), fork from the smoothed `X_i(fork)`, run
+    /// `[fork, run_end]`, and evaluate every quantity over that span. A series
+    /// operand's time axis is exactly the arm's snapshots over `[fork, run_end]`;
+    /// a reduced operand reduces over that same span (no clipping — the fork runs
+    /// exactly the right window).
     #[allow(clippy::too_many_arguments)]
     fn replay(
         &self,
@@ -296,7 +356,8 @@ impl Arm {
         draw: usize,
         dt: f64,
         arm_seed: u64,
-        window: ir::contrast::ContrastWindow,
+        fork_t: f64,
+        run_end: f64,
     ) -> Result<ArmDrawResult, String> {
         // θ_i at tier 3.5 (draw row), scenario `set`/`scale` at tier 4.
         let overrides: Vec<(String, f64)> =
@@ -309,17 +370,17 @@ impl Arm {
             }
         }
 
-        // Read the smoothed latent state X_i(T*) from the saved path. The on-disk
+        // Read the smoothed latent state X_i(fork) from the saved path. The on-disk
         // chain dir is 1-based (`chain_{N+1}`); the in-file `chain` column is the
         // 0-based key `read_state_at` matches.
         let traj_path = stage_dir.join(format!("chain_{}", chain + 1)).join("trajectories.tsv");
         let (int_s, real_s) =
-            io::trajectories::read_state_at(&traj_path, col_spec, chain, draw, window.from)
-                .map_err(|e| format!("contrast arm '{run}': reading X(T*={}): {e}", window.from))?;
+            io::trajectories::read_state_at(&traj_path, col_spec, chain, draw, fork_t)
+                .map_err(|e| format!("contrast arm '{run}': reading X(fork={fork_t}): {e}"))?;
 
-        // Fork from X_i(T*): inject the state at cfg.t_start = T*, fresh RNG from the
-        // shared per-draw seed (CRN at the fork; post-fork noise desyncs by design).
-        let cfg = sim::ChainBinomialConfig { t_start: window.from, t_end: window.to, dt };
+        // Fork from X_i(fork): inject the state at cfg.t_start = fork, fresh RNG from
+        // the shared per-draw seed (CRN at the fork; post-fork noise desyncs by design).
+        let cfg = sim::ChainBinomialConfig { t_start: fork_t, t_end: run_end, dt };
         let ss = sim::chain_binomial::StartState { int_s, real_s, rng: None };
         let traj = sim::chain_binomial::run_chain_binomial_with_observer(
             self.compiled.as_ref(),
@@ -330,23 +391,12 @@ impl Arm {
             None,
             sim::chain_binomial::Resume { start: Some(&ss), capture_final_rng: None },
         )
-        .map_err(|e| format!("contrast arm '{run}': forking at T*={}: {e:?}", window.from))?;
+        .map_err(|e| format!("contrast arm '{run}': forking at fork={fork_t}: {e:?}"))?;
 
-        // Clip to [from, to] (a no-op for the fork, which already starts at T*;
-        // a guard for any tail snapshot past `to`).
-        let clipped = clip_trajectory(traj, window.from, window.to);
-        let times: Vec<f64> = clipped.snapshots.iter().map(|s| s.t).collect();
-        let quant = self.quant_eval.eval_draw(&pvec, &clipped, self.compiled.as_ref(), None);
+        let times: Vec<f64> = traj.snapshots.iter().map(|s| s.t).collect();
+        let quant = self.quant_eval.eval_draw(&pvec, &traj, self.compiled.as_ref(), None);
         Ok(ArmDrawResult { quant, times })
     }
-}
-
-/// Keep only the snapshots whose time lies in `[from, to]` (with a small tolerance
-/// at each end). The fork already starts at `from`; this guards an off-grid `to`.
-fn clip_trajectory(mut traj: sim::Trajectory, from: f64, to: f64) -> sim::Trajectory {
-    const EPS: f64 = 1e-9;
-    traj.snapshots.retain(|s| s.t >= from - EPS && s.t <= to + EPS);
-    traj
 }
 
 /// Resolve one arm's parameters: the draw overlay at tier 3.5, the scenario
@@ -377,6 +427,223 @@ fn resolve_arm(
         table_files: &empty_tables,
     };
     resolve_parameters(inputs).map_err(|e| format!("contrast arm '{run}': {e}"))
+}
+
+// ── Derived fork ────────────────────────────────────────────────────────────────
+
+/// The fork derived for one contrast: where to branch the two arms from, and what
+/// drove it. The fork is the last saved trajectory snapshot strictly before the
+/// toggled intervention's fire time — so "fork at/after the intervention" is
+/// unrepresentable by construction.
+struct ForkPlan {
+    /// The fork time: the latest saved snapshot strictly before `fire_t`.
+    fork_t: f64,
+    /// The earliest fire time across the toggled interventions — the first instant
+    /// the arms diverge.
+    fire_t: f64,
+    /// The name of the intervention firing at `fire_t` (for the transparency note).
+    fire_iv: String,
+    /// Every toggled intervention (≥1), sorted; >1 means several differ across the
+    /// arms and the fork is taken before the earliest.
+    toggled: Vec<String>,
+}
+
+/// A toggled intervention's earliest scheduled fire time, or why it can't yield a
+/// single constant fork.
+enum FireTime {
+    /// A constant earliest fire time.
+    Const(f64),
+    /// A parametric `at [...]` fire time (the fork would differ per draw).
+    Parametric,
+    /// A reactive fire source — no static schedule to derive a fork from.
+    Reactive,
+    /// A schedule that produces no fire times in the run window.
+    Empty,
+}
+
+/// Derive the fork for a contrast. The runs it references are the arms; their live
+/// intervention sets differ by the *toggled* intervention(s) (the scenario
+/// enable/disable filter already removed the inactive ones, so a live set is
+/// exactly what fires in that arm). The fork is the last saved snapshot strictly
+/// before the earliest toggled fire time.
+///
+/// Returns `Err(reason)` for the loud-deferral edge cases: no toggled intervention
+/// (a parameter-only counterfactual → gh#327), a parametric / reactive fire time,
+/// or a fire time at/before the first saved snapshot (nothing to fork from).
+fn derive_fork(
+    model: &ir::Model,
+    arms: &HashMap<String, Arm>,
+    runs: &[String],
+    snapshot_times: &[f64],
+) -> Result<ForkPlan, String> {
+    // The live intervention name-set of each arm (what actually fires in it).
+    let live: Vec<HashSet<String>> = runs
+        .iter()
+        .map(|r| {
+            arms[r]
+                .compiled
+                .model
+                .interventions
+                .iter()
+                .map(|iv| iv.name.clone())
+                .collect()
+        })
+        .collect();
+    let toggled = toggled_across_arms(&live);
+    if toggled.is_empty() {
+        return Err(
+            "this contrast has no toggled intervention to derive a fork from; \
+             parameter-only counterfactuals need the time-scheduled-parameter \
+             primitive (gh#327)"
+                .to_string(),
+        );
+    }
+
+    // The earliest constant fire time across the toggled interventions; a
+    // parametric / reactive one is a loud deferral.
+    let mut earliest: Option<(f64, String)> = None;
+    for name in &toggled {
+        let iv = model
+            .interventions
+            .iter()
+            .find(|iv| &iv.name == name)
+            .ok_or_else(|| format!("internal: toggled intervention '{name}' not found in model"))?;
+        match intervention_earliest_fire(iv) {
+            FireTime::Const(t) => {
+                if earliest.as_ref().map_or(true, |(e, _)| t < *e) {
+                    earliest = Some((t, name.clone()));
+                }
+            }
+            FireTime::Parametric => {
+                return Err(format!(
+                    "the toggled intervention '{name}' fires at a parameter-dependent time; \
+                     contrasts don't yet support parametric intervention times (the fork would \
+                     differ per draw) — gh follow-up"
+                ))
+            }
+            FireTime::Reactive => {
+                return Err(format!(
+                    "the toggled intervention '{name}' is reactive (no static fire time); a \
+                     contrast derives its fork from a scheduled fire time"
+                ))
+            }
+            FireTime::Empty => {
+                return Err(format!(
+                    "the toggled intervention '{name}' has no fire times in the run window"
+                ))
+            }
+        }
+    }
+    let (fire_t, fire_iv) = earliest.expect("a non-empty toggled set yields at least one fire time");
+
+    // The fork = the largest saved snapshot strictly before the first divergence.
+    match fork_before(snapshot_times, fire_t) {
+        Some(fork_t) => Ok(ForkPlan { fork_t, fire_t, fire_iv, toggled }),
+        None => Err(format!(
+            "the toggled intervention fires at t={fire_t}, at or before the first saved \
+             snapshot — there is no pre-intervention state to fork from"
+        )),
+    }
+}
+
+/// The largest saved snapshot time strictly before `fire_t` (with a snapshot-time
+/// tolerance), or `None` if every snapshot is at/after the fire — the choice that
+/// makes "fork at/after the intervention" unrepresentable.
+fn fork_before(snapshot_times: &[f64], fire_t: f64) -> Option<f64> {
+    snapshot_times
+        .iter()
+        .copied()
+        .filter(|&t| t < fire_t - SNAPSHOT_TIME_TOL)
+        .fold(None, |m, t| Some(m.map_or(t, |y: f64| y.max(t))))
+}
+
+/// The interventions toggled across the arms: live in some arm but not all (the
+/// N-arm generalization of the symmetric difference). Sorted for a deterministic
+/// note.
+fn toggled_across_arms(live: &[HashSet<String>]) -> Vec<String> {
+    let mut union: BTreeSet<String> = BTreeSet::new();
+    for s in live {
+        union.extend(s.iter().cloned());
+    }
+    union
+        .into_iter()
+        .filter(|name| !live.iter().all(|s| s.contains(name)))
+        .collect()
+}
+
+/// The earliest scheduled fire time of one intervention. Mirrors the runtime fire
+/// expansion (`sim::intervention::intervention_fire_times`) for the constant
+/// schedules; a parametric `at [...]` (any non-constant expr) or a reactive source
+/// is reported so the caller can defer loudly.
+fn intervention_earliest_fire(iv: &Intervention) -> FireTime {
+    match iv.fire.schedule() {
+        None => FireTime::Reactive,
+        Some(InterventionSchedule::AtTimes(ts)) => ts
+            .iter()
+            .copied()
+            .fold(None, |m, t| Some(m.map_or(t, |y: f64| y.min(t))))
+            .map_or(FireTime::Empty, FireTime::Const),
+        Some(InterventionSchedule::AtTimesExpr(exprs)) => {
+            let mut min: Option<f64> = None;
+            for e in exprs {
+                match const_eval_expr(e) {
+                    Some(v) => min = Some(min.map_or(v, |m: f64| m.min(v))),
+                    None => return FireTime::Parametric,
+                }
+            }
+            min.map_or(FireTime::Empty, FireTime::Const)
+        }
+        Some(InterventionSchedule::Recurring(rs)) => {
+            if rs.period <= 0.0 {
+                return FireTime::Empty;
+            }
+            // Earliest fire ≥ start (mirrors intervention_fire_times): with at_day,
+            // `at_day + k0*period` for the smallest k0 ≥ 0 reaching `start`.
+            let first = match rs.at_day {
+                None => rs.start,
+                Some(d) => {
+                    let k0 = ((rs.start - d) / rs.period).ceil().max(0.0);
+                    d + k0 * rs.period
+                }
+            };
+            if first > rs.end + rs.period * 1e-9 {
+                FireTime::Empty
+            } else {
+                FireTime::Const(first)
+            }
+        }
+    }
+}
+
+/// Const-fold an `Expr` to a model-time float, or `None` if it references any
+/// non-constant leaf (a parameter, population, time, …). Mirrors the OCaml
+/// instant-evaluation: `Const`, `+ - * /`, unary `Neg`, and the dimensional escape
+/// `UncheckedDim` (a unit literal like `20 'weeks` lowers to
+/// `0 + UncheckedDim{140}`). Anything else is non-constant.
+fn const_eval_expr(e: &Expr) -> Option<f64> {
+    match e {
+        Expr::Const(c) => Some(c.value),
+        Expr::UncheckedDim(w) => const_eval_expr(&w.unchecked_dim.inner),
+        Expr::UnOp(w) => {
+            let v = const_eval_expr(&w.un_op.arg)?;
+            match w.un_op.op {
+                UnOp::Neg => Some(-v),
+                _ => None,
+            }
+        }
+        Expr::BinOp(w) => {
+            let l = const_eval_expr(&w.bin_op.left)?;
+            let r = const_eval_expr(&w.bin_op.right)?;
+            match w.bin_op.op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => Some(l / r),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 // ── Contrast body walk: per-draw evaluation ─────────────────────────────────────
@@ -928,5 +1195,116 @@ mod tests {
         let cells: Vec<&str> = tsv.trim_end().lines().nth(1).unwrap().split('\t').collect();
         assert_eq!(cells[5], "6", "mean of the 2 finite values");
         assert_eq!(cells[6], "2", "n_forkable counts only finite draws");
+    }
+
+    // ── Derived fork ─────────────────────────────────────────────────────────
+
+    use ir::expr::{BinOpExpr, BinOpWrap, ConstExpr, ParamExpr, UnOpExpr, UnOpWrap,
+                   UncheckedDimExpr, UncheckedDimWrap};
+    use ir::intervention::{Action, FireSource, InterventionSchedule, RecurringSchedule};
+
+    fn set(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn scheduled(name: &str, sched: InterventionSchedule) -> Intervention {
+        Intervention {
+            name: name.into(),
+            base_name: None,
+            fire: FireSource::Scheduled(sched),
+            actions: Vec::<Action>::new(),
+            kind: ir::intervention::InterventionKind::Scenario,
+        }
+    }
+
+    #[test]
+    fn toggled_set_is_the_symmetric_difference_across_arms() {
+        // no_sia (sia off) vs with_sia (sia on) → {sia}.
+        assert_eq!(toggled_across_arms(&[set(&[]), set(&["sia"])]), vec!["sia"]);
+        // Identical live sets (a parameter-only counterfactual) → nothing toggled.
+        assert!(toggled_across_arms(&[set(&["sia"]), set(&["sia"])]).is_empty());
+        // Three arms; `b` differs in only one → {b}, sorted; shared `a` excluded.
+        assert_eq!(
+            toggled_across_arms(&[set(&["a"]), set(&["a", "b"]), set(&["a"])]),
+            vec!["b"]
+        );
+    }
+
+    #[test]
+    fn fork_is_the_last_snapshot_strictly_before_the_fire() {
+        let grid = [0.0, 7.0, 14.0, 21.0, 28.0];
+        // Fire at 28 → fork at 21 (28 itself is excluded — fork must be BEFORE).
+        assert_eq!(fork_before(&grid, 28.0), Some(21.0));
+        // Fire at 22 → fork at 21.
+        assert_eq!(fork_before(&grid, 22.0), Some(21.0));
+        // Fire at/before the first snapshot → nothing to fork from.
+        assert_eq!(fork_before(&grid, 0.0), None);
+        assert_eq!(fork_before(&grid, -1.0), None);
+    }
+
+    #[test]
+    fn const_eval_folds_unit_literal_instants_and_rejects_parameters() {
+        // `20 'weeks` lowers to `0 + UncheckedDim{140}`.
+        let unit_140 = Expr::BinOp(BinOpWrap {
+            bin_op: BinOpExpr {
+                op: BinOp::Add,
+                left: Box::new(Expr::Const(ConstExpr { value: 0.0 })),
+                right: Box::new(Expr::UncheckedDim(UncheckedDimWrap {
+                    unchecked_dim: UncheckedDimExpr {
+                        inner: Box::new(Expr::Const(ConstExpr { value: 140.0 })),
+                        dim: (0, 1),
+                        reason: "unit literal 'weeks".into(),
+                    },
+                })),
+            },
+        });
+        assert_eq!(const_eval_expr(&unit_140), Some(140.0));
+        // A parameter-dependent fire time is NOT a compile-time constant.
+        let parametric = Expr::BinOp(BinOpWrap {
+            bin_op: BinOpExpr {
+                op: BinOp::Add,
+                left: Box::new(Expr::Const(ConstExpr { value: 14.0 })),
+                right: Box::new(Expr::Param(ParamExpr { param: "lag".into() })),
+            },
+        });
+        assert_eq!(const_eval_expr(&parametric), None);
+        // Unary negation folds; an unsupported unary op does not.
+        let neg = Expr::UnOp(UnOpWrap {
+            un_op: UnOpExpr { op: UnOp::Neg, arg: Box::new(Expr::Const(ConstExpr { value: 5.0 })) },
+        });
+        assert_eq!(const_eval_expr(&neg), Some(-5.0));
+    }
+
+    #[test]
+    fn earliest_fire_classifies_each_schedule() {
+        // AtTimes → the minimum of the list.
+        match intervention_earliest_fire(&scheduled("a", InterventionSchedule::AtTimes(vec![140.0, 28.0]))) {
+            FireTime::Const(t) => assert_eq!(t, 28.0),
+            _ => panic!("AtTimes must be a constant fire time"),
+        }
+        // AtTimesExpr with a constant unit literal → folds.
+        let const_expr = Expr::UncheckedDim(UncheckedDimWrap {
+            unchecked_dim: UncheckedDimExpr {
+                inner: Box::new(Expr::Const(ConstExpr { value: 28.0 })),
+                dim: (0, 1),
+                reason: "unit literal 'days".into(),
+            },
+        });
+        match intervention_earliest_fire(&scheduled("a", InterventionSchedule::AtTimesExpr(vec![const_expr]))) {
+            FireTime::Const(t) => assert_eq!(t, 28.0),
+            _ => panic!("a constant AtTimesExpr must fold to a constant fire time"),
+        }
+        // AtTimesExpr referencing a parameter → Parametric (loud deferral).
+        let param_expr = Expr::Param(ParamExpr { param: "t0".into() });
+        assert!(matches!(
+            intervention_earliest_fire(&scheduled("a", InterventionSchedule::AtTimesExpr(vec![param_expr]))),
+            FireTime::Parametric
+        ));
+        // Recurring → earliest fire (start, with no at_day).
+        let rec = RecurringSchedule { start: 10.0, period: 7.0, end: 80.0, at_day: None };
+        match intervention_earliest_fire(&scheduled("a", InterventionSchedule::Recurring(rec))) {
+            FireTime::Const(t) => assert_eq!(t, 10.0),
+            _ => panic!("Recurring must yield its earliest fire"),
+        }
     }
 }

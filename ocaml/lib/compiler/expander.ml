@@ -5976,16 +5976,15 @@ let expand_quantities ctx =
 (* ── Counterfactual contrasts (proposal 2026-06-25) ───────────────────────────
    Resolve each `contrasts { }` entry: two-sided name resolution of every
    run-rooted operand (run ∈ declared scenarios ∪ {fitted}; member ∈ the named
-   sub-namespace), a typed-time instant check on the window endpoints, and
-   lowering of the arithmetic body to [Ir.contrast_expr]. Dimensional agreement
-   of the operands is checked separately by `dimcheck` (the verify path). *)
+   sub-namespace) and lowering of the arithmetic body to [Ir.contrast_expr].
+   There is no window: the counterfactual fork is *derived* in the reducer (the
+   last saved snapshot before the toggled intervention's fire time) and the
+   result is shaped over `[fork, run-end]`. Dimensional agreement of the operands
+   is checked separately by `dimcheck` (the verify path). *)
 let expand_contrasts ctx : Ir.contrast list =
   let scenario_names = List.map (fun (sd : scenario_decl) -> sd.scname) ctx.scenario_decls in
   let quantity_names = List.map (fun (qd : quantity_decl) -> qd.qd_name) ctx.quantity_decls in
   let obs_names      = List.map (fun (o : obs_decl) -> o.oname) ctx.obs_decls in
-  let tt_env = Time_typing.env_of_ctx
-      ~let_tbl:ctx.let_tbl ~param_decls:ctx.param_decls
-      ~origin_set:(ctx.origin <> None) in
   let ns_str = function NsQuantities -> "quantities" | NsObservations -> "observations" in
   (* Resolve one run-rooted operand to Ir.CRunMember, emitting located,
      two-sided diagnostics for an undeclared run or member. *)
@@ -6040,61 +6039,10 @@ let expand_contrasts ctx : Ir.contrast list =
         ();
       None
   in
-  (* Window endpoints must be typed-time instants, not bare durations
-     (`at [20 'weeks]` is the loophole this closes). Classify, reject a
-     non-instant, then resolve to a model-time float. *)
-  (* Const-evaluate a resolved instant to a model-time float. `origin + 20
-     'weeks` resolves to `Const 0 + UncheckedDim{Const 140}` (the unit literal
-     keeps its dimension `T`); strip the dimensional wrapper and fold the
-     arithmetic. `date(...)` resolves to a bare `Const` directly. *)
-  let rec eval_instant (e : Ir.expr) : float option =
-    match e with
-    | Ir.Const f -> Some f
-    | Ir.UncheckedDim u -> eval_instant u.inner
-    | Ir.UnOp { op = Ir.Neg; arg } -> Option.map (fun x -> -. x) (eval_instant arg)
-    | Ir.BinOp { op; left; right } ->
-      (match eval_instant left, eval_instant right with
-       | Some a, Some b ->
-         (match op with
-          | Ir.Add -> Some (a +. b) | Ir.Sub -> Some (a -. b)
-          | Ir.Mul -> Some (a *. b) | Ir.Div -> Some (a /. b)
-          | _ -> None)
-       | _ -> None)
-    | _ -> None
-  in
-  let resolve_endpoint ~which cd_loc (e : expr) : float option =
-    match Time_typing.classify tt_env e with
-    | Time_typing.TInstant ->
-      (match eval_instant (resolve_expr ctx [] e) with
-       | Some f -> Some f
-       | None ->
-         Diagnostics.error ctx.diags ~code:"E296" ~loc:cd_loc
-           ~message:(Printf.sprintf
-             "contrast window %s endpoint must be a compile-time instant" which)
-           ~hint:"the window endpoints are resolved at compile time; use \
-                  `origin + N 'weeks` or `date(\"YYYY-MM-DD\")` (no parameters)"
-           ();
-         None)
-    | _ ->
-      Diagnostics.error ctx.diags ~code:"E296" ~loc:cd_loc
-        ~message:(Printf.sprintf
-          "contrast window %s endpoint must be an instant, not a bare duration"
-          which)
-        ~hint:"use an instant: `origin + 20 'weeks` or `date(\"YYYY-MM-DD\")` \
-               (the window's `from` instant is the counterfactual fork point)"
-        ();
-      None
-  in
   List.filter_map (fun (cd : contrast_decl) ->
-    let cd_loc = diag_loc_of_ast_ctx ctx cd.cd_loc in
-    let (a, b) = cd.cd_window in
-    let body = lower_body cd.cd_body in
-    let from_ = resolve_endpoint ~which:"`from`" cd_loc a in
-    let to_   = resolve_endpoint ~which:"`to`"   cd_loc b in
-    match body, from_, to_ with
-    | Some c_body, Some f, Some t ->
-      Some { Ir.c_name = cd.cd_name; Ir.c_body; Ir.c_window = (f, t) }
-    | _ -> None
+    match lower_body cd.cd_body with
+    | Some c_body -> Some { Ir.c_name = cd.cd_name; Ir.c_body }
+    | None -> None
   ) ctx.contrast_decls
 
 (* ── Hierarchical-prior cycle / self-reference check ─────────────────────── *)

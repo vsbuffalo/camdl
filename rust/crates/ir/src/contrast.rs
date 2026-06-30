@@ -43,21 +43,14 @@ pub enum ContrastExpr {
     },
 }
 
-/// The accumulation / fork window `over [from, to]`, in model time units. The
-/// `from` instant is the counterfactual fork point; both endpoints are resolved
-/// instants (the OCaml frontend rejects a bare duration here).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct ContrastWindow {
-    pub from: f64,
-    pub to: f64,
-}
-
-/// A named difference of two run-rooted operands (cases averted).
+/// A named difference of two run-rooted operands (cases averted). There is no
+/// window: the counterfactual fork is *derived* in the reducer (the last saved
+/// trajectory snapshot strictly before the toggled intervention's fire time) and
+/// the result is shaped over `[fork, run-end]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Contrast {
     pub name: String,
     pub body: ContrastExpr,
-    pub window: ContrastWindow,
 }
 
 #[cfg(test)]
@@ -67,7 +60,7 @@ mod tests {
     #[test]
     fn pins_wire_tags() {
         // The exact on-wire shape the OCaml serde must match:
-        // averted = no_sia.quantities.total - with_sia.quantities.total over [20, 52].
+        // averted = no_sia.quantities.total - with_sia.quantities.total.
         let c = Contrast {
             name: "averted".into(),
             body: ContrastExpr::BinOp {
@@ -83,11 +76,10 @@ mod tests {
                     member: "total".into(),
                 }),
             },
-            window: ContrastWindow { from: 20.0, to: 52.0 },
         };
         assert_eq!(
             serde_json::to_string(&c).unwrap(),
-            r#"{"name":"averted","body":{"bin_op":{"op":"sub","left":{"run_member":{"run":"no_sia","ns":"quantities","member":"total"}},"right":{"run_member":{"run":"with_sia","ns":"quantities","member":"total"}}}},"window":{"from":20.0,"to":52.0}}"#
+            r#"{"name":"averted","body":{"bin_op":{"op":"sub","left":{"run_member":{"run":"no_sia","ns":"quantities","member":"total"}},"right":{"run_member":{"run":"with_sia","ns":"quantities","member":"total"}}}}}"#
         );
         let back: Contrast = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(c, back, "contrast round-trip changed value");

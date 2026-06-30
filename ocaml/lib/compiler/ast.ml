@@ -341,14 +341,14 @@ type quantity_decl = {
 }
 
 (* A counterfactual-contrast declaration (proposal 2026-06-25):
-   `name = <body> over [<from_instant>, <to_instant>]`. The body is arithmetic
-   (reusing [EBinOp]) over run-rooted [ERunMember] operands; the window endpoints
-   are typed-time instants (`origin + 20 'weeks`, `date(...)`), not bare
-   durations. Resolved + lowered to Ir.contrast by the expander. *)
+   `name = <body>`. The body is arithmetic (reusing [EBinOp]) over run-rooted
+   [ERunMember] operands. There is no window — the fork is derived in the reducer
+   (the last saved snapshot before the toggled intervention's fire time) and the
+   result is shaped over `[fork, run-end]`. Resolved + lowered to Ir.contrast by
+   the expander. *)
 type contrast_decl = {
   cd_name   : string;
   cd_body   : expr;            (* arithmetic over ERunMember; reuses EBinOp *)
-  cd_window : expr * expr;     (* over [from_instant, to_instant] *)
   cd_doc    : doc option;
   cd_loc    : loc;
 }

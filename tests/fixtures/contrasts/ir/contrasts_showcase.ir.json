@@ -21,5 +21,5 @@
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[],"D":[],"V":[]},"base_compartments":["S","I","R","D","V"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"quantities":[
 {"name":"total","body":{"reduced":{"source":{"state":{"pop":"D"}},"reduce":{"value":"final"}}},"dimension":[1,0]}
 ],"contrasts":[
-{"name":"averted","body":{"bin_op":{"op":"sub","left":{"run_member":{"run":"no_sia","ns":"quantities","member":"total"}},"right":{"run_member":{"run":"with_sia","ns":"quantities","member":"total"}}}},"window":{"from":140.0,"to":364.0}}
+{"name":"averted","body":{"bin_op":{"op":"sub","left":{"run_member":{"run":"no_sia","ns":"quantities","member":"total"}},"right":{"run_member":{"run":"with_sia","ns":"quantities","member":"total"}}}}}
 ]}}

@@ -734,7 +734,6 @@ type contrast_expr =
 type contrast = {
   c_name:   string;
   c_body:   contrast_expr;
-  c_window: float * float;   (* (from_instant, to_instant), in model time units *)
 }
 
 type model = {

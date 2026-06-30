@@ -137,21 +137,34 @@ quantities    { total_deaths = final(D)                       # scalar  (time co
                 cum_reported = integral(observations.reported) }  # scalar  (series reduced)
 
 contrasts {
-  # scalar — total deaths averted over the window
-  deaths_averted   = no_sia.quantities.total_deaths - with_sia.quantities.total_deaths   over [origin + 20 'weeks, origin + 52 'weeks]
+  # scalar — total deaths averted
+  deaths_averted   = no_sia.quantities.total_deaths - with_sia.quantities.total_deaths
   # series — the averted reported *curve* (a raw obs series; no reducer needed)
-  reported_averted = no_sia.observations.reported   - with_sia.observations.reported     over [origin + 20 'weeks, origin + 52 'weeks]
+  reported_averted = no_sia.observations.reported   - with_sia.observations.reported
   # scalar from a series — reduce inside a named quantity, then contrast it
-  cases_averted    = no_sia.quantities.cum_reported - with_sia.quantities.cum_reported   over [origin + 20 'weeks, origin + 52 'weeks]
+  cases_averted    = no_sia.quantities.cum_reported - with_sia.quantities.cum_reported
 }
 ```
 
-A contrast operand is a run-rooted reference (`<scenario>.quantities.<q>` or
+A contrast is just `name = <run-rooted arithmetic>` — there is no window. A
+contrast operand is a run-rooted reference (`<scenario>.quantities.<q>` or
 `<scenario>.observations.<stream>`) combined by arithmetic. **Reductions live in
 `quantities {}`, not inside the contrast** (v1 takes no inline reducer in a
 contrast expression): a series operand contrasts directly to an averted series,
 and to collapse it to a scalar you name a quantity (`cum_reported` above) —
 which is exactly what the `quantities {}` block is for.
+
+**The fork is derived, not declared.** The counterfactual fork point is _read
+off the model_, not written in the contrast: from the runs a contrast
+references, the reducer diffs the arms' active-intervention sets to find the
+**toggled** intervention, reads its (constant) fire time, and forks at the last
+saved trajectory snapshot **strictly before** that fire time. Both arms then run
+`[fork, run-end]`, where `run-end` is the model's simulation horizon. This makes
+"fork at/after the intervention" unrepresentable (rather than a runtime guard),
+and a contrast inherits its window from the run's own extent — the horizon is
+not a separate concept. "Averted by week N" is read off the time-indexed output
+(or by setting the run horizon); a decoupled `by <instant>` clause is a later
+refinement, not a window conflated with the fork.
 
 Each contrast bands over the **forkable** posterior subset (the joined count
 surfaced, per the `(θ, X)` partial-join contract) and is emitted as a tidy/long
@@ -212,16 +225,9 @@ new token. `.5`/`1.5` stay floats by maximal munch, so `no_sia.quantities` lexes
   already a CLI subcommand (model Δelpd comparison, `compare.rs`); a model block
   and a CLI verb do not collide at parse time, but `contrasts` is the precise
   word and avoids the conceptual overload.
-- The window's `from` instant is the fork; endpoints are **instants** in the
-  existing typed-time system (`origin + 20 'weeks`, `date(...)`; verified to
-  parse). A new **endpoint type check** rejects a bare duration (today
-  `at [20 'weeks]` compiles silently — this is new code, reconciled with the
-  same `at` loophole).
-- Each entry is `name = <contrast_expr> over [<instant>, <instant>]`, with
-  `over` a new keyword binding looser than arithmetic — a real grammar
-  production with explicit precedence (`over` below the additive/subtractive
-  operators, so `a - b over [..]` parses as `(a - b) over [..]`), not an
-  asserted precedence.
+- Each entry is `name = <contrast_expr>` — run-rooted arithmetic, no window. The
+  fork is derived in the reducer (above), so there is no `over` keyword, no fork
+  instant, and no endpoint type check on the surface.
 - Two cross-context diagnostics (the error-quality bar): `observations.x` used
   as a _contrast operand_ (it is a run sub-namespace, not a scenario), and
   `<scenario>.x` used _inside a quantity recipe_ (the run is implicit there),
@@ -253,8 +259,9 @@ the arithmetic:
 - **Dimension agreement** (prerequisite #5) — `deaths − rate` is rejected,
   naming both dimensions.
 
-`over [window]` is orthogonal to shape: it clips the time axis of a series
-operand and scopes the reduction window of a reduced one.
+The result spans `[fork, run-end]` — the derived fork to the run's own horizon.
+A series operand's time axis is exactly the arm's snapshots over that span, and
+a reduced operand reduces over it; there is no separate window to clip against.
 
 **Deferred (the only stratification deferral):** sub-cell / sub-time _selection_
 — `no_sia.quantities.deaths[region = north]`, a `[..]` index picking one cell or
@@ -289,9 +296,15 @@ contrast references it directly; it is not declared:
 ```
 scenarios { lower_trans { scale = { beta = 0.5 } } }   # only the counterfactual is declared
 contrasts {
-  averted = fitted.quantities.cases - lower_trans.quantities.cases  over [...]
+  averted = fitted.quantities.cases - lower_trans.quantities.cases
 }
 ```
+
+A scenario that toggles **no intervention** (a parameter-only `scale`/`set`, as
+`lower_trans` above) has no fork to derive — there is no toggled fire time to
+fork before. Such a contrast is loud-deferred (skip-with-note, never silently
+forked from `init`): a parameter-only counterfactual needs the time-scheduled-
+parameter primitive (**gh#327**).
 
 `fitted` is **fit-relative** — it means the no-overlay run of the one fit this
 contrast is computed against (the fit handle is the invocation argument; an
@@ -331,14 +344,15 @@ proposal's build.
    Validated by the splice invariant. Reads `io::trajectories::read_state_at`
    for a `Sampled` path; an ODE arm recomputes `X(T*)` from θ.
 3. **[build] The `contrasts {}` surface + two-arm replay reducer.** The DSL
-   block (run-rooted DOT member-access, `over` keyword, endpoint type check),
-   then the Rust reducer: for each forkable draw, replay arm A and arm B from
-   `X_i(T*)` via the engine seam, evaluate the operand quantities on each arm,
-   and difference them **elementwise, preserving shape** (scalar / series /
-   stratified / time × strata — see the shape model), banding over the forkable
-   subset. Today `fit predict` builds one inline baseline (`predict.rs:860`);
-   the paired two-arm replay + shape-preserving differencing + per-draw band are
-   net-new.
+   block (run-rooted DOT member-access; no window — the fork is derived in the
+   reducer), then the Rust reducer: derive the fork (the last saved snapshot
+   before the toggled intervention fires), and for each forkable draw replay arm
+   A and arm B from `X_i(fork)` via the engine seam, evaluate the operand
+   quantities on each arm, and difference them **elementwise, preserving shape**
+   (scalar / series / stratified / time × strata — see the shape model), banding
+   over the forkable subset. Today `fit predict` builds one inline baseline
+   (`predict.rs:860`); the paired two-arm replay, the shape-preserving
+   differencing, and the per-draw band are net-new.
 4. **[done] Fork-validity classifier** — the `LatentPath` ADT
    (`Deterministic | Sampled | NotSaved`) landed in prerequisite #1's
    `fit::joint`, with a point-estimate (no-posterior) rejection. NOT an
@@ -390,7 +404,14 @@ the deferrals below each have a tracked issue:
   references the named quantity; a series operand still contrasts directly to an
   averted series. Adding reducer calls to the contrast-expr grammar is a later
   convenience, not a v1 need.
-- Decoupling the conditioning instant from the accumulation window.
+- A decoupled report horizon — a `by <instant>` clause to read "averted by week
+  N" without setting the run horizon. A later refinement on top of the derived
+  fork, kept distinct from the fork (the conflated `over [from, to]` window is
+  explicitly not the design).
+- Parametric / reactive toggled fire times — a contrast whose toggled
+  intervention fires at a parameter-dependent or runtime-triggered time has no
+  single derivable fork; v1 forks only constant scheduled fire times and
+  loud-defers the rest.
 - `last_obs`/`first_obs` as named instants — define the resolver's time source
   for multi-stream (ragged) models.
 - Reconcile the `free_forward` naming with the existing `Horizon::FreeForward`

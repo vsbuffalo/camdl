@@ -147,7 +147,7 @@
 %token AND OR NOT IF THEN ELSE EVERY UNTIL AT_KW FORMAT DESCRIPTION NULL TRANSFER LIKELIHOOD ORIGIN BALANCE EVENTS ADD AT_DAY
 %token COLUMNS EMIT_SCHEDULE
 %token QUANTITIES   (* proposal 2026-06-25: generated quantities *)
-%token CONTRASTS OVER   (* counterfactual contrasts, proposal 2026-06-25 *)
+%token CONTRASTS   (* counterfactual contrasts, proposal 2026-06-25 *)
 %token REACTIVE_INTERVENTIONS WHEN ACTION   (* gh#204 *)
 %token PIPE
 
@@ -913,18 +913,17 @@ quantity_decl:
           qd_loc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 (* ── Contrasts block (counterfactual contrasts, proposal 2026-06-25) ──────────
-   Each entry is `name = <body> over [<from_instant>, <to_instant>]`. The body
-   reuses the shared `expr` (arithmetic over run-rooted `ERunMember` operands);
-   `over` binds looser than the body because the production consumes the whole
-   `body = expr` *before* `OVER`, so `a - b over [..]` parses as `(a - b) over
-   [..]` structurally — no precedence declaration needed. *)
+   Each entry is just `name = <body>`. The body reuses the shared `expr`
+   (arithmetic over run-rooted `ERunMember` operands). There is no window: the
+   counterfactual fork is *derived* in the reducer (the last saved snapshot
+   before the toggled intervention's fire time), and the result is naturally
+   shaped over `[fork, run-end]`. *)
 contrast_list:
   | cs = list(contrast_decl) { cs }
 
 contrast_decl:
   | d = doc_opt name = IDENT EQ body = expr
-      OVER LBRACKET a = expr COMMA b = expr RBRACKET
-      { { cd_name = name; cd_body = body; cd_window = (a, b); cd_doc = d;
+      { { cd_name = name; cd_body = body; cd_doc = d;
           cd_loc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 (* ── Output block ────────────────────────────────────────────────────────── *)

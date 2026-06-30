@@ -418,6 +418,56 @@ pub fn read_state_at(
     ))
 }
 
+/// The sorted, distinct snapshot times saved for `(chain, draw)` in a
+/// `trajectories.tsv`. The counterfactual fork (gh#322) reads this to pick the
+/// latest saved snapshot strictly *before* a toggled intervention's fire time:
+/// the derived fork must coincide with a saved snapshot, since [`read_state_at`]
+/// reads the forked state from exactly that snapshot.
+pub fn snapshot_times(path: &Path, chain: usize, draw: usize) -> Result<Vec<f64>, String> {
+    let txt = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
+    let header: Vec<&str> = lines
+        .next()
+        .ok_or_else(|| format!("empty trajectories file: {}", path.display()))?
+        .split('\t')
+        .collect();
+    let col = |name: &str| -> Result<usize, String> {
+        header
+            .iter()
+            .position(|c| *c == name)
+            .ok_or_else(|| format!("trajectories file {} has no `{name}` column", path.display()))
+    };
+    let (ci, di, ti) = (col("chain")?, col("draw")?, col("time")?);
+
+    let mut times: Vec<f64> = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        let bad = |what: &str| format!("trajectories file {}: bad {what} field", path.display());
+        let row_chain: usize =
+            f.get(ci).and_then(|s| s.parse().ok()).ok_or_else(|| bad("chain"))?;
+        let row_draw: usize =
+            f.get(di).and_then(|s| s.parse().ok()).ok_or_else(|| bad("draw"))?;
+        if row_chain != chain || row_draw != draw {
+            continue;
+        }
+        let t: f64 = f.get(ti).and_then(|s| s.parse().ok()).ok_or_else(|| bad("time"))?;
+        times.push(t);
+    }
+    if times.is_empty() {
+        return Err(format!(
+            "no saved snapshots for (chain={chain}, draw={draw}) in {}",
+            path.display()
+        ));
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).expect("snapshot times are finite"));
+    times.dedup();
+    Ok(times)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

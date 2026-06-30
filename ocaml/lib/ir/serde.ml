@@ -1115,18 +1115,14 @@ let rec contrast_expr_of_json j : contrast_expr =
   | _ -> fail "contrast_expr must be a single-key object (run_member/bin_op)"
 
 let contrast_to_json (c : contrast) : Yojson.Safe.t =
-  let (from_, to_) = c.c_window in
   obj [
     ("name",   str c.c_name);
     ("body",   contrast_expr_to_json c.c_body);
-    ("window", obj [("from", flt from_); ("to", flt to_)]);
   ]
 
 let contrast_of_json j : contrast =
-  let w = member "window" j in
   { c_name   = as_string (member "name" j);
-    c_body   = contrast_expr_of_json (member "body" j);
-    c_window = (as_float (member "from" w), as_float (member "to" w)); }
+    c_body   = contrast_expr_of_json (member "body" j); }
 
 (* ── Parameters ──────────────────────────────────────────────────────────── *)
 

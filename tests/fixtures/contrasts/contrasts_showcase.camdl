@@ -2,11 +2,12 @@
 #
 # A minimal SIRD with a vaccination SIA (S --> V transfer), two scenarios that
 # turn the SIA off / on, a scalar quantity (`total = final(D)`), and a contrast
-# differencing that quantity across the two runs over an instant window — the
-# "deaths averted" headline. Compile-only: pins the IR SHAPE of the `contrasts`
-# node (run-rooted operands, the `over [from, to]` window) and the #5 stored
-# quantity `dimension` field, deserialised cross-language by the
-# `rust/crates/ir contrasts_golden` test.
+# differencing that quantity across the two runs — the "deaths averted"
+# headline. There is no window: the fork is derived in the reducer (the last
+# saved snapshot before the SIA fires) and the result is shaped over
+# `[fork, run-end]`. Compile-only: pins the IR SHAPE of the `contrasts` node
+# (run-rooted operands) and the #5 stored quantity `dimension` field,
+# deserialised cross-language by the `rust/crates/ir contrasts_golden` test.
 
 time_unit = 'days
 origin     = date("2020-01-01")
@@ -43,9 +44,10 @@ quantities {
 }
 
 contrasts {
-  # Deaths averted by the SIA, accumulated over the window from the fork (20w)
-  # to one year (52w). A scalar contrast: same shape and dimension on both arms.
-  averted = no_sia.quantities.total - with_sia.quantities.total over [origin + 20 'weeks, origin + 52 'weeks]
+  # Deaths averted by the SIA. A scalar contrast: same shape and dimension on
+  # both arms. The fork is derived from the SIA's fire time (week 20); the
+  # result spans [fork, run-end].
+  averted = no_sia.quantities.total - with_sia.quantities.total
 }
 
 simulate { from = 0 'days  to = 400 'days }

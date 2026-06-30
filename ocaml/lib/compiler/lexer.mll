@@ -70,7 +70,6 @@
       "observations",  OBSERVATIONS;
       "quantities",    QUANTITIES;
       "contrasts",     CONTRASTS;                         (* counterfactual contrasts *)
-      "over",          OVER;                              (* contrast window keyword *)
       "interventions", INTERVENTIONS;
       "reactive_interventions", REACTIVE_INTERVENTIONS;  (* gh#204 *)
       "when",          WHEN;                             (* gh#204 trigger head *)

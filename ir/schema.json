@@ -1210,22 +1210,12 @@
     },
 
     "contrast": {
-      "comment": "A named difference of two run-rooted operands over an instant window — the cases-averted object (proposal 2026-06-25).",
+      "comment": "A named difference of two run-rooted operands — the cases-averted object (proposal 2026-06-25). No window: the counterfactual fork is derived in the reducer (the last saved snapshot before the toggled intervention's fire time) and the result is shaped over [fork, run-end].",
       "type": "object",
-      "required": ["name", "body", "window"],
+      "required": ["name", "body"],
       "properties": {
         "name": { "type": "string" },
-        "body": { "$ref": "#/definitions/contrast_expr" },
-        "window": {
-          "comment": "The accumulation / fork window in model time units; `from` is the counterfactual fork point.",
-          "type": "object",
-          "required": ["from", "to"],
-          "properties": {
-            "from": { "type": "number" },
-            "to": { "type": "number" }
-          },
-          "additionalProperties": false
-        }
+        "body": { "$ref": "#/definitions/contrast_expr" }
       },
       "additionalProperties": false
     },
