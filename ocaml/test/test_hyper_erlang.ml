@@ -380,6 +380,35 @@ let test_err_branch_neither_mean_nor_rate () =
         branch(label = typical, weight = p, stages = 2), \
         branch(label = prolonged, stages = 1, mean = tau_pro))")
 
+(* A literal weight outside [0,1] (or explicit weights summing past 1) makes the
+   implicit last weight 1 − Σ negative — a negative entry rate / negative initial
+   population. Must be rejected, not silently lowered. *)
+let test_err_weight_out_of_range () =
+  compile_expect_error_code ~code:"E225" ~contains:"clearance"
+    (polio_with_clearance
+       "clearance : I --> R via hyper_erlang(\
+        branch(label = typical, weight = 1.5, stages = 2, mean = tau_typ), \
+        branch(label = prolonged, stages = 1, mean = tau_pro))")
+
+(* An inflow with MULTIPLE destinations into a hyper-staged source — `S --> I + W` —
+   cannot be split across the entry branches: the lowering would weight-1 the
+   sibling and double the source's drain. Rejected loudly (the single-destination
+   form is the supported pattern). *)
+let test_err_multidest_inflow_into_staged () =
+  let src =
+    "time_unit = 'weeks\n\
+     compartments { S, I, R, W }\n\
+     parameters { beta : rate  p : probability  tau_typ : positive  tau_pro : positive }\n\
+     transitions {\n\
+    \  infection : S --> I + W @ beta * S * I / (S + I + R)\n\
+    \  clearance : I --> R via hyper_erlang(\
+        branch(label = typical, weight = p, stages = 2, mean = tau_typ), \
+        branch(label = prolonged, stages = 1, mean = tau_pro))\n\
+     }\n\
+     init { S = 990  I = 10  W = 0 }\n"
+  in
+  compile_expect_error_code ~code:"E224" ~contains:"infection" src
+
 (* ── Deferred: stratified hyper_erlang → E248, not a crash / wrong lowering ──*)
 
 let test_err_stratified_hyper_deferred () =
@@ -464,7 +493,11 @@ let () =
           Alcotest.test_case "branch both mean and rate → E245" `Quick
             test_err_branch_both_mean_and_rate;
           Alcotest.test_case "branch neither mean nor rate → E245" `Quick
-            test_err_branch_neither_mean_nor_rate ] );
+            test_err_branch_neither_mean_nor_rate;
+          Alcotest.test_case "weight out of [0,1] → E225" `Quick
+            test_err_weight_out_of_range;
+          Alcotest.test_case "multi-dest inflow into staged source → E224" `Quick
+            test_err_multidest_inflow_into_staged ] );
       ( "deferred-stratified",
         [ Alcotest.test_case "stratified hyper_erlang → E248" `Quick
             test_err_stratified_hyper_deferred ] );

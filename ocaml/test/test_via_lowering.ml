@@ -227,6 +227,24 @@ let test_stage_rate_from_mean () =
   Alcotest.(check bool) "mean = tau ⇒ (3/tau)*E_s1" true
     (first_chain_rate m = expected)
 
+(* `stages = 1` is the ordinary exponential dwell (proposal §4: "the exponential
+   SEIR … not a no-op"): NO sub-staging, NO stage dimension — it lowers to the
+   SAME plain exponential `E --> I @ sigma * E` as writing `@ sigma * E` directly,
+   so a `stages = 1,2,3,…` sweep family is uniform. (Erlang(1) = Exponential.) *)
+let test_stages_one_is_plain_exponential () =
+  let via   = compile_ok (model_with_onset
+    "onset : E --> I via erlang(stages = 1, rate = sigma)") in
+  let plain = compile_ok (model_with_onset "onset : E --> I @ sigma * E") in
+  Alcotest.(check int) "stages=1: no stage compartments (4 base only)"
+    (List.length plain.Ir.compartments) (List.length via.Ir.compartments);
+  Alcotest.(check int) "stages=1: same transition count as plain exponential"
+    (List.length plain.Ir.transitions) (List.length via.Ir.transitions);
+  let onset_rate m =
+    (List.find (fun (t : Ir.transition) -> t.Ir.name = "onset")
+       m.Ir.transitions).Ir.rate in
+  Alcotest.(check bool) "stages=1: onset rate identical to `@ sigma * E`" true
+    (onset_rate via = onset_rate plain)
+
 (* ── Inflow + init land in stage 1; bare E sums in the FOI ───────────────── *)
 
 let test_inflow_and_init_land_in_stage1 () =
@@ -314,6 +332,17 @@ let test_err_single_exit_violation () =
      init { S = 990  E = 5  I = 5 }\n"
   in
   compile_expect_error_code ~code:"E246" ~contains:"death" src
+
+let test_err_unknown_erlang_keyword () =
+  compile_expect_error_code ~code:"E247" ~contains:"onset"
+    (model_with_onset
+       "onset : E --> I via erlang(stages = 3, rate = sigma, banana = 1)")
+
+let test_err_via_multiple_sources () =
+  (* A staged residence stages exactly one compartment. *)
+  compile_expect_error_code ~code:"E249" ~contains:"onset"
+    (model_with_onset
+       "onset : E + S --> I via erlang(stages = 3, rate = sigma)")
 
 let test_err_unsupported_law_deferred () =
   (* `erlang` and `hyper_erlang` now lower; a still-deferred law (`coxian`)
@@ -499,7 +528,9 @@ let () =
         [ Alcotest.test_case "rate = sigma ⇒ 3*sigma per stage" `Quick
             test_stage_rate_from_rate;
           Alcotest.test_case "mean = tau ⇒ 3/tau per stage" `Quick
-            test_stage_rate_from_mean ] );
+            test_stage_rate_from_mean;
+          Alcotest.test_case "stages = 1 ⇒ plain exponential (no staging)" `Quick
+            test_stages_one_is_plain_exponential ] );
       ( "redirect",
         [ Alcotest.test_case "inflow + init land in stage 1" `Quick
             test_inflow_and_init_land_in_stage1;
@@ -516,6 +547,10 @@ let () =
             test_err_neither_mean_nor_rate;
           Alcotest.test_case "single-exit violation → E246" `Quick
             test_err_single_exit_violation;
+          Alcotest.test_case "unknown erlang keyword → E247" `Quick
+            test_err_unknown_erlang_keyword;
+          Alcotest.test_case "via with >1 source → E249" `Quick
+            test_err_via_multiple_sources;
           Alcotest.test_case "unsupported law (coxian) deferred → E243" `Quick
             test_err_unsupported_law_deferred ] );
       ( "end-to-end",

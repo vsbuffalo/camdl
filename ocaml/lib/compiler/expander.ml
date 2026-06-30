@@ -1079,7 +1079,38 @@ let via_spec_of_call ctx (tr : transition_decl) ((law, args) : via_call)
                  ~hint:"drop `weight` from the last branch" ()); false
            ) branches |> List.for_all (fun x -> x)
          in
-         if enough && distinct && weight_ok then Some (HyperErlang { branches })
+         (* Literal weights must be probabilities in [0, 1], and if EVERY explicit
+            weight is constant-foldable their sum must be ≤ 1 (so the implicit last
+            weight 1 − Σ stays ≥ 0). A `: probability` param weight is bounded by the
+            param system; an unfoldable expression is left to that layer. An
+            out-of-range constant gives a NEGATIVE entry rate / initial population. *)
+         let rec weight_const = function
+           | EConst c -> Some c
+           | EBinOp (Add, a, b) -> (match weight_const a, weight_const b with Some x, Some y -> Some (x +. y) | _ -> None)
+           | EBinOp (Sub, a, b) -> (match weight_const a, weight_const b with Some x, Some y -> Some (x -. y) | _ -> None)
+           | EBinOp (Mul, a, b) -> (match weight_const a, weight_const b with Some x, Some y -> Some (x *. y) | _ -> None)
+           | EBinOp (Div, a, b) -> (match weight_const a, weight_const b with Some x, Some y when y <> 0.0 -> Some (x /. y) | _ -> None)
+           | _ -> None
+         in
+         let explicit  = List.filter_map (fun b -> b.hb_weight) branches in
+         let folded    = List.map weight_const explicit in
+         let any_out   = List.exists (function Some w -> w < 0.0 || w > 1.0 | None -> false) folded in
+         let all_const = explicit <> [] && List.for_all Option.is_some folded in
+         let sum_const = List.fold_left (fun acc -> function Some w -> acc +. w | None -> acc) 0.0 folded in
+         let sum_over  = all_const && sum_const > 1.0 +. 1e-9 in
+         let weights_in_range =
+           if any_out || sum_over then
+             (ignore (err ~code:"E225"
+               ~message:(Printf.sprintf
+                 "transition '%s': hyper_erlang(...) branch weights must be \
+                  probabilities in [0, 1] summing to <= 1 (the implicit last weight \
+                  is 1 - sum of the others)" tr.trname)
+               ~hint:"a weight outside [0,1] or weights summing past 1 give a \
+                      negative entry rate / negative initial population" ()); false)
+           else true
+         in
+         if enough && distinct && weight_ok && weights_in_range
+         then Some (HyperErlang { branches })
          else None
        end)
   | _ ->
@@ -1291,6 +1322,26 @@ let lower_via_transitions ctx =
       match tr.trsrc, spec with
       | [ (src, src_pre_items) ], Erlang { stages; mean } ->
         let k = Pos_int.to_int stages in
+        if k = 1 then begin
+          (* stages = 1 is the ordinary exponential dwell (proposal §4): Erlang(1)
+             IS the exponential — not a no-op, but no sub-staging either. Replace
+             the `via` transition in place with the plain exponential exit
+             `src --> dst @ coeff·src`, coeff = `rate` (or `1/mean`). The source
+             stays unstaged (no stage dimension, no inflow/init redirect), so the
+             k=1 member of a `stages = 1,2,3,…` sweep is byte-identical to writing
+             `@ rate` directly. *)
+          let coeff = match mean with
+            | Rate r -> r
+            | Mean t -> EBinOp (Div, EConst 1.0, t)
+          in
+          let src_ref = match src_pre_items with
+            | []    -> EIdent (src, dummy_loc)
+            | items -> EIndex (src, items, dummy_loc)
+          in
+          let exit_tr = { tr with trdyn = Rate (EBinOp (Mul, coeff, src_ref)) } in
+          ctx.transitions <- List.map (fun (t : transition_decl) ->
+            if t.trname = tr.trname then exit_tr else t) ctx.transitions
+        end else begin
         (* The source's index positions BEFORE staging: 0 for an unstratified
            compartment, 1 for an age-stratified one, … Counted here, before the
            stage dimension is appended to [ctx.stratifies], so it counts only the
@@ -1441,6 +1492,7 @@ let lower_via_transitions ctx =
           in
           { od with oprojection; omeasurement }
         ) ctx.obs_decls
+        end
 
       | [ (src, src_pre_items) ], HyperErlang { branches } ->
         (* ── hyper_erlang: a finite mixture of Erlang chains, branched at entry ──
@@ -1594,25 +1646,38 @@ let lower_via_transitions ctx =
               let first_cell = List.hd (branch_cells b) in
               ((first_cell, []), weight_of_branch b)) branches
           in
-          let redirect_entry (dst : destination_form) : destination_form =
+          let redirect_entry (t : transition_decl) : destination_form =
             (* Replace a `DstSum` mention of [src] (the inflow target) with the
                weighted branch. A transition that does not target [src] is left
                alone. (An entry that already branches — DstBranch — into [src] is
                not a pattern these models produce, so it is passed through.) *)
-            match dst with
+            match t.trdst with
             | DstSum refs when List.exists (fun (c, _) -> c = src) refs ->
-              (* Drop the [src] target, keep any sibling targets, splice in the
-                 weighted per-branch first stages. *)
               let others = List.filter (fun (c, _) -> c <> src) refs in
               if others = [] then DstBranch entry_branch
-              else
-                (* A multi-destination inflow `--> src + X` cannot also be a clean
-                   weighted branch into src's stages plus X; this is not a model
-                   pattern hyper_erlang targets. Keep the others as weight-1
-                   branches alongside. *)
-                DstBranch (entry_branch
-                           @ List.map (fun r -> (r, EConst 1.0)) others)
-            | other -> other
+              else begin
+                (* A multi-destination inflow `--> src + X` cannot be split across
+                   the mixture's entry branches: weighting src's stages AND keeping
+                   X would double src's drain (X as a weight-1 sibling) and decouple
+                   X from the branch event. Reject it — the single-destination
+                   inflow is the supported pattern. (erlang staging keeps
+                   `--> src + X` as one transition, so this is hyper-only.) *)
+                Diagnostics.error ctx.diags ~code:"E224"
+                  ~loc:(diag_loc_of_ast_ctx ctx t.trloc)
+                  ~message:(Printf.sprintf
+                    "transition '%s': an inflow into the hyper-staged compartment \
+                     '%s' also produces other compartments; a multi-destination \
+                     inflow cannot be split across the mixture's entry branches"
+                    t.trname src)
+                  ~hint:"enter a hyper_erlang-staged source with single-destination \
+                         inflows (`--> src`); move the co-products to a separate \
+                         transition, or use manual per-stage compartments"
+                  ();
+                (* Siblings dropped so the rejected lowering stays structurally
+                   clean — the E224 error blocks the compile, so it is unused. *)
+                DstBranch entry_branch
+              end
+            | _ -> t.trdst
           in
 
           (* 4. Replace the original `via` transition with the synthesized chains,
@@ -1620,7 +1685,7 @@ let lower_via_transitions ctx =
                 to the weighted branch. *)
           ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
             if t.trname = tr.trname then synthesized
-            else [ { t with trdst = redirect_entry t.trdst } ]
+            else [ { t with trdst = redirect_entry t } ]
           ) ctx.transitions;
 
           (* 5. Split `init { src = n }` across the branch first-stages by weight:
@@ -3933,7 +3998,7 @@ let expand_transitions_counted ctx =
           | Rate e -> e
           | Via (law_name, _) ->
             Diagnostics.error ctx.diags
-              ~code:"E243"
+              ~code:"E001"
               ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
               ~message:(Printf.sprintf
                 "internal error: transition '%s' still carries `via %s(...)` \
