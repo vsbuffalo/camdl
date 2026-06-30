@@ -39,15 +39,14 @@ impl LatentPath {
     }
 }
 
-/// One paired posterior draw: its parameter vector and its latent classification.
+/// One paired posterior draw: its parameter vector (θ) and its latent
+/// classification (where to recover the smoothed `X(T*)` for a conditioned fork).
 ///
-/// The per-draw pairing is consumed by the engine-seam fork (prerequisite #2),
-/// which reads each forkable draw's `params` (θ) and `latent` (where to get
-/// X(T*)) to run the two arms. The `fit summary` consumer today reads only the
-/// `JointEnsemble` counts, so these fields are a NAMED FOUNDATION on the
-/// committed (θ,X)→contrasts arc (CLAUDE.md) — exercised by the `classify_joint`
-/// tests, wired in production by the fork.
-#[allow(dead_code)]
+/// Both fields are consumed live by the counterfactual contrasts reducer
+/// ([`crate::fit::contrasts::emit_contrasts`]): per forkable draw it reads
+/// `params` to resolve each arm's θ (the 5-tier resolver) and `latent` to locate
+/// the saved path to fork from. `fit summary` additionally reports the
+/// [`JointEnsemble`] counts.
 pub struct JointDraw {
     pub params: HashMap<String, f64>,
     pub latent: LatentPath,
@@ -56,8 +55,7 @@ pub struct JointDraw {
 /// The keyed-joint posterior: every draw paired with its [`LatentPath`], plus
 /// the forkable-subset count — the honest denominator for a contrast band.
 pub struct JointEnsemble {
-    /// Per-draw pairing — see [`JointDraw`]; consumed by the fork (prereq #2).
-    #[allow(dead_code)]
+    /// Per-draw pairing — see [`JointDraw`]; consumed by the contrasts reducer.
     pub draws: Vec<JointDraw>,
     /// Draws with a usable latent state (`Deterministic` + `Sampled`).
     pub n_forkable: usize,

@@ -26,6 +26,15 @@
  (modules test_quantities)
  (libraries compiler ir alcotest))
 
+; Counterfactual-contrasts frontend (proposal 2026-06-25): DSL `contrasts {}`
+; diagnostics. Drives the real compile pipeline over inline models and asserts
+; each surviving contrast diagnostic (E292–E298), the ns-branched E293 hint,
+; and that E295/E298 are located.
+(test
+ (name test_contrasts)
+ (modules test_contrasts)
+ (libraries compiler ir alcotest yojson))
+
 ; Cross-language calendar-time golden (gh#98). Reads ir/golden/caltime.tsv
 ; (the same file rust/crates/ir/tests/caltime_golden.rs reads) by resolving
 ; the repo root at runtime — the TSV lives outside the ocaml dune root and

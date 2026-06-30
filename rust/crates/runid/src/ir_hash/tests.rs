@@ -262,6 +262,41 @@ fn ir_quantities_excluded_from_hash() {
     );
 }
 
+/// Symmetric with `ir_quantities_excluded_from_hash`: a non-empty `contrasts`
+/// must NOT change the model hash. Contrasts (proposal 2026-06-25) are derived
+/// counterfactual reports, like quantities deliberately excluded from
+/// `Model::hash_into` — adding a `contrasts {}` block must never re-key a model's
+/// sim/fit. This pins that the field is genuinely absent from the hash; a future
+/// refactor that re-adds the walk line would trip it.
+#[test]
+fn ir_contrasts_excluded_from_hash() {
+    use ir::contrast::{Contrast, ContrastExpr, RunNamespace};
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    m.contrasts.push(Contrast {
+        name: "averted".into(),
+        body: ContrastExpr::BinOp {
+            op: BinOp::Sub,
+            left: Box::new(ContrastExpr::RunMember {
+                run: "no_sia".into(),
+                ns: RunNamespace::Quantities,
+                member: "total".into(),
+            }),
+            right: Box::new(ContrastExpr::RunMember {
+                run: "with_sia".into(),
+                ns: RunNamespace::Quantities,
+                member: "total".into(),
+            }),
+        },
+    });
+    assert_eq!(
+        base,
+        m.content_hash(),
+        "a non-empty contrasts must NOT change the model hash (contrasts are \
+         non-identity derived reports, excluded from Model::hash_into)"
+    );
+}
+
 /// `Const(0.0)` vs `Const(-0.0)` must produce *distinct* hashes — the
 /// structural-IR-float policy keeps signed zero observable, matching
 /// `ConstExpr::PartialEq` (which compares `to_bits()`).

@@ -197,13 +197,13 @@ cooling = 0.5
 "#;
 
 /// Parse the single banded row of a scalar contrast TSV (header
-/// `q05 q25 q50 q75 q95 mean n_forkable`) into its `q50`, `mean`, `n_forkable`.
+/// `q05 q25 q50 q75 q95 mean n_used`) into its `q50`, `mean`, `n_used`.
 fn scalar_band(path: &Path) -> (f64, f64, usize) {
     let txt = std::fs::read_to_string(path).unwrap();
     let mut lines = txt.lines();
     let header = lines.next().expect("header");
     assert_eq!(
-        header, "q05\tq25\tq50\tq75\tq95\tmean\tn_forkable",
+        header, "q05\tq25\tq50\tq75\tq95\tmean\tn_used",
         "scalar contrast band columns"
     );
     let row: Vec<&str> = lines.next().expect("one band row").split('\t').collect();
@@ -250,8 +250,8 @@ fn fit_predict_emits_deaths_averted_contrast_with_positive_median() {
     // counterfactual `with_sia` arm has FEWER deaths → `no_sia − with_sia > 0`.
     let averted = find_artifact(&results, "contrasts", "averted")
         .expect("contrasts/averted.tsv must be auto-emitted by fit predict");
-    let (q50, mean, n_forkable) = scalar_band(&averted);
-    assert!(n_forkable > 0, "the band is over a positive forkable count, got {n_forkable}");
+    let (q50, mean, n_used) = scalar_band(&averted);
+    assert!(n_used > 0, "the band is over a positive used-draw count, got {n_used}");
     assert!(
         q50 > 0.0,
         "the SIA averts deaths → median averted must be positive, got q50={q50} (mean={mean})"
@@ -475,6 +475,326 @@ fn parameter_only_contrast_skips_with_a_located_note_and_no_file() {
         find_artifact(&tmp.join("results"), "contrasts", "param_only").is_none(),
         "no file may be written for a skipped parameter-only contrast"
     );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── (gh#325) ODE deterministic forking is a named deferral ────────────────────
+
+/// An ODE/MH-fit model with a `contrasts {}` block. The fit IS forkable (ODE is
+/// `Deterministic`: X recomputes from θ), so the reducer passes the latent-state
+/// gate — but ODE forking is not wired in this build, so the contrast is
+/// skip-with-noted (gh#325) and NO file is written. Poisson observations; both
+/// estimated params carry a `~` prior (MH requires priors for every estimate).
+const ODE_MODEL: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+compartments { S, I, R, D, V }
+parameters {
+  beta  : rate  in [0.05, 1.5] ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate  in [0.05, 0.5] ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate  in [0.0, 0.3]
+  N0    : count
+  I0    : count
+}
+let N = S + I + R + D + V
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+  death     : I --> D  @ mu * I
+}
+init { S = N0 - I0  I = I0 }
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia] }
+  with_sia { enable  = [sia] }
+}
+observations {
+  prevalence {
+    columns       { time : time, prevalence : count }
+    projected     = prevalence(I)
+    emit_schedule = every 4 'days
+    prevalence    ~ poisson(rate = projected)
+  }
+}
+quantities {
+  total = final(D)
+}
+contrasts {
+  averted = no_sia.quantities.total - with_sia.quantities.total
+}
+simulate { from = 0 'days  to = 60 'days }
+"#;
+
+const PREVALENCE_DATA: &str = "time\tprevalence\n4\t30\n8\t90\n12\t260\n16\t640\n20\t980\n24\t1100\n28\t900\n32\t620\n36\t400\n40\t250\n44\t150\n48\t90\n52\t55\n56\t33\n60\t20\n";
+
+const ODE_MH: &str = r#"[stages.posterior]
+algorithm = "mh"
+backend = "ode"
+chains = 2
+iterations = 60
+burn_in = 20
+thin = 1
+"#;
+
+#[test]
+fn ode_fit_with_contrasts_skips_with_gh325_note_and_no_file() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_contrasts_ode_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), ODE_MODEL).unwrap();
+    std::fs::write(tmp.join("prevalence.tsv"), PREVALENCE_DATA).unwrap();
+    let fit = format!(
+        r#"output_dir = "results"
+[model]
+camdl = "model.camdl"
+[data.observations]
+prevalence = "prevalence.tsv"
+[estimate]
+beta  = {{ bounds = [0.05, 1.5], start = 0.5 }}
+gamma = {{ bounds = [0.05, 0.5], start = 0.15 }}
+[fixed]
+mu = 0.05
+N0 = 10000
+I0 = 10
+{ODE_MH}
+"#
+    );
+    std::fs::write(tmp.join("fit.toml"), fit).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "mh+ode fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    // ODE is forkable (Deterministic), so the reducer passes the latent gate but
+    // hits the ODE-backend deferral: skip-with-note (gh#325), predict succeeds,
+    // no file is written.
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    assert!(
+        out.status.success(),
+        "fit predict must succeed (the contrast is skipped, not a hard error):\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipping") && stderr.contains("ode") && stderr.contains("gh#325"),
+        "the ODE skip note must name the deferral and gh#325, got: {stderr}"
+    );
+    assert!(
+        find_artifact(&tmp.join("results"), "contrasts", "averted").is_none(),
+        "no contrast file may be written for an ODE fit (gh#325 deferral)"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── (gh#326) observation-sourced operands are a named deferral ─────────────────
+
+/// Two contrasts on one chain_binomial fit: a STATE-sourced `total = final(D)`
+/// contrast that emits, and an OBS-sourced `<run>.observations.weekly_cases`
+/// contrast that is skip-with-noted (gh#326). Predict still succeeds; only the
+/// state-sourced file is written.
+const OBS_MODEL: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+compartments { S, I, R, D, V }
+parameters {
+  beta  : rate         in [0.05, 1.5]  ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate         in [0.05, 0.5]  ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate         in [0.0, 0.3]
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]   ~ beta(alpha = 2.0, beta = 5.0)
+  k     : positive     in [1.0, 100.0] ~ half_normal(sigma = 10.0)
+}
+let N = S + I + R + D + V
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+  death     : I --> D  @ mu * I
+}
+init { S = N0 - I0  I = I0 }
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia] }
+  with_sia { enable  = [sia] }
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+quantities {
+  total = final(D)
+}
+contrasts {
+  state_averted = no_sia.quantities.total - with_sia.quantities.total
+  obs_diff      = no_sia.observations.weekly_cases - with_sia.observations.weekly_cases
+}
+simulate { from = 0 'days  to = 80 'days }
+"#;
+
+#[test]
+fn obs_sourced_contrast_skips_with_gh326_state_sourced_emits() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_contrasts_obs_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), OBS_MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    assert!(
+        out.status.success(),
+        "fit predict must succeed (the obs-sourced contrast is skipped, not fatal):\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipping contrast 'obs_diff'") && stderr.contains("gh#326"),
+        "the obs-sourced skip note must name the contrast and gh#326, got: {stderr}"
+    );
+
+    // The state-sourced contrast emits; the obs-sourced one writes no file.
+    assert!(
+        find_artifact(&tmp.join("results"), "contrasts", "state_averted").is_some(),
+        "the state-sourced contrast must be emitted"
+    );
+    assert!(
+        find_artifact(&tmp.join("results"), "contrasts", "obs_diff").is_none(),
+        "no file may be written for the deferred obs-sourced contrast"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── Stratified-quantity contrast → per-stratum output ─────────────────────────
+
+/// A patch-stratified SIRD+V. Scalar parameters (so the fit.toml is the flat
+/// form), but the COMPARTMENTS are stratified, so the quantity
+/// `final_D[p in patch]` expands to one leaf per patch. The SIA fires on patch
+/// `a` only, so `no_sia − with_sia` is a per-patch contrast: positive for `a`
+/// (deaths averted), near zero for `b`. The output carries a `patch` dim column
+/// and one row per stratum.
+const STRAT_MODEL: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+dimensions { patch = [a, b] }
+compartments { S, I, R, D, V }
+stratify(by = patch)
+parameters {
+  beta  : rate         in [0.05, 1.5]  ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate         in [0.05, 0.5]  ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate         in [0.0, 0.3]
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]   ~ beta(alpha = 2.0, beta = 5.0)
+  k     : positive     in [1.0, 100.0] ~ half_normal(sigma = 10.0)
+}
+let N[p in patch] = S[p] + I[p] + R[p] + D[p] + V[p]
+transitions {
+  infection[p in patch] : S[p] --> I[p]  @ beta * S[p] * I[p] / N[p]
+  recovery[p in patch]  : I[p] --> R[p]  @ gamma * I[p]
+  death[p in patch]     : I[p] --> D[p]  @ mu * I[p]
+}
+init { S[p in patch] = N0 - I0   I[p in patch] = I0 }
+interventions {
+  sia_a : transfer(fraction = 0.6, from = S[a], to = V[a]) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia_a] }
+  with_sia { enable  = [sia_a] }
+}
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    projected     = incidence(infection_a)
+    emit_schedule = every 7 'days
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+quantities {
+  final_D[p in patch] = final(D[p])
+}
+contrasts {
+  averted = no_sia.quantities.final_D - with_sia.quantities.final_D
+}
+simulate { from = 0 'days  to = 80 'days }
+"#;
+
+const STRAT_DATA: &str =
+    "time\tcases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
+
+#[test]
+fn stratified_quantity_contrast_emits_per_stratum_output() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_contrasts_strat_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), STRAT_MODEL).unwrap();
+    std::fs::write(tmp.join("cases.tsv"), STRAT_DATA).unwrap();
+    let fit = format!(
+        r#"output_dir = "results"
+[model]
+camdl = "model.camdl"
+[data.observations]
+cases = "cases.tsv"
+[estimate]
+beta  = {{ bounds = [0.05, 1.5], start = 0.5 }}
+gamma = {{ bounds = [0.05, 0.5], start = 0.15 }}
+[fixed]
+mu  = 0.05
+N0  = 10000
+I0  = 10
+rho = 0.6
+k   = 10.0
+{PGAS}
+"#
+    );
+    std::fs::write(tmp.join("fit.toml"), fit).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    assert!(
+        out.status.success(),
+        "fit predict failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let averted = find_artifact(&tmp.join("results"), "contrasts", "averted")
+        .expect("contrasts/averted.tsv must be emitted for the stratified contrast");
+    let txt = std::fs::read_to_string(&averted).unwrap();
+    let lines: Vec<&str> = txt.lines().collect();
+    let header: Vec<&str> = lines[0].split('\t').collect();
+
+    // A per-stratum contrast carries the `patch` dim column and ends in n_used.
+    assert_eq!(header[0], "patch", "first column is the stratum dim: {:?}", header);
+    assert_eq!(*header.last().unwrap(), "n_used", "band columns end with n_used: {:?}", header);
+
+    // One row per stratum (patch a, patch b) — no aggregation.
+    let rows: Vec<Vec<&str>> = lines[1..].iter().map(|l| l.split('\t').collect()).collect();
+    assert_eq!(rows.len(), 2, "two strata → two rows, got {}: {:?}", rows.len(), rows);
+    let patches: Vec<&str> = rows.iter().map(|r| r[0]).collect();
+    assert!(patches.contains(&"a") && patches.contains(&"b"), "rows cover both patches: {patches:?}");
+
+    // Patch `a` is where the SIA fires → deaths averted is positive there.
+    let q50_i = header.iter().position(|c| *c == "q50").unwrap();
+    let a_row = rows.iter().find(|r| r[0] == "a").unwrap();
+    let a_q50: f64 = a_row[q50_i].parse().unwrap();
+    assert!(a_q50 > 0.0, "the SIA averts deaths on patch a → median > 0, got {a_q50}");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -5831,16 +5831,22 @@ let classify_quantity_body ctx env
   (match find_run_member body with
    | Some (run, ns_v, member, rloc) ->
      let ns = (match ns_v with NsQuantities -> "quantities" | NsObservations -> "observations") in
+     (* The corrected in-recipe form differs by namespace: a quantity is
+        referenced BARE (`quantities.foo` does not parse), whereas an observation
+        series keeps its `observations.` prefix (`observations.afp` parses). *)
+     let dropped, suggested = match ns_v with
+       | NsQuantities   -> Printf.sprintf "%s.quantities." run, member
+       | NsObservations -> Printf.sprintf "%s." run, Printf.sprintf "observations.%s" member
+     in
      Diagnostics.error ctx.diags ~code:"E293"
        ~loc:(diag_loc_of_ast_ctx ctx rloc)
        ~message:(Printf.sprintf
          "`%s.%s.%s` is a contrast operand (a run-prefixed reference), not valid \
           in a `quantities { }` recipe" run ns member)
        ~hint:(Printf.sprintf
-         "in a quantities recipe the run is implicit — drop the `%s.` prefix \
-          (write `%s.%s` for this run's series, or a bare compartment / `let`); \
-          run-prefixed references belong in a `contrasts { }` block"
-         run ns member)
+         "in a quantities recipe the run is implicit — drop the `%s` prefix and \
+          write `%s`; run-prefixed references belong in a `contrasts { }` block"
+         dropped suggested)
        ();
      None
    | None ->
@@ -6023,15 +6029,15 @@ let expand_contrasts ctx : Ir.contrast list =
   (* Lower the contrast arithmetic body. v1 grammar: run-rooted operands combined
      by `+ - * /`. A bare const, comparison, unary op, or any other form is a
      located error (a contrast operand must be a run-rooted reference). *)
-  let rec lower_body (e : expr) : Ir.contrast_expr option =
+  let rec lower_body cd_loc (e : expr) : Ir.contrast_expr option =
     match e with
     | ERunMember { run; ns; member; loc } -> resolve_run_member run ns member loc
     | EBinOp ((Add | Sub | Mul | Div) as op, a, b) ->
-      (match lower_body a, lower_body b with
+      (match lower_body cd_loc a, lower_body cd_loc b with
        | Some l, Some r -> Some (Ir.CBinOp { op = ir_bin_op op; left = l; right = r })
        | _ -> None)
     | _ ->
-      Diagnostics.error ctx.diags ~code:"E295" ~loc:Diagnostics.no_loc
+      Diagnostics.error ctx.diags ~code:"E295" ~loc:(diag_loc_of_ast_ctx ctx cd_loc)
         ~message:"a contrast body must combine run-rooted operands with + - * /"
         ~hint:"each operand is `<run>.quantities.<q>` or `<run>.observations.<stream>`; \
                reduce a series to a scalar in `quantities { }`, then contrast the \
@@ -6039,10 +6045,27 @@ let expand_contrasts ctx : Ir.contrast list =
         ();
       None
   in
+  (* Contrast names must be unique: each lowers to one `contrasts/<name>.tsv`, so
+     a duplicate would silently clobber its sibling. Reject the collision with a
+     located error (mirrors the quantity name-collision check, E289). *)
+  let seen : (string, unit) Hashtbl.t = Hashtbl.create 16 in
   List.filter_map (fun (cd : contrast_decl) ->
-    match lower_body cd.cd_body with
-    | Some c_body -> Some { Ir.c_name = cd.cd_name; Ir.c_body }
-    | None -> None
+    if Hashtbl.mem seen cd.cd_name then begin
+      Diagnostics.error ctx.diags ~code:"E298"
+        ~loc:(diag_loc_of_ast_ctx ctx cd.cd_loc)
+        ~message:(Printf.sprintf
+          "duplicate contrast '%s' — two `contrasts { }` entries share this name"
+          cd.cd_name)
+        ~hint:"each contrast is written to `contrasts/<name>.tsv`, so names must \
+               be unique; rename one of the entries"
+        ();
+      None
+    end else begin
+      Hashtbl.add seen cd.cd_name ();
+      match lower_body cd.cd_loc cd.cd_body with
+      | Some c_body -> Some { Ir.c_name = cd.cd_name; Ir.c_body }
+      | None -> None
+    end
   ) ctx.contrast_decls
 
 (* ── Hierarchical-prior cycle / self-reference check ─────────────────────── *)

@@ -149,7 +149,7 @@ pub fn emit_contrasts(
         eprintln!(
             "fit predict: skipping {} contrast(s) — counterfactual contrasts fork only \
              chain_binomial posterior fits in this build; this fit ran on {}. (ODE \
-             deterministic forking is a named gh#322 follow-up.)",
+             deterministic forking is a named gh#325 follow-up.)",
             model.contrasts.len(),
             backend.as_str(),
         );
@@ -186,6 +186,28 @@ pub fn emit_contrasts(
              paths were classified — the (θ,X) join is inconsistent"
                 .to_string(),
         );
+    }
+
+    // #273-class guard: every arm forks on the FULL parameter vector, so each
+    // draw must carry every model parameter. The canonical `draws.tsv` writes all
+    // of them (estimated columns first, then the fixed values); a draws file
+    // missing columns would silently fall back to model defaults — diverging from
+    // the fit. Assert coverage loudly rather than fork an incomplete vector. (The
+    // join reads only the canonical file today; the guard pins that invariant.)
+    let missing: Vec<&str> = model
+        .parameters
+        .iter()
+        .map(|p| p.name.as_str())
+        .filter(|name| !forkable[0].0.contains_key(*name))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "contrasts: the posterior draws are missing {} model parameter(s): {}. A \
+             contrast forks each arm on the full parameter vector; a draws.tsv lacking \
+             columns would silently fall back to model defaults, diverging from the fit.",
+            missing.len(),
+            missing.join(", "),
+        ));
     }
 
     // Validate each contrast up front; an observation-namespace operand (or a
@@ -672,14 +694,14 @@ fn validate_contrast(c: &Contrast, model: &ir::Model) -> Result<(), String> {
         match expr {
             ContrastExpr::RunMember { ns: RunNamespace::Observations, member, run } => Err(format!(
                 "the observations namespace (`{run}.observations.{member}`) is deferred in \
-                 this build; reduce the stream inside a `quantities {{}}` entry and contrast \
-                 the named quantity instead"
+                 this build (gh#326); reduce the stream inside a `quantities {{}}` entry and \
+                 contrast the named quantity instead"
             )),
             ContrastExpr::RunMember { ns: RunNamespace::Quantities, member, .. } => {
                 if quantity_reduces_observations(model, member) {
                     Err(format!(
                         "quantity '{member}' reduces an `observations.<stream>` source; \
-                         observation-sourced contrasts are deferred in this build (the \
+                         observation-sourced contrasts are deferred in this build (gh#326 — the \
                          obs-time axis over a counterfactual window is unspecified)"
                     ))
                 } else {
@@ -836,6 +858,18 @@ fn combine(op: &BinOp, l: ShapedValue, r: ShapedValue, cname: &str) -> Result<Sh
                 r.times.len()
             ));
         }
+        // Equal length is necessary but not sufficient: the snapshot VALUES must
+        // align too, else an elementwise fold silently differences mismatched
+        // times. Compare within the shared snapshot tolerance (a located error).
+        for (i, (lt, rt)) in l.times.iter().zip(&r.times).enumerate() {
+            if (lt - rt).abs() > SNAPSHOT_TIME_TOL {
+                return Err(format!(
+                    "contrast '{cname}': series operands disagree on snapshot time {i} \
+                     ({lt} vs {rt}) — the arms must share the same output times, not just \
+                     the same count",
+                ));
+            }
+        }
     }
 
     // Index the right leaves by canonical stratum key; the two operand leaf SETS
@@ -960,8 +994,9 @@ fn apply_bin(op: &BinOp, a: f64, b: f64) -> f64 {
 // ── Banding + tidy/long render ──────────────────────────────────────────────────
 
 /// Band the per-draw ShapedValues of one contrast into a tidy/long TSV:
-/// `[time] <dims…> q05 q25 q50 q75 q95 mean n_forkable`, keyed by `(stratum, time)`
-/// as the shape carries.
+/// `[time] <dims…> q05 q25 q50 q75 q95 mean n_used`, keyed by `(stratum, time)`
+/// as the shape carries. `n_used` is the per-cell count of finite/uncensored
+/// draws the band was computed over (NOT the fit-level forkable count).
 fn band_and_render(name: &str, draws: &[ShapedValue]) -> Result<String, String> {
     let template = draws
         .first()
@@ -1012,7 +1047,7 @@ fn band_and_render(name: &str, draws: &[ShapedValue]) -> Result<String, String> 
         header.push((*label).to_string());
     }
     header.push("mean".to_string());
-    header.push("n_forkable".to_string());
+    header.push("n_used".to_string());
 
     let mut out = header.join("\t");
     out.push('\n');
@@ -1061,8 +1096,8 @@ fn band_and_render(name: &str, draws: &[ShapedValue]) -> Result<String, String> 
 }
 
 /// The band/value cells for one cell's per-draw finite values:
-/// `q05 q25 q50 q75 q95 mean n_forkable`. An empty column (every draw censored)
-/// renders empty quantile + mean cells and `n_forkable = 0` — never a fabricated
+/// `q05 q25 q50 q75 q95 mean n_used`. An empty column (every draw censored)
+/// renders empty quantile + mean cells and `n_used = 0` — never a fabricated
 /// band. A non-finite value is rejected by [`band`] (an upstream bug).
 fn band_cells(col: &[f64]) -> Result<Vec<String>, String> {
     let mut cells: Vec<String> = Vec::with_capacity(QUANTILE_LEVELS.len() + 2);
@@ -1071,7 +1106,7 @@ fn band_cells(col: &[f64]) -> Result<Vec<String>, String> {
             cells.push(String::new());
         }
         cells.push(String::new()); // mean
-        cells.push("0".to_string()); // n_forkable
+        cells.push("0".to_string()); // n_used
         return Ok(cells);
     }
     let bands = band(col)?;
@@ -1148,20 +1183,72 @@ mod tests {
     }
 
     #[test]
+    fn stratum_count_mismatch_is_a_located_error() {
+        // A stratified operand (2 strata leaves) minus an unstratified one (1
+        // leaf): same shape + dimension, but the strata axes don't match → a
+        // located error naming the contrast and the differing cell counts.
+        fn keyed_leaf(dim: &str, level: &str, x: f64) -> LeafValue {
+            LeafValue {
+                key: vec![(dim.to_string(), level.to_string())],
+                dims: vec![dim.to_string()],
+                levels: vec![level.to_string()],
+                payload: LeafPayload::Scalar(QuantityDrawValue::Value(x)),
+            }
+        }
+        let strat = ShapedValue {
+            shape: Shape::Scalar,
+            leaves: vec![keyed_leaf("patch", "a", 10.0), keyed_leaf("patch", "b", 4.0)],
+            times: vec![],
+            dim: Some((1, 0)),
+        };
+        let unstrat = ShapedValue {
+            shape: Shape::Scalar,
+            leaves: vec![scalar_leaf(3.0)],
+            times: vec![],
+            dim: Some((1, 0)),
+        };
+        let err = combine(&BinOp::Sub, strat, unstrat, "by_patch").unwrap_err();
+        assert!(err.contains("stratification mismatch"), "got: {err}");
+        assert!(err.contains("'by_patch'"), "names the contrast: {err}");
+        assert!(err.contains("2 vs 1"), "names the cell counts: {err}");
+    }
+
+    #[test]
+    fn series_time_axis_value_mismatch_is_a_located_error() {
+        // Equal length, different snapshot times: the elementwise fold would
+        // silently difference mismatched times → a located error.
+        let l = ShapedValue {
+            shape: Shape::Series,
+            leaves: vec![series_leaf(&[5.0, 6.0])],
+            times: vec![7.0, 14.0],
+            dim: Some((1, 0)),
+        };
+        let r = ShapedValue {
+            shape: Shape::Series,
+            leaves: vec![series_leaf(&[1.0, 2.0])],
+            times: vec![7.0, 21.0],
+            dim: Some((1, 0)),
+        };
+        let err = combine(&BinOp::Sub, l, r, "curve").unwrap_err();
+        assert!(err.contains("snapshot time 1"), "names the offending index: {err}");
+        assert!(err.contains("'curve'"), "names the contrast: {err}");
+    }
+
+    #[test]
     fn scalar_band_columns_and_median() {
-        // Per-draw averted values: median 30, mean 30, n_forkable 5.
+        // Per-draw averted values: median 30, mean 30, n_used 5.
         let draws: Vec<ShapedValue> = [10.0, 20.0, 30.0, 40.0, 50.0]
             .iter()
             .map(|&x| ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(x)], times: vec![], dim: Some((1, 0)) })
             .collect();
         let tsv = band_and_render("averted", &draws).unwrap();
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
-        assert_eq!(lines[0], "q05\tq25\tq50\tq75\tq95\tmean\tn_forkable");
+        assert_eq!(lines[0], "q05\tq25\tq50\tq75\tq95\tmean\tn_used");
         let cells: Vec<&str> = lines[1].split('\t').collect();
-        // q50 (median) = 30, mean = 30, n_forkable = 5.
+        // q50 (median) = 30, mean = 30, n_used = 5.
         assert_eq!(cells[2], "30", "median");
         assert_eq!(cells[5], "30", "mean");
-        assert_eq!(cells[6], "5", "n_forkable");
+        assert_eq!(cells[6], "5", "n_used");
     }
 
     #[test]
@@ -1172,7 +1259,7 @@ mod tests {
             .collect();
         let tsv = band_and_render("curve", &draws).unwrap();
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
-        assert_eq!(lines[0], "time\tq05\tq25\tq50\tq75\tq95\tmean\tn_forkable");
+        assert_eq!(lines[0], "time\tq05\tq25\tq50\tq75\tq95\tmean\tn_used");
         // Two snapshot rows (t=7, t=14), median across {1,3,5}=3 and {2,4,6}=4.
         assert_eq!(lines.len(), 3, "header + 2 snapshot rows");
         let r0: Vec<&str> = lines[1].split('\t').collect();
@@ -1185,7 +1272,7 @@ mod tests {
 
     #[test]
     fn censored_scalar_is_excluded_from_the_band() {
-        // Two finite, one censored → banded over the 2 finite, n_forkable = 2.
+        // Two finite, one censored → banded over the 2 finite, n_used = 2.
         let draws = vec![
             ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(4.0)], times: vec![], dim: None },
             ShapedValue { shape: Shape::Scalar, leaves: vec![LeafValue { key: vec![], dims: vec![], levels: vec![], payload: LeafPayload::Scalar(QuantityDrawValue::Censored) }], times: vec![], dim: None },
@@ -1194,7 +1281,7 @@ mod tests {
         let tsv = band_and_render("c", &draws).unwrap();
         let cells: Vec<&str> = tsv.trim_end().lines().nth(1).unwrap().split('\t').collect();
         assert_eq!(cells[5], "6", "mean of the 2 finite values");
-        assert_eq!(cells[6], "2", "n_forkable counts only finite draws");
+        assert_eq!(cells[6], "2", "n_used counts only finite draws");
     }
 
     // ── Derived fork ─────────────────────────────────────────────────────────

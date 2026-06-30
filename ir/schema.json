@@ -1247,7 +1247,7 @@
               "type": "object",
               "required": ["op", "left", "right"],
               "properties": {
-                "op": { "type": "string" },
+                "op": { "type": "string", "enum": ["add", "sub", "mul", "div"] },
                 "left": { "$ref": "#/definitions/contrast_expr" },
                 "right": { "$ref": "#/definitions/contrast_expr" }
               },

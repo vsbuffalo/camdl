@@ -311,6 +311,46 @@ let quantity_serde_test () =
     {|{"name":"d","body":{"derived":{"const":2.5}}}|}
     (Yojson.Safe.to_string (Serde.quantity_to_json pin_d))
 
+(* proposal 2026-06-25: counterfactual contrasts. The `contrast` IR node is new
+   and appears in no golden model the round-trip above exercises, so assert its
+   serde directly (mirroring quantity_serde_test and the Rust contrast.rs
+   coverage): a run-member operand, a bin-op body, the run_namespace tags, and
+   the exact pinned wire shape. *)
+let contrast_serde_test () =
+  let open Ir in
+  let roundtrips (c : contrast) =
+    Serde.contrast_of_json (Serde.contrast_to_json c) = c in
+  (* run_namespace tags round-trip both arms. *)
+  Alcotest.(check bool) "NsQuantities round-trips" true
+    (Serde.run_namespace_of_json (Serde.run_namespace_to_json NsQuantities)
+     = NsQuantities);
+  Alcotest.(check bool) "NsObservations round-trips" true
+    (Serde.run_namespace_of_json (Serde.run_namespace_to_json NsObservations)
+     = NsObservations);
+  (* A scalar contrast differencing a quantity across two runs (the showcase
+     "deaths averted" shape). *)
+  let averted = {
+    c_name = "averted";
+    c_body = CBinOp {
+      op = Sub;
+      left  = CRunMember { run = "no_sia";   ns = NsQuantities; member = "total" };
+      right = CRunMember { run = "with_sia"; ns = NsQuantities; member = "total" };
+    };
+  } in
+  (* A bare run-member body against the observations namespace. *)
+  let raw = {
+    c_name = "raw";
+    c_body = CRunMember { run = "fitted"; ns = NsObservations; member = "afp" };
+  } in
+  List.iter (fun (label, c) ->
+    Alcotest.(check bool) (label ^ " round-trips") true (roundtrips c))
+    [ ("contrast bin_op Sub (quantities)", averted);
+      ("contrast bare run_member (observations)", raw) ];
+  (* Pin the exact on-wire shape the Rust serde fixes (contrast.rs). *)
+  Alcotest.(check string) "pinned contrast wire"
+    {|{"name":"averted","body":{"bin_op":{"op":"sub","left":{"run_member":{"run":"no_sia","ns":"quantities","member":"total"}},"right":{"run_member":{"run":"with_sia","ns":"quantities","member":"total"}}}}}|}
+    (Yojson.Safe.to_string (Serde.contrast_to_json averted))
+
 let () =
   let tests =
     List.map (fun name ->
@@ -327,6 +367,7 @@ let () =
     Alcotest.test_case "integrator serde (rk45 round-trip + strict)" `Quick integrator_serde_test;
     Alcotest.test_case "expr serde (PerEvalRef round-trips)" `Quick expr_serde_test;
     Alcotest.test_case "quantity serde (round-trip + pinned wire)" `Quick quantity_serde_test;
+    Alcotest.test_case "contrast serde (round-trip + pinned wire)" `Quick contrast_serde_test;
   ] in
   Alcotest.run "IR round-trip" [
     ("golden", tests);
