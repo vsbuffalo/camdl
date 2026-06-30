@@ -37,6 +37,7 @@ pub mod nlopt_stage;
 pub mod handle;   // gh#322: fit handles (@label / hash / run-dir / fit.toml) → segment
 pub mod joint;    // gh#322: keyed-joint (θ, X) read — LatentPath classifier + join
 pub mod predict;  // `camdl fit predict`: free-forward posterior predictive verb + types
+pub mod contrasts; // gh#322: counterfactual `contrasts {}` two-arm replay reducer (stage C)
 
 /// `camdl fit methods` — print the supported (algorithm, backend) pairs.
 /// Reads from `methods::METHODS`, the single source of truth.

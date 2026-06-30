@@ -153,8 +153,18 @@ which is exactly what the `quantities {}` block is for.
 Each contrast bands over the **forkable** posterior subset (the joined count
 surfaced, per the `(θ, X)` partial-join contract) and is emitted as a tidy/long
 `contrasts/<name>.tsv` keyed by whatever axes the operands carry (`stratum`,
-`time`) with `q05…q95 / mean / n_forkable` columns — the same shape the
-quantities series/stratified emitter produces.
+`time`) with `q05…q95 / mean / n_forkable` columns.
+
+**Invocation: auto-emitted on `fit predict`.** A contrast has no verb or flag of
+its own. When the model declares a `contrasts {}` block,
+`camdl fit predict <fit>` computes each contrast against that fit and writes
+`contrasts/<name>.tsv` under the predict output directory, alongside the
+predictive / quantities / observed sidecars. The fit handle is the predict
+invocation argument, so `fitted` resolves to the no-overlay run of that one fit
+(the fit's identity is the output path). A fit with no forkable draws (no saved
+latent paths) or a deterministic backend emits no file and a located note rather
+than a band; a point-estimate fit is already refused by `fit predict` before any
+output.
 
 **The namespace is the run, with two uniform sub-namespaces — `quantities` and
 `observations`.** Dot is one operator — "member of a run" — and a run member is

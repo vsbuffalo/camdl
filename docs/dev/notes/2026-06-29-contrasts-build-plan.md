@@ -150,8 +150,10 @@ OCaml + Rust + golden, per "Changing the IR schema" in CLAUDE.md)
 
 ## Stage C — Rust reducer (`rust/crates/`, second gated commit)
 
-The `contrasts {}` evaluator, invoked on a fit (the `fitted`/scenario arms read
-its `(θ, X)` output):
+The `contrasts {}` evaluator, **auto-emitted on `fit predict`** (no new
+verb/flag: when the model declares a `contrasts {}` block, `fit predict` also
+writes `contrasts/<name>.tsv` under the predict output dir, alongside the
+predictive output). The `fitted`/scenario arms read the fit's `(θ, X)` output:
 
 1. Resolve the forkable subset via `fit::joint::classify_joint` (built); reject
    a point-estimate fit (`LatentPath` gate). Surface the forkable count.

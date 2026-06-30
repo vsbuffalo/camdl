@@ -1407,6 +1407,21 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         written.push(path);
     }
+    // Counterfactual contrasts: auto-emitted when the model declares any
+    // `contrasts {}`. The two-arm replay reducer forks each forkable posterior
+    // draw from its smoothed X(T*) and bands the difference into
+    // `contrasts/<name>.tsv`. A model with no `contrasts {}` is byte-identical
+    // (this is a no-op). A non-forkable / ODE fit emits no file and a located note.
+    if !model.contrasts.is_empty() {
+        let paths = crate::fit::contrasts::emit_contrasts(
+            &segment,
+            args.stage.as_deref(),
+            &model,
+            posterior.backend,
+            seed,
+        )?;
+        written.extend(paths);
+    }
     let method_label = posterior.method.map(|m| m.as_str()).unwrap_or("posterior");
     let mut horizons: Vec<String> = Vec::new();
     if free_forward.is_some() {
