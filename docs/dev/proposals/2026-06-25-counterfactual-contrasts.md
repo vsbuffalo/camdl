@@ -1,12 +1,15 @@
 # Counterfactual contrasts (cases averted)
 
-Status: **spec — implement.** The design is converged (three adversarial review
-rounds) and its infrastructure prerequisites are now built: the joint keyed
-`(θ, X)` output (#1), the start-from-state engine seam (#2), and the
-`LatentPath` fork-validity classifier (#4) have landed (gh#322), and generated
-quantities (`2026-06-25-generated-quantities.md`) shipped. What remains to build
-is the DSL `contrasts {}` surface + the two-arm replay reducer (#3) and a stored
-quantity dimension for the contrast binop check (#5).
+Status: **v1 implemented** (gh#322). The infrastructure prerequisites — the
+joint keyed `(θ, X)` output (#1), the start-from-state engine seam (#2), and the
+`LatentPath` fork-validity classifier (#4) — landed, as did the DSL
+`contrasts {}` surface + IR `Contrast` node, the stored quantity dimension (#5),
+and the two-arm replay reducer (#3) auto-emitted on `fit predict`. v1 covers
+**chain_binomial** fits with **state-sourced** operands (the
+cases/deaths-averted headline). Two parts are loud-deferred with tracked
+follow-ups: ODE/deterministic forks (**gh#325**) and observation-sourced
+operands (**gh#326**) — see "v1 implementation status" below. (Generated
+quantities, a prerequisite, shipped via `2026-06-25-generated-quantities.md`.)
 
 Splits the counterfactual half out of
 `2026-06-24-generated-quantities-and-counterfactuals.md` (superseded).
