@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.21",
+  "ir_version": "0.22",
   "validated_by": "hand-curated-fixture",
   "model": {
     "name": "seir_spatial_5",
