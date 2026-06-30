@@ -108,13 +108,13 @@ _rejects_ ODE as `NotFilterable::Deterministic`, the exact opposite of the
 fork's verdict (ODE is the easy, valid case), so reusing it would overload one
 enum arm with two opposite meanings. The validity table:
 
-| method    | backend        | latent state                 | conditioned fork               |
-| --------- | -------------- | ---------------------------- | ------------------------------ |
-| PGAS      | chain_binomial | smoothed path per draw       | valid (CRN)                    |
-| PMMH / PF | chain_binomial | path _if saved_ (today: not) | valid once saved (CRN)         |
-| IF2       | chain_binomial | none (MLE point)             | rejected — `PointEstimate`     |
-| MH        | ODE            | θ-determined                 | valid, deterministic (no CRN)  |
-| **NLopt** | ODE            | θ-determined **point**       | **rejected — `PointEstimate`** |
+| method    | backend        | latent state                 | conditioned fork                                    |
+| --------- | -------------- | ---------------------------- | --------------------------------------------------- |
+| PGAS      | chain_binomial | smoothed path per draw       | valid (CRN)                                         |
+| PMMH / PF | chain_binomial | path _if saved_ (today: not) | valid once saved (CRN)                              |
+| IF2       | chain_binomial | none (MLE point)             | rejected — `PointEstimate`                          |
+| MH        | ODE            | θ-determined                 | valid, deterministic (no CRN); v1-deferred → gh#325 |
+| **NLopt** | ODE            | θ-determined **point**       | **rejected — `PointEstimate`**                      |
 
 NLopt on ODE is a point estimate (no posterior), so it rejects exactly like IF2
 — the classifier keys on posterior-vs-point (the artifact), not on
@@ -165,6 +165,21 @@ invocation argument, so `fitted` resolves to the no-overlay run of that one fit
 latent paths) or a deterministic backend emits no file and a located note rather
 than a band; a point-estimate fit is already refused by `fit predict` before any
 output.
+
+**v1 implementation status.** Shipped now: **chain_binomial** fits with
+**state-sourced** operands — the `deaths_averted` line above (the CRN headline).
+Two parts of this surface are landed-but-loud-deferred, each with a tracked
+follow-up:
+
+- **ODE / deterministic forks** (`MH` on ODE) → **gh#325**. The fork is
+  well-defined (recompute `X(T*)` from θ, two-leg integration) but needs the
+  start-from-state seam extended to `run_ode`; until then an ODE fit emits the
+  located note above, not a band.
+- **Observation-sourced operands** (`reported_averted`, `cases_averted` above,
+  i.e. anything reading `run.observations.<stream>`) → **gh#326**. Blocked on
+  the obs-time axis over a fork window (the deferred `last_obs`/`first_obs`
+  time-source); a contrast referencing them is skipped with a note while the
+  model's state-sourced contrasts still emit.
 
 **The namespace is the run, with two uniform sub-namespaces — `quantities` and
 `observations`.** Dot is one operator — "member of a run" — and a run member is
@@ -354,8 +369,15 @@ blocker for prerequisites #1–#2.)
 
 These are named non-goals for v1, not unresolved design questions. v1 ships
 shape-polymorphic contrasts (scalar / series / stratified / time × strata, by
-shape inheritance); what is deferred is _selection_, not _shape_:
+shape inheritance) on **chain_binomial** fits with **state-sourced** operands;
+the deferrals below each have a tracked issue:
 
+- **ODE / deterministic forks** — **gh#325**. Recompute `X(T*)` from θ via a
+  start-from-state seam on `run_ode` (two-leg factual/arm integration); v1 forks
+  chain_binomial only.
+- **Observation-sourced operands** (`run.observations.<stream>`) — **gh#326**.
+  Blocked on the obs-time axis over a fork window; v1 operands are state-sourced
+  quantities.
 - Sub-cell / sub-time **selection** —
   `no_sia.quantities.deaths[region = north]`, a `[..]` index picking one cell or
   instant. _Contrasting_ stratified / series quantities (whole-vector results)
