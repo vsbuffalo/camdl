@@ -217,6 +217,7 @@ let quantity_serde_test () =
   let peak = {
     q_name = "peak_prevalence";
     q_stratum = [];
+    q_dimension = None;
     q_body = QBReduced {
       source = QSState (BinOp { op = Div; left = Pop "I"; right = Pop "N" });
       reduce = Some (RValue VMax);
@@ -226,23 +227,27 @@ let quantity_serde_test () =
      in a sibling, plus an Integral — exercise every TemporalReduce arm. *)
   let series = {
     q_name = "prevalence"; q_stratum = [];
+    q_dimension = None;
     q_body = QBReduced {
       source = QSState (BinOp { op = Div; left = Pop "I"; right = Pop "N" });
       reduce = None };
   } in
   let onset = {
     q_name = "takeoff_time"; q_stratum = [];
+    q_dimension = None;
     q_body = QBReduced {
       source = QSState (Pop "I_total");
       reduce = Some (RTime (FirstAbove (Param "i_thresh"))) };
   } in
   let person_days = {
     q_name = "person_days_inf"; q_stratum = [];
+    q_dimension = None;
     q_body = QBReduced { source = QSState (Pop "I"); reduce = Some RIntegral };
   } in
   let counts = {
     q_name = "positive_months";
     q_stratum = [("patch", "p1")];
+    q_dimension = None;
     q_body = QBReduced {
       source = QSState (Pop "I_p1");
       reduce = Some (RValue (VCountAbove (Param "i_thresh"))) };
@@ -252,6 +257,7 @@ let quantity_serde_test () =
   let dur = {
     q_name = "outbreak_dur";
     q_stratum = [("patch", "p1")];
+    q_dimension = None;
     q_body = QBDerived (SUnOp {
       op = Abs;
       arg = SBinOp {
@@ -268,6 +274,7 @@ let quantity_serde_test () =
   (* v1.1: an observation-source quantity (reduces the simulated y_sim). *)
   let obs = {
     q_name = "first_afp"; q_stratum = [];
+    q_dimension = None;
     q_body = QBReduced {
       source = QSObservation "afp";
       reduce = Some (RTime (FirstAbove (Const 0.0))) };
@@ -287,6 +294,7 @@ let quantity_serde_test () =
   (* Pin the exact on-wire shape the Rust serde fixes (quantity.rs pins_wire_tags). *)
   let pin_q = {
     q_name = "p"; q_stratum = [];
+    q_dimension = None;
     q_body = QBReduced {
       source = QSState (Pop "I");
       reduce = Some (RTime TimeOfMax) };
@@ -296,6 +304,7 @@ let quantity_serde_test () =
     (Yojson.Safe.to_string (Serde.quantity_to_json pin_q));
   let pin_d = {
     q_name = "d"; q_stratum = [];
+    q_dimension = None;
     q_body = QBDerived (SConst 2.5);
   } in
   Alcotest.(check string) "pinned derived/const wire"

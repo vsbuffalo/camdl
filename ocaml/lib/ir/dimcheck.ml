@@ -79,6 +79,7 @@ type subject =
   | SOde         of string   (* compartment whose ODE derivative *)
   | SObservation of string
   | SBinding     of string
+  | SContrast    of string   (* contrast whose operand dimensions conflict *)
 
 type diagnostic = {
   severity : severity;
@@ -92,6 +93,12 @@ type diagnostic = {
 type result = {
   diagnostics : diagnostic list;
   param_dims  : (string * dim_vec) list;
+  (* Resolved dimension of each generated quantity, keyed by (name, stratum)
+     (prerequisite #5 of the counterfactual-contrasts proposal). Carries only
+     the dimensions that resolved to a concrete vector; the compiler writes
+     these onto the `Quantity` IR nodes so the Rust contrast reducer can check
+     operand-dimension agreement without re-deriving. *)
+  quantity_dims : ((string * (string * string) list) * dim_vec) list;
 }
 
 (* ── Checker state ──────────────────────────────────────────────────────── *)
@@ -751,6 +758,161 @@ let rec expr_to_short_string (e : expr) : string =
   | BindingRef n -> n
   | PerEvalRef n -> n   (* display helper: render the name, never crash in error formatting *)
 
+(* ── Generated quantities + counterfactual contrasts ──────────────────────────
+   Run AFTER the transition/observation inference rounds (params resolved). Two
+   jobs: (a) compute each quantity's resolved dimension for the #5 stored field
+   (read-only — `read_dim` never emits or allocates fresh vars, so adding this
+   never surfaces a new error on an existing quantity-bearing model); and (b)
+   the contrast dimensional check — operands of `+`/`-` must agree. *)
+
+(* The result dimension of a temporal reduction of a series of dimension
+   [series]. Final/Max/Min/Mean preserve it; CountAbove/CountBelow count snapshots
+   (dimensionless); a time reduction yields T; an integral multiplies by T; a bare
+   series keeps it. *)
+let reduced_value_dim (series : dim) (reduce : temporal_reduce option) : dim =
+  match reduce with
+  | None -> series
+  | Some (RValue (VFinal | VMax | VMin | VMean)) -> series
+  | Some (RValue (VCountAbove _ | VCountBelow _)) -> Known dimensionless
+  | Some (RTime _) -> Known (make 0 1)
+  | Some RIntegral ->
+    (match series with Known v -> Known (dim_mul v (make 0 1)) | d -> d)
+
+(* The dimension of a declared observation stream — its projection's dimension
+   (population for incidence/prevalence; the inferred dim for a DerivedExpr).
+   Read-only. *)
+let obs_projection_dim st (m : model) (stream : string) : dim =
+  match List.find_opt (fun (o : observation_model) -> o.name = stream) m.observations with
+  | Some o ->
+    (match o.projection with
+     | DerivedExpr e -> read_dim st e
+     | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ ->
+       Known population)
+  | None -> Unknown (-1)
+
+(* Build the (name, stratum) → resolved-dimension table for all quantities, in
+   declaration order so a Derived body's QRef reads an earlier leaf's dim. *)
+let compute_quantity_dim_table st (m : model)
+    : ((string * (string * string) list), dim) Hashtbl.t =
+  let resolved : ((string * (string * string) list), dim) Hashtbl.t = Hashtbl.create 16 in
+  let lookup_qref (name : string) (stratum : (string * string) list) : dim =
+    match Hashtbl.find_opt resolved (name, stratum) with
+    | Some d -> d
+    | None ->
+      (* fall back to any leaf of that name (dim is stratum-invariant) *)
+      Hashtbl.fold (fun (n, _) d acc ->
+        match acc with Some _ -> acc | None -> if n = name then Some d else None)
+        resolved None
+      |> (function Some d -> d | None -> Unknown (-1))
+  in
+  let rec scalar_dim (se : scalar_expr) : dim =
+    match se with
+    | SConst _ -> Any
+    | SParam p ->
+      (match Hashtbl.find_opt st.param_map p with
+       | Some entry -> resolve st entry.stable_dim
+       | None -> Unknown (-1))
+    | SQRef q -> lookup_qref q.qref_name q.qref_stratum
+    | SUnOp { op; arg } ->
+      let da = scalar_dim arg in
+      (match op with
+       | Neg | Abs | Floor | Ceil -> da
+       | Exp | Log | Sin | Cos | Tanh -> Known dimensionless
+       | Sqrt -> (match resolve st da with
+                  | Any -> Any
+                  | Known v when dim_is_even v -> Known (dim_half v)
+                  | Known _ -> Known dimensionless
+                  | _ -> Unknown (-1)))
+    | SBinOp { op; left; right } ->
+      let dl = scalar_dim left and dr = scalar_dim right in
+      (match op with
+       | Add | Sub | Min | Max | Mod ->
+         (match dl, dr with Any, d | d, Any -> d | Known _, _ -> dl | _, Known _ -> dr | _ -> dl)
+       | Mul -> (match resolve st dl, resolve st dr with
+                 | Any, d | d, Any -> d
+                 | Known v1, Known v2 -> Known (dim_mul v1 v2) | _ -> Unknown (-1))
+       | Div -> (match resolve st dl, resolve st dr with
+                 | Any, _ -> Any | _, Any -> dl
+                 | Known v1, Known v2 -> Known (dim_div v1 v2) | _ -> Unknown (-1))
+       | Pow -> Unknown (-1)
+       | Eq | Neq | Lt | Gt | Le | Ge -> Known dimensionless)
+    | SCond { then_; _ } -> scalar_dim then_
+  in
+  List.iter (fun (q : quantity) ->
+    let d = match q.q_body with
+      | QBReduced { source; reduce } ->
+        let sd = match source with
+          | QSState e -> read_dim st e
+          | QSObservation stream -> obs_projection_dim st m stream
+        in reduced_value_dim sd reduce
+      | QBDerived se -> scalar_dim se
+    in
+    Hashtbl.replace resolved (q.q_name, q.q_stratum) (resolve st d)
+  ) m.quantities;
+  resolved
+
+(* A short rendering of a contrast operand for diagnostics. *)
+let rec show_contrast_expr (ce : contrast_expr) : string =
+  match ce with
+  | CRunMember { run; ns; member } ->
+    let nss = match ns with NsQuantities -> "quantities" | NsObservations -> "observations" in
+    Printf.sprintf "%s.%s.%s" run nss member
+  | CBinOp { op; left; right } ->
+    let os = match op with
+      | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | _ -> "?" in
+    Printf.sprintf "(%s %s %s)" (show_contrast_expr left) os (show_contrast_expr right)
+
+(* The dimensional check on every `contrasts { }` entry: the operands of `+`/`-`
+   must agree (a `deaths - rate` contrast is meaningless). Permissive on
+   unresolved operands (fires only on a Known mismatch), mirroring the
+   observation-likelihood `constrain_known` policy. *)
+let check_contrasts st (m : model)
+    (qdims : ((string * (string * string) list), dim) Hashtbl.t) : unit =
+  let member_dim ns member : dim =
+    match ns with
+    | NsQuantities ->
+      Hashtbl.fold (fun (n, _) d acc ->
+        match acc with Some _ -> acc | None -> if n = member then Some d else None)
+        qdims None
+      |> (function Some d -> d | None -> Unknown (-1))
+    | NsObservations -> obs_projection_dim st m member
+  in
+  let rec infer_ce (ce : contrast_expr) : dim =
+    match ce with
+    | CRunMember { ns; member; _ } -> resolve st (member_dim ns member)
+    | CBinOp { op; left; right } ->
+      let dl = infer_ce left and dr = infer_ce right in
+      (match op with
+       | Add | Sub ->
+         (match dl, dr with
+          | Known v1, Known v2 when not (dim_eq v1 v2) ->
+            emit_error st ~code:"E297"
+              ~message:(Printf.sprintf
+                "contrast operands have incompatible dimensions: \
+                 `%s` is %s but `%s` is %s"
+                (show_contrast_expr left)  (dim_display v1)
+                (show_contrast_expr right) (dim_display v2))
+              ~hint:"the two arms of a difference must report the same quantity \
+                     (same dimension); compare counts with counts, rates with rates"
+              ();
+            dl
+          | Any, d | d, Any -> d
+          | Known _, _ -> dl
+          | _ -> dr)
+       | Mul -> (match dl, dr with
+                 | Any, d | d, Any -> d
+                 | Known v1, Known v2 -> Known (dim_mul v1 v2) | _ -> Unknown (-1))
+       | Div -> (match dl, dr with
+                 | Any, _ -> Any | _, Any -> dl
+                 | Known v1, Known v2 -> Known (dim_div v1 v2) | _ -> Unknown (-1))
+       | _ -> Unknown (-1))
+  in
+  List.iter (fun (c : contrast) ->
+    st.subject <- Some (SContrast c.c_name);
+    ignore (infer_ce c.c_body)
+  ) m.contrasts;
+  st.subject <- None
+
 (* ── Main check ─────────────────────────────────────────────────────────── *)
 
 let check_model (m : model) : result =
@@ -1171,5 +1333,17 @@ let check_model (m : model) : result =
     | Any -> ()
   ) st.param_map;
 
+  (* Generated quantities (#5 stored dimension) + the contrast dimensional check.
+     Runs last, after all param/table/binding dims are resolved. The quantity
+     dims are read-only (`read_dim`); only the contrast check emits. *)
+  st.subject <- None;
+  let qdim_table = compute_quantity_dim_table st m in
+  check_contrasts st m qdim_table;
+  let quantity_dims =
+    Hashtbl.fold (fun key d acc ->
+      match d with Known v -> (key, v) :: acc | _ -> acc)
+      qdim_table [] in
+
   { diagnostics = List.rev st.diags;
-    param_dims = !param_dims }
+    param_dims = !param_dims;
+    quantity_dims }

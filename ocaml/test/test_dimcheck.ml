@@ -76,6 +76,7 @@ let empty_model
     identity_tracked_compartments = [];
     doc_index = empty_doc_index;
     quantities = [];
+    contrasts = [];
   }
 
 let mk_compartment name : compartment = { name; kind = Integer }

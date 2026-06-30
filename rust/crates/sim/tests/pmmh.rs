@@ -105,7 +105,7 @@ fn pure_death_model() -> (CompiledModel, Vec<f64>) {
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     };
 
     let compiled = CompiledModel::new(model).unwrap();

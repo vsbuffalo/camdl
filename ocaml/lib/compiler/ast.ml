@@ -84,6 +84,18 @@ and expr =
      the classifier lowers it to Ir.QSObservation; anywhere else resolve_expr
      rejects it (E290). *)
   | EObsAccess of string * loc
+  (* <run>.<quantities|observations>.<member> — a run-rooted contrast operand
+     (counterfactual-contrasts proposal 2026-06-25). `run` is an explicit
+     scenario name or the reserved `fitted`; `ns` selects the sub-namespace;
+     `member` names a quantity / observation stream on that run. Meaningful
+     ONLY inside a `contrasts { }` body, where the expander lowers it to
+     Ir.CRunMember; anywhere else resolve_expr / the quantity classifier reject
+     it with a located cross-context diagnostic. *)
+  | ERunMember of { run : string; ns : run_namespace; member : string; loc : loc }
+
+(* The two symmetric sub-namespaces of a run member: `<run>.quantities.<q>` and
+   `<run>.observations.<stream>`. *)
+and run_namespace = NsQuantities | NsObservations
 
 type compartment_kind = Integer | Real
 
@@ -328,6 +340,19 @@ type quantity_decl = {
   qd_loc     : loc;
 }
 
+(* A counterfactual-contrast declaration (proposal 2026-06-25):
+   `name = <body> over [<from_instant>, <to_instant>]`. The body is arithmetic
+   (reusing [EBinOp]) over run-rooted [ERunMember] operands; the window endpoints
+   are typed-time instants (`origin + 20 'weeks`, `date(...)`), not bare
+   durations. Resolved + lowered to Ir.contrast by the expander. *)
+type contrast_decl = {
+  cd_name   : string;
+  cd_body   : expr;            (* arithmetic over ERunMember; reuses EBinOp *)
+  cd_window : expr * expr;     (* over [from_instant, to_instant] *)
+  cd_doc    : doc option;
+  cd_loc    : loc;
+}
+
 type func_decl = {
   fname    : string;
   findices : index_binding list;
@@ -425,3 +450,4 @@ type declaration =
   | DScenarios    of scenario_decl list
   | DBalance      of balance_decl
   | DQuantities   of quantity_decl list   (* proposal 2026-06-25 *)
+  | DContrasts    of contrast_decl list   (* counterfactual contrasts, proposal 2026-06-25 *)

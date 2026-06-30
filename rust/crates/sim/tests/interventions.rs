@@ -77,7 +77,7 @@ fn minimal_model_with_interventions(
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     }
 }
 
@@ -208,7 +208,7 @@ fn chain_binomial_fires_scheduled_intervention_exactly_once() {
         },
         interventions: vec![intervention],
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     };
     let compiled = CompiledModel::new(model).unwrap();
     let params = compiled.default_params.clone();

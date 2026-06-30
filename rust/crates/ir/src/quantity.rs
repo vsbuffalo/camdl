@@ -30,6 +30,14 @@ pub struct Quantity {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stratum: Vec<StratumKey>,
     pub body: QuantityBody,
+    /// Resolved dimension of the reduced value as `(P exponent, T exponent)`
+    /// (prerequisite #5 of the counterfactual-contrasts proposal). Computed by
+    /// the OCaml `dimcheck` pass and stored so the contrast reducer can check
+    /// operand-dimension agreement without re-deriving. `None` when the dimension
+    /// is undetermined; omitted on the wire when absent, so a model whose
+    /// quantities carry no resolved dimension is byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<(i32, i32)>,
 }
 
 /// Either a reduction of a source series, or reduction arithmetic over earlier
@@ -178,6 +186,7 @@ mod tests {
         let series = Quantity {
             name: "prevalence".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::bin_op(
                     BinOp::Div,
@@ -191,6 +200,7 @@ mod tests {
         let peak = Quantity {
             name: "peak_prevalence".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::bin_op(
                     BinOp::Div,
@@ -204,6 +214,7 @@ mod tests {
         let onset = Quantity {
             name: "takeoff_time".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::pop("I_total")),
                 reduce: Some(TemporalReduce::Time(TimeReduce::FirstAbove(Expr::param(
@@ -215,6 +226,7 @@ mod tests {
         let pd = Quantity {
             name: "person_days_inf".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::pop("I")),
                 reduce: Some(TemporalReduce::Integral),
@@ -224,6 +236,7 @@ mod tests {
         let pos = Quantity {
             name: "positive_months".into(),
             stratum: vec![StratumKey { dim: "patch".into(), level: "p1".into() }],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::pop("I_p1")),
                 reduce: Some(TemporalReduce::Value(ValueReduce::CountAbove(Expr::param(
@@ -243,6 +256,7 @@ mod tests {
         let dur = Quantity {
             name: "outbreak_dur".into(),
             stratum: vec![StratumKey { dim: "patch".into(), level: "p1".into() }],
+            dimension: None,
             body: QuantityBody::Derived(ScalarExpr::UnOp {
                 op: UnOp::Abs,
                 arg: Box::new(ScalarExpr::BinOp {
@@ -271,6 +285,7 @@ mod tests {
         let q = Quantity {
             name: "p".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::pop("I")),
                 reduce: Some(TemporalReduce::Time(TimeReduce::TimeOfMax)),
@@ -284,6 +299,7 @@ mod tests {
         let d = Quantity {
             name: "d".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Derived(ScalarExpr::Const(2.5)),
         };
         assert_eq!(
@@ -298,6 +314,7 @@ mod tests {
         let q = Quantity {
             name: "first_afp".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::Observation { stream: "afp".into() },
                 reduce: Some(TemporalReduce::Time(TimeReduce::FirstAbove(Expr::const_(0.0)))),

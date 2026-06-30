@@ -134,7 +134,7 @@ fn sir_model(output_times: Vec<f64>, t_end: f64) -> (CompiledModel, Vec<f64>) {
         model_structure: None,
         balance: None,
         identity_tracked_compartments: vec![],
-        quantities: vec![],
+        quantities: vec![], contrasts: vec![],
     };
 
     let compiled = CompiledModel::new(model).unwrap();

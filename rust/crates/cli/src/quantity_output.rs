@@ -626,6 +626,7 @@ mod tests {
             name: name.to_string(),
             stratum: Vec::<StratumKey>::new(),
             body,
+            dimension: None,
         };
         let quantities = vec![
             q("prevalence", QuantityBody::Reduced {
@@ -705,6 +706,7 @@ mod tests {
                 source: QuantitySource::State(ir::expr::Expr::Const(ir::expr::ConstExpr { value: 0.0 })),
                 reduce: Some(TemporalReduce::Value(ValueReduce::Max)),
             },
+            dimension: None,
         }];
         // Two draws of a plain value scalar.
         let draws = vec![

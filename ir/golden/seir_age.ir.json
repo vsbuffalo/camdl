@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.20",
-  "validated_by": "ocaml-compiler-v0.20",
+  "ir_version": "0.21",
+  "validated_by": "ocaml-compiler-v0.21",
   "model": {
     "name": "seir_age",
     "version": "0.3",

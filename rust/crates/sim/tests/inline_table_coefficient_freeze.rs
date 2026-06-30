@@ -89,7 +89,7 @@ fn decay_model() -> Model {
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     }
 }
 

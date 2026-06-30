@@ -300,8 +300,14 @@ let run_validate (d : compile_detail) : Diagnostics.diagnostic list =
 (** Run Dimcheck on a compiled model and route results into the diagnostic
     context. Exposed so `camdlc check` runs the same pass as `camdlc compile`;
     previously `check` skipped dimcheck entirely (GH #9). *)
-let run_dimcheck (d : compile_detail) : Diagnostics.diagnostic list =
-  if !no_dim_check then []
+(* Run dimcheck, returning both the routed diagnostics and the resolved quantity
+   dimensions (prerequisite #5). The dimensions are written back onto the model's
+   quantity nodes by [finish_compile] — dimcheck is the single dimension
+   authority, and the stored field is a cache for the Rust contrast reducer. *)
+let run_dimcheck_full (d : compile_detail)
+    : Diagnostics.diagnostic list
+      * ((string * (string * string) list) * (int * int)) list =
+  if !no_dim_check then ([], [])
   else
     (* dimcheck runs on the IR (no source spans); it tags each diagnostic with
        the construct it concerns, which we resolve to the declaration's loc. *)
@@ -309,20 +315,49 @@ let run_dimcheck (d : compile_detail) : Diagnostics.diagnostic list =
       | Some (Dimcheck.STransition n)  -> Expander.transition_loc  d.ctx n
       | Some (Dimcheck.SOde c)         -> Expander.compartment_loc d.ctx c
       | Some (Dimcheck.SObservation n) -> Expander.obs_loc         d.ctx n
+      | Some (Dimcheck.SContrast n)    -> Expander.contrast_loc    d.ctx n
       | Some (Dimcheck.SBinding _) | None -> Diagnostics.no_loc
     in
-    List.map (fun (dc : Dimcheck.diagnostic) ->
-      let loc = loc_of_subject dc.subject in
-      match dc.severity with
-      | Dimcheck.Error ->
-        Diagnostics.mk_error
-          ~code:dc.code ~loc
-          ~message:dc.message ?detail:dc.detail ?hint:dc.hint ()
-      | Dimcheck.Info ->
-        Diagnostics.mk_info
-          ~code:dc.code ~loc
-          ~message:dc.message ?detail:dc.detail ?hint:dc.hint ()
-    ) (Dimcheck.check_model d.model).diagnostics
+    let result = Dimcheck.check_model d.model in
+    let diags =
+      List.map (fun (dc : Dimcheck.diagnostic) ->
+        let loc = loc_of_subject dc.subject in
+        match dc.severity with
+        | Dimcheck.Error ->
+          Diagnostics.mk_error
+            ~code:dc.code ~loc
+            ~message:dc.message ?detail:dc.detail ?hint:dc.hint ()
+        | Dimcheck.Info ->
+          Diagnostics.mk_info
+            ~code:dc.code ~loc
+            ~message:dc.message ?detail:dc.detail ?hint:dc.hint ()
+      ) result.diagnostics
+    in
+    let qdims =
+      List.map (fun ((name, stratum), dv) -> ((name, stratum), (dv.(0), dv.(1))))
+        result.quantity_dims
+    in
+    (diags, qdims)
+
+let run_dimcheck (d : compile_detail) : Diagnostics.diagnostic list =
+  fst (run_dimcheck_full d)
+
+(* Write each resolved quantity dimension (#5) onto its IR node by (name,
+   stratum). Quantities without a resolved dimension keep `None` (omitted on the
+   wire), so only quantity-bearing models gain the field. *)
+let annotate_quantity_dims
+    (qdims : ((string * (string * string) list) * (int * int)) list)
+    (m : Ir.model) : Ir.model =
+  if qdims = [] then m
+  else
+    let quantities =
+      List.map (fun (q : Ir.quantity) ->
+        match List.assoc_opt (q.Ir.q_name, q.Ir.q_stratum) qdims with
+        | Some dim -> { q with Ir.q_dimension = Some dim }
+        | None -> q)
+        m.Ir.quantities
+    in
+    { m with Ir.quantities = quantities }
 
 (** Run the model linter on a compiled model and route its results into
     the diagnostic context as non-blocking warnings. Lints (L4xx) flag
@@ -441,7 +476,8 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
      params), matching the original short-circuit ordering. *)
   if vdiags <> [] then fail ()
   else begin
-    emit_all (Passtime.time "dimcheck" (fun () -> run_dimcheck d));
+    let (ddiags, qdims) = Passtime.time "dimcheck" (fun () -> run_dimcheck_full d) in
+    emit_all ddiags;
     emit_all (Passtime.time "lint" (fun () -> run_lint d));
     if Diagnostics.has_errors d.ctx.diags then fail ()
     else begin
@@ -458,7 +494,10 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
            the ANSI box otherwise, matching the error path's shape. *)
         if Diagnostics.has_any d.ctx.diags then
           ignore (Diagnostics.render d.ctx.diags d.source);
-        let m = { d.model with Ir.transitions = transitions } in
+        (* Write the resolved quantity dimensions (#5) back onto the model
+           before the value-preserving transforms (constant-fold/LICM never
+           touch quantities). *)
+        let m = annotate_quantity_dims qdims { d.model with Ir.transitions = transitions } in
         Ok (maybe_licm (maybe_constant_fold m))
       end
     end

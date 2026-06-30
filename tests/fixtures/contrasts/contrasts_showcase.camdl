@@ -1,0 +1,51 @@
+# Counterfactual-contrasts showcase fixture (proposal 2026-06-25).
+#
+# A minimal SIRD with a vaccination SIA (S --> V transfer), two scenarios that
+# turn the SIA off / on, a scalar quantity (`total = final(D)`), and a contrast
+# differencing that quantity across the two runs over an instant window — the
+# "deaths averted" headline. Compile-only: pins the IR SHAPE of the `contrasts`
+# node (run-rooted operands, the `over [from, to]` window) and the #5 stored
+# quantity `dimension` field, deserialised cross-language by the
+# `rust/crates/ir contrasts_golden` test.
+
+time_unit = 'days
+origin     = date("2020-01-01")
+
+compartments { S, I, R, D, V }
+
+parameters {
+  beta  : rate  in [0.0, 5.0]
+  gamma : rate  in [0.01, 1.0]
+  mu    : rate  in [0.0, 0.5]
+  N     : count in [1, 1000000]
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+  death     : I --> D @ mu * I
+}
+
+init { S = 9000  I = 100  R = 0  D = 0  V = 0 }
+
+# The SIA: a one-off transfer of 60% of S into a vaccinated class, 20 weeks in.
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 20 'weeks]
+}
+
+scenarios {
+  no_sia   { disable = [sia] }   # the SIA is switched off
+  with_sia { enable  = [sia] }   # the SIA fires
+}
+
+quantities {
+  total = final(D)               # total deaths over the run (a count)
+}
+
+contrasts {
+  # Deaths averted by the SIA, accumulated over the window from the fork (20w)
+  # to one year (52w). A scalar contrast: same shape and dimension on both arms.
+  averted = no_sia.quantities.total - with_sia.quantities.total over [origin + 20 'weeks, origin + 52 'weeks]
+}
+
+simulate { from = 0 'days  to = 400 'days }

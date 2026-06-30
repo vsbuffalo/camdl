@@ -186,7 +186,7 @@ fn representative_model() -> Model {
             infectious_compartments: vec!["I".into()],
         }),
         balance: Some(BalanceSpec { target: "R".into(), expr: Expr::pop("R") }),
-        identity_tracked_compartments: vec![], quantities: vec![],
+        identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     }
 }
 
@@ -252,6 +252,7 @@ fn ir_quantities_excluded_from_hash() {
             source: QuantitySource::State(Expr::pop("I")),
             reduce: Some(TemporalReduce::Value(ValueReduce::Max)),
         },
+        dimension: None,
     });
     assert_eq!(
         base,

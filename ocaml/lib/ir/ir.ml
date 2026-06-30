@@ -705,6 +705,36 @@ type quantity = {
   q_name:    string;
   q_stratum: (string * string) list;  (* (dim, level) cells; omitted when empty *)
   q_body:    quantity_body;
+  (* Resolved dimension of the reduced value, as (P exponent, T exponent)
+     (prerequisite #5 of the counterfactual-contrasts proposal). Computed by
+     `dimcheck` and stored so the Rust contrast reducer can check operand-
+     dimension agreement without re-deriving. `None` when the dimension is
+     undetermined (an unconstrained `positive`/`real` leaf); omitted on the wire
+     when absent, so non-quantity-dimension goldens are byte-identical. *)
+  q_dimension: (int * int) option;
+}
+
+(* ── Counterfactual contrasts (proposal 2026-06-25) ────────────────────────────
+   A named difference of two run-rooted operands (cases averted). The DSL block
+   parses + dim-checks + lowers here; the Rust two-arm replay reducer (stage C)
+   evaluates it against a fit's keyed (θ, X) output. Reporting-only and
+   non-identity — excluded from the run-id walk, like quantities. *)
+
+(* The two symmetric sub-namespaces of a run member. *)
+type run_namespace = NsQuantities | NsObservations
+
+(* A contrast body: arithmetic over run-rooted operands. A dedicated ADT
+   (the trigger_expr / scalar_expr precedent) so a run-member reference can
+   never appear in a propensity, and a rate leaf can never appear in a
+   contrast. *)
+type contrast_expr =
+  | CRunMember of { run : string; ns : run_namespace; member : string }
+  | CBinOp     of { op : bin_op; left : contrast_expr; right : contrast_expr }
+
+type contrast = {
+  c_name:   string;
+  c_body:   contrast_expr;
+  c_window: float * float;   (* (from_instant, to_instant), in model time units *)
 }
 
 type model = {
@@ -748,4 +778,8 @@ type model = {
      simulation output. Reporting-only, fully expanded. Empty by default; the
      frontend does not yet produce these. *)
   quantities: quantity list;
+  (* Counterfactual contrasts (proposal 2026-06-25): named differences of two
+     run-rooted operands (cases averted). Reporting-only and non-identity (out
+     of the run-id walk, like quantities). Empty by default. *)
+  contrasts: contrast list;
 }

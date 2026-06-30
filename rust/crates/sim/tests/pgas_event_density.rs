@@ -148,7 +148,7 @@ fn sir_with_seed_event() -> Model {
         presets: vec![],
         bindings: vec![],
         per_eval_bindings: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     }
 }
 
@@ -237,7 +237,7 @@ fn seir_with_seed_event(n_seed: i64, tau: f64) -> Model {
         presets: vec![],
         bindings: vec![],
         per_eval_bindings: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     }
 }
 

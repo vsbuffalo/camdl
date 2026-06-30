@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::{
+    contrast::Contrast,
     expr::Expr,
     intervention::Intervention,
     observation::ObservationModel,
@@ -217,6 +218,13 @@ pub struct Model {
     /// sim/fit (the one Model field deliberately outside the run-id walk).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quantities: Vec<Quantity>,
+    /// Counterfactual contrasts (proposal 2026-06-25): named differences of two
+    /// run-rooted operands (cases averted). Like `quantities`, reporting-only and
+    /// **excluded from `Model::hash_into`** — a contrast is non-identity and must
+    /// never re-key a sim/fit. `default`/`skip_serializing_if` so a model with no
+    /// `contrasts {}` block is byte-identical (the field is omitted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contrasts: Vec<Contrast>,
 }
 
 /// A model-level shared binding (Fix B): a named value (e.g. N[l], I_agg[l],

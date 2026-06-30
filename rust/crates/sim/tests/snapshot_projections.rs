@@ -96,7 +96,7 @@ fn model_with_obs(
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     }
 }
 
@@ -370,7 +370,7 @@ fn snapshot_reads_post_intervention_state() {
             integrator: Default::default(),
         },
         presets: vec![],
-        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![],
+        model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     };
 
     let compiled = Arc::new(CompiledModel::new(model).unwrap());

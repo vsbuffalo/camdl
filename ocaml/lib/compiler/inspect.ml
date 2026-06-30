@@ -787,7 +787,7 @@ let collect_let_refs_ast ctx ast_rate =
     | EFuncCall (_, args) -> List.iter (fun (_, e) -> walk e) args
     | EList es -> List.iter walk es
     | ERange (a, b) -> walk a; walk b
-    | EConst _ | EUnit _ | EObsAccess _ -> ()
+    | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> ()
   in
   walk ast_rate;
   List.rev !found

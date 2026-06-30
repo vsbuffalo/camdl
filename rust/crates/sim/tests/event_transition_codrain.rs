@@ -129,7 +129,7 @@ fn codrain_model() -> CompiledModel {
         presets: vec![],
         model_structure: None,
         balance: None,
-        identity_tracked_compartments: vec![], quantities: vec![],
+        identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     };
     CompiledModel::new(model).unwrap()
 }
@@ -344,7 +344,7 @@ fn inflow_model() -> CompiledModel {
         presets: vec![],
         model_structure: None,
         balance: None,
-        identity_tracked_compartments: vec![], quantities: vec![],
+        identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     };
     CompiledModel::new(model).unwrap()
 }

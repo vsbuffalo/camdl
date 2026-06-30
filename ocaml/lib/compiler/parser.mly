@@ -147,6 +147,7 @@
 %token AND OR NOT IF THEN ELSE EVERY UNTIL AT_KW FORMAT DESCRIPTION NULL TRANSFER LIKELIHOOD ORIGIN BALANCE EVENTS ADD AT_DAY
 %token COLUMNS EMIT_SCHEDULE
 %token QUANTITIES   (* proposal 2026-06-25: generated quantities *)
+%token CONTRASTS OVER   (* counterfactual contrasts, proposal 2026-06-25 *)
 %token REACTIVE_INTERVENTIONS WHEN ACTION   (* gh#204 *)
 %token PIPE
 
@@ -200,6 +201,8 @@ declaration:
       { DObservations obs }
   | QUANTITIES LBRACE qs = quantity_list RBRACE
       { DQuantities qs }
+  | CONTRASTS LBRACE cs = contrast_list RBRACE
+      { DContrasts cs }
   | INTERVENTIONS LBRACE ivs = intervention_list RBRACE
       { DInterventions ivs }
   | EVENTS LBRACE evs = intervention_list RBRACE
@@ -909,6 +912,21 @@ quantity_decl:
       { { qd_name = name; qd_indices = ibs; qd_body = body; qd_doc = d;
           qd_loc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
+(* ── Contrasts block (counterfactual contrasts, proposal 2026-06-25) ──────────
+   Each entry is `name = <body> over [<from_instant>, <to_instant>]`. The body
+   reuses the shared `expr` (arithmetic over run-rooted `ERunMember` operands);
+   `over` binds looser than the body because the production consumes the whole
+   `body = expr` *before* `OVER`, so `a - b over [..]` parses as `(a - b) over
+   [..]` structurally — no precedence declaration needed. *)
+contrast_list:
+  | cs = list(contrast_decl) { cs }
+
+contrast_decl:
+  | d = doc_opt name = IDENT EQ body = expr
+      OVER LBRACKET a = expr COMMA b = expr RBRACKET
+      { { cd_name = name; cd_body = body; cd_window = (a, b); cd_doc = d;
+          cd_loc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+
 (* ── Output block ────────────────────────────────────────────────────────── *)
 
 output_body:
@@ -1163,6 +1181,32 @@ atom_expr:
             end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
         in
         EObsAccess (stream, l) }
+  (* <run>.quantities.<member> / <run>.observations.<member> — a run-rooted
+     contrast operand (counterfactual contrasts, proposal 2026-06-25). The
+     middle token is a keyword (QUANTITIES / OBSERVATIONS), so these are
+     unambiguous against the bare `IDENT` / `IDENT[...]` / `IDENT(...)` forms
+     and against the existing `observations.<stream>` form. Valid only inside a
+     `contrasts { }` body; the expander rejects them elsewhere. *)
+  | run = IDENT DOT QUANTITIES DOT member = IDENT
+      { let l =
+          let open Lexing in
+          { file     = $startpos.pos_fname;
+            line     = $startpos.pos_lnum;
+            col      = $startpos.pos_cnum - $startpos.pos_bol + 1;
+            end_line = $endpos.pos_lnum;
+            end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
+        in
+        ERunMember { run; ns = NsQuantities; member; loc = l } }
+  | run = IDENT DOT OBSERVATIONS DOT member = IDENT
+      { let l =
+          let open Lexing in
+          { file     = $startpos.pos_fname;
+            line     = $startpos.pos_lnum;
+            col      = $startpos.pos_cnum - $startpos.pos_bol + 1;
+            end_line = $endpos.pos_lnum;
+            end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
+        in
+        ERunMember { run; ns = NsObservations; member; loc = l } }
   (* `origin` as a referenceable identifier — Phase 2 of the
      2026-05-22 typed-time proposal §1.1. The ORIGIN keyword is
      consumed by the top-level `origin = date("...")` declaration

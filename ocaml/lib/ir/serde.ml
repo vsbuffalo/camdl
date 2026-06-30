@@ -1054,6 +1054,9 @@ let quantity_to_json (q : quantity) : Yojson.Safe.t =
        | [] -> []
        | ss -> [("stratum", arr (List.map stratum_key_to_json ss))])
     @ [("body", quantity_body_to_json q.q_body)]
+    @ (match q.q_dimension with
+       | None -> []
+       | Some (p, t) -> [("dimension", arr [int p; int t])])
   )
 
 let quantity_of_json j : quantity =
@@ -1061,7 +1064,69 @@ let quantity_of_json j : quantity =
     q_stratum = (match member_opt "stratum" j with
                  | Some `Null | None -> []
                  | Some s -> List.map stratum_key_of_json (as_list s));
-    q_body    = quantity_body_of_json (member "body" j); }
+    q_body    = quantity_body_of_json (member "body" j);
+    q_dimension = (match member_opt "dimension" j with
+                   | Some `Null | None -> None
+                   | Some d -> (match as_list d with
+                                | [p; t] -> Some (as_int p, as_int t)
+                                | _ -> fail "quantity dimension must be [p, t]")); }
+
+(* ── Counterfactual contrasts ──────────────────────────────────────────────────
+   Mirror of rust/crates/ir/src/contrast.rs. Externally-tagged single-key objects;
+   the run-member sub-namespace serializes as "quantities"/"observations" and the
+   binop reuses the shared bin_op encoding. *)
+
+let run_namespace_to_json (ns : run_namespace) : Yojson.Safe.t =
+  match ns with
+  | NsQuantities   -> str "quantities"
+  | NsObservations -> str "observations"
+
+let run_namespace_of_json j : run_namespace =
+  match as_string j with
+  | "quantities"   -> NsQuantities
+  | "observations" -> NsObservations
+  | s -> fail "run namespace must be \"quantities\" or \"observations\", got %S" s
+
+let rec contrast_expr_to_json (ce : contrast_expr) : Yojson.Safe.t =
+  match ce with
+  | CRunMember { run; ns; member } ->
+    obj [("run_member", obj [
+      ("run",    str run);
+      ("ns",     run_namespace_to_json ns);
+      ("member", str member);
+    ])]
+  | CBinOp { op; left; right } ->
+    obj [("bin_op", obj [
+      ("op",    str (bin_op_str op));
+      ("left",  contrast_expr_to_json left);
+      ("right", contrast_expr_to_json right);
+    ])]
+
+let rec contrast_expr_of_json j : contrast_expr =
+  match j with
+  | `Assoc [("run_member", v)] ->
+    CRunMember { run    = as_string (member "run" v);
+                 ns     = run_namespace_of_json (member "ns" v);
+                 member = as_string (member "member" v) }
+  | `Assoc [("bin_op", v)] ->
+    CBinOp { op    = bin_op_of_str (as_string (member "op" v));
+             left  = contrast_expr_of_json (member "left" v);
+             right = contrast_expr_of_json (member "right" v) }
+  | _ -> fail "contrast_expr must be a single-key object (run_member/bin_op)"
+
+let contrast_to_json (c : contrast) : Yojson.Safe.t =
+  let (from_, to_) = c.c_window in
+  obj [
+    ("name",   str c.c_name);
+    ("body",   contrast_expr_to_json c.c_body);
+    ("window", obj [("from", flt from_); ("to", flt to_)]);
+  ]
+
+let contrast_of_json j : contrast =
+  let w = member "window" j in
+  { c_name   = as_string (member "name" j);
+    c_body   = contrast_expr_of_json (member "body" j);
+    c_window = (as_float (member "from" w), as_float (member "to" w)); }
 
 (* ── Parameters ──────────────────────────────────────────────────────────── *)
 
@@ -1476,6 +1541,9 @@ let model_to_json (m : model) : Yojson.Safe.t =
     @ (match m.quantities with
        | [] -> []
        | qs -> [("quantities", arr (List.map quantity_to_json qs))])
+    @ (match m.contrasts with
+       | [] -> []
+       | cs -> [("contrasts", arr (List.map contrast_to_json cs))])
   )
 
 let model_of_json (j : Yojson.Safe.t) : model =
@@ -1521,6 +1589,8 @@ let model_of_json (j : Yojson.Safe.t) : model =
     doc_index          = empty_doc_index;
     quantities         = (match member_opt "quantities" j with
                           | Some (`List v) -> List.map quantity_of_json v | _ -> []);
+    contrasts          = (match member_opt "contrasts" j with
+                          | Some (`List v) -> List.map contrast_of_json v | _ -> []);
   }
 
 (* gh#audit-C8. IR schema version baked at build time from `ir/VERSION`

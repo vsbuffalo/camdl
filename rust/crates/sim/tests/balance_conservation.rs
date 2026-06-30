@@ -116,7 +116,7 @@ fn balance_model() -> CompiledModel {
         model_structure: None,
         // balance { target: R, expr: N0 - S - I }
         balance: Some(BalanceSpec { target: "R".into(), expr: sub(sub(param("N0"), pop("S")), pop("I")) }),
-        identity_tracked_compartments: vec![], quantities: vec![],
+        identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     };
     CompiledModel::new(model).unwrap()
 }

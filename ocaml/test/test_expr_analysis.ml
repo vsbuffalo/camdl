@@ -91,6 +91,7 @@ let model_with_bindings bs =
     identity_tracked_compartments = [];
     doc_index = empty_doc_index;
     quantities = [];
+    contrasts = [];
   }
 
 let test_binding_deps_topo () =

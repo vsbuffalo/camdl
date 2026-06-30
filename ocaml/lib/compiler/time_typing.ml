@@ -187,6 +187,7 @@ let rec classify env (e : expr) : tclass =
   | ESum (_, _, _, body) -> classify env body
   | EList _ | ERange _ -> TOther
   | EObsAccess _ -> TOther
+  | ERunMember _ -> TOther   (* a contrast operand — not a time/duration *)
 
 (* ── Sink walk: Rule 1 at Instant ± Duration nodes ──────────────────── *)
 
@@ -232,6 +233,7 @@ and walk_subexprs env ~on_hit (e : expr) : unit =
   | ERange (a, b) ->
     walk_rule1 env ~on_hit a; walk_rule1 env ~on_hit b
   | EObsAccess _ -> ()
+  | ERunMember _ -> ()   (* leaf — no sub-expressions to walk *)
 
 (* ── Public diagnostic hints ────────────────────────────────────────── *)
 

@@ -26,6 +26,7 @@ type context = {
   mutable event_decls     : intervention_decl list;
   mutable reactive_decls  : reactive_decl list;   (* gh#204 *)
   mutable quantity_decls  : quantity_decl list;   (* proposal 2026-06-25 *)
+  mutable contrast_decls  : contrast_decl list;   (* counterfactual contrasts *)
   mutable diags           : Diagnostics.t;  (* collected errors/warnings *)
   mutable reads           : (string * string) list;
   (* (as-written, resolved) external data files opened during expansion, in
@@ -103,6 +104,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   event_decls          = [];
   reactive_decls       = [];
   quantity_decls       = [];
+  contrast_decls       = [];
   diags                = Diagnostics.create ();
   reads                = [];
   source_dir;
@@ -689,6 +691,14 @@ let obs_loc ctx name =
     ~name_of:(fun (o : obs_decl) -> o.oname)
     ~loc_of:(fun o -> o.oloc) name
 
+(* Resolve a contrast name back to its declaration loc — used by the dimcheck
+   contrast-dimension diagnostic (which runs on the IR and has no source spans).
+   Exact-name match (contrasts are never stratified/expanded). *)
+let contrast_loc ctx name =
+  match List.find_opt (fun (c : contrast_decl) -> c.cd_name = name) ctx.contrast_decls with
+  | Some c -> diag_loc_of_ast_ctx ctx c.cd_loc
+  | None -> Diagnostics.no_loc
+
 (* Distinct external data files opened during expansion, as (as-written,
    resolved) pairs in first-seen order. Deduped by resolved path: the same
    file may be read once per stratum level (file-backed indexed forcings,
@@ -751,6 +761,7 @@ let collect_declarations ctx decls =
     | DEvents evs        -> ctx.event_decls <- List.rev_append evs ctx.event_decls
     | DReactiveInterventions rxs -> ctx.reactive_decls <- List.rev_append rxs ctx.reactive_decls
     | DQuantities qs     -> ctx.quantity_decls <- List.rev_append qs ctx.quantity_decls
+    | DContrasts cs      -> ctx.contrast_decls <- List.rev_append cs ctx.contrast_decls
   ) decls;
   (* Reverse all accumulated lists to restore declaration order *)
   ctx.dim_decls      <- List.rev ctx.dim_decls;
@@ -768,6 +779,7 @@ let collect_declarations ctx decls =
   ctx.scenario_decls <- List.rev ctx.scenario_decls;
   ctx.event_decls    <- List.rev ctx.event_decls;
   ctx.quantity_decls <- List.rev ctx.quantity_decls;
+  ctx.contrast_decls <- List.rev ctx.contrast_decls;
   ctx.orig_transitions <- ctx.transitions
 
 (* ── Dimensions pass ─────────────────────────────────────────────────────── *)
@@ -1877,6 +1889,7 @@ let rec body_refs_param_or_let ctx (e : expr) : bool =
   | EList es            -> List.exists (body_refs_param_or_let ctx) es
   | ERange (lo, hi)     -> body_refs_param_or_let ctx lo || body_refs_param_or_let ctx hi
   | EObsAccess _        -> false
+  | ERunMember _        -> false
 
 (* Every index-position variable in the body must be bound by the let's own
    declared indices or an enclosing `sum`; otherwise the resolved body depends
@@ -1903,6 +1916,7 @@ let free_index_var_clean (lb : let_binding) : bool =
     | EList es            -> List.for_all (ok bound) es
     | ERange (lo, hi)     -> ok bound lo && ok bound hi
     | EObsAccess _        -> true
+    | ERunMember _        -> true
   in
   ok declared lb.lbody
 
@@ -2603,6 +2617,21 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
         "observations.%s is only valid in a quantities block" stream)
       ~hint:"the simulated observation series has no value in a rate or other \
              per-instant expression; reduce it inside `quantities { }`"
+      ();
+    Ir.Const 0.0
+  | ERunMember r ->
+    (* A run-rooted `<run>.<ns>.<member>` reference is a contrast operand, valid
+       ONLY inside a `contrasts { }` body (where a dedicated resolver lowers it
+       to Ir.CRunMember). Reaching resolve_expr means it appeared in a rate /
+       binding / init / other per-instant expression. (`E293` covers the
+       distinct case of one written inside a `quantities { }` recipe.) *)
+    let ns = (match r.ns with NsQuantities -> "quantities" | NsObservations -> "observations") in
+    Diagnostics.error ctx.diags ~code:"E292" ~loc:(diag_loc_of_ast_ctx ctx r.loc)
+      ~message:(Printf.sprintf
+        "`%s.%s.%s` is a contrast operand, only valid inside a `contrasts { }` block"
+        r.run ns r.member)
+      ~hint:"a run-rooted reference has no value in a rate or other per-instant \
+             expression; use it as an operand in a `contrasts { }` entry"
       ();
     Ir.Const 0.0
 
@@ -5150,7 +5179,7 @@ let expand_observations ctx =
           | ESum (_, _, _, e) -> names_of e
           | EList es -> List.concat_map names_of es
           | ERange (a, b) -> names_of a @ names_of b
-          | EConst _ | EUnit _ | EObsAccess _ -> []
+          | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> []
         in
         match meas_v.om_lik with
         | LikNegBinomial k | LikPoisson k | LikNormal k
@@ -5528,7 +5557,7 @@ let classify_quantity_body ctx env
     | ESum (_, _, _, e) -> find_dt e
     | EList es -> List.find_map find_dt es
     | ERange (a, b) -> (match find_dt a with Some l -> Some l | None -> find_dt b)
-    | EConst _ | EUnit _ | EIdent _ | EObsAccess _ -> None
+    | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> None
   in
   let check_dt e =
     match find_dt e with
@@ -5555,7 +5584,7 @@ let classify_quantity_body ctx env
     | ESum (_, _, _, e) -> refs_quantity e
     | EList es -> List.exists refs_quantity es
     | ERange (a, b) -> refs_quantity a || refs_quantity b
-    | EConst _ | EUnit _ | EObsAccess _ -> false
+    | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> false
   in
   (* Does an expression contain an `observations.<stream>` access anywhere? An
      EObsAccess is meaningful ONLY as the whole quantity body or as the SOLE
@@ -5573,7 +5602,7 @@ let classify_quantity_body ctx env
     | ESum (_, _, _, e) -> contains_obs_access e
     | EList es -> List.exists contains_obs_access es
     | ERange (a, b) -> contains_obs_access a || contains_obs_access b
-    | EConst _ | EUnit _ | EIdent _ -> false
+    | EConst _ | EUnit _ | EIdent _ | ERunMember _ -> false
   in
   (* Validate an `observations.<stream>` source at compile time: the stream must
      name a DECLARED observation, and (v1.1) it must be unstratified. Emits a
@@ -5727,6 +5756,12 @@ let classify_quantity_body ctx env
                  stream)`); an observation source is not a scalar operand"
         (Printf.sprintf
           "observations.%s cannot appear in reduction arithmetic" stream)
+    | ERunMember { run; member; _ } ->
+      (* Unreachable: the body-level `find_run_member` guard rejects any
+         run-rooted reference (E293) before classification reaches here. Kept
+         for exhaustiveness. *)
+      err (Printf.sprintf
+        "`%s....%s` is a contrast operand, not valid in a quantities recipe" run member)
     | ESum _ | EList _ | ERange _ ->
       err "this form is not allowed in reduction arithmetic"
   in
@@ -5772,6 +5807,43 @@ let classify_quantity_body ctx env
   let wrong_arity fn expected =
     err (Printf.sprintf "reduction '%s' takes %s" fn expected)
   in
+  (* A run-rooted `<run>.<ns>.<member>` reference is a *contrast* operand; in a
+     `quantities { }` recipe the run is implicit, so the prefix must be dropped
+     (cross-context diagnostic, proposal 2026-06-25). Detect one anywhere in the
+     body and emit the located fix before the ordinary classification runs. *)
+  let rec find_run_member = function
+    | ERunMember { run; ns; member; loc } -> Some (run, ns, member, loc)
+    | EIndex (_, items, _) ->
+      List.find_map (function IPosn e | INamed (_, e) -> find_run_member e) items
+    | EBinOp (_, a, b) ->
+      (match find_run_member a with Some r -> Some r | None -> find_run_member b)
+    | EUnOp (_, x) -> find_run_member x
+    | ECond (p, a, b) ->
+      (match find_run_member p with Some r -> Some r
+       | None -> (match find_run_member a with Some r -> Some r | None -> find_run_member b))
+    | EFuncCall (_, args) -> List.find_map (fun (_, e) -> find_run_member e) args
+    | ESum (_, _, _, e) -> find_run_member e
+    | EList es -> List.find_map find_run_member es
+    | ERange (a, b) ->
+      (match find_run_member a with Some r -> Some r | None -> find_run_member b)
+    | EConst _ | EUnit _ | EIdent _ | EObsAccess _ -> None
+  in
+  (match find_run_member body with
+   | Some (run, ns_v, member, rloc) ->
+     let ns = (match ns_v with NsQuantities -> "quantities" | NsObservations -> "observations") in
+     Diagnostics.error ctx.diags ~code:"E293"
+       ~loc:(diag_loc_of_ast_ctx ctx rloc)
+       ~message:(Printf.sprintf
+         "`%s.%s.%s` is a contrast operand (a run-prefixed reference), not valid \
+          in a `quantities { }` recipe" run ns member)
+       ~hint:(Printf.sprintf
+         "in a quantities recipe the run is implicit — drop the `%s.` prefix \
+          (write `%s.%s` for this run's series, or a bare compartment / `let`); \
+          run-prefixed references belong in a `contrasts { }` block"
+         run ns member)
+       ();
+     None
+   | None ->
   match body with
   | EFuncCall (("total" | "sum") as fn, _) ->
     err ~hint:"summing a stock over snapshots is cadence-dependent; cumulative \
@@ -5835,7 +5907,7 @@ let classify_quantity_body ctx env
           reduced_state (Ir.RTime (Ir.LastBelow (resolve_expr ctx env th))) x
         | None -> wrong_arity fn "two arguments, e.g. last_below(I, thresh)")
      | _ -> classify_non_reduction body)
-  | _ -> classify_non_reduction body
+  | _ -> classify_non_reduction body)
 
 (* Expand the `quantities { }` blocks into fully-expanded [Ir.quantity] leaves.
    Strata expand OUTER (cartesian_product over the decl's index bindings);
@@ -5887,7 +5959,11 @@ let expand_quantities ctx =
             qd.qd_body qd_loc
         with
         | Some (q_body, shape) ->
-          Some ({ Ir.q_name = name; Ir.q_stratum = cell_stratum; Ir.q_body },
+          Some ({ Ir.q_name = name; Ir.q_stratum = cell_stratum; Ir.q_body;
+                  (* Resolved dimension (#5) is filled by the dimcheck write-back
+                     in [Compiler.finish_compile]; the expander has no dimension
+                     inference, so it leaves it unset here. *)
+                  Ir.q_dimension = None },
                 shape)
         | None -> None
       ) combos in
@@ -5896,6 +5972,130 @@ let expand_quantities ctx =
       ) cells;
       List.map fst cells
   ) ctx.quantity_decls
+
+(* ── Counterfactual contrasts (proposal 2026-06-25) ───────────────────────────
+   Resolve each `contrasts { }` entry: two-sided name resolution of every
+   run-rooted operand (run ∈ declared scenarios ∪ {fitted}; member ∈ the named
+   sub-namespace), a typed-time instant check on the window endpoints, and
+   lowering of the arithmetic body to [Ir.contrast_expr]. Dimensional agreement
+   of the operands is checked separately by `dimcheck` (the verify path). *)
+let expand_contrasts ctx : Ir.contrast list =
+  let scenario_names = List.map (fun (sd : scenario_decl) -> sd.scname) ctx.scenario_decls in
+  let quantity_names = List.map (fun (qd : quantity_decl) -> qd.qd_name) ctx.quantity_decls in
+  let obs_names      = List.map (fun (o : obs_decl) -> o.oname) ctx.obs_decls in
+  let tt_env = Time_typing.env_of_ctx
+      ~let_tbl:ctx.let_tbl ~param_decls:ctx.param_decls
+      ~origin_set:(ctx.origin <> None) in
+  let ns_str = function NsQuantities -> "quantities" | NsObservations -> "observations" in
+  (* Resolve one run-rooted operand to Ir.CRunMember, emitting located,
+     two-sided diagnostics for an undeclared run or member. *)
+  let resolve_run_member run ns member rloc : Ir.contrast_expr option =
+    let loc = diag_loc_of_ast_ctx ctx rloc in
+    let run_ok = run = "fitted" || List.mem run scenario_names in
+    let member_ok = match ns with
+      | NsQuantities   -> List.mem member quantity_names
+      | NsObservations -> List.mem member obs_names in
+    if not run_ok then begin
+      Diagnostics.error ctx.diags ~code:"E294" ~loc
+        ~message:(Printf.sprintf
+          "contrast operand `%s.%s.%s`: no run named '%s'"
+          run (ns_str ns) member run)
+        ~hint:"a contrast run is a declared `scenarios { }` preset, or the \
+               reserved `fitted` (the no-overlay fitted model)"
+        ();
+      None
+    end else if not member_ok then begin
+      let kind, where = match ns with
+        | NsQuantities   -> "quantity", "a `quantities { }` entry"
+        | NsObservations -> "observation stream", "an `observations { }` stream" in
+      Diagnostics.error ctx.diags ~code:"E294" ~loc
+        ~message:(Printf.sprintf
+          "contrast operand `%s.%s.%s`: no %s named '%s'"
+          run (ns_str ns) member kind member)
+        ~hint:(Printf.sprintf "`%s.%s` must name %s" (ns_str ns) member where)
+        ();
+      None
+    end else
+      let ir_ns = match ns with
+        | NsQuantities -> Ir.NsQuantities
+        | NsObservations -> Ir.NsObservations in
+      Some (Ir.CRunMember { run; ns = ir_ns; member })
+  in
+  (* Lower the contrast arithmetic body. v1 grammar: run-rooted operands combined
+     by `+ - * /`. A bare const, comparison, unary op, or any other form is a
+     located error (a contrast operand must be a run-rooted reference). *)
+  let rec lower_body (e : expr) : Ir.contrast_expr option =
+    match e with
+    | ERunMember { run; ns; member; loc } -> resolve_run_member run ns member loc
+    | EBinOp ((Add | Sub | Mul | Div) as op, a, b) ->
+      (match lower_body a, lower_body b with
+       | Some l, Some r -> Some (Ir.CBinOp { op = ir_bin_op op; left = l; right = r })
+       | _ -> None)
+    | _ ->
+      Diagnostics.error ctx.diags ~code:"E295" ~loc:Diagnostics.no_loc
+        ~message:"a contrast body must combine run-rooted operands with + - * /"
+        ~hint:"each operand is `<run>.quantities.<q>` or `<run>.observations.<stream>`; \
+               reduce a series to a scalar in `quantities { }`, then contrast the \
+               named quantity (v1 takes no inline reducer, const, or comparison here)"
+        ();
+      None
+  in
+  (* Window endpoints must be typed-time instants, not bare durations
+     (`at [20 'weeks]` is the loophole this closes). Classify, reject a
+     non-instant, then resolve to a model-time float. *)
+  (* Const-evaluate a resolved instant to a model-time float. `origin + 20
+     'weeks` resolves to `Const 0 + UncheckedDim{Const 140}` (the unit literal
+     keeps its dimension `T`); strip the dimensional wrapper and fold the
+     arithmetic. `date(...)` resolves to a bare `Const` directly. *)
+  let rec eval_instant (e : Ir.expr) : float option =
+    match e with
+    | Ir.Const f -> Some f
+    | Ir.UncheckedDim u -> eval_instant u.inner
+    | Ir.UnOp { op = Ir.Neg; arg } -> Option.map (fun x -> -. x) (eval_instant arg)
+    | Ir.BinOp { op; left; right } ->
+      (match eval_instant left, eval_instant right with
+       | Some a, Some b ->
+         (match op with
+          | Ir.Add -> Some (a +. b) | Ir.Sub -> Some (a -. b)
+          | Ir.Mul -> Some (a *. b) | Ir.Div -> Some (a /. b)
+          | _ -> None)
+       | _ -> None)
+    | _ -> None
+  in
+  let resolve_endpoint ~which cd_loc (e : expr) : float option =
+    match Time_typing.classify tt_env e with
+    | Time_typing.TInstant ->
+      (match eval_instant (resolve_expr ctx [] e) with
+       | Some f -> Some f
+       | None ->
+         Diagnostics.error ctx.diags ~code:"E296" ~loc:cd_loc
+           ~message:(Printf.sprintf
+             "contrast window %s endpoint must be a compile-time instant" which)
+           ~hint:"the window endpoints are resolved at compile time; use \
+                  `origin + N 'weeks` or `date(\"YYYY-MM-DD\")` (no parameters)"
+           ();
+         None)
+    | _ ->
+      Diagnostics.error ctx.diags ~code:"E296" ~loc:cd_loc
+        ~message:(Printf.sprintf
+          "contrast window %s endpoint must be an instant, not a bare duration"
+          which)
+        ~hint:"use an instant: `origin + 20 'weeks` or `date(\"YYYY-MM-DD\")` \
+               (the window's `from` instant is the counterfactual fork point)"
+        ();
+      None
+  in
+  List.filter_map (fun (cd : contrast_decl) ->
+    let cd_loc = diag_loc_of_ast_ctx ctx cd.cd_loc in
+    let (a, b) = cd.cd_window in
+    let body = lower_body cd.cd_body in
+    let from_ = resolve_endpoint ~which:"`from`" cd_loc a in
+    let to_   = resolve_endpoint ~which:"`to`"   cd_loc b in
+    match body, from_, to_ with
+    | Some c_body, Some f, Some t ->
+      Some { Ir.c_name = cd.cd_name; Ir.c_body; Ir.c_window = (f, t) }
+    | _ -> None
+  ) ctx.contrast_decls
 
 (* ── Hierarchical-prior cycle / self-reference check ─────────────────────── *)
 
@@ -5927,6 +6127,7 @@ let rec collect_param_refs known_params acc = function
     let a = collect_param_refs known_params acc lo in
     collect_param_refs known_params a hi
   | EObsAccess _ -> acc
+  | ERunMember _ -> acc
 
 (** Check hierarchical prior reference graph for self-references and
     cycles. Wave 2 / malaria #3 Gate 2 — risks C1, C2. Legitimate deep
@@ -6066,6 +6267,7 @@ let check_no_shadowing ctx =
     | EList es            -> List.iter (walk decl bound) es
     | ERange (lo, hi)     -> walk decl bound lo; walk decl bound hi
     | EObsAccess _        -> ()
+    | ERunMember _        -> ()
   in
   List.iter (fun (tr : transition_decl) ->
     let decl = Printf.sprintf "transition '%s'" tr.trname in
@@ -6140,6 +6342,7 @@ let check_quadratic_coupling ctx =
     | EList es -> List.exists (mentions v) es
     | ERange (lo, hi) -> mentions v lo || mentions v hi
     | EObsAccess _ -> false
+    | ERunMember _ -> false
   and guard_mentions v = function
     | GEq (a, b) | GNeq (a, b) -> a = v || b = v
     | GTab (_, idxs, _, operand) ->
@@ -7206,6 +7409,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
       compute_identity_tracked expanded_comps expanded_trs;
     Ir.doc_index = build_doc_index ctx;
     Ir.quantities         = expand_quantities ctx;
+    Ir.contrasts          = expand_contrasts ctx;
   } in
   (* Fix B: the record above is fully forced here, so every resolve_expr call
      (transitions, ode, observations, balance) has run and ctx.hoisted_rev

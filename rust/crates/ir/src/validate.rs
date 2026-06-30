@@ -1173,6 +1173,7 @@ mod tests {
         m.quantities.push(Quantity {
             name: "bad".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::bin_op(
                     crate::expr::BinOp::Mul, Expr::pop("I"), Expr::dt())),
@@ -1202,6 +1203,7 @@ mod tests {
         m.quantities.push(Quantity {
             name: "smuggle".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::binding_ref("poison")),
                 reduce: None,
@@ -1223,6 +1225,7 @@ mod tests {
         m.quantities.push(Quantity {
             name: "thr".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::pop("I")),
                 reduce: Some(TemporalReduce::Time(TimeReduce::FirstAbove(
@@ -1248,6 +1251,7 @@ mod tests {
         m.quantities.push(Quantity {
             name: "prev".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::bin_op(
                     crate::expr::BinOp::Div, Expr::pop("I"), Expr::binding_ref("Ntot"))),
@@ -1257,6 +1261,7 @@ mod tests {
         m.quantities.push(Quantity {
             name: "onset".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::pop("I")),
                 reduce: Some(TemporalReduce::Time(TimeReduce::FirstAbove(Expr::param("beta")))),
@@ -1273,6 +1278,7 @@ mod tests {
         m.quantities.push(Quantity {
             name: "q".into(),
             stratum: vec![],
+            dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::pop("Q")), // not declared
                 reduce: None,

@@ -109,7 +109,7 @@ fn model_with_obs_param() -> (Arc<CompiledModel>, Vec<f64>) {
         presets: vec![],
         model_structure: None,
         balance: None,
-        identity_tracked_compartments: vec![], quantities: vec![],
+        identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
     };
 
     let compiled = Arc::new(CompiledModel::new(model).unwrap());

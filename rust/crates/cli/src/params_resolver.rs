@@ -1080,7 +1080,7 @@ mod tests {
             presets: vec![],
             model_structure: None,
             balance: None,
-            identity_tracked_compartments: vec![], quantities: vec![],
+            identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         }
     }
 

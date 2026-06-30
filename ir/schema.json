@@ -116,6 +116,12 @@
       "comment": "Generated quantities (proposal 2026-06-25): named, non-scored reductions of simulation output — the non-scored twin of an observation. Reporting-only, fully expanded (one leaf per stratum cell). Omitted when empty.",
       "type": "array",
       "items": { "$ref": "#/definitions/quantity" }
+    },
+
+    "contrasts": {
+      "comment": "Counterfactual contrasts (proposal 2026-06-25): named differences of two run-rooted operands (cases averted). Reporting-only and non-identity (excluded from run_id, like quantities). Omitted when empty.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/contrast" }
     }
   },
 
@@ -1191,9 +1197,76 @@
           "default": [],
           "items": { "$ref": "#/definitions/stratum_key" }
         },
-        "body": { "$ref": "#/definitions/quantity_body" }
+        "body": { "$ref": "#/definitions/quantity_body" },
+        "dimension": {
+          "comment": "Resolved dimension of the reduced value as [P exponent, T exponent] (counterfactual-contrasts proposal #5). Computed by dimcheck and stored so the contrast reducer can check operand-dimension agreement without re-deriving. Omitted when undetermined.",
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 2,
+          "maxItems": 2
+        }
       },
       "additionalProperties": false
+    },
+
+    "contrast": {
+      "comment": "A named difference of two run-rooted operands over an instant window — the cases-averted object (proposal 2026-06-25).",
+      "type": "object",
+      "required": ["name", "body", "window"],
+      "properties": {
+        "name": { "type": "string" },
+        "body": { "$ref": "#/definitions/contrast_expr" },
+        "window": {
+          "comment": "The accumulation / fork window in model time units; `from` is the counterfactual fork point.",
+          "type": "object",
+          "required": ["from", "to"],
+          "properties": {
+            "from": { "type": "number" },
+            "to": { "type": "number" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "contrast_expr": {
+      "comment": "Arithmetic over run-rooted operands. Externally-tagged single-key objects.",
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["run_member"],
+          "properties": {
+            "run_member": {
+              "type": "object",
+              "required": ["run", "ns", "member"],
+              "properties": {
+                "run": { "type": "string" },
+                "ns": { "enum": ["quantities", "observations"] },
+                "member": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["bin_op"],
+          "properties": {
+            "bin_op": {
+              "type": "object",
+              "required": ["op", "left", "right"],
+              "properties": {
+                "op": { "type": "string" },
+                "left": { "$ref": "#/definitions/contrast_expr" },
+                "right": { "$ref": "#/definitions/contrast_expr" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
 
     "quantity_body": {

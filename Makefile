@@ -122,7 +122,7 @@ dev-camdlc: build-ocaml
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: test-ocaml check-reactive-golden check-quantities-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
+test: test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
 
 # Inner-loop gate: the whole Rust workspace (unit + integration + doctests) via
 # `cargo test`. Deliberately SKIPS the slow cross-language / doc phases
@@ -237,7 +237,7 @@ test-install:
 
 # ── Golden file management ────────────────────────────────────────────────────
 
-.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden
+.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden
 
 # Recompile all DSL fixtures → ocaml/golden/*.ir.json
 update-ocaml-golden: build-ocaml
@@ -248,7 +248,7 @@ update-ocaml-golden: build-ocaml
 		$(CAMDLC) "$$src" > "$$out"; \
 	done
 
-update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden
+update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden
 
 # Recompile the corner-case fixtures (params baked via --set) →
 # tests/fixtures/corner_cases/ir/*.ir.json. These pin the off-grid /
@@ -339,6 +339,34 @@ check-quantities-golden: build-ocaml
 	done; \
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
 	echo "  quantities goldens in sync"
+
+# Recompile the counterfactual-contrasts showcase fixture →
+# tests/fixtures/contrasts/ir/*.ir.json. Compile-only: pins the IR SHAPE of the
+# `contrasts` node (run-rooted operands, the `over [from, to]` window) and the #5
+# stored quantity `dimension` field, deserialised cross-language by the
+# `rust/crates/ir contrasts_golden` test. Re-run after a schema/grammar change.
+CONTRASTS_DIR := tests/fixtures/contrasts
+update-contrasts-golden: build-ocaml
+	@echo "Recompiling contrasts fixtures..."
+	@mkdir -p $(CONTRASTS_DIR)/ir
+	@$(CAMDLC) $(CONTRASTS_DIR)/contrasts_showcase.camdl -o $(CONTRASTS_DIR)/ir/contrasts_showcase.ir.json
+
+# Drift gate: the showcase .camdl must still compile BYTE-FOR-BYTE to its
+# committed .ir.json. `update-contrasts-golden` regenerates; this FAILS if
+# source and golden diverged. Runs in `make test`.
+.PHONY: check-contrasts-golden
+check-contrasts-golden: build-ocaml
+	@echo "Checking contrasts goldens match their .camdl..."
+	@fail=0; for src in contrasts_showcase; do \
+	  $(CAMDLC) $(CONTRASTS_DIR)/$$src.camdl -o $(CONTRASTS_DIR)/ir/$$src.ir.json.tmp; \
+	  if ! diff -q $(CONTRASTS_DIR)/ir/$$src.ir.json $(CONTRASTS_DIR)/ir/$$src.ir.json.tmp >/dev/null 2>&1; then \
+	    echo "  DRIFT: $$src.camdl no longer compiles to the committed .ir.json — run: make update-contrasts-golden"; \
+	    fail=1; \
+	  fi; \
+	  rm -f $(CONTRASTS_DIR)/ir/$$src.ir.json.tmp; \
+	done; \
+	if [ $$fail -ne 0 ]; then exit 1; fi; \
+	echo "  contrasts goldens in sync"
 
 # ── Release / changelog ───────────────────────────────────────────────────────
 
