@@ -1649,8 +1649,9 @@ let lower_via_transitions ctx =
           let redirect_entry (t : transition_decl) : destination_form =
             (* Replace a `DstSum` mention of [src] (the inflow target) with the
                weighted branch. A transition that does not target [src] is left
-               alone. (An entry that already branches — DstBranch — into [src] is
-               not a pattern these models produce, so it is passed through.) *)
+               alone. A `DstBranch` inflow into [src] — the branching analogue of
+               the multi-destination case — is likewise rejected with a targeted
+               E224 (below), not passed through to a confusing downstream E503. *)
             match t.trdst with
             | DstSum refs when List.exists (fun (c, _) -> c = src) refs ->
               let others = List.filter (fun (c, _) -> c <> src) refs in
@@ -1677,6 +1678,26 @@ let lower_via_transitions ctx =
                    clean — the E224 error blocks the compile, so it is unused. *)
                 DstBranch entry_branch
               end
+            | DstBranch brs when List.exists (fun ((c, _), _) -> c = src) brs ->
+              (* A branching inflow `--> { src : w, … }` into the hyper-staged
+                 source cannot be composed with the mixture's own entry branching.
+                 Reject it with the same E224. Redirect the dangling [src] branch
+                 to the first stage cell so the (rejected) lowering does not ALSO
+                 trip an E503 on the staged-away compartment — the E224 blocks the
+                 compile, so this rewrite is never used. *)
+              Diagnostics.error ctx.diags ~code:"E224"
+                ~loc:(diag_loc_of_ast_ctx ctx t.trloc)
+                ~message:(Printf.sprintf
+                  "transition '%s': a branching inflow (`--> { … }`) into the \
+                   hyper-staged compartment '%s' is not supported; a staged source \
+                   must be entered by single-destination inflows (`--> %s`)"
+                  t.trname src src)
+                ~hint:"move the branch into a separate transition, or use manual \
+                       per-stage compartments"
+                ();
+              let s1 = List.hd (branch_cells (List.hd branches)) in
+              DstBranch (List.map (fun ((c, items), w) ->
+                if c = src then ((s1, items), w) else ((c, items), w)) brs)
             | _ -> t.trdst
           in
 

@@ -409,6 +409,34 @@ let test_err_multidest_inflow_into_staged () =
   in
   compile_expect_error_code ~code:"E224" ~contains:"infection" src
 
+(* A branching (`DstBranch`) inflow into a hyper-staged source — `--> { src : w, … }` —
+   is likewise unsupported, and must give a TARGETED E224, not a confusing E503 on
+   the (silently staged-away) compartment the user wrote. Asserts both: E224 fires
+   AND the E503 cascade on the vanished `I` is suppressed. *)
+let test_err_branching_inflow_into_staged () =
+  let src =
+    "time_unit = 'weeks\n\
+     compartments { S, I, R }\n\
+     parameters { beta : rate  p : probability  tau_typ : positive  tau_pro : positive }\n\
+     transitions {\n\
+    \  infection : S --> { I : p, R : 1 - p } @ beta * S\n\
+    \  clearance : I --> R via hyper_erlang(\
+        branch(label = typical, weight = p, stages = 2, mean = tau_typ), \
+        branch(label = prolonged, stages = 1, mean = tau_pro))\n\
+     }\n\
+     init { S = 990  I = 10 }\n"
+  in
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"hyper_test" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E224 but compile succeeded"
+  | Error e ->
+    Alcotest.(check bool) "targeted E224 naming the branching inflow" true
+      (contains_substring ~needle:"E224" e && contains_substring ~needle:"infection" e);
+    Alcotest.(check bool) "no confusing E503 cascade on the vanished compartment" true
+      (not (contains_substring ~needle:"E503" e))
+
 (* ── Deferred: stratified hyper_erlang → E248, not a crash / wrong lowering ──*)
 
 let test_err_stratified_hyper_deferred () =
@@ -497,7 +525,9 @@ let () =
           Alcotest.test_case "weight out of [0,1] → E225" `Quick
             test_err_weight_out_of_range;
           Alcotest.test_case "multi-dest inflow into staged source → E224" `Quick
-            test_err_multidest_inflow_into_staged ] );
+            test_err_multidest_inflow_into_staged;
+          Alcotest.test_case "branching inflow into staged source → E224 (no E503 cascade)" `Quick
+            test_err_branching_inflow_into_staged ] );
       ( "deferred-stratified",
         [ Alcotest.test_case "stratified hyper_erlang → E248" `Quick
             test_err_stratified_hyper_deferred ] );
