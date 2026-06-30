@@ -93,6 +93,8 @@ fn model_with_lag(lag: Option<Expr>, params: Vec<Parameter>) -> Model {
         model_structure: None,
         balance: None,
         identity_tracked_compartments: vec![],
+        quantities: vec![],
+        contrasts: vec![],
     }
 }
 
