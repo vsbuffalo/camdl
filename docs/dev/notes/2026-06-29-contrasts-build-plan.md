@@ -194,3 +194,73 @@ predictive output). The `fitted`/scenario arms read the fit's `(θ, X)` output:
 - Whether the quantities series/stratified TSV emitter is directly reusable for
   the contrast band writer, or needs a thin adapter.
 - The menhir conflict check on `OVER` + the bracketed window.
+
+## Pre-PR reshape + review fixes (v1.1, NOT yet done) — the runbook
+
+Stages A–C landed (a762d370 / 8e075278) on the **`over [from, to]`** surface. A
+four-agent pre-PR review + a design pass converged on a cleaner surface and
+found fixes. Execute all of this as one focused pass, then PR. The branch is
+pre-PR and gate-green, so this is unhurried.
+
+### Surface change — REMOVE the window entirely (decided)
+
+A contrast is just `name = runA.member - runB.member` (+ arithmetic). No `over`,
+no fork instant, no horizon. Rationale: the fork is **derivable** (just before
+the toggled intervention) and the result is **naturally shaped** (time × strata,
+inherited from the operand quantity) over `[fork, run-end]`, so the horizon is
+the run's own extent, not a concept. This makes the P0 (fork-at-intervention)
+and the inverted-window bug **unrepresentable**, not merely guarded.
+
+- **DELETE:** the `OVER` token + window grammar (`parser.mly`); `eval_instant`,
+  **E296** (bare-duration endpoint), the endpoint type-check, the
+  inverted-window guard (`expander.ml`); the `ContrastWindow` field on the IR
+  `Contrast` node (`contrast.rs` / `ir.ml` / `schema.json`); `clip_trajectory` +
+  its inlined `1e-9` (`contrasts.rs`). Regenerate the one contrasts golden
+  (contained — the node is new in the unmerged 0.21, no version re-bump).
+- **ADD (reducer, the only new logic):** derive the fork. From the contrast
+  body's referenced runs, diff the scenario arms' `enable`/`disable` sets → the
+  toggled intervention → its fire time (per-draw if parametric) → **fork = the
+  last saved trajectory snapshot strictly before that fire time**; the arm sim
+  runs `[fork, run-end]` (run-end = the sim/predict horizon). Edge cases, all
+  located errors: no toggled intervention / param-only scenario → defer to
+  **gh#327** (the time-scheduled-param-intervention unification); multiple
+  toggled interventions → earliest, or error. Keep the shape-preserving
+  difference / band / tidy-long emit unchanged.
+- Update the proposal Surface section + the showcase fixture to the no-window
+  form; "averted by week N" = read the time-indexed output / set the run horizon
+  (a decoupled `by <instant>` clause is a later refinement, NOT the conflated
+  window).
+
+### Review findings to fix (4 agents; full detail in the session)
+
+- **[P0] Duplicate contrast names** silently overwrite (`contrasts/<name>.tsv`
+  keyed on name only). Dedup in `expand_contrasts` (cd_loc in scope), mirror
+  quantities' E289.
+- **[P1] E293 hint suggests invalid syntax** — for `NsQuantities` it says "write
+  `quantities.foo`", which doesn't parse; correct is bare `foo`. Branch the hint
+  on `ns` (`expander.ml` ~5840).
+- **[P1] E295 (malformed body) has no source location** — thread `cd_loc`
+  (`expander.ml:6035`). (Survives the reshape; E296/endpoint do not.)
+- **[P1] Stale `#[allow(dead_code)]` + comment on `JointDraw`**
+  (`joint.rs:44-60`) — the fork now consumes `d.latent`/`d.params`; delete the
+  allows, fix the comment.
+- **[P1] Missing tests:** the diagnostics (E292/E293/E294/E295/E297 — E296
+  gone); the gh#325 (ODE → note+no-file) and gh#326 (obs-sourced → skip+note)
+  deferrals; a stratified contrast (+ a deliberate stratum-mismatch error); and
+  an assertion that the arms fork from the **smoothed `X(T*)`** (today's e2e
+  would pass even if it forked from `init{}` at t=0).
+- **[P2]:** series time-axes compared by length-not-value (`contrasts.rs:562`,
+  assert `l.times==r.times`); `n_forkable` column is per-cell finite count
+  (rename `n_used`/document); schema `contrast_expr.bin_op.op` unconstrained
+  string (enumerate like `:183`); add `ir_contrasts_excluded_from_hash` guard
+  (symmetric with quantities); OCaml contrast deserializer round-trip test;
+  `resolve_joint` bypasses the #273 fixed-param backfill (`joint.rs:109` —
+  backfill or assert full coverage); ODE skip note cites gh#322, should be
+  **gh#325** (`contrasts.rs:139`).
+
+### Clean (verified by review, no action)
+
+OCaml↔Rust↔schema parity exact; run-id correctly excludes `contrasts` +
+`Quantity.dimension`; 99 goldens version-only; CRN-zero + positive-median e2e
+jointly non-vacuous; fork mechanics + param-resolver tiers + loud-deferral
+discipline all correct.
