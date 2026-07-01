@@ -47,3 +47,31 @@ pub use multi_stream_obs::{
     Severity,
 };
 pub use prior::Prior;
+
+/// gh#226. The absorbing-`-inf` backstop predicate: `true` when a
+/// log-likelihood value is not a finite anchor a fit can rest on.
+///
+/// A fit is *degenerate* when NOT ONE surviving chain reached a finite
+/// log-likelihood. Callers pass the best (largest) loglik a chain
+/// reached — the MAP loglik for PMMH / MH, the clean-eval winner loglik
+/// for IF2, the best complete-data sweep for PGAS. When that best is
+/// non-finite the Metropolis ratio is stuck (`-inf - (-inf) = NaN`,
+/// which never accepts) or the whole reachable surface is `-inf`; the
+/// run would otherwise complete with a degenerate posterior and exit 0
+/// (gh#226).
+///
+/// This is the load-bearing half of the condition
+/// `acceptance_rate == 0.0 && !best_loglik.is_finite()`: `acceptance_rate
+/// == 0` is implied for MH samplers (a finite `best_loglik` can only be
+/// reached by evaluating a finite loglik, which starts / moves the MAP),
+/// and IF2 has no MH acceptance at all — so `best_loglik` is the one
+/// quantity every path shares. Because a driver passes the GLOBAL best
+/// (max across surviving chains), `no_finite_anchor(global_best)` is
+/// exactly "every surviving chain has no finite anchor"; a single finite
+/// chain (e.g. mixed inits, some ruled out) makes the global best finite
+/// and the fit proceeds — the false-positive guard the backstop must not
+/// trip on legitimate fits.
+#[inline]
+pub fn no_finite_anchor(best_loglik: f64) -> bool {
+    !best_loglik.is_finite()
+}

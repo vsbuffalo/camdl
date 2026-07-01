@@ -875,6 +875,35 @@ pub fn run_stage(
             stage_name, n_chains));
     }
 
+    // gh#226. Whole-fit backstop: every surviving (non-skipped) chain
+    // reached no finite log-likelihood anchor. Each individual `-inf` is
+    // a correct "θ ruled out" (so `is_structural` rightly left it alone),
+    // but with no finite anchor anywhere the MH chain cannot move
+    // (`-inf - (-inf) = NaN`, never accepted) and the run would otherwise
+    // write a degenerate posterior (acceptance 0, MAP loglik `-inf`) and
+    // exit 0. Init `-inf` is just the special case where the absorbing
+    // region starts at step 0, so this single check covers both halves of
+    // the issue. Fires ONLY when NOT ONE chain is finite: a mixed run
+    // where some inits are ruled out but at least one chain reached a
+    // finite loglik still succeeds (that chain sets a finite MAP → the
+    // predicate is false → no fire).
+    if results.iter().all(|(_, r)| sim::inference::no_finite_anchor(r.map_loglik)) {
+        collector.push(DiagnosticKind::InitialLoglikInfinite);
+        collector.render_to_stderr();
+        let diag_path = stage_dir.join("diagnostics.json");
+        let _ = collector.write_json(&diag_path.to_string_lossy());
+        return Err(format!(
+            "pmmh stage `{}`: all {} surviving chain(s) reached no finite \
+             log-likelihood anchor — every evaluated θ scored -inf, so the \
+             MH chain never moves (-inf - (-inf) = NaN, never accepted) and \
+             the posterior is degenerate. The data may be impossible under \
+             this model, or a recoverable error fires deterministically at \
+             every θ (gh#226). Check the observation model, parameter \
+             bounds, and starting values; run with --verbosity debug for \
+             per-substep diagnostics.",
+            stage_name, results.len()));
+    }
+
     // Find MAP across surviving chains
     let (map_chain, map_result) = results.iter()
         .max_by(|a, b| a.1.map_log_posterior.total_cmp(&b.1.map_log_posterior))

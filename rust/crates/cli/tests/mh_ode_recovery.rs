@@ -42,7 +42,15 @@ fn tempdir(tag: &str) -> TempDir {
 }
 
 const TRUE_BETA: f64 = 0.8;
-const START_BETA: f64 = 1.8; // far from truth, so recovery is a real test
+// Far BELOW truth (0.8), not above. A start above truth (e.g. 1.8, R0=6) burns
+// the epidemic out — I(t) reaches exactly 0 well before the data ends, so
+// prevalence-observed data with ongoing late cases scores -inf at every θ. That
+// is a genuinely degenerate fit: the chain starts at -inf and can never move
+// (log_alpha = finite - (-inf) = +inf, rejected), which gh#226's backstop now
+// correctly rejects. 0.4 (R0=1.33) is a sustained-but-weak epidemic that keeps
+// prevalence > 0, so the init loglik is finite and the chain genuinely climbs
+// toward 0.8 — a real recovery test, still far from truth.
+const START_BETA: f64 = 0.4;
 
 /// SIR with a weakly-informative `~` prior on beta; gamma + N0 fixed. R0 ≈ 2.7
 /// over 60 days gives a clear epidemic, so the observations identify beta well.
@@ -176,6 +184,7 @@ N0 = 10000
 [stages.mh]
 algorithm = "mh"
 backend = "ode"
+init = "single"
 chains = 2
 iterations = 1500
 burn_in = 400

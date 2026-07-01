@@ -1937,6 +1937,30 @@ pub fn run_chains_with_per_chain_params(
     let (best_chain, best_loglik, best_se) =
         select_winner_summary(&loglik_eval_outcome);
 
+    // gh#226. Whole-fit backstop: the clean-eval winner across every
+    // surviving chain reached no finite log-likelihood. IF2 has no MH
+    // acceptance, so `best_loglik` non-finite is the whole signal — the
+    // reachable surface is uniformly `-inf` at every evaluated θ. Without
+    // this, the run selects a `-inf` "winner", writes a degenerate
+    // fit_state, and exits 0. Fires ONLY when NOT ONE chain is finite (a
+    // single finite chain makes the winner finite → no fire); the
+    // is_empty guard above already handles the all-PFDegenerate case.
+    if sim::inference::no_finite_anchor(best_loglik) {
+        collector.push(DiagnosticKind::InitialLoglikInfinite);
+        collector.render_to_stderr();
+        if let Some(dir) = stage_dir {
+            let _ = collector.write_json(&format!("{}/diagnostics.json", dir));
+        }
+        return Err(format!(
+            "if2: all {} surviving chain(s) reached no finite log-likelihood \
+             (best = {}). The likelihood surface is `-inf` at every evaluated \
+             θ — the data may be impossible under this model, or a recoverable \
+             error fires deterministically at every θ (gh#226). Nothing to \
+             infer; check the observation model, parameter bounds, and \
+             starting values.",
+            config.n_chains, best_loglik));
+    }
+
     // Report. `best_se` is derived locally; we log it here but don't
     // store it on `ChainResults` — readers that need it go to
     // `loglik_eval.per_chain[overall_winner_idx]`.

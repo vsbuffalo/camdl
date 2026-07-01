@@ -944,6 +944,29 @@ pub fn run_stage(
         .max_by(|a, b| a.log_complete_data_ll.total_cmp(&b.log_complete_data_ll))
         .expect("any_new_sweeps guard ensures non-empty");
 
+    // gh#226. Whole-fit backstop: the best complete-data log-likelihood
+    // across every chain's sweeps is non-finite → not one chain ever
+    // reached a finite anchor. run_pgas tolerates a non-finite init (it
+    // only warns), so an all-`-inf` surface would otherwise write a
+    // degenerate fit_state (best loglik `-inf`) and exit 0. `best_sweep`
+    // is the global maximum, so `no_finite_anchor(best)` is exactly
+    // "every chain has no finite anchor"; a single finite sweep anywhere
+    // makes it finite and the fit proceeds.
+    if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
+        collector.push(DiagnosticKind::InitialLoglikInfinite);
+        collector.render_to_stderr();
+        let diag_path = stage_dir.join("diagnostics.json");
+        let _ = collector.write_json(&diag_path.to_string_lossy());
+        return Err(format!(
+            "pgas: all {} chain(s) reached no finite complete-data \
+             log-likelihood (best = {}). The reachable surface is `-inf` at \
+             every evaluated θ — the data may be impossible under this model, \
+             or a recoverable error fires deterministically at every θ \
+             (gh#226). Nothing to infer; check the observation model, \
+             parameter bounds, and starting values.",
+            n_chains, best_sweep.log_complete_data_ll));
+    }
+
     let mut start_values = HashMap::new();
     for spec in &config.estimated_params {
         start_values.insert(spec.name.clone(), best_sweep.params[spec.index]);
