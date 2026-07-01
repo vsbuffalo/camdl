@@ -234,7 +234,15 @@ pub fn run_chain_binomial_with_observer(
         {
             let k = ((ot - cfg.t_start) / cfg.dt).round();
             let grid = cfg.t_start + k * cfg.dt;
-            if (grid - ot).abs() > crate::schedule::OUTPUT_EPS {
+            // gh#125 review: scale the tolerance by the time magnitude. `output_times`
+            // enumerates by accumulation (`t += step`), so for a `dt` not exactly
+            // representable in binary (0.1, 0.2, …) the accumulated `ot` drifts from
+            // this freshly-computed `grid` by an amount that GROWS with `t` — an
+            // absolute epsilon false-rejects a perfectly on-grid model at a long
+            // horizon (output-every == dt: the drift crosses 1e-12 near t≈93 at
+            // dt=0.1). The drift is O(t·ε); a genuine sub-dt misalignment is O(dt) ≫
+            // that, so the scaled tolerance stays strict against real misalignment.
+            if (grid - ot).abs() > crate::schedule::OUTPUT_EPS * ot.abs().max(1.0) {
                 return Err(SimError::Validation(format!(
                     "chain_binomial: output time {ot} is not on the dt grid \
                      (t_start={} + k·dt, dt={}); the nearest grid time is {grid}. \

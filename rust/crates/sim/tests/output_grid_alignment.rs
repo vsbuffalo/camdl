@@ -131,3 +131,19 @@ fn chain_binomial_accepts_grid_aligned_output() {
         .expect("chain_binomial must accept grid-aligned output times");
     assert_eq!(traj.snapshots.last().unwrap().t, 5.0);
 }
+
+#[test]
+fn chain_binomial_accepts_aligned_fractional_dt_over_long_horizon() {
+    // gh#125 review regression: output-every == dt == 0.1 (perfectly on-grid) over
+    // a long horizon. `output_times` accumulates `t += 0.1`, so the accumulated
+    // value drifts from the freshly-computed grid by an amount that GROWS with t;
+    // an absolute 1e-12 tolerance false-rejected this legitimate model near t≈93.
+    // The magnitude-scaled tolerance must accept it.
+    let compiled = Arc::new(model(100.0, 0.1));
+    let traj = ChainBinomialSim
+        .run(&compiled, &compiled.default_params, 7,
+             &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 100.0, dt: 0.1 }))
+        .expect("chain_binomial must accept output-every==dt=0.1 on a long horizon (gh#125 review)");
+    assert!((traj.snapshots.last().unwrap().t - 100.0).abs() < 1e-6,
+        "last snapshot should be ~100.0, got {}", traj.snapshots.last().unwrap().t);
+}
