@@ -313,10 +313,11 @@ infrastructure with `Wxxx` warnings; the `Lxxx` prefix marks them as lints
 rather than compiler-internal warnings, which clarifies their intent for users
 (a lint is asking "did you mean this?", not "this is suspicious internally").
 
-| Code | Severity | Category       | Summary                                                                               |
-| ---- | -------- | -------------- | ------------------------------------------------------------------------------------- |
-| L401 | Warning  | discretization | discretization-correction pattern uses fixed time literal — likely meant `dt` (gh#54) |
-| L402 | Warning  | dead-code      | compartment declared but referenced nowhere — likely a leftover (gh#168)              |
+| Code | Severity | Category       | Summary                                                                                                                        |
+| ---- | -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| L401 | Warning  | discretization | discretization-correction pattern uses fixed time literal — likely meant `dt` (gh#54)                                          |
+| L402 | Warning  | dead-code      | compartment declared but referenced nowhere — likely a leftover (gh#168)                                                       |
+| L403 | Warning  | forcing-units  | a per-time forcing (already rescaled at load) is manually re-divided by a time-conversion constant — double conversion (gh#13) |
 
 ### L401 — fixed-time-literal in Euler-correction pattern
 
@@ -383,6 +384,80 @@ keeps a compartment alive.
 The lint lives in `ocaml/lib/ir/lint.ml` (`Lint.check_model`), mirroring the
 Dimcheck pass, and is routed to a non-blocking `Diagnostics.warning` by
 `compiler.ml`'s `run_lint` (run by both `camdlc compile` and `camdlc check`).
+
+### L403 — manual re-conversion of an already-rescaled rate forcing
+
+**Fires when:** a transition rate (or a hoisted `let` binding body) divides a
+_rate-dimensioned_ forcing by a bare numeric time-conversion constant. Two
+shapes match:
+
+- a `Div` whose denominator is a **bare** `Const` c matching a time-conversion
+  magnitude, and whose numerator subtree references a rate forcing
+  (`birthrate(t) * pop(t) / 365.25`);
+- a `Mul` by the **reciprocal** of such a magnitude — a bare `Const` ≈ 1/m, or
+  the unfolded `1 / Const` (the lint runs before constant folding) — whose other
+  operand references a rate forcing (`birthrate(t) * (1 / 365.25) * S`).
+
+**Why:** a forcing declared with a per-time tier-3 unit literal (`'per_day`,
+`'per_week`, `'per_month`, `'per_year`) has its stored values rescaled to the
+model `time_unit` at expand time (spec §7 "Required unit literal";
+`unit_to_model_time` / `scale_expr` in `expander.ml`). So `birthrate(t)` already
+returns a value in the model time unit — a `'per_year` forcing under
+`time_unit = 'days` yields a **per-day** value at every reference site. A model
+author who reads the `'per_year` annotation as a passive type tag and "converts"
+manually — `birthrate(t) * pop(t) / 365.25` — divides a **second** time,
+producing a rate ~365× too small.
+
+The dim-checker cannot catch this: dividing a rate (T⁻¹) by a bare dimensionless
+constant preserves the dimension, and the dim system tracks the (P_exp, T_exp)
+tuple but **not** the time-scale, so per-year and per-day carry the identical
+dimension T⁻¹. The rescale is applied silently at every reference — there is no
+signal at the use site. This lint is that signal. The real fix (a scale-aware
+dim system) is a large lift and out of scope; L403 is the make-loud stopgap.
+
+**Magnitude set** (matched within a 0.5% relative band):
+`{7, 12, 24, 30, 30.44, 52, 60, 365, 365.25, 365.2425, 366, 3600, 86400}` — the
+reciprocals of the standard time-conversion constants (days/week, months/year,
+hours/day, days/month, weeks/year, s/min, days/year variants, s/hr, s/day).
+These essentially never occur by accident as a **bare** divisor next to a rate
+forcing, which is what keeps the false-positive rate near zero. The set and the
+0.5% band are a deliberate design call (conservative on purpose); the smaller
+members (7, 12, 24, 30, 52, 60) carry marginally higher false-positive risk than
+the year-magnitudes, but the joint requirement — a **bare** constant _and_ a
+rate forcing in the numerator — keeps even those safe in practice.
+
+**Only rate forcings qualify.** The numerator must reference a forcing whose
+declared dimension is a rate `(0, -1)`. A `'ratio` / `'count` / duration forcing
+divided by a constant is **not** flagged — those are not per-time values, so
+there is no double conversion.
+
+**Bare `Const` only (the unit-literal escape).** The denominator must be a bare
+`Ir.Const`, not an `UncheckedDim`. A unit-annotated divisor (`1 'years`,
+`365 'days`) wraps in `UncheckedDim` and is exactly the recommended dimensioned
+form, so it must not fire. (`'ratio` / `'count` literals lower to a bare `Const`
+and are correctly indistinguishable from a plain number here.)
+
+**Warning, not error (for now):** the magnitude match is a heuristic, and a hard
+error needs the per-site suppression escape hatch (gh#55 `#[allow(...)]` / gh#56
+`--allow=`) which does not exist yet. Once that lands, L403 is a candidate to
+promote to a hard error (with the migration hint) per the "signpost the
+migration" rule.
+
+**Known heuristic gap:** if the forcing reference is hoisted into its **own**
+separate `let` (e.g. `let br = birthrate(t)` then `br / 365.25` elsewhere), the
+numerator sees a `BindingRef`, not the `TimeFunc`, and the lint does not resolve
+through it. The common inline and single-`let`
+(`let flow = birthrate(t) * pop(t)
+/ 365.25`) forms are both covered — the lint
+walks transition rates and binding bodies.
+
+**Fix:** drop the manual conversion — `birthrate(t)` is already in the model
+`time_unit`, so use it directly. If a further scale is genuinely intended, write
+the factor as a dimensioned unit literal (not a bare number) so the dim-checker
+can validate it.
+
+The lint lives in `ocaml/lib/compiler/expander.ml` (`lint_l403`, mirroring
+`lint_l401`), emitted during `expand_detail` after bindings are collected.
 
 ## Future work
 

@@ -2382,6 +2382,181 @@ let test_l401_no_fire_on_unit_conversion () =
     let n = count_diags_with_code d.ctx.diags.diags "L401" in
     Alcotest.(check int) "no L401 on unit conversion (no exp)" 0 n
 
+(* ── L403: manual re-conversion of an already-rescaled rate forcing (gh#13) ── *)
+
+(* True iff SOME L403 diagnostic's message contains [needle]. *)
+let l403_msg_contains needle (diags : Diagnostics.diagnostic list) =
+  List.exists (fun (d : Diagnostics.diagnostic) ->
+    d.code = "L403" && contains_substring ~needle d.message
+  ) diags
+
+(* Div form: `birthrate(t) * popsize(t) / 365.25`. birthrate is 'per_year (a
+   rate forcing, already rescaled at load); popsize is 'count. L403 must fire
+   once, naming the forcing and the magnitude. *)
+let test_l403_fires_on_div_conversion () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { R0 : rate in [0.1, 5.0] }
+    forcing {
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = "linear" }
+    }
+    transitions {
+      births : S --> I @ birthrate(t) * popsize(t) / 365.25
+    }
+    init { S = 100 }
+    simulate { from = 0 'days  to = 100 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile_detail_result ~name:"l403_div" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Error e -> Alcotest.failf "should compile despite L403: %s" e
+  | Ok d ->
+    let n = count_diags_with_code d.ctx.diags.diags "L403" in
+    Alcotest.(check int) "L403 fires once on the div-conversion" 1 n;
+    Alcotest.(check bool) "L403 names the forcing" true
+      (l403_msg_contains "birthrate" d.ctx.diags.diags);
+    Alcotest.(check bool) "L403 names the magnitude" true
+      (l403_msg_contains "365.25" d.ctx.diags.diags)
+
+(* Reciprocal-as-Mul form: `birthrate(t) * (1 / 365.25) * S`. The lint runs
+   pre-constant-fold, so `1 / 365.25` is `Div{Const 1, Const 365.25}`. *)
+let test_l403_fires_on_reciprocal_mul () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { R0 : rate in [0.1, 5.0] }
+    forcing {
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+    }
+    transitions {
+      births : S --> I @ birthrate(t) * (1 / 365.25) * S
+    }
+    init { S = 100 }
+    simulate { from = 0 'days  to = 100 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile_detail_result ~name:"l403_recip" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Error e -> Alcotest.failf "should compile despite L403: %s" e
+  | Ok d ->
+    let n = count_diags_with_code d.ctx.diags.diags "L403" in
+    Alcotest.(check int) "L403 fires once on the reciprocal-mul" 1 n;
+    Alcotest.(check bool) "L403 names the forcing" true
+      (l403_msg_contains "birthrate" d.ctx.diags.diags)
+
+(* Control: plain use `birthrate(t) * S` — no bare conversion → no L403. *)
+let test_l403_no_fire_on_plain_use () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { R0 : rate in [0.1, 5.0] }
+    forcing {
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+    }
+    transitions {
+      births : S --> I @ birthrate(t) * S
+    }
+    init { S = 100 }
+    simulate { from = 0 'days  to = 100 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile_detail_result ~name:"l403_plain" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Error e -> Alcotest.failf "should compile cleanly: %s" e
+  | Ok d ->
+    let n = count_diags_with_code d.ctx.diags.diags "L403" in
+    Alcotest.(check int) "no L403 on plain forcing use" 0 n
+
+(* Control: a 'ratio and a 'count forcing divided by a conversion constant.
+   Neither is a rate forcing, so the double-conversion bug does not apply. *)
+let test_l403_no_fire_on_non_rate_forcing () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { R0 : rate in [0.1, 5.0] }
+    forcing {
+      seasonal : interpolated 'ratio { times = [0, 100]  values = [1.0, 1.2]  method = "linear" }
+      popsize  : interpolated 'count { times = [0, 100]  values = [1000, 1100]  method = "linear" }
+    }
+    transitions {
+      a : S --> I @ seasonal(t) / 365.25 * R0 * S
+      b : S --> I @ popsize(t) / 365.25 * R0
+    }
+    init { S = 100 }
+    simulate { from = 0 'days  to = 100 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile_detail_result ~name:"l403_nonrate" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Error e -> Alcotest.failf "should compile cleanly: %s" e
+  | Ok d ->
+    let n = count_diags_with_code d.ctx.diags.diags "L403" in
+    Alcotest.(check int) "no L403 on 'ratio / 'count forcing" 0 n
+
+(* Control: `mu * S / 365.25` — a bare conversion constant, but no rate forcing
+   anywhere in the numerator. Must not fire. *)
+let test_l403_no_fire_on_unrelated_div () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters {
+      R0 : rate in [0.1, 5.0]
+      mu : rate in [0.001, 1.0]
+    }
+    forcing {
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+    }
+    transitions {
+      decay : I --> S @ mu * S / 365.25
+    }
+    init { S = 100 }
+    simulate { from = 0 'days  to = 100 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile_detail_result ~name:"l403_unrel" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Error e -> Alcotest.failf "should compile cleanly: %s" e
+  | Ok d ->
+    let n = count_diags_with_code d.ctx.diags.diags "L403" in
+    Alcotest.(check int) "no L403 without a rate forcing in the numerator" 0 n
+
+(* The `let flow = birthrate(t) * popsize(t) / 365.25` idiom hoists into a
+   model-level binding; the lint must walk binding bodies too, else this common
+   pattern escapes it silently. *)
+let test_l403_fires_via_hoisted_binding () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { R0 : rate in [0.1, 5.0] }
+    forcing {
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = "linear" }
+    }
+    let birth_flow = birthrate(t) * popsize(t) / 365.25
+    transitions {
+      births : S --> I @ birth_flow
+    }
+    init { S = 100 }
+    simulate { from = 0 'days  to = 100 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile_detail_result ~name:"l403_hoist" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Error e -> Alcotest.failf "should compile despite L403: %s" e
+  | Ok d ->
+    let n = count_diags_with_code d.ctx.diags.diags "L403" in
+    Alcotest.(check int) "L403 fires once via the hoisted binding" 1 n;
+    Alcotest.(check bool) "L403 names the binding" true
+      (l403_msg_contains "birth_flow" d.ctx.diags.diags)
+
 (* ── gh#58: trig primitives (sin/cos/tanh) + pi/e ──────────────────────────── *)
 
 let test_trig_pi_resolves_to_const () =
@@ -8076,6 +8251,14 @@ let () =
       Alcotest.test_case "L401 fires on fixed time literal"          `Quick test_l401_fires_on_fixed_time_literal;
       Alcotest.test_case "L401 quiet when dt primitive used"         `Quick test_l401_no_fire_when_dt_used;
       Alcotest.test_case "L401 quiet on unit conversion (no exp)"    `Quick test_l401_no_fire_on_unit_conversion;
+    ];
+    "l403_lint", [
+      Alcotest.test_case "L403 fires on div-conversion"              `Quick test_l403_fires_on_div_conversion;
+      Alcotest.test_case "L403 fires on reciprocal-mul"              `Quick test_l403_fires_on_reciprocal_mul;
+      Alcotest.test_case "L403 quiet on plain forcing use"          `Quick test_l403_no_fire_on_plain_use;
+      Alcotest.test_case "L403 quiet on 'ratio / 'count forcing"    `Quick test_l403_no_fire_on_non_rate_forcing;
+      Alcotest.test_case "L403 quiet without a rate forcing"        `Quick test_l403_no_fire_on_unrelated_div;
+      Alcotest.test_case "L403 fires via hoisted binding"           `Quick test_l403_fires_via_hoisted_binding;
     ];
     "compile_outcome", [
       Alcotest.test_case "clean model returns Some value, no errors" `Quick test_compile_outcome_clean_returns_value;
