@@ -204,6 +204,19 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
             );
             std::process::exit(1);
         }
+    } else if eval_method == SurveyEvalMethod::Pfilter {
+        // gh#191: `--eval pfilter` (and `--eval auto` resolved to pfilter above)
+        // scores each survey row with the chain_binomial particle filter — a
+        // stochastic INFERENCE producer that carries no real state. A
+        // real-coupled (REAL_COMPARTMENTS) model would be scored with its
+        // reservoir frozen at init: silently mis-ranked. The pfilter path
+        // bypasses the fit gate, so apply the same chain_binomial gate here.
+        if let Err(msg) = crate::fit::methods::check_model_capabilities(
+            crate::run_meta::InferenceBackend::ChainBinomial, &resolved.compiled,
+        ) {
+            eprintln!("error: {}", msg);
+            std::process::exit(1);
+        }
     }
 
     // Curse-of-dim warnings + n_points auto-resolution

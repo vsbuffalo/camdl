@@ -98,6 +98,15 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     compiled
         .validate_single_source_transitions()
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    // gh#191: the particle filter is a chain_binomial INFERENCE producer — it
+    // carries no real state and never advances a reservoir, so a real-coupled
+    // (REAL_COMPARTMENTS) model would be filtered with its reservoir frozen at
+    // its init value: silently mis-fit. `camdl fit`/`profile` route through
+    // `check_model_capabilities`, but the standalone `pfilter` command bypasses
+    // it — so gate here too, with the same shared inference gate.
+    crate::fit::methods::check_model_capabilities(
+        crate::run_meta::InferenceBackend::ChainBinomial, &compiled,
+    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     let params = compiled.default_params.clone();
 
     // ── Resolve --data flags (gh#90) ─────────────────────────────────
