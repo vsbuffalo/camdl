@@ -280,6 +280,15 @@ fn pgas_survey_top_k_writes_chain_starts_with_survey_ranks() {
         "pgas fit must succeed with init=survey_top_k.\n\
          stdout:\n{}\nstderr:\n{}", stdout, stderr);
 
+    // gh#129: `init = "survey_top_k"` seeds chains at LIKELIHOOD maxima, not
+    // posterior — a silent bias for any non-flat prior. The loud warning must
+    // fire on every survey_top_k run; pin it so a refactor can't drop it
+    // (removing `emit_rank_by_likelihood_bias_warning` fails this assertion).
+    assert!(
+        stderr.contains("ranks survey rows by likelihood"),
+        "gh#129 rank-by-likelihood bias warning must be emitted; stderr:\n{}", stderr
+    );
+
     let fits_dir = tmp.path().join("results/fits");
     let stage_dir = cas_stage_leaf(&fits_dir, "post");
     assert!(stage_dir.join("run.json").is_file(),
