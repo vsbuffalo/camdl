@@ -10,7 +10,10 @@
 //!     `~ <dist>` declaration; fall back to bounds-uniform with a
 //!     startup warning for parameters with no prior (Decision A).
 //!   - [`InitMethod::FromPosterior`] — per-chain draw from a posterior
-//!     draws TSV (uniformly with replacement; gh#83's default).
+//!     draws TSV (uniformly with replacement; gh#83's default). An
+//!     explicit source that can't bind every estimated parameter — a
+//!     missing column or an unparseable cell — is a hard error, never a
+//!     silent bounds-uniform fallback (gh#274).
 //!   - [`InitMethod::FromMle`] — all chains at the MLE point from a
 //!     prior fit; knows the fit-output TOML schema.
 //!   - [`InitMethod::FromParams`] — all chains at a hand-written flat
@@ -148,11 +151,13 @@ impl ChainStarts {
 /// Errors specific to chain-start drawing. Returned by
 /// [`draw_chain_starts`] and the per-variant loaders.
 ///
-/// Missing parameters in a source file are handled by the loaders
-/// themselves via bounds-uniform fall-back + a stderr warning (per
-/// proposal §"Init family"), not by a distinct error variant. The
-/// variants here cover only the cases where no graceful fall-back is
-/// available.
+/// Missing parameters in a `from-mle` / `from-params` / `from-prior`
+/// source are handled by those loaders via bounds-uniform fall-back +
+/// a stderr warning (per proposal §"Init family"), not by a distinct
+/// error variant. `from-posterior` is the exception: an explicit draws
+/// source that can't bind an estimated parameter (missing column or
+/// unparseable cell) is a hard [`InitError::SchemaMismatch`], not a
+/// silent fall-back (gh#274).
 #[derive(Debug)]
 pub enum InitError {
     /// A path argument doesn't point at a readable file or directory.
@@ -604,6 +609,13 @@ fn sample_gamma_shape_rate(rng: &mut StatefulRng, shape: f64, rate: f64) -> f64 
 
 /// `--init from-posterior`: per-chain row draw (uniform with
 /// replacement) from a posterior draws TSV.
+///
+/// The source is explicitly requested, so it must bind every estimated
+/// parameter: a missing column, or a cell that won't parse as a number,
+/// is a hard [`InitError::SchemaMismatch`] — not a silent bounds-uniform
+/// or base-value substitution (gh#274). Cells are parsed up front so a
+/// bad value is caught deterministically, independent of which rows the
+/// per-chain sampler happens to draw.
 fn draw_from_posterior(
     resolved: &ResolvedParameters,
     source: &PosteriorSource,
@@ -632,42 +644,61 @@ fn draw_from_posterior(
     let col_for: HashMap<String, usize> = header.iter().enumerate()
         .map(|(i, h)| (h.clone(), i))
         .collect();
-    let bounds_map = bounds_map_for_estimate(resolved);
-    let base = estimate_values_from_resolved(resolved);
+    // Every estimated parameter must have a matching column. An
+    // explicitly-requested from-posterior source that cannot bind the
+    // parameters we asked for is a HARD ERROR, never a silent
+    // bounds-uniform substitution — silently starting a stiff model at
+    // extreme uniform draws is the gh#274 failure mode (chains blow up
+    // at the first emit, with nothing logged).
     let missing: Vec<String> = resolved.estimate_set.iter()
         .filter(|n| !col_for.contains_key(n.as_str()))
         .cloned()
         .collect();
     if !missing.is_empty() {
-        eprintln!(
-            "\x1b[33mwarning:\x1b[0m --init from-posterior `{}` is \
-             missing column(s): {}. Falling back to bounds-uniform \
-             for those parameter(s).",
-            path.display(), missing.join(", "));
+        let expected_cols: Vec<&str> =
+            resolved.estimate_set.iter().map(String::as_str).collect();
+        return Err(InitError::SchemaMismatch {
+            path: path.clone(),
+            expected: "posterior draws TSV",
+            msg: format!(
+                "missing column(s): {} — the draws TSV must have one \
+                 column per estimated parameter ({}). Present columns: {}.",
+                missing.join(", "),
+                expected_cols.join(", "),
+                header.join(", ")),
+        });
+    }
+    // Parse the estimate-set columns for every row up front, so an
+    // unparseable cell in an explicitly-requested source is a
+    // deterministic hard error (independent of which rows get sampled)
+    // rather than a silent base-value substitution (gh#274). After this
+    // the sampling loop only indexes into already-parsed values.
+    let names: Vec<&String> = resolved.estimate_set.iter().collect();
+    let mut parsed: Vec<Vec<f64>> = Vec::with_capacity(rows.len());
+    for (r, row) in rows.iter().enumerate() {
+        let mut vals = Vec::with_capacity(names.len());
+        for name in &names {
+            let col = col_for[name.as_str()]; // present: checked above
+            let cell = row.get(col).map(String::as_str).unwrap_or("");
+            let v = cell.parse::<f64>().map_err(|_| InitError::SchemaMismatch {
+                path: path.clone(),
+                expected: "posterior draws TSV",
+                msg: format!(
+                    "column `{}` row {} has value `{}` that does not \
+                     parse as a number",
+                    name, r + 1, cell),
+            })?;
+            vals.push(v);
+        }
+        parsed.push(vals);
     }
     let mut rng = StatefulRng::new(seed ^ 0xb05_e_05u64);
     let starts: Vec<ChainStart> = (0..n_chains).map(|chain_id| {
         let row_idx = (rng.uniform() * rows.len() as f64).floor() as usize;
         let row_idx = row_idx.min(rows.len() - 1);
-        let row = &rows[row_idx];
-        let mut values = HashMap::with_capacity(resolved.estimate_set.len());
-        for name in &resolved.estimate_set {
-            let val = match col_for.get(name) {
-                Some(&i) => row.get(i)
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or_else(|| base.get(name).copied().unwrap_or(0.0)),
-                None => {
-                    // Missing column: bounds-uniform fall-back.
-                    let chain_seed = derive_chain_seed(seed, chain_id);
-                    let mut local = StatefulRng::new(chain_seed.wrapping_add(0x100));
-                    match bounds_map.get(name) {
-                        Some(&(lo, hi)) if lo.is_finite() && hi.is_finite() =>
-                            lo + local.uniform() * (hi - lo),
-                        _ => base.get(name).copied().unwrap_or(0.0),
-                    }
-                }
-            };
-            values.insert(name.clone(), val);
+        let mut values = HashMap::with_capacity(names.len());
+        for (k, name) in names.iter().enumerate() {
+            values.insert((*name).clone(), parsed[row_idx][k]);
         }
         ChainStart {
             chain_id,
@@ -1210,6 +1241,70 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn from_posterior_missing_column_is_hard_error() {
+        // gh#274: an explicitly-requested from_posterior source whose
+        // draws TSV lacks a column for an estimated parameter must be a
+        // HARD ERROR — never a silent bounds-uniform fallback (which on a
+        // stiff model starts the chains at extreme uniform draws and
+        // crashes at the first emit). `gamma` is estimated but absent
+        // from the file.
+        let resolved = mk_resolved(
+            vec![
+                mk_param("beta",  0.3, None, Some((0.0, 1.0))),
+                mk_param("gamma", 0.1, None, Some((0.0, 1.0))),
+            ],
+            &["beta", "gamma"],
+        );
+        let path = write_tmp("from_post_missing_col",
+            "beta\n0.10\n0.20\n0.30\n");
+        let err = draw_chain_starts(
+            &resolved,
+            &InitMethod::FromPosterior {
+                source: PosteriorSource::DrawsTsv(path.clone()),
+            },
+            4, 42,
+        ).unwrap_err();
+        let msg = err.to_string();
+        // names the file, the missing column, and hints the fix.
+        assert!(msg.contains(&path.display().to_string()),
+            "error must name the file: {}", msg);
+        assert!(msg.contains("gamma"),
+            "error must name the missing column: {}", msg);
+        assert!(msg.contains("column"),
+            "error must hint the one-column-per-parameter fix: {}", msg);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn from_posterior_unparseable_cell_is_hard_error() {
+        // gh#274: a matched column whose value won't parse as f64 is a
+        // hard error for an explicit source, not a silent base-value
+        // substitution. The check is deterministic (all rows validated
+        // up front), so it fires regardless of which rows get sampled.
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let path = write_tmp("from_post_bad_cell",
+            "beta\n0.10\nnotanumber\n0.30\n");
+        let err = draw_chain_starts(
+            &resolved,
+            &InitMethod::FromPosterior {
+                source: PosteriorSource::DrawsTsv(path.clone()),
+            },
+            4, 42,
+        ).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(&path.display().to_string()),
+            "error must name the file: {}", msg);
+        assert!(msg.contains("beta"),
+            "error must name the offending column: {}", msg);
+        assert!(msg.contains("notanumber"),
+            "error must name the offending value: {}", msg);
+        std::fs::remove_file(&path).ok();
     }
 
     // ─── `from-prior` ──────────────────────────────────────────────────
