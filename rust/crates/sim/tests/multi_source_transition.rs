@@ -208,3 +208,40 @@ fn single_source_model_is_accepted_on_chain_binomial() {
         "a single-source model must still run on chain_binomial"
     );
 }
+
+/// gh#121 review: a SINGLE source written as several un-collapsed negative
+/// entries (`[["S",-1],["S",-1],…]`) must be ACCEPTED. camdlc always collapses
+/// stoichiometry per compartment, but the IR is a public contract, so a
+/// hand-authored IR can carry this shape. The validator counts DISTINCT source
+/// compartments, not stoich entries — otherwise the same reaction gets opposite
+/// verdicts by representation (the collapsed `[["S",-2],…]` is accepted).
+#[test]
+fn single_source_as_duplicate_entries_is_accepted() {
+    let dup_entry = Transition {
+        name: "react".into(),
+        stoichiometry: vec![
+            StoichiometryEntry("S".into(), -1),
+            StoichiometryEntry("S".into(), -1),
+            StoichiometryEntry("I".into(), 1),
+        ],
+        rate: mul(param("k"), pop("S")),
+        metadata: None,
+        draw_method: DrawMethod::Poisson,
+        rate_grad: Default::default(),
+        lineage: None,
+    };
+    let model = build(
+        "dup_entry_single_source",
+        &["S", "I"],
+        vec![dup_entry],
+        vec![fixed("k", 0.0001)],
+        &[("S", 1000.0), ("I", 0.0)],
+        20.0,
+    );
+    let compiled = CompiledModel::new(model).unwrap();
+    assert!(
+        compiled.validate_single_source_transitions().is_ok(),
+        "a single source written as duplicate negative entries must NOT be \
+         rejected as multi-source (it dedups to one distinct compartment)"
+    );
+}

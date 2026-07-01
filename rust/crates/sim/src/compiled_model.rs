@@ -772,11 +772,19 @@ impl CompiledModel {
     /// chain-binomial producer), and the standalone `pfilter` command.
     pub fn validate_single_source_transitions(&self) -> Result<(), SimError> {
         for (tr_idx, stoich) in self.transition_stoich.iter().enumerate() {
-            let sources: Vec<usize> = stoich
+            // gh#121 review: count DISTINCT source compartments, not stoich
+            // entries. camdlc always collapses stoichiometry per compartment, but
+            // the IR is a public contract (`camdl simulate model.ir.json`) and a
+            // hand-authored IR may carry one source as several un-collapsed
+            // negative entries (`[["S",-1],["S",-1],…]`); dedup so the same
+            // reaction can't get opposite verdicts by representation.
+            let mut sources: Vec<usize> = stoich
                 .iter()
                 .filter(|&&(_, d)| d < 0)
                 .map(|&(local, _)| local)
                 .collect();
+            sources.sort_unstable();
+            sources.dedup();
             if sources.len() < 2 {
                 continue;
             }
