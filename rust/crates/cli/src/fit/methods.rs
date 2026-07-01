@@ -640,6 +640,20 @@ pub fn check_model_capabilities(
         }
         InferenceBackend::Ode => Capabilities::REAL_COMPARTMENTS | Capabilities::RUNTIME_DT,
     };
+    // gh#122: a source that mixes a `deterministic(...)` exit with another exit
+    // is unsupported on the stochastic (chain_binomial) inference producer — the
+    // competing-risk draw would over-draw the source. This is a STRUCTURAL model
+    // property (not a backend-feature bitflag), so it is checked here rather than
+    // via `Capabilities`, which lets the error name the offending compartment and
+    // transitions. ODE inference runs every transition as a deterministic flow
+    // and is exempt. This is the single inference chokepoint every stochastic
+    // fit stage / profile / survey routes through.
+    if matches!(backend, InferenceBackend::ChainBinomial) {
+        compiled
+            .validate_deterministic_source_exits()
+            .map_err(|e| e.to_string())?;
+    }
+
     let required = compiled.required_capabilities();
     let unsupported = required - backend_caps;
     if unsupported.is_empty() {
@@ -798,6 +812,110 @@ pub fn render_matrix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#122: a source that mixes a `deterministic(...)` exit with another exit
+    /// is rejected on the chain_binomial inference producer (the over-draw
+    /// hazard) with a located, gh#122-tagged message, but still accepted on the
+    /// ODE inference backend (which runs every transition as a deterministic
+    /// flow). Proves the inference dispatch gate is wired to the shared
+    /// `CompiledModel::validate_deterministic_source_exits`.
+    #[test]
+    fn mixed_deterministic_source_rejected_on_chain_binomial_inference_only() {
+        use ir::{
+            expr::{BinOp, BinOpExpr, BinOpWrap, Expr, ParamExpr, PopExpr},
+            model::{
+                Compartment, CompartmentKind, InitialConditions, OutputConfig, OutputSchedule,
+                RegularOutputSchedule, SimulationConfig,
+            },
+            parameter::{ParamValue, Parameter},
+            transition::{DrawMethod, StoichiometryEntry, Transition},
+            Model,
+        };
+        use std::collections::HashMap;
+
+        let mul = |l: Expr, r: Expr| {
+            Expr::BinOp(BinOpWrap {
+                bin_op: BinOpExpr { op: BinOp::Mul, left: Box::new(l), right: Box::new(r) },
+            })
+        };
+        let rate = |p: &str, c: &str| mul(
+            Expr::Param(ParamExpr { param: p.into() }),
+            Expr::Pop(PopExpr { pop: c.into() }),
+        );
+        let tr = |name: &str, dst: &str, dm: DrawMethod, r: Expr| Transition {
+            name: name.into(),
+            stoichiometry: vec![StoichiometryEntry("I".into(), -1), StoichiometryEntry(dst.into(), 1)],
+            rate: r,
+            metadata: None,
+            draw_method: dm,
+            rate_grad: Default::default(),
+            lineage: None,
+        };
+
+        // Source `I` mixes a deterministic recovery with a Poisson death.
+        let model = Model {
+            name: "mixed_source_infer".into(),
+            version: "0.3".into(),
+            time_unit: "days".into(),
+            description: None,
+            origin: None,
+            origin_rata_die: None,
+            compartments: ["I", "R", "D"]
+                .iter()
+                .map(|c| Compartment { name: (*c).into(), kind: CompartmentKind::Integer })
+                .collect(),
+            transitions: vec![
+                tr("recover", "R", DrawMethod::Deterministic, rate("gamma", "I")),
+                tr("die", "D", DrawMethod::Poisson, rate("mu", "I")),
+            ],
+            ode_equations: vec![],
+            time_functions: vec![],
+            tables: vec![],
+            interventions: vec![],
+            observations: vec![],
+            bindings: vec![],
+            per_eval_bindings: vec![],
+            parameters: vec![
+                Parameter { name: "gamma".into(), value: ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None },
+                Parameter { name: "mu".into(), value: ParamValue::Fixed { value: 0.02 }, param_kind: None, param_dim: None },
+            ],
+            initial_conditions: InitialConditions::Explicit(
+                [("I", 1000.0), ("R", 0.0), ("D", 0.0)]
+                    .iter()
+                    .map(|(k, v)| ((*k).into(), *v))
+                    .collect::<HashMap<String, f64>>(),
+            ),
+            output: OutputConfig {
+                times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
+                format: "tsv".into(),
+                trajectory: true,
+                observations: false,
+            },
+            simulation: SimulationConfig {
+                t_start: 0.0, t_end: 5.0, time_semantics: "continuous".into(),
+                dt: Some(1.0), rng_seed: Some(7), integrator: Default::default(),
+            },
+            presets: vec![],
+            model_structure: None,
+            balance: None,
+            identity_tracked_compartments: vec![],
+            quantities: vec![],
+            contrasts: vec![],
+        };
+        let compiled = sim::CompiledModel::new(model).expect("mixed model still compiles");
+
+        let err = check_model_capabilities(InferenceBackend::ChainBinomial, &compiled)
+            .expect_err("chain_binomial inference must reject a mixed deterministic source");
+        assert!(err.contains("gh#122"), "must cite the issue: {err}");
+        assert!(err.contains("I"), "must name the source compartment: {err}");
+        assert!(err.contains("recover"), "must name the deterministic exit: {err}");
+
+        // ODE inference integrates every transition as a flow — still accepted.
+        assert!(
+            check_model_capabilities(InferenceBackend::Ode, &compiled).is_ok(),
+            "ODE inference must accept a mixed deterministic source"
+        );
+    }
 
     #[test]
     fn every_phase1_method_present() {

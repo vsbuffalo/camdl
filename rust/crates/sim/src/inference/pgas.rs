@@ -841,6 +841,26 @@ pub fn log_transition_density_substep(
             continue;
         }
 
+        // gh#122: a sole-exit deterministic source member is a POINT MASS.
+        // `step_one` records `count = clamp(round(rate*dt), 0, n_src)`, so its
+        // density is 0 (log 1) iff the recorded flow matches, else -inf. Mark it
+        // handled here (so it is NOT re-scored by the ungrouped Poisson loop
+        // below, which lacks the n_src cap) and validate the exact count.
+        // `compute_source_group_probs` still skips deterministic members (they
+        // never enter the competing-risk split); because a source that mixes a
+        // deterministic exit with another exit is rejected upstream, a
+        // deterministic member here is always the group's only exit. No-op for
+        // deterministic-free groups (byte-identical density).
+        for &tr_idx in group {
+            if is_determ[tr_idx] {
+                let expected = ((propensities[tr_idx] * dt).round() as i64).clamp(0, n_src) as u64;
+                if flows[tr_idx] != expected {
+                    return Ok(f64::NEG_INFINITY);
+                }
+                handled[tr_idx] = true;
+            }
+        }
+
         let (probs, total_rate) = match compute_source_group_probs(
             group, flows, &propensities, &is_determ, &sigma_sq_by_tr,
             gammas, &mut gamma_idx, n_src,

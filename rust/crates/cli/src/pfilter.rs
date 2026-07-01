@@ -84,6 +84,13 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
 
     let compiled = CompiledModel::new(model.clone())
         .unwrap_or_else(|e| { eprintln!("compile error: {:?}", e); std::process::exit(1); });
+    // gh#122: the particle filter is a stochastic (chain_binomial) producer; a
+    // source that mixes a deterministic exit with another exit would over-draw
+    // the source. Reject it here (the standalone `pfilter` command bypasses
+    // `check_model_capabilities`).
+    compiled
+        .validate_deterministic_source_exits()
+        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     let params = compiled.default_params.clone();
 
     // ── Resolve --data flags (gh#90) ─────────────────────────────────

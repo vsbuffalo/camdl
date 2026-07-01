@@ -199,6 +199,13 @@ pub fn run_chain_binomial_with_observer(
     // fires immediately) or feed NaN/±∞ straight into the kernel.
     model.validate_schedule(cfg.dt, params)?;
 
+    // gh#122: reject a source that mixes a deterministic exit with another exit
+    // BEFORE any stepping — the chain-binomial competing-risk draw would
+    // over-draw the source (deterministic + stochastic flows are capped
+    // independently). Forward chain-binomial chokepoint; the inference producer
+    // is gated separately (fit::methods::check_model_capabilities + pfilter).
+    model.validate_deterministic_source_exits()?;
+
     // gh#125: chain_binomial is the SNAP policy — it steps a full `dt` per
     // substep and records outputs at grid times (`t_start + k*dt`); it never
     // lands on a sub-`dt` output time. An off-grid output time would therefore
@@ -608,7 +615,27 @@ pub fn step_one(
             let rate = scratch.propensities[tr_idx];
             if rate <= RATE_EPSILON { scratch.handled[tr_idx] = true; continue; }
             let per_capita = rate / n_src as f64;
-            if let ResolvedDraw::Deterministic = &scratch.draws[tr_idx] { scratch.handled[tr_idx] = true; continue; }
+            if let ResolvedDraw::Deterministic = &scratch.draws[tr_idx] {
+                // gh#122: a sole-exit deterministic source transition FIRES
+                // `round(rate*dt)`, capped by source availability for
+                // conservation — the same `round(rate*dt)` convention as the
+                // source-LESS deterministic path below. A source that MIXES a
+                // deterministic exit with another exit is rejected upstream
+                // (`validate_deterministic_source_exits`), so a deterministic
+                // member here is always the group's only exit; it is therefore
+                // NOT pushed to `probs`/`total_rate` and the group's
+                // competing-risk draw (Step 2/3) does not run. This branch
+                // consumes NO rng, so a source group with no deterministic
+                // member is byte-identical to before it existed (CRN preserved:
+                // `binomial_z_idx` and every draw are untouched here).
+                let count = ((rate * dt).round() as i64).clamp(0, n_src) as u64;
+                for &(local, delta) in &model.transition_stoich[tr_idx] {
+                    scratch.pending_deltas.push((local, delta * count as i64));
+                }
+                flows[tr_idx] += count;
+                scratch.handled[tr_idx] = true;
+                continue;
+            }
             let effective = match &scratch.draws[tr_idx] {
                 ResolvedDraw::Overdispersed(sigma_sq) => {
                     let g = scratch.gamma_override.take()

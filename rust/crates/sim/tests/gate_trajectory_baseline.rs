@@ -293,7 +293,13 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("flu_data_forcing", "chain_binomial", 0x7b037870200ca140),
     ("flu_data_forcing", "ode", 0x19cffc0fbaebe987),
     ("phenom_mixing_unchecked", "gillespie", 0x5113d45f49fcb942),
-    ("phenom_mixing_unchecked", "chain_binomial", 0x25b6e10456e53ef9),
+    // gh#122: the sole-exit deterministic `waning : R --> S @ deterministic(omega*R)`
+    // was silently FROZEN on chain_binomial (never fired); it now fires
+    // `round(omega*R*dt)`, so this trajectory legitimately changed. gillespie/ode
+    // never had the freeze (both run `deterministic()` as a flow), so their
+    // baselines above/below are unchanged. This is the ONLY golden with a sourced
+    // deterministic transition; every deterministic-free baseline is byte-identical.
+    ("phenom_mixing_unchecked", "chain_binomial", 0xeb226deae32a4e86),
     ("phenom_mixing_unchecked", "ode", 0x38dcf13c1d2f0570),
     ("seir_pop_balance", "chain_binomial", 0xc3eb97c9311a8dca),
     ("seir_seasonal_importation", "gillespie", 0xba237ff576896498),

@@ -122,10 +122,25 @@ pub fn log_transition_density_grad(
 
         for &tr_idx in group {
             let rate = propensities[tr_idx];
-            if rate <= crate::chain_binomial::RATE_EPSILON
-                || matches!(model.model.transitions[tr_idx].draw_method,
-                    ir::transition::DrawMethod::Deterministic)
+            // gh#122: a sole-exit deterministic source member is a POINT MASS.
+            // `step_one` records `count = clamp(round(rate*dt), 0, n_src)`; the
+            // density is a point mass (no term) and its gradient is 0 (`round`
+            // is piecewise-constant → d/dθ = 0 a.e.). A flow disagreeing with the
+            // recorded count is an impossible trajectory (density 0 → -inf), and
+            // that guard MUST match the value fn (`log_transition_density_substep`)
+            // so the NUTS (energy, gradient) pair stays consistent. (Mixed sources
+            // are rejected upstream, so a deterministic member is the sole exit.)
+            if matches!(model.model.transitions[tr_idx].draw_method,
+                        ir::transition::DrawMethod::Deterministic)
             {
+                let expected = ((rate * dt).round() as i64).clamp(0, n_src) as u64;
+                if flows[tr_idx] != expected {
+                    return Ok((f64::NEG_INFINITY, vec![0.0; d]));
+                }
+                handled[tr_idx] = true;
+                continue;
+            }
+            if rate <= crate::chain_binomial::RATE_EPSILON {
                 handled[tr_idx] = true;
                 continue;
             }

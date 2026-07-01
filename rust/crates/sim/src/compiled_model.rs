@@ -668,6 +668,80 @@ impl CompiledModel {
             .unwrap_or_else(|| format!("(local-int-{local})"))
     }
 
+    /// gh#122: reject a source compartment that mixes a `deterministic(...)`
+    /// exit with any other outgoing transition, for the stochastic backends.
+    ///
+    /// A `deterministic(rate)` transition that is the SOLE exit from its source
+    /// is supported (`chain_binomial::step_one` fires `round(rate*dt)` capped by
+    /// the source count). But when a source has a deterministic exit AND ≥1
+    /// other exit, the chain-binomial competing-risk draw would compute the
+    /// deterministic flow and the stochastic flow(s) INDEPENDENTLY — each capped
+    /// only by the source count — so together they can exceed the source
+    /// population and drive the compartment negative. The correct treatment (a
+    /// reserve-off-the-top law: draw the deterministic reserve first, then split
+    /// the stochastic remainder over what is left) is not implemented; rather
+    /// than silently over-draw, reject the model here with a located error.
+    ///
+    /// The ODE backend runs every transition as a deterministic flow regardless
+    /// of `draw_method`, so the mix is well-defined there — ODE paths do NOT
+    /// call this. Gillespie ignores `draw_method` entirely (every transition is
+    /// an ordinary CTMC event), so it has neither the freeze bug nor the
+    /// over-draw hazard and also does not call this.
+    ///
+    /// Called at the stochastic dispatch chokepoints: the forward chain-binomial
+    /// entry (`run_chain_binomial_with_observer`) and the inference dispatch gate
+    /// (`fit::methods::check_model_capabilities` for the chain-binomial producer,
+    /// plus the standalone `pfilter` command).
+    pub fn validate_deterministic_source_exits(&self) -> Result<(), SimError> {
+        use ir::transition::DrawMethod;
+        for &(src_local, ref group) in &self.source_groups {
+            // Sole-exit (group of one) or no deterministic member ⇒ supported.
+            if group.len() < 2 {
+                continue;
+            }
+            let determ: Vec<usize> = group
+                .iter()
+                .copied()
+                .filter(|&tr| matches!(self.model.transitions[tr].draw_method, DrawMethod::Deterministic))
+                .collect();
+            if determ.is_empty() {
+                continue;
+            }
+            let src = self.int_compartment_name(src_local);
+            let determ_names: Vec<&str> =
+                determ.iter().map(|&tr| self.model.transitions[tr].name.as_str()).collect();
+            let other_names: Vec<&str> = group
+                .iter()
+                .copied()
+                .filter(|tr| !determ.contains(tr))
+                .map(|tr| self.model.transitions[tr].name.as_str())
+                .collect();
+            let other_desc = if other_names.is_empty() {
+                "(none — every exit is deterministic; two deterministic exits from \
+                 one source still compete for the same pool)"
+                    .to_string()
+            } else {
+                other_names.join(", ")
+            };
+            return Err(SimError::Validation(format!(
+                "compartment '{src}' has {n} competing exit transitions, {k} of them \
+                 deterministic ({determ_list}); a `deterministic(...)` exit is only \
+                 supported when it is the SOLE exit from its source (gh#122). Mixed \
+                 with another exit, the deterministic and stochastic flows are drawn \
+                 independently and can together exceed the '{src}' population (driving \
+                 it negative). Other exit(s) from '{src}': {other_desc}. Fix: use \
+                 `@ rate` (a Poisson competing-risk draw) for every exit from '{src}', \
+                 or run this model on the `ode` backend (which treats all transitions \
+                 as deterministic flows), or restructure so '{src}' has a single \
+                 deterministic exit.",
+                n = group.len(),
+                k = determ.len(),
+                determ_list = determ_names.join(", "),
+            )));
+        }
+        Ok(())
+    }
+
     /// Resolve per-intervention fire **times** for the current
     /// parameter vector. For constant schedules (`AtTimes`,
     /// `Recurring`) returns the baked `self.fire_times`; for
