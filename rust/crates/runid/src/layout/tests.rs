@@ -27,7 +27,7 @@ fn config(t_end: f64) -> SimConfig {
         dt: fid(1.0),
         t_start: fid(0.0),
         t_end: fid(t_end),
-        output: ResolvedOutputSchedule::Regular { start: fid(0.0), step: fid(1.0), end: fid(t_end) },
+        output: ResolvedOutputSchedule::Regular { start: fid(0.0), step: fid(1.0) },
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: false,
         no_flows: false,

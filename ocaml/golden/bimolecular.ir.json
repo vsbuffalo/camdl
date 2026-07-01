@@ -1,4 +1,4 @@
-{"ir_version":"0.22","validated_by":"ocaml-compiler-v0.22","model":{"name":"bimolecular","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.23","validated_by":"ocaml-compiler-v0.23","model":{"name":"bimolecular","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"A","kind":"integer"},
 {"name":"B","kind":"integer"},
 {"name":"C","kind":"integer"}
@@ -8,7 +8,7 @@
 {"name":"k","value":{"mode":"estimated","bounds":[0.0001,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"A0","value":{"mode":"estimated","bounds":[1.0,10000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
 {"name":"B0","value":{"mode":"estimated","bounds":[1.0,10000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"parameterized":{"A":{"param":"A0"},"B":{"param":"B0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":50.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":50.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"parameterized":{"A":{"param":"A0"},"B":{"param":"B0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":50.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"equal reactants","params":{"k":0.001,"A0":100.0,"B0":100.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"A":[],"B":[],"C":[]},"base_compartments":["A","B","C"],"transmission_transitions":[],"infectious_compartments":[]},"bindings":[
 {"name":"N","expr":{"pop_sum":["A","B","C"]}}

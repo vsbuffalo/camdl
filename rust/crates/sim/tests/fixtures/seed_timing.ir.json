@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.22",
-  "validated_by": "ocaml-compiler-v0.22",
+  "ir_version": "0.23",
+  "validated_by": "ocaml-compiler-v0.23",
   "model": {
     "name": "seed_timing",
     "version": "0.3",
@@ -550,7 +550,7 @@
       "parameterized": { "S": { "param": "N0" }, "I": { "const": 0.0 } }
     },
     "output": {
-      "times": { "regular": { "start": 0.0, "step": 1.0, "end": 120.0 } },
+      "times": { "regular": { "start": 0.0, "step": 1.0 } },
       "format": "tsv",
       "trajectory": true,
       "observations": true

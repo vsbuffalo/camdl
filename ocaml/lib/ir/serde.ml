@@ -1352,7 +1352,6 @@ let output_schedule_to_json (s : output_schedule) : Yojson.Safe.t =
     obj [("regular", obj [
       ("start", flt r.start);
       ("step",  flt r.step);
-      ("end",   flt r.end_);
     ])]
   | OutAtTimes ts ->
     obj [("at_times", arr (List.map flt ts))]
@@ -1365,7 +1364,6 @@ let output_schedule_of_json j =
       OutRegular {
         start = as_float (member "start" v);
         step  = as_float (member "step"  v);
-        end_  = as_float (member "end"   v);
       }
     | "at_times" -> OutAtTimes (List.map as_float (as_list v))
     | k -> fail "unknown output_schedule '%s'" k

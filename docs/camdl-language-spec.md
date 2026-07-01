@@ -3159,9 +3159,14 @@ metadata.json         # run provenance (see §19)
 ### 16.2 IR Mapping
 
 The trajectories block compiles to the IR `output` schedule: `every = E` →
-`OutRegular { start, step, end }` (start defaults to `min(0, t_start)` so the
+`OutRegular { start, step }` (start defaults to `min(0, t_start)` so the
 schedule covers anchored models with a negative `t_start`); `at = [...]` →
 `OutAtTimes`. The runtime writes the trajectory directly during simulation.
+
+Output emission is confined to `[start, simulation.t_end]`: `simulation.t_end`
+is the sole horizon authority, and output times are derived from it at emission
+— a regular schedule enumerates up to `t_end`, and an explicit `at = [...]` time
+beyond the horizon is not emitted (never against a frozen post-horizon state).
 
 Synthetic observations (forward simulation) are not part of the trajectory
 output; they are produced by the simulate command's `--obs` family of flags

@@ -70,7 +70,6 @@ pub enum InitialConditions {
 pub struct RegularOutputSchedule {
     pub start: f64,
     pub step:  f64,
-    pub end:   f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

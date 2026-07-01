@@ -69,7 +69,7 @@ pub enum ResolvedObsAlignment {
 /// A resolved output schedule: concrete cadence/times over [`FiniteF64`].
 #[derive(Debug, Clone, PartialEq, RunInput)]
 pub enum ResolvedOutputSchedule {
-    Regular { start: FiniteF64, step: FiniteF64, end: FiniteF64 },
+    Regular { start: FiniteF64, step: FiniteF64 },
     AtTimes(Vec<FiniteF64>),
 }
 
@@ -137,8 +137,13 @@ pub struct ResolvedScenario {
 /// `columns`) changes the hashed bytes of every `SimConfig`, re-keying all sim
 /// leaves — a deliberate, versioned turnover (per the re-key policy in the
 /// runid doc), not a collateral churn. Existing cached sims re-run on next use.
+///
+/// `schema_version = 3` (gh#143): `ResolvedOutputSchedule::Regular` dropped its
+/// `end` field — the output horizon collapsed onto `simulation.t_end` (still
+/// hashed here as `t_end`), so no identity is lost, only re-keyed. Another
+/// deliberate, versioned turnover.
 #[derive(Debug, Clone, PartialEq, RunInput)]
-#[run_input(schema_version = 2)]
+#[run_input(schema_version = 3)]
 pub struct SimConfig {
     pub backend: Backend,
     pub dt: FiniteF64,

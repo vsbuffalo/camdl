@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.22",
-  "validated_by": "ocaml-compiler-v0.22",
+  "ir_version": "0.23",
+  "validated_by": "ocaml-compiler-v0.23",
   "model": {
     "name": "sparse_P8",
     "version": "0.3",
@@ -1312,7 +1312,7 @@
       }
     },
     "output": {
-      "times": { "regular": { "start": 0.0, "step": 1.0, "end": 365.0 } },
+      "times": { "regular": { "start": 0.0, "step": 1.0 } },
       "format": "tsv",
       "trajectory": true,
       "observations": true

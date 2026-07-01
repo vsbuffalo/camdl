@@ -1,4 +1,4 @@
-{"ir_version":"0.22","validated_by":"ocaml-compiler-v0.22","model":{"name":"sir_two_patch","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.23","validated_by":"ocaml-compiler-v0.23","model":{"name":"sir_two_patch","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_urban","kind":"integer"},
 {"name":"S_rural","kind":"integer"},
 {"name":"I_urban","kind":"integer"},
@@ -16,6 +16,6 @@
 {"name":"N_rural","value":{"mode":"estimated","bounds":[100.0,100000.0],"prior":"flat","transform":"identity"},"param_kind":"positive","param_dim":null},
 {"name":"R0_urban","value":{"mode":"estimated","bounds":[0.5,10.0],"prior":"flat","transform":"identity"},"param_kind":"positive","param_dim":null},
 {"name":"R0_rural","value":{"mode":"estimated","bounds":[0.5,10.0],"prior":"flat","transform":"identity"},"param_kind":"positive","param_dim":null}
-],"initial_conditions":{"explicit":{"S_urban":990.0,"I_urban":10.0,"R_urban":0.0,"S_rural":999.0,"I_rural":1.0,"R_rural":0.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":200.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":200.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"explicit":{"S_urban":990.0,"I_urban":10.0,"R_urban":0.0,"S_rural":999.0,"I_rural":1.0,"R_rural":0.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":200.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"default","params":{"gamma":0.1,"N_urban":1000.0,"N_rural":1000.0,"R0_urban":2.5,"R0_rural":1.8},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[{"name":"patch","values":["urban","rural"]}],"compartment_dims":{"S":["patch"],"I":["patch"],"R":["patch"]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]}}}

@@ -1,4 +1,4 @@
-{"ir_version":"0.22","validated_by":"ocaml-compiler-v0.22","model":{"name":"sir_dim_annotated","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.23","validated_by":"ocaml-compiler-v0.23","model":{"name":"sir_dim_annotated","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -13,7 +13,7 @@
 {"name":"amplitude","value":{"mode":"required"},"param_kind":"real","param_dim":[0,0]},
 {"name":"mu","value":{"mode":"required"},"param_kind":"positive","param_dim":[1,-1]},
 {"name":"coupling","value":{"mode":"required"},"param_kind":"positive","param_dim":[0,0]}
-],"initial_conditions":{"explicit":{"S":999.0,"I":1.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":100.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":100.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"explicit":{"S":999.0,"I":1.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":100.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"default","params":{"beta":0.3,"gamma":0.1,"amplitude":1.0,"mu":0.5,"coupling":0.01},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}

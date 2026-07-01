@@ -118,7 +118,7 @@ fn flow_model() -> CompiledModel {
             m
         }),
         output: OutputConfig {
-            times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: T_END }),
+            times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
             format: "tsv".into(),
             trajectory: true,
             observations: false,

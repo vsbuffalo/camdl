@@ -1,4 +1,4 @@
-{"ir_version":"0.22","validated_by":"ocaml-compiler-v0.22","model":{"name":"seir_defines_patch","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.23","validated_by":"ocaml-compiler-v0.23","model":{"name":"seir_defines_patch","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_north","kind":"integer"},
 {"name":"S_south","kind":"integer"},
 {"name":"S_east","kind":"integer"},
@@ -28,7 +28,7 @@
 {"name":"sigma","value":{"mode":"estimated","bounds":[0.001,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.001,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"I0","value":{"mode":"estimated","bounds":[1.0,1000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"parameterized":{"S_north":{"bin_op":{"op":"sub","left":{"table_lookup":{"table":"pop","indices":[{"const":0.0}]}},"right":{"param":"I0"}}},"S_south":{"bin_op":{"op":"sub","left":{"table_lookup":{"table":"pop","indices":[{"const":1.0}]}},"right":{"param":"I0"}}},"S_east":{"bin_op":{"op":"sub","left":{"table_lookup":{"table":"pop","indices":[{"const":2.0}]}},"right":{"param":"I0"}}},"I_north":{"param":"I0"},"I_south":{"param":"I0"},"I_east":{"param":"I0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":90.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":90.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"parameterized":{"S_north":{"bin_op":{"op":"sub","left":{"table_lookup":{"table":"pop","indices":[{"const":0.0}]}},"right":{"param":"I0"}}},"S_south":{"bin_op":{"op":"sub","left":{"table_lookup":{"table":"pop","indices":[{"const":1.0}]}},"right":{"param":"I0"}}},"S_east":{"bin_op":{"op":"sub","left":{"table_lookup":{"table":"pop","indices":[{"const":2.0}]}},"right":{"param":"I0"}}},"I_north":{"param":"I0"},"I_south":{"param":"I0"},"I_east":{"param":"I0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":90.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"baseline","params":{"beta":0.3,"sigma":0.2,"gamma":0.1,"I0":5.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[{"name":"patch","values":["north","south","east"]}],"compartment_dims":{"S":["patch"],"E":["patch"],"I":["patch"],"R":["patch"]},"base_compartments":["S","E","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N_north","expr":{"pop_sum":["S_north","E_north","I_north","R_north"]}},

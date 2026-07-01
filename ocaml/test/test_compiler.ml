@@ -652,7 +652,8 @@ let test_comparison_in_rate () =
    The parser uses `every` as a reserved keyword (EVERY token) inside
    trajectories blocks, matched via List.assoc_opt which defaults to EConst 1.0.
    Test that the expand_output function produces OutRegular with the default
-   step=1.0 when no output block is provided, and with the t_end from simulate.
+   step=1.0 when no output block is provided; the horizon (gh#143) lives in
+   simulation.t_end, taken from simulate's `to`.
    (A direct "custom step" end-to-end test requires fixing the parser to accept
    EVERY inside func_arg context — deferred.) ──────────────────────────────── *)
 
@@ -684,9 +685,12 @@ let test_output_format_from_decl () =
     Alcotest.(check string) "format" "tsv" m.Ir.output.Ir.format;
     (match m.Ir.output.Ir.times with
      | Ir.OutRegular r ->
-       Alcotest.(check (float 0.01)) "default step" 1.0 r.Ir.step;
-       Alcotest.(check (float 0.01)) "t_end" 120.0 r.Ir.end_
-     | _ -> Alcotest.fail "expected OutRegular schedule")
+       Alcotest.(check (float 0.01)) "default step" 1.0 r.Ir.step
+     | _ -> Alcotest.fail "expected OutRegular schedule");
+    (* gh#143: the output schedule no longer carries its own end; the horizon
+       is `simulation.t_end`, the sole authority the runtime derives output
+       times from. *)
+    Alcotest.(check (float 0.01)) "t_end" 120.0 m.Ir.simulation.Ir.t_end
 
 let test_output_step_default () =
   let src = {|

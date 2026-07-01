@@ -4660,7 +4660,7 @@ dt = 1.0
             output: OutputConfig {
                 // Daily snapshots 0..=28 so 7/14/21/28 each get one.
                 times: OutputSchedule::Regular(RegularOutputSchedule {
-                    start: 0.0, step: 1.0, end: 28.0,
+                    start: 0.0, step: 1.0,
                 }),
                 format: "tsv".into(), trajectory: true, observations: false,
             },

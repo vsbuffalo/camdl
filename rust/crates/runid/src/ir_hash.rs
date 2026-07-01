@@ -954,7 +954,6 @@ impl ContentAddressed for RegularOutputSchedule {
         header(h, "ir::model::RegularOutputSchedule");
         h.write_f64_bits(self.start);
         h.write_f64_bits(self.step);
-        h.write_f64_bits(self.end);
     }
 }
 

@@ -151,7 +151,6 @@ fn resolve_output(sched: &ir::model::OutputSchedule) -> Result<ResolvedOutputSch
         O::Regular(r) => ResolvedOutputSchedule::Regular {
             start: finite(r.start)?,
             step: finite(r.step)?,
-            end: finite(r.end)?,
         },
         O::AtTimes(ts) => {
             let mut v = Vec::with_capacity(ts.len());

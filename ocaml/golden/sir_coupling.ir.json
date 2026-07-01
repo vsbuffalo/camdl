@@ -1,4 +1,4 @@
-{"ir_version":"0.22","validated_by":"ocaml-compiler-v0.22","model":{"name":"sir_coupling","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.23","validated_by":"ocaml-compiler-v0.23","model":{"name":"sir_coupling","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_young","kind":"integer"},
 {"name":"S_old","kind":"integer"},
 {"name":"I_young","kind":"integer"},
@@ -17,7 +17,7 @@
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.001,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"N0","value":{"mode":"estimated","bounds":[100.0,100000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
 {"name":"I0","value":{"mode":"estimated","bounds":[1.0,1000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"parameterized":{"S_young":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}},"S_old":{"param":"N0"},"I_young":{"param":"I0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":50.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":50.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"parameterized":{"S_young":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}},"S_old":{"param":"N0"},"I_young":{"param":"I0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":50.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"default","params":{"beta":0.05,"gamma":0.1,"N0":1000.0,"I0":10.0},"enable":[],"disable":[],"t_end":50.0},
 {"name":"high_coupling","label":"high coupling  (strong cross-mixing)","params":{"beta":0.09,"gamma":0.1,"N0":1000.0,"I0":5.0},"enable":[],"disable":[],"t_end":50.0}
 ],"model_structure":{"dimensions":[{"name":"age","values":["young","old"]}],"compartment_dims":{"S":["age"],"I":["age"],"R":["age"]},"base_compartments":["S","I","R"],"transmission_transitions":[],"infectious_compartments":[]},"bindings":[

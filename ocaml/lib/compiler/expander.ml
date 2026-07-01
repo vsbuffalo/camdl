@@ -5157,11 +5157,13 @@ let expand_simulate ctx =
       Ir.integrator }
 
 let expand_output ctx =
-  let t_start, t_end = match ctx.simulate with
-    | None    -> (0.0, 100.0)
-    | Some sd ->
-      ( resolve_float_expr ctx sd.sim_from,
-        resolve_float_expr ctx sd.sim_to )
+  (* The output window's upper bound is no longer stored on the schedule
+     (gh#143): `simulation.t_end` is the sole horizon authority, and the
+     runtime derives output times from `[start, t_end]` at emission. Only
+     `start` is set here — a deliberate widening to `min(0, t_start)`. *)
+  let t_start = match ctx.simulate with
+    | None    -> 0.0
+    | Some sd -> resolve_float_expr ctx sd.sim_from
   in
   let format = match ctx.output_decl with
     | Some { out_trajectories = Some ot; _ } -> ot.otformat
@@ -5181,9 +5183,9 @@ let expand_output ctx =
   let times = match ctx.output_decl with
     | Some { out_trajectories = Some ot; _ } ->
       (match ot.otschedule with
-       | SchedEvery e -> Ir.OutRegular { Ir.start; Ir.step = resolve_float_expr ctx e; Ir.end_ = t_end }
+       | SchedEvery e -> Ir.OutRegular { Ir.start; Ir.step = resolve_float_expr ctx e }
        | SchedAt ts   -> Ir.OutAtTimes (List.map (resolve_float_expr ctx) ts))
-    | _ -> Ir.OutRegular { Ir.start; Ir.step = 1.0; Ir.end_ = t_end }
+    | _ -> Ir.OutRegular { Ir.start; Ir.step = 1.0 }
   in
   { Ir.times;
     Ir.format       = format;

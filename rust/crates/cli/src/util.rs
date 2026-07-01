@@ -3028,17 +3028,16 @@ impl OutputColumns {
 }
 
 /// Override a model's trajectory output cadence (`--output-every`), preserving
-/// the existing schedule window. Caller validates `step > 0`.
+/// the existing schedule start. The upper bound of the window is
+/// `simulation.t_end` (the sole horizon authority, gh#143), derived at
+/// emission — not stored on the schedule. Caller validates `step > 0`.
 fn apply_output_every(model: &mut ir::Model, step: f64) {
-    let (start, end) = match &model.output.times {
-        ir::model::OutputSchedule::Regular(r) => (r.start, r.end),
-        ir::model::OutputSchedule::AtTimes(ts) => (
-            ts.first().copied().unwrap_or(0.0).min(0.0),
-            ts.last().copied().unwrap_or(model.simulation.t_end),
-        ),
+    let start = match &model.output.times {
+        ir::model::OutputSchedule::Regular(r) => r.start,
+        ir::model::OutputSchedule::AtTimes(ts) => ts.first().copied().unwrap_or(0.0).min(0.0),
     };
     model.output.times = ir::model::OutputSchedule::Regular(
-        ir::model::RegularOutputSchedule { start, step, end },
+        ir::model::RegularOutputSchedule { start, step },
     );
 }
 

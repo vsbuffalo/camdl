@@ -32,7 +32,7 @@ fn tiny_model() -> Model {
         per_eval_bindings: vec![],
         initial_conditions: InitialConditions::Explicit(Default::default()),
         output: OutputConfig {
-            times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 }),
+            times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
             format: "tsv".into(),
             trajectory: true,
             observations: false,
@@ -103,7 +103,7 @@ fn horizon_change_re_keys_the_run_id() {
     // t_end change must change the
     // config level hash and the run_id (but not the model level).
     let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 });
+    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
     let p = HashMap::new();
     let a = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 1, 1)).unwrap();
     let b = resolve_trajectory(&ctx(&model, &out, &p, 200.0, 1, 1)).unwrap();
@@ -147,7 +147,7 @@ fn lone_vs_sweep_point_same_base_seed_distinct_paths() {
     // store paths. Non-vacuous: both carry base_seed = 42, so this passes
     // only because the seed level hashes process_seed, not the base.
     let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 });
+    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
     let p = HashMap::new();
     let mixed = crate::util::mix_cell_seed(42, 1, 0);
     let lone = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 42, 42)).unwrap();
@@ -168,7 +168,7 @@ fn run_id_is_composed_from_the_level_hashes() {
     // The leaf identity is the factored tuple: run_id = hash(kind, [level
     // hashes in path order]) — the contract the store/reader rely on.
     let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 });
+    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
     let p = HashMap::new();
     let r = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 5, 5)).unwrap();
     assert_eq!(r.levels.len(), 5, "model/config/params/scenario/seed");
@@ -181,7 +181,7 @@ fn run_id_is_composed_from_the_level_hashes() {
 #[test]
 fn non_finite_param_is_a_resolve_error() {
     let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 });
+    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
     let mut p = HashMap::new();
     p.insert("beta".to_string(), f64::NAN);
     let r = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 1, 1));
@@ -196,7 +196,7 @@ fn scenario_delta_re_keys_only_the_scenario_level() {
     // An enable/disable change re-keys the scenario level (and run_id), not
     // the model/config/params/seed levels.
     let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 });
+    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
     let p = HashMap::new();
     let base = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 1, 1)).unwrap();
 
@@ -255,7 +255,7 @@ impl SimInputs {
             dt: 1.0,
             t_start: 0.0,
             t_end: 100.0,
-            output: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 100.0 }),
+            output: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
             allow_degenerate_rates: false,
             no_flows: false,
             columns: std::collections::BTreeSet::new(),
@@ -309,7 +309,7 @@ fn differential_semantic_inputs_rekey_the_run_id() {
         ("t_start",          Box::new(|i| i.t_start = 10.0)),
         ("t_end",            Box::new(|i| i.t_end = 200.0)),
         ("output_step",      Box::new(|i| i.output =
-            OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 2.0, end: 100.0 }))),
+            OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 2.0 }))),
         ("base_param",       Box::new(|i| { i.base_params.insert("beta".into(), 0.5); })),
         ("scenario_enable",  Box::new(|i| i.enable = vec!["vacc".into()])),
         ("scenario_disable", Box::new(|i| i.disable = vec!["aging".into()])),

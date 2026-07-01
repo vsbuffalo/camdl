@@ -89,7 +89,11 @@ impl OutputTimes {
     /// Produce + validate + role-tag from the model's output schedule.
     pub fn from_model(model: &CompiledModel) -> Result<Self, SimError> {
         Ok(OutputTimes(
-            SortedFiniteTimes::new(crate::output::output_times(&model.model.output.times))?.into_vec(),
+            SortedFiniteTimes::new(crate::output::output_times(
+                &model.model.output.times,
+                model.model.simulation.t_end,
+            ))?
+            .into_vec(),
         ))
     }
 

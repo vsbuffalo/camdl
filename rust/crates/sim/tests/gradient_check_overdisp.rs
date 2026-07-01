@@ -481,7 +481,7 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
             h.insert("S".into(), 1000.0); h.insert("R".into(), 0.0); h
         }),
         output: OutputConfig {
-            times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0, end: 20.0 }),
+            times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
             format: "tsv".into(), trajectory: true, observations: false,
         },
         simulation: SimulationConfig {

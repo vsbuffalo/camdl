@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.22",
+  "ir_version": "0.23",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "cholera_siwr",
@@ -253,8 +253,7 @@
       "times": {
         "regular": {
           "start": 0.0,
-          "step": 7.0,
-          "end": 365.0
+          "step": 7.0
         }
       },
       "format": "tsv",

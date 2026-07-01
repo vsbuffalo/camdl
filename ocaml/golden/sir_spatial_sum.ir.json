@@ -1,4 +1,4 @@
-{"ir_version":"0.22","validated_by":"ocaml-compiler-v0.22","model":{"name":"sir_spatial_sum","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.23","validated_by":"ocaml-compiler-v0.23","model":{"name":"sir_spatial_sum","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_p0","kind":"integer"},
 {"name":"S_p1","kind":"integer"},
 {"name":"S_p2","kind":"integer"},
@@ -26,7 +26,7 @@
 {"name":"beta","value":{"mode":"estimated","bounds":[0.0,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"rho","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null}
-],"initial_conditions":{"explicit":{"S_p0":4999.0,"I_p0":1.0,"S_p1":10000.0,"S_p2":8000.0,"S_p3":3000.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":200.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":200.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"explicit":{"S_p0":4999.0,"I_p0":1.0,"S_p1":10000.0,"S_p2":8000.0,"S_p3":3000.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":200.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"no_coupling","label":"independent patches (rho = 0)","params":{"beta":0.3,"gamma":0.1,"rho":0.0},"enable":[],"disable":[],"t_end":null},
 {"name":"weak_coupling","label":"weak spatial coupling (rho = 0.01)","params":{"beta":0.3,"gamma":0.1,"rho":0.01},"enable":[],"disable":[],"t_end":null},
 {"name":"strong_coupling","label":"strong spatial coupling (rho = 0.1)","params":{"beta":0.3,"gamma":0.1,"rho":0.1},"enable":[],"disable":[],"t_end":null}

@@ -152,7 +152,6 @@ fn representative_model() -> Model {
             times: OutputSchedule::Regular(RegularOutputSchedule {
                 start: 0.0,
                 step: 1.0,
-                end: 365.0,
             }),
             format: "tsv".into(),
             trajectory: true,
@@ -212,7 +211,11 @@ fn model_golden_hash() {
     // optional `lag`. The representative model carries a forcing, so its
     // `Option<Expr>` presence tag (`None` -> one byte) shifts the model hash —
     // another deliberate, version-bumped re-key (forcing lag is run identity).
-    const GOLDEN: &str = "e2b203863a860b1d34e04be33851251701046e138a782b5efbf4abc15bfd5cac";
+    // gh#143 (ir/VERSION -> 0.23): `RegularOutputSchedule` dropped `end` (the
+    // output horizon collapsed onto `simulation.t_end`), so `hash_into` folds one
+    // fewer f64 and the model hash shifts once — a deliberate, version-bumped
+    // re-key (the horizon stays in identity via `simulation.t_end`).
+    const GOLDEN: &str = "05deda014f8ece802897bfa556e28c43753e8924fd48285b692cbdde73e27b47";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }

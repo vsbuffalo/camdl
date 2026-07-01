@@ -564,7 +564,7 @@ type initial_conditions =
 
 (* ── Output ──────────────────────────────────────────────────────────────────── *)
 
-type regular_output_schedule = { start: float; step: float; end_: float }
+type regular_output_schedule = { start: float; step: float }
 
 type output_schedule =
   | OutRegular          of regular_output_schedule

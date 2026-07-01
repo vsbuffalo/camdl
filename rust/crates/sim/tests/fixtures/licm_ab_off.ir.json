@@ -1,4 +1,4 @@
-{"ir_version":"0.22","validated_by":"ocaml-compiler-v0.22","model":{"name":"licm_ab","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.23","validated_by":"ocaml-compiler-v0.23","model":{"name":"licm_ab","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_p0","kind":"integer"},
 {"name":"S_p1","kind":"integer"},
 {"name":"S_p2","kind":"integer"},
@@ -39,7 +39,7 @@
 {"name":"kappa","value":{"mode":"fixed","value":0.5},"param_kind":"positive","param_dim":null},
 {"name":"gamma_k","value":{"mode":"fixed","value":2.0},"param_kind":"positive","param_dim":null},
 {"name":"theta","value":{"mode":"fixed","value":0.02},"param_kind":"positive","param_dim":null}
-],"initial_conditions":{"parameterized":{"S_p0":{"table_lookup":{"table":"N0","indices":[{"const":0.0}]}},"S_p1":{"table_lookup":{"table":"N0","indices":[{"const":1.0}]}},"S_p2":{"table_lookup":{"table":"N0","indices":[{"const":2.0}]}},"S_p3":{"table_lookup":{"table":"N0","indices":[{"const":3.0}]}},"I_p0":{"const":10.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":120.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":120.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[{"name":"patch","values":["p0","p1","p2","p3"]}],"compartment_dims":{"S":["patch"],"E":["patch"],"I":["patch"],"R":["patch"]},"base_compartments":["S","E","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
+],"initial_conditions":{"parameterized":{"S_p0":{"table_lookup":{"table":"N0","indices":[{"const":0.0}]}},"S_p1":{"table_lookup":{"table":"N0","indices":[{"const":1.0}]}},"S_p2":{"table_lookup":{"table":"N0","indices":[{"const":2.0}]}},"S_p3":{"table_lookup":{"table":"N0","indices":[{"const":3.0}]}},"I_p0":{"const":10.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":120.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[{"name":"patch","values":["p0","p1","p2","p3"]}],"compartment_dims":{"S":["patch"],"E":["patch"],"I":["patch"],"R":["patch"]},"base_compartments":["S","E","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N_p0","expr":{"pop_sum":["S_p0","E_p0","I_p0","R_p0"]}},
 {"name":"N_p1","expr":{"pop_sum":["S_p1","E_p1","I_p1","R_p1"]}},
 {"name":"N_p2","expr":{"pop_sum":["S_p2","E_p2","I_p2","R_p2"]}},

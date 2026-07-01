@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.22",
+  "ir_version": "0.23",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "pure_death",
@@ -83,8 +83,7 @@
       "times": {
         "regular": {
           "start": 0.0,
-          "step": 1.0,
-          "end": 20.0
+          "step": 1.0
         }
       },
       "format": "tsv",

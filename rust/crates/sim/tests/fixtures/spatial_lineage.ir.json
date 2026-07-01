@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.22",
-  "validated_by": "ocaml-compiler-v0.22",
+  "ir_version": "0.23",
+  "validated_by": "ocaml-compiler-v0.23",
   "model": {
     "name": "spatial_lineage",
     "version": "0.3",
@@ -414,7 +414,7 @@
       "explicit": { "S_a": 4000.0, "I_a": 5.0, "S_b": 2000.0, "I_b": 40.0 }
     },
     "output": {
-      "times": { "regular": { "start": 0.0, "step": 1.0, "end": 40.0 } },
+      "times": { "regular": { "start": 0.0, "step": 1.0 } },
       "format": "tsv",
       "trajectory": true,
       "observations": true

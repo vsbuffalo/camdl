@@ -1,4 +1,4 @@
-{"ir_version":"0.22","validated_by":"ocaml-compiler-v0.22","model":{"name":"seir_pop_balance","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.23","validated_by":"ocaml-compiler-v0.23","model":{"name":"seir_pop_balance","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"E","kind":"integer"},
 {"name":"I","kind":"integer"},
@@ -17,7 +17,7 @@
 {"name":"pop_amp","value":{"mode":"required"},"param_kind":"count","param_dim":null},
 {"name":"I0","value":{"mode":"required"},"param_kind":"count","param_dim":null},
 {"name":"immune0","value":{"mode":"required"},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"parameterized":{"S":{"bin_op":{"op":"sub","left":{"bin_op":{"op":"sub","left":{"param":"pop_mean"},"right":{"param":"I0"}}},"right":{"param":"immune0"}}},"I":{"param":"I0"},"R":{"param":"immune0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":730.485}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":730.485,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"parameterized":{"S":{"bin_op":{"op":"sub","left":{"bin_op":{"op":"sub","left":{"param":"pop_mean"},"right":{"param":"I0"}}},"right":{"param":"immune0"}}},"I":{"param":"I0"},"R":{"param":"immune0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":730.485,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"seasonal census, endemic SEIR","params":{"beta":0.4,"sigma":0.2,"gamma":0.1,"pop_mean":1000000.0,"pop_amp":20000.0,"I0":1000.0,"immune0":50000.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"E":[],"I":[],"R":[]},"base_compartments":["S","E","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"balance":{"target":"R","expr":{"bin_op":{"op":"sub","left":{"bin_op":{"op":"sub","left":{"bin_op":{"op":"sub","left":{"time_func":{"name":"census"}},"right":{"pop":"S"}}},"right":{"pop":"E"}}},"right":{"pop":"I"}}}},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","E","I","R"]}}

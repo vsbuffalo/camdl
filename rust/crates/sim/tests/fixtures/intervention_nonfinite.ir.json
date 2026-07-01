@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.22",
+  "ir_version": "0.23",
   "validated_by": "hand-curated-guard-fixture",
   "model": {
     "name": "intervention_nonfinite",
@@ -62,7 +62,7 @@
       "explicit": { "S": 1000, "I": 0, "V": 0 }
     },
     "output": {
-      "times": { "regular": { "start": 0.0, "step": 1.0, "end": 5.0 } },
+      "times": { "regular": { "start": 0.0, "step": 1.0 } },
       "format": "tsv",
       "trajectory": true,
       "observations": false

@@ -1,4 +1,4 @@
-{"ir_version":"0.22","validated_by":"hand-written-gh166","model":{"name":"ode_linear_rate_flow","version":"0.1","time_unit":"days","description":"gh#166 Phase B analytic incidence gate. A single transition whose rate is beta*time (linear in t, state-INDEPENDENT), so the cumulative flow over [0,T] has the closed form beta*T^2/2 and the per-interval flow over [a,b] is beta*(b^2-a^2)/2. RK4 integrates a linear integrand EXACTLY (Simpson weights), so the augmented flow matches the analytic value to machine precision; the old left-rectangle Euler flow is O(dt)-wrong. The rate references no compartment, so the flow is independent of state/rounding.","compartments":[
+{"ir_version":"0.23","validated_by":"hand-written-gh166","model":{"name":"ode_linear_rate_flow","version":"0.1","time_unit":"days","description":"gh#166 Phase B analytic incidence gate. A single transition whose rate is beta*time (linear in t, state-INDEPENDENT), so the cumulative flow over [0,T] has the closed form beta*T^2/2 and the per-interval flow over [a,b] is beta*(b^2-a^2)/2. RK4 integrates a linear integrand EXACTLY (Simpson weights), so the augmented flow matches the analytic value to machine precision; the old left-rectangle Euler flow is O(dt)-wrong. The rate references no compartment, so the flow is independent of state/rounding.","compartments":[
 {"name":"Src","kind":"integer"},
 {"name":"Dst","kind":"integer"}
 ],"transitions":[
@@ -6,6 +6,6 @@
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[],"parameters":[
 {"name":"beta","value":{"mode":"estimated","bounds":[0.0001,100.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"Src0","value":{"mode":"estimated","bounds":[1.0,1000000000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"parameterized":{"Src":{"param":"Src0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0,"end":10.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":10.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"parameterized":{"Src":{"param":"Src0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":10.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"linear rate","params":{"beta":2.0,"Src0":1000000.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"Src":[],"Dst":[]},"base_compartments":["Src","Dst"],"transmission_transitions":[],"infectious_compartments":[]},"bindings":[]}}

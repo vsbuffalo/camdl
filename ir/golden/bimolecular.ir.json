@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.22",
-  "validated_by": "ocaml-compiler-v0.22",
+  "ir_version": "0.23",
+  "validated_by": "ocaml-compiler-v0.23",
   "model": {
     "name": "bimolecular",
     "version": "0.3",
@@ -82,7 +82,7 @@
       "parameterized": { "A": { "param": "A0" }, "B": { "param": "B0" } }
     },
     "output": {
-      "times": { "regular": { "start": 0.0, "step": 1.0, "end": 50.0 } },
+      "times": { "regular": { "start": 0.0, "step": 1.0 } },
       "format": "tsv",
       "trajectory": true,
       "observations": true

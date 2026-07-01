@@ -1138,11 +1138,10 @@
           "properties": {
             "regular": {
               "type": "object",
-              "required": ["start", "step", "end"],
+              "required": ["start", "step"],
               "properties": {
                 "start": { "type": "number" },
-                "step": { "type": "number" },
-                "end": { "type": "number" }
+                "step": { "type": "number" }
               }
             }
           },

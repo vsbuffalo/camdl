@@ -79,7 +79,7 @@ let empty_model
     per_eval_bindings = [];
     initial_conditions;
     output = {
-      times = OutRegular { start = 0.0; step = 1.0; end_ = 100.0 };
+      times = OutRegular { start = 0.0; step = 1.0 };
       format = "tsv";
       trajectory = true;
       observations = false;
