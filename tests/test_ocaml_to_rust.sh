@@ -55,13 +55,17 @@ print(s[0]['name'] if s else '')
         # shellcheck disable=SC2086
         if ! "$CAMDL" simulate "$tmpir" $params_flag --backend "$backend" \
                 --seed 42 --allow-degenerate-rates > /dev/null 2>"$tmperr"; then
-            # Expected: model needs features this backend doesn't support
-            # (e.g. overdispersed() → OVERDISPERSION, which Gillespie/ODE
-            # reject). Match the capability-rejection wording emitted by the
-            # dispatch guard in rust/crates/sim/src/lib.rs — keep this in
-            # sync if that message is reworded (it was: "requires
-            # capabilities" → "does not support required capabilities").
-            if grep -q "does not support required capabilities" "$tmperr"; then
+            # Expected: model needs features this backend doesn't support, so
+            # the backend cleanly REFUSES it. Two refusal classes:
+            #  - capability gate (e.g. overdispersed() → OVERDISPERSION, which
+            #    Gillespie/ODE reject): "does not support required capabilities"
+            #    (dispatch guard in rust/crates/sim/src/lib.rs);
+            #  - structural validation (gh#121): a multi-source transition
+            #    (`A + B --> C`, e.g. the `bimolecular` golden) is bounded by
+            #    only the first source on chain_binomial, so it is rejected with
+            #    "... not supported on chain_binomial ..." — gillespie/ode run it.
+            # Keep these in sync if either message is reworded.
+            if grep -qE "does not support required capabilities|not supported on chain_binomial" "$tmperr"; then
                 rm -f "$tmperr"
                 continue
             fi

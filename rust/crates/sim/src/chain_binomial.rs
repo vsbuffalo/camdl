@@ -206,6 +206,14 @@ pub fn run_chain_binomial_with_observer(
     // is gated separately (fit::methods::check_model_capabilities + pfilter).
     model.validate_deterministic_source_exits()?;
 
+    // gh#121: reject a multi-source stochastic transition (`A + B --> C`) BEFORE
+    // any stepping — chain-binomial bounds the drawn flow by only the FIRST
+    // source, so a secondary source can be driven negative (silently in mild
+    // regimes; as a cryptic NegativeCount otherwise). gillespie/ode apply the
+    // multi-source firing correctly. Same chokepoint pattern as gh#122; the
+    // inference producer is gated in check_model_capabilities + pfilter.
+    model.validate_single_source_transitions()?;
+
     // gh#125: chain_binomial is the SNAP policy — it steps a full `dt` per
     // substep and records outputs at grid times (`t_start + k*dt`); it never
     // lands on a sub-`dt` output time. An off-grid output time would therefore

@@ -111,6 +111,16 @@ fn test_smoke_all_ocaml_golden() {
             if !(required - sim.capabilities()).is_empty() {
                 continue;
             }
+            // gh#121: a multi-source stochastic transition (`A + B --> C`) is
+            // rejected on chain_binomial (bounded by only the first source).
+            // That is a structural model property, not a Capabilities bitflag,
+            // so skip it explicitly here (the dedicated rejection is asserted in
+            // multi_source_transition.rs). gillespie applies it correctly.
+            if *backend == "chain_binomial"
+                && compiled.validate_single_source_transitions().is_err()
+            {
+                continue;
+            }
             let traj = sim.run(&compiled, &params, 42, config)
                 .unwrap_or_else(|e| panic!("{}: sim error: {:?}", label, e));
 

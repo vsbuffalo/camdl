@@ -1,15 +1,17 @@
-//! Multi-source transition conservation tests (wave 1 / malaria #1).
+//! Multi-source transition tests (wave 1 / malaria #1).
 //!
-//! For the bimolecular reaction `A + B --> C @ k * A * B / N`, every
-//! firing must atomically decrement A and B together and increment C.
-//! If firing is NOT atomic (A decremented but B missed, or vice versa),
-//! these invariants break. Exercises all three stochastic backends
-//! because Gillespie, tau-leap, and chain-binomial each apply
-//! stoichiometry through different code paths.
+//! For the bimolecular reaction `A + B --> C @ k * A * B / N`, a correct
+//! firing atomically decrements A and B together and increments C. Gillespie
+//! applies each firing as one atomic CTMC event, so it holds the invariants
 //!
 //!   A(t) + C(t) = A(0)   (every A consumed became a C)
 //!   B(t) + C(t) = B(0)   (every B consumed became a C)
 //!   A(0) - A(t) = B(0) - B(t)   (co-decrement — the atomicity invariant)
+//!
+//! chain_binomial bounds a transition's drawn flow by only its FIRST source, so
+//! a multi-source transition can drive a secondary source negative — it is
+//! rejected up front (gh#121; see the rejection test below and
+//! `multi_source_transition.rs`).
 
 use std::path::Path;
 use sim::{
@@ -94,16 +96,34 @@ fn test_bimolecular_gillespie_conservation() {
         "gillespie");
 }
 
+/// gh#121: the bimolecular reaction `A + B --> C` is a MULTI-SOURCE stochastic
+/// transition — chain_binomial bounds the drawn flow by only the first source
+/// (`A`), so the secondary source `B` can be driven negative (silently in a mild
+/// regime; here as a runtime `NegativeCount` once the flow exceeds `B`). It is
+/// therefore rejected up front on chain_binomial with a located gh#121 error,
+/// while gillespie/ode (above) run it correctly with atomic co-decrement. The
+/// dedicated rejection is also asserted in `multi_source_transition.rs`.
 #[test]
-fn test_bimolecular_chain_binomial_conservation() {
+fn test_bimolecular_chain_binomial_rejected() {
     let (model, compiled) = load_bimolecular();
     let params = compiled.default_params.clone();
+
+    // Structural validation rejects the multi-source transition with a located
+    // gh#121 message naming the transition and its two sources.
+    let err = compiled
+        .validate_single_source_transitions()
+        .expect_err("bimolecular is multi-source and must be rejected on chain_binomial");
+    let msg = err.to_string();
+    assert!(msg.contains("gh#121"), "message must cite the issue: {msg}");
+
+    // Forward chain_binomial hard-errors with that same gh#121 message rather
+    // than over-drawing `B` into a cryptic NegativeCount.
     let config = SimConfig::ChainBinomial(ChainBinomialConfig {
         t_start: model.simulation.t_start,
         t_end: model.simulation.t_end,
         dt: 1.0,
     });
-    assert_bimolecular_invariants(&compiled, &params,
-        |seed| ChainBinomialSim.run(&compiled, &params, seed, &config).unwrap(),
-        "chain_binomial");
+    let res = ChainBinomialSim.run(&compiled, &params, 0, &config);
+    assert!(res.is_err(), "chain_binomial must reject the multi-source bimolecular model");
+    assert!(res.unwrap_err().to_string().contains("gh#121"));
 }

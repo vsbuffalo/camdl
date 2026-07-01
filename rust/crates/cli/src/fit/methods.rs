@@ -652,6 +652,15 @@ pub fn check_model_capabilities(
         compiled
             .validate_deterministic_source_exits()
             .map_err(|e| e.to_string())?;
+        // gh#121: a multi-source stochastic transition (`A + B --> C`) is bounded
+        // by only its first source on the chain-binomial producer, driving the
+        // secondary source negative. Same structural-model rejection as gh#122
+        // (not a Capabilities bitflag, so the error can name the transition and
+        // its source compartments). ODE inference runs each transition as a
+        // flow and is exempt.
+        compiled
+            .validate_single_source_transitions()
+            .map_err(|e| e.to_string())?;
     }
 
     let required = compiled.required_capabilities();

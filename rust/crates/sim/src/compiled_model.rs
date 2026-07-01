@@ -742,6 +742,63 @@ impl CompiledModel {
         Ok(())
     }
 
+    /// gh#121: reject a transition that draws from **two or more** source
+    /// compartments (≥2 negative-stoichiometry entries, e.g. `A + B --> C`) on
+    /// the stochastic chain-binomial paths.
+    ///
+    /// Chain-binomial groups a transition under a SINGLE source compartment
+    /// (`source_groups` keys on the FIRST negative-stoich entry) and bounds the
+    /// drawn flow by that one source's count. A multi-source transition's flow
+    /// is therefore capped by only the first source, then applied to every
+    /// source — so a *secondary* source with fewer members than the drawn flow
+    /// is driven negative: silently in a mild regime (the secondary source stays
+    /// abundant) and, in a harsher regime, as a cryptic runtime
+    /// `NegativeCount{cause: BinomialOvershoot}` that never names the real cause.
+    /// The correct treatment (a joint draw bounded by `min` over all sources)
+    /// is not implemented; rather than over-draw, reject the model up front with
+    /// a located error.
+    ///
+    /// Gillespie applies each firing as one atomic CTMC event that decrements
+    /// every source together (bounded by the event's own occurrence), and the
+    /// ODE backend runs every transition as a continuous flow — neither has the
+    /// single-source-bound hazard, so those paths do NOT call this.
+    ///
+    /// Scans `self.transition_stoich` DIRECTLY (not `self.source_groups`, which
+    /// has already collapsed each transition onto its first source and would
+    /// hide the secondary sources this check exists to find). Called at the same
+    /// stochastic dispatch chokepoints as
+    /// [`Self::validate_deterministic_source_exits`]: the forward chain-binomial
+    /// entry, the inference dispatch gate (`check_model_capabilities` for the
+    /// chain-binomial producer), and the standalone `pfilter` command.
+    pub fn validate_single_source_transitions(&self) -> Result<(), SimError> {
+        for (tr_idx, stoich) in self.transition_stoich.iter().enumerate() {
+            let sources: Vec<usize> = stoich
+                .iter()
+                .filter(|&&(_, d)| d < 0)
+                .map(|&(local, _)| local)
+                .collect();
+            if sources.len() < 2 {
+                continue;
+            }
+            let name = &self.model.transitions[tr_idx].name;
+            let src_names: Vec<String> =
+                sources.iter().map(|&local| self.int_compartment_name(local)).collect();
+            return Err(SimError::Validation(format!(
+                "transition '{name}' draws from {n} source compartments ({src_list}); \
+                 multi-source stochastic transitions are not supported on \
+                 chain_binomial — the drawn flow is bounded by only the first \
+                 source ('{first}'), so the secondary source(s) can be driven \
+                 negative (gh#121). Use the `gillespie` or `ode` backend (both \
+                 apply the multi-source firing correctly), or restructure into \
+                 single-source transitions.",
+                n = src_names.len(),
+                src_list = src_names.join(" + "),
+                first = src_names[0],
+            )));
+        }
+        Ok(())
+    }
+
     /// Resolve per-intervention fire **times** for the current
     /// parameter vector. For constant schedules (`AtTimes`,
     /// `Recurring`) returns the baked `self.fire_times`; for

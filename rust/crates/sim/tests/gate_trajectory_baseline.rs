@@ -132,7 +132,9 @@ fn ode_state_hash(traj: &sim::state::Trajectory) -> u64 {
 /// machine against the current compiler+runtime. Re-capture per the header.
 const BASELINES: &[(&str, &str, u64)] = &[
     ("bimolecular", "gillespie", 0x54a38d360dcf4c01),
-    ("bimolecular", "chain_binomial", 0x54a38d360dcf4c01),
+    // gh#121: `bimolecular` is a MULTI-SOURCE transition (`A + B --> C`), now
+    // rejected on chain_binomial (bounded by only the first source). The gate's
+    // per-run `Err(_) => continue` drops it, so no CB baseline exists for it.
     ("branching_si_symp_asym", "gillespie", 0x325b8b153b1b16d4),
     ("branching_si_symp_asym", "chain_binomial", 0xae1bb55ced8410bd),
     // Ebola onset-to-outcome as a CFR-split `via hyper_erlang(...)` mixture

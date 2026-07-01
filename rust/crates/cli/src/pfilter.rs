@@ -91,6 +91,13 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     compiled
         .validate_deterministic_source_exits()
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    // gh#121: a multi-source stochastic transition (`A + B --> C`) is bounded by
+    // only its first source on chain_binomial, driving the secondary source
+    // negative. The standalone pfilter bypasses check_model_capabilities, so
+    // gate it here too.
+    compiled
+        .validate_single_source_transitions()
+        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     let params = compiled.default_params.clone();
 
     // ── Resolve --data flags (gh#90) ─────────────────────────────────
