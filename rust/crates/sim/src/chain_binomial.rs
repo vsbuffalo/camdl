@@ -199,6 +199,40 @@ pub fn run_chain_binomial_with_observer(
     // fires immediately) or feed NaN/±∞ straight into the kernel.
     model.validate_schedule(cfg.dt, params)?;
 
+    // gh#125: chain_binomial is the SNAP policy — it steps a full `dt` per
+    // substep and records outputs at grid times (`t_start + k*dt`); it never
+    // lands on a sub-`dt` output time. An off-grid output time would therefore
+    // be stamped with the POST-step state under an earlier label (silent-wrong:
+    // the snapshot for `t=0.5` at `dt=1` would carry the state at `t=1.0`).
+    // Reject a misaligned output time with a located error. ODE/Gillespie use
+    // the EXACT policy — they clip exactly to each output time and record the
+    // true state — so this guard is deliberately chain_binomial-only.
+    //
+    // Only the fresh forward path checks this: a resume (gh#322 start-from-state)
+    // reuses a model that already passed this guard on its forward run — a model
+    // with sub-dt output cannot forward-simulate on chain_binomial, so it cannot
+    // be resumed either — and an off-grid resume time `T*` is rejected separately
+    // by the output-cursor re-seat check below.
+    if resume.start.is_none() {
+        for &ot in &crate::output::output_times(
+            &model.model.output.times, model.model.simulation.t_end)
+        {
+            let k = ((ot - cfg.t_start) / cfg.dt).round();
+            let grid = cfg.t_start + k * cfg.dt;
+            if (grid - ot).abs() > crate::schedule::OUTPUT_EPS {
+                return Err(SimError::Validation(format!(
+                    "chain_binomial: output time {ot} is not on the dt grid \
+                     (t_start={} + k·dt, dt={}); the nearest grid time is {grid}. \
+                     The chain-binomial (Snap) backend records the post-step state \
+                     at grid times only, so a sub-dt output time would be stamped \
+                     with the wrong state. Make output times whole multiples of dt \
+                     above t_start, or use the ode/gillespie backend (which clips \
+                     exactly to each output time).",
+                    cfg.t_start, cfg.dt)));
+            }
+        }
+    }
+
     // gh#322 start-from-state seam: seed the compartment state from the injected
     // fork state when resuming; otherwise build it from the model. `None` (every
     // existing path) is byte-identical.

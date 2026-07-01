@@ -219,12 +219,20 @@ fn sub_dt_fraction_grows_with_dt() {
     // Monte-Carlo noise).
     let mut m = load_fixture("sir_lineage");
     set_params(&mut m, &[("beta", 1.2), ("gamma", 0.2), ("N0", 2000.0)]);
+    // gh#125: chain_binomial rejects sub-dt output. The fixture emits every 1,
+    // which is off the coarse dt=2.0 grid; emit the coarse run at its own dt
+    // grid instead. sub_dt_fraction comes from the event log (transmission
+    // crowding within an integration step), independent of the output schedule,
+    // so aligning the coarse output changes nothing this test asserts.
+    let mut m_coarse = m.clone();
+    m_coarse.output.times = ir::model::OutputSchedule::Regular(
+        ir::model::RegularOutputSchedule { start: 0.0, step: 2.0 });
     let mut fine_sum = 0.0;
     let mut coarse_sum = 0.0;
     let seeds = [1u64, 2, 3, 4, 5, 6, 7, 8];
     for &seed in &seeds {
         let (_, _, fine, _) = run_with_lineage(&m, Backend::ChainBinomial, seed, 0.1);
-        let (_, _, coarse, _) = run_with_lineage(&m, Backend::ChainBinomial, seed, 2.0);
+        let (_, _, coarse, _) = run_with_lineage(&m_coarse, Backend::ChainBinomial, seed, 2.0);
         fine_sum += fine;
         coarse_sum += coarse;
     }
