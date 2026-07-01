@@ -292,6 +292,17 @@ proposals rewrite.
    by_ the same capability-gate-consolidation proposal, which upgrades the
    simulate message to the shared hint builder.
 
+4. **Gillespie + time-varying rates is a piecewise-constant approximation, not a
+   capability error.** Gillespie's next-event draw holds the total propensity
+   constant over each exponential wait, so a time-varying rate (seasonal
+   forcing, a bare `t`, importation forcing) is frozen within the wait and only
+   refreshed at grid boundaries — biasing the inhomogeneous Poisson process. It
+   is _allowed_ (a fine output grid shrinks the bias), so it is surfaced as a
+   WARNING (`warn_if_gillespie_time_dep`, gh#95) at the gillespie forward
+   dispatch, not a hard gate. Mitigation: use a fine output grid, or prefer
+   `chain_binomial` (re-evaluates the rate every substep). Mirrors
+   `warn_if_ode_euler_flow` (the `dt`-in-rate ODE-Euler caveat).
+
 ## Two traps to internalise
 
 - **"It ran" ≠ "it's valid for this algorithm."** Axis 3 is where the

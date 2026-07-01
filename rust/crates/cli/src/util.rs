@@ -2765,6 +2765,12 @@ pub fn simulate_compiled(
     if matches!(run.backend, ForwardBackend::Ode) {
         crate::fit::methods::warn_if_ode_euler_flow(compiled);
     }
+    // gh#95: warn (once) if a time-varying-rate model runs on gillespie — its
+    // next-event draw freezes the total rate over each exponential wait, so a
+    // seasonal/forced/bare-`t` rate is a piecewise-constant approximation.
+    if matches!(run.backend, ForwardBackend::Gillespie) {
+        crate::fit::methods::warn_if_gillespie_time_dep(compiled);
+    }
 
     // Tick closure: advance the bar to the current sim time. Read-only, RNG-free
     // (the backends call it before any draw). We scale by 1000 so a unit-`dt`

@@ -708,6 +708,37 @@ pub fn warn_if_ode_euler_flow(compiled: &sim::CompiledModel) {
     }
 }
 
+/// gh#95: the predicate behind [`warn_if_gillespie_time_dep`] — true iff the
+/// model has at least one transition whose rate is time-varying (a `TimeFunc`
+/// forcing, a bare `t`, or anything that transitively reads one; the same set
+/// Gillespie must re-evaluate as time advances, `time_dep_transitions`).
+/// Factored out so the classification is unit-testable without capturing stderr.
+pub(crate) fn gillespie_time_dep_warn(compiled: &sim::CompiledModel) -> bool {
+    !compiled.time_dep_transitions.is_empty()
+}
+
+/// gh#95: Gillespie's next-event draw holds the total propensity CONSTANT over
+/// each exponential inter-event wait, so a time-varying rate is effectively
+/// frozen within the wait and only refreshed at grid boundaries — a
+/// piecewise-constant approximation to the true inhomogeneous Poisson process
+/// (seasonal forcing, a bare-`t` ramp, importation forcing). A fine output grid
+/// shrinks the bias, so this is surfaced as a WARNING rather than a hard error
+/// (mirrors `warn_if_ode_euler_flow`). Emitted once, at the gillespie forward
+/// dispatch chokepoint. No-op unless the model has a time-varying rate.
+pub fn warn_if_gillespie_time_dep(compiled: &sim::CompiledModel) {
+    if gillespie_time_dep_warn(compiled) {
+        eprintln!(
+            "\x1b[33m⚠ model has time-varying transition rate(s): on the \
+             gillespie backend the next-event draw holds the total rate constant \
+             over each exponential wait, so a time-varying rate is treated as \
+             piecewise-constant on the output grid — biasing the inhomogeneous \
+             Poisson process. Mitigations: use a fine output grid (smaller steps \
+             → smaller bias), or prefer backend = \"chain_binomial\", which \
+             re-evaluates the rate every substep. (gh#95)\x1b[0m"
+        );
+    }
+}
+
 /// Per-capability hint text for the unsupported-capability error. Keyed on the
 /// `Capabilities` flag; `name` is the bitflags constant name (used as the
 /// non-blank fallback for any flag without bespoke guidance, so the message
@@ -923,6 +954,101 @@ mod tests {
         assert!(
             check_model_capabilities(InferenceBackend::Ode, &compiled).is_ok(),
             "ODE inference must accept a mixed deterministic source"
+        );
+    }
+
+    /// gh#95: `gillespie_time_dep_warn` is TRUE for a model with a time-varying
+    /// transition rate (here a bare `t` factor) and FALSE for a time-free model.
+    /// This is the predicate behind the gillespie inhomogeneous-Poisson warning.
+    #[test]
+    fn gillespie_time_dep_warn_detects_time_varying_rate() {
+        use ir::{
+            expr::{BinOp, BinOpExpr, BinOpWrap, Expr, ParamExpr, PopExpr, TimeExpr},
+            model::{
+                Compartment, CompartmentKind, InitialConditions, OutputConfig, OutputSchedule,
+                RegularOutputSchedule, SimulationConfig,
+            },
+            parameter::{ParamValue, Parameter},
+            transition::{DrawMethod, StoichiometryEntry, Transition},
+            Model,
+        };
+        use std::collections::HashMap;
+
+        let mul = |l: Expr, r: Expr| {
+            Expr::BinOp(BinOpWrap {
+                bin_op: BinOpExpr { op: BinOp::Mul, left: Box::new(l), right: Box::new(r) },
+            })
+        };
+        // Build a one-transition S --> I model whose infection rate is `rate`.
+        let build = |name: &str, rate: Expr| -> sim::CompiledModel {
+            let model = Model {
+                name: name.into(),
+                version: "0.3".into(),
+                time_unit: "days".into(),
+                description: None,
+                origin: None,
+                origin_rata_die: None,
+                compartments: ["S", "I"]
+                    .iter()
+                    .map(|c| Compartment { name: (*c).into(), kind: CompartmentKind::Integer })
+                    .collect(),
+                transitions: vec![Transition {
+                    name: "infect".into(),
+                    stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
+                    rate,
+                    metadata: None,
+                    draw_method: DrawMethod::Poisson,
+                    rate_grad: Default::default(),
+                    lineage: None,
+                }],
+                ode_equations: vec![],
+                time_functions: vec![],
+                tables: vec![],
+                interventions: vec![],
+                observations: vec![],
+                bindings: vec![],
+                per_eval_bindings: vec![],
+                parameters: vec![Parameter {
+                    name: "beta".into(), value: ParamValue::Fixed { value: 0.001 },
+                    param_kind: None, param_dim: None,
+                }],
+                initial_conditions: InitialConditions::Explicit(
+                    [("S", 990.0), ("I", 10.0)].iter().map(|(k, v)| ((*k).into(), *v))
+                        .collect::<HashMap<String, f64>>(),
+                ),
+                output: OutputConfig {
+                    times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
+                    format: "tsv".into(), trajectory: true, observations: false,
+                },
+                simulation: SimulationConfig {
+                    t_start: 0.0, t_end: 5.0, time_semantics: "continuous".into(),
+                    dt: Some(1.0), rng_seed: Some(7), integrator: Default::default(),
+                },
+                presets: vec![],
+                model_structure: None,
+                balance: None,
+                identity_tracked_compartments: vec![],
+                quantities: vec![],
+                contrasts: vec![],
+            };
+            sim::CompiledModel::new(model).expect("compile")
+        };
+
+        let beta_i = || mul(
+            Expr::Param(ParamExpr { param: "beta".into() }),
+            Expr::Pop(PopExpr { pop: "I".into() }),
+        );
+        // Time-varying: rate = beta * I * t.
+        let time_varying = build("tvar", mul(beta_i(), Expr::Time(TimeExpr { time: () })));
+        assert!(
+            gillespie_time_dep_warn(&time_varying),
+            "a rate with a bare `t` factor must be flagged time-varying (gh#95)"
+        );
+        // Time-free control: rate = beta * I.
+        let time_free = build("tfree", beta_i());
+        assert!(
+            !gillespie_time_dep_warn(&time_free),
+            "a time-free rate must NOT be flagged"
         );
     }
 
