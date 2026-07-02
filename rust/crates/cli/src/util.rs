@@ -2771,6 +2771,19 @@ pub fn simulate_compiled(
     if matches!(run.backend, ForwardBackend::Gillespie) {
         crate::fit::methods::warn_if_gillespie_time_dep(compiled);
     }
+    // gh#125 review: an `at = [...]` output list entirely beyond the horizon is
+    // confined out (`<= t_end`), leaving a header-only trajectory. Warn rather
+    // than silently emit nothing.
+    if let ir::model::OutputSchedule::AtTimes(ts) = &compiled.model.output.times {
+        let t_end = compiled.model.simulation.t_end;
+        if !ts.is_empty() && ts.iter().all(|&t| t > t_end) {
+            eprintln!(
+                "\x1b[33mwarning:\x1b[0m every `at = [...]` output time is beyond the \
+                 simulation horizon (t_end = {t_end}); the trajectory will have no rows \
+                 (gh#125). Add output times within [t_start, t_end], or raise t_end."
+            );
+        }
+    }
 
     // Tick closure: advance the bar to the current sim time. Read-only, RNG-free
     // (the backends call it before any draw). We scale by 1000 so a unit-`dt`

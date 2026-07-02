@@ -1954,10 +1954,11 @@ pub fn run_chains_with_per_chain_params(
         return Err(format!(
             "if2: all {} surviving chain(s) reached no finite log-likelihood \
              (best = {}). The likelihood surface is `-inf` at every evaluated \
-             θ — the data may be impossible under this model, or a recoverable \
-             error fires deterministically at every θ (gh#226). Nothing to \
-             infer; check the observation model, parameter bounds, and \
-             starting values.",
+             θ. Most often the starting values sit in an impossible region — \
+             check those first (try `--init lhs` or a different start); less \
+             often the data are impossible under this model, or a recoverable \
+             error fires at every θ (gh#226). Also check the observation model \
+             and parameter bounds.",
             config.n_chains, best_loglik));
     }
 

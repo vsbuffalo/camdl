@@ -960,10 +960,11 @@ pub fn run_stage(
         return Err(format!(
             "pgas: all {} chain(s) reached no finite complete-data \
              log-likelihood (best = {}). The reachable surface is `-inf` at \
-             every evaluated θ — the data may be impossible under this model, \
-             or a recoverable error fires deterministically at every θ \
-             (gh#226). Nothing to infer; check the observation model, \
-             parameter bounds, and starting values.",
+             every evaluated θ. Most often the starting values sit in an \
+             impossible region — check those first (try `--init lhs` or a \
+             different start); less often the data are impossible under this \
+             model, or a recoverable error fires at every θ (gh#226). Also \
+             check the observation model and parameter bounds.",
             n_chains, best_sweep.log_complete_data_ll));
     }
 

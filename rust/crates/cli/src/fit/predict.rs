@@ -1662,6 +1662,15 @@ fn one_step_bands(
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
         .map_err(|e| format!("observation model construction failed: {e:?}"))?;
 
+    // gh#191 review (defense-in-depth): one_step runs the chain_binomial particle
+    // filter, which does not advance real-valued compartments. A chain_binomial
+    // posterior can only exist for a model that already passed
+    // check_model_capabilities at fit time (withholding REAL_COMPARTMENTS +
+    // rejecting multi-source, gh#121), so this makes the invariant explicit rather
+    // than relying purely on the FilterableFit type witness.
+    crate::fit::methods::check_model_capabilities(
+        crate::run_meta::InferenceBackend::ChainBinomial, &compiled)?;
+
     // ── Build the process ONCE.
     let process = ChainBinomialProcess::new(compiled.clone());
 

@@ -896,11 +896,13 @@ pub fn run_stage(
             "pmmh stage `{}`: all {} surviving chain(s) reached no finite \
              log-likelihood anchor — every evaluated θ scored -inf, so the \
              MH chain never moves (-inf - (-inf) = NaN, never accepted) and \
-             the posterior is degenerate. The data may be impossible under \
-             this model, or a recoverable error fires deterministically at \
-             every θ (gh#226). Check the observation model, parameter \
-             bounds, and starting values; run with --verbosity debug for \
-             per-substep diagnostics.",
+             the posterior is degenerate. Most often the starting values sit \
+             in an impossible region — an MH chain cannot escape a -inf init — \
+             so check those first (try `--init lhs` or a different start); less \
+             often the data are impossible under this model, or a recoverable \
+             error fires at every θ (gh#226). Also check the observation model \
+             and parameter bounds; run with --verbosity debug for per-substep \
+             diagnostics.",
             stage_name, results.len()));
     }
 
