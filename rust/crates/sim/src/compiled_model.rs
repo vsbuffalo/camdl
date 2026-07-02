@@ -208,6 +208,15 @@ fn collect_int_comp_deps(
         // gh#272: a per-eval body is param/table-only (no compartments), so it
         // contributes no integer-compartment dependencies — no descent needed.
         Expr::PerEvalRef(_) => {}
+        // gh#336: `unchecked_dim(inner)` is a transparent dimensional-escape
+        // wrapper — its compartment dependencies are exactly those of `inner`.
+        // Without this arm a compartment referenced only through
+        // `unchecked_dim(...)` fell to `_ => {}` and was omitted from the sparse
+        // dependency set, so Gillespie would not recompute the propensity when
+        // that compartment changed (stale propensities → silent wrong dynamics).
+        Expr::UncheckedDim(w) => {
+            collect_int_comp_deps(&w.unchecked_dim.inner, comp_index, global_to_int, bindings, deps);
+        }
         // Const, Param, Time, TimeFunc: no compartment dependencies
         _ => {}
     }
@@ -253,6 +262,12 @@ fn expr_is_time_dependent(expr: &Expr, bindings: &HashMap<&str, &Expr>) -> bool 
         // gh#272: a per-eval body is param/table-only (no Time/Dt/forcing) by the
         // keystone invariant, so it is never time-dependent.
         Expr::PerEvalRef(_) => false,
+        // gh#336: `unchecked_dim(inner)` is a transparent dimensional-escape
+        // wrapper (identity at runtime) — time-dependent iff `inner` is. Without
+        // this arm a forcing wrapped to satisfy the dim-checker (e.g.
+        // `unchecked_dim(seasonal(t), …)`) fell to `_ => false` and Gillespie
+        // froze the propensity at `t=0` (silent wrong dynamics).
+        Expr::UncheckedDim(w) => expr_is_time_dependent(&w.unchecked_dim.inner, bindings),
         _ => false,
     }
 }
@@ -1632,9 +1647,21 @@ impl CompiledModel {
 mod tests {
     use super::expr_is_time_dependent;
     use super::CompiledModel;
-    use ir::expr::{BinOp, Expr, UnOp};
+    use ir::expr::{BinOp, Expr, UnOp, UncheckedDimExpr, UncheckedDimWrap};
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    /// Wrap `inner` in the dimensional-escape node (`unchecked_dim`). The node is
+    /// a transparent identity at runtime; every AST analysis must see through it.
+    fn escape(inner: Expr) -> Expr {
+        Expr::UncheckedDim(UncheckedDimWrap {
+            unchecked_dim: UncheckedDimExpr {
+                inner: Box::new(inner),
+                dim: (0, 0),
+                reason: "test".into(),
+            },
+        })
+    }
 
     /// Load a golden IR fixture and resolve every parameter to a concrete value
     /// (preset first, then a `1.0` placeholder) so `CompiledModel::new` reaches
@@ -1904,6 +1931,42 @@ mod tests {
             Expr::bin_op(BinOp::Add, Expr::const_(1.0), Expr::un_op(UnOp::Exp, exponent)),
         );
         assert!(expr_is_time_dependent(&pulse, &nb));
+    }
+
+    /// gh#336: `unchecked_dim(...)` is a transparent dimensional-escape wrapper —
+    /// it is time-dependent iff its inner expression is. Before the fix,
+    /// `expr_is_time_dependent` had no `UncheckedDim` arm, so it fell to the
+    /// `_ => false` catch-all: a forcing wrapped in `unchecked_dim` (a realistic
+    /// pattern used to satisfy the dim-checker) was misclassified as
+    /// time-INdependent, and Gillespie froze the propensity at `t=0` — silent
+    /// wrong dynamics.
+    #[test]
+    fn unchecked_dim_is_transparent_for_time_dependence() {
+        let nb: HashMap<&str, &Expr> = HashMap::new();
+        // unchecked_dim(t) — bare Time wrapped in the escape node.
+        assert!(expr_is_time_dependent(&escape(Expr::time()), &nb));
+        // unchecked_dim(seasonal(t)) modeled as unchecked_dim(exp(t)): a
+        // time-varying inner must propagate through the wrapper.
+        assert!(expr_is_time_dependent(
+            &escape(Expr::un_op(UnOp::Exp, Expr::time())),
+            &nb
+        ));
+        // beta * S * unchecked_dim(exp(t)) — the wrapper nested inside a rate.
+        let rate = Expr::bin_op(
+            BinOp::Mul,
+            Expr::param("beta"),
+            Expr::bin_op(
+                BinOp::Mul,
+                Expr::pop("S"),
+                escape(Expr::un_op(UnOp::Exp, Expr::time())),
+            ),
+        );
+        assert!(expr_is_time_dependent(&rate, &nb));
+        // Negative: unchecked_dim over a time-free inner stays time-independent.
+        assert!(!expr_is_time_dependent(
+            &escape(Expr::bin_op(BinOp::Mul, Expr::param("beta"), Expr::pop("S"))),
+            &nb
+        ));
     }
 
     /// A rate with no time reference (only params/consts) is not time-dependent.
