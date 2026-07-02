@@ -126,3 +126,127 @@ fn gillespie_rejects_nonfinite_resolution_dt() {
     let cfg = SimConfig::Gillespie(GillespieConfig { t_start: 0.0, t_end: 30.0, output_dt: Some(1.0) });
     assert_named_dt_error(GillespieSim.run(&compiled, &params, 1, &cfg), "gillespie dt=NaN");
 }
+
+// ── gh#257: output-step / recurrence-period positivity ────────────────────────
+//
+// `output_times` (`t += step`) and each `Recurring` intervention's fire-time
+// enumeration (`t += period`) are infinite-loop hazards with the same shape as
+// a non-positive `dt`: a `step`/`period` of `0` (or a negative) never advances
+// the loop cursor, so the loop `push`es to a `Vec` UNBOUNDED and exhausts
+// memory (an OOM, not merely a hang). The recurring fire-time loop enumerates
+// inside `CompiledModel::new` — fire times are baked at construction — so a
+// non-positive period would OOM before any backend guard could run. The guard
+// therefore lives at the construction boundary (`CompiledModel::new`): a bad
+// step/period is rejected before `new` returns, so the loop is never entered.
+//
+// These tests assert `CompiledModel::new` returns a named error. They must NOT
+// `.unwrap()` a bad model (constructing it IS the OOM) nor drive a `run` (the
+// model never constructs). The builders return the pre-compile `Model`; the
+// caller compiles it, which is where the gate fires.
+
+use ir::intervention::{
+    Action, AddAction, FireSource, Intervention, InterventionSchedule, RecurringSchedule,
+};
+use ir::model::{OutputSchedule, RegularOutputSchedule};
+
+fn assert_named_construction_error(
+    res: Result<CompiledModel, sim::SimError>,
+    needle: &str,
+    ctx: &str,
+) {
+    let err = match res {
+        Err(e) => e,
+        Ok(_) => panic!("{ctx}: bad schedule must be rejected at construction, not constructed"),
+    };
+    assert!(
+        matches!(err, sim::SimError::Validation(_)),
+        "{ctx}: expected SimError::Validation, got {err:?}"
+    );
+    assert!(
+        format!("{err}").contains(needle),
+        "{ctx}: error must name `{needle}`: {err}"
+    );
+}
+
+/// Build a `sir_basic` model whose `Regular` output schedule carries the given
+/// step. Returns the pre-compile `Model`; the caller runs `CompiledModel::new`,
+/// which is where the gh#257 positivity gate fires.
+fn model_with_output_step(step: f64) -> ir::Model {
+    let mut model = load_model("sir_basic");
+    model.output.times = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step });
+    model
+}
+
+/// Build a `sir_basic` model with one `Recurring` intervention of the given
+/// period. A minimal `add(S, 0)` action keeps the model well-formed; only the
+/// schedule period is under test. Returns the pre-compile `Model` (see
+/// [`model_with_output_step`]).
+fn model_with_recurring_period(period: f64) -> ir::Model {
+    let mut model = load_model("sir_basic");
+    model.interventions.push(Intervention {
+        name: "pulse".to_string(),
+        base_name: None,
+        fire: FireSource::Scheduled(InterventionSchedule::Recurring(RecurringSchedule {
+            start: 0.0,
+            period,
+            end: 30.0,
+            at_day: None,
+        })),
+        actions: vec![Action::Add(AddAction {
+            compartment: "S".to_string(),
+            count: ir::expr::Expr::const_(0.0),
+        })],
+        kind: Default::default(),
+    });
+    model
+}
+
+#[test]
+fn rejects_zero_output_step() {
+    assert_named_construction_error(
+        CompiledModel::new(model_with_output_step(0.0)),
+        "step",
+        "output step = 0",
+    );
+}
+
+#[test]
+fn rejects_negative_output_step() {
+    assert_named_construction_error(
+        CompiledModel::new(model_with_output_step(-1.0)),
+        "step",
+        "output step < 0",
+    );
+}
+
+#[test]
+fn rejects_zero_recurrence_period() {
+    assert_named_construction_error(
+        CompiledModel::new(model_with_recurring_period(0.0)),
+        "period",
+        "recurrence period = 0",
+    );
+}
+
+#[test]
+fn rejects_negative_recurrence_period() {
+    assert_named_construction_error(
+        CompiledModel::new(model_with_recurring_period(-7.0)),
+        "period",
+        "recurrence period < 0",
+    );
+}
+
+#[test]
+fn still_runs_with_valid_output_step_and_recurrence() {
+    // Over-rejection guard: a valid output step AND a valid recurring period
+    // must construct AND produce a trajectory.
+    let compiled = CompiledModel::new(model_with_recurring_period(7.0))
+        .expect("valid step + period must construct");
+    let params = compiled.default_params.clone();
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: 1.0 });
+    let traj = ChainBinomialSim
+        .run(&compiled, &params, 1, &cfg)
+        .expect("valid step + period must run");
+    assert!(!traj.snapshots.is_empty(), "valid run must emit snapshots");
+}

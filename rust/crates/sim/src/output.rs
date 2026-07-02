@@ -1,13 +1,22 @@
 use ir::model::{OutputSchedule, RegularOutputSchedule};
 
-/// Convert an `OutputSchedule` to a sorted list of output times, confined to
-/// the horizon `[start, t_end]`.
+/// Convert an `OutputSchedule` to a sorted, deduplicated list of output times,
+/// confined to the horizon `[start, t_end]`.
 ///
 /// `t_end` is the sole horizon authority (`simulation.t_end`, gh#143): the
 /// output schedule no longer carries its own end. A `Regular` schedule
-/// enumerates `start, start+step, …` up to and including `t_end`; an `AtTimes`
-/// list is filtered to entries `≤ t_end`, so an explicitly-listed time beyond
-/// the dynamics horizon is dropped, not emitted against a frozen state.
+/// enumerates `start, start+step, …` up to and including `t_end` (already
+/// ascending and unique by construction); an `AtTimes` list is filtered to
+/// entries `≤ t_end`, so an explicitly-listed time beyond the dynamics horizon
+/// is dropped, not emitted against a frozen state.
+///
+/// gh#257: an author-supplied `at = [...]` list may arrive out of order or with
+/// repeats. The `AtTimes` branch is sorted and deduplicated here so the result
+/// honours the "sorted list" contract and a repeated time does not emit a
+/// duplicate snapshot row. Non-finite entries are not this function's concern —
+/// they are rejected at the `OutputTimes`/`SortedFiniteTimes` boundary the
+/// backends build their schedule through (`NaN`/`+∞` never satisfy `≤ t_end`
+/// and drop out here; a surviving `-∞` is rejected there).
 pub fn output_times(sched: &OutputSchedule, t_end: f64) -> Vec<f64> {
     match sched {
         OutputSchedule::Regular(RegularOutputSchedule { start, step }) => {
@@ -20,7 +29,10 @@ pub fn output_times(sched: &OutputSchedule, t_end: f64) -> Vec<f64> {
             times
         }
         OutputSchedule::AtTimes(ts) => {
-            ts.iter().copied().filter(|&t| t <= t_end).collect()
+            let mut times: Vec<f64> = ts.iter().copied().filter(|&t| t <= t_end).collect();
+            times.sort_by(f64::total_cmp);
+            times.dedup();
+            times
         }
     }
 }
@@ -60,5 +72,18 @@ mod tests {
         let sched = OutputSchedule::AtTimes(vec![0.0, 10.0, 40.0, 50.0, 100.0]);
         let times = output_times(&sched, 40.0);
         assert_eq!(times, vec![0.0, 10.0, 40.0]);
+    }
+
+    /// gh#257: an `at = [...]` list may arrive unsorted and with duplicates.
+    /// `output_times` is documented to return a *sorted* list; it must also
+    /// deduplicate, so a repeated output time does not emit a duplicate
+    /// snapshot row. (Non-finite entries are rejected downstream at the
+    /// `OutputTimes`/`SortedFiniteTimes` boundary; here we pin the sort + dedup
+    /// normalization at the producer so every consumer sees a canonical axis.)
+    #[test]
+    fn at_times_are_sorted_and_deduped() {
+        let sched = OutputSchedule::AtTimes(vec![10.0, 5.0, 5.0, 0.0, 10.0]);
+        let times = output_times(&sched, 40.0);
+        assert_eq!(times, vec![0.0, 5.0, 10.0]);
     }
 }

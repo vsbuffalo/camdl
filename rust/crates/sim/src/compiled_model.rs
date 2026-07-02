@@ -846,6 +846,16 @@ impl CompiledModel {
     /// `docs/dev/notes/2026-06-08-static-typing-as-bug-prevention.md` §6.
     pub fn validate_schedule(&self, dt: f64, params: &[f64]) -> Result<(), SimError> {
         crate::time::validate_dt(dt)?;
+
+        // gh#257: the output-step and recurrence-period positivity guards live
+        // in `CompiledModel::new` (the construction boundary), not here — the
+        // recurring fire-time loop enumerates at construction, so a non-positive
+        // period must be rejected before `new` returns, or it OOMs before any
+        // backend calls this. A constructed `CompiledModel` therefore already
+        // has a positive output step and positive recurrence periods. What
+        // remains runtime-dependent is checked here: the integrator `dt` (a
+        // config value) and the finiteness of resolved fire times (parametric
+        // `AtTimesExpr` schedules resolve against `params`).
         for times in self.resolve_fire_times(params) {
             crate::time::validate_fire_times(&times)?;
         }
@@ -874,6 +884,28 @@ impl CompiledModel {
     }
 
     pub fn new(model: Model) -> Result<Self, SimError> {
+        // gh#257: the output schedule's `t += step` and each recurring
+        // intervention's `t += period` are infinite-loop hazards with the same
+        // shape as a non-positive integrator `dt` — a non-positive step/period
+        // never advances the loop cursor. But unlike `dt` (a runtime config
+        // value checked at each backend's entry), the recurring fire-time loop
+        // below (`Recurring` arm of the `fire_times` enumeration) runs HERE, at
+        // construction — so a non-positive period does not merely hang, it
+        // `push`es to a `Vec` unbounded and exhausts memory before any backend
+        // guard could run. Validate at the construction boundary so a bad model
+        // is a controlled setup error, not an OOM: once a `CompiledModel`
+        // exists, its schedule is provably safe to enumerate. `dt` and resolved
+        // fire-time finiteness stay in `validate_schedule` (they depend on the
+        // runtime `dt` / parameter vector, unknown here).
+        if let ir::model::OutputSchedule::Regular(reg) = &model.output.times {
+            crate::time::validate_output_step(reg.step)?;
+        }
+        for iv in &model.interventions {
+            if let Some(ir::intervention::InterventionSchedule::Recurring(rs)) = iv.fire.schedule() {
+                crate::time::validate_recurrence_period(rs.period)?;
+            }
+        }
+
         let n_comps = model.compartments.len();
 
         let mut comp_index = HashMap::with_capacity(n_comps);

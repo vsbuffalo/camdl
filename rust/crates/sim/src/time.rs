@@ -49,6 +49,58 @@ pub fn validate_dt(dt: f64) -> Result<(), SimError> {
     Ok(())
 }
 
+/// Validate a `Regular` output schedule's step BEFORE it drives the
+/// `output_times` enumeration loop. Returns a named
+/// [`SimError::Validation`] for a non-finite or non-positive step.
+///
+/// gh#257: `output_times` enumerates `start, start+step, …` with a
+/// `while t <= t_end { t += step }` loop. A `step` of `0` (or a
+/// negative, or `NaN`/`±∞`) never advances `t` past the bound, so the
+/// loop runs forever and the worker stalls with a half-written
+/// trajectory. Mirrors [`validate_dt`]: an always-on release check at
+/// the schedule boundary, so a bad (or parameter-proposed) step is a
+/// controlled setup error, not a hung process.
+pub fn validate_output_step(step: f64) -> Result<(), SimError> {
+    if !step.is_finite() {
+        return Err(SimError::Validation(format!(
+            "output schedule step must be finite, got {step}"
+        )));
+    }
+    if step <= 0.0 {
+        return Err(SimError::Validation(format!(
+            "output schedule step must be positive, got {step}; \
+             an every-{step} cadence never advances the output cursor"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a `Recurring` intervention schedule's period BEFORE it
+/// drives the fire-time enumeration loop. Returns a named
+/// [`SimError::Validation`] for a non-finite or non-positive period.
+///
+/// gh#257: `intervention_fire_times` enumerates
+/// `start, start+period, …` with a `while t <= end { t += period }`
+/// loop. A `period` of `0` (or a negative, or `NaN`/`±∞`) never
+/// advances `t` past `end`, so the loop runs forever. Mirrors
+/// [`validate_dt`]: an always-on release check at the schedule
+/// boundary so a bad (or parameter-proposed) period is a controlled
+/// setup error, not a hung process.
+pub fn validate_recurrence_period(period: f64) -> Result<(), SimError> {
+    if !period.is_finite() {
+        return Err(SimError::Validation(format!(
+            "recurring schedule period must be finite, got {period}"
+        )));
+    }
+    if period <= 0.0 {
+        return Err(SimError::Validation(format!(
+            "recurring schedule period must be positive, got {period}; \
+             a period of {period} never advances to the next fire time"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate a list of scheduled fire times: every time must be finite.
 /// A non-finite fire time (`NaN`/`±∞`, e.g. from a parametric `at [...]`
 /// schedule expression that went through zero) would map to a garbage
@@ -284,6 +336,63 @@ mod tests {
     #[test]
     fn validate_fire_times_accepts_finite() {
         assert!(validate_fire_times(&[0.0, 1.0, 258.0, 988.5]).is_ok());
+    }
+
+    // gh#257: the same infinite-loop hazard as `dt <= 0`, at two other
+    // schedule-driving loops — `output_times` (`t += step`) and the
+    // `Recurring` fire-time enumeration (`t += period`). A non-positive
+    // output step or recurrence period must be rejected with a named
+    // Validation error at the boundary, not silently loop forever.
+
+    #[test]
+    fn validate_output_step_rejects_nonpositive() {
+        let err = validate_output_step(0.0).expect_err("output step = 0 must be rejected");
+        assert!(matches!(err, crate::SimError::Validation(_)), "expected Validation, got {err:?}");
+        assert!(format!("{err}").contains("step"), "error must name the step: {err}");
+
+        let err = validate_output_step(-1.0).expect_err("output step < 0 must be rejected");
+        assert!(matches!(err, crate::SimError::Validation(_)), "expected Validation, got {err:?}");
+    }
+
+    #[test]
+    fn validate_output_step_rejects_non_finite() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = validate_output_step(bad).expect_err("non-finite output step must be rejected");
+            assert!(matches!(err, crate::SimError::Validation(_)),
+                "expected Validation for step={bad}, got {err:?}");
+        }
+    }
+
+    #[test]
+    fn validate_output_step_accepts_positive_finite() {
+        assert!(validate_output_step(1.0).is_ok());
+        assert!(validate_output_step(0.5).is_ok());
+        assert!(validate_output_step(1e-6).is_ok());
+    }
+
+    #[test]
+    fn validate_recurrence_period_rejects_nonpositive() {
+        let err = validate_recurrence_period(0.0).expect_err("period = 0 must be rejected");
+        assert!(matches!(err, crate::SimError::Validation(_)), "expected Validation, got {err:?}");
+        assert!(format!("{err}").contains("period"), "error must name the period: {err}");
+
+        let err = validate_recurrence_period(-7.0).expect_err("period < 0 must be rejected");
+        assert!(matches!(err, crate::SimError::Validation(_)), "expected Validation, got {err:?}");
+    }
+
+    #[test]
+    fn validate_recurrence_period_rejects_non_finite() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = validate_recurrence_period(bad).expect_err("non-finite period must be rejected");
+            assert!(matches!(err, crate::SimError::Validation(_)),
+                "expected Validation for period={bad}, got {err:?}");
+        }
+    }
+
+    #[test]
+    fn validate_recurrence_period_accepts_positive_finite() {
+        assert!(validate_recurrence_period(7.0).is_ok());
+        assert!(validate_recurrence_period(1.0).is_ok());
     }
 
     #[test]
