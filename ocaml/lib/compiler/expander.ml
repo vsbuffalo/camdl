@@ -5675,7 +5675,11 @@ let expand_time_function_one ctx fname (env : (string * string) list) fkind (fun
     | None   -> None
     | Some e -> Some (resolve_expr ctx env e)
   in
-  { Ir.name = fname; Ir.kind; Ir.dim; Ir.lag }
+  (* Return the load-time rescale factor [scale] alongside the expanded forcing:
+     it is the single source of the per-forcing scale (L403 gh#13 needs it to
+     tell an actually-rescaled forcing from a same-unit one, and cannot recover
+     it from [Ir.time_function], which retains only [dim]). *)
+  ({ Ir.name = fname; Ir.kind; Ir.dim; Ir.lag }, scale)
 
 (** Expand ODE equations from the DSL's `ode { X = expr }` blocks into
     IR `ode_equation` records.
@@ -5696,19 +5700,26 @@ let expand_ode_equations ctx : Ir.ode_equation list =
     { Ir.compartment = od.ocomp; Ir.derivative = deriv }
   ) ctx.ode_decls
 
-let expand_time_functions ctx : Ir.time_function list =
-  List.concat_map (fun (fd : func_decl) ->
-    if fd.findices = [] then
-      [expand_time_function_one ctx fd.fname [] fd.fkind fd.funit fd.fargs]
-    else begin
-      let combos = cartesian_product fd.findices ctx in
-      List.map (fun env ->
-        let parts = name_parts_from_bindings fd.findices env in
-        let fname = fd.fname ^ "_" ^ String.concat "_" parts in
-        expand_time_function_one ctx fname env fd.fkind fd.funit fd.fargs
-      ) combos
-    end
-  ) ctx.func_decls
+(* Returns the expanded forcings and, alongside, an assoc list mapping each
+   expanded forcing name to its load-time rescale factor (from
+   [expand_time_function_one]). The scale map is consumed by [lint_l403]. *)
+let expand_time_functions ctx : Ir.time_function list * (string * float) list =
+  let pairs =
+    List.concat_map (fun (fd : func_decl) ->
+      if fd.findices = [] then
+        [expand_time_function_one ctx fd.fname [] fd.fkind fd.funit fd.fargs]
+      else begin
+        let combos = cartesian_product fd.findices ctx in
+        List.map (fun env ->
+          let parts = name_parts_from_bindings fd.findices env in
+          let fname = fd.fname ^ "_" ^ String.concat "_" parts in
+          expand_time_function_one ctx fname env fd.fkind fd.funit fd.fargs
+        ) combos
+      end
+    ) ctx.func_decls
+  in
+  (List.map fst pairs,
+   List.map (fun ((tf : Ir.time_function), s) -> (tf.Ir.name, s)) pairs)
 
 (* gh#204: the shared action resolver — used by both scheduled
    interventions/events and reactive policies, so the transfer-kwarg validation
@@ -8295,24 +8306,33 @@ let lint_l401 ctx (expanded_trs : Ir.transition list) =
    every reference site — there is no signal at the use site. This lint is that
    signal (make-loud; the real fix, a scale-aware dim system, is out of scope).
 
+   The lint fires ONLY for a forcing that was ACTUALLY rescaled at load: its
+   declared dim is a rate (T⁻¹) AND its unit differs from the model `time_unit`,
+   so its rescale factor `s = unit_to_model_time ctx 1.0 funit ≠ 1.0`. A
+   same-unit rate forcing — e.g. a `'per_day` forcing under `time_unit = 'days`,
+   where `s = 1` and NO conversion happened at load — is left alone: dividing it
+   by a constant is not the double-conversion bug. The matched divisor is checked
+   against THIS forcing's OWN double-convert magnitude `m = 1/s`, not a generic
+   set of calendar constants — so a structural divisor that merely collides with
+   a calendar constant (`import_rate('per_year)(t) / 12`, where `/12` is 12
+   provinces, not months) does NOT fire.
+
    Shape matched (post-expansion, per transition rate / hoisted binding body):
      - `Div` whose DENOMINATOR is a BARE `Const` c (NOT a unit literal —
        `UncheckedDim` wraps `1 'years` / `365 'days`, and writing the divisor
        as a unit literal is exactly the recommended fix, so it must NOT fire)
-       with c ≈ a time-conversion magnitude, AND whose NUMERATOR subtree
-       references a rate-dimensioned forcing;
-     - `Mul` by the RECIPROCAL of such a magnitude — a bare `Const c` with
-       c ≈ 1/magnitude, or an unfolded `Const 1 / Const magnitude` — where the
-       OTHER operand references a rate-dimensioned forcing. (The lint runs
-       inside `expand_detail`, BEFORE constant folding, so `1/365.25` is still
-       `Div{Const 1, Const 365.25}`, not a single folded `Const`.)
+       with c ≈ m for the rate forcing referenced in the NUMERATOR subtree;
+     - `Mul` by the RECIPROCAL of m — a bare `Const c` with c ≈ 1/m = s, or an
+       unfolded `Const 1 / Const m` — where the OTHER operand references that
+       rate forcing. (The lint runs inside `expand_detail`, BEFORE constant
+       folding, so `1/365.25` is still `Div{Const 1, Const 365.25}`, not a single
+       folded `Const`.)
 
-   Magnitude set — reciprocals of the time-conversion constants, which
-   essentially never occur by accident as a BARE divisor next to a rate forcing
-   (matched within a 0.5% relative band):
-     7  (days/week)   12 (months/year)   24 (hours/day)   30, 30.44 (days/month)
-     52 (weeks/year)  60 (s/min, min/hr)   365, 365.25, 365.2425, 366 (days/year)
-     3600 (s/hr)      86400 (s/day)
+   The magnitude `m` is the forcing's own `1/s` (a `'per_year` forcing under
+   `time_unit = 'days` has `s = 1/365.2425`, so `m ≈ 365.2425`), matched within a
+   0.5% relative band. A genuine residual ambiguity remains for a `'per_week`
+   forcing ÷ 7 or a `'per_month` forcing ÷ 30.44, which is indistinguishable from
+   a real double-convert — accepted.
 
    Warning, not a hard error, for 0.2.0: the magnitude match is a heuristic, and
    a hard error needs the per-site suppression escape hatch (gh#55
@@ -8328,31 +8348,27 @@ let as_bare_const = function
   | Ir.Const c -> Some c
   | _ -> None
 
-(* Time-conversion magnitudes (see the L403 header). *)
-let l403_magnitudes =
-  [ 7.0; 12.0; 24.0; 30.0; 30.44; 52.0; 60.0;
-    365.0; 365.25; 365.2425; 366.0; 3600.0; 86400.0 ]
-
 (* 0.5% relative band — conservative, keeps false positives near zero. *)
 let l403_tol = 0.005
 
-(* c ≈ one of the conversion magnitudes (the `Div`-denominator case). *)
-let l403_magnitude_match c =
-  c > 0.0
-  && List.exists (fun m -> Float.abs (c -. m) <= l403_tol *. m) l403_magnitudes
+(* c ≈ [expected] within the relative band (the `Div`-denominator case).
+   [expected] is the referenced forcing's OWN double-convert magnitude m = 1/s,
+   NOT a member of a generic conversion-constant set. *)
+let l403_div_magnitude_match c expected =
+  c > 0.0 && expected > 0.0 && Float.abs (c -. expected) <= l403_tol *. expected
 
-(* A multiplicative factor equal to the RECIPROCAL of a conversion magnitude,
-   returning the magnitude (for the diagnostic). Two forms:
-     - bare `Const c` with c ≈ 1/m           (folded / hand-written reciprocal);
-     - `Const a / Const m`, a ≈ 1, m ≈ magnitude  (unfolded `1/365.25`). *)
-let l403_reciprocal_magnitude = function
-  | Ir.Const c when c > 0.0 ->
-    List.find_opt
-      (fun m -> Float.abs (c -. (1.0 /. m)) <= l403_tol *. (1.0 /. m))
-      l403_magnitudes
-  | Ir.BinOp { op = Ir.Div; left = Ir.Const a; right = Ir.Const m }
-    when Float.abs (a -. 1.0) <= l403_tol && l403_magnitude_match m -> Some m
-  | _ -> None
+(* A multiplicative factor equal to the RECIPROCAL of the forcing's magnitude
+   [expected] (m = 1/s), i.e. the forcing's own rescale factor s. Two forms:
+     - bare `Const c` with c ≈ 1/expected       (folded / hand-written reciprocal);
+     - `Const a / Const m`, a ≈ 1, m ≈ expected  (unfolded `1/365.25`, since the
+       lint runs pre-constant-fold). *)
+let l403_reciprocal_match factor expected =
+  match factor with
+  | Ir.Const c when c > 0.0 && expected > 0.0 ->
+    Float.abs (c -. (1.0 /. expected)) <= l403_tol *. (1.0 /. expected)
+  | Ir.BinOp { op = Ir.Div; left = Ir.Const a; right = Ir.Const m } ->
+    Float.abs (a -. 1.0) <= l403_tol && l403_div_magnitude_match m expected
+  | _ -> false
 
 (* First rate-dimensioned forcing name referenced anywhere in [e], if any.
    [is_rate_forcing] tests membership in the set of forcings whose declared
@@ -8380,65 +8396,82 @@ let rec l403_rate_forcing_in is_rate_forcing = function
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.BindingRef _ -> None
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
-(* Detect the L403 shape rooted at [e]. Returns [Some (forcing_name, magnitude)]
-   where [magnitude] is the conversion constant to report. *)
-let detect_l403_at_node is_rate_forcing = function
+(* Detect the L403 shape rooted at [e]. [mags] maps each already-rescaled rate
+   forcing (dim (0,-1), rescale factor s ≠ 1) to its OWN double-convert magnitude
+   m = 1/s; a forcing absent from [mags] is not a candidate (a non-rate forcing,
+   or a same-unit rate forcing that was never rescaled). Returns
+   [Some (forcing_name, magnitude)] for the diagnostic. *)
+let detect_l403_at_node mags e =
+  let is_rate_forcing name = Hashtbl.mem mags name in
+  match e with
   | Ir.BinOp { op = Ir.Div; left = num; right = denom } ->
     (match as_bare_const denom with
-     | Some c when l403_magnitude_match c ->
+     | Some c ->
        (match l403_rate_forcing_in is_rate_forcing num with
-        | Some fname -> Some (fname, c)
+        | Some fname ->
+          let expected = Hashtbl.find mags fname in
+          if l403_div_magnitude_match c expected then Some (fname, c) else None
         | None -> None)
-     | _ -> None)
+     | None -> None)
   | Ir.BinOp { op = Ir.Mul; left; right } ->
     let check factor other =
-      match l403_reciprocal_magnitude factor with
-      | Some mag ->
-        (match l403_rate_forcing_in is_rate_forcing other with
-         | Some fname -> Some (fname, mag)
-         | None -> None)
+      match l403_rate_forcing_in is_rate_forcing other with
+      | Some fname ->
+        let expected = Hashtbl.find mags fname in
+        if l403_reciprocal_match factor expected then Some (fname, expected)
+        else None
       | None -> None
     in
     (match check left right with Some _ as r -> r | None -> check right left)
   | _ -> None
 
-let rec walk_expr_for_l403 is_rate_forcing ~on_match e =
-  (match detect_l403_at_node is_rate_forcing e with
+let rec walk_expr_for_l403 mags ~on_match e =
+  (match detect_l403_at_node mags e with
    | Some (fname, mag) -> on_match fname mag
    | None -> ());
   match e with
   | Ir.BinOp { left; right; _ } ->
-    walk_expr_for_l403 is_rate_forcing ~on_match left;
-    walk_expr_for_l403 is_rate_forcing ~on_match right
-  | Ir.UnOp { arg; _ } -> walk_expr_for_l403 is_rate_forcing ~on_match arg
+    walk_expr_for_l403 mags ~on_match left;
+    walk_expr_for_l403 mags ~on_match right
+  | Ir.UnOp { arg; _ } -> walk_expr_for_l403 mags ~on_match arg
   | Ir.Cond { pred; then_; else_ } ->
-    walk_expr_for_l403 is_rate_forcing ~on_match pred;
-    walk_expr_for_l403 is_rate_forcing ~on_match then_;
-    walk_expr_for_l403 is_rate_forcing ~on_match else_
-  | Ir.UncheckedDim u -> walk_expr_for_l403 is_rate_forcing ~on_match u.inner
+    walk_expr_for_l403 mags ~on_match pred;
+    walk_expr_for_l403 mags ~on_match then_;
+    walk_expr_for_l403 mags ~on_match else_
+  | Ir.UncheckedDim u -> walk_expr_for_l403 mags ~on_match u.inner
   | Ir.TableLookup (_, args) ->
-    List.iter (walk_expr_for_l403 is_rate_forcing ~on_match) args
+    List.iter (walk_expr_for_l403 mags ~on_match) args
   | Ir.Reduce terms ->
-    List.iter (walk_expr_for_l403 is_rate_forcing ~on_match) terms
+    List.iter (walk_expr_for_l403 mags ~on_match) terms
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
   | Ir.TimeFunc _ | Ir.BindingRef _ -> ()
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 let lint_l403 ctx (transitions : Ir.transition list)
-    (bindings : Ir.binding list) (time_functions : Ir.time_function list) =
-  (* Forcings whose declared dimension is a rate (T⁻¹). Only these qualify —
-     a `'ratio` / `'count` / duration forcing is not a rate, so dividing it by
-     a constant is not the double-conversion bug. *)
-  let rate_forcings = Hashtbl.create 8 in
+    (bindings : Ir.binding list) (time_functions : Ir.time_function list)
+    (forcing_scales : (string * float) list) =
+  (* Candidate forcings, mapped to their OWN double-convert magnitude m = 1/s.
+     A forcing qualifies only when BOTH hold:
+       1. its declared dimension is a rate (T⁻¹) — a `'ratio` / `'count` /
+          duration forcing is not a rate, so dividing it is not this bug; AND
+       2. its load-time rescale factor s ≠ 1.0 — i.e. its unit differs from the
+          model `time_unit`, so a conversion ACTUALLY happened when its stored
+          values were baked. A same-unit rate forcing (`'per_day` under
+          `time_unit = 'days`) has s = 1.0 (round-trip exact for every current
+          unit) and is excluded: there was no first conversion to double. *)
+  let mags = Hashtbl.create 8 in
   List.iter (fun (tf : Ir.time_function) ->
     match tf.Ir.dim with
-    | (0, -1) -> Hashtbl.replace rate_forcings tf.Ir.name ()
+    | (0, -1) ->
+      (match List.assoc_opt tf.Ir.name forcing_scales with
+       | Some scale when scale <> 1.0 && scale > 0.0 ->
+         Hashtbl.replace mags tf.Ir.name (1.0 /. scale)
+       | _ -> ())
     | _ -> ()
   ) time_functions;
-  if Hashtbl.length rate_forcings = 0 then ()   (* nothing to flag — skip the walk *)
+  if Hashtbl.length mags = 0 then ()   (* nothing to flag — skip the walk *)
   else begin
-    let is_rate_forcing name = Hashtbl.mem rate_forcings name in
     (* Fire at most once per (site, forcing): a forcing divided twice in one
        expression must not double-emit, while two distinct bad forcings in the
        same site each surface. *)
@@ -8466,11 +8499,11 @@ let lint_l403 ctx (transitions : Ir.transition list)
       end
     in
     List.iter (fun (t : Ir.transition) ->
-      walk_expr_for_l403 is_rate_forcing t.Ir.rate
+      walk_expr_for_l403 mags t.Ir.rate
         ~on_match:(emit ~site:(Printf.sprintf "transition '%s' rate" t.Ir.name))
     ) transitions;
     List.iter (fun (b : Ir.binding) ->
-      walk_expr_for_l403 is_rate_forcing b.Ir.bexpr
+      walk_expr_for_l403 mags b.Ir.bexpr
         ~on_match:(emit ~site:(Printf.sprintf "binding '%s'" b.Ir.bname))
     ) bindings
   end
@@ -8586,6 +8619,10 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
   let (expanded_trs, filtered_n) = expand_transitions_counted ctx in
   lint_l401 ctx expanded_trs;
   let ms = build_model_structure ctx expanded_trs in
+  (* Expand forcings once, capturing the per-forcing load-time rescale factors
+     [forcing_scales] so [lint_l403] can distinguish an actually-rescaled forcing
+     (scale ≠ 1) from a same-unit one (scale = 1, no conversion happened). *)
+  let (expanded_time_functions, forcing_scales) = expand_time_functions ctx in
   let model = {
     Ir.name               = name;
     Ir.version            = "0.3";
@@ -8609,7 +8646,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
     Ir.compartments       = expanded_comps;
     Ir.transitions        = expanded_trs;
     Ir.ode_equations      = expand_ode_equations ctx;
-    Ir.time_functions     = expand_time_functions ctx;
+    Ir.time_functions     = expanded_time_functions;
     Ir.tables             = resolved_tables;
     Ir.interventions      = expand_interventions ctx;
     Ir.observations       = expand_observations ctx;
@@ -8641,7 +8678,8 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
      forcing (`birthrate(t) / 365.25`). Runs after bindings are collected so it
      can also walk hoisted-`let` bodies, where the `forcing * pop / const` idiom
      often lands. *)
-  lint_l403 ctx model.Ir.transitions model.Ir.bindings model.Ir.time_functions;
+  lint_l403 ctx model.Ir.transitions model.Ir.bindings
+    model.Ir.time_functions forcing_scales;
   (* gh#204: reject reactive triggers that read an undeclared observation stream
      (post-pass: both interventions and observations are now expanded). *)
   validate_reactive_streams ctx model;

@@ -2557,6 +2557,63 @@ let test_l403_fires_via_hoisted_binding () =
     Alcotest.(check bool) "L403 names the binding" true
       (l403_msg_contains "birth_flow" d.ctx.diags.diags)
 
+(* Class A false positive (gh#13 review): a `'per_day` forcing under
+   `time_unit = 'days` is NOT rescaled at load (scale = 1.0), so dividing it by a
+   constant is not a double-conversion — there was no first conversion. Divide by
+   60 (a member of the OLD generic magnitude set, so this FIRED before the fix).
+   Must be SILENT: L403 now matches only the forcing's OWN magnitude (1/scale),
+   which for a same-unit forcing does not exist (scale = 1 → excluded). *)
+let test_l403_no_fire_on_same_unit_forcing () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { R0 : rate in [0.1, 5.0] }
+    forcing {
+      rate_pd : interpolated 'per_day { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+    }
+    transitions {
+      x : S --> I @ rate_pd(t) * S / 60
+    }
+    init { S = 100 }
+    simulate { from = 0 'days  to = 100 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile_detail_result ~name:"l403_same_unit" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Error e -> Alcotest.failf "should compile cleanly: %s" e
+  | Ok d ->
+    let n = count_diags_with_code d.ctx.diags.diags "L403" in
+    Alcotest.(check int) "no L403 on a same-unit (unrescaled) rate forcing" 0 n
+
+(* Class B false positive (gh#13 review): a `'per_year` forcing IS rescaled under
+   `time_unit = 'days` (scale = 1/365.2425, magnitude ≈ 365.2425), but here the
+   divisor 12 is structural (12 provinces), not months. 12 is in the OLD generic
+   magnitude set (months/year), so this FIRED before the fix. Must be SILENT: 12
+   is nowhere near THIS forcing's own magnitude ≈ 365.2425. *)
+let test_l403_no_fire_on_structural_divisor () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { R0 : rate in [0.1, 5.0] }
+    forcing {
+      import_rate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+    }
+    transitions {
+      imp : S --> I @ import_rate(t) * S / 12
+    }
+    init { S = 100 }
+    simulate { from = 0 'days  to = 100 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile_detail_result ~name:"l403_structural_div" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Error e -> Alcotest.failf "should compile cleanly: %s" e
+  | Ok d ->
+    let n = count_diags_with_code d.ctx.diags.diags "L403" in
+    Alcotest.(check int) "no L403 when the divisor is not this forcing's magnitude" 0 n
+
 (* ── gh#58: trig primitives (sin/cos/tanh) + pi/e ──────────────────────────── *)
 
 let test_trig_pi_resolves_to_const () =
@@ -8259,6 +8316,8 @@ let () =
       Alcotest.test_case "L403 quiet on 'ratio / 'count forcing"    `Quick test_l403_no_fire_on_non_rate_forcing;
       Alcotest.test_case "L403 quiet without a rate forcing"        `Quick test_l403_no_fire_on_unrelated_div;
       Alcotest.test_case "L403 fires via hoisted binding"           `Quick test_l403_fires_via_hoisted_binding;
+      Alcotest.test_case "L403 quiet on same-unit rate forcing"     `Quick test_l403_no_fire_on_same_unit_forcing;
+      Alcotest.test_case "L403 quiet on structural divisor"         `Quick test_l403_no_fire_on_structural_divisor;
     ];
     "compile_outcome", [
       Alcotest.test_case "clean model returns Some value, no errors" `Quick test_compile_outcome_clean_returns_value;
