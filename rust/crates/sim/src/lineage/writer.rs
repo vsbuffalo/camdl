@@ -108,13 +108,13 @@ fn parent_columns(p: ParentRef) -> (&'static str, i64) {
 
 /// Column value for an `Option<CompartmentId>`: the id or `-1` if absent.
 fn comp_column(c: Option<CompartmentId>) -> i64 {
-    c.map_or(-1, |g| g as i64)
+    c.map_or(-1, |g| g.0 as i64)
 }
 
 /// Column value for an `Option<DemeId>`: the deme or `-1` if absent (a
 /// non-lineage event has no parent deme).
 fn deme_column(d: Option<DemeId>) -> i64 {
-    d.map_or(-1, |g| g as i64)
+    d.map_or(-1, |g| g.0 as i64)
 }
 
 /// The fixed column order shared by both formats (and the tree reader).
@@ -158,11 +158,11 @@ impl LineListWriter for TsvLineListWriter {
             self.out,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             e.time,
-            e.transition,
+            e.transition.0,
             e.individual.0,
             comp_column(e.source),
             comp_column(e.destination),
-            e.deme,
+            e.deme.0,
             kind,
             pid,
             deme_column(e.parent_deme),
@@ -322,11 +322,11 @@ mod parquet_impl {
         fn write(&mut self, e: &LineListEntry) -> Result<(), SimError> {
             let (kind, pid) = parent_columns(e.parent);
             self.buf.time.push(e.time);
-            self.buf.transition.push(e.transition as u64);
+            self.buf.transition.push(e.transition.0 as u64);
             self.buf.individual.push(e.individual.0);
             self.buf.source.push(comp_column(e.source));
             self.buf.destination.push(comp_column(e.destination));
-            self.buf.deme.push(e.deme);
+            self.buf.deme.push(e.deme.0);
             self.buf.parent_kind.push(kind);
             self.buf.parent_id.push(pid);
             self.buf.parent_deme.push(deme_column(e.parent_deme));
@@ -364,23 +364,23 @@ mod tests {
             w.init().unwrap();
             w.write(&LineListEntry {
                 time: 1.5,
-                transition: 0,
+                transition: TransitionId(0),
                 individual: IndividualId(7),
-                source: Some(0),
-                destination: Some(1),
-                deme: 0,
+                source: Some(CompartmentId(0)),
+                destination: Some(CompartmentId(1)),
+                deme: DemeId(0),
                 parent: ParentRef::Individual(IndividualId(3)),
-                parent_deme: Some(1),
+                parent_deme: Some(DemeId(1)),
                 attribution_logprob: -1.25,
             })
             .unwrap();
             w.write(&LineListEntry {
                 time: 2.0,
-                transition: 2,
+                transition: TransitionId(2),
                 individual: IndividualId(8),
-                source: Some(2),
+                source: Some(CompartmentId(2)),
                 destination: None,
-                deme: 0,
+                deme: DemeId(0),
                 parent: ParentRef::None,
                 parent_deme: None,
                 attribution_logprob: -0.5,

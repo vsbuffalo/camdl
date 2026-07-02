@@ -21,7 +21,7 @@ use sim::{
     config::{GillespieConfig, SimConfig},
     lineage::{
         tree::{summarize, select_samples, Flat, TransmissionForest},
-        IndividualId, LineListEntry, ParentRef,
+        CompartmentId, IndividualId, LineListEntry, ParentRef,
     },
     state::Trajectory,
     GillespieSim, Simulate,
@@ -131,7 +131,7 @@ fn tier1_parent_is_live_in_its_pool_at_child_event_time() {
     // Track the live I-pool (compartment id for "I"). In sir_lineage,
     // infection: S(0) --> I(1), recovery: I(1) --> R(2). The initial I=1 seeds
     // individual 0 into the I pool at t=0 (ParentRef::Seed), so pre-seed it.
-    let i_comp = 1usize;
+    let i_comp = CompartmentId(1);
     let mut live_i: HashSet<u64> = HashSet::new();
     live_i.insert(0); // initial infective minted at t=0
 
@@ -174,7 +174,7 @@ fn tier1_pruned_tips_equal_sampled_set_and_no_unary_nodes() {
     let (_, entries) = run_with_lineage(m, 5, 60.0);
 
     let forest = TransmissionForest::from_entries(&entries);
-    let (summaries, sim_end) = summarize(&entries);
+    let (summaries, sim_end) = summarize(&entries).unwrap();
     let mut rng = sim::rng::StatefulRng::new(3);
     // All-individuals candidate set (not leaf-only): each individual i.i.d. 0.3.
     let sampled = select_samples(&Flat::new(0.3, sim_end), &summaries, &mut rng);
@@ -319,16 +319,16 @@ fn classify_two_pool(entries: &[LineListEntry], i_comp: usize, a_comp: usize) ->
             }
         }
         // Update membership from this event's routing.
-        if e.source == Some(i_comp) {
+        if e.source == Some(CompartmentId(i_comp)) {
             in_i.remove(&e.individual.0);
         }
-        if e.source == Some(a_comp) {
+        if e.source == Some(CompartmentId(a_comp)) {
             in_a.remove(&e.individual.0);
         }
-        if e.destination == Some(i_comp) {
+        if e.destination == Some(CompartmentId(i_comp)) {
             in_i.insert(e.individual.0);
         }
-        if e.destination == Some(a_comp) {
+        if e.destination == Some(CompartmentId(a_comp)) {
             in_a.insert(e.individual.0);
         }
     }
@@ -387,7 +387,7 @@ fn tier3_pure_birth_tree_statistics() {
         // Sackin index is well-defined and non-negative for a full sample.
         // Under all-individuals sampling at rate 1.0, EVERY individual becomes a
         // pendant tip — so #tips == #nodes, not #leaves.
-        let (summaries, sim_end) = summarize(&entries);
+        let (summaries, sim_end) = summarize(&entries).unwrap();
         let mut rng = sim::rng::StatefulRng::new(seed);
         let sampled = select_samples(&Flat::new(1.0, sim_end), &summaries, &mut rng);
         let trees = forest.prune_to(&sampled);
@@ -423,7 +423,7 @@ fn flat_rate_one_samples_all_individuals() {
     set_params(&mut m, &[("beta", 0.7), ("gamma", 0.2), ("N0", 500.0)]);
     let (_, entries) = run_with_lineage(m, 9, 50.0);
     let forest = TransmissionForest::from_entries(&entries);
-    let (summaries, sim_end) = summarize(&entries);
+    let (summaries, sim_end) = summarize(&entries).unwrap();
     let all_individuals: HashSet<IndividualId> = forest.nodes.keys().copied().collect();
     let mut rng = sim::rng::StatefulRng::new(1);
     let sampled = select_samples(&Flat::new(1.0, sim_end), &summaries, &mut rng);
@@ -490,7 +490,7 @@ fn event_log_trajectory_invariant_under_identity_seed() {
 /// transmission `log(w_b/Λ)`, recovery `log(1/|I_b|)`.
 #[test]
 fn attribution_logprob_matches_analytic_sum() {
-    use sim::lineage::{realize, EventLog, EventRecord, RouteInfo};
+    use sim::lineage::{realize, DemeId, EventLog, EventRecord, RouteInfo, TransitionId};
 
     // Model shape: comp 1 = I (tracked, deme 0), comp 2 = R. Transition 0 is a
     // transmission whose single parent pool is I (comp 1); transition 1 is
@@ -508,23 +508,23 @@ fn attribution_logprob_matches_analytic_sum() {
     // event log so Λ = mass and the transmission term reduces to −log|I| at the
     // event-instant pool size, which is exactly hand-checkable.
     let log = EventLog {
-        initial_pools: vec![(0, 1, 2)],
+        initial_pools: vec![(DemeId(0), CompartmentId(1), 2)],
         transitions: vec![
             RouteInfo {
                 source: None,
-                source_deme: 0,
-                destination: Some(1),
-                destination_deme: 0,
-                child_deme: 0,
+                source_deme: DemeId(0),
+                destination: Some(CompartmentId(1)),
+                destination_deme: DemeId(0),
+                child_deme: DemeId(0),
                 touches_tracked: true,
-                parent_pools: vec![(1, 0)],
+                parent_pools: vec![(CompartmentId(1), DemeId(0))],
             },
             RouteInfo {
-                source: Some(1),
-                source_deme: 0,
-                destination: Some(2),
-                destination_deme: 0,
-                child_deme: 0,
+                source: Some(CompartmentId(1)),
+                source_deme: DemeId(0),
+                destination: Some(CompartmentId(2)),
+                destination_deme: DemeId(0),
+                child_deme: DemeId(0),
                 touches_tracked: true,
                 parent_pools: vec![],
             },
@@ -532,7 +532,7 @@ fn attribution_logprob_matches_analytic_sum() {
         events: vec![
             EventRecord {
                 time: 1.0,
-                transition: 0,
+                transition: TransitionId(0),
                 multiplicity: 1,
                 batched: false,
                 step: 1,
@@ -540,7 +540,7 @@ fn attribution_logprob_matches_analytic_sum() {
             },
             EventRecord {
                 time: 2.0,
-                transition: 1,
+                transition: TransitionId(1),
                 multiplicity: 1,
                 batched: false,
                 step: 2,
@@ -548,7 +548,7 @@ fn attribution_logprob_matches_analytic_sum() {
             },
             EventRecord {
                 time: 3.0,
-                transition: 0,
+                transition: TransitionId(0),
                 multiplicity: 1,
                 batched: false,
                 step: 3,

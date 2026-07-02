@@ -10,6 +10,7 @@ use sim::lineage::{
     event_log::{EventLog, EventRecord, RouteInfo},
     event_log_io, realize, realize_from_path,
     writer::TsvLineListWriter,
+    CompartmentId, DemeId, TransitionId,
 };
 
 fn tmp(tag: &str) -> PathBuf {
@@ -26,33 +27,33 @@ fn tmp(tag: &str) -> PathBuf {
 fn big_log(n_events: usize) -> EventLog {
     let routes = vec![
         RouteInfo {
-            source: Some(0),
-            source_deme: 0,
-            destination: Some(1),
-            destination_deme: 0,
-            child_deme: 0,
+            source: Some(CompartmentId(0)),
+            source_deme: DemeId(0),
+            destination: Some(CompartmentId(1)),
+            destination_deme: DemeId(0),
+            child_deme: DemeId(0),
             touches_tracked: true,
-            parent_pools: vec![(1, 0)],
+            parent_pools: vec![(CompartmentId(1), DemeId(0))],
         },
         RouteInfo {
-            source: Some(1),
-            source_deme: 0,
-            destination: Some(2),
-            destination_deme: 0,
-            child_deme: 0,
+            source: Some(CompartmentId(1)),
+            source_deme: DemeId(0),
+            destination: Some(CompartmentId(2)),
+            destination_deme: DemeId(0),
+            child_deme: DemeId(0),
             touches_tracked: true,
             parent_pools: vec![],
         },
     ];
     // Seed the I pool so transmissions have parents to sample.
-    let initial_pools = vec![(0, 1, 200)];
+    let initial_pools = vec![(DemeId(0), CompartmentId(1), 200)];
     let events = (0..n_events)
         .map(|i| {
             // 2 transmissions : 1 recovery, so the I pool stays populated.
             if i % 3 == 2 {
                 EventRecord {
                     time: i as f64 * 0.1,
-                    transition: 1,
+                    transition: TransitionId(1),
                     multiplicity: 1,
                     batched: false,
                     step: i as u64,
@@ -61,7 +62,7 @@ fn big_log(n_events: usize) -> EventLog {
             } else {
                 EventRecord {
                     time: i as f64 * 0.1,
-                    transition: 0,
+                    transition: TransitionId(0),
                     multiplicity: 1,
                     batched: false,
                     step: i as u64,

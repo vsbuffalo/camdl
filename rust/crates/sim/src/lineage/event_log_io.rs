@@ -23,7 +23,7 @@ use crate::error::SimError;
 
 use super::event_log::{EventLog, EventRecord, RouteInfo};
 use super::writer::LineListFormat;
-use super::{CompartmentId, DemeId};
+use super::{CompartmentId, DemeId, TransitionId};
 
 /// Event-log metadata: the t=0 tracked pools and the per-transition route table.
 /// Read up front (Parquet footer / TSV header) so events can then be streamed.
@@ -78,7 +78,14 @@ fn parse_event_fields(f: &[&str], row_for_error: usize) -> Result<EventRecord, S
         .parse()
         .map_err(|e| SimError::Validation(format!("event log step '{}': {}", f[4], e)))?;
     let lineage_weights = parse_weights_cell(f[5])?;
-    Ok(EventRecord { time, transition, multiplicity, batched, step, lineage_weights })
+    Ok(EventRecord {
+        time,
+        transition: TransitionId(transition),
+        multiplicity,
+        batched,
+        step,
+        lineage_weights,
+    })
 }
 
 /// Parse one TSV metadata header line (`# initial_pools\t…` / `# transitions\t…`)
@@ -137,7 +144,7 @@ pub fn write_tsv_into<W: Write>(log: &EventLog, out: &mut W) -> Result<(), SimEr
             out,
             "{}\t{}\t{}\t{}\t{}\t{}",
             e.time,
-            e.transition,
+            e.transition.0,
             e.multiplicity,
             e.batched,
             e.step,
@@ -385,7 +392,7 @@ mod parquet_impl {
 
     fn batch_for(events: &[EventRecord], schema: &Arc<Schema>) -> Result<RecordBatch, SimError> {
         let time: Vec<f64> = events.iter().map(|e| e.time).collect();
-        let transition: Vec<u64> = events.iter().map(|e| e.transition as u64).collect();
+        let transition: Vec<u64> = events.iter().map(|e| e.transition.0 as u64).collect();
         let multiplicity: Vec<u64> = events.iter().map(|e| e.multiplicity).collect();
         let batched: Vec<bool> = events.iter().map(|e| e.batched).collect();
         let step: Vec<u64> = events.iter().map(|e| e.step).collect();
@@ -494,7 +501,7 @@ mod parquet_impl {
             };
             f(EventRecord {
                 time: time.value(r),
-                transition: transition.value(r) as usize,
+                transition: TransitionId(transition.value(r) as usize),
                 multiplicity: multiplicity.value(r),
                 batched: batched.value(r),
                 step: step.value(r),
@@ -558,24 +565,28 @@ mod tests {
     use crate::lineage::event_log::RouteInfo;
 
     fn sample_log() -> EventLog {
+        use crate::lineage::{CompartmentId, DemeId, TransitionId};
         EventLog {
-            initial_pools: vec![(0, 1, 3), (1, 4, 2)],
+            initial_pools: vec![
+                (DemeId(0), CompartmentId(1), 3),
+                (DemeId(1), CompartmentId(4), 2),
+            ],
             transitions: vec![
                 RouteInfo {
-                    source: Some(0),
-                    source_deme: 0,
-                    destination: Some(1),
-                    destination_deme: 0,
-                    child_deme: 0,
+                    source: Some(CompartmentId(0)),
+                    source_deme: DemeId(0),
+                    destination: Some(CompartmentId(1)),
+                    destination_deme: DemeId(0),
+                    child_deme: DemeId(0),
                     touches_tracked: true,
-                    parent_pools: vec![(1, 0), (4, 1)],
+                    parent_pools: vec![(CompartmentId(1), DemeId(0)), (CompartmentId(4), DemeId(1))],
                 },
                 RouteInfo {
-                    source: Some(1),
-                    source_deme: 0,
-                    destination: Some(2),
-                    destination_deme: 0,
-                    child_deme: 0,
+                    source: Some(CompartmentId(1)),
+                    source_deme: DemeId(0),
+                    destination: Some(CompartmentId(2)),
+                    destination_deme: DemeId(0),
+                    child_deme: DemeId(0),
                     touches_tracked: true,
                     parent_pools: vec![],
                 },
@@ -583,7 +594,7 @@ mod tests {
             events: vec![
                 EventRecord {
                     time: 0.5,
-                    transition: 0,
+                    transition: TransitionId(0),
                     multiplicity: 1,
                     batched: false,
                     step: 1,
@@ -591,7 +602,7 @@ mod tests {
                 },
                 EventRecord {
                     time: 1.2,
-                    transition: 1,
+                    transition: TransitionId(1),
                     multiplicity: 3,
                     batched: true,
                     step: 2,
@@ -634,7 +645,7 @@ mod tests {
         log.events = (0..n)
             .map(|i| EventRecord {
                 time: i as f64 * 0.5,
-                transition: i % 2,
+                transition: crate::lineage::TransitionId(i % 2),
                 multiplicity: 1,
                 batched: false,
                 step: i as u64,

@@ -100,14 +100,14 @@ fn pathogen_and_human_migration_have_opposite_genealogies() {
     assert_eq!(fh, 0.0, "human migration must have ZERO cross-deme transmissions, got {fh}");
 
     // The mirror image: migration events live on branches under human migration.
-    assert!(migration_event_count(&h) > 0, "human migration must have migration events");
-    assert_eq!(migration_event_count(&p), 0, "pathogen migration must have no migration events");
+    assert!(migration_event_count(&h).unwrap() > 0, "human migration must have migration events");
+    assert_eq!(migration_event_count(&p).unwrap(), 0, "pathogen migration must have no migration events");
 
     // Regression guard: scoring the human model by *birth* deme (the pre-fix
     // IndividualSummary behaviour) spuriously reports cross-deme transmissions,
     // because a migrant born in a and transmitting in b looks like an a→b edge.
     // The deme-trajectory fix is what keeps the event-time signal (fh) at 0.
-    let (summaries, _) = summarize(&h);
+    let (summaries, _) = summarize(&h).unwrap();
     let (mut n, mut cross_birth) = (0u64, 0u64);
     for e in &h {
         if let ParentRef::Individual(pid) = e.parent {

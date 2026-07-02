@@ -36,7 +36,7 @@
 use std::collections::{HashMap, HashSet};
 
 use sim::{
-    lineage::{LineListEntry, ParentRef},
+    lineage::{CompartmentId, LineListEntry, ParentRef},
     rng::StatefulRng,
     state::Trajectory,
 };
@@ -78,10 +78,10 @@ fn build(entries: &[LineListEntry], t_star: f64) -> (HashMap<u64, u64>, HashMap<
             parent.entry(ind).or_insert(p.0);
         }
         if e.time <= t_star {
-            if e.source == Some(COMP_I) {
+            if e.source == Some(CompartmentId(COMP_I)) {
                 in_i.remove(&ind);
             }
-            if e.destination == Some(COMP_I) {
+            if e.destination == Some(CompartmentId(COMP_I)) {
                 in_i.insert(ind);
             }
         }

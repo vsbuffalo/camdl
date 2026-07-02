@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 
 use sim::{
-    lineage::{LineListEntry, ParentRef},
+    lineage::{CompartmentId, LineListEntry, ParentRef},
     state::Trajectory,
 };
 
@@ -62,7 +62,7 @@ fn offspring_and_births(
         if let ParentRef::Individual(p) = e.parent {
             *children.entry(p.0).or_insert(0) += 1;
         }
-        if e.source == Some(COMP_I) && e.destination == Some(COMP_R) {
+        if e.source == Some(CompartmentId(COMP_I)) && e.destination == Some(CompartmentId(COMP_R)) {
             recovered.insert(ind, true);
         }
     }

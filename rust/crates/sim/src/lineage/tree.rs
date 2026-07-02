@@ -27,7 +27,7 @@ use crate::error::SimError;
 use crate::rng::StatefulRng;
 
 use super::writer::LineListEntry;
-use super::{DemeId, IndividualId, ParentRef};
+use super::{CompartmentId, DemeId, IndividualId, ParentRef, TransitionId};
 
 /// A single node in the raw transmission forest: an individual, the time it
 /// was born (its lineage-event time), and its parent (if any).
@@ -434,7 +434,9 @@ impl IndividualSummary {
 /// pure-parent seeds (individuals that only ever appear as a `parent_id`), with
 /// `infection_time = 0` and `removal_time = None` — matching the forest's
 /// treatment of seed roots.
-pub fn summarize(entries: &[LineListEntry]) -> (HashMap<IndividualId, IndividualSummary>, f64) {
+pub fn summarize(
+    entries: &[LineListEntry],
+) -> Result<(HashMap<IndividualId, IndividualSummary>, f64), SimError> {
     /// Per-individual accumulator: removal time, the raw `(time, deme)` focal
     /// events that become the deme trajectory, and the running current deme
     /// (to tell a migration from a removal).
@@ -447,9 +449,23 @@ pub fn summarize(entries: &[LineListEntry]) -> (HashMap<IndividualId, Individual
     let mut acc: HashMap<IndividualId, Acc> = HashMap::new();
     let mut sim_end = 0.0_f64;
 
-    // Entries are in recorded (time) order, so each individual's events arrive
-    // in order — required to classify deme changes correctly.
+    // Entries MUST be in recorded (time) order, so each individual's events
+    // arrive in order — required to classify deme changes (migration vs
+    // removal) correctly. Guard the precondition rather than silently
+    // misclassifying a hand-edited or reordered line list (H12).
+    let mut last_time = f64::NEG_INFINITY;
     for e in entries {
+        if e.time < last_time {
+            return Err(SimError::Validation(format!(
+                "summarize: line list is out of recorded time order — an event at \
+                 time {} follows an event at time {}. summarize requires entries in \
+                 non-decreasing time order (as written by realize); a reordered or \
+                 hand-edited line list would misclassify deme changes.",
+                e.time, last_time
+            )));
+        }
+        last_time = e.time;
+
         sim_end = sim_end.max(e.time);
         let is_lineage = matches!(e.parent, ParentRef::Individual(_));
 
@@ -484,7 +500,7 @@ pub fn summarize(entries: &[LineListEntry]) -> (HashMap<IndividualId, Individual
         // Ensure a pure-parent seed (only ever a parent_id) exists as a root
         // individual: a single trajectory segment at t=0 in its parent deme.
         if let ParentRef::Individual(p) = e.parent {
-            let pd = e.parent_deme.unwrap_or(0);
+            let pd = e.parent_deme.unwrap_or(DemeId(0));
             acc.entry(p).or_insert(Acc {
                 removal: None,
                 segments: vec![(0.0, pd)],
@@ -509,7 +525,7 @@ pub fn summarize(entries: &[LineListEntry]) -> (HashMap<IndividualId, Individual
         })
         .collect();
 
-    (map, sim_end)
+    Ok((map, sim_end))
 }
 
 /// Fraction of transmission edges that **cross demes** — the infector
@@ -545,10 +561,23 @@ pub fn cross_deme_transmission_fraction(entries: &[LineListEntry]) -> Option<f64
 /// [`cross_deme_transmission_fraction`] — human migration > 0, pathogen
 /// migration = 0. Requires `entries` in recorded (time) order to detect deme
 /// changes (as written by [`super::realize`]).
-pub fn migration_event_count(entries: &[LineListEntry]) -> u64 {
+pub fn migration_event_count(entries: &[LineListEntry]) -> Result<u64, SimError> {
     let mut cur: HashMap<IndividualId, DemeId> = HashMap::new();
     let mut count = 0u64;
+    // Deme-change detection needs entries in recorded (time) order; guard it (H12).
+    let mut last_time = f64::NEG_INFINITY;
     for e in entries {
+        if e.time < last_time {
+            return Err(SimError::Validation(format!(
+                "migration_event_count: line list is out of recorded time order — an \
+                 event at time {} follows an event at time {}. This projection requires \
+                 entries in non-decreasing time order (as written by realize); a \
+                 reordered or hand-edited line list would miscount migrations.",
+                e.time, last_time
+            )));
+        }
+        last_time = e.time;
+
         if matches!(e.parent, ParentRef::Individual(_)) {
             cur.insert(e.individual, e.deme); // infection sets the deme
         } else if let Some(&cd) = cur.get(&e.individual) {
@@ -558,7 +587,7 @@ pub fn migration_event_count(entries: &[LineListEntry]) -> u64 {
             }
         }
     }
-    count
+    Ok(count)
 }
 
 /// A scheme that decides, per individual, whether it is sampled and the
@@ -690,21 +719,21 @@ pub fn read_tsv(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimError> 
             s.parse::<i64>()
                 .map_err(|e| SimError::Validation(format!("line list parse '{}': {}", s, e)))
         };
-        let comp_opt = |v: i64| -> Option<usize> {
+        let comp_opt = |v: i64| -> Option<CompartmentId> {
             if v < 0 {
                 None
             } else {
-                Some(v as usize)
+                Some(CompartmentId(v as usize))
             }
         };
         let time: f64 = f[0]
             .parse()
             .map_err(|e| SimError::Validation(format!("line list time '{}': {}", f[0], e)))?;
-        let transition = parse_i64(f[1])? as usize;
+        let transition = TransitionId(parse_i64(f[1])? as usize);
         let individual = IndividualId(parse_i64(f[2])? as u64);
         let source = comp_opt(parse_i64(f[3])?);
         let destination = comp_opt(parse_i64(f[4])?);
-        let deme = parse_i64(f[5])? as u32;
+        let deme = DemeId(parse_i64(f[5])? as u32);
         let parent_id = parse_i64(f[7])?;
         let parent = match f[6] {
             "individual" => ParentRef::Individual(IndividualId(parent_id as u64)),
@@ -722,7 +751,7 @@ pub fn read_tsv(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimError> 
         // parent_deme: -1 sentinel → None (non-lineage event).
         let parent_deme = match parse_i64(f[8])? {
             v if v < 0 => None,
-            v => Some(v as u32),
+            v => Some(DemeId(v as u32)),
         };
         let attribution_logprob: f64 = f[9].parse().map_err(|e| {
             SimError::Validation(format!("line list attribution_logprob '{}': {}", f[9], e))
@@ -770,7 +799,7 @@ pub fn read_parquet(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimErr
         let parent_id = col(7).as_any().downcast_ref::<Int64Array>().unwrap();
         let parent_deme = col(8).as_any().downcast_ref::<Int64Array>().unwrap();
         let attribution_logprob = col(9).as_any().downcast_ref::<Float64Array>().unwrap();
-        let comp_opt = |v: i64| if v < 0 { None } else { Some(v as usize) };
+        let comp_opt = |v: i64| if v < 0 { None } else { Some(CompartmentId(v as usize)) };
         for r in 0..batch.num_rows() {
             let parent = match parent_kind.value(r) {
                 "individual" => ParentRef::Individual(IndividualId(parent_id.value(r) as u64)),
@@ -780,15 +809,15 @@ pub fn read_parquet(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimErr
             };
             let pdeme = match parent_deme.value(r) {
                 v if v < 0 => None,
-                v => Some(v as u32),
+                v => Some(DemeId(v as u32)),
             };
             out.push(LineListEntry {
                 time: time.value(r),
-                transition: transition.value(r) as usize,
+                transition: TransitionId(transition.value(r) as usize),
                 individual: IndividualId(individual.value(r)),
                 source: comp_opt(source.value(r)),
                 destination: comp_opt(destination.value(r)),
-                deme: deme.value(r),
+                deme: DemeId(deme.value(r)),
                 parent,
                 parent_deme: pdeme,
                 attribution_logprob: attribution_logprob.value(r),
@@ -809,13 +838,13 @@ mod tests {
     fn lineage_entry_deme(t: f64, ind: u64, parent: u64, dst: usize, deme: u32) -> LineListEntry {
         LineListEntry {
             time: t,
-            transition: 0,
+            transition: TransitionId(0),
             individual: IndividualId(ind),
-            source: Some(0),
-            destination: Some(dst),
-            deme,
+            source: Some(CompartmentId(0)),
+            destination: Some(CompartmentId(dst)),
+            deme: DemeId(deme),
             parent: ParentRef::Individual(IndividualId(parent)),
-            parent_deme: Some(0),
+            parent_deme: Some(DemeId(0)),
             attribution_logprob: 0.0,
         }
     }
@@ -826,11 +855,11 @@ mod tests {
     fn removal_entry(t: f64, ind: u64, src: usize, dst: Option<usize>) -> LineListEntry {
         LineListEntry {
             time: t,
-            transition: 1,
+            transition: TransitionId(1),
             individual: IndividualId(ind),
-            source: Some(src),
-            destination: dst,
-            deme: 0,
+            source: Some(CompartmentId(src)),
+            destination: dst.map(CompartmentId),
+            deme: DemeId(0),
             parent: ParentRef::None,
             parent_deme: None,
             attribution_logprob: 0.0,
@@ -916,7 +945,7 @@ mod tests {
             lineage_entry(2.0, 2, 0, 1),
             lineage_entry(3.0, 3, 1, 1),
         ];
-        let (summaries, sim_end) = summarize(&entries);
+        let (summaries, sim_end) = summarize(&entries).unwrap();
         let mut r1 = StatefulRng::new(123);
         let mut r2 = StatefulRng::new(123);
         let s1 = select_samples(&Flat::new(0.5, sim_end), &summaries, &mut r1);
@@ -928,21 +957,22 @@ mod tests {
     fn summarize_infection_removal_and_deme() {
         // 0 -> 1 (infected t=1, deme 0), 1 recovers at t=4 (I->R).
         // 0 -> 2 (infected t=2, deme 1), never recovers.
+        // Entries in recorded (time) order — the precondition summarize enforces.
         let entries = vec![
             lineage_entry_deme(1.0, 1, 0, 1, 0),
-            removal_entry(4.0, 1, 1, Some(2)),
             lineage_entry_deme(2.0, 2, 0, 1, 1),
+            removal_entry(4.0, 1, 1, Some(2)),
         ];
-        let (s, sim_end) = summarize(&entries);
+        let (s, sim_end) = summarize(&entries).unwrap();
         assert_eq!(sim_end, 4.0);
         let s1 = &s[&IndividualId(1)];
         assert_eq!(s1.infection_time, 1.0);
         assert_eq!(s1.removal_time, Some(4.0));
-        assert_eq!(s1.trajectory.birth_deme(), 0);
+        assert_eq!(s1.trajectory.birth_deme(), DemeId(0));
         let s2 = &s[&IndividualId(2)];
         assert_eq!(s2.infection_time, 2.0);
         assert_eq!(s2.removal_time, None);
-        assert_eq!(s2.trajectory.birth_deme(), 1);
+        assert_eq!(s2.trajectory.birth_deme(), DemeId(1));
         // Never-removed individual falls back to sim_end.
         assert_eq!(s2.removal_or(sim_end), 4.0);
         // Seed (pure parent) exists as a root with infection_time 0.
@@ -955,11 +985,11 @@ mod tests {
     fn migration_entry(t: f64, ind: u64, to_deme: u32) -> LineListEntry {
         LineListEntry {
             time: t,
-            transition: 2,
+            transition: TransitionId(2),
             individual: IndividualId(ind),
-            source: Some(2),      // I in source deme
-            destination: Some(3), // I in destination deme
-            deme: to_deme,
+            source: Some(CompartmentId(2)),      // I in source deme
+            destination: Some(CompartmentId(3)), // I in destination deme
+            deme: DemeId(to_deme),
             parent: ParentRef::None,
             parent_deme: None,
             attribution_logprob: 0.0,
@@ -984,25 +1014,25 @@ mod tests {
         // recovery row's deme to 1 so it does not look like a migration back.
         let mut entries = entries;
         if let Some(last) = entries.last_mut() {
-            last.deme = 1;
+            last.deme = DemeId(1);
         }
-        let (s, sim_end) = summarize(&entries);
+        let (s, sim_end) = summarize(&entries).unwrap();
         assert_eq!(sim_end, 5.0);
 
         // Migrant who recovered.
         let s1 = &s[&IndividualId(1)];
-        assert_eq!(s1.trajectory.birth_deme(), 0, "born in deme 0");
+        assert_eq!(s1.trajectory.birth_deme(), DemeId(0), "born in deme 0");
         assert_eq!(s1.trajectory.n_segments(), 2, "one migration → two segments");
-        assert_eq!(s1.trajectory.deme_at(2.0), 0, "before migration: deme 0");
-        assert_eq!(s1.trajectory.deme_at(4.0), 1, "after migration: deme 1");
+        assert_eq!(s1.trajectory.deme_at(2.0), DemeId(0), "before migration: deme 0");
+        assert_eq!(s1.trajectory.deme_at(4.0), DemeId(1), "after migration: deme 1");
         assert_eq!(s1.removal_time, Some(5.0), "recovery is the removal, not migration");
-        assert_eq!(s1.deme_at_sampling(sim_end), 1, "sampled in its current (post-migration) deme");
+        assert_eq!(s1.deme_at_sampling(sim_end), DemeId(1), "sampled in its current (post-migration) deme");
 
         // Migrant still infectious at the horizon: migration must not be read as
         // a removal.
         let s2 = &s[&IndividualId(2)];
         assert_eq!(s2.removal_time, None, "migration is not a removal");
-        assert_eq!(s2.deme_at_sampling(sim_end), 1, "sampled at horizon in deme 1");
+        assert_eq!(s2.deme_at_sampling(sim_end), DemeId(1), "sampled at horizon in deme 1");
     }
 
     #[test]
@@ -1014,21 +1044,46 @@ mod tests {
             lineage_entry_deme(2.0, 2, 0, 1, 1), // cross (helper sets parent_deme=0)
         ];
         assert_eq!(cross_deme_transmission_fraction(&p), Some(0.5));
-        assert_eq!(migration_event_count(&p), 0);
+        assert_eq!(migration_event_count(&p).unwrap(), 0);
 
         // Human-style: local transmissions + a migration. Individual 1 migrates
         // 0→1, then infects 2 locally in deme 1 (parent_deme 1 = child deme).
         let mut infect2 = lineage_entry_deme(4.0, 2, 1, 1, 1);
-        infect2.parent_deme = Some(1);
+        infect2.parent_deme = Some(DemeId(1));
         let h = vec![
             lineage_entry_deme(1.0, 1, 0, 1, 0), // within (parent_deme 0, deme 0)
             migration_entry(3.0, 1, 1),          // 1 migrates 0 → 1
             infect2,                             // within (parent_deme 1, deme 1)
         ];
         assert_eq!(cross_deme_transmission_fraction(&h), Some(0.0));
-        assert_eq!(migration_event_count(&h), 1);
+        assert_eq!(migration_event_count(&h).unwrap(), 1);
 
         assert_eq!(cross_deme_transmission_fraction(&[]), None);
+    }
+
+    /// H12: `summarize` requires entries in recorded time order — a line list
+    /// whose time column regresses is rejected, not silently misclassified.
+    #[test]
+    fn summarize_rejects_out_of_time_order() {
+        let entries = vec![
+            lineage_entry_deme(2.0, 1, 0, 1, 0),
+            lineage_entry_deme(1.0, 2, 0, 1, 0), // time goes backwards
+        ];
+        assert!(matches!(summarize(&entries), Err(SimError::Validation(_))));
+    }
+
+    /// H12: `migration_event_count` has the same recorded-time-order
+    /// precondition and rejects a regression.
+    #[test]
+    fn migration_event_count_rejects_out_of_time_order() {
+        let entries = vec![
+            lineage_entry_deme(2.0, 1, 0, 1, 0),
+            lineage_entry_deme(1.0, 2, 0, 1, 0), // time goes backwards
+        ];
+        assert!(matches!(
+            migration_event_count(&entries),
+            Err(SimError::Validation(_))
+        ));
     }
 
     #[test]
@@ -1037,7 +1092,7 @@ mod tests {
         // With rate 1.0 over ALL individuals, 1 must be in the sampled set —
         // impossible under the old leaf-only scheme.
         let entries = vec![lineage_entry(1.0, 1, 0, 1), lineage_entry(2.0, 2, 1, 1)];
-        let (summaries, sim_end) = summarize(&entries);
+        let (summaries, sim_end) = summarize(&entries).unwrap();
         let mut rng = StatefulRng::new(1);
         let sampled = select_samples(&Flat::new(1.0, sim_end), &summaries, &mut rng);
         assert!(sampled.contains_key(&IndividualId(1)), "infector must be sampleable");
@@ -1065,7 +1120,7 @@ mod tests {
         // time (1).
         let entries = vec![lineage_entry(1.0, 1, 0, 1), removal_entry(6.0, 1, 1, Some(2))];
         let f = TransmissionForest::from_entries(&entries);
-        let (summaries, sim_end) = summarize(&entries);
+        let (summaries, sim_end) = summarize(&entries).unwrap();
         let t_sample = summaries[&IndividualId(1)].removal_or(sim_end);
         assert_eq!(t_sample, 6.0);
 
@@ -1090,8 +1145,8 @@ mod tests {
         for i in 101..=200u64 {
             entries.push(lineage_entry_deme(1.0, i, 0, 1, 1)); // deme 1
         }
-        let (summaries, sim_end) = summarize(&entries);
-        let rates: HashMap<DemeId, f64> = [(0u32, 0.5), (1u32, 0.05)].into_iter().collect();
+        let (summaries, sim_end) = summarize(&entries).unwrap();
+        let rates: HashMap<DemeId, f64> = [(DemeId(0), 0.5), (DemeId(1), 0.05)].into_iter().collect();
         let scheme = Stratified::new(rates, 0.0, sim_end);
 
         let trials = 400;
@@ -1101,7 +1156,7 @@ mod tests {
             let mut rng = StatefulRng::new(seed);
             let sampled = select_samples(&scheme, &summaries, &mut rng);
             for id in sampled.keys() {
-                if summaries[id].deme_at_sampling(sim_end) == 0 {
+                if summaries[id].deme_at_sampling(sim_end) == DemeId(0) {
                     sum_d0 += 1;
                 } else {
                     sum_d1 += 1;

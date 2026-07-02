@@ -5,7 +5,7 @@ use crate::{
     error::SimError,
     boundary_times::{EffectTimes, OutputTimes},
     intervention::apply_events_at,
-    lineage::TransitionObserver,
+    lineage::{DemeId, TransitionId, TransitionObserver},
     ode_integrator::rk4_step,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
@@ -391,7 +391,7 @@ pub fn run_gillespie_with_observer(
         // observer owns its own RNG stream, so it cannot perturb the count
         // trajectory. Single-population slice → deme 0, multiplicity 1.
         if let Some(obs) = observer.as_deref_mut() {
-            obs.on_fired(fired_idx, 0, 1, t, &int_s, &real_s, params)?;
+            obs.on_fired(TransitionId(fired_idx), DemeId(0), 1, t, &int_s, &real_s, params)?;
         }
 
         // Apply stoichiometry

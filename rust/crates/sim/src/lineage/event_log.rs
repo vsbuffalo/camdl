@@ -148,7 +148,7 @@ impl<'m> EventRecorder<'m> {
                 .get(name.as_str())
                 .copied()
                 .ok_or_else(|| SimError::UnknownCompartment(name.clone()))?;
-            tracked.push(g);
+            tracked.push(CompartmentId(g));
         }
         let is_tracked = |g: CompartmentId| tracked.contains(&g);
 
@@ -158,7 +158,7 @@ impl<'m> EventRecorder<'m> {
             let mut source: Option<CompartmentId> = None;
             let mut destination: Option<CompartmentId> = None;
             for &(local, delta) in &model.transition_stoich[tr_idx] {
-                let g = model.int_local_to_global[local];
+                let g = CompartmentId(model.int_local_to_global[local]);
                 if delta < 0 && source.is_none() {
                     source = Some(g);
                 } else if delta > 0 && destination.is_none() {
@@ -173,11 +173,13 @@ impl<'m> EventRecorder<'m> {
                     let mut pools = Vec::with_capacity(l.parent_pool_weights.len());
                     let mut exprs = Vec::with_capacity(l.parent_pool_weights.len());
                     for (comp_name, weight) in &l.parent_pool_weights {
-                        let g = model
-                            .comp_index
-                            .get(comp_name.as_str())
-                            .copied()
-                            .ok_or_else(|| SimError::UnknownCompartment(comp_name.clone()))?;
+                        let g = CompartmentId(
+                            model
+                                .comp_index
+                                .get(comp_name.as_str())
+                                .copied()
+                                .ok_or_else(|| SimError::UnknownCompartment(comp_name.clone()))?,
+                        );
                         pools.push((g, deme_map.deme_of(g)));
                         exprs.push(weight.clone());
                     }
@@ -186,12 +188,12 @@ impl<'m> EventRecorder<'m> {
                 _ => (Vec::new(), None),
             };
 
-            let source_deme = source.map_or(0, |g| deme_map.deme_of(g));
-            let destination_deme = destination.map_or(0, |g| deme_map.deme_of(g));
+            let source_deme = source.map_or(DemeId(0), |g| deme_map.deme_of(g));
+            let destination_deme = destination.map_or(DemeId(0), |g| deme_map.deme_of(g));
             let child_deme = match (source, destination) {
                 (_, Some(dst)) => deme_map.deme_of(dst),
                 (Some(src), None) => deme_map.deme_of(src),
-                (None, None) => 0,
+                (None, None) => DemeId(0),
             };
 
             let touches_tracked = source.is_some_and(is_tracked)
@@ -214,7 +216,7 @@ impl<'m> EventRecorder<'m> {
         // initial counts, each in its own stratum's deme.
         let mut initial_pools = Vec::new();
         for &g in &tracked {
-            if let Some(local) = model.global_to_int[g] {
+            if let Some(local) = model.global_to_int[g.0] {
                 let count = initial_int.counts[local];
                 if count > 0 {
                     initial_pools.push((deme_map.deme_of(g), g, count));
@@ -266,7 +268,7 @@ impl TransitionObserver for EventRecorder<'_> {
         pre_real: &RealState,
         params: &[f64],
     ) -> Result<(), SimError> {
-        let route = &self.routes[transition];
+        let route = &self.routes[transition.0];
         if !route.touches_tracked {
             // Untracked transition — no event recorded, no overhead beyond the
             // flag check (matches the shipped observer's early return).
@@ -277,7 +279,7 @@ impl TransitionObserver for EventRecorder<'_> {
         // `w_b·X_b` against the event-instant (Gillespie) / start-of-step
         // (batched) state. `X_b` is read from `pre_int`, which equals the
         // identity-pool count the shipped observer sampled against.
-        let lineage_weights = if let Some(exprs) = &self.parent_weight_exprs[transition] {
+        let lineage_weights = if let Some(exprs) = &self.parent_weight_exprs[transition.0] {
             let ctx = EvalCtx {
                 model: self.model,
                 int_s: pre_int,
@@ -292,7 +294,7 @@ impl TransitionObserver for EventRecorder<'_> {
             let mut masses = Vec::with_capacity(exprs.len());
             for ((g, _deme), weight_expr) in route.parent_pools.iter().zip(exprs.iter()) {
                 let w = eval_expr(weight_expr, &ctx)?.max(0.0);
-                let count = match self.model.global_to_int[*g] {
+                let count = match self.model.global_to_int[g.0] {
                     Some(local) => pre_int.counts[local].max(0) as f64,
                     None => 0.0,
                 };

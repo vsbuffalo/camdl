@@ -155,7 +155,7 @@ pub fn cohort(entries: &[LineListEntry], event: CohortEvent, window: f64, align_
 
     let matches = |e: &LineListEntry| match event {
         CohortEvent::Infection => matches!(e.parent, ParentRef::Individual(_)),
-        CohortEvent::Transition(t) => e.transition == t,
+        CohortEvent::Transition(t) => e.transition.0 == t,
     };
 
     let times: Vec<f64> = entries.iter().filter(|e| matches(e)).map(|e| e.time).collect();
@@ -196,21 +196,21 @@ pub fn cohort(entries: &[LineListEntry], event: CohortEvent, window: f64, align_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::IndividualId;
+    use super::super::{DemeId, IndividualId, TransitionId};
 
     fn entry(t: f64, ind: u64, src: Option<usize>, dst: Option<usize>, lineage_parent: Option<u64>) -> LineListEntry {
         LineListEntry {
             time: t,
-            transition: 0,
+            transition: TransitionId(0),
             individual: IndividualId(ind),
-            source: src,
-            destination: dst,
-            deme: 0,
+            source: src.map(CompartmentId),
+            destination: dst.map(CompartmentId),
+            deme: DemeId(0),
             parent: match lineage_parent {
                 Some(p) => ParentRef::Individual(IndividualId(p)),
                 None => ParentRef::None,
             },
-            parent_deme: lineage_parent.map(|_| 0),
+            parent_deme: lineage_parent.map(|_| DemeId(0)),
             attribution_logprob: 0.0,
         }
     }
@@ -222,7 +222,7 @@ mod tests {
             entry(1.0, 1, Some(0), Some(1), Some(0)),
             entry(4.0, 1, Some(1), Some(2), None),
         ];
-        let r = sojourn(&entries, 1);
+        let r = sojourn(&entries, CompartmentId(1));
         assert_eq!(r.completed.len(), 1);
         assert_eq!(r.censored, 0);
         assert_eq!(r.completed[0].dwell, 3.0);
@@ -233,7 +233,7 @@ mod tests {
     fn sojourn_censored_individual_counted_not_timed() {
         // Enters compartment 1 at t=2 but never leaves.
         let entries = vec![entry(2.0, 5, Some(0), Some(1), Some(0))];
-        let r = sojourn(&entries, 1);
+        let r = sojourn(&entries, CompartmentId(1));
         assert_eq!(r.completed.len(), 0);
         assert_eq!(r.censored, 1);
         assert!(r.mean_dwell().is_nan());
@@ -252,7 +252,7 @@ mod tests {
             entry(0.0, 4, None, Some(1), None),
             entry(4.0, 4, Some(1), Some(2), None),
         ];
-        let r = sojourn(&entries, 1);
+        let r = sojourn(&entries, CompartmentId(1));
         assert_eq!(r.completed.len(), 4);
         assert_eq!(r.dwell_quantile(0.5), 2.0);
         assert_eq!(r.dwell_quantile(1.0), 4.0);
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn cohort_transition_id_filter() {
         let mut a = entry(0.5, 1, Some(0), Some(1), Some(0));
-        a.transition = 7;
+        a.transition = TransitionId(7);
         let b = entry(0.7, 2, Some(1), Some(2), None); // transition 0
         let bins = cohort(&[a, b], CohortEvent::Transition(7), 1.0, true);
         assert_eq!(bins.len(), 1);

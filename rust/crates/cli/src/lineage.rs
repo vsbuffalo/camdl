@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use sim::lineage::{
     tree::{select_samples, summarize, Flat, SamplingScheme, Stratified, TransmissionForest},
-    DemeId, EventLog, LineListFormat, LineListWriter, TsvLineListWriter,
+    CompartmentId, DemeId, EventLog, LineListFormat, LineListWriter, TsvLineListWriter,
 };
 
 use crate::args::{
@@ -279,11 +279,11 @@ fn parse_stratified_spec(spec: &str) -> Result<(HashMap<DemeId, f64>, f64), Stri
             default = parse_rate(val.trim(), "stratified default rate")?;
             default_set = true;
         } else {
-            let idx: DemeId = key
+            let idx: u32 = key
                 .parse()
                 .map_err(|e| format!("invalid deme index '{}': {}", key, e))?;
             let rate = parse_rate(val.trim(), &format!("stratified rate for deme {}", idx))?;
-            rates.insert(idx, rate);
+            rates.insert(DemeId(idx), rate);
         }
     }
     if rates.is_empty() && !default_set {
@@ -358,7 +358,10 @@ pub fn cmd_lineage_tree(a: &LineageTreeArgs) {
 
     // Per-individual summaries (deme + removal time) and the horizon — the
     // candidate set is every individual.
-    let (summaries, sim_end) = summarize(&entries);
+    let (summaries, sim_end) = summarize(&entries).unwrap_or_else(|e| {
+        eprintln!("error: {:?}", e);
+        std::process::exit(1);
+    });
 
     let scheme = parse_scheme(&a.scheme, sim_end).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
@@ -401,7 +404,7 @@ pub fn cmd_lineage_sojourn(a: &LineageSojournArgs) {
         std::process::exit(1);
     });
 
-    let result = sim::lineage::project::sojourn(&entries, a.compartment);
+    let result = sim::lineage::project::sojourn(&entries, CompartmentId(a.compartment));
 
     // Per-individual sojourns to --output (TSV).
     let mut out = open_required_output("sojourn", a.output.as_deref());
@@ -489,19 +492,19 @@ mod tests {
     fn stratified_spec_parses_indices_and_default() {
         let (rates, default) =
             parse_stratified_spec("0=0.5,1=0.05,default=0.1").unwrap();
-        assert_eq!(rates.get(&0), Some(&0.5));
-        assert_eq!(rates.get(&1), Some(&0.05));
+        assert_eq!(rates.get(&DemeId(0)), Some(&0.5));
+        assert_eq!(rates.get(&DemeId(1)), Some(&0.05));
         assert_eq!(default, 0.1);
         // Whitespace tolerated.
         let (rates, default) = parse_stratified_spec(" 2 = 0.2 , default = 0.3 ").unwrap();
-        assert_eq!(rates.get(&2), Some(&0.2));
+        assert_eq!(rates.get(&DemeId(2)), Some(&0.2));
         assert_eq!(default, 0.3);
     }
 
     #[test]
     fn stratified_default_optional_defaults_to_zero() {
         let (rates, default) = parse_stratified_spec("0=0.4").unwrap();
-        assert_eq!(rates.get(&0), Some(&0.4));
+        assert_eq!(rates.get(&DemeId(0)), Some(&0.4));
         assert_eq!(default, 0.0);
     }
 

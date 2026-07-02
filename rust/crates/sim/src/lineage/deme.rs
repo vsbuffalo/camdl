@@ -54,7 +54,7 @@ impl DemeMap {
     /// global id (matches `CompiledModel::comp_index`).
     pub fn build(model: &Model, comp_index: &HashMap<String, usize>) -> Self {
         let n = comp_index.len();
-        let mut by_comp = vec![0u32; n];
+        let mut by_comp = vec![DemeId(0); n];
 
         let Some(ms) = &model.model_structure else {
             // No stratification: every compartment is deme 0.
@@ -119,12 +119,12 @@ impl DemeMap {
     /// The deme of a global compartment id. Defaults to 0 for unstratified
     /// compartments.
     pub fn deme_of(&self, comp: CompartmentId) -> DemeId {
-        self.by_comp.get(comp).copied().unwrap_or(0)
+        self.by_comp.get(comp.0).copied().unwrap_or(DemeId(0))
     }
 
     /// Number of distinct demes (max index + 1). Used by tests/diagnostics.
     pub fn n_demes(&self) -> usize {
-        self.by_comp.iter().copied().max().map_or(1, |m| m as usize + 1)
+        self.by_comp.iter().copied().max().map_or(1, |m| m.0 as usize + 1)
     }
 }
 
@@ -156,7 +156,7 @@ fn global_stratum_index(
         let digit = idx_by_dim.get(d.name.as_str()).copied().unwrap_or(0) as u64;
         deme = deme * radix + digit;
     }
-    deme as DemeId
+    DemeId(deme as u32)
 }
 
 /// Cartesian product of value lists, preserving order. Returns an empty
@@ -227,12 +227,12 @@ mod tests {
 
         let dm = DemeMap::build(&model, &comp_index);
         // Patch a → deme 0, patch b → deme 1, shared across S/I/R.
-        assert_eq!(dm.deme_of(comp_index["S_a"]), 0);
-        assert_eq!(dm.deme_of(comp_index["I_a"]), 0);
-        assert_eq!(dm.deme_of(comp_index["R_a"]), 0);
-        assert_eq!(dm.deme_of(comp_index["S_b"]), 1);
-        assert_eq!(dm.deme_of(comp_index["I_b"]), 1);
-        assert_eq!(dm.deme_of(comp_index["R_b"]), 1);
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["S_a"])), DemeId(0));
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["I_a"])), DemeId(0));
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["R_a"])), DemeId(0));
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["S_b"])), DemeId(1));
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["I_b"])), DemeId(1));
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["R_b"])), DemeId(1));
         assert_eq!(dm.n_demes(), 2);
     }
 
@@ -242,9 +242,9 @@ mod tests {
         let comp_index: HashMap<String, usize> =
             [("S", 0), ("I", 1), ("R", 2)].iter().map(|(n, i)| (n.to_string(), *i)).collect();
         let dm = DemeMap::build(&model, &comp_index);
-        assert_eq!(dm.deme_of(0), 0);
-        assert_eq!(dm.deme_of(1), 0);
-        assert_eq!(dm.deme_of(2), 0);
+        assert_eq!(dm.deme_of(CompartmentId(0)), DemeId(0));
+        assert_eq!(dm.deme_of(CompartmentId(1)), DemeId(0));
+        assert_eq!(dm.deme_of(CompartmentId(2)), DemeId(0));
         assert_eq!(dm.n_demes(), 1);
     }
 
@@ -265,10 +265,10 @@ mod tests {
             .collect();
         let dm = DemeMap::build(&model, &comp_index);
         // age is the most significant digit (radix 2), patch the least.
-        assert_eq!(dm.deme_of(comp_index["I_child_a"]), 0); // 0*2 + 0
-        assert_eq!(dm.deme_of(comp_index["I_child_b"]), 1); // 0*2 + 1
-        assert_eq!(dm.deme_of(comp_index["I_adult_a"]), 2); // 1*2 + 0
-        assert_eq!(dm.deme_of(comp_index["I_adult_b"]), 3); // 1*2 + 1
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["I_child_a"])), DemeId(0)); // 0*2 + 0
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["I_child_b"])), DemeId(1)); // 0*2 + 1
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["I_adult_a"])), DemeId(2)); // 1*2 + 0
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["I_adult_b"])), DemeId(3)); // 1*2 + 1
         assert_eq!(dm.n_demes(), 4);
     }
 

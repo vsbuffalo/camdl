@@ -132,6 +132,13 @@ struct RealizeState {
     /// the `step` index changes on a batched event.
     snapshot: Option<StepSnapshot>,
     snapshot_step: Option<u64>,
+    /// The `(time, step)` of the most-recently processed event. Every recorded
+    /// event MUST be non-decreasing in this pair (the "recorded time order"
+    /// precondition the snapshot logic and RNG draws depend on); [`process`]
+    /// hard-errors on a regression rather than silently miscomputing. Seeded at
+    /// `(-inf, 0)` so the first event always passes.
+    last_time: f64,
+    last_step: u64,
 }
 
 impl RealizeState {
@@ -156,6 +163,8 @@ impl RealizeState {
             any_batched: false,
             snapshot: None,
             snapshot_step: None,
+            last_time: f64::NEG_INFINITY,
+            last_step: 0,
         }
     }
 
@@ -170,7 +179,28 @@ impl RealizeState {
         transitions: &[RouteInfo],
         writer: &mut dyn LineListWriter,
     ) -> Result<(), SimError> {
-        let route = &transitions[rec.transition];
+        // Guard the "recorded time order" precondition (H12): the snapshot
+        // refresh, the sub-`dt` accounting, and the RNG draw order all assume
+        // events arrive in non-decreasing `(time, step)` order. A user-edited
+        // TSV, shuffled Parquet row groups, or a writer regression would
+        // otherwise silently miscompute — so reject a regression outright rather
+        // than trust the file order.
+        if rec.time < self.last_time
+            || (rec.time == self.last_time && rec.step < self.last_step)
+        {
+            return Err(SimError::Validation(format!(
+                "realize: event log is out of recorded order — event at (time {}, \
+                 step {}) regresses below the previous event at (time {}, step {}). \
+                 Events must be replayed in non-decreasing (time, step) order (the \
+                 order the simulator recorded them); a reordered or hand-edited log \
+                 would miscompute at-step snapshots and parent draws.",
+                rec.time, rec.step, self.last_time, self.last_step
+            )));
+        }
+        self.last_time = rec.time;
+        self.last_step = rec.step;
+
+        let route = &transitions[rec.transition.0];
         self.any_batched |= rec.batched;
 
         if rec.batched {
@@ -412,7 +442,7 @@ fn sample_parent(
             route
                 .parent_pools
                 .first()
-                .map_or(0, |(g, _)| *g)
+                .map_or(0, |(g, _)| g.0)
         )));
     }
 
@@ -446,7 +476,7 @@ fn sample_parent(
         return Err(SimError::Validation(format!(
             "realize: chosen parent pool (comp {}, deme {}) is empty — the event \
              log's recorded weights have diverged from the replayed pool state",
-            chosen, chosen_deme
+            chosen.0, chosen_deme.0
         )));
     }
     let idx = rng.below(pool_len);
@@ -454,7 +484,7 @@ fn sample_parent(
         Some(snap) => snap.member(chosen_deme, chosen, idx).ok_or_else(|| {
             SimError::Validation(format!(
                 "realize: snapshot parent pool (comp {}, deme {}) member {} out of range",
-                chosen, chosen_deme, idx
+                chosen.0, chosen_deme.0, idx
             ))
         })?,
         None => identity.pool_member(chosen_deme, chosen, idx),
@@ -468,17 +498,72 @@ fn sample_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lineage::TransitionId;
 
     fn route(source: Option<CompartmentId>, dest: Option<CompartmentId>, parents: Vec<(CompartmentId, DemeId)>) -> RouteInfo {
         RouteInfo {
             source,
-            source_deme: 0,
+            source_deme: DemeId(0),
             destination: dest,
-            destination_deme: 0,
-            child_deme: 0,
+            destination_deme: DemeId(0),
+            child_deme: DemeId(0),
             touches_tracked: true,
             parent_pools: parents,
         }
+    }
+
+    /// A [`LineListWriter`] that drops everything — the realize tests exercise
+    /// the replay state machine, not the output format.
+    struct NullWriter;
+    impl LineListWriter for NullWriter {
+        fn init(&mut self) -> Result<(), SimError> {
+            Ok(())
+        }
+        fn write(&mut self, _entry: &LineListEntry) -> Result<(), SimError> {
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<(), SimError> {
+            Ok(())
+        }
+    }
+
+    /// H12: replay must reject an event log whose events regress in `(time,
+    /// step)` order. A hand-edited TSV or shuffled Parquet row groups would
+    /// otherwise silently miscompute snapshots and parent draws.
+    #[test]
+    fn realize_rejects_out_of_time_order_events() {
+        use super::super::event_log::{EventLog, EventRecord};
+        // One non-lineage progression route; two events recorded out of order
+        // (t=2.0 then t=1.0). The first processes; the second must hard-error.
+        let log = EventLog {
+            initial_pools: vec![],
+            transitions: vec![route(Some(CompartmentId(0)), Some(CompartmentId(1)), vec![])],
+            events: vec![
+                EventRecord {
+                    time: 2.0,
+                    transition: TransitionId(0),
+                    multiplicity: 1,
+                    batched: false,
+                    step: 2,
+                    lineage_weights: None,
+                },
+                EventRecord {
+                    time: 1.0,
+                    transition: TransitionId(0),
+                    multiplicity: 1,
+                    batched: false,
+                    step: 1,
+                    lineage_weights: None,
+                },
+            ],
+        };
+        let mut writer = NullWriter;
+        let err = realize(&log, 0, &mut writer).expect_err("out-of-order log must be rejected");
+        assert!(
+            matches!(err, SimError::Validation(_)),
+            "expected SimError::Validation, got {:?}",
+            err
+        );
     }
 
     /// SIR: infection (lineage, S→I, parent pool I) + recovery (I→R, non-lineage).
@@ -486,10 +571,12 @@ mod tests {
     /// absorbing R (a write-only recovery destination) is excluded.
     #[test]
     fn readable_excludes_absorbing_recovery_compartment() {
-        let s = 0; let i = 1; let r = 2;
+        let s = CompartmentId(0);
+        let i = CompartmentId(1);
+        let r = CompartmentId(2);
         let routes = vec![
-            route(Some(s), Some(i), vec![(i, 0)]), // #[lineage] infection
-            route(Some(i), Some(r), vec![]),       // recovery
+            route(Some(s), Some(i), vec![(i, DemeId(0))]), // #[lineage] infection
+            route(Some(i), Some(r), vec![]),               // recovery
         ];
         let readable = readable_compartments(&routes);
         assert!(readable.contains(&s), "infection source S must be readable");
@@ -501,9 +588,11 @@ mod tests {
     /// pool must be retained.
     #[test]
     fn readable_includes_recovery_compartment_when_it_is_a_source() {
-        let s = 0; let i = 1; let r = 2;
+        let s = CompartmentId(0);
+        let i = CompartmentId(1);
+        let r = CompartmentId(2);
         let routes = vec![
-            route(Some(s), Some(i), vec![(i, 0)]),
+            route(Some(s), Some(i), vec![(i, DemeId(0))]),
             route(Some(i), Some(r), vec![]),
             route(Some(r), Some(s), vec![]), // waning: R→S
         ];

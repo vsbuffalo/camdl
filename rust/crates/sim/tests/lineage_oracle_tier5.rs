@@ -86,7 +86,7 @@ fn camdl_conditional_distribution() -> BTreeMap<(u32, u32), f64> {
         for e in entries.iter() {
             if let ParentRef::Individual(_) = e.parent {
                 let parent = e.parent_deme.unwrap();
-                *counts.entry((e.deme, parent)).or_default() += 1;
+                *counts.entry((e.deme.0, parent.0)).or_default() += 1;
             }
         }
     }

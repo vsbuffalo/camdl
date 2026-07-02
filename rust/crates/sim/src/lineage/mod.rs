@@ -54,6 +54,7 @@ use std::collections::HashMap;
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 
 use crate::error::SimError;
 use crate::state::{IntState, RealState};
@@ -78,16 +79,32 @@ pub struct IndividualId(pub u64);
 /// Deme (spatial/stratum) identifier — the stratum index of a compartment in
 /// the cartesian product of the model's dimensions (see [`deme::DemeMap`]).
 /// 0 for unstratified compartments and every compartment in a single-
-/// population model, so the single-population slice is the `DemeId = 0`
+/// population model, so the single-population slice is the `DemeId(0)`
 /// special case.
-pub type DemeId = u32;
+///
+/// A newtype, not a `u32` alias: a raw Cartesian index cannot silently become a
+/// deme slot, and a `DemeId` never interchanges with a [`CompartmentId`]. There
+/// is deliberately no `From<u32>` — callers wrap explicitly (`DemeId(n)`) and
+/// unwrap with `.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DemeId(pub u32);
 
 /// Compartment identifier — the *global* compartment index in the model's
 /// combined compartment list (matches `CompiledModel::comp_index` values).
-pub type CompartmentId = usize;
+///
+/// A newtype, not a `usize` alias, so it can never silently interchange with a
+/// [`TransitionId`] (both wrap `usize`). No `From<usize>` — wrap with
+/// `CompartmentId(n)`, unwrap with `.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CompartmentId(pub usize);
 
 /// Transition identifier — the index into `model.transitions`.
-pub type TransitionId = usize;
+///
+/// A newtype, not a `usize` alias, so it can never silently interchange with a
+/// [`CompartmentId`]. No `From<usize>` — wrap with `TransitionId(n)`, unwrap
+/// with `.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TransitionId(pub usize);
 
 /// Where a tracked individual came from. Recorded per line-list entry; the
 /// `Individual` variant is what makes a transmission tree reconstructable.
@@ -295,14 +312,14 @@ mod tests {
     #[test]
     fn identity_state_mint_and_pools() {
         let mut s = IdentityState::new();
-        s.seed_pool(0, 3, 5);
-        assert_eq!(s.pool_len(0, 3), 5);
+        s.seed_pool(DemeId(0), CompartmentId(3), 5);
+        assert_eq!(s.pool_len(DemeId(0), CompartmentId(3)), 5);
         assert_eq!(s.total_minted(), 5);
         let mut rng = LineageRng::from_sim_seed(1);
-        let id = s.remove_uniform(0, 3, &mut rng).unwrap();
-        assert_eq!(s.pool_len(0, 3), 4);
-        assert!(!s.contains(0, 3, id));
-        s.push(0, 7, id);
-        assert!(s.contains(0, 7, id));
+        let id = s.remove_uniform(DemeId(0), CompartmentId(3), &mut rng).unwrap();
+        assert_eq!(s.pool_len(DemeId(0), CompartmentId(3)), 4);
+        assert!(!s.contains(DemeId(0), CompartmentId(3), id));
+        s.push(DemeId(0), CompartmentId(7), id);
+        assert!(s.contains(DemeId(0), CompartmentId(7), id));
     }
 }

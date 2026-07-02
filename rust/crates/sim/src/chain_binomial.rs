@@ -4,7 +4,7 @@ use crate::{
     rng::StatefulRng,
     error::SimError,
     boundary_times::{EffectTimes, OutputTimes},
-    lineage::TransitionObserver,
+    lineage::{DemeId, TransitionId, TransitionObserver},
     ode_integrator::rk4_step,
     propensity::{eval_propensities, EvalCtx},
     resolved_expr::eval_resolved,
@@ -440,7 +440,7 @@ pub fn run_chain_binomial_with_observer(
             obs.begin_batch_step();
             for (tr_idx, &count) in flows.iter().enumerate() {
                 if count > 0 {
-                    obs.on_fired(tr_idx, 0, count, t_grid, pre_int, pre_real, params)?;
+                    obs.on_fired(TransitionId(tr_idx), DemeId(0), count, t_grid, pre_int, pre_real, params)?;
                 }
             }
             obs.end_batch_step();

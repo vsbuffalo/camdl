@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use sim::lineage::{LineListEntry, ParentRef};
+use sim::lineage::{CompartmentId, DemeId, LineListEntry, ParentRef};
 
 mod lineage_helpers;
 use lineage_helpers::{load_fixture, record_event_log, realize_log, set_params, Backend};
@@ -83,10 +83,10 @@ impl State {
     /// recorded compartment ids.
     fn apply(&mut self, e: &LineListEntry) {
         if let Some(src) = e.source {
-            *self.comp_mut(src) -= 1.0;
+            *self.comp_mut(src.0) -= 1.0;
         }
         if let Some(dst) = e.destination {
-            *self.comp_mut(dst) += 1.0;
+            *self.comp_mut(dst.0) += 1.0;
         }
     }
     fn comp_mut(&mut self, c: usize) -> &mut f64 {
@@ -145,9 +145,9 @@ fn tier2b_stratified_attribution_matches_contact_weighted_prediction() {
             if let ParentRef::Individual(_) = e.parent {
                 let parent_deme = e.parent_deme.expect("lineage event must record parent_deme");
                 // parent_deme: 0 = patch a, 1 = patch b.
-                let from_b = if parent_deme == 1 { 1.0 } else { 0.0 };
+                let from_b = if parent_deme.0 == 1 { 1.0 } else { 0.0 };
 
-                let (c_to_a, c_to_b) = match e.transition {
+                let (c_to_a, c_to_b) = match e.transition.0 {
                     INFECTION_A => (C_AA, C_AB),
                     INFECTION_B => (C_BA, C_BB),
                     other => panic!("unexpected lineage transition {other}"),
@@ -163,7 +163,7 @@ fn tier2b_stratified_attribution_matches_contact_weighted_prediction() {
                 // ignoring contact structure and per-stratum normalisers.
                 let p_b_uniform = st.i_b / (st.i_a + st.i_b);
 
-                let tally = if e.transition == INFECTION_A { &mut tally_a } else { &mut tally_b };
+                let tally = if e.transition.0 == INFECTION_A { &mut tally_a } else { &mut tally_b };
                 tally.n_events += 1;
                 tally.observed_from_b += from_b;
                 tally.expected_from_b += p_b;
@@ -231,21 +231,21 @@ fn multi_deme_structural_invariants() {
             ParentRef::Individual(_) => {
                 n_lineage += 1;
                 // Child deme = focal patch of the infection transition.
-                match e.transition {
+                match e.transition.0 {
                     INFECTION_A => {
-                        assert_eq!(e.deme, 0, "infection_a child must be in patch a (deme 0)");
-                        assert_eq!(e.destination, Some(I_A));
-                        assert_eq!(e.source, Some(S_A));
+                        assert_eq!(e.deme, DemeId(0), "infection_a child must be in patch a (deme 0)");
+                        assert_eq!(e.destination, Some(CompartmentId(I_A)));
+                        assert_eq!(e.source, Some(CompartmentId(S_A)));
                     }
                     INFECTION_B => {
-                        assert_eq!(e.deme, 1, "infection_b child must be in patch b (deme 1)");
-                        assert_eq!(e.destination, Some(I_B));
-                        assert_eq!(e.source, Some(S_B));
+                        assert_eq!(e.deme, DemeId(1), "infection_b child must be in patch b (deme 1)");
+                        assert_eq!(e.destination, Some(CompartmentId(I_B)));
+                        assert_eq!(e.source, Some(CompartmentId(S_B)));
                     }
                     other => panic!("unexpected lineage transition {other}"),
                 }
                 let pd = e.parent_deme.expect("lineage event records parent_deme");
-                assert!(pd <= 1, "parent_deme must be a valid patch index, got {pd}");
+                assert!(pd.0 <= 1, "parent_deme must be a valid patch index, got {}", pd.0);
             }
             ParentRef::None => {
                 // Recovery: I[p] -> R[p], child & no parent_deme.
@@ -278,7 +278,7 @@ fn parent_in_correct_stratum_pool_at_event_time() {
     for e in &entries {
         if let ParentRef::Individual(p) = e.parent {
             let pd = e.parent_deme.unwrap();
-            if pd == 0 {
+            if pd.0 == 0 {
                 assert!(
                     in_i_a.contains(&p.0),
                     "parent {} labelled patch a (deme 0) but not live in I_a at t={}",
@@ -295,16 +295,16 @@ fn parent_in_correct_stratum_pool_at_event_time() {
             }
         }
         // Update pool membership from this event's routing.
-        if e.source == Some(I_A) {
+        if e.source == Some(CompartmentId(I_A)) {
             in_i_a.remove(&e.individual.0);
         }
-        if e.source == Some(I_B) {
+        if e.source == Some(CompartmentId(I_B)) {
             in_i_b.remove(&e.individual.0);
         }
-        if e.destination == Some(I_A) {
+        if e.destination == Some(CompartmentId(I_A)) {
             in_i_a.insert(e.individual.0);
         }
-        if e.destination == Some(I_B) {
+        if e.destination == Some(CompartmentId(I_B)) {
             in_i_b.insert(e.individual.0);
         }
     }
@@ -336,17 +336,17 @@ fn cross_stratum_flow_is_asymmetric() {
         for e in &entries {
             if let ParentRef::Individual(_) = e.parent {
                 let pd = e.parent_deme.unwrap();
-                *counts.entry((e.transition, pd)).or_default() += 1;
-                match e.transition {
+                *counts.entry((e.transition.0, pd.0)).or_default() += 1;
+                match e.transition.0 {
                     INFECTION_B => {
                         b_focal += 1;
-                        if pd == 0 {
+                        if pd.0 == 0 {
                             a_into_b += 1;
                         }
                     }
                     INFECTION_A => {
                         a_focal += 1;
-                        if pd == 1 {
+                        if pd.0 == 1 {
                             b_into_a += 1;
                         }
                     }
