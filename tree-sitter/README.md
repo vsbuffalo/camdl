@@ -4,19 +4,23 @@ Tree-sitter grammar for the [camdl](../) compartmental modelling DSL.
 
 ## Coverage
 
-Last refreshed against the language spec on **2026-05-26**. The grammar parses
+Last refreshed against the language spec on **2026-07-02**. The grammar parses
 every model in `ocaml/golden/`, every test fixture under
-`rust/crates/sim/tests/fixtures/`, and every worked example in
-`docs/dev/proposals/fixtures/`. Sibling tooling for static document rendering
-(the KDE/Pandoc syntax XML at `camdl-book/_extensions/camdl/camdl.xml`) covers
-the same surface; the two are maintained in parallel.
+`rust/crates/sim/tests/fixtures/` and `tests/fixtures/`, and every worked
+example in `docs/dev/proposals/fixtures/` (the one exception is
+`ocaml/golden/errors/e267_…`, a stale error fixture whose intervention header
+the compiler itself now rejects with a syntax error). Sibling tooling for static
+document rendering (the KDE/Pandoc syntax XML at
+`camdl-book/_extensions/camdl/camdl.xml`) covers the same surface; the two are
+maintained in parallel.
 
 Surface covered:
 
-- All 22 top-level block kinds — `time_unit`, `description`, `origin`,
+- All 25 top-level block kinds — `time_unit`, `description`, `origin`,
   `dimensions`, `compartments`, `parameters`, `tables`, `functions`, `forcing`,
-  `transitions`, `observations`, `interventions`, `events`, `ode`, `output`,
-  `simulate`, `init`, `timepoints`, `stratify`, `let`, `scenarios`, `balance`.
+  `transitions`, `observations`, `quantities`, `contrasts`, `interventions`,
+  `reactive_interventions`, `events`, `ode`, `output`, `simulate`, `init`,
+  `timepoints`, `stratify`, `let`, `scenarios`, `balance`.
 - `#[lineage]` transition attribute (and the lexer rule that requires `#[` to be
   one token with no intervening space).
 - Calendar-time surface: `origin = date("YYYY-MM-DD")`, `date()` /
@@ -24,6 +28,21 @@ Surface covered:
   kinds.
 - Multi-source stoichiometry (`A + B --> C`) and branching destinations
   (`--> { D1 : w1, D2 : w2 } @ rate`).
+- Staged-residence `via` dwell laws — inline (`E --> I via erlang(...)`),
+  no-arrow (`I via hyper_erlang(branch(..., to = D))`), and block
+  (`{ via = ... }`).
+- Generated quantities (`quantities { peak = max(I_total) }`, the
+  `observations.<stream>` source) and counterfactual contrasts
+  (`averted = a.quantities.total - b.quantities.total`).
+- Reactive interventions (gh#204) — a `when` predicate over `observed()` /
+  `sum_observed()` gates an `action` (with `after` / `once` / `cooldown`).
+- The gh#171 observation surface — colon-free stream header, optional
+  `from <source>`, a `columns { ... }` schema, `emit_schedule = every N 'unit`,
+  and the `<col> ~ Dist(...)` measurement model.
+- Tagged simulate integrator (`integrator = rk45 { atol = 1e-8, rtol = 1e-6 }`)
+  and the `dt` step.
+- Filtered sums (`sum(q in patch where dist[p, q] < 50 and q != p, I[q])`) and
+  table guards in `where` clauses.
 - Tier-3 dimension annotations on parameter declarations — both unit literals
   (`tau : positive 'ratio`) and bracket forms (`mu : positive
   [P*T^-1]`).
@@ -31,7 +50,8 @@ Surface covered:
 - Multi-name shared table declarations (`pop, init_sus : patch = read(...)`).
 - Indexed scenario overrides (`R0[north] = 2.5` in a `set = { ... }` block).
 - Prior assignment (`beta : rate in [0, 1] ~ log_normal(mu = 0, sigma = 1)`)
-  with optional hierarchical pooling (`| age`).
+  with optional hierarchical pooling (`| age`), including the `log_uniform` /
+  `truncated_normal` priors.
 
 If you hit a model the grammar doesn't parse, file an issue with the offending
 fragment.

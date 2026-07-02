@@ -12,7 +12,10 @@
   "forcing"
   "transitions"
   "observations"
+  "quantities"
+  "contrasts"
   "interventions"
+  "reactive_interventions"
   "events"
   "ode"
   "output"
@@ -50,20 +53,25 @@
   "disable"
   "compose"
   "label"
-  "likelihood"
+  "via"
+  "action"
+  "columns"
+  "emit_schedule"
 ] @keyword.operator
 
-; ── Conditionals ─────────────────────────────────────────────────────────────
+; ── Conditionals / reactive triggers ─────────────────────────────────────────
 
 [
   "if"
   "then"
   "else"
+  "when"
 ] @keyword.conditional
 
 [
   "and"
   "or"
+  "not"
 ] @keyword.operator
 
 "sum" @keyword.function
@@ -142,6 +150,21 @@
 
 (obs_decl          name: (identifier) @function)
 (intervention_decl name: (identifier) @function)
+(reactive_decl     name: (identifier) @function)
+
+(quantity_decl name: (identifier) @variable.parameter)
+(contrast_decl name: (identifier) @variable.parameter)
+(obs_column    name: (identifier) @variable.parameter)
+(obs_column    role: (identifier) @type)
+
+; The dwell-law name in a `via LAW(...)` clause (erlang / hyper_erlang / …).
+(via_call law: (identifier) @function.builtin)
+
+; Dotted run-rooted operands: `observations.<stream>`,
+; `<run>.quantities.<member>`, `<run>.observations.<member>`.
+(member_access run:    (identifier) @variable)
+(member_access stream: (identifier) @property)
+(member_access member: (identifier) @property)
 
 ; ── Index bindings ────────────────────────────────────────────────────────────
 
@@ -176,7 +199,20 @@
 ; Distribution names (in priors and likelihoods).
 ((call_expr func: (identifier) @function.builtin)
   (#match? @function.builtin
-   "^(poisson|neg_binomial|normal|binomial|beta_binomial|bernoulli|log_normal|half_normal|beta|gamma|exponential|uniform|diagnostic_test)$"))
+   "^(poisson|neg_binomial|normal|binomial|beta_binomial|bernoulli|log_normal|half_normal|beta|gamma|exponential|uniform|log_uniform|truncated_normal|diagnostic_test)$"))
+
+; Generated-quantity reductions and the reactive-trigger inputs. `observed` /
+; `sum_observed` are only meaningful inside a `when` predicate; the reductions
+; only inside a `quantities {}` body.
+((call_expr func: (identifier) @function.builtin)
+  (#match? @function.builtin
+   "^(final|mean|integral|count_above|count_below|time_of_max|time_of_min|first_above|last_above|first_below|last_below|observed|sum_observed)$"))
+
+; Dwell-law helpers usable in expression position (`branch(...)` inside a
+; `hyper_erlang`); the law name itself is captured via (via_call law: …).
+((call_expr func: (identifier) @function.builtin)
+  (#match? @function.builtin
+   "^(erlang|hyper_erlang|branch)$"))
 
 ; ── Stoich refs ───────────────────────────────────────────────────────────────
 

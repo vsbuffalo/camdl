@@ -4,6 +4,9 @@
 // tree-sitter grammar for the camdl DSL.
 //
 // Refresh history:
+//   2026-07-02 — via dwell-laws, quantities/contrasts, reactive_interventions,
+//                the gh#171 observation surface, tagged integrator, filtered
+//                sum + table guards (see README).
 //   2026-05-26 — bring grammar up to current DSL surface (see README).
 //   2026-03-16 — initial commit.
 
@@ -34,7 +37,10 @@ module.exports = grammar({
         $.forcing_block,
         $.transitions_block,
         $.observations_block,
+        $.quantities_block,
+        $.contrasts_block,
         $.interventions_block,
+        $.reactive_interventions_block,
         $.events_block,
         $.ode_block,
         $.output_block,
@@ -220,31 +226,54 @@ module.exports = grammar({
         optional(field("indices", $.index_bindings)),
         ":",
         field("src", optional($.stoich_ref_list)),
-        "-->",
         choice(
-          // standard form: dsts @ rate [where guard] [tag] OR dsts { rate = ..., ... }
+          // no-arrow staged residence: srcs via LAW(args) [where] — each branch
+          // of a `hyper_erlang` dwell law carries its own `to =` destination, so
+          // no arrow target is written (staged-residence proposal §4).
+          seq("via", field("law", $.via_call), optional($.where_clause)),
           seq(
-            field("dst", optional($.stoich_ref_list)),
+            "-->",
             choice(
+              // standard form: dsts @ rate | via LAW | { rate = ... | via = ... }
               seq(
+                field("dst", optional($.stoich_ref_list)),
+                choice(
+                  seq(
+                    "@",
+                    field("rate", $.expr),
+                    optional($.where_clause),
+                    optional($.tag_clause),
+                  ),
+                  // inline staged residence: `--> dst via LAW(args)` — the dwell
+                  // law replaces the `@ rate` clause (staged-residence §3).
+                  seq("via", field("law", $.via_call), optional($.where_clause)),
+                  seq("{", repeat($.transition_body_entry), "}"),
+                ),
+              ),
+              // branching form: { D1 : w1, ... } @ rate [where guard]
+              seq(
+                "{",
+                field("branches", commaSep1($.branch_entry)),
+                "}",
                 "@",
                 field("rate", $.expr),
                 optional($.where_clause),
-                optional($.tag_clause),
               ),
-              seq("{", repeat($.transition_body_entry), "}"),
             ),
           ),
-          // branching form: { D1 : w1, ... } @ rate [where guard]
-          seq(
-            "{",
-            field("branches", commaSep1($.branch_entry)),
-            "}",
-            "@",
-            field("rate", $.expr),
-            optional($.where_clause),
-          ),
         ),
+      ),
+
+    // A dwell-law call: `LAW(k1 = e1, k2 = e2, …)` — e.g.
+    // `erlang(stages = 3, rate = sigma)` or a `hyper_erlang` whose args are
+    // `branch(...)` calls. Reuses the same keyword-argument machinery as any
+    // other function call.
+    via_call: ($) =>
+      seq(
+        field("law", $.identifier),
+        "(",
+        commaSep($.kw_arg),
+        ")",
       ),
 
     branch_entry: ($) => seq(field("name", $.identifier), ":", field("weight", $.expr)),
@@ -268,6 +297,9 @@ module.exports = grammar({
     transition_body_entry: ($) =>
       choice(
         seq("rate", "=", $.expr),
+        // block-form staged residence: `via = LAW(args)` (a transition is
+        // `rate =` XOR `via =`, never both — resolved by the compiler).
+        seq("via", "=", $.via_call),
         seq("where", $.guard_expr),
         seq("tag", "=", $.string),
       ),
@@ -285,8 +317,22 @@ module.exports = grammar({
       choice(
         seq(field("left", $.identifier), "==", field("right", $.identifier)),
         seq(field("left", $.identifier), "!=", field("right", $.identifier)),
+        // table guard: `T[i, j] <relop> <operand>` (e.g. `dist[p, q] < 50`) —
+        // carves a stratified reduction's support from a lookup table.
+        seq(
+          field("table", $.identifier),
+          "[",
+          commaSep1(field("idx", $.identifier)),
+          "]",
+          field("op", $.relop),
+          field("value", $.guard_operand),
+        ),
         seq("(", $.guard_expr, ")"),
       ),
+
+    relop: (_) => choice("<", "<=", ">", ">=", "==", "!="),
+
+    guard_operand: ($) => choice($.number, $.identifier),
 
     // ── Index bindings  [a in age, (a, a_next) in consecutive(age)] ──────
 
@@ -324,11 +370,14 @@ module.exports = grammar({
 
     observations_block: ($) => seq("observations", "{", repeat($.obs_decl), "}"),
 
+    // Stream header (gh#171): `name [p in dim] (from <source>)? { ... }` — NO
+    // colon after the header (the old `name : { ... }` form is a migration
+    // error in the compiler).
     obs_decl: ($) =>
       seq(
         field("name", $.identifier),
         optional(field("indices", $.index_bindings)),
-        ":",
+        optional(seq("from", field("source", $.identifier))),
         "{",
         repeat($.obs_kv),
         "}",
@@ -336,16 +385,105 @@ module.exports = grammar({
 
     obs_kv: ($) =>
       choice(
-        seq("every", "=", $.expr),
-        seq("at", "=", "[", commaSep($.expr), "]"),
-        seq("likelihood", "=", $.expr),
-        // String literals are now part of `expr`, so a single
-        // `IDENT = expr` form covers both data-stream paths
-        // (`data = "file.tsv"`) and projection expressions
-        // (`projected = incidence(infection)`).
-        seq($.identifier, "=", $.expr),
-        // nested-kind form: `data : tsv { path = "..." }` etc.
-        seq($.identifier, ":", $.identifier, "{", repeat($.func_arg), "}"),
+        // `columns { name : role }` — the explicit file schema.
+        seq("columns", "{", repeat($.obs_column), "}"),
+        // `emit_schedule = every N 'unit | at [...] 'unit` — simulate-only
+        // cadence (note the literal `every N` / `at [...]`, no inner `=`).
+        seq("emit_schedule", "=", $.emit_schedule_spec),
+        // measurement model: `<scored_col> ~ Dist(kw = ..., ...)`.
+        seq(field("scored", $.identifier), "~", field("likelihood", $.call_expr)),
+        // projection (and any other `key = expr` field, e.g.
+        // `projected = incidence(infection)`).
+        seq(field("key", $.identifier), "=", field("value", $.expr)),
+      ),
+
+    // One declared file column: `name : role`. role ∈ { time, dim, <value-kind> }.
+    // Entries may be comma- or newline-separated (trailing comma optional).
+    obs_column: ($) =>
+      seq(
+        field("name", $.identifier),
+        ":",
+        field("role", choice($.param_kind, $.identifier)),
+        optional(","),
+      ),
+
+    emit_schedule_spec: ($) =>
+      choice(
+        seq("every", field("period", $.expr)),
+        seq("at", "[", commaSep($.expr), "]"),
+      ),
+
+    // ── Generated quantities and counterfactual contrasts ────────────────
+
+    // `quantities { name [p in dim] = <expr> }` — each entry is a reduction /
+    // series over the run (proposal 2026-06-25). Reduction function names
+    // (`final`, `max`, `time_of_max`, …) are ordinary calls, not keywords.
+    quantities_block: ($) => seq("quantities", "{", repeat($.quantity_decl), "}"),
+
+    quantity_decl: ($) =>
+      seq(
+        field("name", $.identifier),
+        optional(field("indices", $.index_bindings)),
+        "=",
+        field("body", $.expr),
+      ),
+
+    // `contrasts { name = <run-rooted expr> }` — counterfactual differences
+    // across runs (proposal 2026-06-25). The body is arithmetic over
+    // `<run>.quantities.<member>` / `<run>.observations.<member>` operands.
+    contrasts_block: ($) => seq("contrasts", "{", repeat($.contrast_decl), "}"),
+
+    contrast_decl: ($) =>
+      seq(field("name", $.identifier), "=", field("body", $.expr)),
+
+    // ── Reactive interventions (gh#204) ──────────────────────────────────
+
+    // `name [idx]? : when <predicate> { action = .., after = .., ... }`.
+    reactive_interventions_block: ($) =>
+      seq("reactive_interventions", "{", repeat($.reactive_decl), "}"),
+
+    reactive_decl: ($) =>
+      seq(
+        field("name", $.identifier),
+        optional(field("indices", $.index_bindings)),
+        ":",
+        "when",
+        field("predicate", $.trigger_pred),
+        "{",
+        repeat($.reactive_kv),
+        "}",
+        optional($.where_clause),
+      ),
+
+    // Boolean predicate: and / or / not over comparison atoms. Each atom is a
+    // plain expr (e.g. `sum_observed(stream, window = D) >= threshold`);
+    // `observed()` / `sum_observed()` are ordinary calls recognised only here.
+    trigger_pred: ($) =>
+      choice(
+        prec.left(1, seq($.trigger_pred, "or", $.trigger_pred)),
+        prec.left(2, seq($.trigger_pred, "and", $.trigger_pred)),
+        prec(3, seq("not", $.trigger_pred)),
+        $.expr,
+      ),
+
+    reactive_kv: ($) =>
+      choice(
+        seq("action", "=", $.reactive_action),
+        // `after` / `once` / `cooldown` = expr
+        seq(field("key", $.identifier), "=", field("value", $.expr)),
+      ),
+
+    reactive_action: ($) =>
+      choice(
+        seq("transfer", "(", commaSep($.transfer_kwarg), ")"),
+        seq(
+          "add",
+          "(",
+          field("comp", $.identifier),
+          ",",
+          field("count", $.expr),
+          ")",
+        ),
       ),
 
     // ── Interventions / events (same shape) ──────────────────────────────
@@ -485,10 +623,22 @@ module.exports = grammar({
 
     simulate_block: ($) => seq("simulate", "{", repeat($.simulate_kv), "}"),
 
+    // `from`/`to` are keyword tokens; `dt` and `integrator` lex as identifiers.
+    // The tagged integrator (gh#166) is `integrator = rk45 { atol = .., rtol =
+    // .. }` (or the bare `integrator = rk4`).
     simulate_kv: ($) =>
       choice(
         seq("from", "=", $.expr),
         seq("to", "=", $.expr),
+        seq(
+          field("key", $.identifier),
+          "=",
+          field("method", $.identifier),
+          "{",
+          repeat($.func_arg),
+          "}",
+        ),
+        seq(field("key", $.identifier), "=", field("value", $.expr)),
       ),
 
     // ── Init block ───────────────────────────────────────────────────────
@@ -608,13 +758,38 @@ module.exports = grammar({
         $.sum_expr,
         $.call_expr,
         $.index_expr,
+        $.member_access,
         $.list_expr,
         $.paren_expr,
         $.unit_number,
         $.number,
         $.string,
         $.identifier,
+        "origin",
         "null",
+      ),
+
+    // Dotted member access:
+    //   `observations.<stream>`           — a v1.1 generated-quantity source
+    //   `<run>.quantities.<member>`        — a run-rooted contrast operand
+    //   `<run>.observations.<member>`      — a run-rooted contrast operand
+    member_access: ($) =>
+      choice(
+        seq("observations", ".", field("stream", $.identifier)),
+        seq(
+          field("run", $.identifier),
+          ".",
+          "quantities",
+          ".",
+          field("member", $.identifier),
+        ),
+        seq(
+          field("run", $.identifier),
+          ".",
+          "observations",
+          ".",
+          field("member", $.identifier),
+        ),
       ),
 
     cond_expr: ($) => prec.right(0, seq("if", $.expr, "then", $.expr, "else", $.expr)),
@@ -632,6 +807,8 @@ module.exports = grammar({
 
     unary_expr: ($) => prec(5, seq("-", $.expr)),
 
+    // `sum(v in dim, body)` or the filtered form `sum(v in dim where g, body)`
+    // — the `where` guard carves the reduction's support at compile time.
     sum_expr: ($) =>
       seq(
         "sum",
@@ -639,6 +816,7 @@ module.exports = grammar({
         field("var", $.identifier),
         "in",
         field("dim", $.identifier),
+        optional($.where_clause),
         ",",
         field("body", $.expr),
         ")",
@@ -654,8 +832,25 @@ module.exports = grammar({
 
     kw_arg: ($) =>
       choice(
-        seq(field("key", $.identifier), "=", field("value", $.expr)),
+        seq(field("key", $.arg_key), "=", field("value", $.expr)),
         field("value", $.expr),
+      ),
+
+    // Keyword-argument keys: plain identifiers plus the reserved words that are
+    // also valid arg names (`poisson(rate = ..)`, `branch(..., to = D)`,
+    // `date_range(.., every = 7 'days)`), mirroring the compiler's
+    // `kw_arg_name`.
+    arg_key: ($) =>
+      choice(
+        $.identifier,
+        "rate",
+        "count",
+        "probability",
+        "positive",
+        "real",
+        "integer",
+        "every",
+        "to",
       ),
 
     index_expr: ($) =>
