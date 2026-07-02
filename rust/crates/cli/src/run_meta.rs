@@ -528,6 +528,17 @@ pub struct FitSidecar {
 /// (`fit.toml.original`, the config-diff source `fit table` loads). The archive
 /// is best-effort: a CLI-only fit (no `.toml`) has none and config-diff degrades
 /// to identity. Idempotent; the caller writes it once per fit segment.
+///
+/// The user `label` is **sticky** (gh#29). A multi-stage pipeline
+/// (`scout → refine → validate`) rewrites this sidecar on every `fit run`
+/// invocation, but the sidecar records the *experiment*, not a single call, so a
+/// `--label` set on an earlier invocation must survive a later stage-only re-run
+/// that passes no `--label`. When `sidecar.label` is `None`, a non-`None` label
+/// already on disk at `fit_segment` is preserved; an explicit `Some(label)`
+/// always overrides; a fresh segment with no prior label stays `None`. (The
+/// same one home is what `fit label` relabels post-hoc.) Every other field is a
+/// derived projection of the current invocation's inputs and is overwritten as
+/// before.
 pub fn write_fit_sidecar(
     fit_segment: &std::path::Path,
     fit_toml_path: &std::path::Path,
@@ -537,8 +548,19 @@ pub fn write_fit_sidecar(
     if fit_toml_path.is_file() {
         std::fs::copy(fit_toml_path, fit_segment.join("fit.toml.original"))?;
     }
-    let bytes = serde_json::to_vec_pretty(sidecar)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    // gh#29: keep the label sticky. The `.or_else` reads the on-disk sidecar
+    // only when this write carries no label, and we clone only when a prior
+    // label actually differs — the common override/fresh paths pay nothing.
+    let effective_label = sidecar.label.clone()
+        .or_else(|| read_fit_sidecar(fit_segment).and_then(|s| s.label));
+    let bytes = if effective_label == sidecar.label {
+        serde_json::to_vec_pretty(sidecar)
+    } else {
+        let mut merged = sidecar.clone();
+        merged.label = effective_label;
+        serde_json::to_vec_pretty(&merged)
+    }
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(fit_segment.join("fit.meta.json"), bytes)
 }
 
@@ -888,6 +910,47 @@ mod tests {
             "beta prior source must survive the sidecar round trip");
         assert_eq!(source("gamma"), Some("fit_toml"),
             "gamma prior source must survive the sidecar round trip");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// gh#29: the fit-level sidecar `label` is sticky across repeated
+    /// `fit run` invocations on the same fit segment. A multi-stage pipeline
+    /// (`scout → refine → validate`) rewrites the umbrella sidecar on every
+    /// call; a `--label` set on an earlier invocation must survive a later
+    /// stage-only re-run that passes no `--label`. So a write whose sidecar
+    /// carries `label: None` preserves a non-`None` label already on disk; an
+    /// explicit label always overrides; a fresh segment with no prior label
+    /// stays `None`.
+    #[test]
+    fn fit_sidecar_label_is_sticky_across_writes() {
+        let tmp = crate::test_support::unique_temp_dir("sidecar_sticky_label");
+        let seg = tmp.join("fits").join("demo-5091d4a8");
+        let toml = std::path::Path::new("nonexistent.toml");
+        let label = |seg: &std::path::Path| read_fit_sidecar(seg).unwrap().label;
+
+        // Fresh segment, no prior label, no incoming label → stays `None`.
+        write_fit_sidecar(&seg, toml,
+            &FitSidecar { label: None, ..Default::default() }).unwrap();
+        assert_eq!(label(&seg), None,
+            "a fresh segment with no --label must stay unlabeled");
+
+        // `fit run … --stage scout --label "smoke test scout"`.
+        write_fit_sidecar(&seg, toml,
+            &FitSidecar { label: Some("smoke test scout".into()), ..Default::default() }).unwrap();
+        assert_eq!(label(&seg), Some("smoke test scout".into()));
+
+        // `fit run … --stage refine` (no --label): the earlier label must stick.
+        write_fit_sidecar(&seg, toml,
+            &FitSidecar { label: None, ..Default::default() }).unwrap();
+        assert_eq!(label(&seg), Some("smoke test scout".into()),
+            "gh#29: a stage-only re-run without --label must not clobber the label");
+
+        // A later invocation with an explicit --label overrides the sticky one.
+        write_fit_sidecar(&seg, toml,
+            &FitSidecar { label: Some("validate run".into()), ..Default::default() }).unwrap();
+        assert_eq!(label(&seg), Some("validate run".into()),
+            "an explicit --label must override the sticky label");
 
         std::fs::remove_dir_all(&tmp).ok();
     }
