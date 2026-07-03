@@ -11,13 +11,19 @@
     emits the analytic ∂forcing/∂coef for the kinds it supports (Sinusoidal,
     Fourier, constant-indexed inline tables).
 
-    Two distinct not-yet-supported cases, handled differently (gh#215):
-    - LIVE coefficients the gradient just doesn't cover yet — a Periodic step
-      value, or an inline-table value reached by a non-constant index. The Rust
-      runtime evaluates these live, so the model must compile (forward sim and
-      gradient-free IF2/PF work). [differentiate] omits the parameter (a
-      [Known (Const 0.0)] that [differentiate_rate] drops); the Rust NUTS guard
+    Three differentiation outcomes, handled differently (gh#215, gh#314):
+    - KNOWN — a real derivative expression (including a genuine [Const 0.0] when
+      the parameter does not drive the node).
+    - OMITTED — a LIVE coefficient the gradient just doesn't cover yet: a
+      Periodic step value/period, an inline-table value reached by a
+      non-constant index, or a forcing's evaluation-time shift ([lag], gh#314).
+      The Rust runtime evaluates these live, so the model must compile (forward
+      sim and gradient-free IF2/PF work). [differentiate_rate] drops the
+      parameter — byte-identical to a genuine zero — and the Rust NUTS guard
       (coeff_guard.rs) refuses a NUTS fit that depends on the missing gradient.
+      (The obs/σ² driver, a later phase, instead refuses with the carried
+      [reason], so a live-but-omitted coefficient never masquerades as a genuine
+      zero on the observation path.)
     - STRUCTURAL data a parameter cannot drive at all — interpolation knots, a
       piecewise step grid, the spline basis, or a non-constant lookup index.
       These return [Unsupported], which [differentiate_rate] turns into a
@@ -28,25 +34,36 @@
 
 open Ir
 
-(** A differentiation result: a known derivative expression, or an explicit
-    "not differentiated" carrying a reason. Replaces the former silent
-    [Const 0.0] for forcing/table nodes — a dropped derivative is now a value
-    [differentiate_rate] is forced to handle (proposal
-    `2026-06-09-const-parametric-forcing.md` §4; note
-    `2026-06-08-static-typing-as-bug-prevention.md` §7). *)
+(** A differentiation result. Three outcomes, distinguished so a live-but-
+    omitted coefficient never masquerades as a genuine zero (proposal
+    `2026-07-03-unified-obs-gradient-autodiff.md` §4.2; note
+    `2026-06-08-static-typing-as-bug-prevention.md` §7):
+    - [Known e]      — a real derivative [e] (including a genuine [Const 0.0]).
+    - [Omitted]      — a live coefficient whose derivative is not emitted (tier
+                       2b: Periodic step/period, inline-table value via a
+                       non-constant index, or a forcing's [lag]);
+                       [differentiate_rate] drops it, exactly as it drops a
+                       proven zero.
+    - [Unsupported]  — structural data a parameter cannot drive (tier 3);
+                       [differentiate_rate] raises a compile-time error. *)
 type deriv =
   | Known of expr
+  | Omitted of { node : string; reason : string }
   | Unsupported of { node : string; reason : string }
 
 let map1 (d : deriv) (f : expr -> expr) : deriv =
-  match d with Known e -> Known (f e) | Unsupported _ as u -> u
+  match d with
+  | Known e -> Known (f e)
+  | (Omitted _ | Unsupported _) as nd -> nd
 
-(* Combine two sub-derivatives under a calculus rule, propagating Unsupported. *)
+(* Combine two sub-derivatives under a calculus rule. Precedence:
+   [Unsupported] dominates [Omitted] dominates [Known] — a structural refusal
+   outranks a live-but-omitted one, which outranks a real derivative. *)
 let map2 (da : deriv) (db : deriv) (f : expr -> expr -> expr) : deriv =
   match da, db with
+  | (Unsupported _ as u), _ | _, (Unsupported _ as u) -> u
+  | (Omitted _ as o), _ | _, (Omitted _ as o) -> o
   | Known a, Known b -> Known (f a b)
-  | (Unsupported _ as u), _ -> u
-  | _, (Unsupported _ as u) -> u
 
 (** Does [param] appear syntactically in [e]? Forcings/tables are opaque here
     (their definitions are checked separately by the [differentiate] lookups);
@@ -140,6 +157,12 @@ let differentiate (top : expr) (param : string)
     | Some { source = Inline vals; _ } -> List.exists (mentions param) vals
     | _ -> false
   in
+  (* Does [param] drive the forcing's evaluation-time shift ([lag], gh#314)?
+     The closed forms below differentiate against bare [Time], not [Time − lag],
+     so a param in the lag has a live derivative none of them emit. *)
+  let lag_mentions (tf : time_function) =
+    match tf.lag with Some l -> mentions param l | None -> false
+  in
   let rec d (e : expr) : deriv =
     match e with
     (* Constants in the θ|X step — derivative is zero. *)
@@ -151,14 +174,23 @@ let differentiate (top : expr) (param : string)
     (* Parameter reference — 1 if it's the target, 0 otherwise. *)
     | Param p -> Known (if p = param then Const 1.0 else Const 0.0)
 
-    (* Forcing. Three cases:
+    (* Forcing. Cases, in order:
+       - lag guard (any kind): if [param] drives the forcing's evaluation-time
+         shift ([lag], gh#314), the closed forms below cannot express the
+         derivative (they differentiate against bare [Time], not [Time − lag]).
+         Omitted — a live coefficient with an un-emitted gradient. Checked
+         FIRST so a param that also drives a coefficient does not slip through
+         to a closed form that silently ignores the lag.
        - Sinusoidal/Fourier: differentiate through the closed form (real grad).
        - Periodic: period + step values are LIVE scalar coefficients (the Rust
-         runtime evaluates them per-step via `resolve_coeff`), but the gradient
-         is not yet emitted (gh#215). Omit it (Known (Const 0.0)) so the model
-         compiles — forward sim and gradient-free IF2/PF use the live value, and
-         the Rust NUTS guard (coeff_guard.rs) refuses a NUTS fit that depends on
-         it. NOT a hard error: that would also break forward sim and IF2/PF.
+         runtime evaluates them per-step via `resolve_coeff`). When [param]
+         actually drives one, the gradient is not yet emitted (gh#215): Omitted
+         so the model compiles — forward sim and gradient-free IF2/PF use the
+         live value, and the Rust NUTS guard (coeff_guard.rs) refuses a NUTS fit
+         that depends on it. NOT a hard error: that would also break forward sim
+         and IF2/PF. When [param] does NOT drive the coefficient, the derivative
+         is a genuine zero (tier 2a), exactly as for any constant — this is the
+         common case, e.g. a param multiplying a constant-valued periodic term.
        - Piecewise/Interpolated/PeriodicSpline: a parameter there drives
          STRUCTURAL data (interpolation knots, a piecewise step grid, the
          de-Boor spline basis) — precomputed at construction, so it cannot be a
@@ -166,9 +198,29 @@ let differentiate (top : expr) (param : string)
          rejects it at IR-load via `eval_structural`). *)
     | TimeFunc fname ->
       (match List.find_opt (fun (tf : time_function) -> tf.name = fname) tfs with
+       | Some tf when lag_mentions tf ->
+         Omitted
+           { node = Printf.sprintf "forcing `%s`" fname;
+             reason = Printf.sprintf
+               "parameter '%s' drives the evaluation-time shift (`lag`) of \
+                forcing `%s`: the forcing is evaluated at t − lag, but the \
+                derivative w.r.t. the lag is not emitted (gh#314). Forward \
+                simulation and gradient-free IF2/PF use the live value; a NUTS \
+                fit that depends on this gradient is refused" param fname }
        | Some { kind = Sinusoidal s; _ } -> d (sinusoidal_closed s)
        | Some { kind = Fourier f; _ } -> d (fourier_closed f)
-       | Some { kind = Periodic _; _ } -> Known (Const 0.0)
+       | Some { kind = Periodic _; _ } ->
+         if forcing_mentions fname then
+           Omitted
+             { node = Printf.sprintf "forcing `%s`" fname;
+               reason = Printf.sprintf
+                 "parameter '%s' drives a periodic forcing coefficient (step \
+                  value or period) of `%s`: a live coefficient the Rust runtime \
+                  evaluates per step, but whose gradient is not emitted \
+                  (gh#215). Forward simulation and gradient-free IF2/PF use the \
+                  live value; a NUTS fit that depends on this gradient is \
+                  refused" param fname }
+         else Known (Const 0.0)
        | Some { kind = (Piecewise _ | Interpolated _ | PeriodicSpline _) as kind; _ } ->
          if forcing_mentions fname then
            Unsupported
@@ -215,9 +267,17 @@ let differentiate (top : expr) (param : string)
         (* The parameter is an inline-table VALUE selected by a non-constant
            index. The value is a live coefficient (the Rust runtime resolves it),
            but the gradient through a runtime-chosen cell is not yet emitted
-           (gh#215). Omit it so the model compiles — IF2/PF use the live value,
+           (gh#215). Omitted so the model compiles — IF2/PF use the live value,
            and the NUTS guard refuses a NUTS fit that depends on it. *)
-        Known (Const 0.0)
+        Omitted
+          { node = Printf.sprintf "table `%s`" name;
+            reason = Printf.sprintf
+              "parameter '%s' is an inline-table value in `%s` selected by a \
+               non-constant index: a live coefficient the Rust runtime \
+               resolves, but the gradient through a runtime-chosen cell is not \
+               emitted (gh#215). Forward simulation and gradient-free IF2/PF \
+               use the live value; a NUTS fit that depends on this gradient is \
+               refused" param name }
       else Known (Const 0.0)
 
     (* Binary operations — standard calculus rules; Unsupported propagates. *)
@@ -310,16 +370,24 @@ let differentiate (top : expr) (param : string)
     | Cond c -> map2 (d c.then_) (d c.else_)
                   (fun dt de -> Cond { pred = c.pred; then_ = dt; else_ = de })
 
-    (* Sum is linear: d/dp (Σ tᵢ) = Σ d/dp tᵢ; any Unsupported term propagates. *)
+    (* Sum is linear: d/dp (Σ tᵢ) = Σ d/dp tᵢ. Precedence (map2): an Unsupported
+       term short-circuits immediately (it dominates); the first Omitted term is
+       remembered and returned only once the scan proves no Unsupported term
+       follows; otherwise every term is Known and we rebuild the sum. *)
     | Reduce terms ->
-      let rec collect acc = function
-        | [] -> Known (Reduce (List.rev acc))
+      let rec collect acc omitted = function
+        | [] ->
+          (match omitted with
+           | Some o -> o
+           | None -> Known (Reduce (List.rev acc)))
         | t :: rest ->
           (match d t with
-           | Known e -> collect (e :: acc) rest
+           | Known e -> collect (e :: acc) omitted rest
+           | Omitted _ as o ->
+             collect acc (match omitted with None -> Some o | some -> some) rest
            | Unsupported _ as u -> u)
       in
-      collect [] terms
+      collect [] None terms
 
     (* Hoisted FOI bindings are param-free (state-only): d/dp BindingRef = 0. *)
     | BindingRef _ -> Known (Const 0.0)
@@ -410,9 +478,13 @@ let simplify_fixpoint (e : expr) : expr =
     Returns [Ok assoc] — an association list [(param_name, derivative_expr)] —
     or [Error msg] if any parameter's derivative is [Unsupported] (the caller
     turns that into a compile-time diagnostic). Parameters whose derivative is
-    a proven [Const 0.0] (absent from the rate) are omitted; the Rust backend
-    treats a missing entry as a zero gradient. The [Unsupported] path is the
-    only way a non-zero derivative is dropped, and it is never silent. *)
+    a proven [Const 0.0] (absent from the rate), or whose forcing/table
+    coefficient is live-but-omitted ([Omitted]: Periodic, [lag], inline-table
+    value via non-constant index), are dropped; the Rust backend treats a
+    missing entry as a zero gradient, and the NUTS coeff_guard refuses a fit
+    that depends on such a dropped rate coefficient. [Omitted] and a proven
+    zero are handled identically here, so rate gradients are byte-stable. The
+    [Unsupported] path is the only one that raises an error. *)
 let differentiate_rate (rate : expr) (param_names : string list)
     (tfs : time_function list) (tbls : table list) :
     ((string * expr) list, string) result =
@@ -421,6 +493,10 @@ let differentiate_rate (rate : expr) (param_names : string list)
     | p :: rest ->
       (match differentiate rate p tfs tbls with
        | Unsupported u -> Error (Printf.sprintf "%s: %s" u.node u.reason)
+       (* Live-but-omitted rate coefficient: drop the param, exactly as a proven
+          zero is dropped. Forward sim and IF2/PF use the live value; the NUTS
+          coeff_guard refuses a fit that depends on the missing gradient. *)
+       | Omitted _ -> go acc rest
        | Known dexpr ->
          (match simplify_fixpoint dexpr with
           | Const 0.0 -> go acc rest
