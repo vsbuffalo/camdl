@@ -244,8 +244,11 @@ impl FilterableFit {
 pub enum FitResult {
     /// A Bayesian stage wrote a posterior draws cloud.
     Posterior(PosteriorDraws),
-    /// An optimizer stage (IF2 / NLopt): one best point, no cloud. v1 cannot
-    /// draw a band from it; carries the method/stage for the refusal message.
+    /// No posterior draws cloud resolved for the chosen stage — so there is no
+    /// band to draw. Either a genuine optimizer stage (IF2 / NLopt: one best
+    /// point, no cloud) or a Bayesian sampler whose `draws.tsv` is not yet
+    /// present (incomplete / still running). The method (when known) tells the
+    /// two apart, so the refusal never mislabels a sampler an optimizer (gh#343).
     PointEstimate {
         method: Option<FitAlgorithm>,
         stage: String,
@@ -1860,16 +1863,41 @@ fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, stage: &st
     }
 }
 
-/// The actionable refusal for a point-estimate fit (the proposal's message).
+/// The actionable refusal when a fit reaches `predict` with no posterior band to
+/// draw. Two genuinely different causes, told apart by the stage's method
+/// (gh#343): a Bayesian sampler (PGAS / PMMH / MH) that simply has not written
+/// its `draws.tsv` yet — incomplete or still running — versus a real optimizer
+/// (IF2 / NLopt) that returns a single point and never has a band. Framing a
+/// sampler as an "optimizer fit" misdirected the user of the *default* Bayesian
+/// method to the plug-in workflow, discarding the posterior it does have.
 fn plugin_refusal(method: Option<FitAlgorithm>, stage: &str) -> String {
-    let m = method.map(|m| m.as_str()).unwrap_or("optimizer");
+    if let Some(m) = method.filter(|m| m.is_posterior_sampler()) {
+        return format!(
+            "stage '{stage}' ({m}) is a Bayesian posterior sampler, but it has not \
+             written its posterior draws (draws.tsv) — that file is written at stage \
+             completion, so the fit is likely incomplete or still running.\n  \
+             Let the fit finish (or re-run it); a completed {m} stage has a full \
+             posterior cloud, and `camdl fit predict` will draw the band with no \
+             extra flags."
+        );
+    }
+    if let Some(m) = method.filter(|m| m.is_optimizer()) {
+        return format!(
+            "stage '{stage}' is an optimizer fit ({m}) — it returns a single best-fit \
+             parameter set, not a distribution, so there is no posterior band to draw.\n  \
+             Get those parameters and run a plug-in forward simulation instead:\n    \
+             camdl fit summary <run> --params-only > params.toml\n    \
+             camdl simulate <model> --params params.toml --obs-only-dir out/\n  \
+             (A labelled plug-in predictive is a future cell; v1 emits posterior bands only.)"
+        );
+    }
+    // Neither a posterior sampler nor an optimizer (a likelihood-eval stage such
+    // as pfilter, or an unrecognized method): this stage kind yields no posterior
+    // distribution, so there is nothing to band — but it is NOT an optimizer fit.
+    let m = method.map(|m| m.as_str()).unwrap_or("this stage");
     format!(
-        "stage '{stage}' is an optimizer fit ({m}) — it returns a single best-fit \
-         parameter set, not a distribution, so there is no posterior band to draw.\n  \
-         Get those parameters and run a plug-in forward simulation instead:\n    \
-         camdl fit summary <run> --params-only > params.toml\n    \
-         camdl simulate <model> --params params.toml --obs-only-dir out/\n  \
-         (A labelled plug-in predictive is a future cell; v1 emits posterior bands only.)"
+        "stage '{stage}' ({m}) produced no posterior draws and is not a posterior \
+         sampler, so there is no band to draw for it."
     )
 }
 
@@ -1969,6 +1997,45 @@ mod tests {
         let msg = one_step_refusal(NotFilterable::Deterministic, Some(FitAlgorithm::Mh), "posterior");
         assert!(msg.contains("ODE"), "names the backend: {msg}");
         assert!(msg.contains("--horizon free_forward"), "redirects to free-forward: {msg}");
+    }
+
+    #[test]
+    fn refusal_for_a_posterior_sampler_is_not_an_optimizer_message() {
+        // gh#343: a Bayesian sampler stage (PGAS / PMMH / MH) that reaches the
+        // refusal — its draws.tsv is absent (incomplete / still running) — must
+        // NOT be called an "optimizer fit". PGAS is the *default* Bayesian path;
+        // the misclassification made the blessed posterior-predictive verb
+        // unusable for it. The refusal must name the missing draws, never the
+        // plug-in-simulate optimizer workflow (which discards the posterior).
+        for m in [FitAlgorithm::Pgas, FitAlgorithm::Pmmh, FitAlgorithm::Mh] {
+            let msg = plugin_refusal(Some(m), "posterior");
+            assert!(
+                !msg.contains("optimizer"),
+                "a {m} stage must not be described as an optimizer fit; got: {msg}"
+            );
+            assert!(
+                msg.contains("draws.tsv"),
+                "the refusal should name the missing posterior draws (draws.tsv); got: {msg}"
+            );
+            assert!(
+                !msg.contains("--params-only"),
+                "a sampler is not redirected to the plug-in point-estimate workflow; got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn refusal_for_an_optimizer_still_names_the_plug_in_workflow() {
+        // The optimizer refusal is preserved: IF2 / NLopt genuinely have no band,
+        // so the plug-in-simulate workflow is the right redirect (no over-correction).
+        for m in [FitAlgorithm::If2, FitAlgorithm::NlSbplx, FitAlgorithm::NlBobyqa] {
+            let msg = plugin_refusal(Some(m), "scout");
+            assert!(msg.contains("optimizer fit"), "a {m} stage is an optimizer fit; got: {msg}");
+            assert!(
+                msg.contains("--params-only"),
+                "the optimizer refusal points at the plug-in workflow; got: {msg}"
+            );
+        }
     }
 
     #[test]

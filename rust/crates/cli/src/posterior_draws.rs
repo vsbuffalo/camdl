@@ -78,12 +78,7 @@ pub fn resolve_posterior_draws(
             })?;
             let draws_path = chosen.stage_dir.join(DRAWS_FILE);
             if !draws_path.is_file() {
-                return Err(format!(
-                    "stage '{want}' produced no posterior draws ({DRAWS_FILE}).\n  \
-                     {} is an optimizer stage: it returns a single best-fit point, \
-                     not a distribution.",
-                    fit_algorithm_label(chosen.method)
-                ));
+                return Err(no_draws_for_stage(want, chosen.method));
             }
             return Ok(PosteriorDrawsRef {
                 stage: chosen.stage.clone(),
@@ -128,13 +123,50 @@ pub fn resolve_posterior_draws(
     ))
 }
 
-/// Build the actionable "this is an optimizer fit" error the proposal specifies.
+/// The "this stage has no `draws.tsv`" error, framed by the stage's method
+/// (gh#343). A Bayesian sampler (PGAS / PMMH / MH) writes its cloud at
+/// completion, so a missing file means the stage is incomplete or still running
+/// — not an optimizer. An optimizer (IF2 / NLopt) never has a band.
+fn no_draws_for_stage(stage: &str, method: FitAlgorithm) -> String {
+    let label = fit_algorithm_label(method);
+    if method.is_posterior_sampler() {
+        format!(
+            "stage '{stage}' ({label}) has not written its posterior draws \
+             ({DRAWS_FILE}) yet — it is a Bayesian sampler whose cloud is written at \
+             completion, so the stage is likely incomplete or still running."
+        )
+    } else {
+        format!(
+            "stage '{stage}' produced no posterior draws ({DRAWS_FILE}).\n  \
+             {label} is an optimizer stage: it returns a single best-fit point, \
+             not a distribution."
+        )
+    }
+}
+
+/// Build the actionable "no posterior cloud here" error, framed by the terminal
+/// stage's method. A terminal Bayesian sampler with no `draws.tsv` is incomplete
+/// / still running — never an "optimizer fit" (gh#343); only a genuine optimizer
+/// is redirected to the plug-in-simulate workflow.
 fn no_posterior_error(fit_ref: &str, view: &FitView) -> String {
     let methods: Vec<String> = view
         .stages
         .iter()
         .map(|s| format!("{} ({})", s.stage, fit_algorithm_label(s.method)))
         .collect();
+    if let Some(term) = view.stages.last().filter(|s| s.method.is_posterior_sampler()) {
+        let label = fit_algorithm_label(term.method);
+        return format!(
+            "no {DRAWS_FILE} under {fit_ref}: the terminal Bayesian stage '{}' \
+             ({label}) has not written its posterior draws cloud.\n  \
+             stages found: {}\n  \
+             {DRAWS_FILE} is written at stage completion — if the fit is still \
+             running or was interrupted, let it finish (or re-run it); a completed \
+             {label} stage has a full posterior cloud to band.",
+            term.stage,
+            methods.join(", "),
+        );
+    }
     format!(
         "no stage in {fit_ref} produced a posterior draws cloud ({DRAWS_FILE}).\n  \
          stages found: {}\n  \
@@ -330,6 +362,24 @@ mod tests {
         ]);
         let err = resolve_posterior_draws(seg.to_str().unwrap(), Some("scout")).unwrap_err();
         assert!(err.contains("no posterior draws") || err.contains("optimizer"), "got: {err}");
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn pgas_stage_without_draws_is_not_called_an_optimizer() {
+        // gh#343: a Bayesian sampler stage (pgas) that has not written draws.tsv
+        // — incomplete or still running — must NOT be framed as an optimizer fit,
+        // on either the default (terminal-stage) or the --stage-named path.
+        let tmp = crate::test_support::unique_temp_dir("pdraws_pgas_nodraws");
+        let seg = fixture_segment(&tmp, &[("01-posterior", "posterior", "pgas", None)]);
+
+        let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err();
+        assert!(!err.contains("optimizer"), "a pgas stage is not an optimizer: {err}");
+        assert!(err.contains(DRAWS_FILE), "names the missing posterior draws: {err}");
+
+        let err2 = resolve_posterior_draws(seg.to_str().unwrap(), Some("posterior")).unwrap_err();
+        assert!(!err2.contains("optimizer"), "named pgas stage is not an optimizer: {err2}");
+        assert!(err2.contains(DRAWS_FILE), "named stage names the missing draws: {err2}");
         fs::remove_dir_all(&tmp).ok();
     }
 

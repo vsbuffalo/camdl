@@ -49,6 +49,28 @@ impl FitAlgorithm {
             FitAlgorithm::NlBobyqa => "nl-bobyqa",
         }
     }
+
+    /// A Bayesian posterior sampler: it explores the full posterior and writes a
+    /// `draws.tsv` cloud, so a completed run has a posterior band to draw. PGAS
+    /// (the default Bayesian path), PMMH, and MH are samplers. This is the
+    /// authoritative sampler/optimizer partition used to frame `fit predict`'s
+    /// refusals — a sampler with no resolvable draws is *incomplete*, never an
+    /// "optimizer fit" (gh#343).
+    pub fn is_posterior_sampler(self) -> bool {
+        matches!(self, FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Mh)
+    }
+
+    /// An optimizer: it returns a single best-fit point (no posterior cloud), so
+    /// a predictive can only ever plug those parameters in — there is no band.
+    /// IF2 and the NLopt family (sbplx / bobyqa) are optimizers. `Pfilter` is a
+    /// likelihood evaluation, not a fit, so it is *neither* a sampler nor an
+    /// optimizer.
+    pub fn is_optimizer(self) -> bool {
+        matches!(
+            self,
+            FitAlgorithm::If2 | FitAlgorithm::NlSbplx | FitAlgorithm::NlBobyqa
+        )
+    }
 }
 
 impl std::fmt::Display for FitAlgorithm {
@@ -620,6 +642,27 @@ mod tests {
                 algo
             );
         }
+    }
+
+    /// The sampler/optimizer partition is the authoritative classifier `fit
+    /// predict` uses to frame its refusals (gh#343). PGAS / PMMH / MH are
+    /// Bayesian samplers (a completed run has a posterior band); IF2 and the
+    /// NLopt family are optimizers (a single point, refused); a particle filter
+    /// is neither (a likelihood eval, not a fit). Every variant is covered so a
+    /// new algorithm cannot silently fall into "neither" unnoticed.
+    #[test]
+    fn fit_algorithm_sampler_optimizer_partition() {
+        for m in [FitAlgorithm::Pgas, FitAlgorithm::Pmmh, FitAlgorithm::Mh] {
+            assert!(m.is_posterior_sampler(), "{m} is a posterior sampler");
+            assert!(!m.is_optimizer(), "{m} is not an optimizer");
+        }
+        for m in [FitAlgorithm::If2, FitAlgorithm::NlSbplx, FitAlgorithm::NlBobyqa] {
+            assert!(m.is_optimizer(), "{m} is an optimizer");
+            assert!(!m.is_posterior_sampler(), "{m} is not a posterior sampler");
+        }
+        // A particle filter is a likelihood evaluation, not a fit — neither.
+        assert!(!FitAlgorithm::Pfilter.is_posterior_sampler());
+        assert!(!FitAlgorithm::Pfilter.is_optimizer());
     }
 
     /// `ForwardBackend` (renamed from `args::types::Backend`) keeps its wire
