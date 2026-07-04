@@ -1904,6 +1904,7 @@ mod tests {
             projection: Projection::CumulativeFlow(format!("infection_{level}")),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () }),
+                rate_grad: Default::default(),
             }),
         }
     }

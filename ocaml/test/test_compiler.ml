@@ -4616,7 +4616,7 @@ let test_poisson_rate_kwarg_parses () =
   |} in
   let m = compile_expect_ok src in
   match (List.hd m.observations).likelihood with
-  | Ir.Poisson { rate = Ir.Projected } -> ()
+  | Ir.Poisson { rate = Ir.Projected; _ } -> ()
   | _ -> Alcotest.fail "expected Poisson{ rate = Projected }"
 
 let test_poisson_positional_errors () =

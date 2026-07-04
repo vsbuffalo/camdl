@@ -972,7 +972,7 @@ let check_model (m : model) : result =
       propagate st ~ctx tr.rate rate_total;
       (* Overdispersion *)
       (match tr.draw_method with
-       | DrawOverdispersed sigma_sq ->
+       | DrawOverdispersed { sigma_sq; _ } ->
          ignore (infer st ~ctx sigma_sq);
          propagate st ~ctx sigma_sq dimensionless
        | _ -> ())
@@ -1162,7 +1162,7 @@ let check_model (m : model) : result =
      | _ -> ());
     (* Overdispersion sigma^2 must be dimensionless *)
     (match tr.draw_method with
-     | DrawOverdispersed sigma_sq ->
+     | DrawOverdispersed { sigma_sq; _ } ->
        let sd = resolve st (read_dim st sigma_sq) in
        (match sd with
         | Known v when not (dim_is_zero v) ->

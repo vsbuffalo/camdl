@@ -263,17 +263,71 @@ let metadata_of_json j =
     dest_compartment   = opt_null as_string (match member_opt "dest_compartment"   j with Some v -> v | None -> `Null);
   }
 
+(* ── Derivative entries (obs/σ² gradient surface) ──────────────────────────
+   Externally-tagged single-key objects, mirroring `ir::deriv::DerivEntry`'s
+   Rust `#[serde(rename_all="snake_case")]`:
+     DEGrad e        -> {"grad": <expr>}
+     DEUnsupported   -> {"unsupported": {"node": "…", "code": "<reason>"}}
+   A grad_map serialises as a plain {param → deriv_entry} object, exactly like
+   the transition rate_grad's {param → expr}. *)
+let deriv_entry_to_json (de : deriv_entry) : Yojson.Safe.t =
+  match de with
+  | DEGrad e -> obj [("grad", expr_to_json e)]
+  | DEUnsupported { node; code } ->
+    obj [("unsupported",
+          obj [("node", str node); ("code", str (unsupported_reason_name code))])]
+
+let deriv_entry_of_json j : deriv_entry =
+  match j with
+  | `Assoc [(key, v)] -> (
+    match key with
+    | "grad" -> DEGrad (expr_of_json v)
+    | "unsupported" ->
+      let code_s = as_string (member "code" v) in
+      DEUnsupported {
+        node = as_string (member "node" v);
+        code = (match unsupported_reason_of_name code_s with
+                | Some c -> c
+                | None   -> fail "unknown unsupported reason code '%s'" code_s);
+      }
+    | k -> fail "unknown deriv_entry '%s'" k
+  )
+  | _ -> fail "deriv_entry must be a single-key object"
+
+let grad_map_to_json (m : (string * deriv_entry) list) : Yojson.Safe.t =
+  obj (List.map (fun (p, de) -> (p, deriv_entry_to_json de)) m)
+
+let grad_map_of_json = function
+  | `Assoc pairs -> List.map (fun (name, de_j) -> (name, deriv_entry_of_json de_j)) pairs
+  | `Null -> []
+  | _ -> []
+
+(* Append a grad_map field only when non-empty (mirrors the Rust
+   `skip_serializing_if`, so an un-computed gradient serialises byte-identically). *)
+let grad_field key (m : (string * deriv_entry) list) =
+  match m with [] -> [] | _ -> [(key, grad_map_to_json m)]
+
 let draw_method_to_json (dm : draw_method) : Yojson.Safe.t =
   match dm with
   | DrawPoisson       -> str "poisson"
   | DrawDeterministic -> str "deterministic"
-  | DrawOverdispersed e -> obj [("overdispersed", expr_to_json e)]
+  (* Keep the σ² VALUE as the bare expression (byte-stable golden); carry the
+     gradient as an adjacent sibling key present only when non-empty. *)
+  | DrawOverdispersed { sigma_sq; sigma_sq_grad } ->
+    obj ([("overdispersed", expr_to_json sigma_sq)]
+         @ grad_field "overdispersed_grad" sigma_sq_grad)
 
 let draw_method_of_json j =
   match j with
   | `String "poisson"       -> Ir.DrawPoisson
   | `String "deterministic" -> Ir.DrawDeterministic
-  | `Assoc [("overdispersed", e)] -> Ir.DrawOverdispersed (expr_of_json e)
+  | `Assoc fields when List.mem_assoc "overdispersed" fields ->
+    let sigma_sq = expr_of_json (List.assoc "overdispersed" fields) in
+    let sigma_sq_grad = match List.assoc_opt "overdispersed_grad" fields with
+      | None | Some `Null -> []
+      | Some g -> grad_map_of_json g
+    in
+    Ir.DrawOverdispersed { sigma_sq; sigma_sq_grad }
   | _ -> fail "draw_method must be \"poisson\", \"deterministic\", or {\"overdispersed\": expr}"
 
 let transition_lineage_to_json (l : transition_lineage) : Yojson.Safe.t =
@@ -743,63 +797,77 @@ let projection_of_json j =
   )
   | _ -> fail "projection must be a single-key object"
 
+(* Each differentiable argument's grad map rides as an adjacent key
+   (`<arg>_grad`), present only when non-empty — byte-stable when un-computed,
+   and matching the Rust field name / declaration order (value field, then grad).
+   `n` carries no grad. *)
 let likelihood_to_json (l : likelihood) : Yojson.Safe.t =
   match l with
   | Poisson p ->
-    obj [("poisson", obj [("rate", expr_to_json p.rate)])]
+    obj [("poisson", obj ([("rate", expr_to_json p.rate)]
+                          @ grad_field "rate_grad" p.rate_grad))]
   | NegBinomial nb ->
-    obj [("neg_binomial", obj [
-      ("mean",       expr_to_json nb.mean);
-      ("dispersion", expr_to_json nb.dispersion);
-    ])]
+    obj [("neg_binomial", obj (
+      [("mean", expr_to_json nb.mean)] @ grad_field "mean_grad" nb.mean_grad
+      @ [("dispersion", expr_to_json nb.dispersion)]
+      @ grad_field "dispersion_grad" nb.dispersion_grad))]
   | Normal n ->
-    obj [("normal", obj [
-      ("mean", expr_to_json n.mean);
-      ("sd",   expr_to_json n.sd);
-    ])]
+    obj [("normal", obj (
+      [("mean", expr_to_json n.mean)] @ grad_field "mean_grad" n.mean_grad
+      @ [("sd", expr_to_json n.sd)] @ grad_field "sd_grad" n.sd_grad))]
   | Binomial b ->
-    obj [("binomial", obj [
-      ("n", expr_to_json b.n);
-      ("p", expr_to_json b.p);
-    ])]
+    obj [("binomial", obj (
+      [("n", expr_to_json b.n); ("p", expr_to_json b.p)]
+      @ grad_field "p_grad" b.p_grad))]
   | BetaBinomial bb ->
-    obj [("beta_binomial", obj [
-      ("n",     expr_to_json bb.n);
-      ("alpha", expr_to_json bb.alpha);
-      ("beta",  expr_to_json bb.beta);
-    ])]
+    obj [("beta_binomial", obj (
+      [("n", expr_to_json bb.n)]
+      @ [("alpha", expr_to_json bb.alpha)] @ grad_field "alpha_grad" bb.alpha_grad
+      @ [("beta",  expr_to_json bb.beta)]  @ grad_field "beta_grad" bb.beta_grad))]
   | Bernoulli b ->
-    obj [("bernoulli", obj [("p", expr_to_json b.p)])]
+    obj [("bernoulli", obj ([("p", expr_to_json b.p)]
+                            @ grad_field "p_grad" b.p_grad))]
 
 let likelihood_of_json j =
+  let grad key v = match member_opt key v with
+    | None | Some `Null -> []
+    | Some g -> grad_map_of_json g
+  in
   match j with
   | `Assoc [(key, v)] -> (
     match key with
     | "poisson" ->
-      Poisson { rate = expr_of_json (member "rate" v) }
+      Poisson { rate = expr_of_json (member "rate" v); rate_grad = grad "rate_grad" v }
     | "neg_binomial" ->
       NegBinomial {
-        mean       = expr_of_json (member "mean"       v);
-        dispersion = expr_of_json (member "dispersion" v);
+        mean            = expr_of_json (member "mean"       v);
+        mean_grad       = grad "mean_grad" v;
+        dispersion      = expr_of_json (member "dispersion" v);
+        dispersion_grad = grad "dispersion_grad" v;
       }
     | "normal" ->
       Normal {
-        mean = expr_of_json (member "mean" v);
-        sd   = expr_of_json (member "sd"   v);
+        mean      = expr_of_json (member "mean" v);
+        mean_grad = grad "mean_grad" v;
+        sd        = expr_of_json (member "sd"   v);
+        sd_grad   = grad "sd_grad" v;
       }
     | "binomial" ->
       Binomial {
-        n = expr_of_json (member "n" v);
-        p = expr_of_json (member "p" v);
+        n      = expr_of_json (member "n" v);
+        p      = expr_of_json (member "p" v);
+        p_grad = grad "p_grad" v;
       }
     | "beta_binomial" ->
       BetaBinomial {
-        n     = expr_of_json (member "n"     v);
-        alpha = expr_of_json (member "alpha" v);
-        beta  = expr_of_json (member "beta"  v);
+        n          = expr_of_json (member "n"     v);
+        alpha      = expr_of_json (member "alpha" v);
+        alpha_grad = grad "alpha_grad" v;
+        beta       = expr_of_json (member "beta"  v);
+        beta_grad  = grad "beta_grad" v;
       }
     | "bernoulli" ->
-      Bernoulli { p = expr_of_json (member "p" v) }
+      Bernoulli { p = expr_of_json (member "p" v); p_grad = grad "p_grad" v }
     | k -> fail "unknown likelihood '%s'" k
   )
   | _ -> fail "likelihood must be a single-key object"

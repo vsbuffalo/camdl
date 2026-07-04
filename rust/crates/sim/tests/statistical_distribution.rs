@@ -206,8 +206,10 @@ fn test_overdispersion_variance_chain_binomial() {
                     },
                 }),
                 metadata: None,
-                draw_method: ir::transition::DrawMethod::Overdispersed(
-                    Expr::Param(ParamExpr { param: "sigma_sq".into() })),
+                draw_method: ir::transition::DrawMethod::Overdispersed {
+                    sigma_sq: Expr::Param(ParamExpr { param: "sigma_sq".into() }),
+                    sigma_sq_grad: Default::default(),
+                },
                 rate_grad: Default::default(), lineage: None,
             },
         ],

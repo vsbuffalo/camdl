@@ -1,4 +1,4 @@
-{"ir_version":"0.23","validated_by":"ocaml-compiler-v0.23","model":{"name":"seir_age_erlang_via","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.24","validated_by":"ocaml-compiler-v0.24","model":{"name":"seir_age_erlang_via","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_child","kind":"integer"},
 {"name":"S_adult","kind":"integer"},
 {"name":"E_child","kind":"integer"},

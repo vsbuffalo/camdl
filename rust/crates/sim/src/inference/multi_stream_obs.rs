@@ -1377,6 +1377,7 @@ mod bind_tests {
             projection: Projection::CumulativeFlow("inc".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: Expr::Projected(ProjectedExpr { projected: () }),
+                rate_grad: Default::default(),
             }),
         }
     }
@@ -1664,6 +1665,7 @@ mod hole_scoring_tests {
                             left: Box::new(Expr::Param(ParamExpr { param: "rho".into() })),
                             right: Box::new(Expr::Projected(ProjectedExpr { projected: () })),
                         }}),
+                        rate_grad: Default::default(),
                     }),
                 },
             ],

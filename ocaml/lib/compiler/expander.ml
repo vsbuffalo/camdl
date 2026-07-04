@@ -4058,7 +4058,7 @@ let expand_transitions_counted ctx =
         let raw_rate, draw_method = match rate_expr with
           | EFuncCall ("overdispersed", [("", inner); ("", var)]) ->
             let resolved_var = normalize_expr (resolve_expr ctx env var) in
-            (inner, Ir.DrawOverdispersed resolved_var)
+            (inner, Ir.DrawOverdispersed { sigma_sq = resolved_var; sigma_sq_grad = [] })
           | EFuncCall ("overdispersed", args) ->
             validate_draw_shape "overdispersed" args 2
               "overdispersed(rate, sigma_squared)";
@@ -6504,31 +6504,40 @@ let expand_observations ctx =
         Ir.Const 0.0
     in
     let likelihood = match lik_v with
+      (* Gradients land present-but-EMPTY here; the obs/σ² autodiff driver (a
+         later phase) populates them. *)
       | LikNegBinomial kwargs ->
         Ir.NegBinomial {
-          Ir.mean       = resolve_kw kwargs "mean";
-          Ir.dispersion = resolve_kw kwargs "r";
+          Ir.mean            = resolve_kw kwargs "mean";
+          Ir.mean_grad       = [];
+          Ir.dispersion      = resolve_kw kwargs "r";
+          Ir.dispersion_grad = [];
         }
       | LikPoisson kwargs ->
-        Ir.Poisson { Ir.rate = resolve_kw kwargs "rate" }
+        Ir.Poisson { Ir.rate = resolve_kw kwargs "rate"; Ir.rate_grad = [] }
       | LikNormal kwargs ->
         Ir.Normal {
-          Ir.mean = resolve_kw kwargs "mean";
-          Ir.sd   = resolve_kw kwargs "sd";
+          Ir.mean      = resolve_kw kwargs "mean";
+          Ir.mean_grad = [];
+          Ir.sd        = resolve_kw kwargs "sd";
+          Ir.sd_grad   = [];
         }
       | LikBinomial kwargs ->
         Ir.Binomial {
-          Ir.n = resolve_kw kwargs "n";
-          Ir.p = resolve_kw kwargs "p";
+          Ir.n      = resolve_kw kwargs "n";
+          Ir.p      = resolve_kw kwargs "p";
+          Ir.p_grad = [];
         }
       | LikBetaBinomial kwargs ->
         Ir.BetaBinomial {
-          Ir.n     = resolve_kw kwargs "n";
-          Ir.alpha = resolve_kw kwargs "alpha";
-          Ir.beta  = resolve_kw kwargs "beta";
+          Ir.n          = resolve_kw kwargs "n";
+          Ir.alpha      = resolve_kw kwargs "alpha";
+          Ir.alpha_grad = [];
+          Ir.beta       = resolve_kw kwargs "beta";
+          Ir.beta_grad  = [];
         }
       | LikBernoulli kwargs ->
-        Ir.Bernoulli { Ir.p = resolve_kw kwargs "p" }
+        Ir.Bernoulli { Ir.p = resolve_kw kwargs "p"; Ir.p_grad = [] }
     in
     ctx.obs_aux_cols <- [];
     let parts = name_parts_from_bindings od.oindices env in

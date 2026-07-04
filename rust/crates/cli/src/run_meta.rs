@@ -996,12 +996,14 @@ mod tests {
     }
 
     fn poisson() -> Likelihood {
-        Likelihood::Poisson(PoissonLikelihood { rate: const_expr() })
+        Likelihood::Poisson(PoissonLikelihood { rate: const_expr(), rate_grad: Default::default() })
     }
     fn neg_binomial() -> Likelihood {
         Likelihood::NegBinomial(NegBinomialLikelihood {
             mean: const_expr(),
+            mean_grad: Default::default(),
             dispersion: const_expr(),
+            dispersion_grad: Default::default(),
         })
     }
 

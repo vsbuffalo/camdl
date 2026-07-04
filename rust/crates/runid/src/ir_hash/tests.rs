@@ -139,6 +139,7 @@ fn representative_model() -> Model {
                     Expr::param("rho"),
                     Expr::Projected(ProjectedExpr { projected: () }),
                 ),
+                rate_grad: Default::default(),
             }),
         }],
         parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.5), bounds: Some((0.0, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::Uniform(UniformPrior { lower: 0.0, upper: 2.0 })), transform: Transform::Log }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: Some((0, -1)) }],
@@ -215,7 +216,14 @@ fn model_golden_hash() {
     // output horizon collapsed onto `simulation.t_end`), so `hash_into` folds one
     // fewer f64 and the model hash shifts once — a deliberate, version-bumped
     // re-key (the horizon stays in identity via `simulation.t_end`).
-    const GOLDEN: &str = "05deda014f8ece802897bfa556e28c43753e8924fd48285b692cbdde73e27b47";
+    // gh#180 (ir/VERSION -> 0.24): unified obs-gradient autodiff. `Likelihood`
+    // now folds each arg's `*_grad` map (and `DrawMethod::Overdispersed` its
+    // `sigma_sq_grad`) right after the arg — the obs/σ² analogue of the
+    // transition `rate_grad`, hashed into run identity. The representative model
+    // carries a Poisson observation, so its empty `rate_grad` length-0 prefix
+    // shifts the model hash once — a deliberate, version-bumped re-key (obs
+    // gradients are run identity, mirroring `rate_grad`).
+    const GOLDEN: &str = "e009aabc7f8c56ae94f8cd12673f830e73ea30260dc9ac13f11f6bc34c6c70cd";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }

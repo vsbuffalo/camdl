@@ -817,7 +817,7 @@ pub fn log_transition_density_substep(
     for (i, tr) in model.model.transitions.iter().enumerate() {
         match &tr.draw_method {
             ir::transition::DrawMethod::Deterministic => { is_determ[i] = true; }
-            ir::transition::DrawMethod::Overdispersed(_) => {
+            ir::transition::DrawMethod::Overdispersed { .. } => {
                 sigma_sq_by_tr[i] = Some(eval_resolved(model.resolved.overdispersion[i].as_ref().unwrap(), &ctx));
             }
             _ => {}

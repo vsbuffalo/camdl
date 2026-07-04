@@ -1360,8 +1360,8 @@ impl CompiledModel {
 
         let overdispersion: Vec<Option<ResolvedExpr>> = model.transitions.iter()
             .map(|tr| match &tr.draw_method {
-                ir::transition::DrawMethod::Overdispersed(expr) =>
-                    resolve_expr(expr, &resolve_ctx).map(Some),
+                ir::transition::DrawMethod::Overdispersed { sigma_sq, .. } =>
+                    resolve_expr(sigma_sq, &resolve_ctx).map(Some),
                 _ => Ok(None),
             })
             .collect::<Result<_, _>>()?;
@@ -1543,7 +1543,7 @@ impl CompiledModel {
     /// Features this model requires from a backend.
     pub fn required_capabilities(&self) -> crate::Capabilities {
         let mut caps = crate::Capabilities::empty();
-        if self.model.transitions.iter().any(|t| matches!(t.draw_method, ir::transition::DrawMethod::Overdispersed(_))) {
+        if self.model.transitions.iter().any(|t| matches!(t.draw_method, ir::transition::DrawMethod::Overdispersed { .. })) {
             caps |= crate::Capabilities::OVERDISPERSION;
         }
         if !self.real_comp_indices.is_empty() {

@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.23",
-  "validated_by": "ocaml-compiler-v0.23",
+  "ir_version": "0.24",
+  "validated_by": "ocaml-compiler-v0.24",
   "model": {
     "name": "branching_si_symp_asym",
     "version": "0.3",

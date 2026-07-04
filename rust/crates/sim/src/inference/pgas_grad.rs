@@ -152,7 +152,7 @@ pub fn log_transition_density_grad(
                 d_rate[est_idx] = eval_resolved(resolved_grad, &ctx) / n_src as f64;
             }
 
-            let (effective, d_effective) = if let ir::transition::DrawMethod::Overdispersed(_) =
+            let (effective, d_effective) = if let ir::transition::DrawMethod::Overdispersed { .. } =
                 &model.model.transitions[tr_idx].draw_method
             {
                 // Consume one gamma per overdispersed transition —

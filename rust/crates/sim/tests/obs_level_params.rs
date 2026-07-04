@@ -80,8 +80,10 @@ fn model_with_obs_param() -> (Arc<CompiledModel>, Vec<f64>) {
                 likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {
                     // mean = projected (cumulative deaths)
                     mean: Expr::Projected(ProjectedExpr { projected: () }),
+                    mean_grad: Default::default(),
                     // dispersion = k (a PARAMETER, not a constant)
                     dispersion: Expr::Param(ParamExpr { param: "k".into() }),
+                    dispersion_grad: Default::default(),
                 }),
             },
         ],

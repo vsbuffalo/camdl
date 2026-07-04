@@ -68,6 +68,53 @@ and unchecked_dim_expr = {
   reason: string;
 }
 
+(* ── Derivative entries (obs/σ² gradient surface) ────────────────────────────────
+
+   The observation/σ² analogue of the transition [rate_grad], but classified so a
+   live-but-omitted coefficient never masquerades as a genuine zero. The autodiff
+   pass ([autodiff.ml]) classifies each differentiable position as
+   [Known | Omitted | Unsupported]; the obs/σ² driver (a later phase) collapses
+   that to the two states the IR carries — a real gradient [DEGrad], or a loud,
+   coded refusal [DEUnsupported] — so the fit-time gate consumes the reason
+   (proposal 2026-07-03-unified-obs-gradient-autodiff §4.1). An ABSENT map key is
+   a genuine zero.
+
+   Unlike a rate [Unsupported] (a compile-time error, never serialized), an obs/σ²
+   [DEUnsupported] is serialized into the IR and hashed into run_id identity, so it
+   carries a STABLE [unsupported_reason] code — the only hashed part — while the
+   human label ([node]) and message are derived for display, keeping a copy-edit
+   from re-keying run_id. New reasons append at the END (positional hash index). *)
+type unsupported_reason =
+  | URLag
+  | URPeriodicCoeff
+  | URStructuralForcing
+  | URNonConstTableIndex
+  | URMod
+  | URParametricN
+
+type deriv_entry =
+  | DEGrad of expr
+  | DEUnsupported of { node : string; code : unsupported_reason }
+
+(* snake_case wire names — must match the Rust `#[serde(rename_all="snake_case")]`
+   on `ir::deriv::UnsupportedReason`. *)
+let unsupported_reason_name = function
+  | URLag                -> "lag"
+  | URPeriodicCoeff      -> "periodic_coeff"
+  | URStructuralForcing  -> "structural_forcing"
+  | URNonConstTableIndex -> "non_const_table_index"
+  | URMod                -> "mod"
+  | URParametricN        -> "parametric_n"
+
+let unsupported_reason_of_name = function
+  | "lag"                   -> Some URLag
+  | "periodic_coeff"        -> Some URPeriodicCoeff
+  | "structural_forcing"    -> Some URStructuralForcing
+  | "non_const_table_index" -> Some URNonConstTableIndex
+  | "mod"                   -> Some URMod
+  | "parametric_n"          -> Some URParametricN
+  | _                       -> None
+
 (* ── Compartment ─────────────────────────────────────────────────────────────── *)
 
 type compartment_kind = Integer | Real
@@ -89,7 +136,10 @@ type transition_metadata = {
 
 type draw_method =
   | DrawPoisson
-  | DrawOverdispersed of expr
+  (* [sigma_sq_grad] is the ∂σ²/∂param map (empty ⇒ not computed; absent key ⇒
+     genuine zero), carried alongside its expression so a derivative can never be
+     written without a slot for it (the Diffable principle, proposal §4.1). *)
+  | DrawOverdispersed of { sigma_sq : expr; sigma_sq_grad : (string * deriv_entry) list }
   | DrawDeterministic
 
 (* Lineage (individual-sampling) annotation, emitted for `#[lineage]`
@@ -296,12 +346,20 @@ type projection =
      whose variant indices are positional and permanent. *)
   | CumulativeFlowSum of string list
 
-type poisson_likelihood      = { rate:       expr }
-type neg_binomial_likelihood = { mean: expr; dispersion: expr }
-type normal_likelihood       = { mean: expr; sd: expr }
-type binomial_likelihood     = { n:    expr; p:  expr }
-type beta_binomial_likelihood = { n: expr; alpha: expr; beta: expr }
-type bernoulli_likelihood    = { p: expr }
+(* Each differentiable likelihood argument carries its ∂arg/∂param map (empty ⇒
+   not computed; absent key ⇒ genuine zero), the obs analogue of the transition
+   [rate_grad]. `n` (Binomial/BetaBinomial) has NO grad — it must be θ-independent
+   (rounded to an integer). Proposal 2026-07-03 §4.1, §4.4/§4.5. *)
+type grad_map = (string * deriv_entry) list
+type poisson_likelihood      = { rate: expr; rate_grad: grad_map }
+type neg_binomial_likelihood = { mean: expr; mean_grad: grad_map;
+                                 dispersion: expr; dispersion_grad: grad_map }
+type normal_likelihood       = { mean: expr; mean_grad: grad_map;
+                                 sd: expr; sd_grad: grad_map }
+type binomial_likelihood     = { n: expr; p: expr; p_grad: grad_map }
+type beta_binomial_likelihood = { n: expr; alpha: expr; alpha_grad: grad_map;
+                                  beta: expr; beta_grad: grad_map }
+type bernoulli_likelihood    = { p: expr; p_grad: grad_map }
 
 type likelihood =
   | Poisson      of poisson_likelihood

@@ -4645,7 +4645,9 @@ dt = 1.0
                     projection: Projection::CumulativeFlow("inflow".into()),
                     likelihood: Likelihood::Normal(NormalLikelihood {
                         mean: Expr::Projected(ProjectedExpr { projected: () }),
+                        mean_grad: Default::default(),
                         sd: Expr::Const(ConstExpr { value: sd }),
+                        sd_grad: Default::default(),
                     }),
                 },
             ],

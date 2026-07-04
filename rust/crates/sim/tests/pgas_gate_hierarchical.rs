@@ -68,6 +68,7 @@ fn build_poisson_obs_block() -> ir::observation::ObservationModel {
         projection: Projection::CumulativeFlow("infection".into()),
         likelihood: Likelihood::Poisson(PoissonLikelihood {
             rate: Expr::Projected(ProjectedExpr { projected: () }),
+            rate_grad: Default::default(),
         }),
     }
 }

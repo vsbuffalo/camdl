@@ -530,6 +530,7 @@ fn build_poisson_seir() -> ir::Model {
         if let Likelihood::NegBinomial(nb) = &om.likelihood {
             om.likelihood = Likelihood::Poisson(PoissonLikelihood {
                 rate: nb.mean.clone(),
+                rate_grad: Default::default(),
             });
         }
     }
@@ -593,7 +594,9 @@ fn build_discretized_normal_seir() -> ir::Model {
         if let Likelihood::NegBinomial(nb) = &om.likelihood {
             om.likelihood = Likelihood::Normal(NormalLikelihood {
                 mean: nb.mean.clone(),
+                mean_grad: Default::default(),
                 sd: Expr::Param(ParamExpr { param: "sigma_obs".to_string() }),
+                sd_grad: Default::default(),
             });
         }
     }
@@ -650,6 +653,7 @@ fn build_binomial_seir() -> ir::Model {
             om.likelihood = Likelihood::Binomial(BinomialLikelihood {
                 n: Expr::Projected(ProjectedExpr { projected: () }),
                 p: Expr::Param(ParamExpr { param: "rho".to_string() }),
+                p_grad: Default::default(),
             });
         }
     }
@@ -735,7 +739,9 @@ fn build_beta_binomial_seir() -> ir::Model {
             om.likelihood = Likelihood::BetaBinomial(BetaBinomialLikelihood {
                 n: Expr::Projected(ProjectedExpr { projected: () }),
                 alpha: Expr::Param(ParamExpr { param: "a_obs".to_string() }),
+                alpha_grad: Default::default(),
                 beta: Expr::Param(ParamExpr { param: "b_obs".to_string() }),
+                beta_grad: Default::default(),
             });
         }
     }

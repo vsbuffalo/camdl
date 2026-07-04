@@ -138,6 +138,7 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
                             right: Box::new(ir::expr::Expr::Const(ir::expr::ConstExpr { value: 0.1 })),
                         },
                     }),
+                    rate_grad: Default::default(),
                 }),
             },
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),

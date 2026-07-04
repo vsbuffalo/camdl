@@ -24,6 +24,7 @@
 //! and production handles multi-GB IRs without overflow, so a recursive
 //! `hash_into` is exactly as safe as the engine itself.
 
+use ir::deriv::{DerivEntry, UnsupportedReason};
 use ir::expr::{BinOp, Expr, UnOp};
 use ir::intervention::{
     Action, CmpOp, FireSource, Intervention, InterventionKind,
@@ -72,6 +73,42 @@ fn hash_opt_f64(h: &mut CanonicalHasher, x: &Option<f64>) {
         Some(v) => {
             h.write_u8(1);
             h.write_f64_bits(*v);
+        }
+    }
+}
+
+// ── deriv.rs ─────────────────────────────────────────────────────────────────
+
+impl ContentAddressed for UnsupportedReason {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::deriv::UnsupportedReason");
+        // Positional discriminant; variants append at the end (see the type).
+        let idx: u32 = match self {
+            UnsupportedReason::Lag => 0,
+            UnsupportedReason::PeriodicCoeff => 1,
+            UnsupportedReason::StructuralForcing => 2,
+            UnsupportedReason::NonConstTableIndex => 3,
+            UnsupportedReason::Mod => 4,
+            UnsupportedReason::ParametricN => 5,
+        };
+        h.write_u32(idx);
+    }
+}
+
+impl ContentAddressed for DerivEntry {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::deriv::DerivEntry");
+        match self {
+            DerivEntry::Grad(e) => {
+                h.write_u32(0);
+                e.hash_into(h);
+            }
+            // Hash the stable `code`, NEVER the free-text `node` label — a
+            // message/label copy-edit must not re-key run_id (§4.1).
+            DerivEntry::Unsupported { node: _, code } => {
+                h.write_u32(1);
+                code.hash_into(h);
+            }
         }
     }
 }
@@ -232,9 +269,12 @@ impl ContentAddressed for DrawMethod {
         header(h, "ir::transition::DrawMethod");
         match self {
             DrawMethod::Poisson => h.write_u32(0),
-            DrawMethod::Overdispersed(expr) => {
+            DrawMethod::Overdispersed { sigma_sq, sigma_sq_grad } => {
                 h.write_u32(1);
-                expr.hash_into(h);
+                sigma_sq.hash_into(h);
+                // sigma_sq_grad: HashMap<String, DerivEntry> — sorted by key
+                // (mirrors the transition rate_grad). Empty ⇒ length-0 prefix.
+                h.write_str_map(sigma_sq_grad.iter());
             }
             DrawMethod::Deterministic => h.write_u32(2),
         }
@@ -477,34 +517,46 @@ impl ContentAddressed for Likelihood {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::observation::Likelihood");
         match self {
+            // Each arg's gradient map is hashed right after its expression —
+            // sorted by key (mirrors the transition rate_grad); empty ⇒ length-0
+            // prefix. `n` (Binomial/BetaBinomial) carries no grad (θ-independent).
             Likelihood::Poisson(l) => {
                 h.write_u32(0);
                 l.rate.hash_into(h);
+                h.write_str_map(l.rate_grad.iter());
             }
             Likelihood::NegBinomial(l) => {
                 h.write_u32(1);
                 l.mean.hash_into(h);
+                h.write_str_map(l.mean_grad.iter());
                 l.dispersion.hash_into(h);
+                h.write_str_map(l.dispersion_grad.iter());
             }
             Likelihood::Normal(l) => {
                 h.write_u32(2);
                 l.mean.hash_into(h);
+                h.write_str_map(l.mean_grad.iter());
                 l.sd.hash_into(h);
+                h.write_str_map(l.sd_grad.iter());
             }
             Likelihood::Binomial(l) => {
                 h.write_u32(3);
                 l.n.hash_into(h);
                 l.p.hash_into(h);
+                h.write_str_map(l.p_grad.iter());
             }
             Likelihood::BetaBinomial(l) => {
                 h.write_u32(4);
                 l.n.hash_into(h);
                 l.alpha.hash_into(h);
+                h.write_str_map(l.alpha_grad.iter());
                 l.beta.hash_into(h);
+                h.write_str_map(l.beta_grad.iter());
             }
             Likelihood::Bernoulli(l) => {
                 h.write_u32(5);
                 l.p.hash_into(h);
+                h.write_str_map(l.p_grad.iter());
             }
         }
     }

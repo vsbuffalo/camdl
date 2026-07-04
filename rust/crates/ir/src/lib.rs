@@ -1,5 +1,6 @@
 pub mod caltime;
 pub mod contrast;
+pub mod deriv;
 pub mod envelope;
 pub mod expr;
 pub mod intervention;

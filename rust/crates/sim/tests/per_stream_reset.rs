@@ -127,7 +127,9 @@ fn ir_incidence_obs(name: &str) -> IrObs {
         projection: Projection::CumulativeFlow("inflow".into()),
         likelihood: Likelihood::Normal(NormalLikelihood {
             mean: Expr::Projected(ProjectedExpr { projected: () }),
+            mean_grad: Default::default(),
             sd: Expr::Const(ConstExpr { value: 50.0 }),
+            sd_grad: Default::default(),
         }),
     }
 }

@@ -608,6 +608,7 @@ fn pgas_obs_model(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> MultiStre
                         right: Box::new(ir::expr::Expr::Const(ir::expr::ConstExpr { value: 0.1 })),
                     },
                 }),
+                rate_grad: Default::default(),
             }),
             stratum: vec![],
         },

@@ -807,6 +807,20 @@ pub fn stage_per_eval(
 
 /// Pre-resolved observation likelihood. All `Expr` fields replaced by
 /// `ResolvedExpr`. Constructed at closure-build time, captured by obs closures.
+///
+/// P4 TODO (unified obs-gradient autodiff, proposal 2026-07-03 §4.3): give each
+/// differentiable argument a resolved gradient carrier — a
+/// `Vec<(usize /* model param idx */, ResolvedExpr)>` per arg (`rate`, `mean`,
+/// `sd`, …), the obs analogue of `CompiledModel::rate_grads_indexed`. P4 populates
+/// it in [`resolve_likelihood`] from the IR `*_grad` maps (resolving each
+/// `DerivEntry::Grad` expression and mapping its param name → model index) and
+/// consumes it in `eval_likelihood_resolved_grad`, replacing the per-arg
+/// `eval_resolved_deriv` calls. It is **not** added here in P2: the IR grad maps
+/// are empty until P3 and the runtime consumer is still `eval_resolved_deriv`, so
+/// an empty carrier would be dead weight that ripples `..` edits through every
+/// `ResolvedLikelihood` match arm in the P4-reviewed inference path. `DerivEntry`
+/// / `Unsupported` never reaches this resolved form — the fit-time gate (P5)
+/// refuses an `Unsupported`-covered param before a gradient is ever evaluated.
 #[derive(Debug, Clone)]
 pub enum ResolvedLikelihood {
     Poisson { rate: ResolvedExpr },

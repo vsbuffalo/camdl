@@ -593,7 +593,7 @@ pub fn step_one(
             scratch.draws.push(match &tr.draw_method {
                 ir::transition::DrawMethod::Poisson => ResolvedDraw::Poisson,
                 ir::transition::DrawMethod::Deterministic => ResolvedDraw::Deterministic,
-                ir::transition::DrawMethod::Overdispersed(_) => {
+                ir::transition::DrawMethod::Overdispersed { .. } => {
                     let sigma_sq = eval_resolved(model.resolved.overdispersion[i].as_ref().unwrap(), &ctx);
                     ResolvedDraw::Overdispersed(sigma_sq)
                 }

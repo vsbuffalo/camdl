@@ -1,6 +1,16 @@
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::expr::Expr;
+use crate::deriv::DerivEntry;
 use crate::parameter::ParamKind;
+
+/// `#[serde(skip_serializing_if)]` predicate for the observation gradient maps:
+/// an empty grad map is omitted, so a model whose obs gradients have not been
+/// computed (or are all genuine zeros) serialises byte-identically to before the
+/// gradient surface existed.
+fn grad_is_empty(m: &HashMap<String, DerivEntry>) -> bool {
+    m.is_empty()
+}
 
 // ── Projection ────────────────────────────────────────────────────────────────
 
@@ -58,39 +68,70 @@ impl Projection {
 
 // ── Likelihood ────────────────────────────────────────────────────────────────
 
+/// `∂arg/∂param` for each estimated parameter, keyed by parameter name. Populated
+/// by the OCaml compiler's obs-gradient autodiff pass; empty (and omitted from
+/// the JSON) if not computed. Absent key ⇒ genuine zero. Mirrors the transition
+/// `rate_grad`, but carries the `Known | Unsupported` classification via
+/// [`DerivEntry`].
+///
+/// One alias per differentiable likelihood argument (`rate`, `mean`, `sd`, …);
+/// `n` (Binomial/BetaBinomial) has **no** grad — it must be θ-independent.
+type GradMap = HashMap<String, DerivEntry>;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PoissonLikelihood {
     pub rate: Expr,
+    #[serde(default, skip_serializing_if = "grad_is_empty")]
+    pub rate_grad: GradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NegBinomialLikelihood {
     pub mean:       Expr,
+    #[serde(default, skip_serializing_if = "grad_is_empty")]
+    pub mean_grad:  GradMap,
     pub dispersion: Expr,
+    #[serde(default, skip_serializing_if = "grad_is_empty")]
+    pub dispersion_grad: GradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NormalLikelihood {
     pub mean: Expr,
+    #[serde(default, skip_serializing_if = "grad_is_empty")]
+    pub mean_grad: GradMap,
     pub sd:   Expr,
+    #[serde(default, skip_serializing_if = "grad_is_empty")]
+    pub sd_grad: GradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BinomialLikelihood {
+    /// The number of trials. Must be θ-independent (a constant or an observed
+    /// data column) — it is rounded to an integer, so it carries no gradient.
     pub n: Expr,
     pub p: Expr,
+    #[serde(default, skip_serializing_if = "grad_is_empty")]
+    pub p_grad: GradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BetaBinomialLikelihood {
+    /// The number of trials. Must be θ-independent (see [`BinomialLikelihood::n`]).
     pub n:     Expr,
     pub alpha: Expr,
+    #[serde(default, skip_serializing_if = "grad_is_empty")]
+    pub alpha_grad: GradMap,
     pub beta:  Expr,
+    #[serde(default, skip_serializing_if = "grad_is_empty")]
+    pub beta_grad: GradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BernoulliLikelihood {
     pub p: Expr,
+    #[serde(default, skip_serializing_if = "grad_is_empty")]
+    pub p_grad: GradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
