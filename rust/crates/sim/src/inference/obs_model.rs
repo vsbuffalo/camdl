@@ -8,7 +8,7 @@ use crate::compiled_model::CompiledModel;
 use crate::rng::StatefulRng;
 use crate::propensity::EvalCtx;
 use crate::resolved_expr::{
-    ResolvedLikelihood, ResolveCtx, resolve_likelihood, eval_resolved, eval_resolved_deriv,
+    ResolvedLikelihood, ResolveCtx, resolve_likelihood, eval_resolved, eval_emitted_grad,
 };
 use crate::state::{IntState, RealState};
 use crate::inference::obs_loglik::{
@@ -78,12 +78,12 @@ pub(crate) fn eval_likelihood_resolved(
     };
 
     match likelihood {
-        ResolvedLikelihood::NegBinomial { mean, dispersion } => {
+        ResolvedLikelihood::NegBinomial { mean, dispersion, .. } => {
             let m = eval_resolved(mean, &ctx(projected));
             let k = eval_resolved(dispersion, &ctx(projected));
             negbin_logpmf(observed, m, k)
         }
-        ResolvedLikelihood::Normal { mean, sd } => {
+        ResolvedLikelihood::Normal { mean, sd, .. } => {
             // IC2 in the 2026-04-19 inference review: `Normal` is
             // pomp/He-et-al.'s discretized-Normal *count* likelihood.
             // A clearly-fractional observation probably means the user
@@ -107,18 +107,18 @@ pub(crate) fn eval_likelihood_resolved(
             let s = eval_resolved(sd, &ctx(projected));
             discretized_normal_logpmf_tol(observed, m, s * s, DEFAULT_TOL)
         }
-        ResolvedLikelihood::Poisson { rate } => {
+        ResolvedLikelihood::Poisson { rate, .. } => {
             let r = eval_resolved(rate, &ctx(projected));
             poisson_logpmf(observed, r)
         }
-        ResolvedLikelihood::Binomial { n, p } => {
+        ResolvedLikelihood::Binomial { n, p, .. } => {
             let n_val = eval_resolved(n, &ctx(projected));
             let p_val = eval_resolved(p, &ctx(projected));
             let k = observed.round().max(0.0) as u64;
             let n_int = n_val.round().max(0.0) as u64;
             crate::inference::obs_loglik::binom_logpmf(k, n_int, p_val)
         }
-        ResolvedLikelihood::BetaBinomial { n, alpha, beta } => {
+        ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
             let n_val = eval_resolved(n, &ctx(projected));
             let alpha_val = eval_resolved(alpha, &ctx(projected));
             let beta_val = eval_resolved(beta, &ctx(projected));
@@ -126,7 +126,7 @@ pub(crate) fn eval_likelihood_resolved(
             let n_int = n_val.round().max(0.0) as u64;
             crate::inference::obs_loglik::beta_binomial_logpmf(k, n_int, alpha_val, beta_val)
         }
-        ResolvedLikelihood::Bernoulli { p } => {
+        ResolvedLikelihood::Bernoulli { p, .. } => {
             // Clamp p to [0, 1] before forming the log-probability.
             // Without the clamp, an out-of-range p (e.g. PGAS proposes
             // p_detect > 1 before the posterior concentrates) produces
@@ -146,16 +146,19 @@ pub(crate) fn eval_likelihood_resolved(
 /// Accumulates into `grad[i] += d(log L)/d(θ_i)` for each estimated parameter,
 /// chain-ruling through every likelihood-argument expression that may depend
 /// on θ. Mirrors `eval_likelihood_resolved` exactly so the gradient and the
-/// scalar match. (gh#76)
+/// scalar match. (gh#76, gh#180)
 ///
-/// Caveat — projection dependence. If a stream's `projection` is a
-/// `DerivedExpr` that depends on parameters, the resulting d(projected)/dθ is
-/// **not** propagated here — the likelihood args are differentiated assuming
-/// `projected` is a constant. For `FlowSum` and `IntCompSum` projections (the
-/// common case), `projected` does not depend on θ, so this is exact. For
-/// `DerivedExpr` projections referencing θ, the gradient is missing a term;
-/// see docs/dev/notes/2026-05-25-pgas-obs-grad-derivation.md. Issue gh#76's
-/// reproducer (rho, k_obs, σ_obs) does not exercise that case.
+/// The `∂arg/∂θ` factor now comes from the compiler-emitted gradient map
+/// (`*_grad`, resolved into each arm's `*_grad` carrier), evaluated through the
+/// shared [`eval_emitted_grad`](crate::resolved_expr::eval_emitted_grad) seam —
+/// the same authority that feeds `rate_grad`. Because the OCaml autodiff inlines
+/// a `DerivedExpr` projection into the argument before differentiating, a
+/// parameter that reaches an observation THROUGH the projection
+/// (`projected = qgam · prevalence`) now contributes its chain-rule term
+/// `∂L/∂projected · ∂projected/∂θ` — the gh#180 term that was silently zero when
+/// this path ran a runtime forward-mode differentiator over the argument alone.
+/// The per-distribution `∂logpmf/∂arg` factors (`negbin_logpmf_grad`, …) are the
+/// irreducible runtime piece and are unchanged.
 pub(crate) fn eval_likelihood_resolved_grad(
     likelihood: &ResolvedLikelihood,
     t: f64,
@@ -176,17 +179,17 @@ pub(crate) fn eval_likelihood_resolved_grad(
     let ctx = ctx_at(projected);
 
     match likelihood {
-        ResolvedLikelihood::NegBinomial { mean, dispersion } => {
+        ResolvedLikelihood::NegBinomial { mean, mean_grad, dispersion, dispersion_grad } => {
             let m = eval_resolved(mean, &ctx);
             let k = eval_resolved(dispersion, &ctx);
             let (d_mu, d_k) = negbin_logpmf_grad(observed, m, k);
             for (i, &model_idx) in estimated_to_model.iter().enumerate() {
-                let dm = eval_resolved_deriv(mean, model_idx, &ctx);
-                let dk = eval_resolved_deriv(dispersion, model_idx, &ctx);
+                let dm = eval_emitted_grad(mean_grad, model_idx, &ctx);
+                let dk = eval_emitted_grad(dispersion_grad, model_idx, &ctx);
                 grad[i] += d_mu * dm + d_k * dk;
             }
         }
-        ResolvedLikelihood::Normal { mean, sd } => {
+        ResolvedLikelihood::Normal { mean, mean_grad, sd, sd_grad } => {
             // Discretized-normal in the implementation; gradients w.r.t.
             // (mean, variance) come from `discretized_normal_logpmf_grad`,
             // then chain-ruled to (mean, sd) via d(var)/d(sd) = 2·sd.
@@ -194,26 +197,28 @@ pub(crate) fn eval_likelihood_resolved_grad(
             let s = eval_resolved(sd, &ctx);
             let var = s * s;
             let (d_mu, d_var) = discretized_normal_logpmf_grad(observed, m, var, DEFAULT_TOL);
-            // d(log L)/d(sd) = d(log L)/d(var) · d(var)/d(sd) = d_var · 2·sd
+            // d(log L)/d(sd) = d(log L)/d(var) · d(var)/d(sd) = d_var · 2·sd.
+            // The `2·sd` Jacobian stays in this runtime factor — the emitted
+            // `sd_grad` is ∂sd/∂θ, NOT ∂var/∂θ (proposal §4).
             let d_sd = d_var * 2.0 * s;
             for (i, &model_idx) in estimated_to_model.iter().enumerate() {
-                let dm = eval_resolved_deriv(mean, model_idx, &ctx);
-                let ds = eval_resolved_deriv(sd, model_idx, &ctx);
+                let dm = eval_emitted_grad(mean_grad, model_idx, &ctx);
+                let ds = eval_emitted_grad(sd_grad, model_idx, &ctx);
                 grad[i] += d_mu * dm + d_sd * ds;
             }
         }
-        ResolvedLikelihood::Poisson { rate } => {
+        ResolvedLikelihood::Poisson { rate, rate_grad } => {
             let r = eval_resolved(rate, &ctx);
             let d_rate = poisson_logpmf_grad(observed, r);
             for (i, &model_idx) in estimated_to_model.iter().enumerate() {
-                let dr = eval_resolved_deriv(rate, model_idx, &ctx);
+                let dr = eval_emitted_grad(rate_grad, model_idx, &ctx);
                 grad[i] += d_rate * dr;
             }
         }
-        ResolvedLikelihood::Binomial { n, p } => {
+        ResolvedLikelihood::Binomial { n, p, p_grad } => {
             // log p(k|n,p) = log C(n,k) + k·log(p) + (n-k)·log(1-p)
-            // n is integer-valued (rounded); treat n as constant w.r.t. θ.
-            // d/dp = k/p - (n-k)/(1-p)
+            // n is integer-valued (rounded) and θ-independent (gated by P5);
+            // it carries no gradient. d/dp = k/p - (n-k)/(1-p)
             let n_val = eval_resolved(n, &ctx);
             let p_val = eval_resolved(p, &ctx);
             let n_int = n_val.round().max(0.0) as u64;
@@ -221,20 +226,20 @@ pub(crate) fn eval_likelihood_resolved_grad(
             if p_val > 0.0 && p_val < 1.0 && k_obs <= n_int {
                 let d_p = k_obs as f64 / p_val - (n_int - k_obs) as f64 / (1.0 - p_val);
                 for (i, &model_idx) in estimated_to_model.iter().enumerate() {
-                    let dp = eval_resolved_deriv(p, model_idx, &ctx);
+                    let dp = eval_emitted_grad(p_grad, model_idx, &ctx);
                     grad[i] += d_p * dp;
                 }
             }
         }
-        ResolvedLikelihood::BetaBinomial { n, alpha, beta } => {
+        ResolvedLikelihood::BetaBinomial { n, alpha, alpha_grad, beta, beta_grad } => {
             // log L = log C(n,k) + lgamma(k+α) + lgamma(n−k+β) + lgamma(α+β)
             //         − lgamma(n+α+β) − lgamma(α) − lgamma(β)
-            // n is integer-valued (rounded); treat it as constant w.r.t. θ,
-            // exactly as the Binomial arm treats its `n`. The combinatorial
-            // log C(n,k) term carries no α/β dependence. The remaining
-            // gradient w.r.t. (α, β) comes from `beta_binomial_logpmf_grad`,
-            // then chain-rules to each estimated param via the α/β arg
-            // expressions.
+            // n is integer-valued (rounded) and θ-independent (gated by P5); it
+            // carries no gradient, exactly as the Binomial arm treats its `n`.
+            // The combinatorial log C(n,k) term carries no α/β dependence. The
+            // remaining gradient w.r.t. (α, β) comes from
+            // `beta_binomial_logpmf_grad`, then chain-rules to each estimated
+            // param via the emitted α/β gradient maps.
             let n_val = eval_resolved(n, &ctx);
             let alpha_val = eval_resolved(alpha, &ctx);
             let beta_val = eval_resolved(beta, &ctx);
@@ -242,12 +247,12 @@ pub(crate) fn eval_likelihood_resolved_grad(
             let (d_alpha, d_beta) =
                 beta_binomial_logpmf_grad(observed, n_round, alpha_val, beta_val);
             for (i, &model_idx) in estimated_to_model.iter().enumerate() {
-                let da = eval_resolved_deriv(alpha, model_idx, &ctx);
-                let db = eval_resolved_deriv(beta, model_idx, &ctx);
+                let da = eval_emitted_grad(alpha_grad, model_idx, &ctx);
+                let db = eval_emitted_grad(beta_grad, model_idx, &ctx);
                 grad[i] += d_alpha * da + d_beta * db;
             }
         }
-        ResolvedLikelihood::Bernoulli { p } => {
+        ResolvedLikelihood::Bernoulli { p, p_grad } => {
             // log L = log(p)         if observed > 0.5
             //       = log(1 - p)     otherwise
             // Outside [0,1] the clamp in eval_likelihood_resolved fires,
@@ -256,7 +261,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
             if p_val > 0.0 && p_val < 1.0 {
                 let d_log = if observed > 0.5 { 1.0 / p_val } else { -1.0 / (1.0 - p_val) };
                 for (i, &model_idx) in estimated_to_model.iter().enumerate() {
-                    let dp = eval_resolved_deriv(p, model_idx, &ctx);
+                    let dp = eval_emitted_grad(p_grad, model_idx, &ctx);
                     grad[i] += d_log * dp;
                 }
             }
@@ -325,29 +330,29 @@ pub(crate) fn sample_obs_resolved(
     };
 
     match likelihood {
-        ResolvedLikelihood::NegBinomial { mean, dispersion } => {
+        ResolvedLikelihood::NegBinomial { mean, dispersion, .. } => {
             let m = eval_resolved(mean, &ctx(projected));
             let k = eval_resolved(dispersion, &ctx(projected));
             if m <= 0.0 || k <= 0.0 { return 0.0; }
             let g = Gamma::new(k, m / k).unwrap().sample(rng.inner_mut());
             rng.poisson(g) as f64
         }
-        ResolvedLikelihood::Normal { mean, sd } => {
+        ResolvedLikelihood::Normal { mean, sd, .. } => {
             let m = eval_resolved(mean, &ctx(projected));
             let s = eval_resolved(sd, &ctx(projected));
             let draw = Normal::new(m, s.max(1e-10)).unwrap().sample(rng.inner_mut());
             draw.round().max(0.0)
         }
-        ResolvedLikelihood::Poisson { rate } => {
+        ResolvedLikelihood::Poisson { rate, .. } => {
             let r = eval_resolved(rate, &ctx(projected));
             rng.poisson(r) as f64
         }
-        ResolvedLikelihood::Binomial { n, p } => {
+        ResolvedLikelihood::Binomial { n, p, .. } => {
             let n_val = eval_resolved(n, &ctx(projected));
             let p_val = eval_resolved(p, &ctx(projected));
             rng.binomial(n_val.round().max(0.0) as u64, p_val.clamp(0.0, 1.0)) as f64
         }
-        ResolvedLikelihood::BetaBinomial { n, alpha, beta } => {
+        ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
             // Draw BetaBinomial(n, alpha, beta): p ~ Beta(alpha, beta),
             // then k ~ Binomial(n, p). Uses the inner RNG directly for
             // the Beta draw (Gamma(a,1)/(Gamma(a,1)+Gamma(b,1))).
@@ -362,7 +367,7 @@ pub(crate) fn sample_obs_resolved(
             let p = a / (a + b);
             rng.binomial(n_int, p.clamp(0.0, 1.0)) as f64
         }
-        ResolvedLikelihood::Bernoulli { p } => {
+        ResolvedLikelihood::Bernoulli { p, .. } => {
             // Clamp before sampling — an out-of-range p would
             // otherwise always-1 (p > 1) or always-0 (p < 0).
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
@@ -395,15 +400,15 @@ pub(crate) fn eval_obs_mean_resolved(
         ResolvedLikelihood::Normal { mean, .. } => {
             eval_resolved(mean, &ctx(projected))
         }
-        ResolvedLikelihood::Poisson { rate } => {
+        ResolvedLikelihood::Poisson { rate, .. } => {
             eval_resolved(rate, &ctx(projected))
         }
-        ResolvedLikelihood::Binomial { n, p } => {
+        ResolvedLikelihood::Binomial { n, p, .. } => {
             let n_val = eval_resolved(n, &ctx(projected));
             let p_val = eval_resolved(p, &ctx(projected));
             n_val * p_val
         }
-        ResolvedLikelihood::BetaBinomial { n, alpha, beta } => {
+        ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
             // E[BetaBinomial(n, α, β)] = n · α / (α + β)
             let n_val = eval_resolved(n, &ctx(projected));
             let alpha_val = eval_resolved(alpha, &ctx(projected));
@@ -411,7 +416,7 @@ pub(crate) fn eval_obs_mean_resolved(
             let denom = (alpha_val + beta_val).max(LOG_PROB_FLOOR);
             n_val * (alpha_val / denom)
         }
-        ResolvedLikelihood::Bernoulli { p } => {
+        ResolvedLikelihood::Bernoulli { p, .. } => {
             eval_resolved(p, &ctx(projected))
         }
     }

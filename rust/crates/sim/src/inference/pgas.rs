@@ -2332,8 +2332,9 @@ pub fn run_pgas(
     };
 
     // Inverse map: estimated_to_model[est_idx] = model_param_idx. Used by
-    // gh#20 (gamma-density gradient) and gh#76 (obs-density gradient) to
-    // thread `eval_resolved_deriv` through σ² and likelihood-arg expressions.
+    // gh#20 (gamma-density gradient) and gh#76/gh#180 (obs-density gradient) to
+    // look up the compiler-emitted `∂σ²/∂θ` and `∂arg/∂θ` maps (via the shared
+    // `eval_emitted_grad` seam).
     let estimated_to_model: Vec<usize> = if2_params.iter().map(|spec| spec.index).collect();
 
     // ── Trajectory warm-up: CSMC-only sweeps before parameter updates ──

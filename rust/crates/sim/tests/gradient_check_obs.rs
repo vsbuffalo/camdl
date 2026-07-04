@@ -34,6 +34,23 @@ fn load_model(path: &str) -> ir::Model {
         .unwrap_or_else(|e| panic!("cannot parse {}: {}", path, e))
 }
 
+/// A single-entry compiler-mirroring gradient map `{param: Grad(e)}` for the
+/// programmatic obs-model builders below. Under P4 the runtime consumes the
+/// emitted `*_grad` map (not a runtime differentiator), so these hand-built
+/// likelihoods must carry the same `∂arg/∂θ` the OCaml autodiff would emit for
+/// the same argument — the FD check is the ground-truth validator of that
+/// mirror (a wrong entry makes the FD fail).
+fn grad1(param: &str, e: ir::expr::Expr) -> std::collections::HashMap<String, ir::deriv::DerivEntry> {
+    std::collections::HashMap::from([(param.to_string(), ir::deriv::DerivEntry::Grad(e))])
+}
+
+/// `∂arg/∂θ = 1` for an argument that is exactly `Param(θ)` (e.g. `dispersion = k`,
+/// `p = rho`, `alpha = a_obs`) — mirrors the compiler, which folds the
+/// derivative of a bare parameter to `Const 1.0`.
+fn const1() -> ir::expr::Expr {
+    ir::expr::Expr::Const(ir::expr::ConstExpr { value: 1.0 })
+}
+
 fn build_obs_model(
     compiled: Arc<CompiledModel>,
     obs_times: &[f64],
@@ -253,20 +270,20 @@ fn obs_sd_for_likelihood(
         projected: Some(proj), aux: None, int_float_override: None, per_eval: None,
     };
     match lh {
-        ResolvedLikelihood::NegBinomial { mean, dispersion } => {
+        ResolvedLikelihood::NegBinomial { mean, dispersion, .. } => {
             // var = μ + μ²/k → sd = √(μ + μ²/k)
             let m = eval_resolved(mean, &ctx(projected));
             let k = eval_resolved(dispersion, &ctx(projected)).max(1e-30);
             (m + m * m / k).max(0.0).sqrt()
         }
         ResolvedLikelihood::Normal { sd, .. } => eval_resolved(sd, &ctx(projected)),
-        ResolvedLikelihood::Poisson { rate } => eval_resolved(rate, &ctx(projected)).max(0.0).sqrt(),
-        ResolvedLikelihood::Binomial { n, p } => {
+        ResolvedLikelihood::Poisson { rate, .. } => eval_resolved(rate, &ctx(projected)).max(0.0).sqrt(),
+        ResolvedLikelihood::Binomial { n, p, .. } => {
             let n_val = eval_resolved(n, &ctx(projected));
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             (n_val * p_val * (1.0 - p_val)).max(0.0).sqrt()
         }
-        ResolvedLikelihood::BetaBinomial { n, alpha, beta } => {
+        ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
             let n_val = eval_resolved(n, &ctx(projected));
             let a = eval_resolved(alpha, &ctx(projected)).max(1e-30);
             let b = eval_resolved(beta, &ctx(projected)).max(1e-30);
@@ -275,7 +292,7 @@ fn obs_sd_for_likelihood(
             let var = n_val * p * (1.0 - p) * (a + b + n_val) / (a + b + 1.0);
             var.max(0.0).sqrt()
         }
-        ResolvedLikelihood::Bernoulli { p } => {
+        ResolvedLikelihood::Bernoulli { p, .. } => {
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             (p_val * (1.0 - p_val)).max(0.0).sqrt()
         }
@@ -302,18 +319,18 @@ fn obs_mean_for_likelihood(
     match lh {
         ResolvedLikelihood::NegBinomial { mean, .. } => eval_resolved(mean, &ctx(projected)),
         ResolvedLikelihood::Normal { mean, .. } => eval_resolved(mean, &ctx(projected)),
-        ResolvedLikelihood::Poisson { rate } => eval_resolved(rate, &ctx(projected)),
-        ResolvedLikelihood::Binomial { n, p } => {
+        ResolvedLikelihood::Poisson { rate, .. } => eval_resolved(rate, &ctx(projected)),
+        ResolvedLikelihood::Binomial { n, p, .. } => {
             eval_resolved(n, &ctx(projected)) * eval_resolved(p, &ctx(projected))
         }
-        ResolvedLikelihood::BetaBinomial { n, alpha, beta } => {
+        ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
             let n_val = eval_resolved(n, &ctx(projected));
             let a = eval_resolved(alpha, &ctx(projected));
             let b = eval_resolved(beta, &ctx(projected));
             let denom = (a + b).max(1e-300);
             n_val * (a / denom)
         }
-        ResolvedLikelihood::Bernoulli { p } => eval_resolved(p, &ctx(projected)),
+        ResolvedLikelihood::Bernoulli { p, .. } => eval_resolved(p, &ctx(projected)),
     }
 }
 
@@ -530,7 +547,9 @@ fn build_poisson_seir() -> ir::Model {
         if let Likelihood::NegBinomial(nb) = &om.likelihood {
             om.likelihood = Likelihood::Poisson(PoissonLikelihood {
                 rate: nb.mean.clone(),
-                rate_grad: Default::default(),
+                // rate = rho * projected → ∂rate/∂rho = projected. Reuse the
+                // compiler-emitted mean_grad from the NegBin source verbatim.
+                rate_grad: nb.mean_grad.clone(),
             });
         }
     }
@@ -594,9 +613,11 @@ fn build_discretized_normal_seir() -> ir::Model {
         if let Likelihood::NegBinomial(nb) = &om.likelihood {
             om.likelihood = Likelihood::Normal(NormalLikelihood {
                 mean: nb.mean.clone(),
-                mean_grad: Default::default(),
+                // mean = rho * projected → ∂mean/∂rho = projected (reuse source).
+                mean_grad: nb.mean_grad.clone(),
                 sd: Expr::Param(ParamExpr { param: "sigma_obs".to_string() }),
-                sd_grad: Default::default(),
+                // sd = sigma_obs → ∂sd/∂sigma_obs = 1.
+                sd_grad: grad1("sigma_obs", const1()),
             });
         }
     }
@@ -653,7 +674,8 @@ fn build_binomial_seir() -> ir::Model {
             om.likelihood = Likelihood::Binomial(BinomialLikelihood {
                 n: Expr::Projected(ProjectedExpr { projected: () }),
                 p: Expr::Param(ParamExpr { param: "rho".to_string() }),
-                p_grad: Default::default(),
+                // p = rho → ∂p/∂rho = 1. (n = projected is θ-independent — no grad.)
+                p_grad: grad1("rho", const1()),
             });
         }
     }
@@ -668,7 +690,7 @@ fn gh76_binomial_obs_grad_matches_fd() {
     // `complete_data_loglik_grad`. The existing NegBin/Poisson/Normal
     // tests don't cover Binomial's chain-rule form
     //   d/dp [log C(n,k) + k·log(p) + (n−k)·log(1−p)] = k/p − (n−k)/(1−p)
-    // multiplied by d(p)/d(θ_k) through `eval_resolved_deriv`.
+    // multiplied by d(p)/d(θ_k) through the emitted `p_grad` map.
     let mut model = build_binomial_seir();
     set_param_defaults(&mut model, &[
         ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
@@ -718,7 +740,7 @@ fn gh76_binomial_obs_grad_matches_fd() {
 /// per-case reporting probability itself varies (cluster/household
 /// heterogeneity). `α` and `β` are exposed as estimated parameters
 /// (`a_obs`, `b_obs`) so the gradient's chain-rule path through
-/// `eval_resolved_deriv` is exercised on each in turn. Mean is
+/// the emitted `alpha_grad`/`beta_grad` maps are exercised on each in turn. Mean is
 /// `n·α/(α+β)` (see `obs_mean_for_likelihood`), which stays well below `n`
 /// for the chosen α, β, so synthetic obs satisfy `k ≤ n`.
 fn build_beta_binomial_seir() -> ir::Model {
@@ -739,9 +761,11 @@ fn build_beta_binomial_seir() -> ir::Model {
             om.likelihood = Likelihood::BetaBinomial(BetaBinomialLikelihood {
                 n: Expr::Projected(ProjectedExpr { projected: () }),
                 alpha: Expr::Param(ParamExpr { param: "a_obs".to_string() }),
-                alpha_grad: Default::default(),
+                // alpha = a_obs → ∂alpha/∂a_obs = 1.
+                alpha_grad: grad1("a_obs", const1()),
                 beta: Expr::Param(ParamExpr { param: "b_obs".to_string() }),
-                beta_grad: Default::default(),
+                // beta = b_obs → ∂beta/∂b_obs = 1.
+                beta_grad: grad1("b_obs", const1()),
             });
         }
     }
@@ -762,7 +786,7 @@ fn gh76_beta_binomial_obs_grad_matches_fd() {
     //   d/dα [log C + lgamma(k+α) + lgamma(n−k+β) + lgamma(α+β)
     //         − lgamma(n+α+β) − lgamma(α) − lgamma(β)]
     //   = ψ(k+α) − ψ(α) − ψ(n+α+β) + ψ(α+β)   (and the β-mirror)
-    // multiplied by d(α)/d(θ_k) [resp. d(β)/d(θ_k)] via `eval_resolved_deriv`.
+    // multiplied by d(α)/d(θ_k) [resp. d(β)/d(θ_k)] via the emitted grad maps.
     let mut model = build_beta_binomial_seir();
     set_param_defaults(&mut model, &[
         ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
@@ -805,6 +829,143 @@ fn gh76_beta_binomial_obs_grad_matches_fd() {
         &[a_obs_idx, b_obs_idx, beta_idx],
         dt, 1e-4,
         "gh76_beta_binomial_obs",
+    );
+}
+
+/// Build the gh#180 headline model: a Poisson obs with a PARAMETRIC
+/// `DerivedExpr` projection `projected = qgam * I`. The scaling parameter `qgam`
+/// reaches the observation ONLY through the projection; the rate `rho * projected`
+/// then depends on qgam via the chain rule.
+///
+/// The emitted `rate_grad` inlines the projection into the argument exactly as
+/// the OCaml autodiff does for a `DerivedExpr` projection (verified against the
+/// `surveillance_likelihoods` golden's inlined `alpha_grad[kappa] = R/N`):
+/// with `rate = rho · (qgam · I)`,
+///   `∂rate/∂rho  = qgam · I`  (the projection, inlined — the FlowSum case would
+///                              instead leave a bare `projected` node), and
+///   `∂rate/∂qgam = rho · I`   (the gh#180 chain-rule term — silently zero when
+///                              the obs path differentiated the argument alone).
+fn build_parametric_projection_poisson_seir() -> ir::Model {
+    use ir::expr::*;
+    use ir::observation::*;
+    use ir::parameter::Parameter;
+    let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");
+    model.observations.retain(|o| o.name == "weekly_cases");
+
+    // qgam: the estimated projection-scaling parameter (positive).
+    model.parameters.push(Parameter {
+        name: "qgam".to_string(),
+        value: ir::parameter::ParamValue::Estimated {
+            init: Some(0.1),
+            bounds: Some((0.001, 10.0)),
+            prior: ir::parameter::PriorSpec::Flat,
+            transform: ir::parameter::Transform::Identity,
+        },
+        param_kind: Some(ir::parameter::ParamKind::Positive),
+        param_dim: None,
+    });
+
+    // qgam · I  — infectious prevalence scaled by qgam (the parametric DerivedExpr
+    // projection) — and rho · I, the qgam chain-rule term after inlining.
+    let qgam_times_i = Expr::bin_op(BinOp::Mul, Expr::param("qgam"), Expr::pop("I"));
+    let rho_times_i  = Expr::bin_op(BinOp::Mul, Expr::param("rho"),  Expr::pop("I"));
+
+    for om in &mut model.observations {
+        om.projection = Projection::DerivedExpr(qgam_times_i.clone());
+        let mut rate_grad = std::collections::HashMap::new();
+        rate_grad.insert("rho".to_string(),
+            ir::deriv::DerivEntry::Grad(qgam_times_i.clone()));
+        rate_grad.insert("qgam".to_string(),
+            ir::deriv::DerivEntry::Grad(rho_times_i.clone()));
+        om.likelihood = Likelihood::Poisson(PoissonLikelihood {
+            rate: Expr::bin_op(
+                BinOp::Mul,
+                Expr::param("rho"),
+                Expr::Projected(ProjectedExpr { projected: () }),
+            ),
+            rate_grad,
+        });
+    }
+    model
+}
+
+#[test]
+fn gh180_parametric_projection_grad_matches_fd() {
+    // gh#180 headline (the proof this whole arc exists for). A parameter `qgam`
+    // reaches the observation ONLY through a parametric `DerivedExpr` projection
+    // `projected = qgam · I`. Before the unified obs-gradient autodiff, the obs
+    // gradient ran a runtime forward-mode differentiator over the likelihood
+    // ARGUMENT alone (treating `projected` as constant), so ∂L/∂qgam was
+    // SILENTLY ZERO. Now the emitted `rate_grad` carries the projection-inlined
+    // chain-rule term and the runtime consumes it.
+    //
+    // Asserts the qgam gradient is (a) NON-zero and (b) central-difference
+    // matching. Calls `complete_data_loglik_grad` DIRECTLY — `run_pgas`'s C1
+    // preflight still refuses a parametric DerivedExpr projection until P5.
+    let mut model = build_parametric_projection_poisson_seir();
+    set_param_defaults(&mut model, &[
+        ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
+        ("rho", 0.5), ("k", 5.0), ("p_detect", 0.8),
+        ("N0", 10000.0), ("I0", 10.0), ("qgam", 0.1),
+    ]);
+    model.simulation.t_end = 60.0;
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let (params, param_names) = build_params_and_names(&compiled);
+
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let dt = 1.0;
+    let mut rng = StatefulRng::new(49);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let n_substeps = trajectory.substeps.len();
+
+    let (substep_idx, obs_times) = obs_substep_indices_regular(
+        t_start, dt, n_substeps, 7.0, 7.0, t_end,
+    );
+
+    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+    let observations: Vec<Observation> = obs_times.iter()
+        .map(|&t| Observation { time: t, value: 0.0 }).collect();
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let qgam_idx = compiled.param_index["qgam"];
+    let rho_idx = compiled.param_index["rho"];
+    let beta_idx = compiled.param_index["beta"];
+
+    // Non-zero check: compute the analytic gradient directly and assert the qgam
+    // coordinate is non-zero — the exact quantity that was silently zero before.
+    let d = estimated_indices.len();
+    let mut model_to_estimated: Vec<Option<usize>> = vec![None; compiled.model.parameters.len()];
+    for (est_idx, &model_idx) in estimated_indices.iter().enumerate() {
+        model_to_estimated[model_idx] = Some(est_idx);
+    }
+    let rate_grads_for_run = sim::inference::pgas_grad::resolve_rate_grad_for_run(
+        &compiled.resolved.rate_grads_indexed, &model_to_estimated,
+    );
+    let oas = build_obs_at_substep(&observations, t_start, dt).unwrap();
+    let (_ll, grad) = complete_data_loglik_grad(
+        &compiled, &trajectory, &params, &observations, dt,
+        &obs_model, &[], d, &rate_grads_for_run, &oas, &estimated_indices,
+    ).unwrap();
+    let qgam_est = estimated_indices.iter().position(|&i| i == qgam_idx).unwrap();
+    eprintln!("[gh180_parametric_projection] d(ll)/d(qgam) = {:.6e} (analytic)", grad[qgam_est]);
+    assert!(
+        grad[qgam_est].abs() > 1e-6,
+        "gh#180: the qgam gradient must be NON-zero — it reaches the observation \
+         through the parametric projection and was silently zero before the \
+         chain-rule term was captured; got {:.3e}", grad[qgam_est]
+    );
+
+    fd_check(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices,
+        // qgam is the headline (the projection chain-rule term); rho shares the
+        // projection; beta guards the rate-density gradient.
+        &[qgam_idx, rho_idx, beta_idx],
+        dt, 1e-4,
+        "gh180_parametric_projection",
     );
 }
 

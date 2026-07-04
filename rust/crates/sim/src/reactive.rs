@@ -715,6 +715,7 @@ mod tests {
                 kind: TemporalKind::Interval,
                 resolved: ResolvedLikelihood::Poisson {
                     rate: crate::resolved_expr::ResolvedExpr::Const(1.0),
+                    rate_grad: Vec::new(),
                 },
                 interval_flows: vec![0],
                 emit_times: vec![7.0, 14.0],
@@ -740,6 +741,7 @@ mod tests {
                 kind: TemporalKind::Instant,
                 resolved: ResolvedLikelihood::Poisson {
                     rate: crate::resolved_expr::ResolvedExpr::Const(1.0),
+                    rate_grad: Vec::new(),
                 },
                 interval_flows: vec![0],
                 emit_times: vec![7.0],

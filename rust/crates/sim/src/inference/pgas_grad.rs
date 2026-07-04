@@ -13,7 +13,7 @@
 use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
 use crate::propensity::{eval_propensities, EvalCtx};
-use crate::resolved_expr::{eval_resolved, eval_resolved_deriv, ResolvedExpr};
+use crate::resolved_expr::{eval_resolved, eval_emitted_grad, ResolvedExpr};
 use crate::state::{IntState, RealState};
 use crate::inference::obs_loglik::{binom_logpmf, digamma, gamma_multiplier_log_density};
 use crate::inference::numerics::BINOM_PROB_EPS;
@@ -316,8 +316,8 @@ pub fn log_transition_density_grad(
 /// Some(overdispersion)).
 ///
 /// `estimated_to_model[i]` is the model-param index of the i-th estimated
-/// parameter — used to thread `eval_resolved_deriv` through the σ²
-/// resolved expression.
+/// parameter — used to look up `∂σ²/∂θ` in the compiler-emitted σ² gradient map
+/// via the shared `eval_emitted_grad` seam (gh#180).
 fn gamma_density_value_and_grad_substep(
     model: &CompiledModel,
     counts_before: &[i64],
@@ -364,6 +364,11 @@ fn gamma_density_value_and_grad_substep(
             }
             if let Some(ref resolved_od) = model.resolved.overdispersion[tr_idx] {
                 let sigma_sq = eval_resolved(resolved_od, &ctx);
+                // σ²'s emitted `∂σ²/∂θ` map (in lockstep with `overdispersion`, so
+                // `Some` here). Empty ⇒ every σ² derivative is a genuine zero.
+                let od_grad = model.resolved.overdispersion_grad[tr_idx]
+                    .as_deref()
+                    .unwrap_or(&[]);
                 if gamma_idx_local < gammas.len() && sigma_sq > OVERDISP_SIGMA_SQ_FLOOR {
                     let g = gammas[gamma_idx_local];
                     let shape = dt / sigma_sq;
@@ -390,7 +395,7 @@ fn gamma_density_value_and_grad_substep(
                         let dlg_dsq = dlg_dshape * dshape_dsq + dlg_dscale * dscale_dsq;
 
                         for (est_idx, &model_idx) in estimated_to_model.iter().enumerate() {
-                            let d_sigma_sq = eval_resolved_deriv(resolved_od, model_idx, &ctx);
+                            let d_sigma_sq = eval_emitted_grad(od_grad, model_idx, &ctx);
                             grad[est_idx] += dlg_dsq * d_sigma_sq;
                         }
                     }
@@ -409,10 +414,11 @@ fn gamma_density_value_and_grad_substep(
 /// 2. Transition rate-density gradient (via compiler-emitted `rate_grad` and
 ///    the binomial-chain-rule machinery in `log_transition_density_grad`).
 /// 3. Gamma-multiplier-density gradient w.r.t. σ² (gh#20) — chain rule through
-///    the σ² resolved expression via `eval_resolved_deriv`.
-/// 4. Observation-density gradient w.r.t. obs-model params (gh#76) — chain
-///    rule through each likelihood-argument expression via the per-distribution
-///    gradient helpers in `obs_loglik.rs`.
+///    the compiler-emitted `∂σ²/∂θ` map via the shared `eval_emitted_grad` seam.
+/// 4. Observation-density gradient w.r.t. obs-model params (gh#76, gh#180) —
+///    per-distribution `∂logpmf/∂arg` helpers in `obs_loglik.rs` times the
+///    compiler-emitted `∂arg/∂θ` (with a `DerivedExpr` projection inlined, so a
+///    param reaching the observation through the projection is captured).
 ///
 /// `estimated_to_model[i]` is the model-param index of the i-th estimated
 /// parameter (the inverse of `model_to_estimated` used to build
@@ -530,8 +536,8 @@ pub fn complete_data_loglik_grad(
 
             // Per-distribution gradient helpers in `obs_loglik.rs` give
             // d(log L)/d(mean), d(log L)/d(k), etc.; the per-stream method
-            // chain-rules through each likelihood arg expression via
-            // `eval_resolved_deriv` to reach the estimated parameters.
+            // chain-rules through the compiler-emitted `∂arg/∂θ` map (via the
+            // shared `eval_emitted_grad` seam) to reach the estimated parameters.
             let obs_grad = obs_model.log_likelihood_grad_from_flows_and_counts(
                 &acc, &rec.counts_after, obs_idx, params, estimated_to_model,
             );

@@ -606,6 +606,12 @@ pub struct ResolvedModel {
     pub per_eval_bindings: Vec<ResolvedExpr>,
     /// Per-transition resolved overdispersion σ² (None for Poisson/Deterministic).
     pub overdispersion: Vec<Option<ResolvedExpr>>,
+    /// Per-transition resolved σ² gradient map (`Some` iff `Overdispersed`, in
+    /// lockstep with `overdispersion`). The obs/σ² analogue of
+    /// `rate_grads_indexed`: model-param-indexed `∂σ²/∂θ` entries consumed by the
+    /// PGAS gamma-density gradient via `eval_emitted_grad` (gh#180). An empty map
+    /// means every σ² derivative is a genuine zero.
+    pub overdispersion_grad: Vec<Option<crate::resolved_expr::ResolvedGradMap>>,
     /// Per-transition resolved rate gradients: Vec of (param_name, resolved_expr).
     pub rate_grads: Vec<Vec<(String, ResolvedExpr)>>,
     /// Like rate_grads but with param names replaced by model param indices
@@ -1366,6 +1372,19 @@ impl CompiledModel {
             })
             .collect::<Result<_, _>>()?;
 
+        // gh#180: resolve each transition's compiler-emitted `∂σ²/∂θ` map into the
+        // model-param-indexed carrier the PGAS gamma-density gradient consumes.
+        // In lockstep with `overdispersion`: `Some` iff `Overdispersed`.
+        let overdispersion_grad: Vec<Option<crate::resolved_expr::ResolvedGradMap>> =
+            model.transitions.iter()
+                .map(|tr| match &tr.draw_method {
+                    ir::transition::DrawMethod::Overdispersed { sigma_sq_grad, .. } =>
+                        crate::resolved_expr::resolve_grad_map(sigma_sq_grad, &resolve_ctx)
+                            .map(Some),
+                    _ => Ok(None),
+                })
+                .collect::<Result<_, _>>()?;
+
         // Enforce the "overdispersion σ² is state-independent" invariant
         // that CPM (`correlated_pf.rs`) and PGAS gamma-density eval
         // (`pgas.rs:528`) assume. If σ² references compartment state,
@@ -1504,6 +1523,7 @@ impl CompiledModel {
             bindings: resolved_bindings,
             per_eval_bindings: resolved_per_eval_bindings,
             overdispersion,
+            overdispersion_grad,
             rate_grads,
             rate_grads_indexed,
             ode_derivatives,

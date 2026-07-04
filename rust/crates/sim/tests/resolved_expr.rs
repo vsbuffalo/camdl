@@ -20,7 +20,7 @@ use ir::{
 use sim::{
     compiled_model::CompiledModel,
     propensity::{eval_expr, EvalCtx},
-    resolved_expr::{resolve_expr, eval_resolved, eval_resolved_deriv, ResolveCtx},
+    resolved_expr::{resolve_expr, eval_resolved, ResolveCtx},
     state::{IntState, RealState},
 };
 
@@ -293,52 +293,6 @@ fn test_resolve_error_unknown_compartment() {
     let rctx = resolve_ctx_from(&model);
     let expr = Expr::Pop(PopExpr { pop: "nonexistent".into() });
     assert!(resolve_expr(&expr, &rctx).is_err());
-}
-
-#[test]
-fn test_derivative_matches() {
-    // d/d(beta) of (beta * S * I / N) = S * I / N
-    let model = CompiledModel::new(minimal_model(
-        vec![int_comp("S"), int_comp("I"), int_comp("R")],
-        vec![param("beta", 0.3), param("gamma", 0.1)],
-    )).unwrap();
-    let mut int_s = IntState::new(3);
-    int_s.counts[0] = 990;
-    int_s.counts[1] = 10;
-    int_s.counts[2] = 0;
-    let real_s = RealState::new(0);
-    let params = vec![0.3, 0.1];
-
-    let n = Expr::pop_sum(vec!["S".into(), "I".into(), "R".into()]);
-    let expr = Expr::bin_op(
-        BinOp::Div,
-        Expr::bin_op(
-            BinOp::Mul,
-            Expr::bin_op(BinOp::Mul, Expr::param("beta"), Expr::pop("S")),
-            Expr::pop("I"),
-        ),
-        n,
-    );
-
-    let rctx = resolve_ctx_from(&model);
-    let resolved = resolve_expr(&expr, &rctx).unwrap();
-    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &params, t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
-
-    // beta is param index 0
-    let old_deriv = sim::propensity::eval_expr_deriv(&expr, 0, &ctx);
-    let new_deriv = eval_resolved_deriv(&resolved, 0, &ctx);
-    assert!(
-        (old_deriv - new_deriv).abs() < 1e-12,
-        "derivative mismatch: eval_expr_deriv={}, eval_resolved_deriv={}", old_deriv, new_deriv
-    );
-
-    // gamma is param index 1 — derivative should be 0 (not in expression)
-    let old_deriv2 = sim::propensity::eval_expr_deriv(&expr, 1, &ctx);
-    let new_deriv2 = eval_resolved_deriv(&resolved, 1, &ctx);
-    assert!(
-        (old_deriv2 - new_deriv2).abs() < 1e-12,
-        "derivative mismatch for gamma: eval_expr_deriv={}, eval_resolved_deriv={}", old_deriv2, new_deriv2
-    );
 }
 
 #[test]

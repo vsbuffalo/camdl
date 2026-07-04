@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use ir::expr::{BinOp, Expr, UnOp};
+use ir::deriv::{DerivEntry, UnsupportedReason};
 use ir::table::OobPolicy;
 
 use crate::error::SimError;
@@ -803,35 +804,150 @@ pub fn stage_per_eval(
     }
 }
 
+// ── Resolved derivative entries (obs/σ² gradient carriers) ───────────────────
+
+/// Resolved analogue of [`ir::deriv::DerivEntry`] — one differentiable
+/// argument's per-parameter gradient entry, carried into the runtime obs/σ²
+/// gradient eval.
+///
+/// `Grad` holds the resolved `∂arg/∂param` expression, evaluated with the value
+/// evaluator [`eval_resolved`] — exactly how `pgas_grad` already consumes a
+/// transition's `rate_grad`. `Unsupported` is *carried* (so the P5 fit-time
+/// preflight can read its `code` and refuse the fit with that reason) but is
+/// never evaluated on a gated path: the preflight rejects any estimated
+/// parameter it covers before a gradient is taken (proposal
+/// `2026-07-03-unified-obs-gradient-autodiff.md` §4.1, §4.3).
+#[derive(Debug, Clone)]
+pub enum ResolvedDerivEntry {
+    /// A real `∂arg/∂param` expression (resolved for hot-path evaluation).
+    Grad(ResolvedExpr),
+    /// The derivative could not be emitted; the stable `code` is the refusal
+    /// reason the P5 gate surfaces. Never evaluated in a gated fit.
+    Unsupported { code: UnsupportedReason },
+}
+
+/// One differentiable argument's resolved gradient map: `(model_param_idx,
+/// entry)` pairs — the obs/σ² analogue of [`CompiledModel::rate_grads_indexed`].
+///
+/// Keyed by MODEL parameter index (the eval filters to the run's estimated set
+/// via `estimated_to_model`). An **absent** model-param key is a genuine zero
+/// (mirrors `rate_grad`: the compiler omits a folded `Const 0.0`).
+///
+/// [`CompiledModel`]: crate::compiled_model::CompiledModel
+pub type ResolvedGradMap = Vec<(usize, ResolvedDerivEntry)>;
+
+/// Resolve an IR `HashMap<String, DerivEntry>` gradient map into a
+/// [`ResolvedGradMap`]. Mirrors the `rate_grads_indexed` construction
+/// (`compiled_model.rs`): each `Grad` expression is resolved for hot-path eval
+/// and its parameter NAME is mapped to a MODEL parameter index; an
+/// `Unsupported` entry carries its `code` forward for the P5 gate.
+///
+/// A key that is not a declared model parameter is a malformed IR — reject it
+/// loudly (a dropped gradient component reads as zero to NUTS, silently
+/// optimizing a different model than the simulator's likelihood), exactly as the
+/// rate path does.
+pub(crate) fn resolve_grad_map(
+    grad: &std::collections::HashMap<String, DerivEntry>,
+    ctx: &ResolveCtx<'_>,
+) -> Result<ResolvedGradMap, SimError> {
+    let mut out = Vec::with_capacity(grad.len());
+    for (name, entry) in grad {
+        let model_idx = *ctx.param_index.get(name.as_str()).ok_or_else(|| {
+            SimError::Validation(format!(
+                "observation/σ² gradient references unknown parameter '{}' — every \
+                 grad key must be a declared model parameter. A dropped gradient \
+                 component is silently treated as zero by gradient-based inference \
+                 (NUTS), which then optimizes a different model than the simulator. \
+                 This is a malformed IR (likely a typo'd or stale autodiff key).",
+                name
+            ))
+        })?;
+        let resolved = match entry {
+            DerivEntry::Grad(e) => ResolvedDerivEntry::Grad(resolve_expr(e, ctx)?),
+            DerivEntry::Unsupported { code, .. } =>
+                ResolvedDerivEntry::Unsupported { code: *code },
+        };
+        out.push((model_idx, resolved));
+    }
+    Ok(out)
+}
+
+/// The single shared seam that turns a compiler-emitted gradient map into a
+/// value: evaluate `∂arg/∂θ` for MODEL parameter index `model_idx`.
+///
+/// - `Grad(e)`  → `eval_resolved(e, ctx)` (the value evaluator — how `rate_grad`
+///   is consumed);
+/// - absent key → genuine `0.0` (the parameter does not enter this argument);
+/// - `Unsupported` → **unreachable on a gated path**: the P5 fit-time preflight
+///   refused any estimated parameter it covers before a gradient was taken. Trip
+///   a `debug_assert!` (so a regression surfaces in tests) and fall back to
+///   `0.0` in release. P5 makes this unreachable-by-construction.
+///
+/// The observation likelihood arguments, the σ² overdispersion term, and a
+/// future ODE-NUTS `det_grad` all route through THIS function, so the emitted
+/// gradient is turned into a number in exactly one place — the obs/σ²/ODE cells
+/// cannot fork (proposal §4.3, §10).
+#[inline]
+pub(crate) fn eval_emitted_grad(
+    grad: &[(usize, ResolvedDerivEntry)],
+    model_idx: usize,
+    ctx: &EvalCtx<'_>,
+) -> f64 {
+    match grad.iter().find(|(mi, _)| *mi == model_idx) {
+        Some((_, ResolvedDerivEntry::Grad(e))) => eval_resolved(e, ctx),
+        Some((_, ResolvedDerivEntry::Unsupported { code })) => {
+            // `code` is read here (surfacing which refusal leaked) so it is not a
+            // dead field in P4; P5's fit-time preflight consumes it as the user
+            // message and makes this branch unreachable-by-construction.
+            debug_assert!(
+                false,
+                "ungated Unsupported obs/σ² gradient ({code:?}) reached eval for \
+                 model param {model_idx} — the P5 fit-time preflight invariant was \
+                 violated"
+            );
+            0.0
+        }
+        None => 0.0,
+    }
+}
+
 // ── Resolved observation likelihood ──────────────────────────────────────────
 
 /// Pre-resolved observation likelihood. All `Expr` fields replaced by
-/// `ResolvedExpr`. Constructed at closure-build time, captured by obs closures.
+/// `ResolvedExpr`, and each differentiable argument carries its resolved
+/// gradient map ([`ResolvedGradMap`], the obs analogue of
+/// [`CompiledModel::rate_grads_indexed`]). Constructed at closure-build time,
+/// captured by obs closures; evaluates with params at call time.
 ///
-/// P4 TODO (unified obs-gradient autodiff, proposal 2026-07-03 §4.3): give each
-/// differentiable argument a resolved gradient carrier — a
-/// `Vec<(usize /* model param idx */, ResolvedExpr)>` per arg (`rate`, `mean`,
-/// `sd`, …), the obs analogue of `CompiledModel::rate_grads_indexed`. P4 populates
-/// it in [`resolve_likelihood`] from the IR `*_grad` maps (resolving each
-/// `DerivEntry::Grad` expression and mapping its param name → model index) and
-/// consumes it in `eval_likelihood_resolved_grad`, replacing the per-arg
-/// `eval_resolved_deriv` calls. It is **not** added here in P2: the IR grad maps
-/// are empty until P3 and the runtime consumer is still `eval_resolved_deriv`, so
-/// an empty carrier would be dead weight that ripples `..` edits through every
-/// `ResolvedLikelihood` match arm in the P4-reviewed inference path. `DerivEntry`
-/// / `Unsupported` never reaches this resolved form — the fit-time gate (P5)
-/// refuses an `Unsupported`-covered param before a gradient is ever evaluated.
+/// The `*_grad` carriers are populated by [`resolve_likelihood`] from the IR
+/// `*_grad` maps (compiler-emitted, proposal
+/// `2026-07-03-unified-obs-gradient-autodiff.md`) and consumed by
+/// `eval_likelihood_resolved_grad` via [`eval_emitted_grad`]. `n`
+/// (Binomial/BetaBinomial) carries no gradient — it must be θ-independent.
+///
+/// [`CompiledModel`]: crate::compiled_model::CompiledModel
 #[derive(Debug, Clone)]
 pub enum ResolvedLikelihood {
-    Poisson { rate: ResolvedExpr },
-    NegBinomial { mean: ResolvedExpr, dispersion: ResolvedExpr },
-    Normal { mean: ResolvedExpr, sd: ResolvedExpr },
-    Binomial { n: ResolvedExpr, p: ResolvedExpr },
-    BetaBinomial { n: ResolvedExpr, alpha: ResolvedExpr, beta: ResolvedExpr },
-    Bernoulli { p: ResolvedExpr },
+    Poisson { rate: ResolvedExpr, rate_grad: ResolvedGradMap },
+    NegBinomial {
+        mean: ResolvedExpr, mean_grad: ResolvedGradMap,
+        dispersion: ResolvedExpr, dispersion_grad: ResolvedGradMap,
+    },
+    Normal {
+        mean: ResolvedExpr, mean_grad: ResolvedGradMap,
+        sd: ResolvedExpr, sd_grad: ResolvedGradMap,
+    },
+    Binomial { n: ResolvedExpr, p: ResolvedExpr, p_grad: ResolvedGradMap },
+    BetaBinomial {
+        n: ResolvedExpr,
+        alpha: ResolvedExpr, alpha_grad: ResolvedGradMap,
+        beta: ResolvedExpr, beta_grad: ResolvedGradMap,
+    },
+    Bernoulli { p: ResolvedExpr, p_grad: ResolvedGradMap },
 }
 
-/// Resolve a `Likelihood` into a `ResolvedLikelihood`.
+/// Resolve a `Likelihood` into a `ResolvedLikelihood`, resolving both the
+/// argument expressions and their compiler-emitted gradient maps.
 pub fn resolve_likelihood(
     lik: &ir::observation::Likelihood,
     ctx: &ResolveCtx<'_>,
@@ -840,120 +956,35 @@ pub fn resolve_likelihood(
     match lik {
         Likelihood::Poisson(p) => Ok(ResolvedLikelihood::Poisson {
             rate: resolve_expr(&p.rate, ctx)?,
+            rate_grad: resolve_grad_map(&p.rate_grad, ctx)?,
         }),
         Likelihood::NegBinomial(nb) => Ok(ResolvedLikelihood::NegBinomial {
             mean: resolve_expr(&nb.mean, ctx)?,
+            mean_grad: resolve_grad_map(&nb.mean_grad, ctx)?,
             dispersion: resolve_expr(&nb.dispersion, ctx)?,
+            dispersion_grad: resolve_grad_map(&nb.dispersion_grad, ctx)?,
         }),
         Likelihood::Normal(n) => Ok(ResolvedLikelihood::Normal {
             mean: resolve_expr(&n.mean, ctx)?,
+            mean_grad: resolve_grad_map(&n.mean_grad, ctx)?,
             sd: resolve_expr(&n.sd, ctx)?,
+            sd_grad: resolve_grad_map(&n.sd_grad, ctx)?,
         }),
         Likelihood::Binomial(b) => Ok(ResolvedLikelihood::Binomial {
             n: resolve_expr(&b.n, ctx)?,
             p: resolve_expr(&b.p, ctx)?,
+            p_grad: resolve_grad_map(&b.p_grad, ctx)?,
         }),
         Likelihood::BetaBinomial(bb) => Ok(ResolvedLikelihood::BetaBinomial {
             n: resolve_expr(&bb.n, ctx)?,
             alpha: resolve_expr(&bb.alpha, ctx)?,
+            alpha_grad: resolve_grad_map(&bb.alpha_grad, ctx)?,
             beta: resolve_expr(&bb.beta, ctx)?,
+            beta_grad: resolve_grad_map(&bb.beta_grad, ctx)?,
         }),
         Likelihood::Bernoulli(b) => Ok(ResolvedLikelihood::Bernoulli {
             p: resolve_expr(&b.p, ctx)?,
+            p_grad: resolve_grad_map(&b.p_grad, ctx)?,
         }),
-    }
-}
-
-// ── Forward-mode AD on resolved trees ────────────────────────────────────────
-
-/// Evaluate d(expr)/d(param at index `wrt`) on a pre-resolved tree.
-///
-/// Mirrors `eval_expr_deriv` but operates on `ResolvedExpr` and is infallible.
-/// Pop, PopSum, Time, TimeFunc, TableLookup, Projected have zero derivative
-/// (they don't depend on params given fixed state X).
-///
-/// gh#119: `TimeFunc`/`TableLookup` stay at 0 here on purpose — this is the
-/// secondary forward-mode path (obs-likelihood / overdispersion terms). The
-/// production dynamics gradient rides the compiler-emitted `rate_grad`, which
-/// now carries the analytic ∂forcing/∂coef, so a forcing-coefficient parameter
-/// gets its real gradient there, not through this function.
-#[inline]
-pub fn eval_resolved_deriv(expr: &ResolvedExpr, wrt: usize, ctx: &EvalCtx<'_>) -> f64 {
-    match expr {
-        ResolvedExpr::Param(idx) => if *idx == wrt { 1.0 } else { 0.0 },
-
-        ResolvedExpr::Const(_)
-        | ResolvedExpr::IntPop(_)
-        | ResolvedExpr::RealPop(_)
-        | ResolvedExpr::IntPopSum(_)
-        | ResolvedExpr::MixedPopSum { .. }
-        | ResolvedExpr::Time
-        | ResolvedExpr::Dt
-        | ResolvedExpr::Projected
-        | ResolvedExpr::ObsColumnRef(_)
-        | ResolvedExpr::TimeFunc(_)
-        | ResolvedExpr::TableLookup { .. } => 0.0,
-
-        ResolvedExpr::BinOp { op, left, right } => {
-            let a = eval_resolved(left, ctx);
-            let b = eval_resolved(right, ctx);
-            let da = eval_resolved_deriv(left, wrt, ctx);
-            let db = eval_resolved_deriv(right, wrt, ctx);
-            match op {
-                BinOp::Add => da + db,
-                BinOp::Sub => da - db,
-                BinOp::Mul => da * b + a * db,
-                BinOp::Div => {
-                    if b == 0.0 { 0.0 }
-                    else { (da * b - a * db) / (b * b) }
-                }
-                BinOp::Pow => {
-                    if a <= 0.0 { 0.0 }
-                    else {
-                        let val = a.powf(b);
-                        val * (b * da / a + a.ln() * db)
-                    }
-                }
-                _ => 0.0, // Mod, comparisons: not differentiable
-            }
-        }
-
-        ResolvedExpr::UnOp { op, arg } => {
-            let a = eval_resolved(arg, ctx);
-            let da = eval_resolved_deriv(arg, wrt, ctx);
-            match op {
-                UnOp::Exp  => a.exp() * da,
-                UnOp::Log  => if a > 0.0 { da / a } else { 0.0 },
-                UnOp::Neg  => -da,
-                UnOp::Sqrt => if a > 0.0 { da / (2.0 * a.sqrt()) } else { 0.0 },
-                UnOp::Abs  => da * a.signum(),
-                UnOp::Sin  => a.cos() * da,                   // gh#58
-                UnOp::Cos  => -a.sin() * da,                  // gh#58
-                UnOp::Tanh => (1.0 - a.tanh().powi(2)) * da,  // gh#58
-                UnOp::Floor | UnOp::Ceil => 0.0,
-            }
-        }
-
-        ResolvedExpr::Cond { pred, then_, else_ } => {
-            if eval_resolved(pred, ctx) > 0.0 {
-                eval_resolved_deriv(then_, wrt, ctx)
-            } else {
-                eval_resolved_deriv(else_, wrt, ctx)
-            }
-        }
-
-        ResolvedExpr::UncheckedDim { inner } => {
-            eval_resolved_deriv(inner, wrt, ctx)
-        }
-        ResolvedExpr::Reduce(terms) =>
-            terms.iter().map(|t| eval_resolved_deriv(t, wrt, ctx)).sum(),
-        // Hoisted bindings are param-free (state-only): d/dp = 0.
-        ResolvedExpr::BindingRef(_) => 0.0,
-        // gh#272: LICM is scoped to the `eval_resolved` (forward) surfaces, so a
-        // PerEvalRef never reaches this secondary forward-mode differentiator (it
-        // is param-carrying — a silent 0 would drop a real gradient). The panic
-        // enforces the scoping invariant rather than assuming it.
-        ResolvedExpr::PerEvalRef(_) =>
-            unreachable!("PerEvalRef reached eval_resolved_deriv: LICM scoping invariant violated"),
     }
 }
