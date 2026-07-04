@@ -115,10 +115,31 @@ pub struct PMMHResumeState {
     pub map_log_posterior: f64,
 }
 
-// ── Adaptive proposal (Haario et al. 2001) ─────────────────────────
+// ── Adaptive proposal: Haario covariance + Robbins–Monro global scaling ──
+//
+// The proposal is θ' = θ + λ·L·z (z ~ N(0, I)). Two things adapt, and they are
+// complementary:
+//
+//   * L — the covariance *shape* (orientation + relative widths), learned
+//     online from the empirical covariance of visited states
+//     (Haario, Saksman & Tamminen 2001, "An adaptive Metropolis algorithm",
+//     *Bernoulli* 7(2):223–242).
+//
+//   * λ — a scalar *global scale*, adapted by Robbins–Monro stochastic
+//     approximation toward a target acceptance rate (see `adapt_scale`).
+//
+// Why both: Haario learns the shape from movement, so a chain stuck at 0%
+// acceptance (a too-large initial scale — gh#347) has ~zero visited covariance
+// and *cannot* recover from the shape term alone. The Robbins–Monro scale
+// adapts from the accept/reject signal itself, which is informative even when
+// the chain is frozen, so it shrinks λ until proposals land. This is the
+// standard robust construction of Andrieu & Thoms (2008, "A tutorial on
+// adaptive MCMC", *Stat. Comput.* 18:343–373) and Roberts & Rosenthal (2009,
+// "Examples of Adaptive MCMC", *JCGS* 18(2):349–367).
 
-/// Running mean + covariance via Welford's online algorithm,
-/// plus Cholesky factor for sampling N(0, Σ).
+/// Running mean + covariance via Welford's online algorithm, a Cholesky factor
+/// for sampling N(0, Σ) (the Haario *shape* term), and a Robbins–Monro global
+/// scale (the `log_scale` term — see [`AdaptiveProposal::adapt_scale`]).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AdaptiveProposal {
     d: usize,
@@ -133,6 +154,12 @@ pub struct AdaptiveProposal {
     steps_since_chol: usize,
     /// Whether Cholesky has been computed at least once.
     chol_valid: bool,
+    /// Log of the Robbins–Monro global scale λ = exp(log_scale). Starts at 0
+    /// (λ = 1) and is driven toward the target acceptance by [`adapt_scale`].
+    /// `serde(default)` = 0.0 so a checkpoint written before this field
+    /// resumes at the neutral scale.
+    #[serde(default)]
+    log_scale: f64,
 }
 
 impl AdaptiveProposal {
@@ -146,7 +173,56 @@ impl AdaptiveProposal {
             chol_interval: 100,
             steps_since_chol: 0,
             chol_valid: false,
+            log_scale: 0.0,
         }
+    }
+
+    /// The Robbins–Monro global scale λ = exp(log_scale) applied to every
+    /// perturbation. 1.0 until [`adapt_scale`](Self::adapt_scale) moves it.
+    fn scale(&self) -> f64 {
+        self.log_scale.exp()
+    }
+
+    /// Target acceptance rate for the scale adaptation. The asymptotically
+    /// optimal random-walk-Metropolis acceptance is 0.234 as d → ∞ (Roberts,
+    /// Gelman & Gilks 1997, "Weak convergence and optimal scaling of random
+    /// walk Metropolis algorithms", *Ann. Appl. Probab.* 7(1):110–120), rising
+    /// to ≈0.44 for d = 1. Interpolate `0.234 + 0.206/d` so a 1–2 parameter fit
+    /// targets the higher low-dimensional optimum.
+    fn target_accept(&self) -> f64 {
+        0.234 + 0.206 / self.d.max(1) as f64
+    }
+
+    /// Robbins–Monro update of the global scale from one accept/reject outcome.
+    ///
+    /// This is stochastic approximation (Robbins & Monro 1951, "A Stochastic
+    /// Approximation Method", *Ann. Math. Statist.* 22(3):400–407) applied to
+    /// adaptive MCMC. We want the scale λ whose expected acceptance equals the
+    /// target `a*` — i.e. the root of `g(λ) = E[accept | λ] − a* = 0`. `a(λ)` is
+    /// not available in closed form, but each step's `accepted` indicator is a
+    /// noisy one-sample estimate of it, which is exactly what Robbins–Monro
+    /// consumes. On the log scale (to keep λ > 0):
+    ///
+    /// ```text
+    ///   log λ ← log λ + γ_t · (accepted − a*)
+    /// ```
+    ///
+    /// Accept above target → λ grows (bolder steps); below → λ shrinks. The gain
+    /// `γ_t = (t+1)^(−κ)`, κ = 0.6 ∈ (½, 1], satisfies the Robbins–Monro
+    /// conditions Σγ_t = ∞ (λ can travel from any start to the root) and
+    /// Σγ_t² < ∞ (the measurement noise is summable, so it converges). The
+    /// vanishing gain is also the *diminishing adaptation* that keeps the
+    /// adaptive chain ergodic (Roberts & Rosenthal 2007, "Coupling and
+    /// ergodicity of adaptive MCMC", *J. Appl. Probab.* 44:458–475).
+    ///
+    /// gh#347: a chain stuck at 0% acceptance has `(accepted − a*) = −a* < 0`
+    /// every step, so log λ decreases monotonically — the scale shrinks with no
+    /// dependence on the chain ever moving, breaking the deadlock the Haario
+    /// covariance term cannot (it needs movement to learn a shape).
+    fn adapt_scale(&mut self, accepted: bool, step: usize) {
+        let gamma = ((step + 1) as f64).powf(-0.6);
+        let accept_indicator = if accepted { 1.0 } else { 0.0 };
+        self.log_scale += gamma * (accept_indicator - self.target_accept());
     }
 
     /// Update running statistics with a new sample (on transformed scale).
@@ -226,6 +302,51 @@ impl AdaptiveProposal {
             // Diagonal fallback
             z.iter().zip(fallback_sd).map(|(&zi, &sd)| zi * sd).collect()
         }
+    }
+}
+
+#[cfg(test)]
+mod adaptive_scale_tests {
+    use super::AdaptiveProposal;
+
+    /// gh#347: the Robbins–Monro global scale must SHRINK under a persistent
+    /// 0%-acceptance deadlock — this is the property that rescues a chain stuck
+    /// at a too-large initial proposal, which the Haario covariance term alone
+    /// (learned only from *movement*) cannot. Each all-reject step contributes
+    /// `γ_t·(0 − a*) < 0`, so log_scale is monotonically non-increasing and λ
+    /// collapses toward 0.
+    #[test]
+    fn rm_scale_shrinks_under_zero_acceptance_deadlock() {
+        let mut ap = AdaptiveProposal::new(2);
+        assert_eq!(ap.scale(), 1.0, "λ starts at 1");
+        let mut prev = ap.log_scale;
+        for step in 0..500 {
+            ap.adapt_scale(false, step);
+            assert!(ap.log_scale <= prev, "log_scale must be non-increasing under all-reject");
+            prev = ap.log_scale;
+        }
+        assert!(ap.scale() < 0.05,
+            "λ must collapse under a 0%-acceptance deadlock, got {}", ap.scale());
+    }
+
+    /// The mirror: accepting far above target means the steps are too timid, so
+    /// λ must GROW to explore faster.
+    #[test]
+    fn rm_scale_grows_when_accepting_above_target() {
+        let mut ap = AdaptiveProposal::new(2);
+        for step in 0..200 {
+            ap.adapt_scale(true, step);
+        }
+        assert!(ap.scale() > 1.0, "λ must grow when accepting above target, got {}", ap.scale());
+    }
+
+    /// Target acceptance is dimension-aware: 0.234 as d → ∞ (Roberts, Gelman &
+    /// Gilks 1997), ≈0.44 for d = 1.
+    #[test]
+    fn target_accept_is_dimension_aware() {
+        assert!((AdaptiveProposal::new(1).target_accept() - 0.44).abs() < 1e-9);
+        assert!(AdaptiveProposal::new(2).target_accept() > 0.30);
+        assert!(AdaptiveProposal::new(1000).target_accept() < 0.24);
     }
 }
 
@@ -401,8 +522,14 @@ pub fn run_pmmh(
     }
 
     for step in start_step..config.n_steps {
-        // Propose: θ' = θ + Δ on transformed scale
-        let delta = if let Some(ref ap) = adaptive {
+        // Propose: θ' = θ + λ·Δ on transformed scale. Δ is the shape term
+        // (Haario Cholesky once learned, else the diagonal proposal_sd); λ is
+        // the Robbins–Monro global scale. gh#347: λ scales BOTH branches and
+        // adapts from step 0 (gated on `adapt`, not `adapt_start` — which gates
+        // only the covariance shape), so it can break a 0%-acceptance deadlock
+        // during the pre-`adapt_start` phase where the shape term is still the
+        // fixed, possibly-too-large diagonal.
+        let mut delta = if let Some(ref ap) = adaptive {
             if config.adapt && step >= config.adapt_start {
                 ap.sample_perturbation(&mut rng, &config.proposal_sd)
             } else {
@@ -411,6 +538,14 @@ pub fn run_pmmh(
         } else {
             (0..d).map(|i| rng.normal() * config.proposal_sd[i]).collect::<Vec<f64>>()
         };
+        if config.adapt {
+            if let Some(ref ap) = adaptive {
+                let lambda = ap.scale();
+                for dz in delta.iter_mut() {
+                    *dz *= lambda;
+                }
+            }
+        }
 
         let proposed_transformed: Vec<f64> = current_transformed.iter()
             .zip(delta.iter())
@@ -462,6 +597,16 @@ pub fn run_pmmh(
                       - (current_ll + current_log_prior + current_log_jacobian);
 
         let accepted = log_alpha.is_finite() && rng.uniform().ln() < log_alpha;
+
+        // gh#347: Robbins–Monro update of the global proposal scale from this
+        // accept/reject outcome. Runs from step 0 (independent of `adapt_start`)
+        // so it can shrink an over-large initial scale before the covariance
+        // shape adaptation begins. Diminishing gain → diminishing adaptation.
+        if config.adapt {
+            if let Some(ref mut ap) = adaptive {
+                ap.adapt_scale(accepted, step);
+            }
+        }
 
         if accepted {
             current_params.copy_from_slice(&proposed_params);
@@ -539,13 +684,44 @@ pub fn run_pmmh(
         map_log_posterior,
     };
 
+    // gh#347: the recorded `map_loglik` is the SINGLE likelihood estimate at the
+    // accepted MAP θ. For a particle-filter likelihood that estimate is the
+    // MAXIMUM over many noisy per-step estimates, so it is biased UPWARD — and
+    // the bias grows with better mixing (more distinct θ visited → a higher max
+    // of noisy draws ≈ σ·√(2 ln n) above the truth). Report an honest
+    // re-evaluation at the MAP θ instead: the mean of a few independent
+    // estimates. A deterministic (ODE) likelihood is exact in one eval, so its
+    // mean reproduces the recorded value; only a stochastic (PF) likelihood is
+    // corrected. This makes the reported best-loglik a faithful estimate of
+    // L(θ̂), independent of how well the chain happened to mix. The RESUME state
+    // keeps the recorded value (its MAP tracking must stay on the same scale it
+    // was accumulated on).
+    const MAP_REEVAL_REPS: usize = 8;
+    let honest_map_loglik = {
+        let mut samples = Vec::with_capacity(MAP_REEVAL_REPS);
+        for r in 0..MAP_REEVAL_REPS {
+            if let Ok(ll) = eval_loglik(&map_params, seed.wrapping_add(0x5347_0000 + r as u64)) {
+                if ll.is_finite() {
+                    samples.push(ll);
+                }
+            }
+        }
+        if samples.is_empty() {
+            map_loglik // every re-eval failed (ruled-out θ): keep the recorded value
+        } else {
+            samples.iter().sum::<f64>() / samples.len() as f64
+        }
+    };
+    // Keep posterior = loglik + prior consistent (the prior part is unchanged).
+    let honest_map_log_posterior = honest_map_loglik + (map_log_posterior - map_loglik);
+
     Ok(PMMHResult {
         steps,
         acceptance_rate,
         n_steps: config.n_steps,
         map_params,
-        map_loglik,
-        map_log_posterior,
+        map_loglik: honest_map_loglik,
+        map_log_posterior: honest_map_log_posterior,
         resume_state,
     })
 }

@@ -2299,6 +2299,40 @@ impl FitConfigV2 {
             }
         }
 
+        // gh#347: a sampler stage retains only its post-burn-in draws. A
+        // burn_in ≥ the run length discards EVERY sample, so the fit produces
+        // no posterior no matter how well the chain mixes — and the reported
+        // post-burn acceptance rate degenerates to 0/0, which reads as a
+        // misleading "0% acceptance". Reject at config validation rather than
+        // burn compute for an empty result. (The `profile` path already
+        // enforces the same steps-vs-burn_in invariant.)
+        for (stage_name, stage) in &self.stages {
+            let (n_steps, burn_in, len_field, default_burn) = match stage {
+                Stage::Mh { iterations, burn_in, .. }
+                | Stage::PMMH { iterations, burn_in, .. } => (
+                    *iterations,
+                    burn_in.unwrap_or(super::pmmh::DEFAULT_BURN_IN),
+                    "iterations",
+                    super::pmmh::DEFAULT_BURN_IN,
+                ),
+                Stage::PGAS { sweeps, burn_in, .. } => (
+                    *sweeps,
+                    burn_in.unwrap_or(super::pgas::DEFAULT_BURN_IN),
+                    "sweeps",
+                    super::pgas::DEFAULT_BURN_IN,
+                ),
+                _ => continue,
+            };
+            if burn_in >= n_steps {
+                return Err(format!(
+                    "stage '{stage_name}': burn_in ({burn_in}) ≥ {len_field} ({n_steps}) — \
+                     every sample is discarded as burn-in, so the fit retains no \
+                     posterior draws (and the post-burn acceptance rate degenerates \
+                     to 0%). Reduce burn_in or raise {len_field}. \
+                     (burn_in defaults to {default_burn} when unset.)"));
+            }
+        }
+
         // Bayesian-stage prior presence is checked separately by
         // `validate_priors_present(&ir_priors)`, which needs the model IR
         // in scope to honor the gh#73 precedence fallback. validate()
@@ -4987,6 +5021,85 @@ sweeps = 100
             .expect_err("ic_free=true on a PGAS stage must be rejected (PGAS ignores conditioning)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
         assert!(err.contains("pgas"), "error must name the offending stage's algorithm: {err}");
+    }
+
+    // gh#347: a sampler stage whose burn_in ≥ the run length retains ZERO
+    // posterior draws (every sample discarded), and the post-burn acceptance
+    // rate degenerates to 0/0 = a misleading "0%". Reject at config validation.
+    #[test]
+    fn burn_in_exceeding_iterations_is_rejected() {
+        let src = r#"[model]
+camdl = "models/sir.camdl"
+[data.observations]
+cases = "data/cases.tsv"
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+[fixed]
+N0 = 1000
+I0 = 5
+gamma = 0.1
+[stages.posterior]
+algorithm = "mh"
+backend = "ode"
+chains = 2
+iterations = 2000
+burn_in = 3000
+"#;
+        let config = parse(src).unwrap();
+        let err = config.validate(&ic_free_model_params())
+            .expect_err("burn_in ≥ iterations must be rejected: no retained samples");
+        assert!(err.contains("burn_in"), "error must name burn_in: {err}");
+        assert!(err.contains("iterations"), "error must name iterations: {err}");
+    }
+
+    /// The exact gh#347 repro config: `iterations` below the *default* burn_in
+    /// (5000) must be rejected too — the default must not silently discard all.
+    #[test]
+    fn default_burn_in_exceeding_iterations_is_rejected() {
+        let src = r#"[model]
+camdl = "models/sir.camdl"
+[data.observations]
+cases = "data/cases.tsv"
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+[fixed]
+N0 = 1000
+I0 = 5
+gamma = 0.1
+[stages.posterior]
+algorithm = "mh"
+backend = "ode"
+chains = 2
+iterations = 2000
+"#;
+        let config = parse(src).unwrap();
+        let err = config.validate(&ic_free_model_params())
+            .expect_err("default burn_in (5000) ≥ iterations (2000) must be rejected");
+        assert!(err.contains("5000"), "error should surface the default burn_in: {err}");
+    }
+
+    #[test]
+    fn burn_in_below_iterations_is_accepted() {
+        let src = r#"[model]
+camdl = "models/sir.camdl"
+[data.observations]
+cases = "data/cases.tsv"
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+[fixed]
+N0 = 1000
+I0 = 5
+gamma = 0.1
+[stages.posterior]
+algorithm = "mh"
+backend = "ode"
+chains = 2
+iterations = 2000
+burn_in = 500
+"#;
+        let config = parse(src).unwrap();
+        config.validate(&ic_free_model_params())
+            .expect("burn_in < iterations must validate");
     }
 
     #[test]

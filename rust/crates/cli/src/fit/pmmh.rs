@@ -45,7 +45,7 @@ pub struct PmmhStageOpts {
     pub survey_top_k_n: Option<usize>,
 }
 
-const DEFAULT_BURN_IN: usize = 5000;
+pub(crate) const DEFAULT_BURN_IN: usize = 5000;
 const DEFAULT_THIN: usize = 10;
 
 impl PmmhStageOpts {

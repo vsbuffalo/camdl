@@ -52,7 +52,7 @@ pub struct PgasStageOpts {
     pub survey_top_k_n: Option<usize>,
 }
 
-const DEFAULT_BURN_IN: usize = 2000;
+pub(crate) const DEFAULT_BURN_IN: usize = 2000;
 const DEFAULT_THIN: usize = 5;
 
 impl PgasStageOpts {
