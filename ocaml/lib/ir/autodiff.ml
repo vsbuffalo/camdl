@@ -45,11 +45,18 @@ open Ir
                        [differentiate_rate] drops it, exactly as it drops a
                        proven zero.
     - [Unsupported]  — structural data a parameter cannot drive (tier 3);
-                       [differentiate_rate] raises a compile-time error. *)
+                       [differentiate_rate] raises a compile-time error.
+
+    Both non-[Known] cases carry a stable [Ir.unsupported_reason] [code]
+    alongside the human [node]/[reason]. The rate path uses [node]/[reason] for
+    its E600 message; the obs/σ² driver (P3) uses [code] to build a
+    [deriv_entry] [DEUnsupported] — the classification the differentiation site
+    already made, carried to the driver rather than re-derived from the free-text
+    [reason] (proposal §4.1: the code is canonical, the message is derived). *)
 type deriv =
   | Known of expr
-  | Omitted of { node : string; reason : string }
-  | Unsupported of { node : string; reason : string }
+  | Omitted of { node : string; reason : string; code : unsupported_reason }
+  | Unsupported of { node : string; reason : string; code : unsupported_reason }
 
 let map1 (d : deriv) (f : expr -> expr) : deriv =
   match d with
@@ -200,7 +207,8 @@ let differentiate (top : expr) (param : string)
       (match List.find_opt (fun (tf : time_function) -> tf.name = fname) tfs with
        | Some tf when lag_mentions tf ->
          Omitted
-           { node = Printf.sprintf "forcing `%s`" fname;
+           { code = URLag;
+             node = Printf.sprintf "forcing `%s`" fname;
              reason = Printf.sprintf
                "parameter '%s' drives the evaluation-time shift (`lag`) of \
                 forcing `%s`: the forcing is evaluated at t − lag, but the \
@@ -212,7 +220,8 @@ let differentiate (top : expr) (param : string)
        | Some { kind = Periodic _; _ } ->
          if forcing_mentions fname then
            Omitted
-             { node = Printf.sprintf "forcing `%s`" fname;
+             { code = URPeriodicCoeff;
+               node = Printf.sprintf "forcing `%s`" fname;
                reason = Printf.sprintf
                  "parameter '%s' drives a periodic forcing coefficient (step \
                   value or period) of `%s`: a live coefficient the Rust runtime \
@@ -224,7 +233,8 @@ let differentiate (top : expr) (param : string)
        | Some { kind = (Piecewise _ | Interpolated _ | PeriodicSpline _) as kind; _ } ->
          if forcing_mentions fname then
            Unsupported
-             { node = Printf.sprintf "forcing `%s`" fname;
+             { code = URStructuralForcing;
+               node = Printf.sprintf "forcing `%s`" fname;
                reason = Printf.sprintf
                  "parameter '%s' drives the %s forcing coefficient, which is \
                   structural data — interpolation knots, piecewise step grids, \
@@ -257,7 +267,8 @@ let differentiate (top : expr) (param : string)
            coefficient the NUTS guard covers (it treats indices as body
            sub-expressions). Reject at compile time. *)
         Unsupported
-          { node = Printf.sprintf "table `%s`" name;
+          { code = URNonConstTableIndex;
+            node = Printf.sprintf "table `%s`" name;
             reason = Printf.sprintf
               "parameter '%s' is used as a non-constant lookup index into table \
                `%s`; the lookup selects a cell by its value, so it is not \
@@ -270,7 +281,8 @@ let differentiate (top : expr) (param : string)
            (gh#215). Omitted so the model compiles — IF2/PF use the live value,
            and the NUTS guard refuses a NUTS fit that depends on it. *)
         Omitted
-          { node = Printf.sprintf "table `%s`" name;
+          { code = URNonConstTableIndex;
+            node = Printf.sprintf "table `%s`" name;
             reason = Printf.sprintf
               "parameter '%s' is an inline-table value in `%s` selected by a \
                non-constant index: a live coefficient the Rust runtime \
@@ -321,7 +333,8 @@ let differentiate (top : expr) (param : string)
       | Mod ->
         if mentions param b.left || mentions param b.right then
           Unsupported
-            { node = "mod expression";
+            { code = URMod;
+              node = "mod expression";
               reason = Printf.sprintf
                 "derivative of `mod` w.r.t. parameter '%s' is not representable \
                  in the IR grammar (floor is needed); replace mod with a \
@@ -503,3 +516,141 @@ let differentiate_rate (rate : expr) (param_names : string list)
           | d' -> go ((p, d') :: acc) rest))
   in
   go [] param_names
+
+
+(* ── Observation / σ² gradient driver (proposal 2026-07-03, P3) ───────────────
+
+   The obs and σ² densities need ∂arg/∂θ for each differentiable likelihood
+   argument (mean, sd, rate, p, α, β) and the overdispersion σ² expression. This
+   reuses the single differentiation authority [differentiate]; only the
+   compile-vs-defer POLICY differs from the rate path (the "natural seam"):
+
+   - rate  : [Omitted]/[Unsupported] → drop / E600 ([differentiate_rate]).
+   - obs/σ²: [Omitted] AND [Unsupported] → a serialized, coded
+     [DEUnsupported] the fit-time gate (P5) refuses NUTS on, so a live-but-
+     omitted coefficient never masquerades as a genuine zero on this path.
+
+   A genuine zero ([Known] folding to [Const 0.0]) is OMITTED from the map — an
+   absent key is a genuine zero, mirroring [differentiate_rate] dropping proven
+   zeros. *)
+
+(** Substitute every [Projected] node in [e] with [proj] — a trivial rewrite
+    ([Projected] is nullary). Used to inline a [DerivedExpr] projection into a
+    likelihood argument BEFORE differentiation, so ∂arg/∂θ picks up the
+    ∂(projected)/∂θ chain-rule term. *)
+let rec inline_projected (proj : expr) (e : expr) : expr =
+  match e with
+  | Projected -> proj
+  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | BindingRef _ | ObsColumnRef _ -> e
+  | UnOp u -> UnOp { u with arg = inline_projected proj u.arg }
+  | BinOp b ->
+    BinOp { b with left = inline_projected proj b.left;
+                   right = inline_projected proj b.right }
+  | Cond c ->
+    Cond { pred = inline_projected proj c.pred;
+           then_ = inline_projected proj c.then_;
+           else_ = inline_projected proj c.else_ }
+  | TableLookup (name, args) -> TableLookup (name, List.map (inline_projected proj) args)
+  | UncheckedDim u -> UncheckedDim { u with inner = inline_projected proj u.inner }
+  | Reduce terms -> Reduce (List.map (inline_projected proj) terms)
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
+
+(** Inline a projection into a likelihood argument. Only a [DerivedExpr]
+    projection makes [projected] a function of θ; substituting it lets the
+    chain rule reach ∂(projected)/∂θ. For every other projection kind
+    ([CumulativeFlow]/[CurrentPop]/…) [projected] is θ-independent given the
+    fixed trajectory X, so [Projected] is left in place and differentiates to a
+    genuine zero via the [Projected -> Known (Const 0.0)] arm. *)
+let inline_projection (proj : projection) (arg : expr) : expr =
+  match proj with
+  | DerivedExpr e -> inline_projected e arg
+  | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ -> arg
+
+(** Adapt a differentiation outcome for an obs/σ² argument into a
+    [deriv_entry option]. [None] means "omit the key" — a genuine zero. *)
+let obs_deriv_entry (d : deriv) : deriv_entry option =
+  match d with
+  | Known e ->
+    (match simplify_fixpoint e with
+     | Const 0.0 -> None                     (* genuine zero → absent key *)
+     | e' -> Some (DEGrad e'))
+  | Omitted { node; code; _ } -> Some (DEUnsupported { node; code })
+  | Unsupported { node; code; _ } -> Some (DEUnsupported { node; code })
+
+(** ∂arg/∂θ for one differentiable likelihood argument, over every parameter.
+    The projection is inlined first (so a parametric [DerivedExpr] contributes
+    its chain-rule term); genuine zeros are dropped. *)
+let differentiate_obs_arg (proj : projection) (arg : expr)
+    (param_names : string list) (tfs : time_function list) (tbls : table list)
+    : grad_map =
+  let inlined = inline_projection proj arg in
+  List.filter_map
+    (fun p ->
+      match obs_deriv_entry (differentiate inlined p tfs tbls) with
+      | Some de -> Some (p, de)
+      | None -> None)
+    param_names
+
+(** Fill every [grad_map] of a likelihood. EXHAUSTIVE over [likelihood] (no
+    wildcard) so a future variant is a compile error until its args are wired.
+
+    Per variant we emit into exactly the grad slots that exist:
+    Poisson→rate; NegBinomial→mean+dispersion; Normal→mean+sd; Binomial→p;
+    BetaBinomial→α+β; Bernoulli→p.
+
+    [n] (Binomial/BetaBinomial) is deliberately NOT differentiated — it has no
+    grad field ([n] is rounded to an integer, so it must be θ-independent). The
+    refusal of an estimated param that reaches [n] after inlining is the P5
+    fit-gate's job (see proposal §4.4); nothing to emit here. *)
+let differentiate_likelihood (proj : projection) (lik : likelihood)
+    (param_names : string list) (tfs : time_function list) (tbls : table list)
+    : likelihood =
+  let g arg = differentiate_obs_arg proj arg param_names tfs tbls in
+  match lik with
+  | Poisson pl -> Poisson { pl with rate_grad = g pl.rate }
+  | NegBinomial nb ->
+    NegBinomial { nb with mean_grad = g nb.mean;
+                          dispersion_grad = g nb.dispersion }
+  | Normal n -> Normal { n with mean_grad = g n.mean; sd_grad = g n.sd }
+  | Binomial b -> Binomial { b with p_grad = g b.p }        (* n: not differentiated *)
+  | BetaBinomial bb ->
+    BetaBinomial { bb with alpha_grad = g bb.alpha;
+                           beta_grad = g bb.beta }          (* n: not differentiated *)
+  | Bernoulli b -> Bernoulli { b with p_grad = g b.p }
+
+(** Differentiate every observation stream's likelihood arguments w.r.t. all
+    parameters (the fit reads only the estimated ones; proven zeros are absent).
+    Genuine [Const 0.0] gradients are dropped; a live-but-omitted or structural
+    coefficient becomes a coded [DEUnsupported] the fit-time gate refuses on. *)
+let differentiate_observations (obs : observation_model list)
+    (param_names : string list) (tfs : time_function list) (tbls : table list)
+    : observation_model list =
+  List.map
+    (fun (o : observation_model) ->
+      { o with likelihood = differentiate_likelihood o.projection o.likelihood
+                              param_names tfs tbls })
+    obs
+
+(** Differentiate the σ² expression of every [DrawOverdispersed] transition
+    w.r.t. all parameters, filling [sigma_sq_grad]. σ² carries no [Projected]
+    node (it is a rate-context overdispersion variance, not an observation), so
+    no projection inlining is needed; the adapter is shared with obs. *)
+let differentiate_overdispersion (transitions : transition list)
+    (param_names : string list) (tfs : time_function list) (tbls : table list)
+    : transition list =
+  List.map
+    (fun (t : transition) ->
+      match t.draw_method with
+      | DrawOverdispersed { sigma_sq; _ } ->
+        let sigma_sq_grad =
+          List.filter_map
+            (fun p ->
+              match obs_deriv_entry (differentiate sigma_sq p tfs tbls) with
+              | Some de -> Some (p, de)
+              | None -> None)
+            param_names
+        in
+        { t with draw_method = DrawOverdispersed { sigma_sq; sigma_sq_grad } }
+      | DrawPoisson | DrawDeterministic -> t)
+    transitions

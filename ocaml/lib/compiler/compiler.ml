@@ -494,10 +494,29 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
            the ANSI box otherwise, matching the error path's shape. *)
         if Diagnostics.has_any d.ctx.diags then
           ignore (Diagnostics.render d.ctx.diags d.source);
+        (* Observation + σ² autodiff (proposal 2026-07-03, P3): differentiate
+           every likelihood argument (projection inlined) and every
+           [DrawOverdispersed] σ² w.r.t. all parameters, filling the obs
+           [*_grad] and [sigma_sq_grad] maps. Runs at the same point as
+           [differentiate_transitions] (after expansion, before
+           constant-fold/serialize) and reuses the single differentiation
+           authority [Autodiff.differentiate]; unlike the rate E600 path it
+           never errors — a live-but-omitted or structural coefficient becomes a
+           coded [DEUnsupported] the P5 fit-time gate refuses NUTS on. *)
+        let param_names =
+          List.map (fun (p : Ir.parameter) -> p.name) d.model.Ir.parameters in
+        let tfs = d.model.Ir.time_functions and tbls = d.model.Ir.tables in
+        let transitions =
+          Passtime.time "autodiff-sigma"
+            (fun () -> Autodiff.differentiate_overdispersion transitions param_names tfs tbls) in
+        let observations =
+          Passtime.time "autodiff-obs"
+            (fun () -> Autodiff.differentiate_observations d.model.Ir.observations param_names tfs tbls) in
         (* Write the resolved quantity dimensions (#5) back onto the model
            before the value-preserving transforms (constant-fold/LICM never
            touch quantities). *)
-        let m = annotate_quantity_dims qdims { d.model with Ir.transitions = transitions } in
+        let m = annotate_quantity_dims qdims
+                  { d.model with Ir.transitions = transitions; Ir.observations = observations } in
         Ok (maybe_licm (maybe_constant_fold m))
       end
     end

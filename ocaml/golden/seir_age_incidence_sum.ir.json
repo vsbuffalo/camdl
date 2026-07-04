@@ -17,7 +17,7 @@
 ],"ode_equations":[],"time_functions":[],"tables":[
 {"name":"C_age","values":[{"const":12.0},{"const":4.0},{"const":4.0},{"const":8.0}],"out_of_bounds":"error"}
 ],"interventions":[],"observations":[
-{"name":"weekly_cases","source":"weekly_cases","columns":[{"name":"time","role":"time"},{"name":"weekly_cases","role":{"value":"count"}}],"scored":"weekly_cases","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":100.0}},"projection":{"cumulative_flow_sum":["infection_child","infection_adult"]},"likelihood":{"neg_binomial":{"mean":{"bin_op":{"op":"mul","left":{"param":"rho"},"right":{"projected":null}}},"dispersion":{"param":"k"}}}}
+{"name":"weekly_cases","source":"weekly_cases","columns":[{"name":"time","role":"time"},{"name":"weekly_cases","role":{"value":"count"}}],"scored":"weekly_cases","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":100.0}},"projection":{"cumulative_flow_sum":["infection_child","infection_adult"]},"likelihood":{"neg_binomial":{"mean":{"bin_op":{"op":"mul","left":{"param":"rho"},"right":{"projected":null}}},"mean_grad":{"rho":{"grad":{"projected":null}}},"dispersion":{"param":"k"},"dispersion_grad":{"k":{"grad":{"const":1.0}}}}}}
 ],"parameters":[
 {"name":"beta","value":{"mode":"estimated","bounds":[0.001,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},

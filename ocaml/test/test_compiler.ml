@@ -2801,6 +2801,81 @@ scenarios { baseline { set = { beta = 0.3
       Alcotest.failf "wpeak should be omitted from rate_grad (periodic, gh#215), but is present in '%s'" t.name)
     m.Ir.transitions
 
+(* ── Observation / σ² gradient driver (proposal 2026-07-03, P3) ──────────────── *)
+
+let test_obs_grad_nonderived_projection () =
+  (* Poisson obs: rate = rho * projected, projection = CumulativeFlow "inc"
+     (θ-independent given the fixed trajectory). [Projected] is left in place and
+     differentiates to a genuine zero, so ∂rate/∂rho = projected. A param not in
+     the arg (beta) is a genuine zero → ABSENT key. *)
+  let rate = Ir.BinOp { op = Ir.Mul; left = Ir.Param "rho"; right = Ir.Projected } in
+  let lik = Ir.Poisson { rate; rate_grad = [] } in
+  match Autodiff.differentiate_likelihood (Ir.CumulativeFlow "inc") lik [ "rho"; "beta" ] [] [] with
+  | Ir.Poisson pl ->
+    (match List.assoc_opt "rho" pl.rate_grad with
+     | Some (Ir.DEGrad Ir.Projected) -> ()
+     | Some _ -> Alcotest.failf "rate_grad[rho]: expected DEGrad Projected"
+     | None -> Alcotest.failf "rate_grad[rho] missing");
+    Alcotest.(check bool) "beta (genuine zero) omitted from rate_grad"
+      false (List.mem_assoc "beta" pl.rate_grad)
+  | _ -> Alcotest.failf "likelihood variant changed unexpectedly"
+
+let test_obs_grad_parametric_derived_projection () =
+  (* Poisson obs: rate = rho * projected, projection = DerivedExpr (qgam * P).
+     Inlining projected → (qgam·P) makes rate = rho·(qgam·P), so the chain rule
+     reaches ∂projected/∂qgam:  ∂rate/∂qgam = rho·P,  ∂rate/∂rho = qgam·P.
+     This is the headline gh#180 case — a parametric DerivedExpr projection. *)
+  let rate = Ir.BinOp { op = Ir.Mul; left = Ir.Param "rho"; right = Ir.Projected } in
+  let lik = Ir.Poisson { rate; rate_grad = [] } in
+  let proj = Ir.DerivedExpr (Ir.BinOp { op = Ir.Mul; left = Ir.Param "qgam"; right = Ir.Pop "P" }) in
+  let expect_qgam = Ir.BinOp { op = Ir.Mul; left = Ir.Param "rho";  right = Ir.Pop "P" } in
+  let expect_rho  = Ir.BinOp { op = Ir.Mul; left = Ir.Param "qgam"; right = Ir.Pop "P" } in
+  match Autodiff.differentiate_likelihood proj lik [ "qgam"; "rho" ] [] [] with
+  | Ir.Poisson pl ->
+    let grad p = match List.assoc_opt p pl.rate_grad with
+      | Some (Ir.DEGrad e) -> e
+      | Some (Ir.DEUnsupported _) -> Alcotest.failf "%s: unexpected DEUnsupported" p
+      | None -> Alcotest.failf "%s: missing rate_grad entry" p in
+    Alcotest.(check bool) "∂rate/∂qgam = rho·P (chain rule through DerivedExpr)"
+      true (grad "qgam" = expect_qgam);
+    Alcotest.(check bool) "∂rate/∂rho = qgam·P"
+      true (grad "rho" = expect_rho)
+  | _ -> Alcotest.failf "likelihood variant changed unexpectedly"
+
+let test_obs_grad_structural_forcing_is_coded_refusal () =
+  (* A likelihood argument driving a STRUCTURAL forcing coefficient becomes a
+     coded DEUnsupported (URStructuralForcing) — the obs path is omit-and-refuse,
+     NOT the rate E600 (so forward sim / IF2 / PF still work; P5 refuses NUTS). *)
+  let i : Ir.interpolated =
+    { times = [ Ir.Const 0.0; Ir.Const 1.0 ];
+      values = [ Ir.Param "knot0"; Ir.Const 1.0 ]; method_ = "linear" } in
+  let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0); lag = None } in
+  let lik = Ir.Poisson { rate = Ir.TimeFunc "g"; rate_grad = [] } in
+  match Autodiff.differentiate_likelihood (Ir.CumulativeFlow "inc") lik [ "knot0" ] [ tf ] [] with
+  | Ir.Poisson pl ->
+    (match List.assoc_opt "knot0" pl.rate_grad with
+     | Some (Ir.DEUnsupported { code = Ir.URStructuralForcing; _ }) -> ()
+     | Some _ -> Alcotest.failf "rate_grad[knot0]: expected DEUnsupported URStructuralForcing"
+     | None -> Alcotest.failf "structural-forcing param must produce a coded refusal, not be dropped")
+  | _ -> Alcotest.failf "likelihood variant changed unexpectedly"
+
+let test_sigma_sq_grad_emitted () =
+  (* σ² = phi · S (a rate-context overdispersion variance, no Projected node).
+     differentiate_overdispersion fills sigma_sq_grad[phi] = DEGrad (Pop "S"). *)
+  let sigma_sq = Ir.BinOp { op = Ir.Mul; left = Ir.Param "phi"; right = Ir.Pop "S" } in
+  let t : Ir.transition =
+    { name = "inf"; stoichiometry = []; rate = Ir.Const 1.0; metadata = None;
+      draw_method = Ir.DrawOverdispersed { sigma_sq; sigma_sq_grad = [] };
+      rate_grad = []; lineage = None } in
+  match Autodiff.differentiate_overdispersion [ t ] [ "phi"; "beta" ] [] [] with
+  | [ { draw_method = Ir.DrawOverdispersed { sigma_sq_grad; _ }; _ } ] ->
+    (match List.assoc_opt "phi" sigma_sq_grad with
+     | Some (Ir.DEGrad (Ir.Pop "S")) -> ()
+     | _ -> Alcotest.failf "sigma_sq_grad[phi]: expected DEGrad (Pop S)");
+    Alcotest.(check bool) "beta (genuine zero) omitted from sigma_sq_grad"
+      false (List.mem_assoc "beta" sigma_sq_grad)
+  | _ -> Alcotest.failf "unexpected transition shape after overdispersion autodiff"
+
 let test_trig_pi_reserved () =
   (* Declaring a parameter named `pi` is rejected. *)
   let src = {|
@@ -8339,6 +8414,12 @@ let () =
       Alcotest.test_case "structural forcing-coeff param is a compile error (gh#215)" `Quick test_structural_forcing_coeff_errors;
       Alcotest.test_case "periodic-param-in-rate model compiles to IR (gh#215)" `Quick test_periodic_param_in_rate_compiles;
       Alcotest.test_case "pi as parameter name is reserved (E100)"  `Quick test_trig_pi_reserved;
+    ];
+    "obs_gradient", [
+      Alcotest.test_case "obs grad: non-derived projection ⇒ ∂rate/∂rho = projected" `Quick test_obs_grad_nonderived_projection;
+      Alcotest.test_case "obs grad: parametric DerivedExpr chain rule (gh#180)" `Quick test_obs_grad_parametric_derived_projection;
+      Alcotest.test_case "obs grad: structural-forcing arg ⇒ coded DEUnsupported" `Quick test_obs_grad_structural_forcing_is_coded_refusal;
+      Alcotest.test_case "σ² grad: DrawOverdispersed fills sigma_sq_grad" `Quick test_sigma_sq_grad_emitted;
     ];
     "time_functions", [
       Alcotest.test_case "sinusoidal compiles to TimeFunc"       `Quick test_sinusoidal_time_func;

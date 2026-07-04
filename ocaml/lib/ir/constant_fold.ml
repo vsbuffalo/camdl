@@ -98,9 +98,52 @@ let rec fold tbls (e : expr) : expr =
       let kept = List.filter_map (fun t -> let t' = fold tbls t in if is_zero t' then None else Some t') terms in
       (match kept with [] -> Const 0.0 | [ t ] -> t | _ -> Reduce kept)
 
+(* Fold a deriv_entry / grad_map: only a real [DEGrad] expression carries an
+   expr to fold; a coded [DEUnsupported] refusal has none. *)
+let fold_deriv_entry fe (de : deriv_entry) : deriv_entry =
+  match de with DEGrad e -> DEGrad (fe e) | DEUnsupported _ -> de
+
+let fold_grad_map fe (gm : grad_map) : grad_map =
+  List.map (fun (p, de) -> (p, fold_deriv_entry fe de)) gm
+
+(* Overdispersion σ² and its gradient (proposal 2026-07-03 §4.5). *)
+let fold_draw_method fe (dm : draw_method) : draw_method =
+  match dm with
+  | DrawOverdispersed { sigma_sq; sigma_sq_grad } ->
+      DrawOverdispersed
+        { sigma_sq = fe sigma_sq; sigma_sq_grad = fold_grad_map fe sigma_sq_grad }
+  | (DrawPoisson | DrawDeterministic) as dm -> dm
+
+(* Observation projection ([DerivedExpr] only) + every likelihood argument and
+   its gradient map. Exhaustive so a new likelihood variant is a compile error. *)
+let fold_projection fe (p : projection) : projection =
+  match p with
+  | DerivedExpr e -> DerivedExpr (fe e)
+  | (CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _) as p -> p
+
+let fold_likelihood fe (lik : likelihood) : likelihood =
+  match lik with
+  | Poisson pl -> Poisson { rate = fe pl.rate; rate_grad = fold_grad_map fe pl.rate_grad }
+  | NegBinomial nb ->
+      NegBinomial
+        { mean = fe nb.mean; mean_grad = fold_grad_map fe nb.mean_grad;
+          dispersion = fe nb.dispersion; dispersion_grad = fold_grad_map fe nb.dispersion_grad }
+  | Normal n ->
+      Normal
+        { mean = fe n.mean; mean_grad = fold_grad_map fe n.mean_grad;
+          sd = fe n.sd; sd_grad = fold_grad_map fe n.sd_grad }
+  | Binomial b -> Binomial { n = fe b.n; p = fe b.p; p_grad = fold_grad_map fe b.p_grad }
+  | BetaBinomial bb ->
+      BetaBinomial
+        { n = fe bb.n;
+          alpha = fe bb.alpha; alpha_grad = fold_grad_map fe bb.alpha_grad;
+          beta = fe bb.beta; beta_grad = fold_grad_map fe bb.beta_grad }
+  | Bernoulli b -> Bernoulli { p = fe b.p; p_grad = fold_grad_map fe b.p_grad }
+
 (* Fold the expr-bearing fields where a sparse coupling matrix actually
-   appears: transition rates + their gradients, model-level bindings, and ODE
-   derivatives. Folding a subset is sound (each folded expr keeps its value);
+   appears: transition rates + their gradients + σ² draw method, model-level
+   bindings, ODE derivatives, and observation projections/likelihood arguments +
+   their gradients. Folding a subset is sound (each folded expr keeps its value);
    it just leaves any W-free exprs untouched. *)
 let fold_model (m : model) : model =
   let tbls = inline_table_values m.tables in
@@ -112,9 +155,17 @@ let fold_model (m : model) : model =
       transitions =
         List.map
           (fun (t : transition) ->
-            { t with rate = fe t.rate; rate_grad = List.map (fun (p, g) -> (p, fe g)) t.rate_grad })
+            { t with rate = fe t.rate;
+                     rate_grad = List.map (fun (p, g) -> (p, fe g)) t.rate_grad;
+                     draw_method = fold_draw_method fe t.draw_method })
           m.transitions;
       bindings = List.map (fun (b : binding) -> { b with bexpr = fe b.bexpr }) m.bindings;
       ode_equations =
         List.map (fun (eq : ode_equation) -> { eq with derivative = fe eq.derivative }) m.ode_equations;
+      observations =
+        List.map
+          (fun (o : observation_model) ->
+            { o with projection = fold_projection fe o.projection;
+                     likelihood = fold_likelihood fe o.likelihood })
+          m.observations;
     }
