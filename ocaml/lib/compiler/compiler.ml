@@ -50,6 +50,21 @@ type 'a outcome = {
    W100 / parser-action diagnostics — the caller decides whether to
    continue). [source] is the [Source_cache] for the input, returned even
    on the [None] path so a renderer can show the offending line. *)
+(* Run [body]; on an unexpected [Failure]/exception, record a no-location E001
+   into [diags] and return [Error ()]. The parse and expand phases share this
+   outer guard (parse's inner located lex/parse errors stay inside [body]). *)
+let capture_e001 (diags : Diagnostics.t) (body : unit -> ('a, unit) result)
+    : ('a, unit) result =
+  try body ()
+  with
+  | Failure msg ->
+    Diagnostics.error diags ~code:"E001" ~loc:Diagnostics.no_loc ~message:msg ();
+    Error ()
+  | exn ->
+    Diagnostics.error diags ~code:"E001" ~loc:Diagnostics.no_loc
+      ~message:(Printexc.to_string exn) ();
+    Error ()
+
 let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
     : compile_detail option * Diagnostics.t * Source_cache.t =
   let source = Source_cache.of_string ~filename src in
@@ -60,7 +75,7 @@ let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
   Parser_errors.pending_errors := [];
   let parse_diags = Diagnostics.create () in
   match
-    (try
+    capture_e001 parse_diags (fun () ->
        let lexbuf = Lexing.from_string src in
        Lexing.set_filename lexbuf filename;
        let t_parse = Sys.time () in
@@ -81,16 +96,7 @@ let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
             Error ())
        in
        Passtime.record "parse" (Sys.time () -. t_parse);
-       decls
-     with
-     | Failure msg ->
-       Diagnostics.error parse_diags ~code:"E001" ~loc:Diagnostics.no_loc
-         ~message:msg ();
-       Error ()
-     | exn ->
-       Diagnostics.error parse_diags ~code:"E001" ~loc:Diagnostics.no_loc
-         ~message:(Printexc.to_string exn) ();
-       Error ())
+       decls)
   with
   | Error () -> (None, parse_diags, source)
   | Ok decls ->
@@ -98,17 +104,9 @@ let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
       if filename = "<input>" then "" else Filename.dirname filename
     in
     (match
-       (try Ok (Passtime.time "expand"
-                  (fun () -> Expander.expand_detail ~source_dir ~filename name decls))
-        with
-        | Failure msg ->
-          Diagnostics.error parse_diags ~code:"E001" ~loc:Diagnostics.no_loc
-            ~message:msg ();
-          Error ()
-        | exn ->
-          Diagnostics.error parse_diags ~code:"E001" ~loc:Diagnostics.no_loc
-            ~message:(Printexc.to_string exn) ();
-          Error ())
+       capture_e001 parse_diags (fun () ->
+          Ok (Passtime.time "expand"
+                (fun () -> Expander.expand_detail ~source_dir ~filename name decls)))
      with
      | Error () -> (None, parse_diags, source)
      | Ok (model, ctx, summary) ->
