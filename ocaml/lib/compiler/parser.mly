@@ -1194,38 +1194,14 @@ atom_expr:
   | SUM LPAREN v = IDENT IN d = IDENT WHERE g = guard_expr COMMA body = expr RPAREN
       { ESum (v, d, Some g, body) }
   | name = IDENT LBRACKET items = separated_list(COMMA, index_item) RBRACKET
-      { let l =
-          let open Lexing in
-          { file     = $startpos.pos_fname;
-            line     = $startpos.pos_lnum;
-            col      = $startpos.pos_cnum - $startpos.pos_bol + 1;
-            end_line = $endpos.pos_lnum;
-            end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
-        in
-        EIndex (name, items, l) }
+      { EIndex (name, items, Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   | name = IDENT
-      { let l =
-          let open Lexing in
-          { file     = $startpos.pos_fname;
-            line     = $startpos.pos_lnum;
-            col      = $startpos.pos_cnum - $startpos.pos_bol + 1;
-            end_line = $endpos.pos_lnum;
-            end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
-        in
-        EIdent (name, l) }
+      { EIdent (name, Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   (* observations.<stream> — the v1.1 generated-quantity observation source.
      `observations` is the OBSERVATIONS keyword; the classifier lowers this to
      Ir.QSObservation. Valid only inside a `quantities { }` body. *)
   | OBSERVATIONS DOT stream = IDENT
-      { let l =
-          let open Lexing in
-          { file     = $startpos.pos_fname;
-            line     = $startpos.pos_lnum;
-            col      = $startpos.pos_cnum - $startpos.pos_bol + 1;
-            end_line = $endpos.pos_lnum;
-            end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
-        in
-        EObsAccess (stream, l) }
+      { EObsAccess (stream, Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   (* <run>.quantities.<member> / <run>.observations.<member> — a run-rooted
      contrast operand (counterfactual contrasts, proposal 2026-06-25). The
      middle token is a keyword (QUANTITIES / OBSERVATIONS), so these are
@@ -1233,25 +1209,11 @@ atom_expr:
      and against the existing `observations.<stream>` form. Valid only inside a
      `contrasts { }` body; the expander rejects them elsewhere. *)
   | run = IDENT DOT QUANTITIES DOT member = IDENT
-      { let l =
-          let open Lexing in
-          { file     = $startpos.pos_fname;
-            line     = $startpos.pos_lnum;
-            col      = $startpos.pos_cnum - $startpos.pos_bol + 1;
-            end_line = $endpos.pos_lnum;
-            end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
-        in
-        ERunMember { run; ns = NsQuantities; member; loc = l } }
+      { ERunMember { run; ns = NsQuantities; member;
+                     loc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | run = IDENT DOT OBSERVATIONS DOT member = IDENT
-      { let l =
-          let open Lexing in
-          { file     = $startpos.pos_fname;
-            line     = $startpos.pos_lnum;
-            col      = $startpos.pos_cnum - $startpos.pos_bol + 1;
-            end_line = $endpos.pos_lnum;
-            end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
-        in
-        ERunMember { run; ns = NsObservations; member; loc = l } }
+      { ERunMember { run; ns = NsObservations; member;
+                     loc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* `origin` as a referenceable identifier — Phase 2 of the
      2026-05-22 typed-time proposal §1.1. The ORIGIN keyword is
      consumed by the top-level `origin = date("...")` declaration
@@ -1260,15 +1222,7 @@ atom_expr:
      anchored mode (it is the t=0 point) and errors in unanchored
      mode. *)
   | ORIGIN
-      { let l =
-          let open Lexing in
-          { file     = $startpos.pos_fname;
-            line     = $startpos.pos_lnum;
-            col      = $startpos.pos_cnum - $startpos.pos_bol + 1;
-            end_line = $endpos.pos_lnum;
-            end_col  = $endpos.pos_cnum - $endpos.pos_bol + 1 }
-        in
-        EIdent ("origin", l) }
+      { EIdent ("origin", Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   | LPAREN e = expr RPAREN     { e }
   | LPAREN e = expr RPAREN u = unit_lit
       (* (20 / 100_000) 'per_year — unit applies to the whole expression.
