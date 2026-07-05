@@ -74,6 +74,32 @@ type dim =
   | Unknown of int
   | Any                 (* Const 0.0: universal additive identity *)
 
+(* Dimensional result of a binary op over two ALREADY-RESOLVED operand dims,
+   for the arms that agree across every phase that reads dimensions: [Mul]
+   multiplies, [Div] divides, [Any] absorbs (the [Const 0.0] identity), and a
+   comparison is dimensionless. When the result is not determined, it is the
+   [Unknown (-1)] sentinel. The Add-family and [Pow] arms carry phase-specific
+   unification / emit logic and stay with each caller — they return the same
+   sentinel here and are never routed through this helper. (The inference pass
+   [infer_binop] also keeps its own Mul/Div arms: their fallback allocates a
+   fresh unification variable rather than the dead [Unknown (-1)] sentinel, and
+   its comparison arm unifies the operands as a side effect.) *)
+let dim_binop_known (op : bin_op) (dl : dim) (dr : dim) : dim =
+  match op with
+  | Mul ->
+    (match dl, dr with
+     | Any, d | d, Any -> d
+     | Known v1, Known v2 -> Known (dim_mul v1 v2)
+     | _ -> Unknown (-1))
+  | Div ->
+    (match dl, dr with
+     | Any, _ -> Any
+     | _, Any -> dl
+     | Known v1, Known v2 -> Known (dim_div v1 v2)
+     | _ -> Unknown (-1))
+  | Eq | Neq | Lt | Gt | Le | Ge -> Known dimensionless
+  | Add | Sub | Min | Max | Mod | Pow -> Unknown (-1)
+
 (* ── Diagnostic results ─────────────────────────────────────────────────── *)
 
 type severity = Error | Info
@@ -670,20 +696,12 @@ and read_dim_binop st (b : bin_op_expr) : dim =
      | Known _, _ -> dl
      | _, Known _ -> dr
      | _ -> dl)
-  | Mul ->
-    (match resolve st dl, resolve st dr with
-     | Any, d | d, Any -> d
-     | Known v1, Known v2 -> Known (dim_mul v1 v2)
-     | _ -> Unknown (-1))
+  | Mul -> dim_binop_known Mul (resolve st dl) (resolve st dr)
   | Div ->
     if is_bare_const b.left && is_bare_const b.right then
       Unknown (-1)
     else
-      (match resolve st dl, resolve st dr with
-       | Any, _ -> Any
-       | _, Any -> dl
-       | Known v1, Known v2 -> Known (dim_div v1 v2)
-       | _ -> Unknown (-1))
+      dim_binop_known Div (resolve st dl) (resolve st dr)
   | Pow ->
     (* M19 in 2026-04-19 review: the inference phase correctly
        emits E301 for Pow with a non-integer-literal exponent
@@ -702,7 +720,7 @@ and read_dim_binop st (b : bin_op_expr) : dim =
         | Const n when Float.is_integer n -> Known (dim_scale (Float.to_int n) v)
         | _ -> Unknown (-1))
      | _ -> Unknown (-1))
-  | Eq | Neq | Lt | Gt | Le | Ge -> Known dimensionless
+  | Eq | Neq | Lt | Gt | Le | Ge -> dim_binop_known b.op dl dr
 
 and read_dim_unop st (u : un_op_expr) : dim =
   let da = read_dim st u.arg in
@@ -827,14 +845,10 @@ let compute_quantity_dim_table st (m : model)
       (match op with
        | Add | Sub | Min | Max | Mod ->
          (match dl, dr with Any, d | d, Any -> d | Known _, _ -> dl | _, Known _ -> dr | _ -> dl)
-       | Mul -> (match resolve st dl, resolve st dr with
-                 | Any, d | d, Any -> d
-                 | Known v1, Known v2 -> Known (dim_mul v1 v2) | _ -> Unknown (-1))
-       | Div -> (match resolve st dl, resolve st dr with
-                 | Any, _ -> Any | _, Any -> dl
-                 | Known v1, Known v2 -> Known (dim_div v1 v2) | _ -> Unknown (-1))
+       | Mul -> dim_binop_known Mul (resolve st dl) (resolve st dr)
+       | Div -> dim_binop_known Div (resolve st dl) (resolve st dr)
        | Pow -> Unknown (-1)
-       | Eq | Neq | Lt | Gt | Le | Ge -> Known dimensionless)
+       | Eq | Neq | Lt | Gt | Le | Ge -> dim_binop_known op dl dr)
     | SCond { then_; _ } -> scalar_dim then_
   in
   List.iter (fun (q : quantity) ->
@@ -898,12 +912,8 @@ let check_contrasts st (m : model)
           | Any, d | d, Any -> d
           | Known _, _ -> dl
           | _ -> dr)
-       | Mul -> (match dl, dr with
-                 | Any, d | d, Any -> d
-                 | Known v1, Known v2 -> Known (dim_mul v1 v2) | _ -> Unknown (-1))
-       | Div -> (match dl, dr with
-                 | Any, _ -> Any | _, Any -> dl
-                 | Known v1, Known v2 -> Known (dim_div v1 v2) | _ -> Unknown (-1))
+       | Mul -> dim_binop_known Mul dl dr
+       | Div -> dim_binop_known Div dl dr
        | _ -> Unknown (-1))
   in
   List.iter (fun (c : contrast) ->
