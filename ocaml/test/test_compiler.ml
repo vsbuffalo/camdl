@@ -1782,6 +1782,63 @@ let test_intervention_no_action () =
   |} in
   compile_expect_error_code ~code:"E296" ~contains:"noop" src
 
+(* Indexed references resolve arity three ways (table E202, shaped-let E273,
+   compartment E287); the let / forcing / parameter branches were unguarded, so
+   an over-indexed let silently dropped the extra index and an over-indexed
+   forcing/param name-mangled to a bad (often unlocated) error. A shared
+   check_index_arity now emits a located E299 for all three. *)
+let test_indexed_let_arity () =
+  let src = {|
+    dimensions { patch = [north, south] }
+    compartments { S, I, R }
+    stratify(by = patch)
+    parameters { beta : rate  gamma : rate }
+    let N[p in patch] = S[p] + I[p] + R[p]
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p, south]
+      recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
+    }
+    init { S[p in patch] = 1000  I[p in patch] = 1 }
+    simulate { from = 0 'days  to = 60 'days }
+  |} in
+  compile_expect_error_code ~code:"E299" ~contains:"N" src
+
+let test_indexed_forcing_arity () =
+  let src = {|
+    dimensions { patch = [north, south] }
+    compartments { S, I }
+    stratify(by = patch)
+    parameters { beta : rate }
+    forcing {
+      seasonal[p in patch] : sinusoidal 'ratio {
+        amplitude = 0.1
+        period    = 365
+        phase     = 0
+        baseline  = 1.0
+      }
+    }
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ beta * seasonal[p, south] * S[p]
+    }
+    init { S[p in patch] = 1000  I[p in patch] = 1 }
+    simulate { from = 0 'days  to = 60 'days }
+  |} in
+  compile_expect_error_code ~code:"E299" ~contains:"seasonal" src
+
+let test_indexed_param_arity () =
+  let src = {|
+    dimensions { patch = [north, south] }
+    compartments { S, I }
+    stratify(by = patch)
+    parameters { R0[patch] : positive  gamma : rate }
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ R0[p, south] * gamma * S[p]
+    }
+    init { S[p in patch] = 1000  I[p in patch] = 1 }
+    simulate { from = 0 'days  to = 60 'days }
+  |} in
+  compile_expect_error_code ~code:"E299" ~contains:"R0" src
+
 (* gh#49 sibling check: the expander already validates `fraction` and
    `count` are mutually exclusive (E261). Confirm the parser fix didn't
    accidentally let both through. Uses the JSON-errors helper so the
@@ -8549,6 +8606,14 @@ let () =
         `Quick test_intervention_multi_set;
       Alcotest.test_case "E296 block intervention with no action rejected"
         `Quick test_intervention_no_action;
+    ];
+    "indexed reference arity", [
+      Alcotest.test_case "indexed let over-index rejected (E299)"
+        `Quick test_indexed_let_arity;
+      Alcotest.test_case "indexed forcing over-index rejected (E299)"
+        `Quick test_indexed_forcing_arity;
+      Alcotest.test_case "indexed param over-index rejected (E299)"
+        `Quick test_indexed_param_arity;
     ];
     "reactive_interventions", [
       Alcotest.test_case "observed() (no window) lowers to Latest + defaults"

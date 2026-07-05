@@ -3069,6 +3069,33 @@ let temporal_reduction_names =
 
 let is_temporal_reduction_name n = List.mem n temporal_reduction_names
 
+(* Declared index dims of an indexed parameter (`R0[patch]` → ["patch"]), or
+   None for a scalar / unknown name. *)
+let indexed_param_dims ctx name =
+  List.find_map (function
+    | PIndexed p when p.pname = name -> Some p.pdims
+    | _ -> None) ctx.param_decls
+
+(* Shared arity check for an indexed reference `Name[i, j, ...]`. The table
+   (E202), shaped-let (E273), and compartment (E287) lookups keep their own
+   guards; this is the one check for the let / forcing / parameter branches,
+   which previously dropped (let) or name-mangled (forcing/param) a mismatched
+   index count. Returns true iff the arity matches; on mismatch it emits a
+   located E299 and the caller substitutes a placeholder so the pass keeps
+   collecting diagnostics. *)
+let check_index_arity ctx ~loc ~kind ~name ~declared ~provided : bool =
+  if declared = provided then true
+  else begin
+    let plural n = if n = 1 then "index" else "indices" in
+    Diagnostics.error ctx.diags
+      ~code:"E299" ~loc
+      ~message:(Printf.sprintf "%s '%s' expects %d %s but was given %d"
+                  kind name declared (plural declared) provided)
+      ~hint:(Printf.sprintf "index it with exactly %d %s" declared (plural declared))
+      ();
+    false
+  end
+
 let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
   match e with
   | EConst f     -> Ir.Const f
@@ -3149,6 +3176,10 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     (* 2. Indexed let binding? → inline body with index vars substituted *)
     match Hashtbl.find_opt ctx.let_tbl base_name with
     | Some lb when lb.lindices <> [] ->
+      if not (check_index_arity ctx ~loc:idx_loc ~kind:"let binding" ~name:base_name
+                ~declared:(List.length lb.lindices) ~provided:(List.length items))
+      then Ir.Const 0.0
+      else
       let inner_env = List.mapi (fun i ib ->
         let var_name = match ib with
           | IBind (v, _)      -> v
@@ -3191,12 +3222,23 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     (* 2c. Indexed time function: beta[p] → Ir.TimeFunc "beta_urban" *)
     if (match Hashtbl.find_opt ctx.func_tbl base_name with
         | Some fd -> fd.findices <> [] | None -> false) then
-      let idx_vals = List.map (index_item_to_str env) items in
-      Ir.TimeFunc (String.concat "_" (base_name :: idx_vals))
+      (let fd = Hashtbl.find ctx.func_tbl base_name in
+       if not (check_index_arity ctx ~loc:idx_loc ~kind:"forcing" ~name:base_name
+                 ~declared:(List.length fd.findices) ~provided:(List.length items))
+       then Ir.Const 0.0
+       else
+         let idx_vals = List.map (index_item_to_str env) items in
+         Ir.TimeFunc (String.concat "_" (base_name :: idx_vals)))
     else
     (* 3. Indexed parameter? → resolve index and return Ir.Param of mangled name *)
     if is_indexed_param ctx base_name then
-      (match items with
+      (let declared =
+         match indexed_param_dims ctx base_name with Some d -> List.length d | None -> 1 in
+       if not (check_index_arity ctx ~loc:idx_loc ~kind:"parameter" ~name:base_name
+                 ~declared ~provided:(List.length items))
+       then Ir.Const 0.0
+       else
+       match items with
        | [IPosn (EIdent (idx, _))] | [INamed (_, EIdent (idx, _))] ->
          let concrete = resolve_index ctx env idx in
          Ir.Param (base_name ^ "_" ^ concrete)
