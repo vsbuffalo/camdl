@@ -82,6 +82,21 @@ type context = {
   mutable table_index    : (string, Ir.expr array * string list) Hashtbl.t;
 }
 
+(* Stratification-name predicates. Expanded names are [base] itself or a leaf
+   [base_<dim values>], so recovering the base of an expanded name is a prefix
+   test. [is_expansion_of] recognises the base and its leaves (used to map an
+   expanded name back to its pre-expansion declaration); [is_indexed_leaf] is
+   the strict variant — a genuine leaf only, excluding the base and the bare
+   [base_] — used to match an indexed parameter declaration's expansions. *)
+let is_expansion_of ~base name =
+  let bl = String.length base in
+  name = base ||
+  (String.length name > bl && String.sub name 0 bl = base && name.[bl] = '_')
+
+let is_indexed_leaf ~base name =
+  let bl = String.length base in
+  String.length name > bl + 1 && String.sub name 0 bl = base && name.[bl] = '_'
+
 let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   time_unit        = Days;
   description      = None;
@@ -666,11 +681,7 @@ let diag_loc_of_ast_ctx ctx (l : Ast.loc) : Diagnostics.loc =
 let find_decl_loc ctx ~(decls : 'a list) ~(name_of : 'a -> string)
     ~(loc_of : 'a -> Ast.loc) (name : string) : Diagnostics.loc =
   match
-    List.find_opt (fun d ->
-      let b = name_of d in
-      let bl = String.length b and nl = String.length name in
-      name = b || (nl > bl && String.sub name 0 bl = b && name.[bl] = '_'))
-      decls
+    List.find_opt (fun d -> is_expansion_of ~base:(name_of d) name) decls
   with
   | Some d -> diag_loc_of_ast_ctx ctx (loc_of d)
   | None -> Diagnostics.no_loc
@@ -8260,10 +8271,7 @@ let expand_scenarios ctx : Ir.preset list =
 let find_base_trname ctx ename =
   List.sort (fun a b ->
     compare (String.length b.trname) (String.length a.trname)) ctx.transitions
-  |> List.find_opt (fun td ->
-    let b = td.trname and bl = String.length td.trname and el = String.length ename in
-    ename = b || (el > bl && String.sub ename 0 bl = b && ename.[bl] = '_')
-  )
+  |> List.find_opt (fun td -> is_expansion_of ~base:td.trname ename)
   |> Option.map (fun td -> td.trname)
 
 (** Same invariant: compartment expanded names are {base}_{dim_values}.
@@ -8271,10 +8279,7 @@ let find_base_trname ctx ename =
 let find_base_compname ctx expanded_name =
   List.sort (fun a b ->
     compare (String.length b.cname) (String.length a.cname)) ctx.comp_decls
-  |> List.find_opt (fun cd ->
-    let b = cd.cname and bl = String.length cd.cname and el = String.length expanded_name in
-    expanded_name = b || (el > bl && String.sub expanded_name 0 bl = b && expanded_name.[bl] = '_')
-  )
+  |> List.find_opt (fun cd -> is_expansion_of ~base:cd.cname expanded_name)
   |> Option.map (fun cd -> cd.cname)
 
 let build_model_structure ctx expanded_trs =

@@ -77,11 +77,8 @@ let pp_indices ppf ibs =
 
 (** Find all IR transitions whose name starts with [base_name] or equals it. *)
 let transitions_for_base (trs : Ir.transition list) base_name =
-  let prefix = base_name ^ "_" in
   List.filter (fun (t : Ir.transition) ->
-    t.name = base_name || String.length t.name >= String.length prefix
-    && String.sub t.name 0 (String.length prefix) = prefix
-  ) trs
+    Expander.is_expansion_of ~base:base_name t.name) trs
 
 (** Pattern match: glob where * matches any substring. *)
 let glob_match pattern s =
@@ -157,10 +154,7 @@ let decl_of_param (ctx : Expander.context) (p : Ir.parameter) : Ast.param_decl o
     match pd with
     | Ast.PScalar s -> s.pname = p.name
     | Ast.PIndexed ix ->
-      let prefix = ix.pname ^ "_" in
-      p.name = ix.pname ||
-      (String.length p.name > String.length prefix &&
-       String.sub p.name 0 (String.length prefix) = prefix)
+      p.name = ix.pname || Expander.is_indexed_leaf ~base:ix.pname p.name
   ) ctx.Expander.param_decls
 
 (* ── --summary ───────────────────────────────────────────────────────────── *)
@@ -822,10 +816,7 @@ let run_transition_rate ppf (model : Ir.model) ctx name =
     Fmt.pf ppf "    %a@\n@\n" (pp_rate ~ascii ~split) t.rate;
     (* Where: find let bindings referenced in the original AST rate *)
     let ast_rate = match List.find_opt (fun (orig : transition_decl) ->
-      t.name = orig.trname ||
-      (String.length t.name > String.length orig.trname &&
-       String.sub t.name 0 (String.length orig.trname) = orig.trname &&
-       t.name.[String.length orig.trname] = '_')
+      Expander.is_expansion_of ~base:orig.trname t.name
     ) ctx.Expander.orig_transitions with
     | Some orig ->
       (* For a `via law(...)` transition there is no single rate expr; reuse the

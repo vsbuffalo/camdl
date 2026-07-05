@@ -399,9 +399,7 @@ let differentiate_transitions (d : compile_detail)
     (* Find the original (pre-expansion) transition declaration by prefix
        match: expanded name "infection_child" → base "infection". *)
     match List.find_opt (fun (td : Ast.transition_decl) ->
-      let b = td.trname and bl = String.length td.trname in
-      let el = String.length name in
-      name = b || (el > bl && String.sub name 0 bl = b && name.[bl] = '_')
+      Expander.is_expansion_of ~base:td.trname name
     ) d.ctx.orig_transitions with
     | Some td -> Expander.diag_loc_of_ast_ctx d.ctx td.trloc
     | None -> Diagnostics.no_loc
