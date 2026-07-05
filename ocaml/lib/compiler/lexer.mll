@@ -53,7 +53,7 @@
               "suspicious digit grouping in '%s' (group widths: %s) — \
                did you mean %s? Use 3-digit groups: 1_000, 10_000, 1_000_000"
               raw sizes_str
-              (String.concat "" (List.map (fun g -> g) groups))
+              (String.concat "" groups)
           ) :: !pending_warnings
         end
     end

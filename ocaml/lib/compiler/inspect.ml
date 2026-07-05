@@ -1155,9 +1155,7 @@ let table_source_label (td : table_decl) =
 (** Format a compiled table value (always Const f after expansion). *)
 let pp_val ppf = function
   | Ir.Const f ->
-    let s = if Float.is_integer f && Float.abs f < 1e15
-            then Printf.sprintf "%g" f
-            else Printf.sprintf "%g" f in
+    let s = Printf.sprintf "%g" f in
     Fmt.string ppf s
   | other ->
     Pp_expr.pp ~mode:Pp_expr.Dsl ~split:Pp_expr.no_split ~ascii:true ppf other
@@ -1325,11 +1323,8 @@ let run_inspect path opts =
     Fmt.epr "Error: %s@\n" e;
     exit 1
   | Ok { model; ctx; summary; source } ->
-    (* Render any collected diagnostics *)
-    if Diagnostics.has_errors ctx.diags then (
-      Diagnostics.render_all ctx.diags source Fmt.stderr;
-      exit 1
-    );
+    (* compile_detail_result returns Ok only when there are no errors, so any
+       remaining diagnostics are warnings/infos — render them and continue. *)
     if ctx.diags.diags <> [] then
       Diagnostics.render_all ctx.diags source Fmt.stderr;
     let ppf = Fmt.stdout in
