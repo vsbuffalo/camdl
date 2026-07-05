@@ -138,6 +138,31 @@ let render_doc ppf (d : Ast.doc) =
    | Some r -> Term_style.dim_style Fmt.string ppf (Printf.sprintf "  [%s]" r)
    | None -> ())
 
+(* Human-readable name for a parameter kind. The default summary,
+   --parameters, and --dims all group parameters by these labels. *)
+let pkind_str (k : Ast.param_type) : string = match k with
+  | Ast.PRate -> "rate" | Ast.PProbability -> "probability"
+  | Ast.PPositive -> "positive" | Ast.PCount -> "count" | Ast.PReal -> "real"
+  | Ast.PInstant -> "instant" | Ast.PDuration -> "duration"
+
+(* Presentation order for the parameter-kind groupings. *)
+let kind_order = ["rate"; "probability"; "positive"; "count"; "real"]
+
+(* Find the source AST declaration for an IR parameter: a scalar matches by
+   name; an indexed declaration matches its expanded leaves by the `<base>_`
+   prefix (and, latently, the bare base name — dead for expanded leaves, kept
+   so every caller shares one lookup). *)
+let decl_of_param (ctx : Expander.context) (p : Ir.parameter) : Ast.param_decl option =
+  List.find_opt (fun pd ->
+    match pd with
+    | Ast.PScalar s -> s.pname = p.name
+    | Ast.PIndexed ix ->
+      let prefix = ix.pname ^ "_" in
+      p.name = ix.pname ||
+      (String.length p.name > String.length prefix &&
+       String.sub p.name 0 (String.length prefix) = prefix)
+  ) ctx.Expander.param_decls
+
 (* ── --summary ───────────────────────────────────────────────────────────── *)
 
 let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
@@ -207,27 +232,14 @@ let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
     Fmt.pf ppf " expanded"
   );
   if model.parameters <> [] then (
-    let pkind_str k = match k with
-      | Ast.PRate -> "rate" | Ast.PProbability -> "probability"
-      | Ast.PPositive -> "positive" | Ast.PCount -> "count" | Ast.PReal -> "real"
-      | Ast.PInstant -> "instant" | Ast.PDuration -> "duration"
-    in
     let kind_of (p : Ir.parameter) =
-      match List.find_opt (fun pd ->
-          match pd with
-          | Ast.PScalar s -> s.pname = p.name
-          | Ast.PIndexed ix ->
-            let prefix = ix.pname ^ "_" in
-            String.length p.name > String.length prefix &&
-            String.sub p.name 0 (String.length prefix) = prefix
-        ) ctx.param_decls with
+      match decl_of_param ctx p with
       | Some (Ast.PScalar pd)  -> pkind_str pd.pkind
       | Some (Ast.PIndexed pd) -> pkind_str pd.pkind
       | None -> "?"
     in
     (* Count by kind, preserving a stable declaration-order-like
        presentation: rate, probability, positive, count, real. *)
-    let kind_order = ["rate"; "probability"; "positive"; "count"; "real"] in
     let counts_by_kind = List.map (fun k ->
       (k, List.length (List.filter (fun p -> kind_of p = k) model.parameters))
     ) kind_order in
@@ -594,20 +606,8 @@ let run_compartments ppf (model : Ir.model) ctx =
     larger models (Garki has 17 params, which wraps the one-line
     summary's listing unreadably). *)
 let run_parameters ppf (model : Ir.model) (ctx : Expander.context) =
-  let pkind_str k = match k with
-    | Ast.PRate -> "rate" | Ast.PProbability -> "probability"
-    | Ast.PPositive -> "positive" | Ast.PCount -> "count" | Ast.PReal -> "real"
-    | Ast.PInstant -> "instant" | Ast.PDuration -> "duration"
-  in
   let kind_of (p : Ir.parameter) =
-    match List.find_opt (fun pd ->
-        match pd with
-        | Ast.PScalar s -> s.pname = p.name
-        | Ast.PIndexed ix ->
-          let prefix = ix.pname ^ "_" in
-          String.length p.name > String.length prefix &&
-          String.sub p.name 0 (String.length prefix) = prefix
-      ) ctx.Expander.param_decls with
+    match decl_of_param ctx p with
     | Some (Ast.PScalar pd)  -> pkind_str pd.pkind
     | Some (Ast.PIndexed pd) -> pkind_str pd.pkind
     | None -> "?"
@@ -616,19 +616,11 @@ let run_parameters ppf (model : Ir.model) (ctx : Expander.context) =
      (scalar by name, indexed by `name_`-prefix). An indexed param's leaves
      all share the one declaration's doc, mirroring shared bounds. *)
   let doc_of (p : Ir.parameter) =
-    match List.find_opt (fun pd ->
-        match pd with
-        | Ast.PScalar s -> s.pname = p.name
-        | Ast.PIndexed ix ->
-          let prefix = ix.pname ^ "_" in
-          String.length p.name > String.length prefix &&
-          String.sub p.name 0 (String.length prefix) = prefix
-      ) ctx.Expander.param_decls with
+    match decl_of_param ctx p with
     | Some (Ast.PScalar pd)  -> pd.pdoc
     | Some (Ast.PIndexed pd) -> pd.pdoc
     | None -> None
   in
-  let kind_order = ["rate"; "probability"; "positive"; "count"; "real"] in
   List.iter (fun kind ->
     let ps = List.filter (fun p -> kind_of p = kind) model.parameters in
     if ps <> [] then begin
@@ -1062,24 +1054,10 @@ let run_dims ppf (model : Ir.model) ctx =
   let dc_result = Dimcheck.check_model model in
   (* Build a lookup: param name → (kind, has_explicit_dim) from AST *)
   let param_info = List.filter_map (fun (p : Ir.parameter) ->
-    let ast_decl = List.find_opt (fun pd ->
-      match pd with
-      | Ast.PScalar s -> s.pname = p.name
-      | Ast.PIndexed ix ->
-        let prefix = ix.pname ^ "_" in
-        p.name = ix.pname ||
-        (String.length p.name > String.length prefix &&
-         String.sub p.name 0 (String.length prefix) = prefix)
-    ) ctx.Expander.param_decls in
+    let ast_decl = decl_of_param ctx p in
     let kind_str = match ast_decl with
-      | Some (Ast.PScalar pd) -> Ast.(match pd.pkind with
-          | PRate -> "rate" | PProbability -> "probability"
-          | PPositive -> "positive" | PCount -> "count" | PReal -> "real"
-          | PInstant -> "instant" | PDuration -> "duration")
-      | Some (Ast.PIndexed pd) -> Ast.(match pd.pkind with
-          | PRate -> "rate" | PProbability -> "probability"
-          | PPositive -> "positive" | PCount -> "count" | PReal -> "real"
-          | PInstant -> "instant" | PDuration -> "duration")
+      | Some (Ast.PScalar pd)  -> pkind_str pd.pkind
+      | Some (Ast.PIndexed pd) -> pkind_str pd.pkind
       | None -> "?"
     in
     (* A dimension is "declared" if the param_kind gives it a known dimension
@@ -1297,18 +1275,9 @@ type inspect_opts = {
   no_color : bool;   (* --no-color *)
 }
 
-(** Read the entire contents of a file into a string. *)
-let read_file path =
-  let ic = open_in path in
-  let n  = in_channel_length ic in
-  let s  = Bytes.create n in
-  really_input ic s 0 n;
-  close_in ic;
-  Bytes.to_string s
-
 let run_inspect path opts =
   let name = Filename.basename path |> Filename.remove_extension in
-  let src  = read_file path in
+  let src  = Compiler.read_file path in
   if opts.no_color then (
     Fmt.set_style_renderer Fmt.stdout `None;
     Fmt.set_style_renderer Fmt.stderr `None
@@ -1363,7 +1332,7 @@ let run_inspect path opts =
     removes that surface entirely. *)
 let run_check path =
   let name = Filename.basename path |> Filename.remove_extension in
-  let src  = read_file path in
+  let src  = Compiler.read_file path in
   Fmt.set_style_renderer Fmt.stdout `Ansi_tty;
   Fmt.set_style_renderer Fmt.stderr `Ansi_tty;
   let (detail, diags, source) = Compiler.collect_detail ~name ~filename:path src in

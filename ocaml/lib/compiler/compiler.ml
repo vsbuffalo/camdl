@@ -29,6 +29,9 @@ type 'a outcome = {
   source      : Source_cache.t;
 }
 
+(** Read the entire contents of a file into a string. *)
+let read_file path = In_channel.with_open_bin path In_channel.input_all
+
 (* ── Front-end core ───────────────────────────────────────────────────────
 
    The single, non-aborting lex/parse/expand front end. It runs the

@@ -59,13 +59,6 @@ let tokens s =
   |> String.split_on_char ' '
   |> List.filter (fun t -> t <> "")
 
-let read_file path =
-  let ic = open_in path in
-  let n = in_channel_length ic in
-  let s = really_input_string ic n in
-  close_in ic;
-  s
-
 (* ── filesystem helpers for inline data ───────────────────────────────────── *)
 
 let rec mkdir_p dir =
