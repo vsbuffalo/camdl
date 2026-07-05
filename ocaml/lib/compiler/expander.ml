@@ -4284,9 +4284,6 @@ let expand_transitions_counted ctx =
   ) ctx.transitions in
   (expanded, !filtered)
 
-let expand_transitions ctx =
-  fst (expand_transitions_counted ctx)
-
 (* ── Parameter expansion ─────────────────────────────────────────────────── *)
 
 (* resolve_float_expr_simple / resolve_bounds are defined below, after
@@ -5391,30 +5388,6 @@ let load_interpolated_for_level ctx path ~key_col ~key_val ~time_col ~value_col 
           ~on_header ~on_row ~on_done with
   | Some result -> result
   | None -> ([], [])
-
-(** Resolve a func_decl kwarg to an Ir.expr, preserving Param references.
-    Emits a diagnostic and returns Const 0.0 if the key is missing. *)
-let get_expr_kwarg ctx kwargs key =
-  match List.assoc_opt key kwargs with
-  | None   ->
-    Diagnostics.error ctx.diags ~code:"E403" ~loc:Diagnostics.no_loc
-      ~message:(Printf.sprintf "time function missing required argument '%s'" key)
-      ~hint:(Printf.sprintf "Add '%s = <value>' to the forcing function body." key)
-      ();
-    Ir.Const 0.0
-  | Some e -> resolve_expr ctx [] e
-
-let get_expr_list_kwarg ctx kwargs key =
-  match List.assoc_opt key kwargs with
-  | None   ->
-    Diagnostics.error ctx.diags ~code:"E403" ~loc:Diagnostics.no_loc
-      ~message:(Printf.sprintf "time function missing required argument '%s'" key)
-      ~hint:(Printf.sprintf "Add '%s = <value>' to the forcing function body." key)
-      ();
-    []
-  | Some e -> match e with
-    | EList es -> List.map (resolve_expr ctx []) es
-    | _ -> [resolve_expr ctx [] e]
 
 let expand_time_function_one ctx fname (env : (string * string) list)
     (findices : index_binding list) fkind (funit : unit_lit) fargs =
