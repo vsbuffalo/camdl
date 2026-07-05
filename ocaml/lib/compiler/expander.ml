@@ -333,26 +333,31 @@ let split_by sep line =
     Handles path resolution, extension-based separator detection, and error
     reporting. Returns [None] if the file is missing; [Some result] from
     [on_done] otherwise. [on_done] is called after all rows, before close. *)
-let read_csv_rows ctx path ~on_header ~on_row ~on_done =
-  (* W104: an absolute `read("/...")` path is non-portable — it bakes one
-     machine's filesystem layout into the model, breaking sharing, model-repo
-     reuse, and `camdl mre` bundling (gh#211). We warn (not error) because an
-     absolute path still works locally, so a hard error would block legitimate
-     exploratory work; `-Werror` / `--deny` (gh#56) make it strict for CI. The
-     check is on the path STRING (before the file-existence check below), so it
-     fires whether or not the absolute file happens to exist on this machine —
-     non-portability is a property of the path, not of local presence. We use
-     [Filename.is_relative] (the stdlib portable predicate); a `../`-escaping
-     *relative* path is a legitimate multi-model-repo pattern and is NOT
-     flagged. *)
+let read_csv_rows ctx path ~ref_desc ~ref_hint_example ~on_header ~on_row ~on_done =
+  (* W104: an absolute file path is non-portable — it bakes one machine's
+     filesystem layout into the model, breaking sharing, model-repo reuse, and
+     `camdl mre` bundling (gh#211, gh#307). This is the shared chokepoint for
+     every compile-time file read — `read(...)` tables/dimensions AND a forcing's
+     `data =` time series — so a single check covers them all; [ref_desc] /
+     [ref_hint_example] let each call site name the construct the author actually
+     wrote (so a forcing `data =` path is not misreported as `read()`). We warn
+     (not error) because an absolute path still works locally, so a hard error
+     would block legitimate exploratory work; `-Werror` / `--deny` (gh#56) make
+     it strict for CI. The check is on the path STRING (before the file-existence
+     check below), so it fires whether or not the absolute file happens to exist
+     on this machine — non-portability is a property of the path, not of local
+     presence. We use [Filename.is_relative] (the stdlib portable predicate); a
+     `../`-escaping *relative* path is a legitimate multi-model-repo pattern and
+     is NOT flagged. *)
   if not (Filename.is_relative path) then
     Diagnostics.warning ctx.diags
       ~code:"W104"
       ~loc:Diagnostics.no_loc
       ~message:(Printf.sprintf
-        "read() uses an absolute path %S — non-portable model" path)
-      ~hint:"use a path relative to the .camdl source file (e.g. \
-             read(\"data/contact.tsv\")) so the model runs on any machine"
+        "%s uses an absolute path %S — non-portable model" ref_desc path)
+      ~hint:(Printf.sprintf
+        "use a path relative to the .camdl source file (e.g. %s) so the \
+         model runs on any machine" ref_hint_example)
       ();
   let abs_path = resolve_data_path ctx path in
   if not (Sys.file_exists abs_path) then begin
@@ -638,7 +643,9 @@ let load_table_data ctx path ~dims ~n_values ~default_val ~cell_kind =
     end;
     Array.to_list arrays
   in
-  match read_csv_rows ctx path ~on_header ~on_row ~on_done with
+  match read_csv_rows ctx path
+          ~ref_desc:"read()" ~ref_hint_example:"read(\"data/contact.tsv\")"
+          ~on_header ~on_row ~on_done with
   | Some result -> result
   | None -> List.init n_values (fun _ -> [||])
 
@@ -1824,7 +1831,9 @@ let read_dim_column_from_file ctx path col_name =
         end
   in
   let on_done () = (List.rev !order, !n_rows, !n_dups) in
-  match read_csv_rows ctx path ~on_header ~on_row ~on_done with
+  match read_csv_rows ctx path
+          ~ref_desc:"read()" ~ref_hint_example:"read(\"data/levels.tsv\")"
+          ~on_header ~on_row ~on_done with
   | Some result -> result
   | None -> ([], 0, 0)
 
@@ -5376,7 +5385,10 @@ let load_interpolated_for_level ctx path ~key_col ~key_val ~time_col ~value_col 
       | _ -> ()
   in
   let on_done () = (List.rev !times, List.rev !values) in
-  match read_csv_rows ctx path ~on_header ~on_row ~on_done with
+  match read_csv_rows ctx path
+          ~ref_desc:"the forcing data reference"
+          ~ref_hint_example:"data = \"data/forcing.tsv\""
+          ~on_header ~on_row ~on_done with
   | Some result -> result
   | None -> ([], [])
 

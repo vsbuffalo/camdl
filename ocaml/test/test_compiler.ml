@@ -8065,6 +8065,69 @@ let test_w104_summed_no_warn () =
   (* the summed-rate `where` form (where_radius_src) must NOT trip W104 *)
   Alcotest.(check bool) "W104 silent on the summed-rate form" false (warns_w104 where_radius_src)
 
+(* ── W104: absolute path in a forcing `data =` reference (gh#307) ──────────────
+   W104 already flags absolute `read(...)` table/dimension paths; a forcing's
+   file-backed `data =` loader shares the same `read_csv_rows` chokepoint, so the
+   same portability warning fires on it too. These tests pin (a) that W104 fires
+   on an absolute forcing `data =` path and (b) that the message names the
+   forcing construct rather than misattributing the mistake to `read()`. The
+   model reads a non-existent absolute file, so E200/E227 also fire — we look at
+   the diagnostic list directly (via [collect_diagnostics], which does not abort
+   on errors) rather than compiling to completion. *)
+
+let forcing_data_model ~path =
+  Printf.sprintf
+    {|
+    time_unit = 'days
+    compartments { S, E, I, R }
+    let N = S + E + I + R
+    parameters { beta : rate  sigma : rate  gamma : rate  N0 : count  I0 : count }
+    forcing {
+      clim : interpolated 'ratio {
+        data      = "%s"
+        time_col  = t
+        value_col = force
+        method    = "linear"
+      }
+    }
+    transitions {
+      infection   : S --> E @ beta * clim(t) * S * I / N
+      progression : E --> I @ sigma * E
+      recovery    : I --> R @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 10 'days }
+  |}
+    path
+
+let test_w104_forcing_data_absolute_warns () =
+  (* Path deliberately contains neither "forcing" nor "read" so the message-text
+     assertions test the construct label, not an incidental filename match. *)
+  let diags =
+    Compiler.collect_diagnostics ~name:"w104_forcing"
+      (forcing_data_model ~path:"/abs/beta_series.tsv") in
+  let w104 =
+    List.filter (fun (d : Diagnostics.diagnostic) ->
+      d.code = "W104" && d.severity = Diagnostics.Warning) diags in
+  Alcotest.(check int)
+    "W104 fires once on the absolute forcing data path" 1 (List.length w104);
+  match w104 with
+  | [ d ] ->
+    Alcotest.(check bool) "W104 message names the forcing data reference" true
+      (contains_substring ~needle:"forcing data" d.message);
+    Alcotest.(check bool) "W104 message does not misattribute to read()" false
+      (contains_substring ~needle:"read()" d.message)
+  | _ -> Alcotest.fail "expected exactly one W104 diagnostic"
+
+let test_w104_forcing_data_relative_no_warn () =
+  (* A relative forcing data path is portable — no W104, even though the file
+     does not exist here (E200/E227 still fire). *)
+  let diags =
+    Compiler.collect_diagnostics ~name:"w104_forcing_rel"
+      (forcing_data_model ~path:"data/beta_series.tsv") in
+  Alcotest.(check int) "no W104 on a relative forcing data path"
+    0 (count_diags_with_code diags "W104")
+
 (* ── gh#204 reactive interventions ──────────────────────────────────────── *)
 
 (* A full, valid model whose only variable is the reactive_interventions body. *)
@@ -8410,6 +8473,12 @@ let () =
     "quadratic_coupling_warning", [
       Alcotest.test_case "W104 on per-(p,q) transition" `Quick test_w104_perpair_warns;
       Alcotest.test_case "no W104 on summed-rate form" `Quick test_w104_summed_no_warn;
+    ];
+    "w104_forcing_data_absolute_path", [
+      Alcotest.test_case "W104 fires on an absolute forcing data path"
+        `Quick test_w104_forcing_data_absolute_warns;
+      Alcotest.test_case "no W104 on a relative forcing data path"
+        `Quick test_w104_forcing_data_relative_no_warn;
     ];
     "restricted_sum_where", [
       Alcotest.test_case "where dist[p,q] < r prunes to in-radius neighbours (fold off)"

@@ -129,21 +129,21 @@ documented at each emit site in `ocaml/lib/compiler/`.)
 
 ## Warnings
 
-| Code | Severity | Category   | Summary                                                                                       |
-| ---- | -------- | ---------- | --------------------------------------------------------------------------------------------- |
-| W100 | Warning  | model-file | inconsistent digit grouping in a numeric literal (drained from the lexer)                     |
-| W103 | Warning  | model-file | questionable model-file construct                                                             |
-| W104 | Warning  | model-file | `read(...)` uses an absolute path — non-portable model (gh#211)                               |
-| W105 | Warning  | model-file | per-(p,q) coupling antipattern (O(P²) transitions); use a summed rate `sum(q in dim where …)` |
-| W200 | Warning  | IR         | suspicious IR shape                                                                           |
-| W201 | Warning  | IR         | suspicious IR shape                                                                           |
-| W301 | Warning  | covariate  | periodic range not aligned to step size                                                       |
-| W310 | Warning  | covariate  | covariate / interpolation issue                                                               |
-| W311 | Warning  | covariate  | covariate / interpolation issue                                                               |
-| W324 | Warning  | calendar   | bare number in `simulate.from`/`.to` with a calendar origin declared                          |
-| W325 | Warning  | calendar   | bare number in a recurring/at time position with a calendar origin declared                   |
-| W327 | Warning  | calendar   | calendar `add_*`/`subtract_*` round-trip is not in general the identity (month-end clamping)  |
-| W328 | Warning  | calendar   | `date_range` `end` does not land on a cadence boundary                                        |
+| Code | Severity | Category   | Summary                                                                                                     |
+| ---- | -------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| W100 | Warning  | model-file | inconsistent digit grouping in a numeric literal (drained from the lexer)                                   |
+| W103 | Warning  | model-file | questionable model-file construct                                                                           |
+| W104 | Warning  | model-file | absolute path in a file reference (`read(...)` or a forcing `data =`) — non-portable model (gh#211, gh#307) |
+| W105 | Warning  | model-file | per-(p,q) coupling antipattern (O(P²) transitions); use a summed rate `sum(q in dim where …)`               |
+| W200 | Warning  | IR         | suspicious IR shape                                                                                         |
+| W201 | Warning  | IR         | suspicious IR shape                                                                                         |
+| W301 | Warning  | covariate  | periodic range not aligned to step size                                                                     |
+| W310 | Warning  | covariate  | covariate / interpolation issue                                                                             |
+| W311 | Warning  | covariate  | covariate / interpolation issue                                                                             |
+| W324 | Warning  | calendar   | bare number in `simulate.from`/`.to` with a calendar origin declared                                        |
+| W325 | Warning  | calendar   | bare number in a recurring/at time position with a calendar origin declared                                 |
+| W327 | Warning  | calendar   | calendar `add_*`/`subtract_*` round-trip is not in general the identity (month-end clamping)                |
+| W328 | Warning  | calendar   | `date_range` `end` does not land on a cadence boundary                                                      |
 
 (Each row should eventually be expanded with a one-paragraph rationale
 documenting the failure mode the warning catches. Future emit-site additions
@@ -160,14 +160,20 @@ section below instead of a first-cell table row — otherwise the meta-test flag
 it as a stale catalog row. Do not "fix" the apparent table omission by adding a
 row.
 
-### W104 — absolute path in `read(...)` (non-portable model)
+### W104 — absolute path in a file reference (non-portable model)
 
-**Fires when:** a `read("...")` data-load (table or any other `read()`-loaded
-file) is given an _absolute_ path — one for which `Filename.is_relative` is
-false (e.g. `read("/home/alice/data/contact.tsv")`). A relative path
-(`read("data/contact.tsv")`, even a `../`-escaping `read("../shared/x.tsv")`)
-does NOT fire — those resolve against the `.camdl` source directory and travel
-with the model.
+**Fires when:** a compile-time file reference is given an _absolute_ path — one
+for which `Filename.is_relative` is false. Two surfaces share the check: a
+`read("...")` data-load (a table, or a file-derived dimension), e.g.
+`read("/home/alice/data/contact.tsv")`; and a file-backed forcing's `data =`
+time series, e.g.
+`forcing { beta : interpolated 'rate { data =
+"/home/alice/data/beta.tsv" … } }`.
+A relative path (`read("data/contact.tsv")`, `data = "data/beta.tsv"`, even a
+`../`-escaping `read("../shared/x.tsv")`) does NOT fire — those resolve against
+the `.camdl` source directory and travel with the model. The diagnostic message
+names the surface the author actually wrote (`read()` vs the forcing `data =`),
+so it points at the real mistake.
 
 **Why:** an absolute path bakes one machine's filesystem layout into the model.
 It compiles fine on the author's machine and is silently non-portable — it
@@ -179,16 +185,18 @@ absolute path still works locally, so a hard error would block legitimate
 exploratory work. `-Werror` / `--deny` (gh#56) promote it to a hard failure for
 CI; per-site suppression (gh#55) silences the rare deliberate case.
 
-**Where it fires:** at expander time, not at IR-lint time. By IR time the
-`read()` path is gone (inline tables become `{values}`, external becomes
-`{external: name}` — no path field survives serialization), so an `ir/lint.ml`
-pass cannot see it. The check has to live where the path string still exists:
-the single `read()` chokepoint `read_csv_rows` in
-`ocaml/lib/compiler/expander.ml`, beside the existing E200 (file-not-found)
-raise. The warning is checked on the path STRING _before_ the file-existence
-check, so it fires whether or not the absolute file happens to exist on the
-compiling machine — non-portability is a property of the path, not of local
-presence. (Consequently a missing absolute file emits both W104 and E200.)
+**Where it fires:** at expander time, not at IR-lint time. By IR time the path
+is gone (inline tables become `{values}`, external becomes `{external: name}`,
+forcing knots become baked `(times, values)` — no path field survives
+serialization), so an `ir/lint.ml` pass cannot see it. The check has to live
+where the path string still exists: the single file-read chokepoint
+`read_csv_rows` in `ocaml/lib/compiler/expander.ml`, through which every
+compile-time read flows (`read()` tables/dimensions and the forcing `data =`
+loader), beside the existing E200 (file-not-found) raise. The warning is checked
+on the path STRING _before_ the file-existence check, so it fires whether or not
+the absolute file happens to exist on the compiling machine — non-portability is
+a property of the path, not of local presence. (Consequently a missing absolute
+file emits both W104 and E200.)
 
 **Scope:** absolute paths are the clear win and the only thing W104 flags. A
 `../`-escaping _relative_ path is a legitimate multi-model-repo pattern and is

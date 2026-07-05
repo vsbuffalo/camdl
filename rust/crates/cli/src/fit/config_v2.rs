@@ -1982,11 +1982,56 @@ impl FitConfigV2 {
         Ok(config)
     }
 
+    /// Portability lint (gh#307): one warning line per file reference in the
+    /// fit config that is written as an ABSOLUTE path. Absolute paths bake one
+    /// machine's filesystem layout into the config, breaking sharing and
+    /// reproducibility (the content-addressable design) — the fit-config
+    /// counterpart of the compiler's W104 on model-file paths. Covered
+    /// surfaces: `[model] camdl`, `output_dir`, the wide-TSV `[data] file`, and
+    /// every `[data.observations]` stream source.
+    ///
+    /// Checked on the AS-WRITTEN strings, so it must run BEFORE [`load`]
+    /// resolves relative paths against the fit.toml directory (which rewrites
+    /// every relative path to an absolute one, erasing the distinction). Pure
+    /// and side-effect-free so it is unit-testable; [`load`] prints the returned
+    /// lines to stderr.
+    pub fn absolute_path_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut check = |what: &str, path: &str| {
+            if std::path::Path::new(path).is_absolute() {
+                out.push(format!(
+                    "warning: {what} is an absolute path ({path}) — non-portable; \
+                     use a path relative to the fit.toml so the fit runs on any machine"
+                ));
+            }
+        };
+        check("[model] camdl", &self.model.camdl);
+        if let Some(dir) = &self.output_dir {
+            check("output_dir", dir);
+        }
+        if let Some(data) = &self.data {
+            if let Some(file) = &data.file {
+                check("[data] file", file);
+            }
+            for (stream, src) in &data.observations {
+                check(&format!("[data.observations] {stream}"), src);
+            }
+        }
+        out
+    }
+
     pub fn load(path: &str) -> Result<Self, String> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {}", path, e))?;
         let mut config = FitConfigV2::from_toml_str(&contents)
             .map_err(|e| format!("error in {}:\n{}", path, e))?;
+
+        // gh#307: warn (do not error) on absolute file references — checked on
+        // the as-written paths, before the relative-path resolution below turns
+        // every relative path absolute.
+        for w in config.absolute_path_warnings() {
+            eprintln!("{w}");
+        }
 
         // Resolve toml-relative paths against the toml's directory
         // (Cargo / pyproject convention). Closes GH #22: pre-fix, paths
@@ -2648,6 +2693,110 @@ cooling = 0.70
             }
             _ => panic!("expected IF2 stage"),
         }
+    }
+
+    // gh#307: absolute-path portability lint over fit-config file references.
+
+    /// A minimal but valid fit config parametrized by the four file-reference
+    /// surfaces the lint covers, so a test can flip any of them absolute/relative
+    /// without repeating the boilerplate.
+    fn cfg_with_paths(camdl: &str, obs: &str, output_dir: &str) -> FitConfigV2 {
+        parse(&format!(
+            r#"
+output_dir = "{output_dir}"
+
+[model]
+camdl = "{camdl}"
+
+[data.observations]
+weekly_cases = "{obs}"
+
+[estimate]
+beta = {{ bounds = [0.01, 2.0] }}
+
+[fixed]
+N0 = 1000000
+
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 100
+iterations = 10
+cooling = 0.7
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn absolute_path_warnings_flags_all_surfaces() {
+        let cfg = cfg_with_paths(
+            "/abs/models/sir.camdl",
+            "/abs/data/cases.tsv",
+            "/abs/out",
+        );
+        let warnings = cfg.absolute_path_warnings();
+        assert_eq!(
+            warnings.len(),
+            3,
+            "one warning each for [model] camdl, [data.observations] weekly_cases, output_dir; got: {warnings:?}"
+        );
+        // Each warning names its surface and the offending path, and flags it as
+        // non-portable (not just "absolute").
+        assert!(warnings.iter().any(|w|
+            w.contains("[model] camdl") && w.contains("/abs/models/sir.camdl")));
+        assert!(warnings.iter().any(|w|
+            w.contains("[data.observations] weekly_cases") && w.contains("/abs/data/cases.tsv")));
+        assert!(warnings.iter().any(|w|
+            w.contains("output_dir") && w.contains("/abs/out")));
+        assert!(warnings.iter().all(|w| w.contains("non-portable")));
+    }
+
+    #[test]
+    fn absolute_path_warnings_silent_on_relative() {
+        let cfg = cfg_with_paths(
+            "models/sir.camdl",
+            "data/cases.tsv",
+            "out",
+        );
+        assert!(
+            cfg.absolute_path_warnings().is_empty(),
+            "relative paths are portable and must not warn: {:?}",
+            cfg.absolute_path_warnings()
+        );
+    }
+
+    #[test]
+    fn absolute_path_warnings_flags_wide_data_file() {
+        // The `[data] file = "..."` wide-TSV form is a data source path too.
+        let cfg = parse(
+            r#"
+[model]
+camdl = "models/sir.camdl"
+
+[data]
+file = "/abs/data/wide.tsv"
+
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+
+[fixed]
+N0 = 1000000
+
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 100
+iterations = 10
+cooling = 0.7
+"#,
+        )
+        .unwrap();
+        let warnings = cfg.absolute_path_warnings();
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(warnings[0].contains("[data] file") && warnings[0].contains("/abs/data/wide.tsv"));
     }
 
     /// gh#241 C3: serde cannot apply `deny_unknown_fields` to the
