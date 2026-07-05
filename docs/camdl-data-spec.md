@@ -484,6 +484,45 @@ This is a natural extension, not a new concept: time functions already do
 runtime interpolation, and indexing one by a dimension is the same
 `[p in patch]` pattern used everywhere else.
 
+**Two data sources.** The form above reads its own long-format file
+(`data = …`). Alternatively the series can come from a table already in the
+central `tables {}` block — the same road population, contact matrices, and
+adjacency travel — with `table =` and `time_dim =`:
+
+```camdl
+tables {
+  temp_data : patch × climate_week = read("data/temperature.tsv")
+}
+
+forcing {
+  temperature[p in patch] : interpolated 'ratio {
+    table    = temp_data     # the source table
+    time_dim = climate_week  # which dimension is the time axis (its levels are the knot times)
+    method   = "linear"
+  }
+}
+```
+
+The forcing's own index (`[p in patch]`) binds the stratum; `time_dim` names the
+time axis; every table dimension must be **either** indexed by the forcing
+**or** the `time_dim`. A dimension left unaccounted for is a compile error
+(**E229**) that names it — never a silent guess:
+
+```
+# clim : patch × season × week, but the forcing only indexes patch —
+temperature[p in patch] : interpolated 'ratio { table = clim  time_dim = week }
+# E229: table 'clim' has dimension 'season' that is neither indexed by the
+#   forcing nor the time axis — index it ([p in patch, s in season]) or
+#   aggregate it out.
+```
+
+Use `data =` for a forcing whose data is a standalone long-format file; use
+`table =` when the data is (or should be) a `tables {}` matrix — reused
+elsewhere in the model, or when the forcing is stratified over more than one
+dimension (a single `data =` file has one key column, whereas `table =` composes
+to `[p in patch, s in season]` + `time_dim = week`). The knots are sorted by
+their numeric time, so the dimension's declaration order does not matter.
+
 **For the immediate Nigeria model:** per-patch sinusoidal approximation via
 parameters works:
 

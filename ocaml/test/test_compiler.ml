@@ -2557,6 +2557,126 @@ let test_gh345_indexed_file_backed_forcing () =
   Alcotest.(check (list (float 1e-9)))
     "south forcing gets south's own rows" [0.5; 0.8; 0.6] (values "cforce_south")
 
+(* ── gh#345 sibling: the table-backed form ──────────────────────────────────
+   The per-stratum series comes from a `tables {}` matrix, not a `data =` file.
+   `table = temp_data` names the source, `time_dim = climate_week` names the
+   time axis, and the forcing's `[p in patch]` index binds the stratum — no `:`
+   slice, no inference. The `climate_week` levels here arrive OUT of numeric
+   order (10, 0, 20 by first occurrence), so this also pins that the knots are
+   sorted by time (each value paired to its own time). ───────────────────────*)
+let test_gh345_table_backed_forcing () =
+  let dir = Filename.get_temp_dir_name () in
+  let tsv = Filename.concat dir "camdl_gh345t.tsv" in
+  let oc  = open_out tsv in
+  (* week first-occurrence order is 10, 0, 20 — deliberately unsorted *)
+  output_string oc
+    "patch\tweek\tcval\n\
+     north\t10\t2.0\nnorth\t0\t1.0\nnorth\t20\t1.5\n\
+     south\t10\t0.8\nsouth\t0\t0.5\nsouth\t20\t0.6\n";
+  close_out oc;
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions {
+      patch        = [north, south]
+      climate_week = read("camdl_gh345t.tsv", column = "week")
+    }
+    stratify(by = patch)
+    let N[p in patch] = S[p] + I[p]
+    parameters { beta : rate  gamma : rate }
+    tables {
+      temp_data : patch × climate_week = read("camdl_gh345t.tsv")
+    }
+    forcing {
+      cforce[p in patch] : interpolated 'ratio {
+        table    = temp_data
+        time_dim = climate_week
+        method   = "linear"
+      }
+    }
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ beta * cforce[p] * S[p] * I[p] / N[p]
+      recovery[p in patch]  : I[p] --> S[p] @ gamma * I[p]
+    }
+    init { S[north] = 990  I[north] = 10  S[south] = 495  I[south] = 5 }
+    simulate { from = 0 'days  to = 20 'days }
+  |} in
+  let model_path = Filename.concat dir "camdl_gh345t_model.camdl" in
+  let m = match Compiler.compile ~name:"gh345t" ~filename:model_path src with
+    | Ok m    -> m
+    | Error e -> Alcotest.failf "compile failed: %s" e
+  in
+  let interp name =
+    match List.find_opt (fun (tf : Ir.time_function) -> tf.name = name) m.time_functions with
+    | Some { kind = Ir.Interpolated i; _ } ->
+      let consts = List.map (function Ir.Const x -> x
+                                    | _ -> Alcotest.failf "%s: non-const knot" name) in
+      (consts i.times, consts i.values)
+    | Some _ -> Alcotest.failf "%s is not an interpolated forcing" name
+    | None   -> Alcotest.failf "forcing %s not found" name
+  in
+  let (north_t, north_v) = interp "cforce_north" in
+  let (_south_t, south_v) = interp "cforce_south" in
+  (* knots sorted by time despite the unsorted dimension levels *)
+  Alcotest.(check (list (float 1e-9)))
+    "times sorted to the climate_week levels" [0.0; 10.0; 20.0] north_t;
+  Alcotest.(check (list (float 1e-9)))
+    "north = row `north`, value paired to its own time" [1.0; 2.0; 1.5] north_v;
+  Alcotest.(check (list (float 1e-9)))
+    "south = row `south`, value paired to its own time" [0.5; 0.8; 0.6] south_v
+
+(* gh#345: a table dimension neither indexed by the forcing nor named as
+   time_dim is a named error (E229) — never a silent axis guess. *)
+let test_gh345_table_unaccounted_dim_rejected () =
+  let dir = Filename.get_temp_dir_name () in
+  let tsv = Filename.concat dir "camdl_gh345u.tsv" in
+  let oc  = open_out tsv in
+  output_string oc
+    "patch\tseason\tweek\tcval\n\
+     north\twet\t0\t1.0\nnorth\twet\t10\t2.0\n\
+     north\tdry\t0\t1.1\nnorth\tdry\t10\t2.1\n\
+     south\twet\t0\t0.5\nsouth\twet\t10\t0.8\n\
+     south\tdry\t0\t0.6\nsouth\tdry\t10\t0.9\n";
+  close_out oc;
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions {
+      patch  = [north, south]
+      season = [wet, dry]
+      week   = read("camdl_gh345u.tsv", column = "week")
+    }
+    stratify(by = patch)
+    let N[p in patch] = S[p] + I[p]
+    parameters { beta : rate  gamma : rate }
+    tables {
+      clim : patch × season × week = read("camdl_gh345u.tsv")
+    }
+    forcing {
+      cforce[p in patch] : interpolated 'ratio {
+        table    = clim
+        time_dim = week
+        method   = "linear"
+      }
+    }
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ beta * cforce[p] * S[p] * I[p] / N[p]
+      recovery[p in patch]  : I[p] --> S[p] @ gamma * I[p]
+    }
+    init { S[north] = 990  I[north] = 10  S[south] = 495  I[south] = 5 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile ~name:"gh345u" ~filename:(Filename.concat dir "m.camdl") src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _    -> Alcotest.failf "expected E229 for the unaccounted `season` dimension"
+  | Error e ->
+    if not (contains_substring ~needle:"E229" e) then
+      Alcotest.failf "expected error code E229, got: %s" e;
+    if not (contains_substring ~needle:"season" e) then
+      Alcotest.failf "error must name the unaccounted `season` dimension, got: %s" e
+
 (* Control: `mu * S / 365.25` — a bare conversion constant, but no rate forcing
    anywhere in the numerator. Must not fire. *)
 let test_l403_no_fire_on_unrelated_div () =
@@ -8452,6 +8572,8 @@ let () =
       Alcotest.test_case "L403 quiet on same-unit rate forcing"     `Quick test_l403_no_fire_on_same_unit_forcing;
       Alcotest.test_case "L403 quiet on structural divisor"         `Quick test_l403_no_fire_on_structural_divisor;
       Alcotest.test_case "gh#345 indexed file-backed forcing"       `Quick test_gh345_indexed_file_backed_forcing;
+      Alcotest.test_case "gh#345 table-backed forcing"              `Quick test_gh345_table_backed_forcing;
+      Alcotest.test_case "gh#345 table forcing unaccounted dim"     `Quick test_gh345_table_unaccounted_dim_rejected;
     ];
     "compile_outcome", [
       Alcotest.test_case "clean model returns Some value, no errors" `Quick test_compile_outcome_clean_returns_value;

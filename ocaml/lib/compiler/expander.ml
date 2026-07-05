@@ -2973,6 +2973,13 @@ let apply_relop op (a : float) (b : float) : bool =
    Emits E284 (predicate not compile-time decidable) and returns None on any
    failure — unknown/non-constant table, bad arity, unknown level, OOB, or a
    non-constant (parameterized) cell. *)
+(* Row-major flat offset of a table cell: per-dimension positions (0-based) and
+   the dimension sizes, folded Horner-style (dimension 0 varies slowest). Shared
+   by the where-predicate cell reader and the gh#345 table-backed forcing slice
+   so the stride math lives in one place. *)
+let row_major_offset positions sizes =
+  List.fold_left2 (fun acc pos sz -> (acc * sz) + pos) 0 positions sizes
+
 let eval_tab_cell ctx env tname idxs : float option =
   let err msg =
     Diagnostics.error ctx.diags ~code:"E284" ~loc:Diagnostics.no_loc ~message:msg ();
@@ -3003,7 +3010,7 @@ let eval_tab_cell ctx env tname idxs : float option =
            known level of its dimension." tname)
       else
         let positions = List.map Option.get positions in
-        let offset = List.fold_left2 (fun acc pos sz -> (acc * sz) + pos) 0 positions sizes in
+        let offset = row_major_offset positions sizes in
         if offset < 0 || offset >= Array.length cells then
           err (Printf.sprintf "the where-predicate index into table '%s' is out of bounds." tname)
         else match cells.(offset) with
@@ -5350,7 +5357,8 @@ let get_expr_list_kwarg ctx kwargs key =
     | EList es -> List.map (resolve_expr ctx []) es
     | _ -> [resolve_expr ctx [] e]
 
-let expand_time_function_one ctx fname (env : (string * string) list) fkind (funit : unit_lit) fargs =
+let expand_time_function_one ctx fname (env : (string * string) list)
+    (findices : index_binding list) fkind (funit : unit_lit) fargs =
   let get_kw key =
     match List.assoc_opt key fargs with
     | None   ->
@@ -5376,6 +5384,84 @@ let expand_time_function_one ctx fname (env : (string * string) list) fkind (fun
   let get_str_kw key default = match List.assoc_opt key fargs with
     | Some (EIdent (s, _)) -> s
     | Some _ | None -> default
+  in
+  (* gh#345: a table-backed interpolated forcing draws its per-stratum series
+     from a `tables {}` matrix. `table = temp_data` names the source; `time_dim =
+     week` names which dimension is the time axis; the forcing's own index binds
+     the stratum. Every table dimension must be either indexed by the forcing or
+     the `time_dim`, else a named error. Returns (time, value-cell) knots sorted
+     by time — a dimension's level order is arbitrary, and the Rust knot-builder
+     requires a strictly-increasing axis (and rejects duplicate times). *)
+  let table_backed_knots tbl =
+    let err ?hint msg =
+      Diagnostics.error ctx.diags ~code:"E229" ~loc:Diagnostics.no_loc ~message:msg ?hint () in
+    let time_dim = get_str_kw "time_dim" "" in
+    let tdims    = table_dims ctx tbl in
+    let stratum  = List.filter_map (function IBind (v, d) -> Some (v, d) | _ -> None) findices in
+    if tdims = [] then
+      (err ~hint:(Printf.sprintf "declare it as `tables { %s : dim \xc3\x97 time = read(...) }`" tbl)
+         (Printf.sprintf "forcing '%s': `table = %s` is not a table" fname tbl); [])
+    else if time_dim = "" then
+      (err ~hint:"name the table dimension that is the time axis, e.g. `time_dim = week`"
+         (Printf.sprintf "forcing '%s': a table-backed forcing needs `time_dim = <dimension>`" fname);
+       [])
+    else if List.length stratum <> List.length findices then
+      (err (Printf.sprintf
+         "forcing '%s': a table-backed forcing must be indexed by plain dimensions \
+          (`[p in patch]`), not consecutive pairs or compartments" fname); [])
+    else begin
+      let stratum_dims = List.map snd stratum in
+      (* Dimension accounting: { stratum dims } ∪ { time_dim } == { table dims }. *)
+      if not (List.mem time_dim tdims) then
+        err (Printf.sprintf
+          "forcing '%s': time_dim = '%s' is not a dimension of table '%s' [%s]"
+          fname time_dim tbl (String.concat " \xc3\x97 " tdims));
+      List.iter (fun d ->
+        if d <> time_dim && not (List.mem d stratum_dims) then
+          err ~hint:(Printf.sprintf
+            "index it (e.g. add `%s in %s` to the forcing) or aggregate '%s' out of the table"
+            (String.lowercase_ascii d) d d)
+            (Printf.sprintf
+              "forcing '%s': table '%s' has dimension '%s' that is neither indexed by \
+               the forcing nor the time axis" fname tbl d)) tdims;
+      List.iter (fun d ->
+        if not (List.mem d tdims) then
+          err (Printf.sprintf
+            "forcing '%s': indexed by dimension '%s', but table '%s' has no such dimension"
+            fname d tbl)) stratum_dims;
+      let cells = match Hashtbl.find_opt ctx.table_index tbl with
+        | Some (arr, _) -> arr | None -> [||] in
+      if Array.length cells = 0 then
+        (err (Printf.sprintf
+           "forcing '%s': table '%s' has no compile-time values to slice \
+            (an external `--table` cannot be sliced)" fname tbl); [])
+      else begin
+        let sizes = List.map (fun d -> List.length (dim_values ctx d)) tdims in
+        let stratum_pos d =
+          match List.find_opt (fun (_, dd) -> dd = d) stratum with
+          | Some (v, _) ->
+            let lvl = match List.assoc_opt v env with Some l -> l | None -> v in
+            int_of_float (dim_value_index ctx d lvl)
+          | None -> 0
+        in
+        let pairs = List.mapi (fun j lvl ->
+          let positions = List.map (fun d -> if d = time_dim then j else stratum_pos d) tdims in
+          let off = row_major_offset positions sizes in
+          let cell = if off >= 0 && off < Array.length cells then cells.(off) else Ir.Const 0.0 in
+          let t = match float_of_string_opt lvl with
+            | Some f -> f
+            | None ->
+              err ~hint:"the time axis must be a dimension whose levels are numbers"
+                (Printf.sprintf
+                  "forcing '%s': time_dim '%s' level '%s' is not numeric, so it cannot \
+                   be a knot time" fname time_dim lvl);
+              0.0
+          in
+          (t, cell)
+        ) (dim_values ctx time_dim) in
+        List.stable_sort (fun (a, _) (b, _) -> Float.compare a b) pairs
+      end
+    end
   in
   let kind = match fkind with
     | "sinusoidal" ->
@@ -5445,11 +5531,20 @@ let expand_time_function_one ctx fname (env : (string * string) list) fkind (fun
            method_;
          }
        | _ ->
-         Ir.Interpolated {
-           times   = get_kw_list "times";
-           values  = get_kw_list "values";
-           method_;
-         })
+         match List.assoc_opt "table" fargs with
+         | Some (EIdent (tbl, _)) ->
+           let knots = table_backed_knots tbl in
+           Ir.Interpolated {
+             times  = List.map (fun (t, _) -> Ir.Const t) knots;
+             values = List.map (fun (_, c) -> c) knots;
+             method_;
+           }
+         | _ ->
+           Ir.Interpolated {
+             times   = get_kw_list "times";
+             values  = get_kw_list "values";
+             method_;
+           })
     | "periodic" ->
       let period_expr = get_kw "period" in
       let values =
@@ -5733,13 +5828,13 @@ let expand_time_functions ctx : Ir.time_function list * (string * float) list =
   let pairs =
     List.concat_map (fun (fd : func_decl) ->
       if fd.findices = [] then
-        [expand_time_function_one ctx fd.fname [] fd.fkind fd.funit fd.fargs]
+        [expand_time_function_one ctx fd.fname [] fd.findices fd.fkind fd.funit fd.fargs]
       else begin
         let combos = cartesian_product fd.findices ctx in
         List.map (fun env ->
           let parts = name_parts_from_bindings fd.findices env in
           let fname = fd.fname ^ "_" ^ String.concat "_" parts in
-          expand_time_function_one ctx fname env fd.fkind fd.funit fd.fargs
+          expand_time_function_one ctx fname env fd.findices fd.fkind fd.funit fd.fargs
         ) combos
       end
     ) ctx.func_decls
