@@ -277,6 +277,20 @@ transformed scale; bounds are enforced by construction.
 extracts R̂, ESS, the MLE table, and any fired diagnostics. Eyeballing trace TSVs
 is for debugging the summary, not for routine inspection.
 
+**Derived channels belong in `quantities {}`, not a downstream script.** When
+you want a time-varying quantity the model computes but doesn't carry as a
+compartment — force of infection `λ(t)`, effective reproduction number `Rₑ(t)`,
+cumulative incidence, EIR, prevalence `I/N` — declare it in a `quantities {}`
+block as an **unreduced** expression. camdl evaluates it at every output time,
+writes `quantities/<name>.tsv`, and `fit predict` bands it over the posterior
+alongside the observed streams. Do **not** reconstruct it in a pandas/matplotlib
+script from `traj.tsv`: a hand-rolled recomputation drifts from the model's own
+arithmetic (a subtly different `N`, a dropped `cond` guard), is not banded over
+the posterior, and has to be rewritten for every run. A reduction (`max`,
+`final`, `time_of_max`, …) collapses the same expression to a scalar summary
+(peak, attack rate, time-to-peak); omit the reduction to keep the full series.
+See `camdl docs user-features` ("Reporting derived quantities").
+
 **Don't reach for these escape hatches without understanding them:**
 
 - `--allow-degenerate-rates` — restores legacy silent-zero on `Div by zero` etc.

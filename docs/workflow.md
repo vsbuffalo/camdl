@@ -260,9 +260,13 @@ posterior band to draw; get its parameters with
 `camdl simulate --params …` instead.
 
 If the model declares a `quantities {}` block, `fit predict` also bands each
-derived quantity (peak size, attack rate, time-to-peak, …) over the same
-posterior draws into `quantities/<name>.tsv` with a `quantities.json` manifest —
-the posterior of a reported summary, not just of the fitted series. See
+derived quantity over the same posterior draws into `quantities/<name>.tsv` with
+a `quantities.json` manifest. These are either **series** — a channel the model
+computes but doesn't track as a compartment (force of infection, effective
+reproduction number, cumulative incidence, EIR), one value per output time — or
+**scalar** summaries (peak size, attack rate, time-to-peak): the posterior of a
+reported quantity, not just of the fitted series. Declare them in the model
+rather than reconstructing them in a downstream script; see
 [`camdl docs user-features`](user-features.md) ("Reporting derived quantities").
 
 ### Other validation steps

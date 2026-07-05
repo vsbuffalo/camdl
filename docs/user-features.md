@@ -354,9 +354,15 @@ quantities {
 }
 ```
 
-A state quantity with no reduction is a **series**; a reduction (`final`, `max`,
-`mean`, `time_of_max`, `first_above`, `integral`, `count_above`, …) collapses it
-to a **scalar**. A reduction can also fold a **simulated observation** —
+A state quantity with no reduction is a **series** — one value per output time.
+This is how you emit a _derived channel_ the model computes but doesn't carry as
+a compartment: force of infection `λ(t)`, effective reproduction number,
+cumulative incidence, EIR, prevalence `I / N`. Declaring it here — rather than
+reconstructing it in a downstream script from `traj.tsv` — keeps it in step with
+the model's own arithmetic and bands it over the posterior in `fit predict`. A
+reduction (`final`, `max`, `mean`, `time_of_max`, `first_above`, `integral`,
+`count_above`, …) instead collapses the series to a **scalar**. A reduction can
+also fold a **simulated observation** —
 `peak_reported = max(observations.cases)` reduces the same `y_sim` the run drew
 for the declared `cases` stream (never a fresh draw); an observation source must
 be reduced (a bare `observations.cases` series is rejected). They run wherever a
