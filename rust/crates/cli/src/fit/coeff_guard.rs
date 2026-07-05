@@ -19,10 +19,12 @@
 
 use std::collections::HashSet;
 
+use ir::deriv::DerivEntry;
 use ir::expr::Expr;
 use ir::model::InitialConditions;
-use ir::observation::Likelihood;
+use ir::observation::{Likelihood, Projection};
 use ir::time_func::TimeFuncKind;
+use ir::transition::DrawMethod;
 
 /// Collect parameter names referenced anywhere in `e`.
 fn collect(e: &Expr, out: &mut HashSet<String>) {
@@ -135,29 +137,174 @@ fn collect_forcing(kind: &TimeFuncKind, out: &mut HashSet<String>) {
     }
 }
 
-/// Estimated parameters that NUTS cannot estimate because their gradient is a
-/// silent zero: referenced inside a forcing/table coefficient, present in no
-/// rate/observation/initial-value body, **and** carrying no emitted `rate_grad`
-/// entry.
+/// Collect the names of every forcing (`TimeFunc`) and inline table
+/// (`TableLookup`) referenced anywhere in `e`. Used to partition forcings/tables
+/// into coeff_guard's domain (referenced by a rate/IC) versus the obs-gradient
+/// preflight's domain (referenced only by an observation) — proposal §4.4.
+fn collect_forcing_table_refs(e: &Expr, forcings: &mut HashSet<String>, tables: &mut HashSet<String>) {
+    match e {
+        Expr::TimeFunc(w) => {
+            forcings.insert(w.time_func.name.clone());
+        }
+        Expr::TableLookup(w) => {
+            tables.insert(w.table_lookup.table.clone());
+            for i in &w.table_lookup.indices {
+                collect_forcing_table_refs(i, forcings, tables);
+            }
+        }
+        Expr::BinOp(w) => {
+            collect_forcing_table_refs(&w.bin_op.left, forcings, tables);
+            collect_forcing_table_refs(&w.bin_op.right, forcings, tables);
+        }
+        Expr::UnOp(w) => collect_forcing_table_refs(&w.un_op.arg, forcings, tables),
+        Expr::Cond(w) => {
+            collect_forcing_table_refs(&w.cond.pred, forcings, tables);
+            collect_forcing_table_refs(&w.cond.then, forcings, tables);
+            collect_forcing_table_refs(&w.cond.else_, forcings, tables);
+        }
+        Expr::Reduce(w) => {
+            for t in &w.reduce {
+                collect_forcing_table_refs(t, forcings, tables);
+            }
+        }
+        Expr::UncheckedDim(w) => collect_forcing_table_refs(&w.unchecked_dim.inner, forcings, tables),
+        Expr::Const(_)
+        | Expr::Param(_)
+        | Expr::Pop(_)
+        | Expr::PopSum(_)
+        | Expr::Time(_)
+        | Expr::Dt(_)
+        | Expr::Projected(_)
+        | Expr::ObsColumnRef(_)
+        | Expr::BindingRef(_) => {}
+        // Pre-LICM IR (this guard runs at the CLI fit layer, before hoisting).
+        Expr::PerEvalRef(_) => {}
+    }
+}
+
+/// Forcing/table names referenced by a likelihood's argument expressions.
+fn collect_likelihood_forcing_table_refs(
+    lik: &Likelihood,
+    forcings: &mut HashSet<String>,
+    tables: &mut HashSet<String>,
+) {
+    let mut go = |e: &Expr| collect_forcing_table_refs(e, forcings, tables);
+    match lik {
+        Likelihood::Poisson(p) => go(&p.rate),
+        Likelihood::NegBinomial(nb) => {
+            go(&nb.mean);
+            go(&nb.dispersion);
+        }
+        Likelihood::Normal(n) => {
+            go(&n.mean);
+            go(&n.sd);
+        }
+        Likelihood::Binomial(b) => {
+            go(&b.n);
+            go(&b.p);
+        }
+        Likelihood::BetaBinomial(bb) => {
+            go(&bb.n);
+            go(&bb.alpha);
+            go(&bb.beta);
+        }
+        Likelihood::Bernoulli(b) => go(&b.p),
+    }
+}
+
+/// The `DerivEntry::Grad` keys of every observation likelihood argument — the
+/// obs analogue of `rate_grad.keys()`. A parameter here has a real emitted
+/// observation gradient, so (like a `rate_grad` key) it must not be flagged.
+fn obs_grad_keys(lik: &Likelihood) -> Vec<&str> {
+    fn grads<'a>(m: &'a std::collections::HashMap<String, DerivEntry>, out: &mut Vec<&'a str>) {
+        for (name, entry) in m {
+            if matches!(entry, DerivEntry::Grad(_)) {
+                out.push(name.as_str());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    match lik {
+        Likelihood::Poisson(p) => grads(&p.rate_grad, &mut out),
+        Likelihood::NegBinomial(nb) => {
+            grads(&nb.mean_grad, &mut out);
+            grads(&nb.dispersion_grad, &mut out);
+        }
+        Likelihood::Normal(n) => {
+            grads(&n.mean_grad, &mut out);
+            grads(&n.sd_grad, &mut out);
+        }
+        Likelihood::Binomial(b) => grads(&b.p_grad, &mut out),
+        Likelihood::BetaBinomial(bb) => {
+            grads(&bb.alpha_grad, &mut out);
+            grads(&bb.beta_grad, &mut out);
+        }
+        Likelihood::Bernoulli(b) => grads(&b.p_grad, &mut out),
+    }
+    out
+}
+
+/// Estimated parameters that NUTS cannot estimate because their forcing/table
+/// gradient is a silent zero. This is coeff_guard's half of a two-gate
+/// partition (proposal §4.4): every forcing/table coefficient parameter is
+/// classified **exactly once** —
 ///
-/// The `rate_grad` exclusion is what keeps this honest after the gradient half
-/// (gh#119): the compiler now emits an analytic ∂forcing/∂coef for Sinusoidal
-/// and Fourier coefficients and constant-indexed parameter tables, so such a
-/// parameter *does* have a usable gradient and must NOT be flagged — otherwise
-/// the guard would refuse the very fits the gradient half enables. What remains
-/// flagged is the genuinely gradient-less case: a coefficient parameter whose
-/// kind has no emitted derivative. Two sub-cases:
-/// - A Periodic step value (or an inline-table value via a non-constant index):
-///   the compiler omits its gradient (gh#215) but the value is live, so the
-///   model compiles and IF2/PF estimate it — only NUTS is blocked. The Periodic
-///   case is flagged even when the param also drives a rate body (its forcing
-///   contribution is never in the emitted gradient — see `periodic_coeff`).
-/// - A forcing/table coefficient referenced only through an observation (the
-///   obs gradient zeroes the forcing), with no rate appearance and no emitted
-///   gradient — caught by the `coeff ∧ ¬body ∧ ¬has_grad` clause.
+/// - here, if the coefficient's forcing/table is referenced by a **rate or
+///   initial-condition** body (coeff_guard's domain); or
+/// - by the observation-gradient preflight at the `run_pgas` boundary, if the
+///   coefficient's forcing/table is referenced **only** through an observation
+///   (the obs preflight's domain, refused there with the compiler's own
+///   `DerivEntry::Unsupported` reason).
+///
+/// A forcing/table referenced by both a rate/IC and an observation is
+/// rate-referenced — coeff_guard owns it (the tiebreak: rate wins). So the scan
+/// **skips** a forcing/table that is obs-referenced and not rate/IC-referenced.
+///
+/// Within coeff_guard's domain, a coefficient parameter is flagged when it has
+/// no usable gradient:
+/// - **`has_grad` escape** — a parameter for which the compiler emitted a real
+///   derivative (a transition `rate_grad`, a σ² `sigma_sq_grad`, or an
+///   observation `*_grad` — all `DerivEntry::Grad`) has a usable NUTS gradient
+///   and is never flagged (Sinusoidal/Fourier coefficients, constant-indexed
+///   parameter tables). The obs/σ² union is what keeps this honest once the obs
+///   path emits gradients: a coefficient with a real emitted obs gradient must
+///   not be spuriously refused.
+/// - **`body` escape** — a parameter also appearing in a rate/observation/IC
+///   body carries its gradient there (the non-periodic `coeff` clause).
+/// - **Periodic / `lag`** step values have a live-but-omitted gradient
+///   (gh#215/gh#314); they are flagged unconditionally within the domain (no
+///   `body`/`has_grad` escape), because the emitted body gradient never includes
+///   the forcing contribution.
 ///
 /// Sorted, for a deterministic diagnostic.
 pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>) -> Vec<String> {
+    // ── Partition the forcings/tables into coeff_guard's domain (rate/IC) vs the
+    //    obs preflight's domain (observation-only). ──
+    let mut rate_ic_forcings = HashSet::new();
+    let mut rate_ic_tables = HashSet::new();
+    for t in &model.transitions {
+        collect_forcing_table_refs(&t.rate, &mut rate_ic_forcings, &mut rate_ic_tables);
+    }
+    if let InitialConditions::Parameterized(map) = &model.initial_conditions {
+        for e in map.values() {
+            collect_forcing_table_refs(e, &mut rate_ic_forcings, &mut rate_ic_tables);
+        }
+    }
+    let mut obs_forcings = HashSet::new();
+    let mut obs_tables = HashSet::new();
+    for o in &model.observations {
+        collect_likelihood_forcing_table_refs(&o.likelihood, &mut obs_forcings, &mut obs_tables);
+        if let Projection::DerivedExpr(e) = &o.projection {
+            collect_forcing_table_refs(e, &mut obs_forcings, &mut obs_tables);
+        }
+    }
+    // A forcing/table is the obs preflight's domain (skipped here) iff it is
+    // observation-referenced and NOT rate/IC-referenced.
+    let forcing_is_obs_only =
+        |name: &str| obs_forcings.contains(name) && !rate_ic_forcings.contains(name);
+    let table_is_obs_only =
+        |name: &str| obs_tables.contains(name) && !rate_ic_tables.contains(name);
+
     let mut body = HashSet::new();
     for t in &model.transitions {
         collect(&t.rate, &mut body);
@@ -173,9 +320,15 @@ pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>
 
     let mut coeff = HashSet::new();
     for tf in &model.time_functions {
+        if forcing_is_obs_only(&tf.name) {
+            continue;
+        }
         collect_forcing(&tf.kind, &mut coeff);
     }
     for tbl in &model.tables {
+        if table_is_obs_only(&tbl.name) {
+            continue;
+        }
         if let Some(values) = tbl.source.values() {
             for e in values {
                 collect(e, &mut coeff);
@@ -192,9 +345,13 @@ pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>
     // such a param unconditionally (no body / no `has_grad` escape). No false
     // positive: a Periodic coefficient gradient is never emitted, so a param
     // here never legitimately has its forcing contribution covered. (When
-    // gh#215 emits Periodic derivatives, drop this set.)
+    // gh#215 emits Periodic derivatives, drop this set.) Obs-only forcings are
+    // the preflight's domain — skipped here just like the `coeff` scan.
     let mut periodic_coeff = HashSet::new();
     for tf in &model.time_functions {
+        if forcing_is_obs_only(&tf.name) {
+            continue;
+        }
         if let TimeFuncKind::Periodic(p) = &tf.kind {
             collect(&p.period, &mut periodic_coeff);
             p.values.iter().for_each(|e| collect(e, &mut periodic_coeff));
@@ -215,12 +372,27 @@ pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>
         }
     }
 
-    // Parameters the compiler emitted a derivative for (any transition) — these
-    // have a usable NUTS gradient and are never blocked.
+    // Parameters the compiler emitted a real derivative for — these have a
+    // usable NUTS gradient and are never blocked. Unioned across all three
+    // emitted-gradient surfaces (D-accept, §4.4): transition `rate_grad`, σ²
+    // `sigma_sq_grad`, and observation likelihood `*_grad` (only `Grad` entries;
+    // an `Unsupported` entry is the preflight's refusal, not a usable gradient).
     let mut has_grad: HashSet<&str> = HashSet::new();
     for t in &model.transitions {
         for name in t.rate_grad.keys() {
             has_grad.insert(name.as_str());
+        }
+        if let DrawMethod::Overdispersed { sigma_sq_grad, .. } = &t.draw_method {
+            for (name, entry) in sigma_sq_grad {
+                if matches!(entry, DerivEntry::Grad(_)) {
+                    has_grad.insert(name.as_str());
+                }
+            }
+        }
+    }
+    for o in &model.observations {
+        for name in obs_grad_keys(&o.likelihood) {
+            has_grad.insert(name);
         }
     }
 
@@ -478,5 +650,146 @@ mod tests {
         }];
         let estimated: HashSet<String> = ["k".to_string()].into_iter().collect();
         assert_eq!(coefficient_only_estimated(&m, &estimated), vec!["k".to_string()]);
+    }
+
+    /// A `time_func:<name>` reference expression.
+    fn time_func_ref(name: &str) -> Expr {
+        use ir::expr::{TimeFuncRef, TimeFuncWrap};
+        Expr::TimeFunc(TimeFuncWrap { time_func: TimeFuncRef { name: name.into() } })
+    }
+
+    /// A Poisson observation whose `rate` is `rate` and whose `rate_grad` carries
+    /// the given entries — the obs analogue of a transition's `rate_grad`.
+    fn poisson_obs(rate: Expr, rate_grad: &[(&str, DerivEntry)]) -> ir::observation::ObservationModel {
+        use ir::observation::*;
+        ir::observation::ObservationModel {
+            name: "cases".into(),
+            source: "cases".into(),
+            columns: vec![
+                ObsColumn { name: "time".into(), role: ColumnRole::Time },
+                ObsColumn { name: "cases".into(), role: ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "cases".into(),
+            emit_schedule: None,
+            stratum: vec![],
+            projection: Projection::CumulativeFlow("infection".into()),
+            likelihood: Likelihood::Poisson(PoissonLikelihood {
+                rate,
+                rate_grad: rate_grad.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            }),
+        }
+    }
+
+    /// D-scan (§4.4): a forcing referenced ONLY through an observation is the obs
+    /// preflight's domain — coeff_guard must NOT flag its coefficient. The
+    /// amplitude carries a real emitted obs `DerivEntry::Grad`, so it is admitted
+    /// (before P5 this was the spurious refusal: `has_grad` was `rate_grad`-only
+    /// and the global forcing scan flagged the amplitude).
+    #[test]
+    fn does_not_flag_forcing_used_only_in_observation() {
+        let mut m = base_model();
+        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
+        // No transition references `seasonal`; the observation does (via its
+        // rate), and the compiler emitted `∂rate/∂amp` as a `Grad`.
+        m.observations = vec![poisson_obs(
+            time_func_ref("seasonal"),
+            &[("amp", DerivEntry::Grad(Expr::const_(1.0)))],
+        )];
+        let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
+        assert!(
+            coefficient_only_estimated(&m, &estimated).is_empty(),
+            "an obs-only forcing coefficient with an emitted obs gradient must not \
+             be refused by coeff_guard (it is the preflight's domain)"
+        );
+    }
+
+    /// Tiebreak (§4.4): a forcing referenced by BOTH a rate and an observation is
+    /// rate-referenced — coeff_guard owns it. With no emitted gradient at all the
+    /// amplitude is (correctly) flagged, exactly as a rate-only forcing would be.
+    #[test]
+    fn flags_forcing_referenced_by_rate_and_observation_when_gradientless() {
+        let mut m = base_model();
+        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
+        // A transition references `seasonal` (rate-referenced → coeff_guard's
+        // domain), with no rate_grad; the observation references it too.
+        m.transitions = vec![ir::transition::Transition {
+            name: "infection".into(),
+            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
+            rate: time_func_ref("seasonal"),
+            metadata: None,
+            draw_method: ir::transition::DrawMethod::Poisson,
+            rate_grad: HashMap::new(),
+            lineage: None,
+        }];
+        m.observations = vec![poisson_obs(time_func_ref("seasonal"), &[])];
+        let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
+        assert_eq!(
+            coefficient_only_estimated(&m, &estimated), vec!["amp".to_string()],
+            "a rate-referenced forcing coefficient with no emitted gradient must be \
+             flagged (rate-referenced wins the tiebreak — coeff_guard owns it)"
+        );
+    }
+
+    /// D-accept (§4.4): the `has_grad` union admits a coeff_guard-domain parameter
+    /// whose emitted gradient rides the observation `*_grad` rather than a
+    /// `rate_grad`. Isolates the union: the forcing is rate-referenced (so it is
+    /// coeff_guard's domain and its `rate_grad` is empty), yet the observation
+    /// emitted a real `Grad` for the amplitude — without the union it would be
+    /// spuriously flagged.
+    #[test]
+    fn obs_grad_union_rescues_a_coeff_domain_param() {
+        let mut m = base_model();
+        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
+        m.transitions = vec![ir::transition::Transition {
+            name: "infection".into(),
+            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
+            rate: time_func_ref("seasonal"),
+            metadata: None,
+            draw_method: ir::transition::DrawMethod::Poisson,
+            rate_grad: HashMap::new(),
+            lineage: None,
+        }];
+        m.observations = vec![poisson_obs(
+            Expr::Projected(ir::expr::ProjectedExpr { projected: () }),
+            &[("amp", DerivEntry::Grad(Expr::const_(1.0)))],
+        )];
+        let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
+        assert!(
+            coefficient_only_estimated(&m, &estimated).is_empty(),
+            "the obs `Grad` union must rescue a coeff_guard-domain param whose \
+             gradient was emitted only on the observation surface"
+        );
+    }
+
+    /// An `Unsupported` obs entry is NOT a usable gradient — it must not enter
+    /// `has_grad`. Here `amp` drives an obs-referenced-AND-rate-referenced forcing
+    /// (coeff_guard's domain) whose obs gradient is `Unsupported`; with no
+    /// `rate_grad` it stays flagged.
+    #[test]
+    fn obs_unsupported_entry_does_not_rescue() {
+        let mut m = base_model();
+        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
+        m.transitions = vec![ir::transition::Transition {
+            name: "infection".into(),
+            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
+            rate: time_func_ref("seasonal"),
+            metadata: None,
+            draw_method: ir::transition::DrawMethod::Poisson,
+            rate_grad: HashMap::new(),
+            lineage: None,
+        }];
+        m.observations = vec![poisson_obs(
+            time_func_ref("seasonal"),
+            &[("amp", DerivEntry::Unsupported {
+                node: "time_func:seasonal".into(),
+                code: ir::deriv::UnsupportedReason::PeriodicCoeff,
+            })],
+        )];
+        let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
+        assert_eq!(
+            coefficient_only_estimated(&m, &estimated), vec!["amp".to_string()],
+            "an Unsupported obs entry is a refusal, not a usable gradient — it must \
+             not rescue via has_grad"
+        );
     }
 }

@@ -1,27 +1,20 @@
-//! Regression tests for the audit-C1 preflight gate after the gh#76 residual
-//! (BetaBinomial obs-density gradient) landed.
+//! Regression tests for the observation-gradient preflight (proposal §4.4) at
+//! the `run_pgas` boundary. Both cases route a parameter into an observation
+//! and assert the fit is ADMITTED — the compiler now emits a real
+//! `DerivEntry::Grad` for each, so neither is refused:
 //!
-//! History: the C1 gate fenced estimation of any parameter whose reachability
-//! graph traversed an *uncovered* observation-gradient arm. There were two:
+//!   * `gh76_pgas_runs_betabinomial_routed_param_with_nuts` — a BetaBinomial
+//!     `alpha` param estimated via NUTS RUNS (the BetaBinomial obs-density
+//!     gradient is wired).
+//!   * `gh180_pgas_admits_parametric_derived_projection_param` — a param
+//!     driving a parametric `DerivedExpr` projection RUNS. This is the
+//!     inversion of the old C1 fence: the projection is inlined into the
+//!     likelihood argument and differentiated (tier-1), so the preflight
+//!     admits it instead of refusing every projection param.
 //!
-//!   1. `BetaBinomial`: `eval_likelihood_resolved_grad` was a no-op.
-//!   2. Parametric `DerivedExpr` projections: the chain-rule term
-//!      ∂L/∂(projected) · ∂(projected)/∂θ is omitted.
-//!
-//! The gh#76 residual wired the BetaBinomial gradient
-//! (`beta_binomial_logpmf_grad` + the `eval_likelihood_resolved_grad` arm),
-//! so arm 1 is now covered and the gate no longer fences it. Arm 2 is still
-//! a documented no-op, so the gate must still fire for it.
-//!
-//! These two tests pin both halves of that transition:
-//!
-//!   * `gh76_pgas_runs_betabinomial_routed_param_with_nuts` — a fit that
-//!     estimates a BetaBinomial-bound param via NUTS now RUNS (no gate
-//!     error). This is the *inversion* of the original assertion.
-//!   * `gh76_pgas_refuses_parametric_derived_projection_param` — the gate
-//!     STILL refuses a param routed through a parametric `DerivedExpr`
-//!     projection (the remaining uncovered arm). This preserves coverage of
-//!     the live fence.
+//! The complementary refusals — an estimated param reaching an `Unsupported`
+//! obs/σ² gradient, or a parametric Binomial/BetaBinomial `n` — live in
+//! `pgas_gate_obs_unsupported.rs`.
 
 use std::sync::Arc;
 use sim::compiled_model::CompiledModel;
@@ -85,14 +78,17 @@ fn build_betabinomial_obs_block(alpha_param: &str) -> ir::observation::Observati
 
 /// Build an obs block whose *projection* is a parametric `DerivedExpr`:
 /// `proj = scale * <flow>`. The likelihood is an ordinary Poisson over the
-/// projected value, so the only uncovered-gradient path is the projection
-/// itself (the `scale` parameter). This is the live C1 fence.
+/// projected value. Post-gh#180, this is a **tier-1 differentiable** case: the
+/// compiler inlines the projection into `rate` (`rate = scale · projected`) and
+/// emits `∂rate/∂scale = projected` as a `DerivEntry::Grad`, so the preflight
+/// ADMITS the `scale` parameter. The `rate_grad` below mirrors that emitted
+/// gradient (the FD checks in `gradient_check_obs.rs` pin the numeric value).
 fn build_parametric_derived_proj_block(scale_param: &str) -> ir::observation::ObservationModel {
     use ir::expr::*;
     use ir::observation::*;
 
     // projection = scale_param * projected — a DerivedExpr that depends on a
-    // parameter, so ∂(projected)/∂(scale) ≠ 0 but is not propagated.
+    // parameter; ∂(projected)/∂(scale) ≠ 0 and IS propagated (the fix).
     let projection_expr = Expr::BinOp(BinOpWrap {
         bin_op: BinOpExpr {
             op: BinOp::Mul,
@@ -106,6 +102,14 @@ fn build_parametric_derived_proj_block(scale_param: &str) -> ir::observation::Ob
     // through the projection.
     let rate = Expr::Projected(ProjectedExpr { projected: () });
 
+    // Compiler-mirroring emitted gradient: inlining the projection gives
+    // `rate = scale · projected`, so `∂rate/∂scale = projected` — a real
+    // `Grad`, NOT an `Unsupported`. The preflight admits a `Grad`.
+    let rate_grad = std::collections::HashMap::from([(
+        scale_param.to_string(),
+        ir::deriv::DerivEntry::Grad(Expr::Projected(ProjectedExpr { projected: () })),
+    )]);
+
     ObservationModel {
         name: "weekly_cases".into(),
         source: "weekly_cases".into(),
@@ -117,7 +121,7 @@ fn build_parametric_derived_proj_block(scale_param: &str) -> ir::observation::Ob
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
         projection: Projection::DerivedExpr(projection_expr),
-        likelihood: Likelihood::Poisson(PoissonLikelihood { rate, rate_grad: Default::default() }),
+        likelihood: Likelihood::Poisson(PoissonLikelihood { rate, rate_grad }),
     }
 }
 
@@ -236,11 +240,13 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
 }
 
 #[test]
-fn gh76_pgas_refuses_parametric_derived_projection_param() {
-    // The remaining uncovered obs-gradient arm: a parametric `DerivedExpr`
-    // projection. The chain-rule term ∂L/∂(projected)·∂(projected)/∂θ is
-    // omitted, so estimating the projection's `scale` param via NUTS would
-    // be a silent-zero gradient. The C1 gate must STILL fire here.
+fn gh180_pgas_admits_parametric_derived_projection_param() {
+    // Post-gh#180: a parametric `DerivedExpr` projection is a tier-1
+    // differentiable case. The compiler inlines the projection into the
+    // likelihood argument and emits `∂rate/∂scale` as a `DerivEntry::Grad`, so
+    // the preflight ADMITS the `scale` param (the inversion of the old C1
+    // fence, which refused every param in a parametric projection). This fit
+    // must now RUN.
     let mut model = host_model();
     model.parameters.push(ir::parameter::Parameter { name: "scale_obs".into(), value: ir::parameter::ParamValue::Estimated { init: Some(1.0), bounds: Some((0.1, 10.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: Some(ir::parameter::ParamKind::Positive), param_dim: None });
     model.observations = vec![build_parametric_derived_proj_block("scale_obs")];
@@ -315,21 +321,23 @@ fn gh76_pgas_refuses_parametric_derived_projection_param() {
         &config, &obs, &obs_model, 12345, None, None, "gate_derived_proj".into(),
     );
 
+    // Must NOT be refused: the parametric projection now carries a real emitted
+    // `DerivEntry::Grad`, so the preflight admits it (the inversion of the old
+    // C1 fence). A `Validation` error naming the projection would be the old
+    // refusal leaking back.
     match result {
-        Err(SimError::Validation(msg)) => {
-            // The gate must (a) name the blocked parameter and (b) point at
-            // the uncovered parametric-projection arm.
-            assert!(msg.contains("scale_obs"),
-                "error must name the blocked parameter; got: {}", msg);
-            assert!(msg.contains("DerivedExpr") || msg.contains("projection"),
-                "error must name the uncovered parametric-projection arm; got: {}", msg);
-            eprintln!("[gate test] saw expected validation error:\n  {}", msg);
+        Ok(_) => {}
+        Err(SimError::Validation(msg))
+            if msg.contains("scale_obs")
+                || msg.contains("DerivedExpr")
+                || msg.contains("projection")
+                || msg.contains("could not emit") =>
+        {
+            panic!(
+                "preflight must NOT fence a parametric DerivedExpr projection param \
+                 now that it is differentiated (gh#180); got refusal: {}", msg
+            );
         }
-        Err(e) => panic!("expected SimError::Validation, got: {:?}", e),
-        Ok(_) => panic!(
-            "run_pgas must refuse to estimate a param routed through a parametric \
-             DerivedExpr projection via NUTS — the projection chain-rule term is a \
-             documented no-op (silent-zero gradient)."
-        ),
+        Err(e) => panic!("run_pgas failed for an unrelated reason: {:?}", e),
     }
 }

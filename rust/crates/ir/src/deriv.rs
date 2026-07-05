@@ -50,6 +50,35 @@ pub enum UnsupportedReason {
     ParametricN,
 }
 
+impl UnsupportedReason {
+    /// The human-readable explanation, **derived** from the stable code — never
+    /// hashed, never serialized (§4.1). The fit-time preflight (proposal §4.4)
+    /// surfaces this as the refusal reason, so a copy-edit here changes only the
+    /// user message, never a golden or a run_id. Each clause completes the
+    /// sentence "parameter `X` …".
+    pub fn reason_message(self) -> &'static str {
+        match self {
+            UnsupportedReason::Lag =>
+                "drives a forcing's evaluation-time shift (`lag`), whose derivative \
+                 the compiler does not emit (gh#314)",
+            UnsupportedReason::PeriodicCoeff =>
+                "drives a Periodic forcing's step value or period, whose derivative \
+                 the compiler does not emit (gh#215)",
+            UnsupportedReason::StructuralForcing =>
+                "drives a structural forcing coefficient (a Piecewise / Interpolated / \
+                 PeriodicSpline knot), precomputed at construction and not differentiable",
+            UnsupportedReason::NonConstTableIndex =>
+                "selects an inline-table value through a non-constant index, whose \
+                 derivative the compiler does not emit",
+            UnsupportedReason::Mod =>
+                "enters through `mod`, which is not differentiable",
+            UnsupportedReason::ParametricN =>
+                "reaches a Binomial/BetaBinomial `n`, which must be θ-independent — a \
+                 constant or an observed data column (it is rounded to an integer)",
+        }
+    }
+}
+
 /// One entry in a differentiable position's per-parameter gradient map: either a
 /// real derivative expression, or a loud, coded refusal.
 ///

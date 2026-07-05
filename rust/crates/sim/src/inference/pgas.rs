@@ -82,6 +82,59 @@ fn collect_param_refs(e: &ir::expr::Expr, out: &mut std::collections::HashSet<St
     }
 }
 
+/// Collect every `Param` an estimated coordinate could reach through a
+/// Binomial/BetaBinomial `n` expression, **with the projection inlined** exactly
+/// as the OCaml autodiff inlines it (`autodiff.ml`: `inline_projection`). At a
+/// `Projected` node a `DerivedExpr` projection contributes its own param refs
+/// (verbatim, non-recursive substitution); every other projection kind leaves
+/// `Projected` θ-independent given the fixed trajectory, so it adds nothing.
+///
+/// `n` carries no gradient field (§4.5) — it is rounded to an integer, so it must
+/// be θ-independent. This is the D-n scan feeding the P5 preflight: any estimated
+/// param found here is refused with [`ir::deriv::UnsupportedReason::ParametricN`].
+fn collect_n_param_refs(
+    n: &ir::expr::Expr,
+    projection: &ir::observation::Projection,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use ir::expr::Expr;
+    match n {
+        // The one arm that differs from `collect_param_refs`: inline a
+        // parametric `DerivedExpr` projection so a param reaching `n` only
+        // through `projected` (e.g. `n = round(projected)`) is caught.
+        Expr::Projected(_) => {
+            if let ir::observation::Projection::DerivedExpr(e) = projection {
+                collect_param_refs(e, out);
+            }
+        }
+        Expr::Param(p) => { out.insert(p.param.clone()); }
+        Expr::BinOp(w) => {
+            collect_n_param_refs(&w.bin_op.left, projection, out);
+            collect_n_param_refs(&w.bin_op.right, projection, out);
+        }
+        Expr::UnOp(w) => collect_n_param_refs(&w.un_op.arg, projection, out),
+        Expr::Cond(w) => {
+            collect_n_param_refs(&w.cond.pred, projection, out);
+            collect_n_param_refs(&w.cond.then, projection, out);
+            collect_n_param_refs(&w.cond.else_, projection, out);
+        }
+        Expr::TableLookup(w) => {
+            for ix in &w.table_lookup.indices {
+                collect_n_param_refs(ix, projection, out);
+            }
+        }
+        Expr::UncheckedDim(w) => collect_n_param_refs(&w.unchecked_dim.inner, projection, out),
+        Expr::Reduce(w) => {
+            for t in &w.reduce { collect_n_param_refs(t, projection, out); }
+        }
+        Expr::PopSum(_) | Expr::Pop(_) | Expr::Const(_) | Expr::Time(_)
+        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ObsColumnRef(_)
+        | Expr::BindingRef(_) => {}
+        Expr::PerEvalRef(_) =>
+            unreachable!("PerEvalRef reached collect_n_param_refs: LICM scoping invariant violated"),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════
@@ -2265,53 +2318,112 @@ pub fn run_pgas(
                    Increase sweeps in fit.toml to continue.", start_sweep, config.n_sweeps);
     }
 
-    // gh#audit-C1 preflight gate, narrowed by gh#20 + gh#76 + the gh#76
-    // residual (BetaBinomial gradient). The observation-density gradient
-    // now covers every likelihood arm:
+    // gh#180 P5 — the `DerivEntry::Unsupported` preflight (proposal §4.4).
     //
-    //   • σ² (overdispersion) — wired via `gamma_density_value_and_grad_substep`.
-    //   • NegBinomial, Normal, Poisson, Binomial, Bernoulli, BetaBinomial
-    //     obs likelihoods — wired via `eval_likelihood_resolved_grad`.
+    // The obs/σ² gradients now ride the compiler-emitted `*_grad` / `sigma_sq_grad`
+    // maps, each entry classified `Grad | Unsupported{code}` by the autodiff pass
+    // (the projection is inlined before differentiation, so a param reaching an
+    // observation THROUGH a parametric `DerivedExpr` projection is already
+    // classified in the argument's grad map — a tier-1 case, e.g. `qgam·prevalence`,
+    // carries a `Grad` and is ADMITTED here, retiring the old C1 fence).
     //
-    // One arm remains uncovered (silent-zero gradient):
+    // The invariant: a NUTS fit runs only if every estimated parameter reaching an
+    // observation — through a projection or any likelihood argument, after
+    // projection inlining — is covered by a `Grad`. An `Unsupported{code}` keyed by
+    // an estimated param in ANY obs `*_grad` or `sigma_sq_grad` map is refused here,
+    // at the `run_pgas` boundary (protecting every caller, not just the CLI
+    // `if use_nuts` site), with the human message derived from `code`. This makes
+    // `eval_emitted_grad`'s `Unsupported` branch unreachable-by-construction.
     //
-    //   • `DerivedExpr` obs *projection* that depends on parameters — the
-    //     chain-rule term ∂L/∂(projected) · ∂(projected)/∂θ is omitted
-    //     (see derivation note 2026-05-25-pgas-obs-grad-derivation.md).
-    //
-    // That route lands the user in the silent-zero regime gh#76 was filed
-    // against. Refuse `if2_params` whose reachability path touches a
-    // parametric projection with a clear error.
-    {
-        use std::collections::HashSet;
+    // NUTS is the only θ|X step that consumes the gradient (`has_gradients` gates
+    // `complete_data_loglik_grad`, l.~2177); an MH-within-Gibbs (`--no-nuts`) sweep
+    // never differentiates, so an Unsupported obs grad cannot bias it — gate on
+    // `use_nuts`, matching the CLI `coeff_guard` site.
+    if config.use_nuts {
+        use std::collections::{BTreeMap, HashSet};
+        use ir::deriv::{DerivEntry, UnsupportedReason};
+        use ir::observation::Likelihood;
+        use ir::transition::DrawMethod;
 
-        let mut parametric_derived_proj_refs: HashSet<String> = HashSet::new();
+        let estimated: HashSet<&str> = if2_params.iter().map(|s| s.name.as_str()).collect();
 
+        // param → refusal reason (deterministic ordering; first reason wins for a
+        // param uncovered on more than one surface).
+        let mut refused: BTreeMap<String, UnsupportedReason> = BTreeMap::new();
+        let note_unsupported = |grad: &std::collections::HashMap<String, DerivEntry>,
+                                refused: &mut BTreeMap<String, UnsupportedReason>| {
+            for (pname, entry) in grad {
+                if let DerivEntry::Unsupported { code, .. } = entry {
+                    if estimated.contains(pname.as_str()) {
+                        refused.entry(pname.clone()).or_insert(*code);
+                    }
+                }
+            }
+        };
+
+        // (a) Observation likelihood argument gradients (projection already inlined
+        //     by the compiler). Exhaustive over `Likelihood` — a new arm forces a
+        //     compile error here rather than a silently-unscanned grad map.
         for om in &model.model.observations {
-            // DerivedExpr projections that depend on any parameter.
-            if let ir::observation::Projection::DerivedExpr(e) = &om.projection {
-                collect_param_refs(e, &mut parametric_derived_proj_refs);
+            match &om.likelihood {
+                Likelihood::Poisson(l) => note_unsupported(&l.rate_grad, &mut refused),
+                Likelihood::NegBinomial(l) => {
+                    note_unsupported(&l.mean_grad, &mut refused);
+                    note_unsupported(&l.dispersion_grad, &mut refused);
+                }
+                Likelihood::Normal(l) => {
+                    note_unsupported(&l.mean_grad, &mut refused);
+                    note_unsupported(&l.sd_grad, &mut refused);
+                }
+                Likelihood::Binomial(l) => note_unsupported(&l.p_grad, &mut refused),
+                Likelihood::BetaBinomial(l) => {
+                    note_unsupported(&l.alpha_grad, &mut refused);
+                    note_unsupported(&l.beta_grad, &mut refused);
+                }
+                Likelihood::Bernoulli(l) => note_unsupported(&l.p_grad, &mut refused),
             }
         }
 
-        let mut blocked: Vec<String> = Vec::new();
-        for spec in if2_params.iter() {
-            if parametric_derived_proj_refs.contains(spec.name.as_str()) {
-                blocked.push(format!("'{}' (in a parametric DerivedExpr projection)", spec.name));
+        // (b) σ² overdispersion gradients.
+        for t in &model.model.transitions {
+            if let DrawMethod::Overdispersed { sigma_sq_grad, .. } = &t.draw_method {
+                note_unsupported(sigma_sq_grad, &mut refused);
             }
         }
-        if !blocked.is_empty() {
-            return Err(crate::error::SimError::Validation(format!(
-                "PGAS+NUTS gradient does not cover parametric DerivedExpr obs \
-                 projections (gh#76 follow-up). Estimating these parameters with \
-                 NUTS would produce silently biased posteriors because the \
-                 projection chain-rule term ∂L/∂(projected)·∂(projected)/∂θ is \
-                 omitted, so the gradient is identically zero on the affected \
-                 coordinate. Blocked parameters: {}. Either fix these parameters \
-                 (move from `[estimate.X]` to `[fixed.X]` in fit.toml), switch to \
-                 a non-gradient method (IF2, PMMH), or wait for the projection \
-                 chain-rule term to land.",
-                blocked.join(", ")
+
+        // (c) D-n — an estimated param reaching a Binomial/BetaBinomial `n` (after
+        //     projection inlining). `n` carries no grad field, so the `Unsupported`
+        //     scan above cannot see it; scan the `n` expression directly. A silent
+        //     admission here would leave the param unconstrained under NUTS.
+        for om in &model.model.observations {
+            let n_expr = match &om.likelihood {
+                Likelihood::Binomial(l) => Some(&l.n),
+                Likelihood::BetaBinomial(l) => Some(&l.n),
+                _ => None,
+            };
+            if let Some(n) = n_expr {
+                let mut refs: HashSet<String> = HashSet::new();
+                collect_n_param_refs(n, &om.projection, &mut refs);
+                for pname in refs {
+                    if estimated.contains(pname.as_str()) {
+                        refused.entry(pname).or_insert(UnsupportedReason::ParametricN);
+                    }
+                }
+            }
+        }
+
+        if !refused.is_empty() {
+            let details: Vec<String> = refused
+                .iter()
+                .map(|(p, code)| format!("`{}` {}", p, code.reason_message()))
+                .collect();
+            return Err(SimError::Validation(format!(
+                "PGAS+NUTS cannot estimate parameter(s) whose gradient the compiler \
+                 could not emit for an observation or overdispersion term — NUTS would \
+                 sample against an incomplete (silently biased) gradient. Refused: {}. \
+                 Estimate these with a gradient-free method (IF2 or PMMH), run PGAS with \
+                 --no-nuts, or fix them (`[fixed.X]` in fit.toml).",
+                details.join("; ")
             )));
         }
     }
