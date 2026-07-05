@@ -1154,6 +1154,22 @@ impl CompiledModel {
                              time/value pair to interpolate)",
                             tf.name)));
                     }
+                    // Interpolation requires strictly-increasing knot times:
+                    // `interpolated_value` indexes by position and `constant_value`
+                    // binary-searches, so an out-of-order time axis silently returns
+                    // wrong values. The OCaml producers emit knots in file/dimension
+                    // order without sorting, so reject a non-monotone axis here — the
+                    // one place every IR producer funnels through (gh#345).
+                    for w in ts.windows(2) {
+                        if !(w[0] < w[1]) {
+                            return Err(SimError::Validation(format!(
+                                "interpolated forcing '{}': knot times must be strictly \
+                                 increasing, but {} is followed by {} — sort the \
+                                 forcing's time axis (its data rows or its time dimension's \
+                                 levels) into increasing time order",
+                                tf.name, w[0], w[1])));
+                        }
+                    }
                     match i.method {
                         ir::time_func::InterpMethod::Spline =>
                             CompiledTimeFuncKind::CubicSpline(CubicSpline::new(&ts, &vs)),
@@ -1761,6 +1777,36 @@ mod tests {
         assert!(
             msg.contains("bad_forcing") && msg.contains("knot"),
             "error must name the forcing and the knot mismatch, got: {msg}"
+        );
+    }
+
+    /// gh#345: a non-monotone time axis silently mis-interpolates
+    /// (`interpolated_value` indexes by position, `constant_value`
+    /// binary-searches). The OCaml producers emit knots in file/dimension order
+    /// without sorting, so reject a non-strictly-increasing axis at construction.
+    #[test]
+    fn interpolated_nonmonotone_times_rejected() {
+        use ir::expr::ConstExpr;
+        use ir::time_func::{InterpMethod, Interpolated, TimeFuncKind, TimeFunction};
+        let konst = |v: f64| Expr::Const(ConstExpr { value: v });
+        let mut model = load_with_params("sir_basic");
+        model.time_functions.push(TimeFunction {
+            name: "unsorted_forcing".to_string(),
+            kind: TimeFuncKind::Interpolated(Interpolated {
+                times: vec![konst(20.0), konst(0.0), konst(10.0)], // out of order
+                values: vec![konst(1.0), konst(2.0), konst(3.0)],
+                method: InterpMethod::Linear,
+            }),
+            dim: (1, 0),
+            lag: None,
+        });
+        let msg = match CompiledModel::new(model) {
+            Ok(_) => panic!("non-monotone interpolation knots must be rejected"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(
+            msg.contains("unsorted_forcing") && msg.contains("increasing"),
+            "error must name the forcing and the ordering requirement, got: {msg}"
         );
     }
 
