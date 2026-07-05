@@ -237,7 +237,7 @@ test-install:
 
 # ── Golden file management ────────────────────────────────────────────────────
 
-.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden
+.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden
 
 # Recompile all DSL fixtures → ocaml/golden/*.ir.json
 update-ocaml-golden: build-ocaml
@@ -248,7 +248,7 @@ update-ocaml-golden: build-ocaml
 		$(CAMDLC) "$$src" > "$$out"; \
 	done
 
-update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden
+update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden
 
 # Recompile the corner-case fixtures (params baked via --set) →
 # tests/fixtures/corner_cases/ir/*.ir.json. These pin the off-grid /
@@ -269,6 +269,16 @@ update-corner-golden: build-ocaml
 	@$(CAMDLC) $(CORNER_DIR)/multi_effect_same_time.camdl      --set k=0.0 -o $(CORNER_DIR)/ir/multi_effect_same_time.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/event_drain_fusion.camdl          --set k=0.3 --set f=0.2 -o $(CORNER_DIR)/ir/event_drain_fusion.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/dt_rate.camdl                     --set beta=1.0 --set gamma=0.2 --set tau=1.0 -o $(CORNER_DIR)/ir/dt_rate.ir.json
+
+# Recompile the gradient regression fixtures → tests/fixtures/gradient/ir/*.ir.json.
+# These exercise the compiler-emitted rate_grad on hard cases (a lagged forcing
+# with an estimated coefficient — incident 2026-07-05) via the finite-difference
+# gradient checks in rust/crates/sim/tests/gradient_check.rs.
+GRADIENT_DIR := tests/fixtures/gradient
+update-gradient-golden: build-ocaml
+	@echo "Recompiling gradient fixtures..."
+	@mkdir -p $(GRADIENT_DIR)/ir
+	@$(CAMDLC) $(GRADIENT_DIR)/seir_seasonal_lagged.camdl -o $(GRADIENT_DIR)/ir/seir_seasonal_lagged.ir.json
 
 # Recompile the regression fixtures (params baked via --set) →
 # tests/fixtures/regression/ir/*.ir.json. These reproduce specific fixed bugs;

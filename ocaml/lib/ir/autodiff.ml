@@ -117,11 +117,21 @@ let two_pi = 2.0 *. Float.pi
     evaluator (`sinusoidal_value`). Differentiating this w.r.t. a coefficient
     parameter yields the analytic ∂forcing/∂coef via the ordinary rules (the
     coefficient sub-expressions carry the parameter dependence). *)
-let sinusoidal_closed (s : sinusoidal) : expr =
+let sinusoidal_closed ?lag (s : sinusoidal) : expr =
+  (* Evaluation-time shift (gh#314): the runtime evaluates the forcing at
+     t - lag, so the differentiated closed form must be built over (Time - lag),
+     not bare Time — otherwise the emitted gradient is evaluated at t while the
+     value is at t - lag (incident 2026-07-05). The lag_mentions guard in
+     [differentiate] runs FIRST, so here the differentiation parameter is never
+     inside [lag]; the - lag term therefore rides along as a constant shift. *)
+  let t = match lag with
+    | Some l -> BinOp { op = Sub; left = Time; right = l }
+    | None -> Time
+  in
   let theta =
     BinOp { op = Div;
             left = BinOp { op = Mul; left = Const two_pi;
-                           right = BinOp { op = Sub; left = Time; right = s.phase } };
+                           right = BinOp { op = Sub; left = t; right = s.phase } };
             right = s.period }
   in
   BinOp { op = Add; left = s.baseline;
@@ -132,12 +142,18 @@ let sinusoidal_closed (s : sinusoidal) : expr =
     [Σ_k a_k cos(2π(k+1)t/period) + b_k sin(2π(k+1)t/period)] (k 0-based,
     harmonic k+1) — matching the Rust evaluator (`fourier_value`). No baseline;
     the model author writes `1 + fourier(t)`. *)
-let fourier_closed (f : fourier) : expr =
+let fourier_closed ?lag (f : fourier) : expr =
+  (* Same evaluation-time shift as [sinusoidal_closed] (gh#314, incident
+     2026-07-05): differentiate over (Time - lag), not bare Time. *)
+  let t = match lag with
+    | Some l -> BinOp { op = Sub; left = Time; right = l }
+    | None -> Time
+  in
   let term k (a, b) =
     let kf = float_of_int (k + 1) in
     let arg =
       BinOp { op = Div;
-              left = BinOp { op = Mul; left = Const (two_pi *. kf); right = Time };
+              left = BinOp { op = Mul; left = Const (two_pi *. kf); right = t };
               right = f.period }
     in
     BinOp { op = Add;
@@ -215,8 +231,8 @@ let differentiate (top : expr) (param : string)
                 derivative w.r.t. the lag is not emitted (gh#314). Forward \
                 simulation and gradient-free IF2/PF use the live value; a NUTS \
                 fit that depends on this gradient is refused" param fname }
-       | Some { kind = Sinusoidal s; _ } -> d (sinusoidal_closed s)
-       | Some { kind = Fourier f; _ } -> d (fourier_closed f)
+       | Some ({ kind = Sinusoidal s; _ } as tf) -> d (sinusoidal_closed ?lag:tf.lag s)
+       | Some ({ kind = Fourier f; _ } as tf) -> d (fourier_closed ?lag:tf.lag f)
        | Some { kind = Periodic _; _ } ->
          if forcing_mentions fname then
            Omitted

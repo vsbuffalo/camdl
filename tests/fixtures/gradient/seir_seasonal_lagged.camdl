@@ -1,0 +1,51 @@
+# Gradient regression fixture for the lagged-forcing autodiff bug
+# (docs/dev/incidents/2026-07-05-lagged-forcing-autodiff-wrong-gradient.md).
+#
+# A sinusoidal forcing WITH a `lag` whose amplitude (alpha) and phase
+# (phi_season) are estimated. The runtime evaluates the forcing at t - lag; the
+# emitted rate_grad w.r.t. alpha/phi_season must therefore evaluate the sinusoid
+# at t - lag too. Before the fix it was built over bare Time (evaluated at t),
+# so the FD gradient check in gradient_check.rs fails. Sibling of
+# ocaml/golden/seir_vaccine_seasonal (identical but no lag), which stays green.
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+let N = S + E + I + R
+
+parameters {
+  beta       : rate
+  sigma      : rate
+  gamma      : rate
+  alpha      : probability   # seasonal amplitude — estimated forcing coefficient
+  phi_season : real          # seasonal phase   — estimated forcing coefficient
+  N0         : count
+  I0         : count
+}
+
+forcing {
+  seasonal : sinusoidal 'ratio {
+    amplitude = alpha
+    period    = 365.25
+    phase     = phi_season
+    baseline  = 1.0
+    lag       = 60 'days     # forward evaluates seasonal at t - 60
+  }
+}
+
+transitions {
+  infection   : S --> E  @ beta * seasonal(t) * S * I / N
+  progression : E --> I  @ sigma * E
+  recovery    : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 200 'days
+}

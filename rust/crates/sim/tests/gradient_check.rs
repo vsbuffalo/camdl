@@ -570,6 +570,113 @@ fn test_gradient_vs_finite_differences_seasonal() {
     eprintln!("  max relative error: {:.2e}", max_rel_err);
 }
 
+/// Lagged-forcing gradient gate (incident 2026-07-05). Sibling of the seasonal
+/// test above, but the sinusoidal forcing carries `lag = 60 days`. The runtime
+/// evaluates the forcing at `t − lag`, so the emitted ∂rate/∂{alpha,phi_season}
+/// must too. Before the fix, `sinusoidal_closed` built the closed form over bare
+/// `Time`, so the analytic gradient (at `t`) diverged from the value (at
+/// `t − lag`) — sign-flipping over the period. This FD check catches it; the
+/// no-lag seasonal test above stays green, so together they pin the
+/// forcing-coefficient × {lag, no-lag} cells.
+#[test]
+fn test_gradient_vs_finite_differences_lagged_forcing() {
+    let mut model = load_model("../../../tests/fixtures/gradient/ir/seir_seasonal_lagged.ir.json");
+    let has_grads = model.transitions.iter().any(|t| !t.rate_grad.is_empty());
+    assert!(has_grads, "lagged model must carry rate_grad (run make update-gradient-golden)");
+
+    // Non-vacuity: the fixture must actually declare a forcing lag, or this is
+    // just the no-lag seasonal case again.
+    assert!(model.time_functions.iter().any(|tf| tf.lag.is_some()),
+        "seir_seasonal_lagged must declare a forcing `lag` — otherwise this test \
+         does not exercise the lagged-gradient path");
+
+    for p in &mut model.parameters {
+        if p.value.resolved_value().is_none() {
+            p.value = p.value.with_value(match p.name.as_str() {
+                "beta" => 0.3, "sigma" => 0.2, "gamma" => 0.1,
+                "alpha" => 0.15, "phi_season" => 90.0,
+                "N0" => 1_000_000.0, "I0" => 10.0,
+                _ => 0.5,
+            });
+        }
+    }
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+
+    let dt = 1.0;
+    let t_end = compiled.model.simulation.t_end;
+    let n_params = compiled.param_index.len();
+
+    let mut params = vec![0.0; n_params];
+    for p in &compiled.model.parameters {
+        params[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+    }
+
+    let mut rng = StatefulRng::new(42);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+
+    let observations: Vec<Observation> = vec![];
+    let ivp_mappings: Vec<IVPMapping> = vec![];
+    let obs_model = MultiStreamObsModel::empty(compiled.clone());
+    let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
+
+    let model_to_estimated: Vec<Option<usize>> = (0..n_params).map(Some).collect();
+    let rate_grads_for_run = sim::inference::pgas_grad::resolve_rate_grad_for_run(
+        &compiled.resolved.rate_grads_indexed,
+        &model_to_estimated,
+    );
+    let estimated_to_model: Vec<usize> = (0..n_params).collect();
+
+    let (ll, grad) = complete_data_loglik_grad(
+        &compiled, &trajectory, &params, &observations, dt,
+        &obs_model, &ivp_mappings,
+        n_params, &rate_grads_for_run, &oas,
+        &estimated_to_model,
+    ).unwrap();
+    assert!(ll.is_finite(), "lagged complete-data LL must be finite");
+    eprintln!("  log-likelihood: {:.4}", ll);
+
+    // alpha/phi_season are the forcing coefficients whose gradient was wrong
+    // under lag; beta threads through seasonal(t) multiplicatively (correct even
+    // pre-fix — ∂/∂beta keeps the TimeFunc node); gamma/sigma are
+    // time-independent regressions.
+    let mut max_rel_err = 0.0_f64;
+    for name in ["alpha", "phi_season", "beta", "gamma", "sigma"] {
+        let i = compiled.param_index[name];
+        let p_val = params[i];
+        let eps = (1e-5 * p_val.abs()).max(1e-8);
+
+        let mut p_plus = params.clone();
+        let mut p_minus = params.clone();
+        p_plus[i] += eps;
+        p_minus[i] -= eps;
+
+        let ll_plus = complete_data_loglik(
+            &compiled, &trajectory, &p_plus, &observations, dt,
+            &obs_model, &ivp_mappings, &oas,
+        ).unwrap().total;
+        let ll_minus = complete_data_loglik(
+            &compiled, &trajectory, &p_minus, &observations, dt,
+            &obs_model, &ivp_mappings, &oas,
+        ).unwrap().total;
+        let fd = (ll_plus - ll_minus) / (2.0 * eps);
+
+        let rel_err = if fd.abs() > 1e-10 {
+            (grad[i] - fd).abs() / fd.abs()
+        } else {
+            (grad[i] - fd).abs()
+        };
+        max_rel_err = max_rel_err.max(rel_err);
+
+        eprintln!("  d(ll)/d({:10}) = {:14.4} (analytical) vs {:14.4} (fd), rel_err = {:.2e}",
+            name, grad[i], fd, rel_err);
+
+        assert!(rel_err < 1e-4,
+            "lagged-forcing gradient mismatch for {}: analytical={:.6}, fd={:.6}, rel_err={:.2e}",
+            name, grad[i], fd, rel_err);
+    }
+    eprintln!("  max relative error: {:.2e}", max_rel_err);
+}
+
 /// T2: NUTS invariance on a known 2D Gaussian target.
 /// Runs NUTS for 5K steps on N([3, -1], [[1, 0.5], [0.5, 2]]).
 /// Verifies sample mean within 3σ of true mean.
