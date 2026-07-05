@@ -1,4 +1,10 @@
 (library
  (name ir)
  (wrapped false)
+ ; -w @8: promote non-exhaustive-match (warning 8) to a hard error in every
+ ; profile. autodiff.ml's `differentiate` is exhaustive and wildcard-free over
+ ; `Expr` and its operator sub-ADTs — a new variant must be classified
+ ; Known|Omitted|Unsupported, never fall through to a silent zero. This pins that
+ ; seal so it survives a profile change (gh#180).
+ (flags (:standard -w @8))
  (libraries yojson))

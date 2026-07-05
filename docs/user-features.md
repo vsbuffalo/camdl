@@ -543,6 +543,17 @@ observations {
 }
 ```
 
+Observation-model parameters (`rho`, `k` here, and parameters inside a derived
+projection such as `qgam * prevalence`) are estimated by gradient-based NUTS on
+the same footing as transition-rate parameters: the compiler differentiates the
+likelihood analytically, so there is no finite-difference approximation and no
+silent zero. Where a parameter reaches an observation through something the
+compiler genuinely cannot differentiate — a spline/step forcing coefficient, a
+forcing's time-shift (`lag`), a non-constant table index, or a binomial
+denominator `n` — the fit is refused with a message naming the parameter and the
+reason, rather than proceeding on a zero gradient. Gradient-free methods (IF2,
+particle-filter PMMH) estimate those cases unchanged.
+
 ### Parameter transforms
 
 **pomp** — separate declaration, manual enumeration:

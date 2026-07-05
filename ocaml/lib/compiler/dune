@@ -1,6 +1,11 @@
 (library
  (name compiler)
  (wrapped false)
+ ; -w @8: non-exhaustive match is a hard error (see ocaml/lib/ir/dune). The
+ ; obs/σ² autodiff driver matches `Likelihood` exhaustively (no wildcard) so a
+ ; new likelihood variant is a compile error until its arguments are wired for
+ ; differentiation (gh#180).
+ (flags (:standard -w @8))
  (libraries ir yojson fmt))
 
 (ocamllex (modules lexer))
