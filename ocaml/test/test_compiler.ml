@@ -1839,6 +1839,26 @@ let test_indexed_param_arity () =
   |} in
   compile_expect_error_code ~code:"E299" ~contains:"R0" src
 
+(* A stratified compartment answers to its bare base name (a PopSum aggregate)
+   as well as its cells, but check_declaration_names only registered the cells —
+   so a `let`/param sharing the base name silently shadowed it with no collision.
+   Registering the base too makes the collision a located E278. *)
+let test_stratified_base_name_collision () =
+  let src = {|
+    dimensions { patch = [north, south] }
+    compartments { S, I, R }
+    stratify(by = patch)
+    parameters { beta : rate  gamma : rate }
+    let R = 100
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ beta * S[p]
+      recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
+    }
+    init { S[p in patch] = 1000  I[p in patch] = 1 }
+    simulate { from = 0 'days  to = 60 'days }
+  |} in
+  compile_expect_error_code ~code:"E278" ~contains:"R" src
+
 (* gh#49 sibling check: the expander already validates `fraction` and
    `count` are mutually exclusive (E261). Confirm the parser fix didn't
    accidentally let both through. Uses the JSON-errors helper so the
@@ -8614,6 +8634,10 @@ let () =
         `Quick test_indexed_forcing_arity;
       Alcotest.test_case "indexed param over-index rejected (E299)"
         `Quick test_indexed_param_arity;
+    ];
+    "declaration name collisions", [
+      Alcotest.test_case "stratified compartment base name vs let (E278)"
+        `Quick test_stratified_base_name_collision;
     ];
     "reactive_interventions", [
       Alcotest.test_case "observed() (no window) lowers to Latest + defaults"

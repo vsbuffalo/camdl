@@ -2034,11 +2034,16 @@ let check_declaration_names ctx =
      entry per *occurrence*; a name with >1 entry is the collision. *)
   let entries : (string * string * Diagnostics.loc) list ref = ref [] in
   let add name ns loc = entries := (name, ns, loc) :: !entries in
-  (* Compartments — base + stratified expansions all share one decl loc. *)
+  (* Compartments — the stratified cells, plus (for a stratified compartment)
+     the bare base name: a stratified `R` answers to `R` (a PopSum aggregate) as
+     well as `R_north`/`R_south`, so a `let`/param sharing the base must collide.
+     Registering only the cells let the base silently shadow the aggregate. *)
   List.iter (fun (cd : compartment_decl) ->
     let loc = diag_loc_of_ast_ctx ctx cd.cloc in
-    List.iter (fun n -> add n "compartment" loc)
-      (expand_compartment_name ctx cd.cname)
+    let cells = expand_compartment_name ctx cd.cname in
+    let names =
+      if comp_dims ctx cd.cname = [] then cells else cd.cname :: cells in
+    List.iter (fun n -> add n "compartment" loc) names
   ) ctx.comp_decls;
   (* Parameters — scalar by name; indexed by expanded `<base>_<level>`. *)
   List.iter (fun pd ->
