@@ -60,6 +60,13 @@ let formal_dim d =
 
 let dim_display d = Printf.sprintf "%s (%s)" (formal_dim d) (display_dim d)
 
+(* Human-readable name for a unary operator, used in diagnostics and the
+   short-string expression printer. Exhaustive over [un_op] (satisfies -w @8). *)
+let un_op_name : un_op -> string = function
+  | Neg -> "-" | Exp -> "exp" | Log -> "log" | Sqrt -> "sqrt"
+  | Abs -> "abs" | Floor -> "floor" | Ceil -> "ceil"
+  | Sin -> "sin" | Cos -> "cos" | Tanh -> "tanh"
+
 (* ── Dimension type with unknowns ───────────────────────────────────────── *)
 
 type dim =
@@ -411,10 +418,7 @@ and infer_unop st ~ctx (u : un_op_expr) : dim =
   | Exp | Log | Sin | Cos | Tanh ->
     constrain_known st ~code:"E301"
       ~message:(Printf.sprintf "argument to %s in '%s' must be dimensionless"
-                  (match u.op with
-                   | Exp -> "exp" | Log -> "log"
-                   | Sin -> "sin" | Cos -> "cos" | Tanh -> "tanh"
-                   | _ -> "log") ctx)
+                  (un_op_name u.op) ctx)
       da dimensionless;
     Known dimensionless
   | Sqrt ->
@@ -742,12 +746,7 @@ let rec expr_to_short_string (e : expr) : string =
     Printf.sprintf "(%s %s %s)"
       (expr_to_short_string b.left) op_str (expr_to_short_string b.right)
   | UnOp u ->
-    let op_str = match u.op with
-      | Neg -> "-" | Exp -> "exp" | Log -> "log" | Sqrt -> "sqrt"
-      | Abs -> "abs" | Floor -> "floor" | Ceil -> "ceil"
-      | Sin -> "sin" | Cos -> "cos" | Tanh -> "tanh"
-    in
-    Printf.sprintf "%s(%s)" op_str (expr_to_short_string u.arg)
+    Printf.sprintf "%s(%s)" (un_op_name u.op) (expr_to_short_string u.arg)
   | Cond c ->
     Printf.sprintf "if(%s, %s, %s)"
       (expr_to_short_string c.pred)
