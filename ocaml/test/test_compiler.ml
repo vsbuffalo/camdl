@@ -2499,6 +2499,64 @@ let test_l403_no_fire_on_non_rate_forcing () =
     let n = count_diags_with_code d.ctx.diags.diags "L403" in
     Alcotest.(check int) "no L403 on 'ratio / 'count forcing" 0 n
 
+(* ── gh#345: indexed (per-stratum) file-backed forcing ──────────────────────
+   `cforce[p in patch] : interpolated { data=… key_col=patch … }` must expand to
+   one interpolated forcing per patch, each carrying THAT patch's rows from the
+   long-format file. Regression guard for the silent key-lookup bug: the filter
+   level was looked up by the data-column name in an env keyed by the *binder*
+   variable, so `[p in patch]` produced empty knots (interpolate-to-0 every-
+   where, the gh#308 failure mode) unless the binder happened to be named
+   `patch`. The stratum level now comes from the binding, decoupled from both
+   the binder name and the column name. ──────────────────────────────────────*)
+let test_gh345_indexed_file_backed_forcing () =
+  let dir = Filename.get_temp_dir_name () in
+  let tsv = Filename.concat dir "camdl_gh345_temps.tsv" in
+  let oc  = open_out tsv in
+  output_string oc
+    "patch\tweek\tcval\n\
+     north\t0\t1.0\nnorth\t10\t2.0\nnorth\t20\t1.5\n\
+     south\t0\t0.5\nsouth\t10\t0.8\nsouth\t20\t0.6\n";
+  close_out oc;
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { patch = [north, south] }
+    stratify(by = patch)
+    let N[p in patch] = S[p] + I[p]
+    parameters { beta : rate  gamma : rate }
+    forcing {
+      cforce[p in patch] : interpolated 'ratio {
+        data = "camdl_gh345_temps.tsv"
+        key_col = patch  time_col = week  value_col = cval  method = "linear"
+      }
+    }
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ beta * cforce[p] * S[p] * I[p] / N[p]
+      recovery[p in patch]  : I[p] --> S[p] @ gamma * I[p]
+    }
+    init { S[north] = 990  I[north] = 10  S[south] = 495  I[south] = 5 }
+    simulate { from = 0 'days  to = 20 'days }
+  |} in
+  let model_path = Filename.concat dir "camdl_gh345_model.camdl" in
+  let m = match Compiler.compile ~name:"gh345" ~filename:model_path src with
+    | Ok m    -> m
+    | Error e -> Alcotest.failf "compile failed: %s" e
+  in
+  let values name =
+    match List.find_opt (fun (tf : Ir.time_function) -> tf.name = name) m.time_functions with
+    | Some { kind = Ir.Interpolated i; _ } ->
+      List.map (function Ir.Const f -> f
+                       | _ -> Alcotest.failf "%s: non-const knot" name) i.values
+    | Some _ -> Alcotest.failf "%s is not an interpolated forcing" name
+    | None   -> Alcotest.failf "forcing %s not found (got: [%s])" name
+                  (String.concat ", "
+                     (List.map (fun (t : Ir.time_function) -> t.name) m.time_functions))
+  in
+  Alcotest.(check (list (float 1e-9)))
+    "north forcing gets north's own rows" [1.0; 2.0; 1.5] (values "cforce_north");
+  Alcotest.(check (list (float 1e-9)))
+    "south forcing gets south's own rows" [0.5; 0.8; 0.6] (values "cforce_south")
+
 (* Control: `mu * S / 365.25` — a bare conversion constant, but no rate forcing
    anywhere in the numerator. Must not fire. *)
 let test_l403_no_fire_on_unrelated_div () =
@@ -8393,6 +8451,7 @@ let () =
       Alcotest.test_case "L403 fires via hoisted binding"           `Quick test_l403_fires_via_hoisted_binding;
       Alcotest.test_case "L403 quiet on same-unit rate forcing"     `Quick test_l403_no_fire_on_same_unit_forcing;
       Alcotest.test_case "L403 quiet on structural divisor"         `Quick test_l403_no_fire_on_structural_divisor;
+      Alcotest.test_case "gh#345 indexed file-backed forcing"       `Quick test_gh345_indexed_file_backed_forcing;
     ];
     "compile_outcome", [
       Alcotest.test_case "clean model returns Some value, no errors" `Quick test_compile_outcome_clean_returns_value;

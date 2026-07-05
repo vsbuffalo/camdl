@@ -5397,22 +5397,48 @@ let expand_time_function_one ctx fname (env : (string * string) list) fkind (fun
        | Some (EIdent (path, _)) ->
          let time_col  = get_str_kw "time_col"  "time"  in
          let value_col = get_str_kw "value_col" "value" in
-         (* For indexed functions, filter rows by key_col = level.
-            For non-indexed functions (env is empty), read all rows. *)
-         let (times, values) =
-           if env = [] then
-             (* Non-indexed: read all rows, no key filtering *)
-             load_interpolated_for_level ctx path
-               ~key_col:"" ~key_val:"" ~time_col ~value_col
-           else
-             let key_col = get_str_kw "key_col" "key" in
-             let key_val = match List.assoc_opt key_col env with
-               | Some v -> v
-               | None   -> ""
-             in
-             load_interpolated_for_level ctx path
-               ~key_col ~key_val ~time_col ~value_col
+         (* The stratum filter. For an indexed forcing the level comes from its
+            single index binding (env = [(binder_var, level)]); it is
+            independent of both the binder name (`p`) and the data column name
+            (`key_col`). A non-indexed forcing (env = []) reads every row. A
+            forcing indexed by more than one dimension cannot be filtered by a
+            single key column. *)
+         let (key_col, key_val) = match env with
+           | []                -> ("", "")
+           | [ (_var, level) ] -> (get_str_kw "key_col" "key", level)
+           | _ ->
+             Diagnostics.error ctx.diags ~code:"E226" ~loc:Diagnostics.no_loc
+               ~message:(Printf.sprintf
+                 "file-backed forcing '%s' is indexed by %d dimensions, but a \
+                  data file can only be filtered by a single key column"
+                 fname (List.length env))
+               ~hint:"index the forcing by one dimension, or pre-join the data \
+                      to a single key column"
+               ();
+             (get_str_kw "key_col" "key", "")
          in
+         let (times, values) =
+           load_interpolated_for_level ctx path ~key_col ~key_val ~time_col ~value_col
+         in
+         (* An interpolated forcing with no knots silently interpolates to 0
+            everywhere (gh#308). For an indexed forcing that almost always means
+            the key filter matched nothing — fail here, naming the stratum, so
+            the user is not left with the runtime's opaque "no knots" error. *)
+         (if times = [] then
+            if env = [] then
+              Diagnostics.error ctx.diags ~code:"E227" ~loc:Diagnostics.no_loc
+                ~message:(Printf.sprintf
+                  "file-backed forcing '%s': '%s' contains no data rows" fname path)
+                ~hint:"the file must have at least one (time, value) row"
+                ()
+            else
+              Diagnostics.error ctx.diags ~code:"E227" ~loc:Diagnostics.no_loc
+                ~message:(Printf.sprintf
+                  "file-backed forcing '%s': no rows in '%s' where column '%s' = '%s'"
+                  fname path key_col key_val)
+                ~hint:"check that key_col names the column holding the stratum \
+                       id and that the file has rows for every level"
+                ());
          Ir.Interpolated {
            times   = List.map (fun f -> Ir.Const f) times;
            values  = List.map (fun f -> Ir.Const f) values;

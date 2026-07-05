@@ -439,24 +439,31 @@ the temperature at t = 14.73 days?"
 This is NOT a table lookup problem — it's a time function problem. Tables are
 compile-time lookups. Time-varying covariates need runtime interpolation.
 
-**The design: indexed time functions (future).**
+**Per-stratum data-driven forcing: an indexed interpolated time function.**
+
+A forcing indexed by a dimension reads each stratum's own series from a
+**long-format** file — one row per `(stratum, time)` — and interpolates it at
+runtime. The file has a stratum-id column (`key_col`), a time column, and a
+value column:
+
+```
+# data/temperature.tsv
+patch     week   temp
+kano      0      27.1
+kano      28     29.8
+katsina   0      26.4
+katsina   28     28.9
+```
 
 ```camdl
-dimensions {
-  patch_clim   = read("data/temperature.tsv", column = "patch")
-  climate_week = read("data/temperature.tsv", column = "week")
-}
-
-tables {
-  temp_data : patch_clim × climate_week = read("data/temperature.tsv")
-}
-
 forcing {
-  temperature[p in patch] = interpolated(
-    times  = climate_week,        # the time index levels (as floats)
-    values = temp_data[p, :],     # the row of the table for this patch
-    method = linear               # linear interpolation between points
-  )
+  temperature[p in patch] : interpolated 'ratio {
+    data      = "data/temperature.tsv"
+    key_col   = patch      # the column identifying the stratum
+    time_col  = week       # numeric time in the model's time_unit, or an ISO date
+    value_col = temp
+    method    = "linear"   # or "constant", "spline"
+  }
 }
 
 transitions {
@@ -465,14 +472,17 @@ transitions {
 }
 ```
 
-At runtime, `temperature[kano_dala]` evaluates by interpolating the Kano
-temperature series at the current time `t`. This extends the existing time
-function system (which already handles sinusoidal, piecewise, interpolated) with
-per-dimension members.
+This expands to one interpolated forcing per patch — `temperature_kano`,
+`temperature_katsina`, … — each carrying only that patch's rows. At runtime
+`temperature[kano]` interpolates the Kano series at the current time `t`. The
+stratum a row belongs to is its `key_col` value, matched to the forcing's index
+level; the binder name (`p`) and the column name (`patch`) need not coincide,
+and a level with no matching rows is a compile error (**E227**), not a silent
+zero-forcing.
 
 This is a natural extension, not a new concept: time functions already do
-runtime interpolation. Indexing them by a dimension is the same `[p in patch]`
-pattern used everywhere else.
+runtime interpolation, and indexing one by a dimension is the same
+`[p in patch]` pattern used everywhere else.
 
 **For the immediate Nigeria model:** per-patch sinusoidal approximation via
 parameters works:
@@ -496,25 +506,26 @@ forward generative model.
 
 ## Stress test: every epi data type
 
-| Data type                      | Type signature                 | Works?                                  |
-| ------------------------------ | ------------------------------ | --------------------------------------- |
-| Population                     | `patch → f64`                  | ✅                                      |
-| Population × age               | `patch × age → f64`            | ✅                                      |
-| Contact matrix                 | `age × age → f64`              | ✅                                      |
-| Spatial adjacency (sparse)     | `patch × patch → f64`          | ✅ `default = 0.0`                      |
-| SIA campaigns (ragged)         | `patch × sia_time → f64`       | ✅ `where > 0` filter                   |
-| Demographics (multi-value)     | `patch → (f64, f64)`           | ✅ `pop, sex_ratio : patch = read(...)` |
-| Seroprevalence                 | `patch × age → f64`            | ✅                                      |
-| Environmental covariates       | `patch → f64`                  | ✅                                      |
-| Routine immunization           | `patch × age × ri_month → f64` | ✅ 3D table                             |
-| Detection probability          | `patch → f64`                  | ✅                                      |
-| Genetic distances              | `strain × strain → f64`        | ✅                                      |
-| Climate / time-varying spatial | `patch × week → f64`           | ⚠️ Needs indexed time functions          |
-| Case data (for fitting)        | observation data               | separate pipeline (observations block)  |
+| Data type                      | Type signature                 | Works?                                    |
+| ------------------------------ | ------------------------------ | ----------------------------------------- |
+| Population                     | `patch → f64`                  | ✅                                        |
+| Population × age               | `patch × age → f64`            | ✅                                        |
+| Contact matrix                 | `age × age → f64`              | ✅                                        |
+| Spatial adjacency (sparse)     | `patch × patch → f64`          | ✅ `default = 0.0`                        |
+| SIA campaigns (ragged)         | `patch × sia_time → f64`       | ✅ `where > 0` filter                     |
+| Demographics (multi-value)     | `patch → (f64, f64)`           | ✅ `pop, sex_ratio : patch = read(...)`   |
+| Seroprevalence                 | `patch × age → f64`            | ✅                                        |
+| Environmental covariates       | `patch → f64`                  | ✅                                        |
+| Routine immunization           | `patch × age × ri_month → f64` | ✅ 3D table                               |
+| Detection probability          | `patch → f64`                  | ✅                                        |
+| Genetic distances              | `strain × strain → f64`        | ✅                                        |
+| Climate / time-varying spatial | `patch × week → f64`           | ✅ indexed forcing (long-format `data =`) |
+| Case data (for fitting)        | observation data               | separate pipeline (observations block)    |
 
-One gap: per-patch time-varying covariates need indexed time functions.
-Everything else works with `dims → scalar` tables, the `dimensions {}` block,
-and the existing `[i in dim]` iteration.
+Per-patch time-varying covariates load as an indexed interpolated forcing (a
+long-format file, one series per stratum — see above). Everything else works
+with `dims → scalar` tables, the `dimensions {}` block, and the existing
+`[i in dim]` iteration.
 
 ---
 
@@ -637,7 +648,7 @@ scenarios {
 | Multiple values             | `a, b : dims = read(...)`                | two tables from one CSV                    |
 | Numeric level coercion      | `at = t` where `t` iterates numeric dim  | campaign times as floats                   |
 | Compile-time filtering      | `where expr > 0`                         | skip zero-coverage events                  |
-| Time-varying spatial        | indexed time functions (future)          | `temperature[p in patch]`                  |
+| Time-varying spatial        | indexed forcing, long-format `data =`    | `temperature[p in patch]`                  |
 
 **One loader, one table type, one iteration syntax.** All external data is
 `dims → scalar`. All iteration is `[i in dim]`. Dimensions are declared in the
