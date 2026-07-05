@@ -340,9 +340,6 @@ let run_dimcheck_full (d : compile_detail)
     in
     (diags, qdims)
 
-let run_dimcheck (d : compile_detail) : Diagnostics.diagnostic list =
-  fst (run_dimcheck_full d)
-
 (* Write each resolved quantity dimension (#5) onto its IR node by (name,
    stratum). Quantities without a resolved dimension keep `None` (omitted on the
    wire), so only quantity-bearing models gain the field. *)
@@ -364,8 +361,8 @@ let annotate_quantity_dims
     the diagnostic context as non-blocking warnings. Lints (L4xx) flag
     semantically valid but discouraged patterns (e.g. L402 dead
     compartment); they render with hint text but never set [has_errors],
-    so the build does not fail on a lint. Called right after
-    [run_dimcheck] so both `camdlc compile` and `camdlc check` run it. *)
+    so the build does not fail on a lint. Runs right after dimcheck in
+    [run_analysis], so both `camdlc compile` and `camdlc check` run it. *)
 let run_lint (d : compile_detail) : Diagnostics.diagnostic list =
   List.map (fun (l : Lint.diagnostic) ->
     let loc = match l.compartment with
@@ -451,75 +448,97 @@ let maybe_licm (m : Ir.model) : Ir.model =
   then m
   else Passtime.time "licm" (fun () -> Licm.licm_model m)
 
-(* The post-expansion pipeline (validate → dimcheck → lint → autodiff →
-   constant-fold), factored out of [compile] so [compile_with_reads] can reuse
-   it without duplicating the high-risk pipeline. [compile] stays
-   byte-identical — it is now [compile_detail_result] + [finish_compile]. *)
-let finish_compile (d : compile_detail) : (Ir.model, string) result =
-  (* Post-expansion passes are pure (return diagnostic lists); emit them
-     into [d.ctx.diags] — the accumulator [has_errors]/[render] read — and
-     on any Error-severity diagnostic return [Error (render …)] rather than
-     raising. [compile] never throws (gh#181): a late-phase error (validate
-     E5xx, dimcheck, autodiff E600) now arrives as [Error], the same shape
-     the front-end path already returns, so the CLI exits cleanly (1)
-     instead of on an uncaught [Compile_error] (a Fatal-error trace, exit 2).
-     [render] still writes the diagnostics to stderr exactly as before; only
-     the control flow changes from raise to return.
-     Validate first (M1 / C5 in the 2026-04-19 compiler review). *)
+(* ── The post-expansion analysis pipeline ────────────────────────────────────
+
+   [run_analysis] is the single definition of "the post-expansion pipeline":
+   validate → dimcheck → lint → autodiff-transitions, in that order, with the
+   short-circuit structure [compile] and `check` must share. Each stage emits
+   its diagnostics into [d.ctx.diags] (the accumulator [has_errors]/[render]
+   read); the sequence stops early exactly where [compile] historically did —
+   after Validate (dimcheck ICEs on unknown params, so a structural error must
+   halt first), and after dimcheck+lint / autodiff on any Error-severity
+   diagnostic.
+
+   Returns [Some (qdims, transitions)] on the all-clear path — the resolved
+   quantity dimensions (#5) and the gradient-annotated transitions [compile]
+   needs to finish building the model — or [None] if a stage short-circuited on
+   an error. [compile] ([finish_compile]) builds a model from the [Some];
+   `check`/[collect_detail] discards it and keeps only the accumulated
+   diagnostics. Having ONE place define the stage sequence is the cure for the
+   recurring check/compile divergence (gh#9 re dimcheck, gh#170 re validate,
+   gh#114 re one-root-cause-one-diagnostic): a stage added here is added to both
+   paths at once, so they cannot drift.
+
+   The passes are pure (each returns a diagnostic list rather than emitting or
+   raising); [run_analysis] emits them, so no pass throws — a late-phase error
+   (validate E5xx, dimcheck, autodiff E600) becomes a [None] the caller renders,
+   never an uncaught [Compile_error] (gh#181). *)
+let run_analysis (d : compile_detail)
+    : (((string * (string * string) list) * (int * int)) list
+       * Ir.transition list) option =
   let emit_all = List.iter (Diagnostics.emit d.ctx.diags) in
-  let fail () : (Ir.model, string) result =
-    Error (Diagnostics.render d.ctx.diags d.source) in
   let vdiags = Passtime.time "validate" (fun () -> run_validate d) in
   emit_all vdiags;
   (* Validate short-circuits before dimcheck (dimcheck ICEs on unknown
      params), matching the original short-circuit ordering. *)
-  if vdiags <> [] then fail ()
+  if vdiags <> [] then None
   else begin
     let (ddiags, qdims) = Passtime.time "dimcheck" (fun () -> run_dimcheck_full d) in
     emit_all ddiags;
     emit_all (Passtime.time "lint" (fun () -> run_lint d));
-    if Diagnostics.has_errors d.ctx.diags then fail ()
+    if Diagnostics.has_errors d.ctx.diags then None
     else begin
       let (transitions, gdiags) = differentiate_transitions d in
       emit_all gdiags;
-      if Diagnostics.has_errors d.ctx.diags then fail ()
-      else begin
-        (* Single render of any collected non-blocking diagnostics
-           (expansion warnings + dimcheck infos + L4xx lints). The ONLY
-           non-blocking emission, on the definitely-succeeding path after
-           the final [has_errors] check — it can never co-fire with a
-           [fail ()] render above, so warnings never double-print. Routing
-           through [Diagnostics.render] gives JSON under [--json-errors] and
-           the ANSI box otherwise, matching the error path's shape. *)
-        if Diagnostics.has_any d.ctx.diags then
-          ignore (Diagnostics.render d.ctx.diags d.source);
-        (* Observation + σ² autodiff (proposal 2026-07-03, P3): differentiate
-           every likelihood argument (projection inlined) and every
-           [DrawOverdispersed] σ² w.r.t. all parameters, filling the obs
-           [*_grad] and [sigma_sq_grad] maps. Runs at the same point as
-           [differentiate_transitions] (after expansion, before
-           constant-fold/serialize) and reuses the single differentiation
-           authority [Autodiff.differentiate]; unlike the rate E600 path it
-           never errors — a live-but-omitted or structural coefficient becomes a
-           coded [DEUnsupported] the P5 fit-time gate refuses NUTS on. *)
-        let param_names =
-          List.map (fun (p : Ir.parameter) -> p.name) d.model.Ir.parameters in
-        let tfs = d.model.Ir.time_functions and tbls = d.model.Ir.tables in
-        let transitions =
-          Passtime.time "autodiff-sigma"
-            (fun () -> Autodiff.differentiate_overdispersion transitions param_names tfs tbls) in
-        let observations =
-          Passtime.time "autodiff-obs"
-            (fun () -> Autodiff.differentiate_observations d.model.Ir.observations param_names tfs tbls) in
-        (* Write the resolved quantity dimensions (#5) back onto the model
-           before the value-preserving transforms (constant-fold/LICM never
-           touch quantities). *)
-        let m = annotate_quantity_dims qdims
-                  { d.model with Ir.transitions = transitions; Ir.observations = observations } in
-        Ok (maybe_licm (maybe_constant_fold m))
-      end
+      if Diagnostics.has_errors d.ctx.diags then None
+      else Some (qdims, transitions)
     end
   end
+
+(* The post-expansion pipeline, factored out of [compile] so [compile_with_reads]
+   can reuse it without duplicating the high-risk pipeline. [compile] stays
+   byte-identical — it is now [compile_detail_result] + [finish_compile].
+
+   [run_analysis] runs the shared stage sequence (validate → dimcheck → lint →
+   autodiff-transitions), emitting into [d.ctx.diags]. On [None] a stage
+   short-circuited on an error, so render + [Error] (gh#181: the CLI exits
+   cleanly 1, never on an uncaught [Compile_error] trace). On [Some (qdims,
+   transitions)] every stage cleared, so finish building the model: the obs/σ²
+   autodiff tail, the quantity-dim write-back, and the value-preserving
+   constant-fold/LICM transforms. *)
+let finish_compile (d : compile_detail) : (Ir.model, string) result =
+  match run_analysis d with
+  | None -> Error (Diagnostics.render d.ctx.diags d.source)
+  | Some (qdims, transitions) ->
+    (* Single render of any collected non-blocking diagnostics (expansion
+       warnings + dimcheck infos + L4xx lints). The ONLY non-blocking emission,
+       on the definitely-succeeding path — it can never co-fire with the [None]
+       render above, so warnings never double-print. Routing through
+       [Diagnostics.render] gives JSON under [--json-errors] and the ANSI box
+       otherwise, matching the error path's shape. *)
+    if Diagnostics.has_any d.ctx.diags then
+      ignore (Diagnostics.render d.ctx.diags d.source);
+    (* Observation + σ² autodiff (proposal 2026-07-03, P3): differentiate every
+       likelihood argument (projection inlined) and every [DrawOverdispersed] σ²
+       w.r.t. all parameters, filling the obs [*_grad] and [sigma_sq_grad] maps.
+       Reuses the single differentiation authority [Autodiff.differentiate];
+       unlike the rate E600 path it never errors — a live-but-omitted or
+       structural coefficient becomes a coded [DEUnsupported] the P5 fit-time
+       gate refuses NUTS on. *)
+    let param_names =
+      List.map (fun (p : Ir.parameter) -> p.name) d.model.Ir.parameters in
+    let tfs = d.model.Ir.time_functions and tbls = d.model.Ir.tables in
+    let transitions =
+      Passtime.time "autodiff-sigma"
+        (fun () -> Autodiff.differentiate_overdispersion transitions param_names tfs tbls) in
+    let observations =
+      Passtime.time "autodiff-obs"
+        (fun () -> Autodiff.differentiate_observations d.model.Ir.observations param_names tfs tbls) in
+    (* Write the resolved quantity dimensions (#5) back onto the model before the
+       value-preserving transforms (constant-fold/LICM never touch quantities). *)
+    let m = annotate_quantity_dims qdims
+              { d.model with Ir.transitions = transitions; Ir.observations = observations } in
+    Ok (maybe_licm (maybe_constant_fold m))
 
 let compile ?(name = "model") ?(filename = "<input>") (src : string) : (Ir.model, string) result =
   match compile_detail_result ~name ~filename src with
@@ -592,31 +611,20 @@ let collect_detail ?(name = "model") ?(filename = "<input>") (src : string)
   (match detail with
    | None -> ()                     (* lex/parse/expand failed; diags has the E001 *)
    | Some d ->
-     (* Same staged pipeline as [compile], minus rendering/abort: Validate
-        first (it gates dimcheck, which ICEs on unknown params), then
-        dimcheck + lint, then autodiff. Short-circuit after Validate matches
-        [compile]; downstream passes run only on a structurally-valid model.
-        The passes are pure now, so emit their lists into [d.ctx.diags] (the
-        accumulator this function returns). *)
-     let emit_all = List.iter (Diagnostics.emit d.ctx.diags) in
-     (* Short-circuit the post-expansion passes if the front end (expander)
-        already emitted errors — matching [compile], where
-        [compile_detail_result] returns [Error] before [run_validate] runs.
-        Skipping it here avoids emitting a *second*, less-located diagnostic
-        for a root cause the expander already reported with a located code
-        (e.g. an init-membership error: located E277 from [expand_init] would
-        otherwise be shadowed by a no-location E513 from [run_validate]).
+     (* Same post-expansion pipeline as [compile], minus rendering/abort: run the
+        shared [run_analysis] stages, discarding its model outputs and keeping
+        only the diagnostics it emitted into [d.ctx.diags] (the accumulator this
+        function returns).
+
+        Skip the passes if the front end (expander) already emitted errors —
+        matching [compile], where [compile_detail_result] returns [Error] before
+        [run_analysis] runs. Skipping avoids emitting a *second*, less-located
+        diagnostic for a root cause the expander already reported with a located
+        code (e.g. an init-membership error: a located E277 from [expand_init]
+        would otherwise be shadowed by a no-location E513 from [run_validate]).
         gh#114 reviewer feedback: one root cause → one diagnostic. *)
-     if not (Diagnostics.has_errors d.ctx.diags) then begin
-       let vdiags = Passtime.time "validate" (fun () -> run_validate d) in
-       emit_all vdiags;
-       if vdiags = [] then begin
-         emit_all (Passtime.time "dimcheck" (fun () -> run_dimcheck d));
-         emit_all (Passtime.time "lint" (fun () -> run_lint d));
-         if not (Diagnostics.has_errors d.ctx.diags) then
-           emit_all (snd (differentiate_transitions d))
-       end
-     end);
+     if not (Diagnostics.has_errors d.ctx.diags) then
+       ignore (run_analysis d));
   (detail, diags, source)
 
 (* [collect_diagnostics] is the thin test/tooling projection of
