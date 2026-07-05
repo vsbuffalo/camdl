@@ -5927,6 +5927,16 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
   in
   List.concat_map (fun iv ->
     let iv_loc = diag_loc_of_ast_ctx ctx iv.ivloc in
+    if iv.ivaction = [] then begin
+      (* A scheduled intervention or event must carry at least one action.
+         Empty was previously an implicit `ATransfer []` that misfired as E261. *)
+      let noun = match kind with Ir.Scenario -> "intervention" | Ir.Event -> "event" in
+      Diagnostics.error ctx.diags ~code:"E296" ~loc:iv_loc
+        ~message:(Printf.sprintf "%s '%s' has no action" noun iv.ivname)
+        ~hint:"add at least one action — a set (`S = S - 100`), an `add`, or a `transfer(...)`"
+        ();
+      []
+    end else begin
     let base_name = if iv.ivindices = [] then None else Some iv.ivname in
     let combos = cartesian_product iv.ivindices ctx in
     List.filter_map (fun env ->
@@ -6012,11 +6022,14 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
           Ir.Recurring { Ir.start = t_start; Ir.period; Ir.end_ = t_end; Ir.at_day = Some at_day }
       in
       let actions =
-        resolve_intervention_action ctx env ~name:iv_name ~loc:iv_loc iv.ivaction
+        List.concat_map
+          (resolve_intervention_action ctx env ~name:iv_name ~loc:iv_loc)
+          iv.ivaction
       in
       Some { Ir.name = iv_name; Ir.base_name; Ir.fire = Ir.Scheduled schedule;
              Ir.actions; Ir.kind }
     ) combos
+    end
   ) decls
 
 (* ── Reactive interventions (gh#204) ─────────────────────────────────────────
@@ -7459,12 +7472,14 @@ let check_no_shadowing ctx =
   (* interventions and events share intervention_decl (the same [p in dim]
      index binder + expr actions). *)
   List.iter (fun (iv : intervention_decl) ->
-    walk_action (Printf.sprintf "intervention '%s'" iv.ivname)
-      (loop_vars_of_indices iv.ivindices) iv.ivaction
+    List.iter
+      (walk_action (Printf.sprintf "intervention '%s'" iv.ivname)
+         (loop_vars_of_indices iv.ivindices)) iv.ivaction
   ) ctx.interv_decls;
   List.iter (fun (ev : intervention_decl) ->
-    walk_action (Printf.sprintf "event '%s'" ev.ivname)
-      (loop_vars_of_indices ev.ivindices) ev.ivaction
+    List.iter
+      (walk_action (Printf.sprintf "event '%s'" ev.ivname)
+         (loop_vars_of_indices ev.ivindices)) ev.ivaction
   ) ctx.event_decls;
   List.iter (fun (fd : func_decl) ->
     let decl = Printf.sprintf "forcing '%s'" fd.fname in
@@ -7736,11 +7751,11 @@ let check_surface_time_typing ctx =
     List.iter (fun (iv : intervention_decl) ->
       let loc = diag_loc_of_ast_ctx ctx iv.ivloc in
       (* Action expressions can carry exprs too — fraction/count, set, add *)
-      (match iv.ivaction with
+      List.iter (fun a -> match a with
        | ATransfer kws -> List.iter (fun (_, e) ->
            walk_expr_rule1 ~loc ~context:label e) kws
        | ASet (_, _, e) -> walk_expr_rule1 ~loc ~context:label e
-       | AAdd (_, _, e) -> walk_expr_rule1 ~loc ~context:label e);
+       | AAdd (_, _, e) -> walk_expr_rule1 ~loc ~context:label e) iv.ivaction;
       (* Schedule expressions: at-list, recurring cadences *)
       (match iv.ivschedule with
        | SAtTimes exprs ->

@@ -784,32 +784,32 @@ intervention_list:
 
 intervention_decl:
   | name = IDENT ibs = index_bindings_opt COLON LBRACE iv_kvs = list(iv_kv) RBRACE guard = where_clause_opt
-      { let action = ref (ATransfer []) in
-        let sched  = ref (SAtTimes []) in
-        List.iter (function
-          | `Action a -> action := a
-          | `Schedule s -> sched := s
-        ) iv_kvs;
-        { ivname = name; ivindices = ibs; ivaction = !action; ivschedule = !sched; ivguard = guard;
+      { (* Keep ALL `Action` items in source order — a block `set` may carry
+           several `COMP = EXPR` assignments. The empty-action case is diagnosed
+           in the expander (E296). Schedule: last one wins, as before. *)
+        let actions = List.filter_map (function `Action a -> Some a | `Schedule _ -> None) iv_kvs in
+        let sched = List.fold_left (fun acc -> function `Schedule s -> s | `Action _ -> acc)
+                      (SAtTimes []) iv_kvs in
+        { ivname = name; ivindices = ibs; ivaction = actions; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = ATransfer kwargs; ivschedule = SAtTimes ts; ivguard = guard;
+      { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* transfer(...) { every = T, from = T0, until = T1 } — recurring schedule *)
   | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = ATransfer kwargs; ivschedule = sched; ivguard = guard;
+      { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) at [...] *)
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = AAdd (comp, [], count); ivschedule = SAtTimes ts; ivguard = guard;
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) { every = T, from = T0, until = T1 } — recurring schedule *)
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = AAdd (comp, [], count); ivschedule = sched; ivguard = guard;
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) every PERIOD at_day DAY *)
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN EVERY period = expr AT_DAY day = expr guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = AAdd (comp, [], count); ivschedule = SEveryAtDay (period, day); ivguard = guard;
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = SEveryAtDay (period, day); ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Reactive interventions (gh#204) ─────────────────────────────────────────

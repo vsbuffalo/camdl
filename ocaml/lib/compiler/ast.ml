@@ -377,7 +377,7 @@ type schedule_decl =
 type intervention_decl = {
   ivname    : string;
   ivindices : index_binding list;   (* [] for non-indexed interventions *)
-  ivaction  : action_decl;
+  ivaction  : action_decl list;     (* one or more; block-form `set` keeps all *)
   ivschedule: schedule_decl;
   ivguard   : guard option;         (* where expr — compile-time filter *)
   ivloc     : loc;

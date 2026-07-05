@@ -1736,6 +1736,52 @@ let test_intervention_transfer_count_kwarg () =
                       (count kwarg should not produce fraction-flavoured IR)"
      | _ -> Alcotest.fail "expected AbsoluteTransfer action")
 
+(* Multi-set: a block intervention with several `COMP = EXPR` assignments must
+   keep ALL of them (spec §13: "one or more assignments"). Before the fix, ast
+   `ivaction` was a single action and the parser fold kept only the last,
+   silently dropping the rest — a wrong compiled model for a documented feature. *)
+let test_intervention_multi_set () =
+  let src = {|
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate  N0 : count  I0 : count }
+    let N = S + I + R
+    transitions {
+      infection : S --> I @ beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    interventions {
+      shock : { S = S - 100  I = I + 100  at = [30] }
+    }
+    simulate { from = 0 'days  to = 60 'days }
+  |} in
+  let m = compile_expect_ok src in
+  Alcotest.(check int) "one intervention" 1 (List.length m.Ir.interventions);
+  let iv = List.hd m.Ir.interventions in
+  Alcotest.(check int) "both set actions kept" 2 (List.length iv.Ir.actions);
+  let targets = List.filter_map (function
+    | Ir.Set s -> Some s.Ir.compartment
+    | _ -> None) iv.Ir.actions in
+  Alcotest.(check (list string)) "targets S then I, in source order"
+    ["S"; "I"] targets
+
+(* Option-b: a block intervention with a schedule but NO action is an author
+   error, not a silent no-op. Before, it defaulted to `ATransfer []` and
+   misfired later as E261 ("transfer missing from/to"); now it is a located
+   E296 that names the real problem. *)
+let test_intervention_no_action () =
+  let src = {|
+    compartments { S, I }
+    parameters { beta : rate }
+    transitions { infection : S --> I @ beta * S }
+    init { S = 1000  I = 1 }
+    interventions {
+      noop : { at = [30] }
+    }
+    simulate { from = 0 'days  to = 60 'days }
+  |} in
+  compile_expect_error_code ~code:"E296" ~contains:"noop" src
+
 (* gh#49 sibling check: the expander already validates `fraction` and
    `count` are mutually exclusive (E261). Confirm the parser fix didn't
    accidentally let both through. Uses the JSON-errors helper so the
@@ -8499,6 +8545,10 @@ let () =
         `Quick test_intervention_transfer_count_kwarg;
       Alcotest.test_case "transfer(count + fraction) rejected as mutually exclusive (gh#49)"
         `Quick test_intervention_transfer_count_and_fraction_rejected;
+      Alcotest.test_case "block set keeps all assignments (multi-set)"
+        `Quick test_intervention_multi_set;
+      Alcotest.test_case "E296 block intervention with no action rejected"
+        `Quick test_intervention_no_action;
     ];
     "reactive_interventions", [
       Alcotest.test_case "observed() (no window) lowers to Latest + defaults"
