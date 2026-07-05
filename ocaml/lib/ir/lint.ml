@@ -173,16 +173,7 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
      defining expressions — cheap safety to keep the false-positive rate at
      zero. *)
   List.iter (fun (tf : time_function) ->
-    let exprs = match tf.kind with
-      | Sinusoidal s -> [s.amplitude; s.period; s.phase; s.baseline]
-      | Piecewise p -> p.breakpoints @ p.values
-      | Interpolated i -> i.times @ i.values
-      | Periodic p -> p.period :: p.values
-      | Fourier f ->
-        f.period :: List.concat_map (fun (a, b) -> [a; b]) f.harmonics
-      | PeriodicSpline ps -> ps.period :: ps.coefs
-    in
-    List.iter add_expr exprs
+    List.iter add_expr (Autodiff.forcing_coeff_exprs tf.kind)
   ) m.time_functions;
 
   refs
