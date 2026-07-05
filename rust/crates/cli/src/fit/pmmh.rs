@@ -599,9 +599,32 @@ pub fn run_stage(
                             "chain {} init-eval failed with structural error: {}",
                             chain_id + 1, e));
                     }
+                    Ok(ll) if !ll.is_finite() => {
+                        // gh#334: a −∞ init means the start θ predicts a
+                        // trajectory that cannot explain the data (e.g. an
+                        // epidemic that goes extinct, zeroing the modelled
+                        // incidence where the data is positive). This is a bad
+                        // START in parameter space, not a bad seed — reseeding
+                        // would silently change the realized draws and hide the
+                        // seed→draws relationship, so we WARN and leave the fix
+                        // to the user. With the −∞-escape fix (mh_accept) the
+                        // chain CAN still recover if a finite-likelihood region
+                        // is within proposal reach; a persistent 0% acceptance
+                        // means the start itself is the problem.
+                        eprintln!(
+                            "  \x1b[33mwarning\x1b[0m: chain {} starts at a θ with \
+                             -inf log-likelihood — the start predicts a trajectory that \
+                             can't explain the data (e.g. an epidemic that goes extinct \
+                             where the data has cases). The chain can only mix if a \
+                             finite-likelihood region is reachable from there; if its \
+                             acceptance rate stays 0%, propose a better start (a \
+                             multi-start `init`, or adjust the start toward a θ that \
+                             sustains the epidemic).",
+                            chain_id + 1);
+                    }
                     _ => {
-                        // Ok(finite | −∞) or a recoverable Err (ruled-out θ) —
-                        // MH proceeds via the standard accept/reject path.
+                        // Ok(finite) or a recoverable Err (ruled-out θ) — MH
+                        // proceeds via the standard accept/reject path.
                     }
                 }
             } else if resume_states[chain_id].is_none() {
