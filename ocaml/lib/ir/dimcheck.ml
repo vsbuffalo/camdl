@@ -922,6 +922,24 @@ let check_contrasts st (m : model)
   ) m.contrasts;
   st.subject <- None
 
+(* Observation-likelihood argument checks (2026-06-10 §3.1). Two recurring
+   shapes, each emitting E304 with a per-argument [msg] (the messages differ, so
+   they are passed in):
+   - [require_count]: the argument is an external count denominator or expected
+     count (Binomial/BetaBinomial `n`, Poisson `rate`). A bare numeric literal
+     is a count by context and exempt; otherwise its inferred dim must be a
+     [population].
+   - [require_dimensionless]: the argument is a probability or shape parameter
+     (Binomial/Bernoulli `p`, BetaBinomial `alpha`/`beta`) — its inferred dim
+     must be dimensionless. *)
+let require_count st ~ctx ~msg arg =
+  if not (is_bare_const arg) then
+    constrain_known st ~code:"E304" ~message:msg (infer st ~ctx arg) population
+  else ignore (infer st ~ctx arg)
+
+let require_dimensionless st ~ctx ~msg arg =
+  constrain_known st ~code:"E304" ~message:msg (infer st ~ctx arg) dimensionless
+
 (* ── Main check ─────────────────────────────────────────────────────────── *)
 
 let check_model (m : model) : result =
@@ -1076,14 +1094,11 @@ let check_model (m : model) : result =
             dimensionally-wrong rate is a located E304. A bare numeric literal
             (`rate = 100`) carries no real dimension — it is a count by context,
             like a seeding constant — so it is exempt. (2026-06-10 §3.1.) *)
-         if not (is_bare_const p.rate) then begin
-           let rate_dim = infer st ~ctx p.rate in
-           constrain_known st ~code:"E304"
-             ~message:(Printf.sprintf
-               "%s: Poisson `rate` must have the dimension of a count \
-                (expected events over the reporting interval)" ctx)
-             rate_dim population
-         end else ignore (infer st ~ctx p.rate)
+         require_count st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: Poisson `rate` must have the dimension of a count \
+              (expected events over the reporting interval)" ctx)
+           p.rate
        | Normal n -> ignore (infer st ~ctx n.mean); ignore (infer st ~ctx n.sd)
        | Binomial b ->
          (* The binomial `n` is an external DENOMINATOR — a count (e.g. number
@@ -1091,53 +1106,43 @@ let check_model (m : model) : result =
             declared `tested : count` is verified, and a `real`/probability
             column feeding `n` is a located E304. A bare numeric literal
             (`n = 100`) is a count by context and exempt. (2026-06-10 §3.1.) *)
-         if not (is_bare_const b.n) then begin
-           let n_dim = infer st ~ctx b.n in
-           constrain_known st ~code:"E304"
-             ~message:(Printf.sprintf
-               "%s: Binomial `n` must be a count (the trial denominator); \
-                declare the column feeding `n` as `count`." ctx)
-             n_dim population
-         end else ignore (infer st ~ctx b.n);
+         require_count st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: Binomial `n` must be a count (the trial denominator); \
+              declare the column feeding `n` as `count`." ctx)
+           b.n;
          (* gh#116: `p` must be a probability (dimensionless on
             [0, 1]). A count here is the textbook missing-`/N` bug. *)
-         let p_dim = infer st ~ctx b.p in
-         constrain_known st ~code:"E304"
-           ~message:(Printf.sprintf
+         require_dimensionless st ~ctx
+           ~msg:(Printf.sprintf
              "%s: Binomial `p` must be dimensionless (probability); \
               a count here is almost certainly a missing `/N`." ctx)
-           p_dim dimensionless
+           b.p
        | BetaBinomial bb ->
          (* BetaBinomial `n` is the same external count denominator as the
             Binomial; constrain it likewise (bare literal exempt). (§3.1.) *)
-         if not (is_bare_const bb.n) then begin
-           let n_dim = infer st ~ctx bb.n in
-           constrain_known st ~code:"E304"
-             ~message:(Printf.sprintf
-               "%s: BetaBinomial `n` must be a count (the trial denominator); \
-                declare the column feeding `n` as `count`." ctx)
-             n_dim population
-         end else ignore (infer st ~ctx bb.n);
+         require_count st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: BetaBinomial `n` must be a count (the trial denominator); \
+              declare the column feeding `n` as `count`." ctx)
+           bb.n;
          (* gh#116: alpha/beta are shape parameters of a Beta
             distribution — both dimensionless by definition. *)
-         let a_dim = infer st ~ctx bb.alpha in
-         let b_dim = infer st ~ctx bb.beta in
-         constrain_known st ~code:"E304"
-           ~message:(Printf.sprintf
+         require_dimensionless st ~ctx
+           ~msg:(Printf.sprintf
              "%s: BetaBinomial `alpha` must be dimensionless" ctx)
-           a_dim dimensionless;
-         constrain_known st ~code:"E304"
-           ~message:(Printf.sprintf
+           bb.alpha;
+         require_dimensionless st ~ctx
+           ~msg:(Printf.sprintf
              "%s: BetaBinomial `beta` must be dimensionless" ctx)
-           b_dim dimensionless
+           bb.beta
        | Bernoulli b ->
          (* gh#116: same as Binomial.p — must be a probability. *)
-         let p_dim = infer st ~ctx b.p in
-         constrain_known st ~code:"E304"
-           ~message:(Printf.sprintf
+         require_dimensionless st ~ctx
+           ~msg:(Printf.sprintf
              "%s: Bernoulli `p` must be dimensionless (probability); \
               a count here is almost certainly a missing `/N`." ctx)
-           p_dim dimensionless);
+           b.p);
       st.projected_dim <- None;
       Hashtbl.reset st.obs_col_dims
     ) m.observations;
