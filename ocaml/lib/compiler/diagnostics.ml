@@ -174,37 +174,29 @@ let diagnostic_to_json (d : diagnostic) : Yojson.Safe.t =
   in
   `Assoc fields
 
+(* Total order on diagnostics for stable, source-following output: sort
+   ascending by (file, line, code, message) so JSON and text renderers agree
+   and de-duplicate identically. *)
+let by_source_order (a : diagnostic) (b : diagnostic) : int =
+  let c = compare a.loc.file b.loc.file in
+  if c <> 0 then c else
+  let c = compare a.loc.line b.loc.line in
+  if c <> 0 then c else
+  let c = compare a.code b.code in
+  if c <> 0 then c else
+  compare a.message b.message
+
 let to_json_string (t : t) : string =
   (* Sort ascending by (file, line, code, message) so JSON output
      matches text-mode ordering. Pre-fix this used rev_map on the
      raw diag list, giving unsorted, arbitrary-insertion-order
      output that disagreed with the text renderer. *)
-  let sorted =
-    List.sort_uniq (fun a b ->
-      let c = compare a.loc.file b.loc.file in
-      if c <> 0 then c else
-      let c = compare a.loc.line b.loc.line in
-      if c <> 0 then c else
-      let c = compare a.code b.code in
-      if c <> 0 then c else
-      compare a.message b.message
-    ) t.diags
-  in
+  let sorted = List.sort_uniq by_source_order t.diags in
   let arr = `List (List.map diagnostic_to_json sorted) in
   Yojson.Safe.to_string arr
 
 let render_all t cache ppf =
-  let sorted =
-    List.sort_uniq (fun a b ->
-      let c = compare a.loc.file b.loc.file in
-      if c <> 0 then c else
-      let c = compare a.loc.line b.loc.line in
-      if c <> 0 then c else
-      let c = compare a.code b.code in
-      if c <> 0 then c else
-      compare a.message b.message
-    ) t.diags
-  in
+  let sorted = List.sort_uniq by_source_order t.diags in
   List.iter (render_one ppf cache) sorted
 
 (** Render every diagnostic in [t] to stderr, honouring [json_errors_mode]:
