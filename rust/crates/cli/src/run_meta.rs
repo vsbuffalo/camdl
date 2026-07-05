@@ -569,6 +569,27 @@ pub fn write_fit_sidecar(
     std::fs::create_dir_all(fit_segment)?;
     if fit_toml_path.is_file() {
         std::fs::copy(fit_toml_path, fit_segment.join("fit.toml.original"))?;
+        // gh#353: archive the model `.camdl` source too, symmetric with
+        // fit.toml.original, so the leaf is self-contained (source + config +
+        // IR) and a viewer/reproduction doesn't depend on the original checkout
+        // layout. Best-effort and .camdl-only: a model supplied directly as
+        // `.ir.json` is already captured by the leaf's `model.ir.json`, and a
+        // missing/unreadable source must not fail the fit. The recorded
+        // `model_path` is relative to the fit.toml's directory (or absolute).
+        if sidecar.model_path.ends_with(".camdl") {
+            let raw = std::path::Path::new(&sidecar.model_path);
+            let src = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                fit_toml_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(raw)
+            };
+            if src.is_file() {
+                let _ = std::fs::copy(&src, fit_segment.join("model.camdl.original"));
+            }
+        }
     }
     // gh#29: keep the label sticky. The `.or_else` reads the on-disk sidecar
     // only when this write carries no label, and we clone only when a prior
@@ -994,6 +1015,57 @@ mod tests {
             &FitSidecar { label: Some("validate run".into()), ..Default::default() }).unwrap();
         assert_eq!(label(&seg), Some("validate run".into()),
             "an explicit --label must override the sticky label");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// gh#353: the fit run leaf archives the model `.camdl` source as
+    /// `model.camdl.original`, symmetric with `fit.toml.original`, so a consumer
+    /// (e.g. camdl-watch's Source tab) can read it from the self-contained leaf
+    /// instead of a checkout-relative path that doesn't resolve elsewhere. The
+    /// recorded `model_path` is relative to the fit.toml's directory.
+    #[test]
+    fn fit_sidecar_archives_model_camdl_source() {
+        let tmp = crate::test_support::unique_temp_dir("sidecar_model_source");
+        std::fs::create_dir_all(&tmp).unwrap();
+        // A model source next to the fit.toml, referenced by a relative path.
+        let model_src = "compartments { S, I }\n"; // content is opaque to the archive
+        std::fs::write(tmp.join("m.camdl"), model_src).unwrap();
+        let toml = tmp.join("fit.toml");
+        std::fs::write(&toml, "[model]\ncamdl = \"m.camdl\"\n").unwrap();
+        let seg = tmp.join("fits").join("demo-a1b2c3d4");
+
+        write_fit_sidecar(
+            &seg,
+            &toml,
+            &FitSidecar { model_path: "m.camdl".into(), ..Default::default() },
+        )
+        .unwrap();
+
+        let archived = seg.join("model.camdl.original");
+        assert!(
+            archived.is_file(),
+            "gh#353: the model source must be archived beside fit.toml.original"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&archived).unwrap(),
+            model_src,
+            "the archived source must be a verbatim copy of the model file"
+        );
+
+        // A model given directly as .ir.json has no .camdl source to archive —
+        // the leaf's model.ir.json already captures it, so no stray file.
+        let seg_ir = tmp.join("fits").join("demo-irjson0");
+        write_fit_sidecar(
+            &seg_ir,
+            &toml,
+            &FitSidecar { model_path: "m.ir.json".into(), ..Default::default() },
+        )
+        .unwrap();
+        assert!(
+            !seg_ir.join("model.camdl.original").exists(),
+            "a non-.camdl model_path must not produce a model.camdl.original"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }
