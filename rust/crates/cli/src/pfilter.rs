@@ -927,8 +927,16 @@ fn parse_column_cells<'a>(
     time_column: &str,
     column: &str,
 ) -> Result<(Vec<&'a str>, Vec<Option<f64>>, Vec<usize>), String> {
-    let mut lines = content.lines();
-    let header = lines.next().ok_or("empty data file")?;
+    // gh#344: skip leading `#` comment lines (a provenance/attribution header is
+    // a common convention) and blank lines before the column header —
+    // consistent with the `interpolated` forcing reader and polars
+    // `comment_prefix`. Enumerate the whole file so error line numbers stay
+    // accurate past any skipped comments.
+    let mut lines = content.lines().enumerate();
+    let (_, header) = lines
+        .by_ref()
+        .find(|(_, l)| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+        .ok_or("empty data file (or only comment/blank lines)")?;
     let cols: Vec<&str> = header.split('\t').collect();
 
     // Find the TIME column index BY NAME (the by-name-time flip — no
@@ -973,12 +981,15 @@ fn parse_column_cells<'a>(
     let mut time_cells: Vec<&str> = Vec::new();
     let mut rows: Vec<usize> = Vec::new();
     let mut cells: Vec<Option<f64>> = Vec::new();
-    for (line_num, line) in lines.enumerate() {
-        if line.trim().is_empty() { continue; }
+    for (line_idx, line) in lines {
+        // `line_idx` is the 0-based file line index (enumerate over the whole
+        // file), so the human line number is `line_idx + 1` — accurate past any
+        // skipped leading `#` comments (gh#344). Skip blank + comment rows.
+        if line.trim().is_empty() || line.trim_start().starts_with('#') { continue; }
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() <= max_idx {
             return Err(format!("line {}: expected {}+ columns, got {}",
-                line_num + 2, max_idx + 1, fields.len()));
+                line_idx + 1, max_idx + 1, fields.len()));
         }
         let raw = fields[col_idx].trim();
         // TODO: make the missing-value token (`NA`) a user option (CLI flag /
@@ -988,18 +999,18 @@ fn parse_column_cells<'a>(
         } else {
             let value: f64 = raw.parse()
                 .map_err(|_| format!("line {}: cannot parse value '{}' in column '{}'",
-                    line_num + 2, fields[col_idx], column))?;
+                    line_idx + 1, fields[col_idx], column))?;
             if !value.is_finite() {
                 return Err(format!(
                     "line {} (t='{}'): non-finite observation value '{}' in column '{}' \
                      — NaN and infinities are not valid observations (a missing value \
                      is the token `NA`). Fix or remove the row.",
-                    line_num + 2, fields[time_idx].trim(), fields[col_idx].trim(), column));
+                    line_idx + 1, fields[time_idx].trim(), fields[col_idx].trim(), column));
             }
             Some(value)
         };
         time_cells.push(fields[time_idx]);
-        rows.push(line_num + 2);
+        rows.push(line_idx + 1);
         cells.push(cell);
     }
 
@@ -1141,8 +1152,15 @@ pub fn load_long_form_stream(
 
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: {}", path, e))?;
-    let mut lines = content.lines();
-    let header = lines.next().ok_or("empty data file")?;
+    // gh#344: skip leading `#` comment lines + blank lines before the header,
+    // consistent with the forcing reader / polars `comment_prefix` and with
+    // `parse_column_cells`. Enumerate the whole file so error line numbers stay
+    // accurate past skipped comments.
+    let mut lines = content.lines().enumerate();
+    let (_, header) = lines
+        .by_ref()
+        .find(|(_, l)| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+        .ok_or("empty data file (or only comment/blank lines)")?;
     let cols: Vec<&str> = header.split('\t').collect();
 
     let col_idx = |name: &str, what: &str| -> Result<usize, String> {
@@ -1213,9 +1231,9 @@ pub fn load_long_form_stream(
     };
 
     let mut rows: Vec<Row> = Vec::new();
-    for (line_num, line) in lines.enumerate() {
-        if line.trim().is_empty() { continue; }
-        let file_row = line_num + 2;
+    for (line_idx, line) in lines {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') { continue; }
+        let file_row = line_idx + 1;
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() <= max_idx {
             return Err(format!("line {}: expected {}+ columns, got {}",
@@ -1732,6 +1750,22 @@ mod tests {
         assert!(err.contains("cases"), "error must name requested column: {}", err);
         assert!(err.contains("case_count") && err.contains("deaths"),
             "error must list available headers: {}", err);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// gh#344: a leading `#` provenance comment must be SKIPPED, not treated as
+    /// the header — consistent with the `interpolated` forcing reader and polars
+    /// `comment_prefix`. Pre-fix the comment line was taken as the header, so the
+    /// declared `time` column wasn't found and the fit failed with a confusing
+    /// "Headers present: [# ...]" error.
+    #[test]
+    fn load_data_tsv_column_skips_leading_comment_header() {
+        let path = write_temp_tsv("comment_header",
+            "# Crude all-age prevalence, village 408\ntime\tcases\n7\t10\n14\t20\n");
+        let result = load_data_tsv_column(&path, "time", "cases", &numeric_opts());
+        assert!(result.is_ok(),
+            "a leading `#` comment must be skipped, not treated as the header; got {:?}",
+            result.as_ref().err());
         std::fs::remove_file(&path).ok();
     }
 
