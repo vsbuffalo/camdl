@@ -91,20 +91,60 @@ impl PFRandomState {
     }
 }
 
-/// Inverse binomial CDF: find smallest k such that P(X <= k) >= u.
+/// Inverse binomial CDF: smallest `k` such that `P(X <= k) >= u`, `X ~ Binomial(n, p)`.
+///
+/// Walks the CDF of the *lighter* tail so the starting probability never
+/// underflows. For `p > 0.5` the successes cluster near `n`, so a direct walk
+/// from `k=0` seeds `P(X=0) = (1-p)^n`, which underflows to `0` for `p` near 1
+/// with large `n` — after which the walk never accumulates and the old code
+/// returned `n` (the whole source compartment) for *every* `u`, silently
+/// over-draining a fast compartment on the correlated-PF path (gh#362). Instead,
+/// for `p > 0.5` walk the failure count `M = n - X ~ Binomial(n, 1-p)` from 0,
+/// where `P(M=0) = p^n` is well-scaled, and map back via the inverse-CDF identity
+///
+/// ```text
+///   min{ k : F_X(k) >= u } = n - min{ m : F_M(m) > 1 - u }
+/// ```
+///
+/// (strict `>` because `F_X(k) >= u  <=>  F_M(n-k-1) <= 1-u`).
 pub fn binomial_quantile(n: u64, p: f64, u: f64) -> u64 {
-    // Walk the CDF from 0. For small np this is fast (< 50 iterations).
-    let mut cdf = 0.0;
-    let q = 1.0 - p;
-    let mut binom_prob = q.powi(n as i32); // P(X=0) = (1-p)^n
-    for k in 0..=n {
-        cdf += binom_prob;
-        if cdf >= u { return k; }
-        // P(X=k+1) = P(X=k) * (n-k)/(k+1) * p/(1-p)
-        binom_prob *= (n - k) as f64 / (k + 1) as f64 * p / q;
-        if binom_prob < LOG_PROB_FLOOR { break; } // underflow guard
+    if p > 0.5 {
+        // Walk the failure tail M ~ Binomial(n, 1-p); its mass sits near 0.
+        let q = p; // = 1 - (failure prob), the "q" of the recurrence for M
+        let pf = 1.0 - p; // failure prob
+        let thresh = 1.0 - u;
+        let mut cdf = 0.0;
+        let mut prob = q.powi(n as i32); // P(M=0) = p^n
+        for m in 0..=n {
+            cdf += prob;
+            if cdf > thresh {
+                return n - m;
+            }
+            prob *= (n - m) as f64 / (m + 1) as f64 * pf / q;
+            if prob < LOG_PROB_FLOOR {
+                break;
+            }
+        }
+        0 // u at the low extreme → k = 0
+    } else {
+        // Direct walk from k=0 (mass near 0 when p <= 0.5; the caller's np <= 20
+        // dispatch keeps `(1-p)^n` well-scaled here).
+        let q = 1.0 - p;
+        let mut cdf = 0.0;
+        let mut binom_prob = q.powi(n as i32); // P(X=0) = (1-p)^n
+        for k in 0..=n {
+            cdf += binom_prob;
+            if cdf >= u {
+                return k;
+            }
+            // P(X=k+1) = P(X=k) * (n-k)/(k+1) * p/(1-p)
+            binom_prob *= (n - k) as f64 / (k + 1) as f64 * p / q;
+            if binom_prob < LOG_PROB_FLOOR {
+                break;
+            }
+        }
+        n // fallback
     }
-    n // fallback
 }
 
 /// Transform a standard normal to a Gamma(shape, scale) draw via inverse CDF.
