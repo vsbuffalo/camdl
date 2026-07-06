@@ -132,6 +132,54 @@ impl Diffable {
 /// (e.g. a Binomial `n`); an unskipped non-`Diffable` field is a compile error,
 /// so a mistyped new argument can never be silently dropped. [`Expr`] therefore
 /// deliberately does **not** implement this trait.
+///
+/// The seal, demonstrated (gh#342 P5). The derive folds a `Diffable` field and
+/// skips a `#[differentiate(skip)]` one — this compiles and `diffables()` reports
+/// exactly the differentiable position:
+///
+/// ```
+/// // The items sit at the doctest crate root (explicit `fn main` stops rustdoc
+/// // from wrapping them in a function) so the derive's `crate::Diffable` /
+/// // `crate::Differentiable` paths resolve — the derive is `ir`-internal, and
+/// // this shim lets it expand in an external doctest crate.
+/// pub use ir::Differentiate;
+/// pub use ir::deriv::{Diffable, Differentiable};
+///
+/// #[derive(Differentiate)]
+/// struct Likelihoodish {
+///     mean: Diffable,
+///     #[differentiate(skip)]
+///     n: ir::expr::Expr, // θ-independent, carries no gradient
+/// }
+///
+/// fn main() {
+///     let l = Likelihoodish {
+///         mean: Diffable::new(ir::expr::Expr::const_(1.0)),
+///         n: ir::expr::Expr::const_(3.0),
+///     };
+///     let names: Vec<_> = l.diffables().into_iter().map(|(name, _)| name).collect();
+///     assert_eq!(names, vec!["mean"]); // `n` is skipped; `mean` is auto-included
+/// }
+/// ```
+///
+/// Drop the `skip` — an unskipped non-`Diffable` field — and the SAME code no
+/// longer compiles, because the derive emits `&self.n` into a `&Diffable` slot.
+/// A new argument accidentally typed `Expr` rather than `Diffable` is rejected
+/// loudly, never silently dropped. (The passing case above shares the identical
+/// crate-root shim, so this failure is attributable to the field, not the paths.)
+///
+/// ```compile_fail
+/// pub use ir::Differentiate;
+/// pub use ir::deriv::{Diffable, Differentiable};
+///
+/// #[derive(Differentiate)]
+/// struct Leaky {
+///     mean: Diffable,
+///     n: ir::expr::Expr, // NOT skipped, NOT `Diffable` → the derive rejects it
+/// }
+///
+/// fn main() {}
+/// ```
 pub trait Differentiable {
     fn diffables(&self) -> Vec<(&'static str, &Diffable)>;
 }

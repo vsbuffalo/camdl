@@ -551,14 +551,24 @@ observations {
 
 Observation-model parameters (`rho`, `k` here, and parameters inside a derived
 projection such as `qgam * prevalence`) are estimated by gradient-based NUTS on
-the same footing as transition-rate parameters: the compiler differentiates the
-likelihood analytically, so there is no finite-difference approximation and no
-silent zero. Where a parameter reaches an observation through something the
-compiler genuinely cannot differentiate — a spline/step forcing coefficient, a
-forcing's time-shift (`lag`), a non-constant table index, or a binomial
-denominator `n` — the fit is refused with a message naming the parameter and the
-reason, rather than proceeding on a zero gradient. Gradient-free methods (IF2,
-particle-filter PMMH) estimate those cases unchanged.
+the same footing as transition-rate and overdispersion parameters: the compiler
+differentiates the rate, likelihood, and σ² terms analytically, so there is no
+finite-difference approximation and no silent zero. The set of differentiable
+positions is derived from the types rather than maintained by hand, so a newly
+added argument is covered by construction — it cannot be silently missed.
+
+Where a parameter reaches the model through something with a live value but no
+emitted gradient — a periodic step-value coefficient, a forcing's time-shift
+(`lag`), an inline-table value chosen by a non-constant index, or a coefficient
+reached _only_ through an initial condition (camdl computes no gradient for
+initial-condition expressions) — NUTS is refused with a message naming the
+parameter and the reason, rather than proceeding on a zero, silently biased
+gradient; a binomial denominator `n`, which must be θ-independent, is refused
+the same way. A genuinely structural coefficient — a spline, interpolation, or
+piecewise knot fixed at construction — is a compile-time error instead, since it
+cannot be estimated by any method. Gradient-free methods (IF2, particle-filter
+PMMH) estimate the live-but-undifferentiated cases unchanged; only NUTS needs
+the gradient.
 
 ### Parameter transforms
 
