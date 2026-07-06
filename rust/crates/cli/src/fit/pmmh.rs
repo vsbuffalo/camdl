@@ -765,8 +765,18 @@ pub fn run_stage(
                 if accepted { accepted_count.fetch_add(1, Ordering::Relaxed); }
                 let acc = accepted_count.load(Ordering::Relaxed) as f64 / (step + 1) as f64;
 
-                // Stream trace row to disk (respecting burn-in/thin)
-                if step >= burn_in && (step - burn_in).is_multiple_of(thin) {
+                // Stream trace row to disk. Warm-up (step < burn_in) rows are
+                // emitted every step for live burn-in observability (a tailing
+                // watcher sees the chain moving during warm-up); the sampling
+                // phase keeps its exact burn-in/thin cadence, so the set of rows
+                // with `step >= burn_in` is byte-identical to before. The
+                // posterior filters warm-up back out: `draws.tsv` on `step >=
+                // burn_in` (below), and R̂/ESS/acceptance/MAP off the in-memory
+                // post-burn-in `steps` (never this raw trace).
+                let is_warmup = step < burn_in;
+                let is_sampling_draw =
+                    step >= burn_in && (step - burn_in).is_multiple_of(thin);
+                if is_warmup || is_sampling_draw {
                     let env = sim::inference::hierarchical::NamedParams {
                         names: &config.param_names,
                         values: params,
@@ -1024,8 +1034,9 @@ pub fn run_stage(
     state.save(&stage_dir.to_string_lossy())?;
 
     // Write draws.tsv: complete-M posterior draws (all params, estimated + fixed)
-    // Reads the per-chain trace.tsv files (already burn-in/thin filtered) and
-    // adds fixed parameter columns.
+    // Reads the per-chain trace.tsv files (which now also carry warm-up rows),
+    // keeps only the post-burn-in tail (`step >= burn_in`), and adds fixed
+    // parameter columns.
     {
         use std::io::Write;
         let draws_path = stage_dir.join("draws.tsv");
@@ -1068,11 +1079,23 @@ pub fn run_stage(
                 let param_col_indices: Vec<usize> = est_names.iter().map(|name| {
                     cols.iter().position(|c| c == name).unwrap_or(usize::MAX)
                 }).collect();
+                // The trace now carries warm-up rows too (`step < burn_in`, for
+                // live burn-in observability); the posterior is the post-burn-in
+                // tail, so filter on the `step` index here. R̂/ESS/MAP read the
+                // in-memory post-burn-in `steps`, not this file, so this is the
+                // one raw-trace consumer that must exclude warm-up.
+                let step_col = cols.iter().position(|c| *c == "step")
+                    .expect("PMMH trace.tsv must carry a `step` index column");
 
                 let mut draw_idx = 0usize;
                 for line in lines {
                     if line.trim().is_empty() { continue; }
                     let fields: Vec<&str> = line.split('\t').collect();
+                    let step: usize = match fields.get(step_col).and_then(|s| s.parse().ok()) {
+                        Some(s) => s,
+                        None => { eprintln!("warning: trace.tsv row missing step index; skipping"); continue; }
+                    };
+                    if step < burn_in { continue; }  // warm-up: not a posterior draw
                     let mut vals: Vec<String> = param_col_indices.iter().map(|&col_idx| {
                         if col_idx < fields.len() {
                             fields[col_idx].to_string()

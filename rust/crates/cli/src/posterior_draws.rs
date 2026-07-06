@@ -3,9 +3,10 @@
 //! A Bayesian fit stage (PGAS / PMMH / MH) writes `<stage_dir>/draws.tsv`: the
 //! post-warm-up, thinned parameter draws, concatenated across chains, carrying
 //! *every* model parameter (estimated columns first, then the fixed values).
-//! That file — not the raw per-chain `trace.tsv`, which on the PGAS path still
-//! contains warm-up sweeps — is the canonical posterior. Reading `trace.tsv`
-//! would silently fold warm-up draws into a "posterior" band.
+//! That file — not the raw per-chain `trace.tsv`, which now carries warm-up
+//! rows (PGAS sweeps and PMMH/MH steps below `burn_in`, for live burn-in
+//! observability) — is the canonical posterior. Reading `trace.tsv` would
+//! silently fold warm-up draws into a "posterior" band.
 //!
 //! Resolution is **by artifact, not by method name** (proposal §"types first"):
 //! a stage has a posterior iff it wrote a `draws.tsv`. An optimizer-only fit

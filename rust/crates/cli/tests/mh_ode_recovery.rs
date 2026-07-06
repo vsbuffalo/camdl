@@ -51,6 +51,9 @@ const TRUE_BETA: f64 = 0.8;
 // prevalence > 0, so the init loglik is finite and the chain genuinely climbs
 // toward 0.8 — a real recovery test, still far from truth.
 const START_BETA: f64 = 0.4;
+/// Warm-up steps discarded from the posterior. Interpolated into the fit.toml
+/// below AND passed to `beta_samples`, so the two can't drift.
+const BURN_IN: usize = 400;
 
 /// SIR with a weakly-informative `~` prior on beta; gamma + N0 fixed. R0 ≈ 2.7
 /// over 60 days gives a clear epidemic, so the observations identify beta well.
@@ -116,16 +119,25 @@ fn find_traces(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Post-burn-in beta samples from a trace.tsv. Columns are
-/// `step, log_likelihood, log_posterior, accepted, <params...>`; the beta
-/// column is resolved by header name, not position.
-fn beta_samples(trace: &Path) -> Vec<f64> {
+/// `step, log_likelihood, log_posterior, accepted, <params...>`; the beta and
+/// step columns are resolved by header name, not position. The trace now also
+/// carries warm-up rows (`step < burn_in`, for live burn-in observability), so
+/// filter those out — the posterior mean is over the post-burn-in tail only.
+fn beta_samples(trace: &Path, burn_in: usize) -> Vec<f64> {
     let text = std::fs::read_to_string(trace).unwrap();
     let mut lines = text.lines().filter(|l| !l.starts_with('#'));
     let header = lines.next().expect("trace header");
-    let beta_col = header.split('\t').position(|h| h == "beta")
+    let cols: Vec<&str> = header.split('\t').collect();
+    let beta_col = cols.iter().position(|h| *h == "beta")
         .unwrap_or_else(|| panic!("no `beta` column in trace header: {header}"));
-    lines.filter_map(|l| l.split('\t').nth(beta_col).and_then(|v| v.parse::<f64>().ok()))
-        .collect()
+    let step_col = cols.iter().position(|h| *h == "step")
+        .unwrap_or_else(|| panic!("no `step` column in trace header: {header}"));
+    lines.filter_map(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        let step: usize = f.get(step_col)?.parse().ok()?;
+        if step < burn_in { return None; }  // warm-up: not a posterior draw
+        f.get(beta_col)?.parse::<f64>().ok()
+    }).collect()
 }
 
 /// Shared end-to-end recovery harness: author the SIR with the given observation
@@ -187,8 +199,8 @@ backend = "ode"
 init = "single"
 chains = 2
 iterations = 1500
-burn_in = 400
-"#, out = out.display(), ir = ir.display(), data = data.display())).unwrap();
+burn_in = {burn_in}
+"#, out = out.display(), ir = ir.display(), data = data.display(), burn_in = BURN_IN)).unwrap();
 
     let status = Command::new(&bin)
         .args(["fit", "run"]).arg(&fit_toml)
@@ -198,7 +210,7 @@ burn_in = 400
 
     let traces = find_traces(&out);
     assert!(!traces.is_empty(), "no chain trace.tsv produced under {}", out.display());
-    let betas: Vec<f64> = traces.iter().flat_map(|t| beta_samples(t)).collect();
+    let betas: Vec<f64> = traces.iter().flat_map(|t| beta_samples(t, BURN_IN)).collect();
     assert!(betas.len() >= 100,
         "too few post-burn-in beta samples ({}) — the mh chains didn't run", betas.len());
     let mean = betas.iter().sum::<f64>() / betas.len() as f64;
