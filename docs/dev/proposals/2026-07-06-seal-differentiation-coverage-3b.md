@@ -536,11 +536,21 @@ they are not separately landable. P3, P4, P5 are independently landable after.
   `make test-inference` + the parity assertion green **before** the deletion
   commit. _I review this phase line by line._
 
-- **P5 — Seal test + docs.** Forced-completeness tests: OCaml — a synthetic
-  added `diffable` field fails to compile until differentiated (negative test);
-  Rust — an unskipped non-`Diffable` likelihood field fails to compile (the
-  include-all guarantee, §4.2). Update `docs/user-features.md`. Gate:
-  `make test`.
+- **P5 — Seal test + docs.** Forced-completeness proofs of the include-all
+  guarantee (§4.2). Rust — a paired doctest on `Differentiable`: a passing case
+  (a `Diffable` field is auto-folded, a `#[differentiate(skip)]` field excluded)
+  and a `compile_fail` case (the identical struct with the `skip` removed no
+  longer compiles), the shared crate-root shim making the failure attributable
+  to the unskipped field, not path resolution — demonstrable with no new
+  dependency. OCaml — the seal is compiler-structural:
+  `differentiate_likelihood` is a full record reconstruction (`autodiff.ml`), so
+  a new `diffable` field is a missing field error until it is differentiated;
+  this is documented at the site and demonstrated cross-language by the Rust
+  `compile_fail` doctest plus the P1–P3 byte round-trip (a committed OCaml
+  expect-compile-fail test would need test-harness infra camdl does not have —
+  out of scope). Update `docs/user-features.md` for the unified refusal (rate +
+  observation + σ² preflight, the initial-condition guard, compile-time
+  structural). Gate: `make test`.
 
 ## 6. Test plan
 
