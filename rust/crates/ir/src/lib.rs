@@ -1,6 +1,8 @@
 pub mod caltime;
 pub mod contrast;
 pub mod deriv;
+pub use deriv::{Diffable, Differentiable, GradMap};
+pub use differentiate_derive::Differentiate;
 pub mod envelope;
 pub mod expr;
 pub mod intervention;
