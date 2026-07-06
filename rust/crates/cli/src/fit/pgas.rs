@@ -168,16 +168,16 @@ pub fn run_stage(
 
     let dt = config.if2_config.dt;
 
-    // gh#119: NUTS drives the θ|X step with compiler-emitted `rate_grad`, which
-    // differentiates a forcing/table coefficient to zero — so an estimated
-    // parameter that drives ONLY a coefficient has a flat gradient and NUTS
-    // would silently mis-sample it. The value half makes such a parameter work
-    // for the gradient-free methods (IF2 / particle filter); until the gradient
-    // half lands, refuse it under NUTS rather than return a garbage posterior.
+    // gh#342 P4: the rate/observation/σ² domains are refused inside `run_pgas`
+    // (the preflight scans the emitted `DerivEntry` maps for `Unsupported`). The
+    // residual the preflight cannot see is a parameter reaching a forcing/table
+    // coefficient ONLY through an initial condition: camdl emits no gradient for
+    // IC expressions (gh#275), so NUTS would sample against a flat surface. This
+    // source-level scan is the only place that classifies it — refuse it here.
     if use_nuts {
         let estimated: std::collections::HashSet<String> =
             config.estimated_params.iter().map(|s| s.name.clone()).collect();
-        let offenders = super::coeff_guard::coefficient_only_estimated(&config.model, &estimated);
+        let offenders = super::coeff_guard::ic_coefficient_only_estimated(&config.model, &estimated);
         if !offenders.is_empty() {
             return Err(super::coeff_guard::nuts_guard_error(&offenders));
         }

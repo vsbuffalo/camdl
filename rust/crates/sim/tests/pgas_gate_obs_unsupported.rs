@@ -298,6 +298,30 @@ fn preflight_admits_rate_forcing_param_with_grad() {
     }
 }
 
+#[test]
+fn preflight_refuses_non_const_table_value_in_rate() {
+    // An inline-table VALUE reached by a non-constant index (tier 2b) serialises
+    // Unsupported{NonConstTableIndex}; the preflight refuses it, completing the
+    // rate-domain tier-2b triad (Periodic / lag / non-const table). The scan is
+    // code-agnostic — it refuses any `Unsupported` — so this exercises the same
+    // path as the Periodic/lag tests with the remaining reason code.
+    let r = attempt_nuts_fit_with("kcell", 1.0, with_rate_grad(
+        "kcell",
+        DerivEntry::Unsupported {
+            node: "table `k_tbl`".into(),
+            code: UnsupportedReason::NonConstTableIndex,
+        },
+    ));
+    match r {
+        Err(SimError::Validation(msg)) => {
+            assert!(msg.contains("kcell"), "must name the refused rate param; got: {}", msg);
+            assert!(msg.contains("rate"), "must attribute the refusal to a rate term; got: {}", msg);
+        }
+        Ok(_) => panic!("expected a rate non-const-table-value refusal, but the fit was admitted"),
+        Err(e) => panic!("expected a Validation refusal, got: {:?}", e),
+    }
+}
+
 // ── Acceptance (headline): a real obs Grad is ADMITTED ────────────────────────
 
 #[test]
