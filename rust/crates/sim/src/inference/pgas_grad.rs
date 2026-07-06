@@ -13,7 +13,7 @@
 use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
 use crate::propensity::{eval_propensities, EvalCtx};
-use crate::resolved_expr::{eval_resolved, eval_emitted_grad, ResolvedExpr};
+use crate::resolved_expr::{eval_resolved, eval_emitted_grad, eval_deriv_entry, ResolvedGradMap};
 use crate::state::{IntState, RealState};
 use crate::inference::obs_loglik::{binom_logpmf, digamma, gamma_multiplier_log_density};
 use crate::inference::numerics::BINOM_PROB_EPS;
@@ -21,27 +21,26 @@ use crate::inference::types::PROB_FRACTION_EPS;
 use crate::inference::pgas::{PGASTrajectory, IVPMapping, OVERDISP_SIGMA_SQ_FLOOR};
 use crate::inference::particle_filter::Observation;
 
-/// Build a run-specific rate_grads table with estimated-param indices.
+/// Build a run-specific rate-gradient table re-keyed to estimated-param indices.
 ///
-/// `rate_grads_indexed[tr_idx]` contains `(model_param_idx, expr)` pairs.
-/// `model_to_estimated[model_idx]` maps a model param index to its position
-/// in the estimated-param vector, or `None` if that param is not being
-/// estimated in this run.
+/// `rate_grads_indexed[tr_idx]` is a [`ResolvedGradMap`] of `(model_param_idx,
+/// entry)`, each entry a real `Grad` or a carried `Unsupported`.
+/// `model_to_estimated[model_idx]` maps a model param index to its position in
+/// the estimated-param vector, or `None` if that param is not estimated this run.
 ///
-/// The returned table has estimated-param indices: `(est_idx, expr)`. Only
-/// entries where `model_to_estimated[model_idx]` is `Some` are kept — fixed
-/// parameters (not in the estimated set) are intentionally dropped.
+/// The returned table is re-keyed to estimated-param indices: `(est_idx, entry)`.
+/// Only entries whose param is estimated are kept — fixed parameters are dropped.
 pub fn resolve_rate_grad_for_run(
-    rate_grads_indexed: &[Vec<(usize, ResolvedExpr)>],
+    rate_grads_indexed: &[ResolvedGradMap],
     model_to_estimated: &[Option<usize>],
-) -> Vec<Vec<(usize, ResolvedExpr)>> {
+) -> Vec<ResolvedGradMap> {
     rate_grads_indexed.iter()
         .map(|tr_grads| {
             tr_grads.iter()
-                .filter_map(|&(model_idx, ref expr)| {
-                    model_to_estimated.get(model_idx)
+                .filter_map(|(model_idx, entry)| {
+                    model_to_estimated.get(*model_idx)
                         .and_then(|opt| *opt)
-                        .map(|est_idx| (est_idx, expr.clone()))
+                        .map(|est_idx| (est_idx, entry.clone()))
                 })
                 .collect()
         })
@@ -53,9 +52,9 @@ pub fn resolve_rate_grad_for_run(
 ///
 /// Returns (log_p, grad) where grad[i] = ∂log_p/∂θ_i for i in 0..d.
 ///
-/// `rate_grads_for_run` is pre-resolved via `resolve_rate_grad_for_run`:
-/// each entry is `(estimated_param_idx, gradient_expr)`. No string lookup
-/// happens in this function — the hot path is index-only.
+/// `rate_grads_for_run` is pre-resolved via `resolve_rate_grad_for_run`: each
+/// entry is `(estimated_param_idx, ResolvedDerivEntry)`. No string lookup happens
+/// here — the hot path is index-only.
 pub fn log_transition_density_grad(
     model: &CompiledModel,
     counts_before: &[i64],
@@ -68,7 +67,7 @@ pub fn log_transition_density_grad(
     // (`complete_data_loglik_grad`) and threaded in. `None` ⇒ on-demand.
     per_eval: Option<&[f64]>,
     d: usize,
-    rate_grads_for_run: &[Vec<(usize, ResolvedExpr)>],
+    rate_grads_for_run: &[ResolvedGradMap],
 ) -> Result<(f64, Vec<f64>), SimError> {
     let n_int = model.int_local_to_global.len();
     let n_tr = model.model.transitions.len();
@@ -148,8 +147,8 @@ pub fn log_transition_density_grad(
 
             // Compute d(rate)/dθ for each estimated parameter (index-keyed, no string lookup)
             let mut d_rate = vec![0.0; d];
-            for &(est_idx, ref resolved_grad) in &rate_grads_for_run[tr_idx] {
-                d_rate[est_idx] = eval_resolved(resolved_grad, &ctx) / n_src as f64;
+            for (est_idx, entry) in &rate_grads_for_run[tr_idx] {
+                d_rate[*est_idx] = eval_deriv_entry(entry, &ctx) / n_src as f64;
             }
 
             let (effective, d_effective) = if let ir::transition::DrawMethod::Overdispersed { .. } =
@@ -270,11 +269,11 @@ pub fn log_transition_density_grad(
         // dλ/dθ = d(rate)/dθ * dt
         log_p += crate::inference::obs_loglik::poisson_logpmf(flow, mean);
 
-        for &(est_idx, ref resolved_grad) in &rate_grads_for_run[tr_idx] {
-            let d_rate = eval_resolved(resolved_grad, &ctx);
+        for (est_idx, entry) in &rate_grads_for_run[tr_idx] {
+            let d_rate = eval_deriv_entry(entry, &ctx);
             let d_mean = d_rate * dt;
             if mean > 0.0 {
-                grad[est_idx] += (flow / mean - 1.0) * d_mean;
+                grad[*est_idx] += (flow / mean - 1.0) * d_mean;
             }
         }
     }
@@ -432,7 +431,7 @@ pub fn complete_data_loglik_grad(
     obs_model: &super::multi_stream_obs::MultiStreamObsModel,
     ivp_mappings: &[IVPMapping],
     d: usize,
-    rate_grads_for_run: &[Vec<(usize, ResolvedExpr)>],
+    rate_grads_for_run: &[ResolvedGradMap],
     obs_at_substep: &super::pgas::ObsAtSubstep,
     estimated_to_model: &[usize],
 ) -> Result<(f64, Vec<f64>), SimError> {

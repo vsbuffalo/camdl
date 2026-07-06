@@ -612,13 +612,13 @@ pub struct ResolvedModel {
     /// PGAS gamma-density gradient via `eval_emitted_grad` (gh#180). An empty map
     /// means every σ² derivative is a genuine zero.
     pub overdispersion_grad: Vec<Option<crate::resolved_expr::ResolvedGradMap>>,
-    /// Per-transition resolved rate gradients: Vec of (param_name, resolved_expr).
-    pub rate_grads: Vec<Vec<(String, ResolvedExpr)>>,
-    /// Like rate_grads but with param names replaced by model param indices
-    /// (indices into the `params` slice). Populated at construction time via
-    /// `param_index`. Gradient terms whose name is not found in `param_index`
-    /// are silently dropped — this only happens if the IR is malformed.
-    pub rate_grads_indexed: Vec<Vec<(usize, ResolvedExpr)>>,
+    /// Per-transition resolved rate gradient map, model-param-indexed
+    /// (`ResolvedGradMap`, the obs/σ² analogue). Each entry is a real `Grad`
+    /// (resolved for hot-path eval) or a carried `Unsupported` refusal; consumed
+    /// by the PGAS transition-density gradient via `eval_deriv_entry`. Built via
+    /// the shared `resolve_grad_map`, which rejects an unknown-parameter key
+    /// loudly (a dropped gradient reads as zero to NUTS — gh#128).
+    pub rate_grads_indexed: Vec<crate::resolved_expr::ResolvedGradMap>,
     /// Per-ODE-equation resolved derivative expression.
     pub ode_derivatives: Vec<ResolvedExpr>,
     /// Per-intervention, per-action resolved expression (count/fraction/value).
@@ -1424,47 +1424,22 @@ impl CompiledModel {
             }
         }
 
-        let rate_grads: Vec<Vec<(String, ResolvedExpr)>> = model.transitions.iter()
-            .map(|tr| {
-                tr.rate_grad.iter()
-                    .map(|(name, expr)| {
-                        resolve_expr(expr, &resolve_ctx).map(|r| (name.clone(), r))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<_, _>>()?;
-
-        // Index-keyed form: resolve String keys to model param indices once at
-        // construction time. gh#128: a key that is NOT a declared parameter is a
-        // malformed IR (a typo'd or stale autodiff key, or a hand-written test
-        // grad) — reject it loudly rather than silently dropping it. A dropped
-        // gradient component reads as zero to NUTS, so gradient-based inference
-        // would optimize a different model than the simulator's likelihood with
-        // no error surfaced. The name+transition are paired here so the
-        // diagnostic points at the exact offending entry.
-        let rate_grads_indexed: Vec<Vec<(usize, ResolvedExpr)>> = rate_grads.iter()
-            .zip(&model.transitions)
-            .map(|(tr_grads, tr)| {
-                tr_grads.iter()
-                    .map(|(name, expr)| {
-                        let idx = *param_index.get(name.as_str()).ok_or_else(|| {
-                            SimError::Validation(format!(
-                                "transition '{}' has a rate_grad entry for unknown \
-                                 parameter '{}' — every rate_grad key must be a \
-                                 declared model parameter. A dropped gradient \
-                                 component is silently treated as zero by \
-                                 gradient-based inference (NUTS), which then \
-                                 optimizes a different model than the simulator. \
-                                 This is a malformed IR (likely a typo'd or stale \
-                                 autodiff key); fix the rate_grad key.",
-                                tr.name, name
-                            ))
-                        })?;
-                        Ok((idx, expr.clone()))
-                    })
-                    .collect::<Result<Vec<_>, SimError>>()
-            })
-            .collect::<Result<_, _>>()?;
+        // Resolve each transition's rate gradient map to its model-param-indexed
+        // form via the shared `resolve_grad_map` — the same seam the obs/σ² grads
+        // use, so rate now resolves (and, below, evaluates) through one path, not
+        // a fork. It resolves each `Grad` expression, maps the parameter NAME to a
+        // model index, carries an `Unsupported` refusal forward for the fit-time
+        // gate, and rejects an unknown-parameter key loudly (gh#128: a dropped
+        // gradient reads as zero to NUTS, silently optimizing a different model).
+        let rate_grads_indexed: Vec<crate::resolved_expr::ResolvedGradMap> =
+            model.transitions.iter()
+                .map(|tr| crate::resolved_expr::resolve_grad_map(&tr.rate_grad, &resolve_ctx)
+                    // Re-add the transition-name context the shared (obs-neutral)
+                    // resolver cannot know, so an unknown rate_grad key names its
+                    // transition (error-quality; unknown_rate_grad_key_is_rejected).
+                    .map_err(|e| SimError::Validation(
+                        format!("transition '{}' rate_grad: {}", tr.name, e))))
+                .collect::<Result<_, _>>()?;
 
         // Resolve ODE derivatives
         let ode_derivatives: Vec<ResolvedExpr> = model.ode_equations.iter()
@@ -1540,7 +1515,6 @@ impl CompiledModel {
             per_eval_bindings: resolved_per_eval_bindings,
             overdispersion,
             overdispersion_grad,
-            rate_grads,
             rate_grads_indexed,
             ode_derivatives,
             intervention_exprs,
@@ -1599,7 +1573,8 @@ impl CompiledModel {
         // `Expr::Dt`, require RUNTIME_DT so gillespie fails dispatch.
         let uses_dt = self.model.transitions.iter().any(|t| {
             expr_contains_dt(&t.rate)
-                || t.rate_grad.values().any(expr_contains_dt)
+                || t.rate_grad.values().any(|de| matches!(de,
+                    ir::deriv::DerivEntry::Grad(e) if expr_contains_dt(e)))
         });
         if uses_dt {
             caps |= crate::Capabilities::RUNTIME_DT;

@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.25",
-  "validated_by": "ocaml-compiler-v0.25",
+  "ir_version": "0.26",
+  "validated_by": "ocaml-compiler-v0.26",
   "model": {
     "name": "ross_macdonald",
     "version": "0.3",
@@ -49,63 +49,109 @@
         },
         "rate_grad": {
           "a": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": { "param": "b_h" },
-                          "right": { "pop": "S_h" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "param": "b_h"
+                            },
+                            "right": {
+                              "pop": "S_h"
+                            }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_v"
                         }
-                      },
-                      "right": { "pop": "I_v" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_h", "I_h"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_h", "I_h"] },
-                  "right": { "pop_sum": ["S_h", "I_h"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "b_h": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": { "param": "a" },
-                          "right": { "pop": "S_h" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "param": "a"
+                            },
+                            "right": {
+                              "pop": "S_h"
+                            }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_v"
                         }
-                      },
-                      "right": { "pop": "I_v" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_h", "I_h"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_h", "I_h"] },
-                  "right": { "pop_sum": ["S_h", "I_h"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -127,7 +173,7 @@
           "source_compartment": "I_h",
           "dest_compartment": "S_h"
         },
-        "rate_grad": { "r": { "pop": "I_h" } }
+        "rate_grad": {"r":{"grad":{"pop":"I_h"}}}
       },
       {
         "name": "infect_v",
@@ -164,63 +210,109 @@
         },
         "rate_grad": {
           "a": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": { "param": "b_v" },
-                          "right": { "pop": "S_v" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "param": "b_v"
+                            },
+                            "right": {
+                              "pop": "S_v"
+                            }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_h"
                         }
-                      },
-                      "right": { "pop": "I_h" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_h", "I_h"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_h", "I_h"] },
-                  "right": { "pop_sum": ["S_h", "I_h"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "b_v": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": { "param": "a" },
-                          "right": { "pop": "S_v" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "param": "a"
+                            },
+                            "right": {
+                              "pop": "S_v"
+                            }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_h"
                         }
-                      },
-                      "right": { "pop": "I_h" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_h", "I_h"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_h", "I_h"] },
-                  "right": { "pop_sum": ["S_h", "I_h"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_h",
+                        "I_h"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -242,7 +334,7 @@
           "source_compartment": "E_v",
           "dest_compartment": "I_v"
         },
-        "rate_grad": { "sigma_v": { "pop": "E_v" } }
+        "rate_grad": {"sigma_v":{"grad":{"pop":"E_v"}}}
       },
       {
         "name": "death_Sv",
@@ -259,7 +351,7 @@
           "source_compartment": "S_v",
           "dest_compartment": null
         },
-        "rate_grad": { "mu_v": { "pop": "S_v" } }
+        "rate_grad": {"mu_v":{"grad":{"pop":"S_v"}}}
       },
       {
         "name": "death_Ev",
@@ -276,7 +368,7 @@
           "source_compartment": "E_v",
           "dest_compartment": null
         },
-        "rate_grad": { "mu_v": { "pop": "E_v" } }
+        "rate_grad": {"mu_v":{"grad":{"pop":"E_v"}}}
       },
       {
         "name": "death_Iv",
@@ -293,7 +385,7 @@
           "source_compartment": "I_v",
           "dest_compartment": null
         },
-        "rate_grad": { "mu_v": { "pop": "I_v" } }
+        "rate_grad": {"mu_v":{"grad":{"pop":"I_v"}}}
       },
       {
         "name": "birth_v",
@@ -310,7 +402,7 @@
           "source_compartment": null,
           "dest_compartment": "S_v"
         },
-        "rate_grad": { "mu_v": { "param": "M0" }, "M0": { "param": "mu_v" } }
+        "rate_grad": {"mu_v":{"grad":{"param":"M0"}},"M0":{"grad":{"param":"mu_v"}}}
       }
     ],
     "ode_equations": [],

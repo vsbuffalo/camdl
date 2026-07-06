@@ -37,10 +37,10 @@ fn representative_model() -> Model {
         Expr::bin_op(BinOp::Mul, Expr::param("beta"), Expr::pop("S")),
         Expr::pop("I"),
     );
-    let mut rate_grad: HashMap<String, Expr> = HashMap::new();
+    let mut rate_grad: HashMap<String, ir::deriv::DerivEntry> = HashMap::new();
     rate_grad.insert(
         "beta".into(),
-        Expr::bin_op(BinOp::Mul, Expr::pop("S"), Expr::pop("I")),
+        ir::deriv::DerivEntry::Grad(Expr::bin_op(BinOp::Mul, Expr::pop("S"), Expr::pop("I"))),
     );
 
     let mut ic: HashMap<String, f64> = HashMap::new();
@@ -228,7 +228,13 @@ fn model_golden_hash() {
     // and hashes as (expr, grad) together instead of expr-then-adjacent-grad. The
     // representative model's Poisson `rate` shifts the model hash once — a
     // deliberate, version-bumped re-key (the obs wire moved to the nested shape).
-    const GOLDEN: &str = "2e561fe33c2b26179d6fa8d4c564700a0629b05ea8a924a3579c14851f23031d";
+    // gh#342 P3 (ir/VERSION -> 0.26): the transition `rate_grad` value type moved
+    // from bare `Expr` to the classified `DerivEntry`, so its `write_str_map` now
+    // hashes each entry through `DerivEntry::hash_into` (type tag + `Grad` variant
+    // + expr) instead of the bare expr. The representative model's `rate_grad`
+    // (∂/∂beta) shifts the model hash once more — the same deliberate,
+    // version-bumped re-key on the rate side.
+    const GOLDEN: &str = "df9c33c6a947dff87ddbf9f7219021321cfacb8a9604b823ac5d1ee4d685e10d";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -376,9 +382,9 @@ fn ir_const_signed_zero_is_distinct() {
 fn rate_grad_map_order_invariant() {
     let build = |order_ab: bool| -> Model {
         let mut m = representative_model();
-        let mut rg: HashMap<String, Expr> = HashMap::new();
-        let a = ("beta".to_string(), Expr::pop("S"));
-        let b = ("gamma".to_string(), Expr::pop("I"));
+        let mut rg: HashMap<String, ir::deriv::DerivEntry> = HashMap::new();
+        let a = ("beta".to_string(), ir::deriv::DerivEntry::Grad(Expr::pop("S")));
+        let b = ("gamma".to_string(), ir::deriv::DerivEntry::Grad(Expr::pop("I")));
         if order_ab {
             rg.insert(a.0.clone(), a.1.clone());
             rg.insert(b.0.clone(), b.1.clone());

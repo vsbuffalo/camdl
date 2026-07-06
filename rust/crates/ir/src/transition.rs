@@ -124,11 +124,15 @@ pub struct Transition {
     /// How event counts are drawn. Defaults to Poisson.
     #[serde(default, skip_serializing_if = "is_poisson")]
     pub draw_method:    DrawMethod,
-    /// ∂rate/∂param for each estimated parameter. Populated by the OCaml
-    /// compiler's autodiff pass. Empty if not computed (backward compatible).
-    /// Maps parameter name → derivative expression.
+    /// ∂rate/∂param for each estimated parameter, classified `Grad | Unsupported`
+    /// (the obs analogue via [`crate::deriv::GradMap`]). Populated by the OCaml
+    /// autodiff pass; empty (and omitted) if not computed, absent key ⇒ genuine
+    /// zero. A live-but-omitted coefficient (Periodic/`lag`/non-const table index)
+    /// serialises an `Unsupported` the fit-time gate refuses on — subsuming the
+    /// old `coeff_guard` (gh#342). A structural coefficient is still an E600 at
+    /// compile time (never reaches here).
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub rate_grad:      std::collections::HashMap<String, Expr>,
+    pub rate_grad:      crate::deriv::GradMap,
     /// Lineage annotation for `#[lineage]` transitions. `None` for ordinary
     /// transitions (the common case), and omitted from the JSON then.
     #[serde(default, skip_serializing_if = "Option::is_none")]

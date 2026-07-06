@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.25",
-  "validated_by": "ocaml-compiler-v0.25",
+  "ir_version": "0.26",
+  "validated_by": "ocaml-compiler-v0.26",
   "model": {
     "name": "seir_spatial_5_inference",
     "version": "0.3",
@@ -103,265 +103,425 @@
         "draw_method": { "overdispersed": { "param": "sigma_se" } },
         "rate_grad": {
           "R0": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "gamma" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "gamma"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p1"
                             }
-                          },
-                          "right": { "pop": "S_p1" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p1" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p1"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "gamma": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p1"
                             }
-                          },
-                          "right": { "pop": "S_p1" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p1" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p1"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "amplitude": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": { "param": "R0" },
-                                  "right": { "param": "gamma" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "param": "R0"
+                                    },
+                                    "right": {
+                                      "param": "gamma"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "const": -1.0
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "const": 2.0
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
                                 }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": { "const": -1.0 },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "const": 2.0 },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p1"
+                            }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p1"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "iota": {
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "param": "gamma"
+                                }
+                              }
+                            },
+                            "right": {
+                              "bin_op": {
+                                "op": "add",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "sub",
+                                    "left": {
+                                      "const": 1.0
+                                    },
+                                    "right": {
+                                      "param": "amplitude"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "param": "amplitude"
+                                        },
+                                        "right": {
+                                          "const": 2.0
+                                        }
+                                      }
+                                    },
+                                    "right": {
+                                      "time_func": {
+                                        "name": "school"
                                       }
                                     }
                                   }
                                 }
                               }
                             }
-                          },
-                          "right": { "pop": "S_p1" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p1" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "pop": "S_p1"
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
-                }
-              }
-            }
-          },
-          "iota": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": { "param": "gamma" }
-                            }
-                          },
-                          "right": {
-                            "bin_op": {
-                              "op": "add",
-                              "left": {
-                                "bin_op": {
-                                  "op": "sub",
-                                  "left": { "const": 1.0 },
-                                  "right": { "param": "amplitude" }
-                                }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "param": "amplitude" },
-                                      "right": { "const": 2.0 }
-                                    }
-                                  },
-                                  "right": {
-                                    "time_func": { "name": "school" }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                      },
-                      "right": { "pop": "S_p1" }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
+                  }
                 }
               }
             }
@@ -442,265 +602,425 @@
         "draw_method": { "overdispersed": { "param": "sigma_se" } },
         "rate_grad": {
           "R0": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "gamma" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "gamma"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p2"
                             }
-                          },
-                          "right": { "pop": "S_p2" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p2" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p2"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "gamma": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p2"
                             }
-                          },
-                          "right": { "pop": "S_p2" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p2" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p2"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "amplitude": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": { "param": "R0" },
-                                  "right": { "param": "gamma" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "param": "R0"
+                                    },
+                                    "right": {
+                                      "param": "gamma"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "const": -1.0
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "const": 2.0
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
                                 }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": { "const": -1.0 },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "const": 2.0 },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p2"
+                            }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p2"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "iota": {
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "param": "gamma"
+                                }
+                              }
+                            },
+                            "right": {
+                              "bin_op": {
+                                "op": "add",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "sub",
+                                    "left": {
+                                      "const": 1.0
+                                    },
+                                    "right": {
+                                      "param": "amplitude"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "param": "amplitude"
+                                        },
+                                        "right": {
+                                          "const": 2.0
+                                        }
+                                      }
+                                    },
+                                    "right": {
+                                      "time_func": {
+                                        "name": "school"
                                       }
                                     }
                                   }
                                 }
                               }
                             }
-                          },
-                          "right": { "pop": "S_p2" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p2" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "pop": "S_p2"
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
-                }
-              }
-            }
-          },
-          "iota": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": { "param": "gamma" }
-                            }
-                          },
-                          "right": {
-                            "bin_op": {
-                              "op": "add",
-                              "left": {
-                                "bin_op": {
-                                  "op": "sub",
-                                  "left": { "const": 1.0 },
-                                  "right": { "param": "amplitude" }
-                                }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "param": "amplitude" },
-                                      "right": { "const": 2.0 }
-                                    }
-                                  },
-                                  "right": {
-                                    "time_func": { "name": "school" }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                      },
-                      "right": { "pop": "S_p2" }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
+                  }
                 }
               }
             }
@@ -781,265 +1101,425 @@
         "draw_method": { "overdispersed": { "param": "sigma_se" } },
         "rate_grad": {
           "R0": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "gamma" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "gamma"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p3"
                             }
-                          },
-                          "right": { "pop": "S_p3" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p3" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p3"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "gamma": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p3"
                             }
-                          },
-                          "right": { "pop": "S_p3" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p3" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p3"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "amplitude": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": { "param": "R0" },
-                                  "right": { "param": "gamma" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "param": "R0"
+                                    },
+                                    "right": {
+                                      "param": "gamma"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "const": -1.0
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "const": 2.0
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
                                 }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": { "const": -1.0 },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "const": 2.0 },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p3"
+                            }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p3"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "iota": {
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "param": "gamma"
+                                }
+                              }
+                            },
+                            "right": {
+                              "bin_op": {
+                                "op": "add",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "sub",
+                                    "left": {
+                                      "const": 1.0
+                                    },
+                                    "right": {
+                                      "param": "amplitude"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "param": "amplitude"
+                                        },
+                                        "right": {
+                                          "const": 2.0
+                                        }
+                                      }
+                                    },
+                                    "right": {
+                                      "time_func": {
+                                        "name": "school"
                                       }
                                     }
                                   }
                                 }
                               }
                             }
-                          },
-                          "right": { "pop": "S_p3" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p3" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "pop": "S_p3"
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
-                }
-              }
-            }
-          },
-          "iota": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": { "param": "gamma" }
-                            }
-                          },
-                          "right": {
-                            "bin_op": {
-                              "op": "add",
-                              "left": {
-                                "bin_op": {
-                                  "op": "sub",
-                                  "left": { "const": 1.0 },
-                                  "right": { "param": "amplitude" }
-                                }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "param": "amplitude" },
-                                      "right": { "const": 2.0 }
-                                    }
-                                  },
-                                  "right": {
-                                    "time_func": { "name": "school" }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                      },
-                      "right": { "pop": "S_p3" }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
+                  }
                 }
               }
             }
@@ -1120,265 +1600,425 @@
         "draw_method": { "overdispersed": { "param": "sigma_se" } },
         "rate_grad": {
           "R0": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "gamma" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "gamma"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p4"
                             }
-                          },
-                          "right": { "pop": "S_p4" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p4" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p4"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "gamma": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p4"
                             }
-                          },
-                          "right": { "pop": "S_p4" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p4" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p4"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "amplitude": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": { "param": "R0" },
-                                  "right": { "param": "gamma" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "param": "R0"
+                                    },
+                                    "right": {
+                                      "param": "gamma"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "const": -1.0
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "const": 2.0
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
                                 }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": { "const": -1.0 },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "const": 2.0 },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p4"
+                            }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p4"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "iota": {
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "param": "gamma"
+                                }
+                              }
+                            },
+                            "right": {
+                              "bin_op": {
+                                "op": "add",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "sub",
+                                    "left": {
+                                      "const": 1.0
+                                    },
+                                    "right": {
+                                      "param": "amplitude"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "param": "amplitude"
+                                        },
+                                        "right": {
+                                          "const": 2.0
+                                        }
+                                      }
+                                    },
+                                    "right": {
+                                      "time_func": {
+                                        "name": "school"
                                       }
                                     }
                                   }
                                 }
                               }
                             }
-                          },
-                          "right": { "pop": "S_p4" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p4" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "pop": "S_p4"
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
-                }
-              }
-            }
-          },
-          "iota": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": { "param": "gamma" }
-                            }
-                          },
-                          "right": {
-                            "bin_op": {
-                              "op": "add",
-                              "left": {
-                                "bin_op": {
-                                  "op": "sub",
-                                  "left": { "const": 1.0 },
-                                  "right": { "param": "amplitude" }
-                                }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "param": "amplitude" },
-                                      "right": { "const": 2.0 }
-                                    }
-                                  },
-                                  "right": {
-                                    "time_func": { "name": "school" }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                      },
-                      "right": { "pop": "S_p4" }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
+                  }
                 }
               }
             }
@@ -1459,265 +2099,425 @@
         "draw_method": { "overdispersed": { "param": "sigma_se" } },
         "rate_grad": {
           "R0": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "gamma" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "gamma"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p5"
                             }
-                          },
-                          "right": { "pop": "S_p5" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p5" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p5"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "gamma": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "const": 1.0 },
-                                      "right": { "param": "amplitude" }
-                                    }
-                                  },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": {
-                                        "bin_op": {
-                                          "op": "mul",
-                                          "left": { "param": "amplitude" },
-                                          "right": { "const": 2.0 }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "const": 1.0
+                                        },
+                                        "right": {
+                                          "param": "amplitude"
                                         }
-                                      },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                                      }
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "bin_op": {
+                                            "op": "mul",
+                                            "left": {
+                                              "param": "amplitude"
+                                            },
+                                            "right": {
+                                              "const": 2.0
+                                            }
+                                          }
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
                                       }
                                     }
                                   }
                                 }
                               }
+                            },
+                            "right": {
+                              "pop": "S_p5"
                             }
-                          },
-                          "right": { "pop": "S_p5" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p5" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p5"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    }
+                  }
                 }
               }
             }
           },
           "amplitude": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": { "param": "R0" },
-                                  "right": { "param": "gamma" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "param": "R0"
+                                    },
+                                    "right": {
+                                      "param": "gamma"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "add",
+                                    "left": {
+                                      "const": -1.0
+                                    },
+                                    "right": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "const": 2.0
+                                        },
+                                        "right": {
+                                          "time_func": {
+                                            "name": "school"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
                                 }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "add",
-                                  "left": { "const": -1.0 },
-                                  "right": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "const": 2.0 },
-                                      "right": {
-                                        "time_func": { "name": "school" }
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p5"
+                            }
+                          }
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "add",
+                            "left": {
+                              "pop": "I_p5"
+                            },
+                            "right": {
+                              "param": "iota"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "iota": {
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "bin_op": {
+                                "op": "mul",
+                                "left": {
+                                  "param": "R0"
+                                },
+                                "right": {
+                                  "param": "gamma"
+                                }
+                              }
+                            },
+                            "right": {
+                              "bin_op": {
+                                "op": "add",
+                                "left": {
+                                  "bin_op": {
+                                    "op": "sub",
+                                    "left": {
+                                      "const": 1.0
+                                    },
+                                    "right": {
+                                      "param": "amplitude"
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "bin_op": {
+                                        "op": "mul",
+                                        "left": {
+                                          "param": "amplitude"
+                                        },
+                                        "right": {
+                                          "const": 2.0
+                                        }
+                                      }
+                                    },
+                                    "right": {
+                                      "time_func": {
+                                        "name": "school"
                                       }
                                     }
                                   }
                                 }
                               }
                             }
-                          },
-                          "right": { "pop": "S_p5" }
-                        }
-                      },
-                      "right": {
-                        "bin_op": {
-                          "op": "add",
-                          "left": { "pop": "I_p5" },
-                          "right": { "param": "iota" }
+                          }
+                        },
+                        "right": {
+                          "pop": "S_p5"
                         }
                       }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
-                }
-              }
-            }
-          },
-          "iota": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "bin_op": {
-                              "op": "mul",
-                              "left": { "param": "R0" },
-                              "right": { "param": "gamma" }
-                            }
-                          },
-                          "right": {
-                            "bin_op": {
-                              "op": "add",
-                              "left": {
-                                "bin_op": {
-                                  "op": "sub",
-                                  "left": { "const": 1.0 },
-                                  "right": { "param": "amplitude" }
-                                }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": {
-                                    "bin_op": {
-                                      "op": "mul",
-                                      "left": { "param": "amplitude" },
-                                      "right": { "const": 2.0 }
-                                    }
-                                  },
-                                  "right": {
-                                    "time_func": { "name": "school" }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                      },
-                      "right": { "pop": "S_p5" }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
+                  }
                 }
               }
             }
@@ -1764,37 +2564,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 1.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 1.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p1"
                             }
-                          },
-                          "right": { "pop": "S_p1" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p2"
                         }
-                      },
-                      "right": { "pop": "I_p2" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -1841,37 +2672,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 2.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 2.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p1"
                             }
-                          },
-                          "right": { "pop": "S_p1" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p3"
                         }
-                      },
-                      "right": { "pop": "I_p3" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -1918,37 +2780,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 3.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 3.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p1"
                             }
-                          },
-                          "right": { "pop": "S_p1" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p4"
                         }
-                      },
-                      "right": { "pop": "I_p4" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -1995,37 +2888,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 4.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 4.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p1"
                             }
-                          },
-                          "right": { "pop": "S_p1" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p5"
                         }
-                      },
-                      "right": { "pop": "I_p5" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2072,37 +2996,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 5.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 5.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p2"
                             }
-                          },
-                          "right": { "pop": "S_p2" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p1"
                         }
-                      },
-                      "right": { "pop": "I_p1" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2149,37 +3104,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 7.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 7.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p2"
                             }
-                          },
-                          "right": { "pop": "S_p2" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p3"
                         }
-                      },
-                      "right": { "pop": "I_p3" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2226,37 +3212,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 8.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 8.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p2"
                             }
-                          },
-                          "right": { "pop": "S_p2" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p4"
                         }
-                      },
-                      "right": { "pop": "I_p4" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2303,37 +3320,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 9.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 9.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p2"
                             }
-                          },
-                          "right": { "pop": "S_p2" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p5"
                         }
-                      },
-                      "right": { "pop": "I_p5" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2380,37 +3428,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 10.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 10.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p3"
                             }
-                          },
-                          "right": { "pop": "S_p3" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p1"
                         }
-                      },
-                      "right": { "pop": "I_p1" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2457,37 +3536,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 11.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 11.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p3"
                             }
-                          },
-                          "right": { "pop": "S_p3" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p2"
                         }
-                      },
-                      "right": { "pop": "I_p2" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2534,37 +3644,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 13.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 13.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p3"
                             }
-                          },
-                          "right": { "pop": "S_p3" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p4"
                         }
-                      },
-                      "right": { "pop": "I_p4" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2611,37 +3752,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 14.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 14.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p3"
                             }
-                          },
-                          "right": { "pop": "S_p3" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p5"
                         }
-                      },
-                      "right": { "pop": "I_p5" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2688,37 +3860,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 15.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 15.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p4"
                             }
-                          },
-                          "right": { "pop": "S_p4" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p1"
                         }
-                      },
-                      "right": { "pop": "I_p1" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2765,37 +3968,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 16.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 16.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p4"
                             }
-                          },
-                          "right": { "pop": "S_p4" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p2"
                         }
-                      },
-                      "right": { "pop": "I_p2" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2842,37 +4076,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 17.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 17.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p4"
                             }
-                          },
-                          "right": { "pop": "S_p4" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p3"
                         }
-                      },
-                      "right": { "pop": "I_p3" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2919,37 +4184,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 19.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 19.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p4"
                             }
-                          },
-                          "right": { "pop": "S_p4" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p5"
                         }
-                      },
-                      "right": { "pop": "I_p5" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] },
-                  "right": { "pop_sum": ["S_p5", "E_p5", "I_p5", "R_p5"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p5",
+                        "E_p5",
+                        "I_p5",
+                        "R_p5"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -2996,37 +4292,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 20.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 20.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p5"
                             }
-                          },
-                          "right": { "pop": "S_p5" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p1"
                         }
-                      },
-                      "right": { "pop": "I_p1" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] },
-                  "right": { "pop_sum": ["S_p1", "E_p1", "I_p1", "R_p1"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p1",
+                        "E_p1",
+                        "I_p1",
+                        "R_p1"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -3073,37 +4400,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 21.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 21.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p5"
                             }
-                          },
-                          "right": { "pop": "S_p5" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p2"
                         }
-                      },
-                      "right": { "pop": "I_p2" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] },
-                  "right": { "pop_sum": ["S_p2", "E_p2", "I_p2", "R_p2"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p2",
+                        "E_p2",
+                        "I_p2",
+                        "R_p2"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -3150,37 +4508,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 22.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 22.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p5"
                             }
-                          },
-                          "right": { "pop": "S_p5" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p3"
                         }
-                      },
-                      "right": { "pop": "I_p3" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] },
-                  "right": { "pop_sum": ["S_p3", "E_p3", "I_p3", "R_p3"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p3",
+                        "E_p3",
+                        "I_p3",
+                        "R_p3"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -3227,37 +4616,68 @@
         },
         "rate_grad": {
           "kappa": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "W",
-                              "indices": [{ "const": 23.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "W",
+                                "indices": [
+                                  {
+                                    "const": 23.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "S_p5"
                             }
-                          },
-                          "right": { "pop": "S_p5" }
+                          }
+                        },
+                        "right": {
+                          "pop": "I_p4"
                         }
-                      },
-                      "right": { "pop": "I_p4" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] },
-                  "right": { "pop_sum": ["S_p4", "E_p4", "I_p4", "R_p4"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S_p4",
+                        "E_p4",
+                        "I_p4",
+                        "R_p4"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -3279,7 +4699,7 @@
           "source_compartment": "E_p1",
           "dest_compartment": "I_p1"
         },
-        "rate_grad": { "sigma": { "pop": "E_p1" } }
+        "rate_grad": {"sigma":{"grad":{"pop":"E_p1"}}}
       },
       {
         "name": "progression_p2",
@@ -3296,7 +4716,7 @@
           "source_compartment": "E_p2",
           "dest_compartment": "I_p2"
         },
-        "rate_grad": { "sigma": { "pop": "E_p2" } }
+        "rate_grad": {"sigma":{"grad":{"pop":"E_p2"}}}
       },
       {
         "name": "progression_p3",
@@ -3313,7 +4733,7 @@
           "source_compartment": "E_p3",
           "dest_compartment": "I_p3"
         },
-        "rate_grad": { "sigma": { "pop": "E_p3" } }
+        "rate_grad": {"sigma":{"grad":{"pop":"E_p3"}}}
       },
       {
         "name": "progression_p4",
@@ -3330,7 +4750,7 @@
           "source_compartment": "E_p4",
           "dest_compartment": "I_p4"
         },
-        "rate_grad": { "sigma": { "pop": "E_p4" } }
+        "rate_grad": {"sigma":{"grad":{"pop":"E_p4"}}}
       },
       {
         "name": "progression_p5",
@@ -3347,7 +4767,7 @@
           "source_compartment": "E_p5",
           "dest_compartment": "I_p5"
         },
-        "rate_grad": { "sigma": { "pop": "E_p5" } }
+        "rate_grad": {"sigma":{"grad":{"pop":"E_p5"}}}
       },
       {
         "name": "recovery_p1",
@@ -3364,7 +4784,7 @@
           "source_compartment": "I_p1",
           "dest_compartment": "R_p1"
         },
-        "rate_grad": { "gamma": { "pop": "I_p1" } }
+        "rate_grad": {"gamma":{"grad":{"pop":"I_p1"}}}
       },
       {
         "name": "recovery_p2",
@@ -3381,7 +4801,7 @@
           "source_compartment": "I_p2",
           "dest_compartment": "R_p2"
         },
-        "rate_grad": { "gamma": { "pop": "I_p2" } }
+        "rate_grad": {"gamma":{"grad":{"pop":"I_p2"}}}
       },
       {
         "name": "recovery_p3",
@@ -3398,7 +4818,7 @@
           "source_compartment": "I_p3",
           "dest_compartment": "R_p3"
         },
-        "rate_grad": { "gamma": { "pop": "I_p3" } }
+        "rate_grad": {"gamma":{"grad":{"pop":"I_p3"}}}
       },
       {
         "name": "recovery_p4",
@@ -3415,7 +4835,7 @@
           "source_compartment": "I_p4",
           "dest_compartment": "R_p4"
         },
-        "rate_grad": { "gamma": { "pop": "I_p4" } }
+        "rate_grad": {"gamma":{"grad":{"pop":"I_p4"}}}
       },
       {
         "name": "recovery_p5",
@@ -3432,7 +4852,7 @@
           "source_compartment": "I_p5",
           "dest_compartment": "R_p5"
         },
-        "rate_grad": { "gamma": { "pop": "I_p5" } }
+        "rate_grad": {"gamma":{"grad":{"pop":"I_p5"}}}
       },
       {
         "name": "waning_p1",

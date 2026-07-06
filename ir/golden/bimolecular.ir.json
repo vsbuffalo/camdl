@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.25",
-  "validated_by": "ocaml-compiler-v0.25",
+  "ir_version": "0.26",
+  "validated_by": "ocaml-compiler-v0.26",
   "model": {
     "name": "bimolecular",
     "version": "0.3",
@@ -41,26 +41,50 @@
         },
         "rate_grad": {
           "k": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": { "pop": "A" },
-                      "right": { "pop": "B" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "pop": "A"
+                        },
+                        "right": {
+                          "pop": "B"
+                        }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "A",
+                        "B",
+                        "C"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["A", "B", "C"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["A", "B", "C"] },
-                  "right": { "pop_sum": ["A", "B", "C"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "A",
+                        "B",
+                        "C"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "A",
+                        "B",
+                        "C"
+                      ]
+                    }
+                  }
                 }
               }
             }

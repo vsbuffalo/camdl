@@ -3048,13 +3048,11 @@ let test_trig_autodiff_matches_finite_diff () =
     | Error msg -> Alcotest.failf "differentiate_rate errored: %s" msg in
   match List.assoc_opt "b" grads with
   | None -> Alcotest.failf "no rate_grad for parameter 'b'"
-  | Some d ->
-    (* After simplify_fixpoint, the derivative should fold to Const (sin c). *)
-    match d with
-    | Ir.Const v ->
-      Alcotest.(check (float 1e-12))
-        "∂(b*sin(c))/∂b = sin(c)" (sin c) v
-    | _ -> Alcotest.failf "expected Const, got non-constant derivative"
+  (* After simplify_fixpoint, the derivative folds to Const (sin c). *)
+  | Some (Ir.DEGrad (Ir.Const v)) ->
+    Alcotest.(check (float 1e-12))
+      "∂(b*sin(c))/∂b = sin(c)" (sin c) v
+  | Some _ -> Alcotest.failf "expected DEGrad (Const), got a non-constant or refused derivative"
 
 let test_fourier_autodiff_emitted () =
   (* gh#119/gh#59: a parameter that is a Fourier harmonic coefficient must get
@@ -3073,23 +3071,26 @@ let test_fourier_autodiff_emitted () =
      | None -> Alcotest.failf "Fourier ∂/∂a1 was dropped (expected a cos term)")
 
 let test_periodic_forcing_coeff_omitted () =
-  (* gh#119/gh#215: a parameter that is a periodic step value is a LIVE
+  (* gh#119/gh#215/gh#342: a parameter that is a periodic step value is a LIVE
      coefficient (the Rust runtime evaluates it per-step), so the model must
-     COMPILE — its gradient is not yet emitted, so the param is simply omitted
-     from rate_grad and the Rust NUTS guard refuses a NUTS fit that depends on
-     it. It must NOT be a hard compile error (which would also break forward
-     simulation and gradient-free IF2/PF). *)
+     COMPILE — its gradient is not yet emitted. Post-3b, rather than being DROPPED,
+     it is a serialized coded DEUnsupported{URPeriodicCoeff}, so the fit-time
+     preflight refuses a NUTS fit that depends on it (subsuming coeff_guard);
+     forward sim and gradient-free IF2/PF still use the live value. It must NOT be
+     a hard compile error (that would break forward sim / IF2 / PF too). *)
   let p : Ir.periodic =
     { period = Ir.Const 7.0; values = [ Ir.Param "v0"; Ir.Const 1.0 ] } in
   let tf : Ir.time_function = { name = "g"; kind = Ir.Periodic p; dim = (0, 0); lag = None } in
   let rate = Ir.TimeFunc "g" in
   match Autodiff.differentiate_rate rate [ "v0" ] [ tf ] [] with
   | Error msg -> Alcotest.failf
-      "a periodic step-value param must compile (omit its gradient), got error: %s" msg
+      "a periodic step-value param must compile (as a coded refusal), got error: %s" msg
   | Ok grads ->
     (match List.assoc_opt "v0" grads with
-     | None -> ()  (* omitted — the NUTS guard handles the missing gradient *)
-     | Some _ -> Alcotest.failf "periodic ∂/∂v0 is not emitted yet; expected it omitted, not present")
+     | Some (Ir.DEUnsupported { code = Ir.URPeriodicCoeff; _ }) -> ()
+     | Some (Ir.DEGrad _) -> Alcotest.failf "periodic ∂/∂v0 must be a coded refusal, not a DEGrad"
+     | Some (Ir.DEUnsupported _) -> Alcotest.failf "periodic ∂/∂v0: expected URPeriodicCoeff, got a different code"
+     | None -> Alcotest.failf "periodic ∂/∂v0 must now be present as DEUnsupported (was dropped pre-3b)")
 
 let test_structural_forcing_coeff_errors () =
   (* gh#119/gh#215: a parameter that drives STRUCTURAL forcing data (an
@@ -3139,10 +3140,20 @@ scenarios { baseline { set = { beta = 0.3
       S0 = 990
       I0 = 10 } } }
 |} in
-  (* wpeak's gradient is not emitted (periodic, gh#215) → no rate_grad entry. *)
+  (* gh#342: a Periodic step-value coefficient's gradient is not emitted (gh#215),
+     but rather than being DROPPED (pre-3b), it is now a serialized coded
+     DEUnsupported{URPeriodicCoeff} — so the fit-time preflight refuses a NUTS fit
+     that depends on it (subsuming the old coeff_guard). Forward sim / IF2 / PF
+     still use the live value. *)
   List.iter (fun (t : Ir.transition) ->
-    if List.mem_assoc "wpeak" t.rate_grad then
-      Alcotest.failf "wpeak should be omitted from rate_grad (periodic, gh#215), but is present in '%s'" t.name)
+    match List.assoc_opt "wpeak" t.rate_grad with
+    | Some (Ir.DEUnsupported { code = Ir.URPeriodicCoeff; _ }) -> ()
+    | Some (Ir.DEGrad _) ->
+      Alcotest.failf "wpeak (periodic) must be a coded refusal, not a DEGrad, in '%s'" t.name
+    | Some (Ir.DEUnsupported _) ->
+      Alcotest.failf "wpeak: expected URPeriodicCoeff, got a different refusal code in '%s'" t.name
+    | None ->
+      Alcotest.failf "wpeak (periodic) must now be present as DEUnsupported in rate_grad of '%s' (was dropped pre-3b)" t.name)
     m.Ir.transitions
 
 (* ── Observation / σ² gradient driver (proposal 2026-07-03, P3) ──────────────── *)
@@ -8846,7 +8857,7 @@ let () =
       Alcotest.test_case "cos(t) rejected with E301"                `Quick test_trig_cos_rejects_dimensional_arg;
       Alcotest.test_case "autodiff emits rate_grad for sin(...)"    `Quick test_trig_autodiff_matches_finite_diff;
       Alcotest.test_case "autodiff emits rate_grad for a Fourier coef" `Quick test_fourier_autodiff_emitted;
-      Alcotest.test_case "periodic step-value param compiles, gradient omitted (gh#215)" `Quick test_periodic_forcing_coeff_omitted;
+      Alcotest.test_case "periodic step-value param compiles, gradient is a coded refusal (gh#342)" `Quick test_periodic_forcing_coeff_omitted;
       Alcotest.test_case "structural forcing-coeff param is a compile error (gh#215)" `Quick test_structural_forcing_coeff_errors;
       Alcotest.test_case "periodic-param-in-rate model compiles to IR (gh#215)" `Quick test_periodic_param_in_rate_compiles;
       Alcotest.test_case "pi as parameter name is reserved (E100)"  `Quick test_trig_pi_reserved;

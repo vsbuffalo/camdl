@@ -1,11 +1,11 @@
-{"ir_version":"0.25","validated_by":"ocaml-compiler-v0.25","model":{"name":"reactive_sir_observed_threshold","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.26","validated_by":"ocaml-compiler-v0.26","model":{"name":"reactive_sir_observed_threshold","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"},
 {"name":"V","kind":"integer"}
 ],"transitions":[
-{"name":"infection","stoichiometry":[["S",-1],["I",1]],"rate":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"metadata":{"origin_kind":"transmission","source_compartment":"S","dest_compartment":"I"},"rate_grad":{"beta":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"pop":"S"},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"right":{"bin_op":{"op":"mul","left":{"binding_ref":"N"},"right":{"binding_ref":"N"}}}}}}},
-{"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"gamma":{"pop":"I"}}}
+{"name":"infection","stoichiometry":[["S",-1],["I",1]],"rate":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"metadata":{"origin_kind":"transmission","source_compartment":"S","dest_compartment":"I"},"rate_grad":{"beta":{"grad":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"pop":"S"},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"right":{"bin_op":{"op":"mul","left":{"binding_ref":"N"},"right":{"binding_ref":"N"}}}}}}}},
+{"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"gamma":{"grad":{"pop":"I"}}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[
 {"name":"sia","fire":{"reactive":{"when":{"cmp":{"lhs":{"observed":{"stream":"weekly_cases","window":28.0,"reducer":"sum"}},"op":"ge","rhs":{"param":"trigger_threshold"}}},"after":21.0,"once":true}},"actions":[{"fraction_transfer":{"src":"S","dst":"V","fraction":{"param":"sia_cov"}}}]}
 ],"observations":[

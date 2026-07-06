@@ -16,11 +16,12 @@ val forcing_coeff_exprs : time_func_kind -> expr list
 (** Repeatedly simplify an expression until it reaches a fixed point. *)
 val simplify_fixpoint : expr -> expr
 
-(** ∂rate/∂pⱼ for each parameter name (in [param_names] order), or [Error msg]
-    when a coefficient derivative is structurally unsupported. *)
+(** ∂rate/∂pⱼ for each parameter name (in [param_names] order) as a classified
+    [grad_map] ([Grad] / [DEUnsupported] for a live-but-omitted coefficient), or
+    [Error msg] when a coefficient derivative is structurally unsupported (E600). *)
 val differentiate_rate :
   expr -> string list -> time_function list -> table list ->
-  ((string * expr) list, string) result
+  ((string * deriv_entry) list, string) result
 
 (** Attach per-parameter gradients to a single likelihood's arguments. *)
 val differentiate_likelihood :

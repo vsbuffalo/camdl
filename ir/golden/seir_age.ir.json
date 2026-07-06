@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.25",
-  "validated_by": "ocaml-compiler-v0.25",
+  "ir_version": "0.26",
+  "validated_by": "ocaml-compiler-v0.26",
   "model": {
     "name": "seir_age",
     "version": "0.3",
@@ -94,59 +94,75 @@
         },
         "rate_grad": {
           "beta": {
-            "bin_op": {
-              "op": "mul",
-              "left": { "pop": "S_child" },
-              "right": {
-                "bin_op": {
-                  "op": "add",
-                  "left": {
-                    "bin_op": {
-                      "op": "div",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "C_age",
-                              "indices": [{ "const": 0.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "mul",
+                "left": {
+                  "pop": "S_child"
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "add",
+                    "left": {
+                      "bin_op": {
+                        "op": "div",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "C_age",
+                                "indices": [
+                                  {
+                                    "const": 0.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "I_child"
                             }
-                          },
-                          "right": { "pop": "I_child" }
+                          }
+                        },
+                        "right": {
+                          "pop_sum": [
+                            "S_child",
+                            "E_child",
+                            "I_child",
+                            "R_child"
+                          ]
                         }
-                      },
-                      "right": {
-                        "pop_sum": [
-                          "S_child",
-                          "E_child",
-                          "I_child",
-                          "R_child"
-                        ]
                       }
-                    }
-                  },
-                  "right": {
-                    "bin_op": {
-                      "op": "div",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "C_age",
-                              "indices": [{ "const": 1.0 }]
+                    },
+                    "right": {
+                      "bin_op": {
+                        "op": "div",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "C_age",
+                                "indices": [
+                                  {
+                                    "const": 1.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "I_adult"
                             }
-                          },
-                          "right": { "pop": "I_adult" }
+                          }
+                        },
+                        "right": {
+                          "pop_sum": [
+                            "S_adult",
+                            "E_adult",
+                            "I_adult",
+                            "R_adult"
+                          ]
                         }
-                      },
-                      "right": {
-                        "pop_sum": [
-                          "S_adult",
-                          "E_adult",
-                          "I_adult",
-                          "R_adult"
-                        ]
                       }
                     }
                   }
@@ -233,59 +249,75 @@
         },
         "rate_grad": {
           "beta": {
-            "bin_op": {
-              "op": "mul",
-              "left": { "pop": "S_adult" },
-              "right": {
-                "bin_op": {
-                  "op": "add",
-                  "left": {
-                    "bin_op": {
-                      "op": "div",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "C_age",
-                              "indices": [{ "const": 2.0 }]
+            "grad": {
+              "bin_op": {
+                "op": "mul",
+                "left": {
+                  "pop": "S_adult"
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "add",
+                    "left": {
+                      "bin_op": {
+                        "op": "div",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "C_age",
+                                "indices": [
+                                  {
+                                    "const": 2.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "I_child"
                             }
-                          },
-                          "right": { "pop": "I_child" }
+                          }
+                        },
+                        "right": {
+                          "pop_sum": [
+                            "S_child",
+                            "E_child",
+                            "I_child",
+                            "R_child"
+                          ]
                         }
-                      },
-                      "right": {
-                        "pop_sum": [
-                          "S_child",
-                          "E_child",
-                          "I_child",
-                          "R_child"
-                        ]
                       }
-                    }
-                  },
-                  "right": {
-                    "bin_op": {
-                      "op": "div",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "table_lookup": {
-                              "table": "C_age",
-                              "indices": [{ "const": 3.0 }]
+                    },
+                    "right": {
+                      "bin_op": {
+                        "op": "div",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "table_lookup": {
+                                "table": "C_age",
+                                "indices": [
+                                  {
+                                    "const": 3.0
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "pop": "I_adult"
                             }
-                          },
-                          "right": { "pop": "I_adult" }
+                          }
+                        },
+                        "right": {
+                          "pop_sum": [
+                            "S_adult",
+                            "E_adult",
+                            "I_adult",
+                            "R_adult"
+                          ]
                         }
-                      },
-                      "right": {
-                        "pop_sum": [
-                          "S_adult",
-                          "E_adult",
-                          "I_adult",
-                          "R_adult"
-                        ]
                       }
                     }
                   }
@@ -310,7 +342,7 @@
           "source_compartment": "E_child",
           "dest_compartment": "I_child"
         },
-        "rate_grad": { "sigma": { "pop": "E_child" } }
+        "rate_grad": {"sigma":{"grad":{"pop":"E_child"}}}
       },
       {
         "name": "progression_adult",
@@ -327,7 +359,7 @@
           "source_compartment": "E_adult",
           "dest_compartment": "I_adult"
         },
-        "rate_grad": { "sigma": { "pop": "E_adult" } }
+        "rate_grad": {"sigma":{"grad":{"pop":"E_adult"}}}
       },
       {
         "name": "recovery_child",
@@ -344,7 +376,7 @@
           "source_compartment": "I_child",
           "dest_compartment": "R_child"
         },
-        "rate_grad": { "gamma": { "pop": "I_child" } }
+        "rate_grad": {"gamma":{"grad":{"pop":"I_child"}}}
       },
       {
         "name": "recovery_adult",
@@ -361,7 +393,7 @@
           "source_compartment": "I_adult",
           "dest_compartment": "R_adult"
         },
-        "rate_grad": { "gamma": { "pop": "I_adult" } }
+        "rate_grad": {"gamma":{"grad":{"pop":"I_adult"}}}
       }
     ],
     "ode_equations": [],

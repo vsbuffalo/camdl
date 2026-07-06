@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.25",
-  "validated_by": "ocaml-compiler-v0.25",
+  "ir_version": "0.26",
+  "validated_by": "ocaml-compiler-v0.26",
   "model": {
     "name": "seir_vaccine_seasonal",
     "version": "0.3",
@@ -49,32 +49,66 @@
         },
         "rate_grad": {
           "beta": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": { "time_func": { "name": "seasonal" } },
-                          "right": { "pop": "S" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "time_func": {
+                                "name": "seasonal"
+                              }
+                            },
+                            "right": {
+                              "pop": "S"
+                            }
+                          }
+                        },
+                        "right": {
+                          "pop": "I"
                         }
-                      },
-                      "right": { "pop": "I" }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S",
+                        "E",
+                        "I",
+                        "R",
+                        "V"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S", "E", "I", "R", "V"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S", "E", "I", "R", "V"] },
-                  "right": { "pop_sum": ["S", "E", "I", "R", "V"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S",
+                        "E",
+                        "I",
+                        "R",
+                        "V"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S",
+                        "E",
+                        "I",
+                        "R",
+                        "V"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -96,7 +130,7 @@
           "source_compartment": "E",
           "dest_compartment": "I"
         },
-        "rate_grad": { "sigma": { "pop": "E" } }
+        "rate_grad": {"sigma":{"grad":{"pop":"E"}}}
       },
       {
         "name": "recovery",
@@ -113,7 +147,7 @@
           "source_compartment": "I",
           "dest_compartment": "R"
         },
-        "rate_grad": { "gamma": { "pop": "I" } }
+        "rate_grad": {"gamma":{"grad":{"pop":"I"}}}
       },
       {
         "name": "waning",
@@ -130,7 +164,7 @@
           "source_compartment": "R",
           "dest_compartment": "S"
         },
-        "rate_grad": { "omega": { "pop": "R" } }
+        "rate_grad": {"omega":{"grad":{"pop":"R"}}}
       },
       {
         "name": "vacc_waning",
@@ -147,7 +181,7 @@
           "source_compartment": "V",
           "dest_compartment": "S"
         },
-        "rate_grad": { "omega": { "pop": "V" } }
+        "rate_grad": {"omega":{"grad":{"pop":"V"}}}
       },
       {
         "name": "reversion",
@@ -164,7 +198,7 @@
           "source_compartment": "V",
           "dest_compartment": "E"
         },
-        "rate_grad": { "reversion_rate": { "pop": "V" } }
+        "rate_grad": {"reversion_rate":{"grad":{"pop":"V"}}}
       }
     ],
     "ode_equations": [],

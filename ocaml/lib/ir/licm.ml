@@ -179,6 +179,12 @@ let rec rw ctx (e : expr) : expr =
    here have no inter-binding references (cheap invariant nodes stay inline and
    maximal subtrees are hoisted whole), so they are trivially topologically
    ordered — insertion order. *)
+(* LICM a gradient entry: hoist invariant subtrees inside a real derivative
+   expression; an [Unsupported] refusal carries no expression, so pass it
+   through unchanged. (gh#342: rate_grad now carries classified [deriv_entry].) *)
+let rw_deriv_entry ctx (de : deriv_entry) : deriv_entry =
+  match de with DEGrad e -> DEGrad (rw ctx e) | DEUnsupported _ -> de
+
 let licm_model (m : model) : model =
   let model_tables = Hashtbl.create (max 1 (List.length m.tables)) in
   List.iter (fun (t : table) -> Hashtbl.replace model_tables t.name t) m.tables;
@@ -188,7 +194,7 @@ let licm_model (m : model) : model =
       (fun (t : transition) ->
         { t with
           rate = rw ctx t.rate;
-          rate_grad = List.map (fun (p, g) -> (p, rw ctx g)) t.rate_grad })
+          rate_grad = List.map (fun (p, de) -> (p, rw_deriv_entry ctx de)) t.rate_grad })
       m.transitions
   in
   let ode_equations =
