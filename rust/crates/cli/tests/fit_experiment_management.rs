@@ -553,16 +553,47 @@ fn summary_table_row_equals_table_first_row() {
     );
     let table_row = &rows[0];
 
+    // `age_seconds` is the one field that legitimately differs between
+    // the two `camdl` invocations: it is `now − created_at` recomputed
+    // from the wall clock in each separate process (`build_row` in
+    // fit/table_row.rs computes `now_unix - created`, and `now_unix` is
+    // `SystemTime::now()` captured independently by `fit summary` and by
+    // `fit table`). When the two calls land on opposite sides of a
+    // one-second boundary the value differs by 1. `created_at` (the
+    // fit's fixed creation time) is identical on both sides, and
+    // `age_seconds` is the ONLY wall-clock-derived field in the row —
+    // every other field is read from disk-persisted fit artifacts.
+    // Normalize it to a canonical value in both rows before comparing
+    // (asserting first that the field is present, so its presence and
+    // shape are still checked) so the byte-equality assertion covers
+    // every other field without racing the clock.
+    let normalize_age = |row: &mut serde_json::Value, which: &str| {
+        let obj = match row.as_object_mut() {
+            Some(o) => o,
+            None => panic!("{which} table_row is not a JSON object"),
+        };
+        assert!(
+            obj.contains_key("age_seconds"),
+            "{which} table_row is missing the `age_seconds` field",
+        );
+        obj.insert("age_seconds".into(), serde_json::json!(0));
+    };
+    let mut summary_row = summary_row;
+    let mut table_row = table_row.clone();
+    normalize_age(&mut summary_row, "summary");
+    normalize_age(&mut table_row, "table");
+
     // Byte-equality: serialize both to canonical JSON and compare.
     // serde_json::Value::eq is structural (not order-sensitive on
     // objects), but we still want byte-level identity for the
     // `summary ⊆ table` invariant — re-serialize via to_string
     // (which keeps BTreeMap order on Maps) and compare.
     let summary_bytes = serde_json::to_string(&summary_row).unwrap();
-    let table_bytes = serde_json::to_string(table_row).unwrap();
+    let table_bytes = serde_json::to_string(&table_row).unwrap();
     assert_eq!(
         summary_bytes, table_bytes,
-        "summary[\"table_row\"] is not byte-equal to table[\"rows\"][0].\n\
+        "summary[\"table_row\"] is not byte-equal to table[\"rows\"][0] \
+         (after normalizing the wall-clock `age_seconds` field).\n\
          summary: {}\n\
          table:   {}",
         summary_bytes, table_bytes
