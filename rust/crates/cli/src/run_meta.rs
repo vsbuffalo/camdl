@@ -575,19 +575,16 @@ pub fn write_fit_sidecar(
         // layout. Best-effort and .camdl-only: a model supplied directly as
         // `.ir.json` is already captured by the leaf's `model.ir.json`, and a
         // missing/unreadable source must not fail the fit. The recorded
-        // `model_path` is relative to the fit.toml's directory (or absolute).
+        // `model_path` is `config.model.camdl`, resolved exactly as the fit
+        // loaded it — via `resolve_ir_path` / `std::fs::read`, i.e. against the
+        // process CWD (a relative path resolves against CWD; an absolute path
+        // stays absolute). Resolving it against the fit.toml's directory would
+        // disagree with the loader and silently skip the archive whenever the
+        // fit is run from a directory other than the fit.toml's parent.
         if sidecar.model_path.ends_with(".camdl") {
-            let raw = std::path::Path::new(&sidecar.model_path);
-            let src = if raw.is_absolute() {
-                raw.to_path_buf()
-            } else {
-                fit_toml_path
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new("."))
-                    .join(raw)
-            };
+            let src = std::path::Path::new(&sidecar.model_path);
             if src.is_file() {
-                let _ = std::fs::copy(&src, fit_segment.join("model.camdl.original"));
+                let _ = std::fs::copy(src, fit_segment.join("model.camdl.original"));
             }
         }
     }
@@ -1022,52 +1019,83 @@ mod tests {
     /// gh#353: the fit run leaf archives the model `.camdl` source as
     /// `model.camdl.original`, symmetric with `fit.toml.original`, so a consumer
     /// (e.g. camdl-watch's Source tab) can read it from the self-contained leaf
-    /// instead of a checkout-relative path that doesn't resolve elsewhere. The
-    /// recorded `model_path` is relative to the fit.toml's directory.
+    /// instead of a checkout-relative path that doesn't resolve elsewhere.
+    ///
+    /// The recorded `model_path` is `config.model.camdl` — the *same* string the
+    /// fit loads through `resolve_ir_path` (`std::fs::read(path)`), i.e. resolved
+    /// against the **process CWD**, never the fit.toml's directory. A fit is
+    /// normally launched from a directory that is not the fit.toml's parent (the
+    /// config and model live in subdirs, run from the repo root), so this test
+    /// puts the two bases in DIFFERENT places: the model lives in a subdir of
+    /// CWD, while the fit.toml lives in a separate temp dir. Resolving the
+    /// recorded path against the fit.toml's directory would look for a file that
+    /// does not exist and silently skip the archive — so this fails red on the
+    /// old (fit.toml-dir-relative) resolution and passes green once the archiver
+    /// resolves the recorded path exactly as `resolve_ir_path` does.
     #[test]
     fn fit_sidecar_archives_model_camdl_source() {
-        let tmp = crate::test_support::unique_temp_dir("sidecar_model_source");
-        std::fs::create_dir_all(&tmp).unwrap();
-        // A model source next to the fit.toml, referenced by a relative path.
+        // A model source in a CWD-relative subdir — this mirrors how
+        // `resolve_ir_path` found it from `config.model.camdl` (the recorded
+        // `model_path`), which is resolved against the process CWD. Unique
+        // subdir name so parallel test threads don't collide; removed before any
+        // assert can panic so the checkout is never left dirty.
+        let unique = crate::test_support::unique_temp_dir("sidecar_cwd_model");
+        let sub = unique.file_name().unwrap().to_str().unwrap().to_string();
+        let model_dir = std::env::current_dir().unwrap().join(&sub);
+        std::fs::create_dir_all(&model_dir).unwrap();
         let model_src = "compartments { S, I }\n"; // content is opaque to the archive
-        std::fs::write(tmp.join("m.camdl"), model_src).unwrap();
+        std::fs::write(model_dir.join("m.camdl"), model_src).unwrap();
+        let rel_model_path = format!("{sub}/m.camdl");
+
+        // The fit.toml lives in a SEPARATE temp dir — its parent is neither CWD
+        // nor the model's directory. This is the case the bug missed.
+        let tmp = crate::test_support::unique_temp_dir("sidecar_fit_dir");
+        std::fs::create_dir_all(&tmp).unwrap();
         let toml = tmp.join("fit.toml");
-        std::fs::write(&toml, "[model]\ncamdl = \"m.camdl\"\n").unwrap();
+        std::fs::write(&toml, format!("[model]\ncamdl = \"{rel_model_path}\"\n")).unwrap();
         let seg = tmp.join("fits").join("demo-a1b2c3d4");
 
-        write_fit_sidecar(
+        let write_result = write_fit_sidecar(
             &seg,
             &toml,
-            &FitSidecar { model_path: "m.camdl".into(), ..Default::default() },
-        )
-        .unwrap();
-
-        let archived = seg.join("model.camdl.original");
-        assert!(
-            archived.is_file(),
-            "gh#353: the model source must be archived beside fit.toml.original"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&archived).unwrap(),
-            model_src,
-            "the archived source must be a verbatim copy of the model file"
+            &FitSidecar { model_path: rel_model_path.clone(), ..Default::default() },
         );
 
-        // A model given directly as .ir.json has no .camdl source to archive —
-        // the leaf's model.ir.json already captures it, so no stray file.
+        // A non-.camdl model has no source to archive — the leaf's model.ir.json
+        // already captures it, so no stray file. Base-independent.
         let seg_ir = tmp.join("fits").join("demo-irjson0");
-        write_fit_sidecar(
+        let ir_write_result = write_fit_sidecar(
             &seg_ir,
             &toml,
             &FitSidecar { model_path: "m.ir.json".into(), ..Default::default() },
-        )
-        .unwrap();
-        assert!(
-            !seg_ir.join("model.camdl.original").exists(),
-            "a non-.camdl model_path must not produce a model.camdl.original"
         );
 
+        // Gather every fact, then clean up BOTH the CWD subdir and the temp dir
+        // before asserting — a failed assert must never leave state behind.
+        let archived = seg.join("model.camdl.original");
+        let archived_is_file = archived.is_file();
+        let archived_bytes = std::fs::read_to_string(&archived).ok();
+        let ir_archive_absent = !seg_ir.join("model.camdl.original").exists();
+        std::fs::remove_dir_all(&model_dir).ok();
         std::fs::remove_dir_all(&tmp).ok();
+
+        write_result.unwrap();
+        ir_write_result.unwrap();
+        assert!(
+            archived_is_file,
+            "gh#353: the model source must be archived beside fit.toml.original \
+             even when the fit runs from a directory that is not the fit.toml's \
+             parent (model_path is CWD-relative, matching resolve_ir_path)"
+        );
+        assert_eq!(
+            archived_bytes.as_deref(),
+            Some(model_src),
+            "the archived source must be a verbatim copy of the CWD-resolved model file"
+        );
+        assert!(
+            ir_archive_absent,
+            "a non-.camdl model_path must not produce a model.camdl.original"
+        );
     }
 
     // ─── ObsSchema: the observation/dimension descriptor fold ──────────────
