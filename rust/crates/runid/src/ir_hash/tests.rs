@@ -134,12 +134,11 @@ fn representative_model() -> Model {
             stratum: vec![],
             projection: Projection::CumulativeFlow("infection".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
-                rate: Expr::bin_op(
+                rate: ir::Diffable::new(Expr::bin_op(
                     BinOp::Mul,
                     Expr::param("rho"),
                     Expr::Projected(ProjectedExpr { projected: () }),
-                ),
-                rate_grad: Default::default(),
+                )),
             }),
         }],
         parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.5), bounds: Some((0.0, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::Uniform(UniformPrior { lower: 0.0, upper: 2.0 })), transform: Transform::Log }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: Some((0, -1)) }],
@@ -223,7 +222,13 @@ fn model_golden_hash() {
     // carries a Poisson observation, so its empty `rate_grad` length-0 prefix
     // shifts the model hash once — a deliberate, version-bumped re-key (obs
     // gradients are run identity, mirroring `rate_grad`).
-    const GOLDEN: &str = "e009aabc7f8c56ae94f8cd12673f830e73ea30260dc9ac13f11f6bc34c6c70cd";
+    // gh#342 (ir/VERSION -> 0.25): each differentiable obs arg is now a `Diffable`
+    // (expr + classified grad), and `Likelihood::hash_into` folds them via the
+    // derived `diffables()` traversal — so each arg gains a `Diffable` type-tag
+    // and hashes as (expr, grad) together instead of expr-then-adjacent-grad. The
+    // representative model's Poisson `rate` shifts the model hash once — a
+    // deliberate, version-bumped re-key (the obs wire moved to the nested shape).
+    const GOLDEN: &str = "2e561fe33c2b26179d6fa8d4c564700a0629b05ea8a924a3579c14851f23031d";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }

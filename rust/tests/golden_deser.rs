@@ -1,18 +1,16 @@
-//! Deserialise all golden IR files and assert no errors.
+//! Deserialise every `ir/golden/*.ir.json` model, round-trip it
+//! (serialise → deserialise → structural equality), and validate it.
 //!
 //! Run with:  cd rust && cargo test --test golden_deser
 //!
-//! `ir/golden/` is a **frozen v0.3 cross-language deserialisation contract**
-//! (hence the `version == "0.3"` assertion below). It predates the Fix-B
-//! shared-bindings work and is deliberately *not* regenerated to the current
-//! compiler's form — it pins that the Rust deserialiser still reads the older
-//! inlined IR. Consequently these fixtures carry no `bindings` field and
-//! exercise zero binding/reduce deser paths. That coverage lives elsewhere and
-//! is asserted, not assumed: `binding_bearing_model_round_trips` below
-//! (model-level `bindings` + `BindingRef`, against an ocaml/golden model that
-//! actually carries them) and `expr.rs::roundtrips_every_variant_and_a_deep_nesting`
-//! (the `Reduce`/`BindingRef` Expr variants). Regenerating `ir/golden/` to v0.6
-//! is a separate contract decision, not a coverage patch.
+//! This guards the Rust serde over a corpus of hand-authored models (the same
+//! files are used as input models by many integration tests): a serialise/
+//! deserialise asymmetry — a field emitted one way and read another — surfaces
+//! here as a round-trip inequality. The corpus carries no `bindings` field, so
+//! `binding_bearing_model_round_trips` below adds a model that does (model-level
+//! `bindings` + `BindingRef`), and
+//! `expr.rs::roundtrips_every_variant_and_a_deep_nesting` covers the
+//! `Reduce`/`BindingRef` Expr variants.
 
 use std::fs;
 use std::path::Path;

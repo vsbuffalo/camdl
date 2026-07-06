@@ -6691,41 +6691,36 @@ let expand_observations ctx =
           ();
         Ir.Const 0.0
     in
+    (* Each differentiable argument is a [diffable] with an EMPTY grad here; the
+       obs/σ² autodiff driver (a later pass) populates the grads. `n` is a bare
+       expr — θ-independent, no grad. *)
+    let diff e : Ir.diffable = { Ir.expr = e; Ir.grad = [] } in
     let likelihood = match lik_v with
-      (* Gradients land present-but-EMPTY here; the obs/σ² autodiff driver (a
-         later phase) populates them. *)
       | LikNegBinomial kwargs ->
         Ir.NegBinomial {
-          Ir.mean            = resolve_kw kwargs "mean";
-          Ir.mean_grad       = [];
-          Ir.dispersion      = resolve_kw kwargs "r";
-          Ir.dispersion_grad = [];
+          Ir.mean       = diff (resolve_kw kwargs "mean");
+          Ir.dispersion = diff (resolve_kw kwargs "r");
         }
       | LikPoisson kwargs ->
-        Ir.Poisson { Ir.rate = resolve_kw kwargs "rate"; Ir.rate_grad = [] }
+        Ir.Poisson { Ir.rate = diff (resolve_kw kwargs "rate") }
       | LikNormal kwargs ->
         Ir.Normal {
-          Ir.mean      = resolve_kw kwargs "mean";
-          Ir.mean_grad = [];
-          Ir.sd        = resolve_kw kwargs "sd";
-          Ir.sd_grad   = [];
+          Ir.mean = diff (resolve_kw kwargs "mean");
+          Ir.sd   = diff (resolve_kw kwargs "sd");
         }
       | LikBinomial kwargs ->
         Ir.Binomial {
-          Ir.n      = resolve_kw kwargs "n";
-          Ir.p      = resolve_kw kwargs "p";
-          Ir.p_grad = [];
+          Ir.n = resolve_kw kwargs "n";
+          Ir.p = diff (resolve_kw kwargs "p");
         }
       | LikBetaBinomial kwargs ->
         Ir.BetaBinomial {
-          Ir.n          = resolve_kw kwargs "n";
-          Ir.alpha      = resolve_kw kwargs "alpha";
-          Ir.alpha_grad = [];
-          Ir.beta       = resolve_kw kwargs "beta";
-          Ir.beta_grad  = [];
+          Ir.n     = resolve_kw kwargs "n";
+          Ir.alpha = diff (resolve_kw kwargs "alpha");
+          Ir.beta  = diff (resolve_kw kwargs "beta");
         }
       | LikBernoulli kwargs ->
-        Ir.Bernoulli { Ir.p = resolve_kw kwargs "p"; Ir.p_grad = [] }
+        Ir.Bernoulli { Ir.p = diff (resolve_kw kwargs "p") }
     in
     ctx.obs_aux_cols <- [];
     let parts = name_parts_from_bindings od.oindices env in

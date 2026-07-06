@@ -1,4 +1,4 @@
-{"ir_version":"0.24","validated_by":"ocaml-compiler-v0.24","model":{"name":"dt_rate","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.25","validated_by":"ocaml-compiler-v0.25","model":{"name":"dt_rate","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -6,7 +6,7 @@
 {"name":"infection","stoichiometry":[["S",-1],["I",1]],"rate":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"right":{"bin_op":{"op":"div","left":{"dt":null},"right":{"param":"tau"}}}}},"metadata":{"origin_kind":"transmission","source_compartment":"S","dest_compartment":"I"},"rate_grad":{"beta":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"pop":"S"},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"right":{"bin_op":{"op":"mul","left":{"binding_ref":"N"},"right":{"binding_ref":"N"}}}}},"right":{"bin_op":{"op":"div","left":{"dt":null},"right":{"param":"tau"}}}}},"tau":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"right":{"bin_op":{"op":"div","left":{"un_op":{"op":"neg","arg":{"dt":null}}},"right":{"bin_op":{"op":"mul","left":{"param":"tau"},"right":{"param":"tau"}}}}}}}}},
 {"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"gamma":{"pop":"I"}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[
-{"name":"cases","source":"cases","columns":[{"name":"time","role":"time"},{"name":"cases","role":{"value":"count"}}],"scored":"cases","emit_schedule":{"regular":{"start":0.0,"step":2.5,"end":20.0}},"projection":{"cumulative_flow":"infection"},"likelihood":{"poisson":{"rate":{"projected":null}}}}
+{"name":"cases","source":"cases","columns":[{"name":"time","role":"time"},{"name":"cases","role":{"value":"count"}}],"scored":"cases","emit_schedule":{"regular":{"start":0.0,"step":2.5,"end":20.0}},"projection":{"cumulative_flow":"infection"},"likelihood":{"poisson":{"rate":{"expr":{"projected":null}}}}}
 ],"parameters":[
 {"name":"beta","value":{"mode":"fixed","value":1.0},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"fixed","value":0.2},"param_kind":"rate","param_dim":null},

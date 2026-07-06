@@ -601,14 +601,13 @@ fn pgas_obs_model(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> MultiStre
             emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
             projection: ir::observation::Projection::CurrentPop("M".into()),
             likelihood: ir::observation::Likelihood::Poisson(ir::observation::PoissonLikelihood {
-                rate: ir::expr::Expr::BinOp(ir::expr::BinOpWrap {
+                rate: ir::Diffable::new(ir::expr::Expr::BinOp(ir::expr::BinOpWrap {
                     bin_op: ir::expr::BinOpExpr {
                         op: ir::expr::BinOp::Add,
                         left: Box::new(ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () })),
                         right: Box::new(ir::expr::Expr::Const(ir::expr::ConstExpr { value: 0.1 })),
                     },
-                }),
-                rate_grad: Default::default(),
+                })),
             }),
             stratum: vec![],
         },

@@ -195,8 +195,7 @@ fn poisson_obs_with_grad(param: &str, entry: DerivEntry) -> ir::observation::Obs
         stratum: vec![],
         projection: Projection::CumulativeFlow("infection".into()),
         likelihood: Likelihood::Poisson(PoissonLikelihood {
-            rate: Expr::Projected(ProjectedExpr { projected: () }),
-            rate_grad: HashMap::from([(param.to_string(), entry)]),
+            rate: ir::Diffable { expr: Expr::Projected(ProjectedExpr { projected: () }), grad: HashMap::from([(param.to_string(), entry)]) },
         }),
     }
 }
@@ -316,8 +315,7 @@ fn binomial_obs_with_n(n: ir::expr::Expr, projection: ir::observation::Projectio
         projection,
         likelihood: Likelihood::Binomial(BinomialLikelihood {
             n,
-            p: Expr::Const(ConstExpr { value: 0.5 }),
-            p_grad: Default::default(),
+            p: ir::Diffable::new(Expr::Const(ConstExpr { value: 0.5 })),
         }),
     }
 }

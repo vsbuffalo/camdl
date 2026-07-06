@@ -3153,15 +3153,15 @@ let test_obs_grad_nonderived_projection () =
      differentiates to a genuine zero, so ∂rate/∂rho = projected. A param not in
      the arg (beta) is a genuine zero → ABSENT key. *)
   let rate = Ir.BinOp { op = Ir.Mul; left = Ir.Param "rho"; right = Ir.Projected } in
-  let lik = Ir.Poisson { rate; rate_grad = [] } in
+  let lik = Ir.Poisson { rate = { Ir.expr = rate; Ir.grad = [] } } in
   match Autodiff.differentiate_likelihood (Ir.CumulativeFlow "inc") lik [ "rho"; "beta" ] [] [] with
   | Ir.Poisson pl ->
-    (match List.assoc_opt "rho" pl.rate_grad with
+    (match List.assoc_opt "rho" pl.rate.grad with
      | Some (Ir.DEGrad Ir.Projected) -> ()
      | Some _ -> Alcotest.failf "rate_grad[rho]: expected DEGrad Projected"
      | None -> Alcotest.failf "rate_grad[rho] missing");
     Alcotest.(check bool) "beta (genuine zero) omitted from rate_grad"
-      false (List.mem_assoc "beta" pl.rate_grad)
+      false (List.mem_assoc "beta" pl.rate.grad)
   | _ -> Alcotest.failf "likelihood variant changed unexpectedly"
 
 let test_obs_grad_parametric_derived_projection () =
@@ -3170,13 +3170,13 @@ let test_obs_grad_parametric_derived_projection () =
      reaches ∂projected/∂qgam:  ∂rate/∂qgam = rho·P,  ∂rate/∂rho = qgam·P.
      This is the headline gh#180 case — a parametric DerivedExpr projection. *)
   let rate = Ir.BinOp { op = Ir.Mul; left = Ir.Param "rho"; right = Ir.Projected } in
-  let lik = Ir.Poisson { rate; rate_grad = [] } in
+  let lik = Ir.Poisson { rate = { Ir.expr = rate; Ir.grad = [] } } in
   let proj = Ir.DerivedExpr (Ir.BinOp { op = Ir.Mul; left = Ir.Param "qgam"; right = Ir.Pop "P" }) in
   let expect_qgam = Ir.BinOp { op = Ir.Mul; left = Ir.Param "rho";  right = Ir.Pop "P" } in
   let expect_rho  = Ir.BinOp { op = Ir.Mul; left = Ir.Param "qgam"; right = Ir.Pop "P" } in
   match Autodiff.differentiate_likelihood proj lik [ "qgam"; "rho" ] [] [] with
   | Ir.Poisson pl ->
-    let grad p = match List.assoc_opt p pl.rate_grad with
+    let grad p = match List.assoc_opt p pl.rate.grad with
       | Some (Ir.DEGrad e) -> e
       | Some (Ir.DEUnsupported _) -> Alcotest.failf "%s: unexpected DEUnsupported" p
       | None -> Alcotest.failf "%s: missing rate_grad entry" p in
@@ -3194,10 +3194,10 @@ let test_obs_grad_structural_forcing_is_coded_refusal () =
     { times = [ Ir.Const 0.0; Ir.Const 1.0 ];
       values = [ Ir.Param "knot0"; Ir.Const 1.0 ]; method_ = "linear" } in
   let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0); lag = None } in
-  let lik = Ir.Poisson { rate = Ir.TimeFunc "g"; rate_grad = [] } in
+  let lik = Ir.Poisson { rate = { Ir.expr = Ir.TimeFunc "g"; Ir.grad = [] } } in
   match Autodiff.differentiate_likelihood (Ir.CumulativeFlow "inc") lik [ "knot0" ] [ tf ] [] with
   | Ir.Poisson pl ->
-    (match List.assoc_opt "knot0" pl.rate_grad with
+    (match List.assoc_opt "knot0" pl.rate.grad with
      | Some (Ir.DEUnsupported { code = Ir.URStructuralForcing; _ }) -> ()
      | Some _ -> Alcotest.failf "rate_grad[knot0]: expected DEUnsupported URStructuralForcing"
      | None -> Alcotest.failf "structural-forcing param must produce a coded refusal, not be dropped")
@@ -5035,7 +5035,7 @@ let test_poisson_rate_kwarg_parses () =
   |} in
   let m = compile_expect_ok src in
   match (List.hd m.observations).likelihood with
-  | Ir.Poisson { rate = Ir.Projected; _ } -> ()
+  | Ir.Poisson { rate = { Ir.expr = Ir.Projected; _ } } -> ()
   | _ -> Alcotest.fail "expected Poisson{ rate = Projected }"
 
 let test_poisson_positional_errors () =

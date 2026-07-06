@@ -109,7 +109,7 @@ fn time_varying_obs(compiled: &Arc<CompiledModel>, obs_times: Vec<f64>, observat
                 stratum: vec![],
                 projection: ir::observation::Projection::CumulativeFlow("death".into()),
                 likelihood: ir::observation::Likelihood::Poisson(
-                    ir::observation::PoissonLikelihood { rate, rate_grad: Default::default() },
+                    ir::observation::PoissonLikelihood { rate: ir::Diffable::new(rate) },
                 ),
             },
             observations: dense_cells(observations),

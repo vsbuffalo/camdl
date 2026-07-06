@@ -351,15 +351,23 @@ type projection =
    [rate_grad]. `n` (Binomial/BetaBinomial) has NO grad — it must be θ-independent
    (rounded to an integer). Proposal 2026-07-03 §4.1, §4.4/§4.5. *)
 type grad_map = (string * deriv_entry) list
-type poisson_likelihood      = { rate: expr; rate_grad: grad_map }
-type neg_binomial_likelihood = { mean: expr; mean_grad: grad_map;
-                                 dispersion: expr; dispersion_grad: grad_map }
-type normal_likelihood       = { mean: expr; mean_grad: grad_map;
-                                 sd: expr; sd_grad: grad_map }
-type binomial_likelihood     = { n: expr; p: expr; p_grad: grad_map }
-type beta_binomial_likelihood = { n: expr; alpha: expr; alpha_grad: grad_map;
-                                  beta: expr; beta_grad: grad_map }
-type bernoulli_likelihood    = { p: expr; p_grad: grad_map }
+
+(* A differentiable likelihood argument: its expression paired with its
+   per-parameter classified gradient. Bundling the two means a gradient can never
+   be written without a slot for its expression; and the producing pass
+   ([Autodiff.differentiate_likelihood]) reconstructs every [diffable] fully, so a
+   new differentiable argument is a compile error until it is differentiated
+   (proposal 2026-07-06 §4.1/§4.3). `n` (Binomial/BetaBinomial) is NOT a
+   [diffable] — it is θ-independent and carries no gradient. On the wire a
+   [diffable] is the nested shape [{"expr": …, "grad": …}] (grad omitted when
+   empty), so a field [mean] serialises as [{"mean": {"expr": …, "grad": …}}]. *)
+type diffable = { expr: expr; grad: grad_map }
+type poisson_likelihood      = { rate: diffable }
+type neg_binomial_likelihood = { mean: diffable; dispersion: diffable }
+type normal_likelihood       = { mean: diffable; sd: diffable }
+type binomial_likelihood     = { n: expr; p: diffable }
+type beta_binomial_likelihood = { n: expr; alpha: diffable; beta: diffable }
+type bernoulli_likelihood    = { p: diffable }
 
 type likelihood =
   | Poisson      of poisson_likelihood

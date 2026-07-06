@@ -1075,12 +1075,12 @@ let check_model (m : model) : result =
           Known population);
       (match obs.likelihood with
        | NegBinomial nb ->
-         ignore (infer st ~ctx nb.mean);
-         let disp_dim = infer st ~ctx nb.dispersion in
+         ignore (infer st ~ctx nb.mean.expr);
+         let disp_dim = infer st ~ctx nb.dispersion.expr in
          (* Pre-existing constraint, kept for symmetry with the new
             checks below. propagate handles Unknown binding;
             constrain_known catches Known-mismatch. *)
-         propagate st ~ctx nb.dispersion dimensionless;
+         propagate st ~ctx nb.dispersion.expr dimensionless;
          constrain_known st ~code:"E304"
            ~message:(Printf.sprintf
              "%s: NegBinomial `dispersion` must be dimensionless" ctx)
@@ -1098,8 +1098,8 @@ let check_model (m : model) : result =
            ~msg:(Printf.sprintf
              "%s: Poisson `rate` must have the dimension of a count \
               (expected events over the reporting interval)" ctx)
-           p.rate
-       | Normal n -> ignore (infer st ~ctx n.mean); ignore (infer st ~ctx n.sd)
+           p.rate.expr
+       | Normal n -> ignore (infer st ~ctx n.mean.expr); ignore (infer st ~ctx n.sd.expr)
        | Binomial b ->
          (* The binomial `n` is an external DENOMINATOR — a count (e.g. number
             tested). Previously inferred-and-discarded; now constrained so a
@@ -1117,7 +1117,7 @@ let check_model (m : model) : result =
            ~msg:(Printf.sprintf
              "%s: Binomial `p` must be dimensionless (probability); \
               a count here is almost certainly a missing `/N`." ctx)
-           b.p
+           b.p.expr
        | BetaBinomial bb ->
          (* BetaBinomial `n` is the same external count denominator as the
             Binomial; constrain it likewise (bare literal exempt). (§3.1.) *)
@@ -1131,18 +1131,18 @@ let check_model (m : model) : result =
          require_dimensionless st ~ctx
            ~msg:(Printf.sprintf
              "%s: BetaBinomial `alpha` must be dimensionless" ctx)
-           bb.alpha;
+           bb.alpha.expr;
          require_dimensionless st ~ctx
            ~msg:(Printf.sprintf
              "%s: BetaBinomial `beta` must be dimensionless" ctx)
-           bb.beta
+           bb.beta.expr
        | Bernoulli b ->
          (* gh#116: same as Binomial.p — must be a probability. *)
          require_dimensionless st ~ctx
            ~msg:(Printf.sprintf
              "%s: Bernoulli `p` must be dimensionless (probability); \
               a count here is almost certainly a missing `/N`." ctx)
-           b.p);
+           b.p.expr);
       st.projected_dim <- None;
       Hashtbl.reset st.obs_col_dims
     ) m.observations;
@@ -1219,7 +1219,7 @@ let check_model (m : model) : result =
     st.subject <- Some (SObservation obs.name);
     (match obs.likelihood with
      | NegBinomial nb ->
-       let dd = resolve st (read_dim st nb.dispersion) in
+       let dd = resolve st (read_dim st nb.dispersion.expr) in
        (match dd with
         | Known v when not (dim_is_zero v) ->
           emit_error st ~code:"E307"

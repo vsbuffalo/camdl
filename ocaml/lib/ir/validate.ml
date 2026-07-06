@@ -169,12 +169,12 @@ let validate (m : model) : (unit, error list) result =
        nowhere. *)
     let chk e = check_expr_r ~site:here e in
     (match obs.likelihood with
-     | Poisson      { rate; _ }                 -> chk rate
-     | NegBinomial  { mean; dispersion; _ }     -> chk mean; chk dispersion
-     | Normal       { mean; sd; _ }             -> chk mean; chk sd
-     | Binomial     { n; p; _ }                 -> chk n; chk p
-     | BetaBinomial { n; alpha; beta; _ }       -> chk n; chk alpha; chk beta
-     | Bernoulli    { p; _ }                    -> chk p)
+     | Poisson      { rate }                    -> chk rate.expr
+     | NegBinomial  { mean; dispersion }        -> chk mean.expr; chk dispersion.expr
+     | Normal       { mean; sd }                -> chk mean.expr; chk sd.expr
+     | Binomial     { n; p }                    -> chk n; chk p.expr
+     | BetaBinomial { n; alpha; beta }          -> chk n; chk alpha.expr; chk beta.expr
+     | Bernoulli    { p }                       -> chk p.expr)
   ) m.observations;
 
   (* Hoist/autodiff contract (defensive invariant). Every entry in

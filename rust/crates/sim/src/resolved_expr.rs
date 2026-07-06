@@ -955,36 +955,36 @@ pub fn resolve_likelihood(
     use ir::observation::Likelihood;
     match lik {
         Likelihood::Poisson(p) => Ok(ResolvedLikelihood::Poisson {
-            rate: resolve_expr(&p.rate, ctx)?,
-            rate_grad: resolve_grad_map(&p.rate_grad, ctx)?,
+            rate: resolve_expr(&p.rate.expr, ctx)?,
+            rate_grad: resolve_grad_map(&p.rate.grad, ctx)?,
         }),
         Likelihood::NegBinomial(nb) => Ok(ResolvedLikelihood::NegBinomial {
-            mean: resolve_expr(&nb.mean, ctx)?,
-            mean_grad: resolve_grad_map(&nb.mean_grad, ctx)?,
-            dispersion: resolve_expr(&nb.dispersion, ctx)?,
-            dispersion_grad: resolve_grad_map(&nb.dispersion_grad, ctx)?,
+            mean: resolve_expr(&nb.mean.expr, ctx)?,
+            mean_grad: resolve_grad_map(&nb.mean.grad, ctx)?,
+            dispersion: resolve_expr(&nb.dispersion.expr, ctx)?,
+            dispersion_grad: resolve_grad_map(&nb.dispersion.grad, ctx)?,
         }),
         Likelihood::Normal(n) => Ok(ResolvedLikelihood::Normal {
-            mean: resolve_expr(&n.mean, ctx)?,
-            mean_grad: resolve_grad_map(&n.mean_grad, ctx)?,
-            sd: resolve_expr(&n.sd, ctx)?,
-            sd_grad: resolve_grad_map(&n.sd_grad, ctx)?,
+            mean: resolve_expr(&n.mean.expr, ctx)?,
+            mean_grad: resolve_grad_map(&n.mean.grad, ctx)?,
+            sd: resolve_expr(&n.sd.expr, ctx)?,
+            sd_grad: resolve_grad_map(&n.sd.grad, ctx)?,
         }),
         Likelihood::Binomial(b) => Ok(ResolvedLikelihood::Binomial {
             n: resolve_expr(&b.n, ctx)?,
-            p: resolve_expr(&b.p, ctx)?,
-            p_grad: resolve_grad_map(&b.p_grad, ctx)?,
+            p: resolve_expr(&b.p.expr, ctx)?,
+            p_grad: resolve_grad_map(&b.p.grad, ctx)?,
         }),
         Likelihood::BetaBinomial(bb) => Ok(ResolvedLikelihood::BetaBinomial {
             n: resolve_expr(&bb.n, ctx)?,
-            alpha: resolve_expr(&bb.alpha, ctx)?,
-            alpha_grad: resolve_grad_map(&bb.alpha_grad, ctx)?,
-            beta: resolve_expr(&bb.beta, ctx)?,
-            beta_grad: resolve_grad_map(&bb.beta_grad, ctx)?,
+            alpha: resolve_expr(&bb.alpha.expr, ctx)?,
+            alpha_grad: resolve_grad_map(&bb.alpha.grad, ctx)?,
+            beta: resolve_expr(&bb.beta.expr, ctx)?,
+            beta_grad: resolve_grad_map(&bb.beta.grad, ctx)?,
         }),
         Likelihood::Bernoulli(b) => Ok(ResolvedLikelihood::Bernoulli {
-            p: resolve_expr(&b.p, ctx)?,
-            p_grad: resolve_grad_map(&b.p_grad, ctx)?,
+            p: resolve_expr(&b.p.expr, ctx)?,
+            p_grad: resolve_grad_map(&b.p.grad, ctx)?,
         }),
     }
 }

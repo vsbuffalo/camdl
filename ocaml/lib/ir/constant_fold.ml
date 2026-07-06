@@ -106,6 +106,11 @@ let fold_deriv_entry fe (de : deriv_entry) : deriv_entry =
 let fold_grad_map fe (gm : grad_map) : grad_map =
   List.map (fun (p, de) -> (p, fold_deriv_entry fe de)) gm
 
+(* Fold a differentiable likelihood argument: its expression and its gradient
+   map. *)
+let fold_diffable fe (d : diffable) : diffable =
+  { expr = fe d.expr; grad = fold_grad_map fe d.grad }
+
 (* Overdispersion σ² and its gradient (proposal 2026-07-03 §4.5). *)
 let fold_draw_method fe (dm : draw_method) : draw_method =
   match dm with
@@ -122,23 +127,14 @@ let fold_projection fe (p : projection) : projection =
   | (CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _) as p -> p
 
 let fold_likelihood fe (lik : likelihood) : likelihood =
+  let fd = fold_diffable fe in
   match lik with
-  | Poisson pl -> Poisson { rate = fe pl.rate; rate_grad = fold_grad_map fe pl.rate_grad }
-  | NegBinomial nb ->
-      NegBinomial
-        { mean = fe nb.mean; mean_grad = fold_grad_map fe nb.mean_grad;
-          dispersion = fe nb.dispersion; dispersion_grad = fold_grad_map fe nb.dispersion_grad }
-  | Normal n ->
-      Normal
-        { mean = fe n.mean; mean_grad = fold_grad_map fe n.mean_grad;
-          sd = fe n.sd; sd_grad = fold_grad_map fe n.sd_grad }
-  | Binomial b -> Binomial { n = fe b.n; p = fe b.p; p_grad = fold_grad_map fe b.p_grad }
-  | BetaBinomial bb ->
-      BetaBinomial
-        { n = fe bb.n;
-          alpha = fe bb.alpha; alpha_grad = fold_grad_map fe bb.alpha_grad;
-          beta = fe bb.beta; beta_grad = fold_grad_map fe bb.beta_grad }
-  | Bernoulli b -> Bernoulli { p = fe b.p; p_grad = fold_grad_map fe b.p_grad }
+  | Poisson pl -> Poisson { rate = fd pl.rate }
+  | NegBinomial nb -> NegBinomial { mean = fd nb.mean; dispersion = fd nb.dispersion }
+  | Normal n -> Normal { mean = fd n.mean; sd = fd n.sd }
+  | Binomial b -> Binomial { n = fe b.n; p = fd b.p }
+  | BetaBinomial bb -> BetaBinomial { n = fe bb.n; alpha = fd bb.alpha; beta = fd bb.beta }
+  | Bernoulli b -> Bernoulli { p = fd b.p }
 
 (* Fold the expr-bearing fields where a sparse coupling matrix actually
    appears: transition rates + their gradients + σ² draw method, model-level
