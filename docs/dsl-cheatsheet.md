@@ -207,6 +207,38 @@ Every forcing declaration carries a **tier-3 unit literal** between the kind
 keyword and the block (`sinusoidal 'ratio`, `interpolated 'count`, etc.). This
 is required per GH #8.
 
+## Staged residences — `via erlang` / `via hyper_erlang`
+
+Non-exponential dwell times without hand-writing the stage chain. A **draining**
+transition takes `via <law>` in place of `@ rate` (a transition is `@ rate` XOR
+`via law`, never both). The law stages the **source** compartment and supplies
+the per-stage rate, lowering to ordinary `consecutive` sub-stages — zero new IR.
+
+```camdl
+onset     : E --> I  via erlang(stages = 3, rate = sigma)     # E is Erlang-3, mean 1/sigma
+recovery  : I --> R  via erlang(stages = 3, mean = 10 'days)
+
+# mixture, branched at entry; shared endpoint on the arrow, last weight implicit
+clearance : I --> R  via hyper_erlang(
+  branch(label = typical,   weight = p, stages = 2, mean = 4 'weeks),
+  branch(label = prolonged,             stages = 1, mean = 2 'years))
+
+# different destinations → each branch carries `to`, transition has no arrow target
+outcome   : I via hyper_erlang(
+  branch(label = fatal,   weight = cfr, stages = 3, mean =  8 'days, to = D),
+  branch(label = recover,               stages = 3, mean = 12 'days, to = R))
+```
+
+`erlang(stages = k, mean | rate)`: give exactly one of `mean` / `rate`; `stages`
+is a positive-integer literal (structure, not fittable — `mean`/`rate`/`weight`
+are). Each `branch(label, stages, mean | rate, weight?, to?)`; `label` required,
+only the **last** branch omits `weight` (⇒ `1 −` the others). A **bare**
+reference to the staged source sums its stages automatically. Block form:
+`{ via = erlang(...) }`. Diagnostics: `E243` unknown law, `E244` stages, `E245`
+mean-XOR-rate, `E246` single-exit, `E255` <2 branches, `E256` last-branch
+weight, `E258` duplicate labels, `E248` stratified `hyper_erlang` (deferred).
+Full section: language spec §9.4.1.
+
 ## Generated quantities — `quantities {}`
 
 Report derived summaries of a run — the non-scored twin of an observation (no
@@ -324,6 +356,11 @@ before assuming the language doesn't do something — it usually does.
 
 ## Recent and incoming changes
 
+- **`via` dwell laws** (gh#313) — non-exponential residence times on a draining
+  transition: `E --> I via erlang(stages = 3, rate = sigma)` and
+  `via hyper_erlang(branch(...), ...)`. Replaces the `@ rate` clause (a
+  transition is `@ rate` XOR `via law`); lowers to ordinary `consecutive`
+  sub-stages, so no new IR. New reserved word: `via`. See the section above.
 - **`quantities {}`** (2026-06-25) — generated quantities: named, non-scored
   reductions of a run (peak, time-to-peak, attack rate, integral, …) reported as
   `quantities/<name>.tsv` from `fit predict` / `simulate --quantities-out`. New

@@ -1812,7 +1812,149 @@ This gives an Erlang(k=3, rate=sigma) distributed latent period. The mean is the
 same as exponential (1/sigma), but the variance is reduced by factor k,
 producing a more peaked distribution — closer to real disease progression.
 
-#### 9.4.1 Aging across a stratified model (canonical use case)
+Writing the chain by hand works, but it buries the modelling intent and invites
+a silent error: the per-stage rate must be `k * sigma`, and writing plain
+`sigma` gives a mean wrong by a factor of `k` with no diagnostic. The `via`
+clause below states the residence directly and lowers to exactly this chain.
+
+#### 9.4.1 Staged residences: the `via` clause
+
+A compartment's residence time is exponential by default: while an individual is
+in `E`, it leaves at the total exit hazard — memoryless, with coefficient of
+variation (CV, the standard deviation over the mean) equal to one. Real latent
+and infectious periods are more regular than that, and the number of stages in a
+period materially changes epidemic speed and the reproduction number inferred
+from the same data. The **method of stages** recovers a non-exponential dwell by
+splitting a compartment into `k` internal sub-stages, each exponential of rate
+`k/τ`, so the total residence is Erlang(`k`, `k/τ`): mean `τ`, variance `τ²/k`,
+CV `1/√k`. The manual `consecutive` staging above is exactly this construction,
+written out.
+
+A transition that **drains** a compartment can carry that residence law
+directly. In place of a rate it takes a `via` clause naming the law, which
+stages the **source** compartment and supplies the per-stage rate for you:
+
+<!-- camdl-doctest-preamble: via-erlang
+compartments { S, E, I, R }
+parameters {
+  beta  : rate
+  sigma : rate
+  gamma : rate
+}
+-->
+
+```camdl preamble=via-erlang
+transitions {
+  infection : S --> E  @ beta * S * I / (S + E + I + R)  # the force of infection (ordinary event)
+  onset     : E --> I  via erlang(stages = 3, rate = sigma)   # E's residence is Erlang-3
+  recovery  : I --> R  via erlang(stages = 3, rate = gamma)   # I's residence is Erlang-3
+}
+```
+
+A transition is **either** `@ rate` **or** `via law`, never both and never
+neither. `@ rate` is an ordinary exponential transition — the rate is the
+propensity; `via law` is a staged residence — the law supplies `k/τ` per stage.
+The force that *fills* the compartment (here `infection`) stays an ordinary
+`@`-transition; only the draining transition carries the dwell law, so there is
+no "entry force versus residence rate" ambiguity.
+
+`via erlang(...)` lowers to ordinary sub-staged compartments and `consecutive`
+transitions — `E` becomes `E_s1, E_s2, E_s3`, chained at rate `3 * sigma` and
+exiting into `I_s1` — isomorphic (modulo stage names) to the hand-written form
+in §9.4. Because the sub-stages are ordinary compartments, a **bare** reference
+to the staged source sums over its stages automatically (the bare-name rule,
+§5.1): the `I` in the force of infection above already means
+`I_s1 + I_s2 + I_s3`, so the mean infectious period and R₀ are preserved and only
+the dwell-time *shape* changes. `via` introduces no new IR — it is a macro over
+existing compartments and transitions, so all three backends and the gradient
+machinery see the lowered model unchanged.
+
+In `erlang(stages = k, mean = τ | rate = r)`, give exactly one of `mean` or
+`rate` (they are reciprocals); `stages` is a positive-integer literal, because it
+sets how many compartments exist — model structure, not a fittable parameter.
+`mean`, `rate`, and mixture weights *are* fittable and gradient-estimable.
+`stages = 1` is the ordinary exponential dwell — not a no-op, but the `k`-knob at
+its lowest setting.
+
+**Mixtures of durations.** Some periods are not a single Erlang but a mixture:
+an individual takes one of several routes, chosen on entry. `hyper_erlang` is a
+finite mixture of Erlang chains, each written as a self-contained `branch(...)`.
+When the branches share an endpoint, write it once on the arrow and give each
+branch a `weight`; the last branch's weight is implicit (`1 −` the sum of the
+others), so the mixture is normalized by construction:
+
+<!-- camdl-doctest-preamble: via-hyper-shared
+time_unit = 'weeks
+compartments { S, I, R }
+parameters {
+  beta    : rate
+  p       : probability
+  tau_typ : positive
+  tau_pro : positive
+}
+-->
+
+```camdl preamble=via-hyper-shared
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  clearance : I --> R via hyper_erlang(
+    branch(label = typical,   weight = p, stages = 2, mean = tau_typ),
+    branch(label = prolonged,             stages = 1, mean = tau_pro)
+  )
+}
+```
+
+When the branches end in *different* compartments — a case-fatality split, where
+the fatal and recovering arms have different durations *and* destinations — each
+branch carries its own `to` and the transition needs no arrow target (a branch
+with neither a `to` nor a transition target is an error):
+
+<!-- camdl-doctest-preamble: via-hyper-dest
+time_unit = 'days
+compartments { S, E, I, R, D }
+parameters {
+  beta  : rate
+  sigma : rate
+  cfr   : probability
+}
+-->
+
+```camdl preamble=via-hyper-dest
+transitions {
+  infection : S --> E @ beta * S * I / (S + E + I + R)
+  onset     : E --> I @ sigma * E
+  outcome   : I via hyper_erlang(
+    branch(label = fatal,   weight = cfr, stages = 3, mean =  8 'days, to = D),
+    branch(label = recover,               stages = 3, mean = 12 'days, to = R)
+  )
+}
+```
+
+Each branch is `branch(label, stages, mean | rate, weight?, to?)`: `label` is a
+required bare name (it names the branch's stage compartments, `I__fatal__1 …`),
+and `weight` and `to` are optional. This is *not* two competing exponential
+exits — those would give coupled, exponential outcome times; here the outcome is
+decided on entry and each arm runs its own gamma chain to its own destination.
+The bare `I` in the force of infection still sums *all* the branch stages
+(everyone infectious), so transmission is unaffected.
+
+The clause also has a **block form**, mirroring the brace body used elsewhere,
+with `rate` and `via` mutually exclusive:
+`onset : E --> I { via = erlang(stages = 3, rate = sigma) }`.
+
+**Scope and diagnostics.** A staged compartment must be drained by exactly one
+`via` transition; a second draining exit — another `via`, or an ordinary `@`
+racing with the dwell — is the *competing-exit* case, rejected with `E246` and
+left to the manual per-stage form for now. The laws that ship are `erlang` and
+`hyper_erlang`; any other law (`coxian`, `fixed`, …) is `E243`. `hyper_erlang`
+on an already-stratified source is a later sub-phase, rejected today with `E248`.
+Argument mistakes each get a named code: a `stages` that is not a positive
+integer is `E244`; giving both or neither of `mean`/`rate` is `E245`; an unknown
+`erlang` keyword is `E247`; fewer than two branches is `E255`; a `weight` on the
+last branch (or a missing one on any earlier branch) is `E256`; and duplicate
+branch labels are `E258`.
+
+#### 9.4.2 Aging across a stratified model (canonical use case)
 
 `consecutive(dim)` is also the right primitive for **demographic aging across
 age bins** in any stratified model. Combined with `c in
