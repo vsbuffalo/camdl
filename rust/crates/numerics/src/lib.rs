@@ -26,8 +26,11 @@ pub fn lgamma(x: f64) -> f64 {
     ];
 
     if x < 0.5 {
-        // Reflection formula: Γ(x)Γ(1-x) = π / sin(πx)
-        return (PI / (PI * x).sin()).ln() - lgamma(1.0 - x);
+        // Reflection: Γ(x)Γ(1-x) = π / sin(πx). We return ln|Γ| (Γ is negative on
+        // (-1,0),(-3,-2),… where sin(πx)<0), so take ln|sin(πx)| — a bare
+        // `ln(π/sin(πx))` is `ln(negative) = NaN` there. Callers only pass x>0;
+        // this keeps the `pub` fn correct for negative args too (gh#373).
+        return PI.ln() - (PI * x).sin().abs().ln() - lgamma(1.0 - x);
     }
 
     let x = x - 1.0;
@@ -302,6 +305,26 @@ mod tests {
                 assert!(x > 0.0, "quantile must be > 0 (no atom): a={a}, p={p} -> {x}");
                 assert!(approx(gammp(a, x), p, 1e-9), "round-trip a={a} p={p}");
             }
+        }
+    }
+
+    #[test]
+    fn lgamma_negative_args() {
+        // Reflection must handle x<0 (returns ln|Γ|); a bare ln(π/sin(πx)) is
+        // NaN where sin(πx)<0, i.e. x in (-1,0),(-3,-2),… (gh#373).
+        // scipy.special.gammaln oracles (covers both sin>0 and sin<0 regions).
+        let cases = [
+            (-0.5, 1.265512123484645),
+            (-0.1, 2.368961332728789),
+            (-1.5, 0.860047015376481),
+            (-2.5, -0.056243716497674),
+            (-2.7, -0.071407085315646),
+            (-3.5, -1.309006684993042),
+        ];
+        for (x, want) in cases {
+            let got = lgamma(x);
+            assert!(got.is_finite(), "lgamma({x}) must be finite, got {got}");
+            assert!(approx(got, want, 1e-10), "lgamma({x})={got}, want {want}");
         }
     }
 
