@@ -107,9 +107,20 @@ fn attempt_nuts_fit(
     param: &str,
     param_init: f64,
 ) -> Result<sim::inference::pgas::PGASResult, SimError> {
+    attempt_nuts_fit_with(param, param_init, |m| m.observations = vec![obs_block])
+}
+
+/// As `attempt_nuts_fit`, but `setup` gets the model (with `param` already pushed
+/// as estimated) to configure — set the observation and/or inject a transition
+/// `rate_grad` entry. Used by the rate-domain gate tests (gh#342 P4).
+fn attempt_nuts_fit_with(
+    param: &str,
+    param_init: f64,
+    setup: impl FnOnce(&mut ir::Model),
+) -> Result<sim::inference::pgas::PGASResult, SimError> {
     let mut model = host_model();
     model.parameters.push(estimated_param(param, param_init));
-    model.observations = vec![obs_block];
+    setup(&mut model);
 
     let compiled = Arc::new(CompiledModel::new(model).unwrap());
     let params = params_from_compiled(&compiled);
@@ -197,6 +208,93 @@ fn poisson_obs_with_grad(param: &str, entry: DerivEntry) -> ir::observation::Obs
         likelihood: Likelihood::Poisson(PoissonLikelihood {
             rate: ir::Diffable { expr: Expr::Projected(ProjectedExpr { projected: () }), grad: HashMap::from([(param.to_string(), entry)]) },
         }),
+    }
+}
+
+/// A benign Poisson obs with an EMPTY grad — no estimated param is refused via
+/// the observation, so a rate-domain refusal can be isolated.
+fn benign_obs() -> ir::observation::ObservationModel {
+    use ir::expr::*;
+    use ir::observation::*;
+    ObservationModel {
+        name: "weekly_cases".into(),
+        source: "weekly_cases".into(),
+        columns: obs_columns(),
+        scored: "weekly_cases".into(),
+        emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
+        stratum: vec![],
+        projection: Projection::CumulativeFlow("infection".into()),
+        likelihood: Likelihood::Poisson(PoissonLikelihood {
+            rate: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
+        }),
+    }
+}
+
+/// A model-setup closure that sets a benign obs and injects `entry` as `param`'s
+/// rate_grad on the `infection` transition — the RATE analogue of an obs grad.
+fn with_rate_grad(param: &str, entry: DerivEntry) -> impl FnOnce(&mut ir::Model) {
+    let param = param.to_string();
+    move |m: &mut ir::Model| {
+        m.observations = vec![benign_obs()];
+        for t in &mut m.transitions {
+            if t.name == "infection" {
+                t.rate_grad.insert(param.clone(), entry.clone());
+            }
+        }
+    }
+}
+
+// ── Rate-domain gate (gh#342 P4): the preflight now scans transition rate_grad ──
+
+#[test]
+fn preflight_refuses_periodic_coeff_in_rate() {
+    // A Periodic step-value coefficient in a RATE serialises Unsupported{Periodic}
+    // (gh#342 P3); the preflight refuses it at the run_pgas boundary — the rate
+    // analogue of the obs case, subsuming coeff_guard's periodic set.
+    let r = attempt_nuts_fit_with("wpeak", 1.0, with_rate_grad(
+        "wpeak",
+        DerivEntry::Unsupported { node: "time_func:weekly".into(), code: UnsupportedReason::PeriodicCoeff },
+    ));
+    match r {
+        Err(SimError::Validation(msg)) => {
+            assert!(msg.contains("wpeak"), "must name the refused rate param; got: {}", msg);
+            assert!(msg.contains("Periodic"), "must carry the Periodic reason; got: {}", msg);
+        }
+        Ok(_) => panic!("expected a rate Periodic-coeff refusal, but the fit was admitted"),
+        Err(e) => panic!("expected a Validation refusal, got: {:?}", e),
+    }
+}
+
+#[test]
+fn preflight_refuses_lag_in_rate() {
+    // A forcing `lag` param reaching a RATE: Unsupported{Lag}; refused.
+    let r = attempt_nuts_fit_with("tau", 1.0, with_rate_grad(
+        "tau",
+        DerivEntry::Unsupported { node: "time_func:seasonal".into(), code: UnsupportedReason::Lag },
+    ));
+    match r {
+        Err(SimError::Validation(msg)) => {
+            assert!(msg.contains("tau"), "must name the refused rate param; got: {}", msg);
+            assert!(msg.contains("lag"), "must carry the lag reason; got: {}", msg);
+        }
+        Ok(_) => panic!("expected a rate lag refusal, but the fit was admitted"),
+        Err(e) => panic!("expected a Validation refusal, got: {:?}", e),
+    }
+}
+
+#[test]
+fn preflight_admits_rate_forcing_param_with_grad() {
+    // A Sinusoidal amplitude in a RATE carries a real Grad → admitted (the rate
+    // analogue of the obs acceptance test; the tier-1 case coeff_guard's has_grad
+    // escape allowed, now admitted by construction).
+    let r = attempt_nuts_fit_with("amp", 0.3, with_rate_grad(
+        "amp",
+        DerivEntry::Grad(ir::expr::Expr::pop("S")),
+    ));
+    match r {
+        Err(SimError::Validation(msg)) if msg.contains("could not emit") =>
+            panic!("preflight must ADMIT a rate param with a real Grad; got refusal: {}", msg),
+        _ => {} // Ok, or an unrelated numerical error, is acceptable here
     }
 }
 
