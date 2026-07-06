@@ -813,7 +813,9 @@ let collect_declarations ctx decls =
    AST nodes (staged-residence proposal, 2026-06-26 §5).
 
    Scope:
-   - Erlang only; `hyper_erlang` (Phase 4) and any unknown law → E243.
+   - `erlang` and `hyper_erlang` are both lowered; any other law (`coxian`,
+     `fixed`, …) → E243. `hyper_erlang` on an already-stratified source is a
+     later sub-phase → E248.
    - The source may itself be stratified (age × stage). A BARE reference to the
      staged source sums over stages for free (PopSum); a PARTIAL-index reference
      (`I[a]` in an age FOI) is rewritten by the pass into the explicit stage-sum
