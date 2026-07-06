@@ -81,27 +81,73 @@ formulation 2's states).
 
 ## Impact
 
-Bias, not merely degraded mixing. The AS step is one of the partially-collapsed
-Gibbs steps whose exact form Theorem 1's invariance proof requires; using `f`
-alone samples the ancestor index from the wrong conditional. It does **not**
-degrade to valid Particle Gibbs (which would set `a^N = N`) — it is a third,
-non-invariant kernel.
+The invariance _guarantee_ is forfeited. The AS step is one of the
+partially-collapsed Gibbs steps whose exact form Theorem 1's invariance proof
+requires; using `f` alone draws the ancestor index from the wrong conditional,
+so the PGAS kernel is no longer _provably_ invariant for the joint posterior. It
+does not degrade to valid Particle Gibbs (which would set `a^N = N`) — it is a
+distinct, non-guaranteed kernel.
 
-Magnitude scales with the **dispersion of the particle weights at observation
-times** (≈ `1 − ESS/N`), because the dropped factor cancels in the softmax to
-the extent it is constant across ancestors:
+But "guarantee forfeited" is not "posterior grossly wrong," and the two must not
+be conflated. Ancestor sampling sits on top of a Particle Gibbs backbone that
+leaves the exact target invariant _without_ it (Andrieu, Doucet & Holenstein
+2010); AS (Lindsten et al. 2014) is a mixing accelerator that fights path
+degeneracy. A wrong AS weight therefore most plausibly degrades the
+_acceleration_ (mixing efficiency) rather than the _stationary target_: the
+reference is re-anchored onto correctly-sampled particle paths, the wrong weight
+only changes _which_ correct path it grabs, and the final `∝ w_T` draw corrects
+further. The stationary bias is expected to be second-order in non-pathological
+regimes; the mixing cost first-order.
 
-- near-uniform weights (noisy/uninformative observations, high ESS) → near-zero
-  bias;
-- dispersed weights (sharp observations, weak process noise, heterogeneous or
-  spatial states, low ESS) → substantial bias.
+Any residual stationary error grows with the dispersion of the particle weights
+at observation times (≈ `1 − ESS/N`) — near-zero when weights are near-uniform
+(noisy observations, high ESS), larger when they are dispersed (sharp
+observations, low ESS) — and the bug fires on the substep after each observation
+(every substep at `dt` = observation cadence). What that amounts to in practice
+is measured below.
 
-Exposure also scales with cadence: at `dt` = observation spacing the bug fires
-every substep; with finer `dt` only the first substep of each interval. The
-direction is toward transition-plausible-but-data-inconsistent histories —
-reconstructed latent trajectories biased toward smoothness around observation
-times — which most plausibly biases process-noise / overdispersion parameters
-downward (model-dependent).
+## Measured impact
+
+A before/after study estimated the overdispersion `sigma_sq` (the parameter the
+bug's smoothing bias should most affect) with the buggy and fixed PGAS binaries
+on identical data, against a bootstrap-particle-filter grid reference that does
+not use `csmc_as` and is therefore bug-independent. Data-generating truth
+`sigma_sq = 0.1`.
+
+| model / regime                        | source   |  mean | median |         90% CI |
+| ------------------------------------- | -------- | ----: | -----: | -------------: |
+| SIR, stressed (sharp obs)             | buggy    | 0.312 |  0.277 | [0.129, 0.596] |
+|                                       | fixed    | 0.308 |  0.275 | [0.130, 0.587] |
+|                                       | grid ref | 0.302 |  0.270 | [0.122, 0.588] |
+| SIR, benign (noisy obs)               | buggy    | 0.344 |  0.311 | [0.125, 0.679] |
+|                                       | fixed    | 0.336 |  0.300 | [0.123, 0.671] |
+|                                       | grid ref | 0.339 |  0.307 | [0.117, 0.676] |
+| SIRS, multi-wave (σ² well-identified) | buggy    | 0.119 |  0.118 | [0.093, 0.151] |
+|                                       | fixed    | 0.119 |  0.118 | [0.092, 0.149] |
+|                                       | grid ref | 0.119 |  0.119 | [0.078, 0.166] |
+
+Across all three the buggy↔fixed difference is within Monte-Carlo noise
+(fixed−buggy median: −0.002 ≈ 0.7σ stressed SIR, −0.011 ≈ 1.2σ benign SIR,
++0.000 ≈ 0.1σ SIRS), and both variants match the bug-independent grid reference
+about equally. Critically, the SIRS series identifies `sigma_sq` sharply
+(posterior 0.118, CI [0.09, 0.15], recovering truth) yet buggy and fixed remain
+indistinguishable — so the null is **not** a weak-identification artifact of the
+single-epidemic case. No systematic mixing difference appeared either
+(`sigma_sq` ESS was buggy-worse in one regime, buggy-better in another — a
+wash).
+
+This is consistent with the mixing-not-stationary reading above: on realistic
+epidemic fits the corrected weight leaves the posterior essentially where the
+buggy one had it. The fix is a correctness fix — the AS weight is provably wrong
+(Eq. 17) — and remains worth landing regardless of the measured magnitude.
+
+**Caveat (worth stating).** These are simple, single-parameter epi probes. They
+show no material posterior corruption on weakly- or well-identified
+overdispersed epidemic models, but they do not construct a pathological regime —
+a sharply-identified parameter with _persistently_ near-degenerate weights (very
+sharp observations, low ESS at every step) — where the residual stationary error
+could be larger. The measurement bounds the practical impact on typical fits as
+negligible; it does not prove harmlessness in the worst case.
 
 ## Reproduction (red → green)
 
