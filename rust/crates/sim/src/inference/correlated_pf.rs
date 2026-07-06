@@ -147,17 +147,21 @@ pub fn binomial_quantile(n: u64, p: f64, u: f64) -> u64 {
     }
 }
 
-/// Transform a standard normal to a Gamma(shape, scale) draw via inverse CDF.
-/// Uses the Wilson-Hilferty approximation for the inverse Gamma CDF.
-fn normal_to_gamma(z: f64, shape: f64, scale: f64) -> f64 {
-    if shape < 1e-6 { return 1.0; } // degenerate: no overdispersion
-    // Wilson-Hilferty: if X ~ Gamma(shape, 1), then
-    //   ((X/shape)^(1/3) - (1 - 1/(9*shape))) / sqrt(1/(9*shape)) ≈ N(0,1)
-    // Invert: X = shape * (1 - 1/(9*shape) + z/sqrt(9*shape))^3
-    let c = 1.0 / (9.0 * shape);
-    let cube = 1.0 - c + z * c.sqrt();
-    let x = if cube > 0.0 { shape * cube * cube * cube } else { 0.0 };
-    x * scale // scale from Gamma(shape, 1) to Gamma(shape, scale)
+/// Transform a standard normal `z` to a `Gamma(shape, scale)` draw via the exact
+/// inverse CDF: `z → u = Φ(z) → scale · GammaQuantile(u; shape)`.
+///
+/// Deterministic and monotone in `z`, so it preserves the correlated-PF
+/// common-random-numbers coupling; and it samples the *exact* Gamma law, so the
+/// correlated path now propagates the same distribution as `rng.gamma_multiplier`
+/// (`rand_distr::Gamma`) does on every other path. Replaces the Wilson-Hilferty
+/// approximation, which was accurate only for `shape ≳ 2` and, below that, biased
+/// the multiplier low and clamped a growing fraction of draws to exactly 0 —
+/// silently biasing correlated PMMH on overdispersed models (gh#372).
+pub fn normal_to_gamma(z: f64, shape: f64, scale: f64) -> f64 {
+    if shape < 1e-6 {
+        return 1.0; // degenerate: no overdispersion (multiplier ≡ 1)
+    }
+    scale * numerics::gammp_inv(shape, phi(z))
 }
 
 /// Standard normal CDF — delegates to `obs_loglik::normal_cdf`.
