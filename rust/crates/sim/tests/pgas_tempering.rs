@@ -131,14 +131,13 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
                 projection: ir::observation::Projection::CumulativeFlow("death".into()),
                 likelihood: ir::observation::Likelihood::Poisson(ir::observation::PoissonLikelihood {
                     // rate = projected + 0.1 (floor to avoid Poisson(0) → -inf)
-                    rate: ir::expr::Expr::BinOp(ir::expr::BinOpWrap {
+                    rate: ir::Diffable::new(ir::expr::Expr::BinOp(ir::expr::BinOpWrap {
                         bin_op: ir::expr::BinOpExpr {
                             op: ir::expr::BinOp::Add,
                             left: Box::new(ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () })),
                             right: Box::new(ir::expr::Expr::Const(ir::expr::ConstExpr { value: 0.1 })),
                         },
-                    }),
-                    rate_grad: Default::default(),
+                    })),
                 }),
             },
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),

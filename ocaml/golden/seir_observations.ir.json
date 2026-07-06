@@ -1,4 +1,4 @@
-{"ir_version":"0.24","validated_by":"ocaml-compiler-v0.24","model":{"name":"seir_observations","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.25","validated_by":"ocaml-compiler-v0.25","model":{"name":"seir_observations","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"E","kind":"integer"},
 {"name":"I","kind":"integer"},
@@ -8,8 +8,8 @@
 {"name":"progression","stoichiometry":[["E",-1],["I",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"sigma"},"right":{"pop":"E"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"E","dest_compartment":"I"},"rate_grad":{"sigma":{"pop":"E"}}},
 {"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"gamma":{"pop":"I"}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[
-{"name":"weekly_cases","source":"weekly_cases","columns":[{"name":"time","role":"time"},{"name":"weekly_cases","role":{"value":"count"}}],"scored":"weekly_cases","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":365.2425}},"projection":{"cumulative_flow":"infection"},"likelihood":{"neg_binomial":{"mean":{"bin_op":{"op":"mul","left":{"param":"rho"},"right":{"projected":null}}},"mean_grad":{"rho":{"grad":{"projected":null}}},"dispersion":{"param":"k"},"dispersion_grad":{"k":{"grad":{"const":1.0}}}}}},
-{"name":"detection","source":"detection","columns":[{"name":"time","role":"time"},{"name":"detection","role":{"value":"count"}}],"scored":"detection","emit_schedule":{"regular":{"start":0.0,"step":14.0,"end":365.2425}},"projection":{"current_pop":"I"},"likelihood":{"bernoulli":{"p":{"param":"p_detect"},"p_grad":{"p_detect":{"grad":{"const":1.0}}}}}}
+{"name":"weekly_cases","source":"weekly_cases","columns":[{"name":"time","role":"time"},{"name":"weekly_cases","role":{"value":"count"}}],"scored":"weekly_cases","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":365.2425}},"projection":{"cumulative_flow":"infection"},"likelihood":{"neg_binomial":{"mean":{"expr":{"bin_op":{"op":"mul","left":{"param":"rho"},"right":{"projected":null}}},"grad":{"rho":{"grad":{"projected":null}}}},"dispersion":{"expr":{"param":"k"},"grad":{"k":{"grad":{"const":1.0}}}}}}},
+{"name":"detection","source":"detection","columns":[{"name":"time","role":"time"},{"name":"detection","role":{"value":"count"}}],"scored":"detection","emit_schedule":{"regular":{"start":0.0,"step":14.0,"end":365.2425}},"projection":{"current_pop":"I"},"likelihood":{"bernoulli":{"p":{"expr":{"param":"p_detect"},"grad":{"p_detect":{"grad":{"const":1.0}}}}}}}
 ],"parameters":[
 {"name":"beta","value":{"mode":"estimated","bounds":[0.001,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},

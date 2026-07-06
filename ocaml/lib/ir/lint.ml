@@ -142,12 +142,12 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
      | CurrentPopSum names -> List.iter add names
      | DerivedExpr e -> add_expr e);
     (match obs.likelihood with
-     | Poisson { rate; _ } -> add_expr rate
-     | NegBinomial { mean; dispersion; _ } -> add_expr mean; add_expr dispersion
-     | Normal { mean; sd; _ } -> add_expr mean; add_expr sd
-     | Binomial { n; p; _ } -> add_expr n; add_expr p
-     | BetaBinomial { n; alpha; beta; _ } -> add_expr n; add_expr alpha; add_expr beta
-     | Bernoulli { p; _ } -> add_expr p)
+     | Poisson { rate } -> add_expr rate.expr
+     | NegBinomial { mean; dispersion } -> add_expr mean.expr; add_expr dispersion.expr
+     | Normal { mean; sd } -> add_expr mean.expr; add_expr sd.expr
+     | Binomial { n; p } -> add_expr n; add_expr p.expr
+     | BetaBinomial { n; alpha; beta } -> add_expr n; add_expr alpha.expr; add_expr beta.expr
+     | Bernoulli { p } -> add_expr p.expr)
   ) m.observations;
 
   (* Model-level shared bindings: a compartment used only in `let N = S+I+R`

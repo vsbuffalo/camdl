@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.24",
+  "ir_version": "0.25",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "cholera_siwr",
@@ -222,10 +222,14 @@
         "likelihood": {
           "neg_binomial": {
             "mean": {
-              "projected": null
+              "expr": {
+                "projected": null
+              }
             },
             "dispersion": {
-              "param": "rho"
+              "expr": {
+                "param": "rho"
+              }
             }
           }
         }

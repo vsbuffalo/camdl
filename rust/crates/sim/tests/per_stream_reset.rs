@@ -126,10 +126,8 @@ fn ir_incidence_obs(name: &str) -> IrObs {
         stratum: vec![],
         projection: Projection::CumulativeFlow("inflow".into()),
         likelihood: Likelihood::Normal(NormalLikelihood {
-            mean: Expr::Projected(ProjectedExpr { projected: () }),
-            mean_grad: Default::default(),
-            sd: Expr::Const(ConstExpr { value: 50.0 }),
-            sd_grad: Default::default(),
+            mean: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
+            sd: ir::Diffable::new(Expr::Const(ConstExpr { value: 50.0 })),
         }),
     }
 }

@@ -72,14 +72,13 @@ fn model_with_obs(
             projection,
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 // rate = projected + 0.1 (floor to avoid Poisson(0) → -inf)
-                rate: Expr::BinOp(BinOpWrap {
+                rate: ir::Diffable::new(Expr::BinOp(BinOpWrap {
                     bin_op: BinOpExpr {
                         op: BinOp::Add,
                         left: Box::new(Expr::Projected(ProjectedExpr { projected: () })),
                         right: Box::new(Expr::Const(ConstExpr { value: 0.1 })),
                     },
-                }),
-                rate_grad: Default::default(),
+                })),
             }),
         }],
         bindings: vec![],
@@ -347,14 +346,13 @@ fn snapshot_reads_post_intervention_state() {
             stratum: vec![],
             projection: Projection::CurrentPop("S".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
-                rate: Expr::BinOp(BinOpWrap {
+                rate: ir::Diffable::new(Expr::BinOp(BinOpWrap {
                     bin_op: BinOpExpr {
                         op: BinOp::Add,
                         left: Box::new(Expr::Projected(ProjectedExpr { projected: () })),
                         right: Box::new(Expr::Const(ConstExpr { value: 0.1 })),
                     },
-                }),
-                rate_grad: Default::default(),
+                })),
             }),
         }],
         bindings: vec![],

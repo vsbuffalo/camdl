@@ -1355,12 +1355,12 @@ pub fn stream_aux_columns(obs: &ir::observation::ObservationModel) -> Vec<String
     }
     use ir::observation::Likelihood as L;
     let args: Vec<&ir::expr::Expr> = match &obs.likelihood {
-        L::Poisson(p) => vec![&p.rate],
-        L::NegBinomial(nb) => vec![&nb.mean, &nb.dispersion],
-        L::Normal(n) => vec![&n.mean, &n.sd],
-        L::Binomial(b) => vec![&b.n, &b.p],
-        L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha, &bb.beta],
-        L::Bernoulli(b) => vec![&b.p],
+        L::Poisson(p) => vec![&p.rate.expr],
+        L::NegBinomial(nb) => vec![&nb.mean.expr, &nb.dispersion.expr],
+        L::Normal(n) => vec![&n.mean.expr, &n.sd.expr],
+        L::Binomial(b) => vec![&b.n, &b.p.expr],
+        L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha.expr, &bb.beta.expr],
+        L::Bernoulli(b) => vec![&b.p.expr],
     };
     let mut out = Vec::new();
     for e in args { walk(e, &mut out); }
@@ -1937,8 +1937,7 @@ mod tests {
             stratum: vec![StratumKey { dim: "patch".into(), level: level.into() }],
             projection: Projection::CumulativeFlow(format!("infection_{level}")),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
-                rate: ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () }),
-                rate_grad: Default::default(),
+                rate: ir::Diffable::new(ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () })),
             }),
         }
     }

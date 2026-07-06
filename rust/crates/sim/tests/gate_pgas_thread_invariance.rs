@@ -70,7 +70,7 @@ fn poisson_obs_block() -> ir::observation::ObservationModel {
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
         projection: Projection::CumulativeFlow("infection".into()),
-        likelihood: Likelihood::Poisson(PoissonLikelihood { rate, rate_grad: Default::default() }),
+        likelihood: Likelihood::Poisson(PoissonLikelihood { rate: ir::Diffable::new(rate) }),
     }
 }
 

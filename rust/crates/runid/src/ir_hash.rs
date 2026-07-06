@@ -24,7 +24,8 @@
 //! and production handles multi-GB IRs without overflow, so a recursive
 //! `hash_into` is exactly as safe as the engine itself.
 
-use ir::deriv::{DerivEntry, UnsupportedReason};
+use ir::deriv::{DerivEntry, Diffable, UnsupportedReason};
+use ir::Differentiable;
 use ir::expr::{BinOp, Expr, UnOp};
 use ir::intervention::{
     Action, CmpOp, FireSource, Intervention, InterventionKind,
@@ -110,6 +111,16 @@ impl ContentAddressed for DerivEntry {
                 code.hash_into(h);
             }
         }
+    }
+}
+
+impl ContentAddressed for Diffable {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::deriv::Diffable");
+        self.expr.hash_into(h);
+        // The classified gradient map, sorted by key (mirrors the transition
+        // `rate_grad`); empty ⇒ length-0 prefix.
+        h.write_str_map(self.grad.iter());
     }
 }
 
@@ -516,48 +527,28 @@ impl ContentAddressed for Projection {
 impl ContentAddressed for Likelihood {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::observation::Likelihood");
+        // Variant index (declaration order — permanent, new variants append).
+        h.write_u32(match self {
+            Likelihood::Poisson(_) => 0,
+            Likelihood::NegBinomial(_) => 1,
+            Likelihood::Normal(_) => 2,
+            Likelihood::Binomial(_) => 3,
+            Likelihood::BetaBinomial(_) => 4,
+            Likelihood::Bernoulli(_) => 5,
+        });
+        // The θ-independent `n` (Binomial/BetaBinomial) carries no gradient, so
+        // it is not a `Diffable` and must be hashed explicitly, before the
+        // differentiable positions.
         match self {
-            // Each arg's gradient map is hashed right after its expression —
-            // sorted by key (mirrors the transition rate_grad); empty ⇒ length-0
-            // prefix. `n` (Binomial/BetaBinomial) carries no grad (θ-independent).
-            Likelihood::Poisson(l) => {
-                h.write_u32(0);
-                l.rate.hash_into(h);
-                h.write_str_map(l.rate_grad.iter());
-            }
-            Likelihood::NegBinomial(l) => {
-                h.write_u32(1);
-                l.mean.hash_into(h);
-                h.write_str_map(l.mean_grad.iter());
-                l.dispersion.hash_into(h);
-                h.write_str_map(l.dispersion_grad.iter());
-            }
-            Likelihood::Normal(l) => {
-                h.write_u32(2);
-                l.mean.hash_into(h);
-                h.write_str_map(l.mean_grad.iter());
-                l.sd.hash_into(h);
-                h.write_str_map(l.sd_grad.iter());
-            }
-            Likelihood::Binomial(l) => {
-                h.write_u32(3);
-                l.n.hash_into(h);
-                l.p.hash_into(h);
-                h.write_str_map(l.p_grad.iter());
-            }
-            Likelihood::BetaBinomial(l) => {
-                h.write_u32(4);
-                l.n.hash_into(h);
-                l.alpha.hash_into(h);
-                h.write_str_map(l.alpha_grad.iter());
-                l.beta.hash_into(h);
-                h.write_str_map(l.beta_grad.iter());
-            }
-            Likelihood::Bernoulli(l) => {
-                h.write_u32(5);
-                l.p.hash_into(h);
-                h.write_str_map(l.p_grad.iter());
-            }
+            Likelihood::Binomial(l) => l.n.hash_into(h),
+            Likelihood::BetaBinomial(l) => l.n.hash_into(h),
+            _ => {}
+        }
+        // Every differentiable position (each `Diffable` = expr + classified grad
+        // map), in declaration order, via the derived traversal — so a new
+        // likelihood argument is hashed automatically, never forgotten.
+        for (_, d) in self.diffables() {
+            d.hash_into(h);
         }
     }
 }

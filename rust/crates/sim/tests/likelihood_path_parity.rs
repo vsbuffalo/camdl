@@ -90,14 +90,12 @@ fn model() -> Arc<CompiledModel> {
                 projection: Projection::CurrentPop("I".into()),
                 likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {
                     // mean = rho * I  (Pop ref → reads counts)
-                    mean: Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+                    mean: ir::Diffable::new(Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
                         op: BinOp::Mul,
                         left: Box::new(Expr::Param(ParamExpr { param: "rho".into() })),
                         right: Box::new(Expr::Pop(PopExpr { pop: "I".into() })),
-                    }}),
-                    mean_grad: Default::default(),
-                    dispersion: Expr::Const(ConstExpr { value: 5.0 }),
-                    dispersion_grad: Default::default(),
+                    }})),
+                    dispersion: ir::Diffable::new(Expr::Const(ConstExpr { value: 5.0 })),
                 }),
             },
         ],

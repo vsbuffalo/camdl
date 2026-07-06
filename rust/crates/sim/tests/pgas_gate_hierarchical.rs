@@ -67,8 +67,7 @@ fn build_poisson_obs_block() -> ir::observation::ObservationModel {
         stratum: vec![],
         projection: Projection::CumulativeFlow("infection".into()),
         likelihood: Likelihood::Poisson(PoissonLikelihood {
-            rate: Expr::Projected(ProjectedExpr { projected: () }),
-            rate_grad: Default::default(),
+            rate: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
         }),
     }
 }

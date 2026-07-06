@@ -80,25 +80,25 @@ fn collect(e: &Expr, out: &mut HashSet<String>) {
 /// Collect parameters in a likelihood's coefficient expressions.
 fn collect_likelihood(lik: &Likelihood, out: &mut HashSet<String>) {
     match lik {
-        Likelihood::Poisson(p) => collect(&p.rate, out),
+        Likelihood::Poisson(p) => collect(&p.rate.expr, out),
         Likelihood::NegBinomial(nb) => {
-            collect(&nb.mean, out);
-            collect(&nb.dispersion, out);
+            collect(&nb.mean.expr, out);
+            collect(&nb.dispersion.expr, out);
         }
         Likelihood::Normal(n) => {
-            collect(&n.mean, out);
-            collect(&n.sd, out);
+            collect(&n.mean.expr, out);
+            collect(&n.sd.expr, out);
         }
         Likelihood::Binomial(b) => {
             collect(&b.n, out);
-            collect(&b.p, out);
+            collect(&b.p.expr, out);
         }
         Likelihood::BetaBinomial(bb) => {
             collect(&bb.n, out);
-            collect(&bb.alpha, out);
-            collect(&bb.beta, out);
+            collect(&bb.alpha.expr, out);
+            collect(&bb.beta.expr, out);
         }
-        Likelihood::Bernoulli(b) => collect(&b.p, out),
+        Likelihood::Bernoulli(b) => collect(&b.p.expr, out),
     }
 }
 
@@ -190,25 +190,25 @@ fn collect_likelihood_forcing_table_refs(
 ) {
     let mut go = |e: &Expr| collect_forcing_table_refs(e, forcings, tables);
     match lik {
-        Likelihood::Poisson(p) => go(&p.rate),
+        Likelihood::Poisson(p) => go(&p.rate.expr),
         Likelihood::NegBinomial(nb) => {
-            go(&nb.mean);
-            go(&nb.dispersion);
+            go(&nb.mean.expr);
+            go(&nb.dispersion.expr);
         }
         Likelihood::Normal(n) => {
-            go(&n.mean);
-            go(&n.sd);
+            go(&n.mean.expr);
+            go(&n.sd.expr);
         }
         Likelihood::Binomial(b) => {
             go(&b.n);
-            go(&b.p);
+            go(&b.p.expr);
         }
         Likelihood::BetaBinomial(bb) => {
             go(&bb.n);
-            go(&bb.alpha);
-            go(&bb.beta);
+            go(&bb.alpha.expr);
+            go(&bb.beta.expr);
         }
-        Likelihood::Bernoulli(b) => go(&b.p),
+        Likelihood::Bernoulli(b) => go(&b.p.expr),
     }
 }
 
@@ -225,21 +225,21 @@ fn obs_grad_keys(lik: &Likelihood) -> Vec<&str> {
     }
     let mut out = Vec::new();
     match lik {
-        Likelihood::Poisson(p) => grads(&p.rate_grad, &mut out),
+        Likelihood::Poisson(p) => grads(&p.rate.grad, &mut out),
         Likelihood::NegBinomial(nb) => {
-            grads(&nb.mean_grad, &mut out);
-            grads(&nb.dispersion_grad, &mut out);
+            grads(&nb.mean.grad, &mut out);
+            grads(&nb.dispersion.grad, &mut out);
         }
         Likelihood::Normal(n) => {
-            grads(&n.mean_grad, &mut out);
-            grads(&n.sd_grad, &mut out);
+            grads(&n.mean.grad, &mut out);
+            grads(&n.sd.grad, &mut out);
         }
-        Likelihood::Binomial(b) => grads(&b.p_grad, &mut out),
+        Likelihood::Binomial(b) => grads(&b.p.grad, &mut out),
         Likelihood::BetaBinomial(bb) => {
-            grads(&bb.alpha_grad, &mut out);
-            grads(&bb.beta_grad, &mut out);
+            grads(&bb.alpha.grad, &mut out);
+            grads(&bb.beta.grad, &mut out);
         }
-        Likelihood::Bernoulli(b) => grads(&b.p_grad, &mut out),
+        Likelihood::Bernoulli(b) => grads(&b.p.grad, &mut out),
     }
     out
 }
@@ -674,8 +674,10 @@ mod tests {
             stratum: vec![],
             projection: Projection::CumulativeFlow("infection".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
-                rate,
-                rate_grad: rate_grad.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+                rate: ir::Diffable {
+                    expr: rate,
+                    grad: rate_grad.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+                },
             }),
         }
     }

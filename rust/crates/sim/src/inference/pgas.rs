@@ -2371,6 +2371,7 @@ pub fn run_pgas(
         use ir::deriv::{DerivEntry, UnsupportedReason};
         use ir::observation::Likelihood;
         use ir::transition::DrawMethod;
+        use ir::Differentiable;
 
         let estimated: HashSet<&str> = if2_params.iter().map(|s| s.name.as_str()).collect();
 
@@ -2389,25 +2390,12 @@ pub fn run_pgas(
         };
 
         // (a) Observation likelihood argument gradients (projection already inlined
-        //     by the compiler). Exhaustive over `Likelihood` — a new arm forces a
-        //     compile error here rather than a silently-unscanned grad map.
+        //     by the compiler). Via the derived `diffables()` traversal — every
+        //     differentiable argument is scanned, so a new likelihood argument is
+        //     covered automatically rather than left silently unscanned.
         for om in &model.model.observations {
-            match &om.likelihood {
-                Likelihood::Poisson(l) => note_unsupported(&l.rate_grad, &mut refused),
-                Likelihood::NegBinomial(l) => {
-                    note_unsupported(&l.mean_grad, &mut refused);
-                    note_unsupported(&l.dispersion_grad, &mut refused);
-                }
-                Likelihood::Normal(l) => {
-                    note_unsupported(&l.mean_grad, &mut refused);
-                    note_unsupported(&l.sd_grad, &mut refused);
-                }
-                Likelihood::Binomial(l) => note_unsupported(&l.p_grad, &mut refused),
-                Likelihood::BetaBinomial(l) => {
-                    note_unsupported(&l.alpha_grad, &mut refused);
-                    note_unsupported(&l.beta_grad, &mut refused);
-                }
-                Likelihood::Bernoulli(l) => note_unsupported(&l.p_grad, &mut refused),
+            for (_, d) in om.likelihood.diffables() {
+                note_unsupported(&d.grad, &mut refused);
             }
         }
 

@@ -72,13 +72,16 @@ use super::obs_model::{
 fn aux_refs_in_likelihood(lik: &ir::observation::Likelihood) -> Vec<String> {
     use ir::observation::Likelihood as L;
     let mut out: Vec<String> = Vec::new();
+    // The argument *expressions* (a `Diffable` arg contributes its `.expr`; `n`
+    // is a bare `Expr` and can itself be an aux data-column reference, so it is
+    // included).
     let args: Vec<&ir::expr::Expr> = match lik {
-        L::Poisson(p) => vec![&p.rate],
-        L::NegBinomial(nb) => vec![&nb.mean, &nb.dispersion],
-        L::Normal(n) => vec![&n.mean, &n.sd],
-        L::Binomial(b) => vec![&b.n, &b.p],
-        L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha, &bb.beta],
-        L::Bernoulli(b) => vec![&b.p],
+        L::Poisson(p) => vec![&p.rate.expr],
+        L::NegBinomial(nb) => vec![&nb.mean.expr, &nb.dispersion.expr],
+        L::Normal(n) => vec![&n.mean.expr, &n.sd.expr],
+        L::Binomial(b) => vec![&b.n, &b.p.expr],
+        L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha.expr, &bb.beta.expr],
+        L::Bernoulli(b) => vec![&b.p.expr],
     };
     for e in args {
         collect_obs_column_refs(e, &mut out);
@@ -1376,8 +1379,7 @@ mod bind_tests {
             stratum: vec![],
             projection: Projection::CumulativeFlow("inc".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
-                rate: Expr::Projected(ProjectedExpr { projected: () }),
-                rate_grad: Default::default(),
+                rate: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
             }),
         }
     }
@@ -1660,12 +1662,11 @@ mod hole_scoring_tests {
                     projection: Projection::CumulativeFlow("recovery".into()),
                     likelihood: Likelihood::Poisson(PoissonLikelihood {
                         // rate = rho * projected
-                        rate: Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+                        rate: ir::Diffable::new(Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
                             op: BinOp::Mul,
                             left: Box::new(Expr::Param(ParamExpr { param: "rho".into() })),
                             right: Box::new(Expr::Projected(ProjectedExpr { projected: () })),
-                        }}),
-                        rate_grad: Default::default(),
+                        }})),
                     }),
                 },
             ],

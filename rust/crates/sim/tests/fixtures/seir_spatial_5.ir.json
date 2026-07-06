@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.24",
+  "ir_version": "0.25",
   "validated_by": "hand-curated-fixture",
   "model": {
     "name": "seir_spatial_5",
@@ -8050,18 +8050,22 @@
         "likelihood": {
           "neg_binomial": {
             "mean": {
-              "bin_op": {
-                "op": "mul",
-                "left": {
-                  "param": "rho"
-                },
-                "right": {
-                  "projected": null
+              "expr": {
+                "bin_op": {
+                  "op": "mul",
+                  "left": {
+                    "param": "rho"
+                  },
+                  "right": {
+                    "projected": null
+                  }
                 }
               }
             },
             "dispersion": {
-              "param": "k"
+              "expr": {
+                "param": "k"
+              }
             }
           }
         }
@@ -8087,18 +8091,22 @@
         "likelihood": {
           "neg_binomial": {
             "mean": {
-              "bin_op": {
-                "op": "mul",
-                "left": {
-                  "param": "rho"
-                },
-                "right": {
-                  "projected": null
+              "expr": {
+                "bin_op": {
+                  "op": "mul",
+                  "left": {
+                    "param": "rho"
+                  },
+                  "right": {
+                    "projected": null
+                  }
                 }
               }
             },
             "dispersion": {
-              "param": "k"
+              "expr": {
+                "param": "k"
+              }
             }
           }
         }
@@ -8124,18 +8132,22 @@
         "likelihood": {
           "neg_binomial": {
             "mean": {
-              "bin_op": {
-                "op": "mul",
-                "left": {
-                  "param": "rho"
-                },
-                "right": {
-                  "projected": null
+              "expr": {
+                "bin_op": {
+                  "op": "mul",
+                  "left": {
+                    "param": "rho"
+                  },
+                  "right": {
+                    "projected": null
+                  }
                 }
               }
             },
             "dispersion": {
-              "param": "k"
+              "expr": {
+                "param": "k"
+              }
             }
           }
         }
@@ -8161,18 +8173,22 @@
         "likelihood": {
           "neg_binomial": {
             "mean": {
-              "bin_op": {
-                "op": "mul",
-                "left": {
-                  "param": "rho"
-                },
-                "right": {
-                  "projected": null
+              "expr": {
+                "bin_op": {
+                  "op": "mul",
+                  "left": {
+                    "param": "rho"
+                  },
+                  "right": {
+                    "projected": null
+                  }
                 }
               }
             },
             "dispersion": {
-              "param": "k"
+              "expr": {
+                "param": "k"
+              }
             }
           }
         }
@@ -8198,18 +8214,22 @@
         "likelihood": {
           "neg_binomial": {
             "mean": {
-              "bin_op": {
-                "op": "mul",
-                "left": {
-                  "param": "rho"
-                },
-                "right": {
-                  "projected": null
+              "expr": {
+                "bin_op": {
+                  "op": "mul",
+                  "left": {
+                    "param": "rho"
+                  },
+                  "right": {
+                    "projected": null
+                  }
                 }
               }
             },
             "dispersion": {
-              "param": "k"
+              "expr": {
+                "param": "k"
+              }
             }
           }
         }

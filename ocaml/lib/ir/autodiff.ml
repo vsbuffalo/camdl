@@ -608,32 +608,35 @@ let differentiate_obs_arg (proj : projection) (arg : expr)
       | None -> None)
     param_names
 
-(** Fill every [grad_map] of a likelihood. EXHAUSTIVE over [likelihood] (no
-    wildcard) so a future variant is a compile error until its args are wired.
+(** Differentiate one likelihood argument: keep its [expr] (raw — the projection
+    is inlined only inside the gradient, never stored) and fill its [grad]. *)
+let differentiate_diffable (proj : projection) (d : diffable)
+    (param_names : string list) (tfs : time_function list) (tbls : table list)
+    : diffable =
+  { expr = d.expr;
+    grad = differentiate_obs_arg proj d.expr param_names tfs tbls }
 
-    Per variant we emit into exactly the grad slots that exist:
-    Poisson→rate; NegBinomial→mean+dispersion; Normal→mean+sd; Binomial→p;
-    BetaBinomial→α+β; Bernoulli→p.
+(** Fill every differentiable position of a likelihood by FULL RECONSTRUCTION
+    (not a functional update): a new [diffable] field is a compile error here
+    until it is differentiated — the OCaml half of the coverage seal (proposal
+    2026-07-06 §4.3). The match is exhaustive over [likelihood], so a new variant
+    is likewise a compile error.
 
-    [n] (Binomial/BetaBinomial) is deliberately NOT differentiated — it has no
-    grad field ([n] is rounded to an integer, so it must be θ-independent). The
-    refusal of an estimated param that reaches [n] after inlining is the P5
-    fit-gate's job (see proposal §4.4); nothing to emit here. *)
+    [n] (Binomial/BetaBinomial) is deliberately NOT a [diffable] — it is
+    θ-independent (rounded to an integer) and carries no gradient; the refusal of
+    an estimated param reaching [n] after inlining is the P5 fit-gate's job
+    (proposal §4.4), nothing to emit here. *)
 let differentiate_likelihood (proj : projection) (lik : likelihood)
     (param_names : string list) (tfs : time_function list) (tbls : table list)
     : likelihood =
-  let g arg = differentiate_obs_arg proj arg param_names tfs tbls in
+  let d arg = differentiate_diffable proj arg param_names tfs tbls in
   match lik with
-  | Poisson pl -> Poisson { pl with rate_grad = g pl.rate }
-  | NegBinomial nb ->
-    NegBinomial { nb with mean_grad = g nb.mean;
-                          dispersion_grad = g nb.dispersion }
-  | Normal n -> Normal { n with mean_grad = g n.mean; sd_grad = g n.sd }
-  | Binomial b -> Binomial { b with p_grad = g b.p }        (* n: not differentiated *)
-  | BetaBinomial bb ->
-    BetaBinomial { bb with alpha_grad = g bb.alpha;
-                           beta_grad = g bb.beta }          (* n: not differentiated *)
-  | Bernoulli b -> Bernoulli { b with p_grad = g b.p }
+  | Poisson pl -> Poisson { rate = d pl.rate }
+  | NegBinomial nb -> NegBinomial { mean = d nb.mean; dispersion = d nb.dispersion }
+  | Normal n -> Normal { mean = d n.mean; sd = d n.sd }
+  | Binomial b -> Binomial { n = b.n; p = d b.p }
+  | BetaBinomial bb -> BetaBinomial { n = bb.n; alpha = d bb.alpha; beta = d bb.beta }
+  | Bernoulli b -> Bernoulli { p = d b.p }
 
 (** Differentiate every observation stream's likelihood arguments w.r.t. all
     parameters (the fit reads only the estimated ones; proven zeros are absent).

@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.24",
+  "ir_version": "0.25",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "birth_death",
@@ -90,7 +90,9 @@
         "likelihood": {
           "poisson": {
             "rate": {
-              "projected": null
+              "expr": {
+                "projected": null
+              }
             }
           }
         }

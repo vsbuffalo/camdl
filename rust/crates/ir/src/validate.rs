@@ -612,26 +612,26 @@ fn check_likelihood_exprs(
 ) {
     use crate::observation::Likelihood;
     match likelihood {
-        Likelihood::Poisson(l)      => check_expr(&l.rate, ctx, true, errors),
+        Likelihood::Poisson(l)      => check_expr(&l.rate.expr, ctx, true, errors),
         Likelihood::NegBinomial(l)  => {
-            check_expr(&l.mean, ctx, true, errors);
-            check_expr(&l.dispersion, ctx, true, errors);
+            check_expr(&l.mean.expr, ctx, true, errors);
+            check_expr(&l.dispersion.expr, ctx, true, errors);
         }
         Likelihood::Normal(l) => {
-            check_expr(&l.mean, ctx, true, errors);
-            check_expr(&l.sd,   ctx, true, errors);
+            check_expr(&l.mean.expr, ctx, true, errors);
+            check_expr(&l.sd.expr,   ctx, true, errors);
         }
         Likelihood::Binomial(l) => {
             check_expr(&l.n, ctx, true, errors);
-            check_expr(&l.p, ctx, true, errors);
+            check_expr(&l.p.expr, ctx, true, errors);
         }
         Likelihood::BetaBinomial(l) => {
             check_expr(&l.n,     ctx, true, errors);
-            check_expr(&l.alpha, ctx, true, errors);
-            check_expr(&l.beta,  ctx, true, errors);
+            check_expr(&l.alpha.expr, ctx, true, errors);
+            check_expr(&l.beta.expr,  ctx, true, errors);
         }
         Likelihood::Bernoulli(l) => {
-            check_expr(&l.p, ctx, true, errors);
+            check_expr(&l.p.expr, ctx, true, errors);
         }
     }
 }

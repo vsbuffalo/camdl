@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.24",
-  "validated_by": "ocaml-compiler-v0.24",
+  "ir_version": "0.25",
+  "validated_by": "ocaml-compiler-v0.25",
   "model": {
     "name": "ross_macdonald",
     "version": "0.3",
@@ -332,42 +332,68 @@
         "projection": { "current_pop": "I_h" },
         "likelihood": {
           "binomial": {
-            "n": { "param": "N_tested" },
+            "n": {
+              "param": "N_tested"
+            },
             "p": {
-              "bin_op": {
-                "op": "add",
-                "left": {
-                  "bin_op": {
-                    "op": "mul",
-                    "left": { "param": "rho_sens" },
-                    "right": {
-                      "bin_op": {
-                        "op": "div",
-                        "left": { "projected": null },
-                        "right": { "pop_sum": ["S_h", "I_h"] }
+              "expr": {
+                "bin_op": {
+                  "op": "add",
+                  "left": {
+                    "bin_op": {
+                      "op": "mul",
+                      "left": {
+                        "param": "rho_sens"
+                      },
+                      "right": {
+                        "bin_op": {
+                          "op": "div",
+                          "left": {
+                            "projected": null
+                          },
+                          "right": {
+                            "pop_sum": [
+                              "S_h",
+                              "I_h"
+                            ]
+                          }
+                        }
                       }
                     }
-                  }
-                },
-                "right": {
-                  "bin_op": {
-                    "op": "mul",
-                    "left": {
-                      "bin_op": {
-                        "op": "sub",
-                        "left": { "const": 1.0 },
-                        "right": { "param": "rho_spec" }
-                      }
-                    },
-                    "right": {
-                      "bin_op": {
-                        "op": "sub",
-                        "left": { "const": 1.0 },
-                        "right": {
-                          "bin_op": {
-                            "op": "div",
-                            "left": { "projected": null },
-                            "right": { "pop_sum": ["S_h", "I_h"] }
+                  },
+                  "right": {
+                    "bin_op": {
+                      "op": "mul",
+                      "left": {
+                        "bin_op": {
+                          "op": "sub",
+                          "left": {
+                            "const": 1.0
+                          },
+                          "right": {
+                            "param": "rho_spec"
+                          }
+                        }
+                      },
+                      "right": {
+                        "bin_op": {
+                          "op": "sub",
+                          "left": {
+                            "const": 1.0
+                          },
+                          "right": {
+                            "bin_op": {
+                              "op": "div",
+                              "left": {
+                                "projected": null
+                              },
+                              "right": {
+                                "pop_sum": [
+                                  "S_h",
+                                  "I_h"
+                                ]
+                              }
+                            }
                           }
                         }
                       }

@@ -546,10 +546,9 @@ fn build_poisson_seir() -> ir::Model {
         use ir::observation::{Likelihood, PoissonLikelihood};
         if let Likelihood::NegBinomial(nb) = &om.likelihood {
             om.likelihood = Likelihood::Poisson(PoissonLikelihood {
-                rate: nb.mean.clone(),
                 // rate = rho * projected → ∂rate/∂rho = projected. Reuse the
                 // compiler-emitted mean_grad from the NegBin source verbatim.
-                rate_grad: nb.mean_grad.clone(),
+                rate: ir::Diffable { expr: nb.mean.expr.clone(), grad: nb.mean.grad.clone() },
             });
         }
     }
@@ -612,12 +611,10 @@ fn build_discretized_normal_seir() -> ir::Model {
         use ir::observation::{Likelihood, NormalLikelihood};
         if let Likelihood::NegBinomial(nb) = &om.likelihood {
             om.likelihood = Likelihood::Normal(NormalLikelihood {
-                mean: nb.mean.clone(),
                 // mean = rho * projected → ∂mean/∂rho = projected (reuse source).
-                mean_grad: nb.mean_grad.clone(),
-                sd: Expr::Param(ParamExpr { param: "sigma_obs".to_string() }),
+                mean: ir::Diffable { expr: nb.mean.expr.clone(), grad: nb.mean.grad.clone() },
                 // sd = sigma_obs → ∂sd/∂sigma_obs = 1.
-                sd_grad: grad1("sigma_obs", const1()),
+                sd: ir::Diffable { expr: Expr::Param(ParamExpr { param: "sigma_obs".to_string() }), grad: grad1("sigma_obs", const1()) },
             });
         }
     }
@@ -673,9 +670,8 @@ fn build_binomial_seir() -> ir::Model {
             // mean of `rho * projected`.
             om.likelihood = Likelihood::Binomial(BinomialLikelihood {
                 n: Expr::Projected(ProjectedExpr { projected: () }),
-                p: Expr::Param(ParamExpr { param: "rho".to_string() }),
                 // p = rho → ∂p/∂rho = 1. (n = projected is θ-independent — no grad.)
-                p_grad: grad1("rho", const1()),
+                p: ir::Diffable { expr: Expr::Param(ParamExpr { param: "rho".to_string() }), grad: grad1("rho", const1()) },
             });
         }
     }
@@ -760,12 +756,10 @@ fn build_beta_binomial_seir() -> ir::Model {
             // α = a_obs, β = b_obs. Mean = n·a_obs/(a_obs+b_obs) = n·0.2.
             om.likelihood = Likelihood::BetaBinomial(BetaBinomialLikelihood {
                 n: Expr::Projected(ProjectedExpr { projected: () }),
-                alpha: Expr::Param(ParamExpr { param: "a_obs".to_string() }),
                 // alpha = a_obs → ∂alpha/∂a_obs = 1.
-                alpha_grad: grad1("a_obs", const1()),
-                beta: Expr::Param(ParamExpr { param: "b_obs".to_string() }),
+                alpha: ir::Diffable { expr: Expr::Param(ParamExpr { param: "a_obs".to_string() }), grad: grad1("a_obs", const1()) },
                 // beta = b_obs → ∂beta/∂b_obs = 1.
-                beta_grad: grad1("b_obs", const1()),
+                beta: ir::Diffable { expr: Expr::Param(ParamExpr { param: "b_obs".to_string() }), grad: grad1("b_obs", const1()) },
             });
         }
     }
@@ -878,12 +872,14 @@ fn build_parametric_projection_poisson_seir() -> ir::Model {
         rate_grad.insert("qgam".to_string(),
             ir::deriv::DerivEntry::Grad(rho_times_i.clone()));
         om.likelihood = Likelihood::Poisson(PoissonLikelihood {
-            rate: Expr::bin_op(
-                BinOp::Mul,
-                Expr::param("rho"),
-                Expr::Projected(ProjectedExpr { projected: () }),
-            ),
-            rate_grad,
+            rate: ir::Diffable {
+                expr: Expr::bin_op(
+                    BinOp::Mul,
+                    Expr::param("rho"),
+                    Expr::Projected(ProjectedExpr { projected: () }),
+                ),
+                grad: rate_grad,
+            },
         });
     }
     model

@@ -85,12 +85,10 @@ fn model(k_per_unit: f64) -> Arc<CompiledModel> {
                 projection: Projection::CumulativeFlow("inflow".into()),
                 likelihood: Likelihood::Normal(NormalLikelihood {
                     // mean = projected (the weekly incidence tally)
-                    mean: Expr::Projected(ProjectedExpr { projected: () }),
-                    mean_grad: Default::default(),
+                    mean: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
                     // a wide, constant sd so the likelihood is finite and
                     // benign; the prediction (`obs_mean`) is what we assert.
-                    sd: Expr::Const(ConstExpr { value: 50.0 }),
-                    sd_grad: Default::default(),
+                    sd: ir::Diffable::new(Expr::Const(ConstExpr { value: 50.0 })),
                 }),
             },
         ],

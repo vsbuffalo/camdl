@@ -377,7 +377,7 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
                 projection: ir::observation::Projection::CumulativeFlow("infection".into()),
                 likelihood: ir::observation::Likelihood::NegBinomial(
                     ir::observation::NegBinomialLikelihood {
-                        mean: ir::expr::Expr::BinOp(ir::expr::BinOpWrap {
+                        mean: ir::Diffable::new(ir::expr::Expr::BinOp(ir::expr::BinOpWrap {
                             bin_op: ir::expr::BinOpExpr {
                                 op: ir::expr::BinOp::Add,
                                 left: Box::new(ir::expr::Expr::Projected(
@@ -385,10 +385,8 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
                                 right: Box::new(ir::expr::Expr::Const(
                                     ir::expr::ConstExpr { value: 0.1 })),
                             },
-                        }),
-                        mean_grad: Default::default(),
-                        dispersion: ir::expr::Expr::Const(ir::expr::ConstExpr { value: 10.0 }),
-                        dispersion_grad: Default::default(),
+                        })),
+                        dispersion: ir::Diffable::new(ir::expr::Expr::Const(ir::expr::ConstExpr { value: 10.0 })),
                     }),
             },
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
