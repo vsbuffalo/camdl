@@ -86,15 +86,12 @@ impl SimplexGroup {
 pub struct IF2Config {
     pub n_particles: usize,
     pub n_iterations: usize,
-    /// Cooling schedule: after `cooling_target_iters` iterations,
-    /// perturbation SD is `cooling_fraction` of initial.
-    /// Matches pomp's cooling.fraction.50 semantics when
-    /// cooling_target_iters = 50.
-    ///
-    /// Cooling factor per filtering step (observation):
-    ///   c = cooling_fraction ^ (1 / (cooling_target_iters * n_obs))
-    /// After m iterations × n_obs steps each:
-    ///   effective_sd = rw_sd × c^(m * n_obs)
+    /// Cooling schedule: after `cooling_target_iters` iterations the perturbation
+    /// SD is `cooling_fraction` of its initial value, then continues to cool —
+    /// pomp's geometric `cooling.fraction.50` (with `cooling_target_iters` playing
+    /// pomp's fixed 50). Each iteration consumes `(1 + n_obs)` filtering steps (a
+    /// t=0 perturbation plus one per observation); the per-step factor is
+    /// `per_step_cooling_factor` (exponent 1, verified against pomp 6.4 source).
     pub cooling_fraction: f64,
     /// Number of iterations over which the cooling fraction applies.
     /// pomp default: 50 (cooling.fraction.50).
@@ -122,6 +119,45 @@ pub struct IF2Config {
 impl super::traits::InferenceConfig for IF2Config {
     fn n_particles(&self) -> usize { self.n_particles }
     fn dt(&self) -> f64 { self.dt }
+}
+
+/// Per-filtering-step cooling factor `c`: the perturbation SD at global step `s`
+/// is `initial · c^s`. Chosen so that after `cooling_target_iters` complete
+/// iterations — each consuming `(1 + n_obs)` steps (one t=0 perturbation plus one
+/// per observation; gh#audit-M2) — the SD reaches `cooling_fraction` of its
+/// initial value.
+///
+/// This is pomp's geometric `cooling.fraction.50` schedule, with
+/// `cooling_target_iters` playing pomp's fixed "50". Verified against pomp 6.4
+/// source: `pomp:::mif2_cooling` returns `alpha = cooling.fraction.50^(m/50)` at
+/// the end of iteration `m`, and `pomp:::mif2_pfilter` perturbs with
+/// `pmag = alpha · rw.sd` — so the exponent is **1**. pomp also returns
+/// `gamma = alpha²` but does NOT use it for the perturbation; taking the squared
+/// value here was the origin of the earlier `2.0` (gh#363), which cooled twice as
+/// fast as pomp (fraction reached at the midpoint, `fraction²` at the endpoint).
+pub fn per_step_cooling_factor(
+    cooling_fraction: f64,
+    cooling_target_iters: usize,
+    n_obs: usize,
+) -> f64 {
+    let total_target_steps = cooling_target_iters as f64 * (1 + n_obs) as f64;
+    cooling_fraction.powf(1.0 / total_target_steps)
+}
+
+/// The cooling multiplier on the perturbation SD at the END of IF2 iteration
+/// `iter` (1-based): `cooling_fraction^(iter / cooling_target_iters)`. It reaches
+/// `cooling_fraction` exactly at `iter = cooling_target_iters` and continues
+/// cooling past it — matching pomp's `alpha`. The `(1 + n_obs)` step granularity
+/// cancels, so the per-iteration multiplier is independent of `n_obs`.
+pub fn cooling_multiplier_at_iter(
+    cooling_fraction: f64,
+    cooling_target_iters: usize,
+    n_obs: usize,
+    iter: usize,
+) -> f64 {
+    let steps_per_iter = (1 + n_obs) as f64;
+    per_step_cooling_factor(cooling_fraction, cooling_target_iters, n_obs)
+        .powf(iter as f64 * steps_per_iter)
 }
 
 /// Result of one IF2 iteration.
@@ -281,23 +317,14 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         }
     }
 
-    // Compute per-filtering-step cooling factor.
-    // Matches pomp's cooling.fraction.50 semantics: the fraction is reached
-    // at the HALFWAY point of the target iterations. After the full run,
-    // rw_sd = cooling_fraction² × initial.
-    //
-    // Per-step factor: c = cooling_fraction ^ (2 / (target_iters × n_obs))
-    // The "2" makes the fraction apply at the midpoint, not the endpoint.
-    //
-    // gh#audit-M2. Each IF2 iteration consumes (1 + n_obs) global_step
-    // ticks — one for the t=0 perturbation and one per observation.
-    // The previous formula `n_obs` made cooling fire 2x as fast for
-    // n_obs = 1 and ~10% stronger than advertised for n_obs = 10.
-    // The (1 + n_obs) form matches the actual tick count exactly.
-    // (IM5 in the 2026-04-19 inference review noted this but didn't
-    // fix it; landing here as part of the audit M2 cleanup.)
-    let total_target_steps = config.cooling_target_iters as f64 * (1 + n_obs) as f64;
-    let per_step_cooling = config.cooling_fraction.powf(2.0 / total_target_steps);
+    // Per-filtering-step cooling factor — pomp's geometric cooling.fraction.50
+    // (exponent 1: the fraction is reached at `cooling_target_iters`, then cooling
+    // continues; gh#363). Each iteration consumes (1 + n_obs) steps — one t=0
+    // perturbation plus one per observation (gh#audit-M2). Formula lives in
+    // `per_step_cooling_factor`, shared with the preflight preview so they can't
+    // drift.
+    let per_step_cooling =
+        per_step_cooling_factor(config.cooling_fraction, config.cooling_target_iters, n_obs);
 
     let mut iterations = Vec::with_capacity(config.n_iterations);
     let mut global_step: u64 = 0; // total filtering steps across all iterations
@@ -603,7 +630,9 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         }
 
         // Per-parameter diagnostics for this iteration
-        let cooling_at_iter = per_step_cooling.powf((iter * n_obs) as f64);
+        // Diagnostic SD at end of `iter`: use (1 + n_obs) steps/iter to match the
+        // actual global-step accounting (the perturbation loop), not `n_obs`.
+        let cooling_at_iter = per_step_cooling.powf((iter * (1 + n_obs)) as f64);
         // Total perturbation attempts: n particles × (1 t=0 step + n_obs observation steps)
         let total_perturb_steps = n * (1 + n_obs);
         let param_diag: Vec<ParamIterDiag> = if2_params.iter().enumerate().map(|(pi, spec)| {
