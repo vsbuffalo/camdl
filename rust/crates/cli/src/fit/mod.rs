@@ -6,7 +6,7 @@
 //! `docs/dev/proposals/2026-04-15-fit-run-spec-v0.4.md`.
 
 pub mod cas;  // gh#147 M3.2: fit-stage CAS identity (resolve_fit_stage)
-pub mod coeff_guard;  // gh#119: NUTS guard — param only inside a forcing/table coefficient
+pub mod coeff_guard;  // gh#342 P4: NUTS guard — param reaching a coefficient only via an init
 pub mod config_v2;
 pub mod loglik;  // gh#280: LoglikType — the single typed source for loglik class
 pub mod state;

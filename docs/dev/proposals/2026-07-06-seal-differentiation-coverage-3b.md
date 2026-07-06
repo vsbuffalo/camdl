@@ -421,17 +421,23 @@ function, mirroring the one Rust `diffables()`.
   state), yet no gradient is emitted for it — the compiler emits no forcing
   gradient there **and** camdl computes no gradient for IC expressions at all
   (there is no `ic_grad`; IC/state sensitivity is the separate gh#275 surface).
-  Four goldens already put `table_lookup` inside `initial_conditions`, so the
-  path is live. Rather than **reimplement** this as a "minimal named guard" —
-  which risks getting the `body`/`has_grad`/periodic-vs- structural distinctions
-  wrong and would over- or under-refuse relative to coeff_guard — **retain
-  coeff_guard's IC scan verbatim**, as a small standalone guard renamed to say
-  what it is ("initial-condition gradients are not computed; NUTS is refused for
-  a param reaching a coefficient only through an IC"). We delete the rate/obs
-  parts of `coeff_guard` (subsumed by the preflight) and keep its IC part
-  unchanged until IC/state gradients exist (gh#275). Reimplementing a working
-  refusal check to shave lines is the wrong trade when a bias hole is the
-  downside.
+  The path is reachable — the DSL permits a forcing reference or an inline-table
+  lookup in an `init` RHS (spec §15.3) — but no committed golden or fixture
+  currently exercises it (verified: `python3` scan of `model.initial_conditions`
+  across `ir/golden/*.ir.json` → zero forcing/table refs; the spatial fixtures'
+  `N0[patch]` in `init` is an _indexed parameter_, which expands to a plain
+  `Param`, not a `TableLookup`). So the IC guard is a defensive net for a real
+  but unexercised state, covered by hand-built unit tests rather than an
+  end-to-end golden. Rather than **reimplement** this as a "minimal named guard"
+  — which risks getting the `body`/`has_grad`/periodic-vs- structural
+  distinctions wrong and would over- or under-refuse relative to coeff_guard —
+  **retain coeff_guard's IC scan verbatim**, as a small standalone guard renamed
+  to say what it is ("initial-condition gradients are not computed; NUTS is
+  refused for a param reaching a coefficient only through an IC"). We delete the
+  rate/obs parts of `coeff_guard` (subsumed by the preflight) and keep its IC
+  part unchanged until IC/state gradients exist (gh#275). Reimplementing a
+  working refusal check to shave lines is the wrong trade when a bias hole is
+  the downside.
 
 ### 4.5 run_id and goldens
 

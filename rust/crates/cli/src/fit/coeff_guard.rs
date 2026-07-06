@@ -1,21 +1,29 @@
-//! NUTS guard: refuse to estimate a parameter that drives only a forcing or
-//! inline-table coefficient (proposal `2026-06-09-const-parametric-forcing.md`
-//! §4/§6).
+//! NUTS guard for the **initial-condition** domain (gh#342 P4): refuse to
+//! estimate a parameter that reaches a forcing or inline-table coefficient ONLY
+//! through an `init` expression.
 //!
-//! The value half made forcing/table coefficients live, so IF2 and the
-//! bootstrap particle filter (gradient-free) now estimate such a parameter
-//! correctly. NUTS still cannot: the compiler's autodiff (`autodiff.ml`)
-//! differentiates `TimeFunc` and `TableLookup` to `Const 0.0`, so a parameter
-//! referenced ONLY inside a coefficient has an identically-zero dynamics
-//! gradient — NUTS would propose against a flat surface and silently
-//! mis-sample. Until the gradient half emits those derivatives, reject such a
-//! fit loudly rather than return a garbage posterior.
+//! camdl emits no gradient for initial-condition expressions at all — there is
+//! no `ic_grad`; IC / state sensitivity is the separate gh#275 surface. So a
+//! parameter whose only path into the likelihood is a forcing/table coefficient
+//! inside an initial condition has an identically-zero emitted gradient: NUTS
+//! would propose against a flat surface and silently mis-sample. The value half
+//! still evaluates it live, so IF2 and the bootstrap particle filter estimate
+//! it correctly; only a gradient-based (NUTS) fit is refused, loudly.
 //!
-//! Scope (matching §6): `body_refs` are the rate / observation / initial-value
-//! expressions; `coeff_refs` are forcing-coefficient and inline-table-value
-//! expressions. A parameter in both is not flagged — the body gradient carries
-//! it. The coefficient sub-expressions live in `model.time_functions[*].kind`
-//! and `model.tables[*]`, not in the rate AST, so this needs its own traversal.
+//! The **rate** and **observation** domains are NOT handled here. A
+//! live-but-omitted rate/obs coefficient (a Periodic step value, a `lag`, a
+//! non-constant table index) now serialises a `DerivEntry::Unsupported` (gh#342
+//! P1–P3) that the `run_pgas` preflight refuses at the boundary — for every
+//! caller, not just the CLI. This guard is the residual the preflight cannot
+//! see: no grad map carries an IC-exclusive coefficient's `Unsupported`, so the
+//! IC scan must read the source model directly.
+//!
+//! Scope: `body` are the rate / observation / initial-condition expressions;
+//! `coeff` are the forcing-coefficient and inline-table-value expressions of a
+//! forcing/table referenced ONLY by an initial condition. A parameter in both a
+//! coefficient and a body, or one with a real emitted gradient, is not flagged.
+//! The coefficient sub-expressions live in `model.time_functions[*].kind` and
+//! `model.tables[*]`, not in the rate AST, so this needs its own traversal.
 
 use std::collections::HashSet;
 
@@ -139,8 +147,9 @@ fn collect_forcing(kind: &TimeFuncKind, out: &mut HashSet<String>) {
 
 /// Collect the names of every forcing (`TimeFunc`) and inline table
 /// (`TableLookup`) referenced anywhere in `e`. Used to partition forcings/tables
-/// into coeff_guard's domain (referenced by a rate/IC) versus the obs-gradient
-/// preflight's domain (referenced only by an observation) — proposal §4.4.
+/// into this guard's domain (referenced ONLY by an initial condition) versus the
+/// `run_pgas` preflight's domain (referenced by a rate or observation, where the
+/// compiler emits a `DerivEntry`) — proposal §4.4.
 fn collect_forcing_table_refs(e: &Expr, forcings: &mut HashSet<String>, tables: &mut HashSet<String>) {
     match e {
         Expr::TimeFunc(w) => {
@@ -244,24 +253,30 @@ fn obs_grad_keys(lik: &Likelihood) -> Vec<&str> {
     out
 }
 
-/// Estimated parameters that NUTS cannot estimate because their forcing/table
-/// gradient is a silent zero. This is coeff_guard's half of a two-gate
-/// partition (proposal §4.4): every forcing/table coefficient parameter is
-/// classified **exactly once** —
+/// Estimated parameters NUTS cannot estimate because their forcing/table
+/// gradient is a silent zero **and no gradient surface classifies it** — the
+/// initial-condition residual of the gh#342 P4 partition. Every forcing/table
+/// coefficient parameter is classified **exactly once**:
 ///
-/// - here, if the coefficient's forcing/table is referenced by a **rate or
-///   initial-condition** body (coeff_guard's domain); or
-/// - by the observation-gradient preflight at the `run_pgas` boundary, if the
-///   coefficient's forcing/table is referenced **only** through an observation
-///   (the obs preflight's domain, refused there with the compiler's own
-///   `DerivEntry::Unsupported` reason).
+/// - by the `run_pgas` preflight, if the coefficient's forcing/table is
+///   referenced by a **rate or observation** — the compiler emits a
+///   `DerivEntry` (Grad, or a live-but-omitted `Unsupported`) for it, and the
+///   preflight refuses on the `Unsupported` at the boundary, for every caller;
+/// - here, if the coefficient's forcing/table is referenced **only** through an
+///   initial condition. camdl emits no gradient for IC expressions at all (no
+///   `ic_grad`; IC/state sensitivity is the separate gh#275 surface), so an
+///   IC-exclusive coefficient carries no `DerivEntry` anywhere — the preflight
+///   cannot see it, and this source-level scan is the only place that can.
 ///
-/// A forcing/table referenced by both a rate/IC and an observation is
-/// rate-referenced — coeff_guard owns it (the tiebreak: rate wins). So the scan
-/// **skips** a forcing/table that is obs-referenced and not rate/IC-referenced.
+/// So the scan **skips** any forcing/table that is rate- or obs-referenced
+/// (those are the preflight's); it owns only the IC-exclusive set. A forcing
+/// referenced by both an IC and a rate/obs is the preflight's — the emitted
+/// gradient there covers its rate/obs contribution, and the residual IC
+/// incompleteness is the same escape coeff_guard already tolerated (deferred to
+/// gh#275).
 ///
-/// Within coeff_guard's domain, a coefficient parameter is flagged when it has
-/// no usable gradient:
+/// Within this guard's IC-exclusive domain, a coefficient parameter is flagged
+/// when it has no usable gradient:
 /// - **`has_grad` escape** — a parameter for which the compiler emitted a real
 ///   derivative (a transition `rate_grad`, a σ² `sigma_sq_grad`, or an
 ///   observation `*_grad` — all `DerivEntry::Grad`) has a usable NUTS gradient
@@ -277,17 +292,21 @@ fn obs_grad_keys(lik: &Likelihood) -> Vec<&str> {
 ///   the forcing contribution.
 ///
 /// Sorted, for a deterministic diagnostic.
-pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>) -> Vec<String> {
-    // ── Partition the forcings/tables into coeff_guard's domain (rate/IC) vs the
-    //    obs preflight's domain (observation-only). ──
-    let mut rate_ic_forcings = HashSet::new();
-    let mut rate_ic_tables = HashSet::new();
+pub fn ic_coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>) -> Vec<String> {
+    // ── Partition the forcings/tables by which surface references them. This
+    //    guard owns ONLY the initial-condition-exclusive set; the rate and
+    //    observation surfaces now refuse a live-but-omitted coefficient at the
+    //    `run_pgas` preflight (via a serialized `DerivEntry::Unsupported`). ──
+    let mut rate_forcings = HashSet::new();
+    let mut rate_tables = HashSet::new();
     for t in &model.transitions {
-        collect_forcing_table_refs(&t.rate, &mut rate_ic_forcings, &mut rate_ic_tables);
+        collect_forcing_table_refs(&t.rate, &mut rate_forcings, &mut rate_tables);
     }
+    let mut ic_forcings = HashSet::new();
+    let mut ic_tables = HashSet::new();
     if let InitialConditions::Parameterized(map) = &model.initial_conditions {
         for e in map.values() {
-            collect_forcing_table_refs(e, &mut rate_ic_forcings, &mut rate_ic_tables);
+            collect_forcing_table_refs(e, &mut ic_forcings, &mut ic_tables);
         }
     }
     let mut obs_forcings = HashSet::new();
@@ -298,12 +317,18 @@ pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>
             collect_forcing_table_refs(e, &mut obs_forcings, &mut obs_tables);
         }
     }
-    // A forcing/table is the obs preflight's domain (skipped here) iff it is
-    // observation-referenced and NOT rate/IC-referenced.
-    let forcing_is_obs_only =
-        |name: &str| obs_forcings.contains(name) && !rate_ic_forcings.contains(name);
-    let table_is_obs_only =
-        |name: &str| obs_tables.contains(name) && !rate_ic_tables.contains(name);
+    // A forcing/table is THIS guard's domain iff it is reached ONLY through an
+    // initial condition — not by a rate, not by an observation. A rate/obs
+    // reference means the compiler emitted a `DerivEntry` (Grad or Unsupported)
+    // for it, which the preflight already classifies; an IC reference emits no
+    // gradient at all (no `ic_grad`), so an IC-exclusive coefficient is the one
+    // silent-zero the preflight cannot see. The scans below skip everything else.
+    let forcing_is_ic_only = |name: &str| {
+        ic_forcings.contains(name) && !rate_forcings.contains(name) && !obs_forcings.contains(name)
+    };
+    let table_is_ic_only = |name: &str| {
+        ic_tables.contains(name) && !rate_tables.contains(name) && !obs_tables.contains(name)
+    };
 
     let mut body = HashSet::new();
     for t in &model.transitions {
@@ -320,13 +345,13 @@ pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>
 
     let mut coeff = HashSet::new();
     for tf in &model.time_functions {
-        if forcing_is_obs_only(&tf.name) {
+        if !forcing_is_ic_only(&tf.name) {
             continue;
         }
         collect_forcing(&tf.kind, &mut coeff);
     }
     for tbl in &model.tables {
-        if table_is_obs_only(&tbl.name) {
+        if !table_is_ic_only(&tbl.name) {
             continue;
         }
         if let Some(values) = tbl.source.values() {
@@ -345,11 +370,13 @@ pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>
     // such a param unconditionally (no body / no `has_grad` escape). No false
     // positive: a Periodic coefficient gradient is never emitted, so a param
     // here never legitimately has its forcing contribution covered. (When
-    // gh#215 emits Periodic derivatives, drop this set.) Obs-only forcings are
-    // the preflight's domain — skipped here just like the `coeff` scan.
+    // gh#215 emits Periodic derivatives, drop this set.) Only IC-exclusive
+    // forcings are scanned; a rate- or obs-referenced Periodic forcing is the
+    // preflight's domain (its `Unsupported` rides the emitted grad map), skipped
+    // here just like the `coeff` scan.
     let mut periodic_coeff = HashSet::new();
     for tf in &model.time_functions {
-        if forcing_is_obs_only(&tf.name) {
+        if !forcing_is_ic_only(&tf.name) {
             continue;
         }
         if let TimeFuncKind::Periodic(p) = &tf.kind {
@@ -416,19 +443,18 @@ pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>
     offenders
 }
 
-/// Error message for a NUTS fit blocked by [`coefficient_only_estimated`].
+/// Error message for a NUTS fit blocked by [`ic_coefficient_only_estimated`].
 pub fn nuts_guard_error(offenders: &[String]) -> String {
     format!(
-        "NUTS cannot estimate parameter(s) [{}]: each drives a forcing or \
-         inline-table coefficient whose gradient is not yet emitted (a periodic \
-         step value, an inline-table value via a non-constant index — gh#215 — \
-         or a forcing `lag`, whose ∂forcing/∂lag is not emitted — gh#314), so \
-         NUTS would sample against an incomplete gradient and silently \
-         mis-estimate them. These parameters still evaluate live, so estimate \
-         them with IF2 or the bootstrap particle filter (gradient-free), or run \
-         PGAS with --no-nuts. To estimate seasonality under NUTS, express it as a \
-         sinusoidal or fourier forcing (whose coefficients have analytic \
-         gradients); a fitted `lag` has no gradient-based path today.",
+        "NUTS cannot estimate parameter(s) [{}]: each reaches a forcing or \
+         inline-table coefficient ONLY through an initial condition (`init`), \
+         and camdl emits no gradient for initial-condition expressions (IC/state \
+         sensitivity is gh#275), so NUTS would sample against an incomplete \
+         gradient and silently mis-estimate them. These parameters still evaluate \
+         live, so estimate them with IF2 or the bootstrap particle filter \
+         (gradient-free), or run PGAS with --no-nuts. Alternatively, drive the \
+         parameter through a rate or observation (whose coefficients do carry \
+         analytic gradients) rather than only the initial state.",
         offenders.join(", ")
     )
 }
@@ -497,180 +523,48 @@ mod tests {
         }
     }
 
-    /// `alpha` drives only the forcing amplitude and no transition emits a
-    /// derivative for it (no `rate_grad`) → no usable gradient → flagged. This
-    /// is the residual case the guard exists for after the gradient half (e.g.
-    /// a forcing referenced only through an observation).
-    #[test]
-    fn flags_param_only_in_forcing_coefficient() {
-        let mut m = base_model();
-        m.time_functions = vec![sinusoidal_forcing(Expr::param("alpha"))];
-        let estimated: HashSet<String> = ["alpha".to_string()].into_iter().collect();
-        assert_eq!(coefficient_only_estimated(&m, &estimated), vec!["alpha".to_string()]);
-    }
-
-    /// `alpha` also appears in a rate → the rate gradient carries it → not flagged.
-    #[test]
-    fn does_not_flag_param_also_in_a_rate() {
-        let mut m = base_model();
-        m.time_functions = vec![sinusoidal_forcing(Expr::param("alpha"))];
-        m.transitions = vec![ir::transition::Transition {
-            name: "decay".into(),
-            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
-            rate: Expr::bin_op(ir::expr::BinOp::Mul, Expr::param("alpha"), Expr::pop("S")),
-            metadata: None,
-            draw_method: ir::transition::DrawMethod::Poisson,
-            rate_grad: HashMap::new(),
-            lineage: None,
-        }];
-        let estimated: HashSet<String> = ["alpha".to_string()].into_iter().collect();
-        assert!(coefficient_only_estimated(&m, &estimated).is_empty());
-    }
-
-    /// gh#119 gradient half: `alpha` enters only the forcing coefficient, but
-    /// the compiler now emits ∂rate/∂alpha (the Sinusoidal derivative), so it
-    /// has a usable NUTS gradient and must NOT be flagged — otherwise the guard
-    /// would refuse the very fits the gradient half enables (the headline
-    /// regression this fixes).
-    #[test]
-    fn does_not_flag_forcing_param_with_emitted_gradient() {
-        let mut m = base_model();
-        m.time_functions = vec![sinusoidal_forcing(Expr::param("alpha"))];
-        // `alpha` is not in the rate body (the forcing is opaque there), but the
-        // compiler emitted a derivative entry for it.
-        let mut rate_grad = HashMap::new();
-        rate_grad.insert("alpha".to_string(), DerivEntry::Grad(Expr::pop("S")));
-        m.transitions = vec![ir::transition::Transition {
-            name: "infection".into(),
-            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
-            rate: Expr::pop("S"),
-            metadata: None,
-            draw_method: ir::transition::DrawMethod::Poisson,
-            rate_grad,
-            lineage: None,
-        }];
-        let estimated: HashSet<String> = ["alpha".to_string()].into_iter().collect();
-        assert!(coefficient_only_estimated(&m, &estimated).is_empty(),
-            "a forcing param with an emitted rate_grad has a usable gradient and \
-             must not be blocked");
-    }
-
-    /// A non-estimated coefficient parameter is not flagged.
-    #[test]
-    fn does_not_flag_unestimated_param() {
-        let mut m = base_model();
-        m.time_functions = vec![sinusoidal_forcing(Expr::param("alpha"))];
-        let estimated: HashSet<String> = HashSet::new();
-        assert!(coefficient_only_estimated(&m, &estimated).is_empty());
-    }
-
-    /// gh#119/gh#215: a `Periodic` step value has NO emitted gradient (the
-    /// compiler omits it; only Sinusoidal/Fourier/const-table are differentiated),
-    /// so even when the same param ALSO drives a rate body — where the emitted
-    /// body gradient is real but does NOT include the forcing contribution — NUTS
-    /// would sample against an incomplete gradient. It must be flagged regardless
-    /// of body presence or a (partial) `rate_grad` entry. Contrast
-    /// `does_not_flag_forcing_param_with_emitted_gradient`: a Sinusoidal coef's
-    /// gradient IS complete, so it stays unflagged.
-    #[test]
-    fn flags_periodic_coeff_param_even_when_in_a_rate_body() {
-        use ir::time_func::Periodic;
-        let mut m = base_model();
-        m.time_functions = vec![TimeFunction {
-            name: "weekly".into(),
-            kind: TimeFuncKind::Periodic(Periodic {
-                period: Expr::const_(7.0),
-                values: vec![Expr::param("wpeak"), Expr::const_(1.0)],
-            }),
-            dim: (0, 0),
-            lag: None,
-        }];
-        // `wpeak` also appears directly in a rate, with a (partial) rate_grad
-        // entry for that body appearance — but it misses the forcing part.
-        let mut rate_grad = HashMap::new();
-        rate_grad.insert("wpeak".to_string(), DerivEntry::Grad(Expr::pop("S")));
-        m.transitions = vec![ir::transition::Transition {
-            name: "infection".into(),
-            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
-            rate: Expr::bin_op(ir::expr::BinOp::Mul, Expr::param("wpeak"), Expr::pop("S")),
-            metadata: None,
-            draw_method: ir::transition::DrawMethod::Poisson,
-            rate_grad,
-            lineage: None,
-        }];
-        let estimated: HashSet<String> = ["wpeak".to_string()].into_iter().collect();
-        assert_eq!(coefficient_only_estimated(&m, &estimated), vec!["wpeak".to_string()],
-            "a periodic-coeff param has no emitted forcing gradient; NUTS must be \
-             blocked even though it also appears in a rate body");
-    }
-
-    /// gh#314: a `lag` parameter has NO emitted gradient — the compiler's
-    /// autodiff differentiates a `TimeFunc` only w.r.t. its kind's coefficients,
-    /// never the evaluation-time shift, so ∂forcing/∂lag is an identically-zero
-    /// dynamics gradient. NUTS must be blocked. Like a Periodic step value, this
-    /// holds even when the lag param ALSO drives a rate body (the emitted body
-    /// gradient omits the forcing's lag contribution).
-    #[test]
-    fn flags_lag_param_even_when_in_a_rate_body() {
-        let mut m = base_model();
-        let mut tf = sinusoidal_forcing(Expr::const_(0.3));
-        tf.lag = Some(Expr::param("tau"));
-        m.time_functions = vec![tf];
-        // `tau` also appears directly in a rate, with a (partial) rate_grad
-        // entry for that body appearance — but it misses the forcing's lag part.
-        let mut rate_grad = HashMap::new();
-        rate_grad.insert("tau".to_string(), DerivEntry::Grad(Expr::pop("S")));
-        m.transitions = vec![ir::transition::Transition {
-            name: "decay".into(),
-            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
-            rate: Expr::bin_op(ir::expr::BinOp::Mul, Expr::param("tau"), Expr::pop("S")),
-            metadata: None,
-            draw_method: ir::transition::DrawMethod::Poisson,
-            rate_grad,
-            lineage: None,
-        }];
-        let estimated: HashSet<String> = ["tau".to_string()].into_iter().collect();
-        assert_eq!(coefficient_only_estimated(&m, &estimated), vec!["tau".to_string()],
-            "a lag param has no emitted forcing gradient; NUTS must be blocked \
-             even though it also appears in a rate body");
-    }
-
-    /// gh#314: a non-estimated lag parameter (e.g. a fixed delay) is not flagged.
-    #[test]
-    fn does_not_flag_unestimated_lag_param() {
-        let mut m = base_model();
-        let mut tf = sinusoidal_forcing(Expr::const_(0.3));
-        tf.lag = Some(Expr::param("tau"));
-        m.time_functions = vec![tf];
-        let estimated: HashSet<String> = HashSet::new();
-        assert!(coefficient_only_estimated(&m, &estimated).is_empty());
-    }
-
-    /// An inline-table value parameter, used nowhere else, is flagged.
-    #[test]
-    fn flags_param_only_in_inline_table_value() {
-        let mut m = base_model();
-        m.tables = vec![ir::table::Table {
-            name: "k_tbl".into(),
-            source: ir::table::TableSource::Inline { values: vec![Expr::param("k")] },
-            out_of_bounds: ir::table::OobPolicy::Error,
-            cell_kind: None,
-        }];
-        let estimated: HashSet<String> = ["k".to_string()].into_iter().collect();
-        assert_eq!(coefficient_only_estimated(&m, &estimated), vec!["k".to_string()]);
-    }
-
-    /// A `time_func:<name>` reference expression.
+    /// A `time_func:<name>` reference expression — the shape an `init` RHS (or a
+    /// rate/obs) uses to name a forcing.
     fn time_func_ref(name: &str) -> Expr {
         use ir::expr::{TimeFuncRef, TimeFuncWrap};
         Expr::TimeFunc(TimeFuncWrap { time_func: TimeFuncRef { name: name.into() } })
     }
 
-    /// A Poisson observation whose `rate` is `rate` and whose `rate_grad` carries
-    /// the given entries — the obs analogue of a transition's `rate_grad`.
-    fn poisson_obs(rate: Expr, rate_grad: &[(&str, DerivEntry)]) -> ir::observation::ObservationModel {
+    /// A `table_lookup` expression selecting cell `idx` of `table`.
+    fn table_lookup(table: &str, idx: f64) -> Expr {
+        use ir::expr::{TableLookupExpr, TableLookupWrap};
+        Expr::TableLookup(TableLookupWrap {
+            table_lookup: TableLookupExpr { table: table.into(), indices: vec![Expr::const_(idx)] },
+        })
+    }
+
+    /// Set `expr` as the initial value of compartment `S`, so any forcing/table
+    /// it names becomes initial-condition-referenced — this guard's domain.
+    fn ic_referencing(m: &mut ir::Model, expr: Expr) {
+        let mut ic = HashMap::new();
+        ic.insert("S".to_string(), expr);
+        m.initial_conditions = InitialConditions::Parameterized(ic);
+    }
+
+    /// A transition with rate `rate` carrying `rate_grad` — used to make a
+    /// forcing rate-referenced (moving it into the preflight's domain).
+    fn rate_transition(rate: Expr, rate_grad: &[(&str, DerivEntry)]) -> ir::transition::Transition {
+        ir::transition::Transition {
+            name: "infection".into(),
+            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
+            rate,
+            metadata: None,
+            draw_method: ir::transition::DrawMethod::Poisson,
+            rate_grad: rate_grad.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            lineage: None,
+        }
+    }
+
+    /// A minimal Poisson observation naming `rate` — used to make a forcing
+    /// observation-referenced (the preflight's domain).
+    fn poisson_obs(rate: Expr) -> ir::observation::ObservationModel {
         use ir::observation::*;
-        ir::observation::ObservationModel {
+        ObservationModel {
             name: "cases".into(),
             source: "cases".into(),
             columns: vec![
@@ -682,124 +576,150 @@ mod tests {
             stratum: vec![],
             projection: Projection::CumulativeFlow("infection".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
-                rate: ir::Diffable {
-                    expr: rate,
-                    grad: rate_grad.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
-                },
+                rate: ir::Diffable { expr: rate, grad: HashMap::new() },
             }),
         }
     }
 
-    /// D-scan (§4.4): a forcing referenced ONLY through an observation is the obs
-    /// preflight's domain — coeff_guard must NOT flag its coefficient. The
-    /// amplitude carries a real emitted obs `DerivEntry::Grad`, so it is admitted
-    /// (before P5 this was the spurious refusal: `has_grad` was `rate_grad`-only
-    /// and the global forcing scan flagged the amplitude).
+    // ── This guard's domain: a coefficient reached ONLY through an `init` ─────
+    // camdl emits no gradient for initial-condition expressions (gh#275), so a
+    // coefficient reached only there has no usable gradient regardless of the
+    // forcing kind — even a Sinusoidal amplitude, whose derivative IS analytic
+    // when it drives a rate/obs.
+
+    /// A Sinusoidal amplitude reached only via an initial condition → flagged
+    /// (no IC gradient path, so the tier-1 analytic derivative is never emitted).
     #[test]
-    fn does_not_flag_forcing_used_only_in_observation() {
+    fn flags_sinusoidal_amp_reached_only_via_ic() {
         let mut m = base_model();
         m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
-        // No transition references `seasonal`; the observation does (via its
-        // rate), and the compiler emitted `∂rate/∂amp` as a `Grad`.
-        m.observations = vec![poisson_obs(
-            time_func_ref("seasonal"),
-            &[("amp", DerivEntry::Grad(Expr::const_(1.0)))],
-        )];
+        ic_referencing(&mut m, time_func_ref("seasonal"));
         let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
-        assert!(
-            coefficient_only_estimated(&m, &estimated).is_empty(),
-            "an obs-only forcing coefficient with an emitted obs gradient must not \
-             be refused by coeff_guard (it is the preflight's domain)"
-        );
+        assert_eq!(ic_coefficient_only_estimated(&m, &estimated), vec!["amp".to_string()]);
     }
 
-    /// Tiebreak (§4.4): a forcing referenced by BOTH a rate and an observation is
-    /// rate-referenced — coeff_guard owns it. With no emitted gradient at all the
-    /// amplitude is (correctly) flagged, exactly as a rate-only forcing would be.
+    /// A Periodic step value reached only via an initial condition → flagged.
     #[test]
-    fn flags_forcing_referenced_by_rate_and_observation_when_gradientless() {
+    fn flags_periodic_coeff_reached_only_via_ic() {
+        use ir::time_func::Periodic;
         let mut m = base_model();
-        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
-        // A transition references `seasonal` (rate-referenced → coeff_guard's
-        // domain), with no rate_grad; the observation references it too.
-        m.transitions = vec![ir::transition::Transition {
-            name: "infection".into(),
-            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
-            rate: time_func_ref("seasonal"),
-            metadata: None,
-            draw_method: ir::transition::DrawMethod::Poisson,
-            rate_grad: HashMap::new(),
-            lineage: None,
+        m.time_functions = vec![TimeFunction {
+            name: "weekly".into(),
+            kind: TimeFuncKind::Periodic(Periodic {
+                period: Expr::const_(7.0),
+                values: vec![Expr::param("wpeak"), Expr::const_(1.0)],
+            }),
+            dim: (0, 0),
+            lag: None,
         }];
-        m.observations = vec![poisson_obs(time_func_ref("seasonal"), &[])];
-        let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
-        assert_eq!(
-            coefficient_only_estimated(&m, &estimated), vec!["amp".to_string()],
-            "a rate-referenced forcing coefficient with no emitted gradient must be \
-             flagged (rate-referenced wins the tiebreak — coeff_guard owns it)"
-        );
+        ic_referencing(&mut m, time_func_ref("weekly"));
+        let estimated: HashSet<String> = ["wpeak".to_string()].into_iter().collect();
+        assert_eq!(ic_coefficient_only_estimated(&m, &estimated), vec!["wpeak".to_string()]);
     }
 
-    /// D-accept (§4.4): the `has_grad` union admits a coeff_guard-domain parameter
-    /// whose emitted gradient rides the observation `*_grad` rather than a
-    /// `rate_grad`. Isolates the union: the forcing is rate-referenced (so it is
-    /// coeff_guard's domain and its `rate_grad` is empty), yet the observation
-    /// emitted a real `Grad` for the amplitude — without the union it would be
-    /// spuriously flagged.
+    /// A forcing `lag` reached only via an initial condition → flagged.
     #[test]
-    fn obs_grad_union_rescues_a_coeff_domain_param() {
+    fn flags_lag_reached_only_via_ic() {
         let mut m = base_model();
-        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
-        m.transitions = vec![ir::transition::Transition {
-            name: "infection".into(),
-            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
-            rate: time_func_ref("seasonal"),
-            metadata: None,
-            draw_method: ir::transition::DrawMethod::Poisson,
-            rate_grad: HashMap::new(),
-            lineage: None,
-        }];
-        m.observations = vec![poisson_obs(
-            Expr::Projected(ir::expr::ProjectedExpr { projected: () }),
-            &[("amp", DerivEntry::Grad(Expr::const_(1.0)))],
-        )];
-        let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
-        assert!(
-            coefficient_only_estimated(&m, &estimated).is_empty(),
-            "the obs `Grad` union must rescue a coeff_guard-domain param whose \
-             gradient was emitted only on the observation surface"
-        );
+        let mut tf = sinusoidal_forcing(Expr::const_(0.3));
+        tf.lag = Some(Expr::param("tau"));
+        m.time_functions = vec![tf];
+        ic_referencing(&mut m, time_func_ref("seasonal"));
+        let estimated: HashSet<String> = ["tau".to_string()].into_iter().collect();
+        assert_eq!(ic_coefficient_only_estimated(&m, &estimated), vec!["tau".to_string()]);
     }
 
-    /// An `Unsupported` obs entry is NOT a usable gradient — it must not enter
-    /// `has_grad`. Here `amp` drives an obs-referenced-AND-rate-referenced forcing
-    /// (coeff_guard's domain) whose obs gradient is `Unsupported`; with no
-    /// `rate_grad` it stays flagged.
+    /// An inline-table value reached only via an initial condition → flagged.
     #[test]
-    fn obs_unsupported_entry_does_not_rescue() {
+    fn flags_inline_table_value_reached_only_via_ic() {
+        let mut m = base_model();
+        m.tables = vec![ir::table::Table {
+            name: "k_tbl".into(),
+            source: ir::table::TableSource::Inline { values: vec![Expr::param("k")] },
+            out_of_bounds: ir::table::OobPolicy::Error,
+            cell_kind: None,
+        }];
+        ic_referencing(&mut m, table_lookup("k_tbl", 0.0));
+        let estimated: HashSet<String> = ["k".to_string()].into_iter().collect();
+        assert_eq!(ic_coefficient_only_estimated(&m, &estimated), vec!["k".to_string()]);
+    }
+
+    // ── Boundary: rate/obs surfaces are the preflight's domain, not this one ──
+
+    /// A coefficient reached through a RATE is the preflight's domain (its
+    /// `DerivEntry` rides the emitted `rate_grad`); this guard must NOT flag it,
+    /// even with a gradientless `rate_grad`. Refusing there is the preflight's
+    /// job — double-flagging is the fork gh#342 removes.
+    #[test]
+    fn does_not_flag_rate_referenced_coefficient() {
         let mut m = base_model();
         m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
-        m.transitions = vec![ir::transition::Transition {
-            name: "infection".into(),
-            stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
-            rate: time_func_ref("seasonal"),
-            metadata: None,
-            draw_method: ir::transition::DrawMethod::Poisson,
-            rate_grad: HashMap::new(),
-            lineage: None,
-        }];
-        m.observations = vec![poisson_obs(
-            time_func_ref("seasonal"),
-            &[("amp", DerivEntry::Unsupported {
-                node: "time_func:seasonal".into(),
-                code: ir::deriv::UnsupportedReason::PeriodicCoeff,
-            })],
-        )];
+        // `seasonal` is referenced by both a rate and the IC — rate-referenced
+        // wins, so this guard skips it (the preflight owns the rate contribution).
+        m.transitions = vec![rate_transition(time_func_ref("seasonal"), &[])];
+        ic_referencing(&mut m, time_func_ref("seasonal"));
         let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
-        assert_eq!(
-            coefficient_only_estimated(&m, &estimated), vec!["amp".to_string()],
-            "an Unsupported obs entry is a refusal, not a usable gradient — it must \
-             not rescue via has_grad"
-        );
+        assert!(ic_coefficient_only_estimated(&m, &estimated).is_empty(),
+            "a rate-referenced coefficient is the preflight's domain, not this guard's");
+    }
+
+    /// A coefficient reached only through an OBSERVATION is likewise the
+    /// preflight's domain — not flagged here.
+    #[test]
+    fn does_not_flag_obs_only_coefficient() {
+        let mut m = base_model();
+        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
+        m.observations = vec![poisson_obs(time_func_ref("seasonal"))];
+        let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
+        assert!(ic_coefficient_only_estimated(&m, &estimated).is_empty(),
+            "an obs-referenced coefficient is the preflight's domain, not this guard's");
+    }
+
+    // ── Retained escape (verbatim; the IC-incompleteness residual is gh#275) ──
+
+    /// A param reaching an IC-only forcing coefficient that ALSO appears directly
+    /// in a rate body is not flagged: the rate body carries a real gradient, and
+    /// the residual IC-forcing incompleteness is the escape this guard tolerates
+    /// until IC/state gradients exist (gh#275). Pins current behavior.
+    #[test]
+    fn does_not_flag_ic_coeff_param_also_in_a_rate_body() {
+        let mut m = base_model();
+        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
+        // `seasonal` is IC-only (the rate references `amp` directly, not the
+        // forcing), and `amp` carries a real rate_grad from that body appearance.
+        m.transitions = vec![rate_transition(
+            Expr::bin_op(ir::expr::BinOp::Mul, Expr::param("amp"), Expr::pop("S")),
+            &[("amp", DerivEntry::Grad(Expr::pop("S")))],
+        )];
+        ic_referencing(&mut m, time_func_ref("seasonal"));
+        let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
+        assert!(ic_coefficient_only_estimated(&m, &estimated).is_empty(),
+            "the body/has_grad escape is retained verbatim (IC incompleteness → gh#275)");
+    }
+
+    // ── Non-triggers ──────────────────────────────────────────────────────────
+
+    /// A non-estimated IC coefficient parameter is not flagged.
+    #[test]
+    fn does_not_flag_unestimated_ic_coefficient() {
+        let mut m = base_model();
+        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
+        ic_referencing(&mut m, time_func_ref("seasonal"));
+        let estimated: HashSet<String> = HashSet::new();
+        assert!(ic_coefficient_only_estimated(&m, &estimated).is_empty());
+    }
+
+    /// A forcing referenced by NOTHING (not rate/obs/IC) drives no dynamics, so
+    /// its coefficient's likelihood is flat — the posterior equals the prior and
+    /// admitting it is benign, NOT a silent bias. This is the behavior change
+    /// from the pre-P4 global scan, which flagged any forcing coefficient.
+    #[test]
+    fn does_not_flag_unreferenced_forcing_coefficient() {
+        let mut m = base_model();
+        m.time_functions = vec![sinusoidal_forcing(Expr::param("amp"))];
+        // No rate, observation, or initial condition references `seasonal`.
+        let estimated: HashSet<String> = ["amp".to_string()].into_iter().collect();
+        assert!(ic_coefficient_only_estimated(&m, &estimated).is_empty(),
+            "a dead forcing coefficient is benign (posterior = prior), not a silent bias");
     }
 }
