@@ -5,7 +5,16 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Flush at least this often, even when fewer than `flush_interval` rows have
+/// accumulated. On a slow sampler (seconds per sweep) this bounds how long a
+/// live `trace.tsv` tail waits to see a row to ~this window — instead of the
+/// file stalling for the whole 50-row batch — while a fast sampler still
+/// batches by the row-count ceiling.
+const FLUSH_AFTER: Duration = Duration::from_millis(250);
 
 /// Streaming TSV trace writer for MCMC traces.
 ///
@@ -18,9 +27,18 @@ use std::sync::Mutex;
 /// `trajectory_renewal`, `accepted`) are passed as `extra_columns` at
 /// construction and `extra_values` at each write.
 pub struct TraceWriter {
-    file: Mutex<BufWriter<File>>,
+    inner: Mutex<Inner>,
     flush_interval: usize,
-    row_count: std::sync::atomic::AtomicUsize,
+    row_count: AtomicUsize,
+}
+
+/// The parts that must stay consistent under one lock: the buffered writer and
+/// the wall-clock of its last flush (the time-based flush trigger). Keeping
+/// them behind the same `Mutex` means a flush and its timestamp update can never
+/// race across the chains sharing the writer.
+struct Inner {
+    writer: BufWriter<File>,
+    last_flush: Instant,
 }
 
 impl TraceWriter {
@@ -36,7 +54,7 @@ impl TraceWriter {
         param_names: &[String],
         append: bool,
     ) -> Self {
-        let file = if append && std::path::Path::new(path).exists() {
+        let writer = if append && std::path::Path::new(path).exists() {
             BufWriter::new(
                 OpenOptions::new().append(true).open(path)
                     .unwrap_or_else(|e| panic!("cannot open {} for append: {}", path, e))
@@ -55,13 +73,17 @@ impl TraceWriter {
                 write!(f, "\t{}", name).unwrap();
             }
             writeln!(f).unwrap();
+            // Flush the header immediately so the file is non-empty — a watcher
+            // can discover it and read its schema the instant the writer exists,
+            // rather than only after the first 50-row batch drains.
+            f.flush().ok();
             f
         };
 
         TraceWriter {
-            file: Mutex::new(file),
+            inner: Mutex::new(Inner { writer, last_flush: Instant::now() }),
             flush_interval: 50,
-            row_count: std::sync::atomic::AtomicUsize::new(0),
+            row_count: AtomicUsize::new(0),
         }
     }
 
@@ -77,22 +99,30 @@ impl TraceWriter {
         extra_values: &[&str],
         param_values: &[f64],
     ) {
-        if let Ok(mut f) = self.file.lock() {
-            write!(f, "{}\t{:.4}\t{:.4}", index, log_likelihood, log_posterior).unwrap();
+        if let Ok(mut inner) = self.inner.lock() {
+            write!(inner.writer, "{}\t{:.4}\t{:.4}", index, log_likelihood, log_posterior).unwrap();
             for val in extra_values {
-                write!(f, "\t{}", val).unwrap();
+                write!(inner.writer, "\t{}", val).unwrap();
             }
             for &v in param_values {
                 // Shortest round-trippable Display — fixed `{:.6}` zeroed any
                 // parameter below ~5e-7 (importation/spark rates), faking a
                 // frozen chain and corrupting R̂/ESS (gh#266).
-                write!(f, "\t{}", v).unwrap();
+                write!(inner.writer, "\t{}", v).unwrap();
             }
-            writeln!(f).unwrap();
+            writeln!(inner.writer).unwrap();
 
-            let n = self.row_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if (n + 1).is_multiple_of(self.flush_interval) {
-                f.flush().ok();
+            // Flush when EITHER the row-count ceiling is reached OR the time
+            // window has elapsed — whichever comes first. The count ceiling
+            // bounds buffering on a fast sampler; the time trigger bounds
+            // staleness on a slow one (so a live tail sees ~every row).
+            let n = self.row_count.fetch_add(1, Ordering::Relaxed);
+            let count_due = (n + 1).is_multiple_of(self.flush_interval);
+            let time_due = inner.last_flush.elapsed() >= FLUSH_AFTER;
+            if count_due || time_due {
+                if inner.writer.flush().is_ok() {
+                    inner.last_flush = Instant::now();
+                }
             }
         }
     }
@@ -125,6 +155,48 @@ mod tests {
         let parse = |line: &str| -> f64 { line.split('\t').nth(col).unwrap().parse().unwrap() };
         assert_eq!(parse(lines.next().unwrap()), 1e-7, "1e-7 must round-trip, not truncate to 0");
         assert_eq!(parse(lines.next().unwrap()), 9.9e-8, "9.9e-8 must round-trip");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live `trace.tsv` tail must not stay 0 bytes until the 50-row batch
+    /// drains. The header must be on disk the instant `new()` returns
+    /// (discoverable + schema-visible), and a single written row must become
+    /// visible via the time-based flush — without accumulating `flush_interval`
+    /// (50) rows first.
+    #[test]
+    fn header_flushed_on_new_and_row_flushed_before_full_batch() {
+        let dir = std::env::temp_dir().join(format!("camdl_tw_flush_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trace.tsv");
+        let ps = path.to_string_lossy().into_owned();
+
+        let tw = TraceWriter::new(
+            &ps, "step", "log_likelihood", &["accepted"], &["beta".to_string()], false,
+        );
+
+        // Header on disk immediately — before any row is written.
+        let after_new = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after_new, "step\tlog_likelihood\tlog_posterior\taccepted\tbeta\n",
+            "new() must flush the header so the file is non-empty from creation",
+        );
+
+        // One row, far under the 50-row ceiling, must be flushed once the time
+        // window elapses. Sleeping past FLUSH_AFTER makes the time trigger fire
+        // on the next write; over-sleeping only strengthens the guarantee.
+        std::thread::sleep(FLUSH_AFTER + Duration::from_millis(100));
+        tw.write_row(0, -10.0, -11.0, &["1"], &[0.5]);
+
+        let txt = std::fs::read_to_string(&path).unwrap();
+        let data_lines: Vec<&str> = txt.lines().skip(1).filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            data_lines.len(), 1,
+            "the single row must be visible via the time-based flush (not batched to 50): {txt:?}",
+        );
+        assert_eq!(
+            data_lines[0], "0\t-10.0000\t-11.0000\t1\t0.5",
+            "row content must be intact",
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
