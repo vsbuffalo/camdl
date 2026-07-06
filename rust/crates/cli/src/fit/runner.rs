@@ -1153,23 +1153,23 @@ pub fn print_preflight(config: &FitRunConfig, collector: &DiagnosticCollector) {
             n_auto, config.estimated_params.len());
     }
 
-    // Cooling schedule preview
+    // Cooling schedule preview — uses the SAME per-iteration multiplier the run
+    // applies (`cooling_multiplier_at_iter`), so preview and actual can't drift.
     let frac = config.if2_config.cooling_fraction;
     let iters = config.if2_config.n_iterations;
     let target_iters = config.if2_config.cooling_target_iters;
     let n_obs = config.observations.len();
-    let mid = iters / 2;
 
-    let total_target_steps = target_iters as f64 * n_obs as f64;
-    let per_step = frac.powf(2.0 / total_target_steps);
-    let steps_per_iter = (1 + n_obs) as f64;
+    let rw_at =
+        |iter: usize| sim::inference::if2::cooling_multiplier_at_iter(frac, target_iters, n_obs, iter);
 
-    let rw_at = |iter: usize| per_step.powf(iter as f64 * steps_per_iter);
-
-    eprintln!("\ncooling: cf50={:.2} over {} iterations × {} observations", frac, iters, n_obs);
+    eprintln!(
+        "\ncooling: cf50={:.2}, reached at iter {} (target), over a {}-iteration run × {} observations",
+        frac, target_iters, iters, n_obs
+    );
     eprintln!("  iter {:3}: rw_sd at {:.1}%", 1, rw_at(1) * 100.0);
-    eprintln!("  iter {:3}: rw_sd at {:.1}% (halfway)", mid, rw_at(mid) * 100.0);
-    eprintln!("  iter {:3}: rw_sd at {:.1}%", iters, rw_at(iters) * 100.0);
+    eprintln!("  iter {:3}: rw_sd at {:.1}% (cf50 reached)", target_iters, rw_at(target_iters) * 100.0);
+    eprintln!("  iter {:3}: rw_sd at {:.1}% (run end)", iters, rw_at(iters) * 100.0);
 
     // Warn if cooling exhausts well before the run ends
     let two_thirds = (iters * 2 / 3).max(1);
