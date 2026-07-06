@@ -1323,6 +1323,77 @@ pub fn simulate_reference_on_grid(
 // Conditional SMC with Ancestor Sampling (CSMC-AS)
 // ═══════════════════════════════════════════════════════════════════
 
+/// Fill `ancestor_log_w` with the reference particle's ancestor-sampling weights.
+///
+/// Lindsten, Jordan & Schön (2014), "Particle Gibbs with Ancestor Sampling",
+/// JMLR 15:2145–2184, Eq. (3) / Eq. (17): the reference's ancestor index `a^N_s`
+/// is drawn with `P(a^N_s = j) ∝ w̃_j`, where
+///
+/// ```text
+///   log w̃_j = log w_{s-1}^j  +  log f_θ(x'_s | x_{s-1}^j).
+/// ```
+///
+/// BOTH factors are load-bearing. `log_weights[j] = log w_{s-1}^j` is the prior
+/// probability of ancestor path `j` (the previous substep's importance weight);
+/// `td = log f_θ(x'_s | x_{s-1}^j)` is the likelihood of the reference's move
+/// from that ancestor's state to its substep-`s` state `x'_s`. The common future
+/// factor `p_θ(x'_{s+1:T}, y_{s:T} | x'_s)` is independent of `j` and cancels in
+/// the softmax, so it is omitted.
+///
+/// The candidate states are the PRE-RESAMPLE ensemble
+/// (`prev_counts_for_ancestor[j]`, captured before the step-1 resample), so the
+/// paired prior weight is `log_weights[j]` — the pre-resample importance weight
+/// of the *same* original slot `j` (the resample never reshuffles `log_weights`).
+/// Dropping it biases the draw whenever the incoming weights are non-uniform
+/// (every substep following an observation) and forfeits the Theorem-1 invariance
+/// of the PGAS kernel. The reference slot `j_ref` uses its own corrected
+/// `ref_counts_before` with its own `log_weights[j_ref]`.
+///
+/// Extracted from [`csmc_as`] and made `pub` so this weight — the quantity the
+/// invariance proof hinges on — is unit-testable in isolation.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_ancestor_log_weights(
+    ancestor_log_w: &mut [f64],
+    model: &CompiledModel,
+    prev_counts_for_ancestor: &[Vec<i64>],
+    ref_counts_before: &[i64],
+    ref_flows: &[u64],
+    ref_gammas: &[f64],
+    log_weights: &[f64],
+    params: &[f64],
+    t: f64,
+    step_dt: f64,
+    per_eval: Option<&[f64]>,
+    j_ref: usize,
+) -> Result<(), SimError> {
+    // Parallel (gh#209): each slot is an independent transition-density eval over
+    // a read-only state; the categorical draw in `csmc_as` reads the buffer only
+    // after this barrier, so concurrency is byte-identical to a serial loop.
+    let results: Vec<Result<(), SimError>> = ancestor_log_w
+        .par_iter_mut()
+        .enumerate()
+        .map(|(j, slot)| {
+            // gh#audit-H8: ancestor states are the pre-resample ensemble; the
+            // reference slot uses its own corrected counts_before.
+            let counts_before = if j == j_ref {
+                ref_counts_before
+            } else {
+                &prev_counts_for_ancestor[j]
+            };
+            let td = log_transition_density_substep(
+                model, counts_before, ref_flows, ref_gammas, params, t, step_dt, per_eval,
+            )?;
+            // Eq (17): log w̃_j = log w_{s-1}^j + log f_θ(x'_s | x_{s-1}^j).
+            *slot = log_weights[j] + td;
+            Ok(())
+        })
+        .collect();
+    for r in results {
+        r?;
+    }
+    Ok(())
+}
+
 /// Run one CSMC-AS sweep: draw X' ~ p(X | θ, y) conditioned on
 /// the reference trajectory.
 ///
@@ -1578,70 +1649,26 @@ pub fn csmc_as(
         prev_counts[j_ref].copy_from_slice(&ref_rec.counts_before);
 
         // ── 4. Ancestor sampling for reference particle ──
-        // ã_j = w_{s-1}^j + log f(X_ref_s | x_{s-1}^j, θ, gamma_ref_s)
-        // The gamma from the reference is used because we're asking:
-        // "given this gamma noise, what's P(reaching ref state from particle j?)"
-        //
-        // IM6 in 2026-04-19 inference review: ancestor sampling runs
-        // POST-resample here, so `prev_counts[j]` is the state at
-        // slot j after resampling (i.e., the pre-resample state of
-        // ancestor `indices[j]`), while `log_weights[j]` is the
-        // pre-resample weight at ORIGINAL slot j (never reshuffled
-        // after resampling at step 1). That pairs a weight from
-        // slot-j pre-resample with a state from slot-indices[j]
-        // pre-resample — a mismatch.
-        //
-        // After resampling, per CSMC theory, all slots carry
-        // uniform weight 1/N. The correct ancestor weight in the
-        // post-resample placement is therefore just the transition
-        // density: ã_j ∝ f(X_ref_s | prev_counts[j]). Adding the
-        // stale log_weights[j] skews the categorical toward slots
-        // whose original weights were high, regardless of whether
-        // the ancestor-source state (at slot indices[j]) happens to
-        // be a good precursor to X_ref.
-        //
-        // Fix: drop log_weights[j] from the sum. The current
-        // log_weights[j] value is discarded at step 5 anyway (either
-        // overwritten by the obs log-likelihood or reset to 0), so
-        // removing it here doesn't affect subsequent steps.
+        // Draw the reference's ancestor a^N_s ∝ w̃_j = w_{s-1}^j · f_θ(x'_s |
+        // x_{s-1}^j) (Lindsten, Jordan & Schön 2014, Eq. 3/17). The reference's
+        // own gamma noise enters the density (given this noise, how likely is
+        // reaching x'_s from ancestor j?). `fill_ancestor_log_weights` owns the
+        // weight formula; the categorical draw + lineage bookkeeping stay here.
         {
-            // Ancestor weights, in parallel (gh#209). Each slot is an
-            // independent transition-density eval over a read-only state; the
-            // categorical draw below reads `ancestor_log_w` only after this
-            // barrier, so concurrency is byte-identical to the serial loop.
-            let ad_results: Vec<Result<(), SimError>> = ancestor_log_w
-                .par_iter_mut()
-                .enumerate()
-                .map(|(j, slot)| {
-                    // gh#audit-H8. Use the pre-resample state cache, not
-                    // the post-resample prev_counts. CSMC ancestor
-                    // sampling is supposed to categoricalise over the
-                    // pre-step particle ensemble; the post-resample
-                    // prev_counts permutes that ensemble silently.
-                    // Reference slot j_ref keeps its corrected
-                    // counts_before via prev_counts[j_ref] above.
-                    let counts_before_substep = if j == j_ref {
-                        &prev_counts[j_ref]  // already corrected to ref_rec.counts_before
-                    } else {
-                        &prev_counts_for_ancestor[j]
-                    };
-                    let td = log_transition_density_substep(
-                        model,
-                        counts_before_substep,
-                        &ref_rec.flows,
-                        &ref_rec.gammas,
-                        params,
-                        t,
-                        step_dt,
-                        per_eval,
-                    )?;
-                    // Post-resample slot j carries uniform weight (1/N);
-                    // the categorical is driven by td alone.
-                    *slot = td;
-                    Ok(())
-                })
-                .collect();
-            for r in ad_results { r?; }
+            fill_ancestor_log_weights(
+                &mut ancestor_log_w,
+                model,
+                &prev_counts_for_ancestor,
+                &prev_counts[j_ref],
+                &ref_rec.flows,
+                &ref_rec.gammas,
+                &log_weights,
+                params,
+                t,
+                step_dt,
+                per_eval,
+                j_ref,
+            )?;
 
             // Sample ancestor from categorical(softmax(ancestor_log_w)).
             // Degenerate case (all -inf): keep reference's own history to
