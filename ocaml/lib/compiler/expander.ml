@@ -4069,6 +4069,71 @@ let guard_to_string g =
   in
   pp g
 
+(* Combine signed stoichiometry entries: sum each compartment's deltas, drop any
+   that net to zero (a catalyst appearing on both sides), and preserve
+   first-appearance order. Pulled out of [emit_one] so that function reads as a
+   sequence of named steps rather than an inline Hashtbl fold. *)
+let collapse_stoichiometry (entries : (string * int) list) : (string * int) list =
+  let order = ref [] in
+  let tbl = Hashtbl.create 8 in
+  List.iter (fun (n, d) ->
+    if not (Hashtbl.mem tbl n) then order := n :: !order;
+    let prev = try Hashtbl.find tbl n with Not_found -> 0 in
+    Hashtbl.replace tbl n (prev + d)
+  ) entries;
+  List.filter_map (fun n ->
+    let d = Hashtbl.find tbl n in
+    if d = 0 then None else Some (n, d)
+  ) (List.rev !order)
+
+(* The single compartment carrying the requested sign in a collapsed
+   stoichiometry (negative = source, positive = destination), or [None] when
+   there are zero or several — the source/dest metadata is filled only for the
+   unambiguous single-source / single-dest case. *)
+let sole_with_sign (stoich : (string * int) list) (sign : int) : string option =
+  let matches =
+    List.filter (fun (_, d) -> if sign < 0 then d < 0 else d > 0) stoich in
+  match matches with
+  | [(n, _)] -> Some n
+  | _        -> None
+
+(* Lineage analysis (#[lineage], 2026-05-19 proposal). Runs on the
+   resolved/normalized IR rate so Pop names are fully qualified after
+   stratification, and the source set is the expanded source compartments. A
+   nonlinear use of a parent count is rejected with E601 pointing at the
+   transition; a structurally-valid (empty-weights) lineage record is still
+   emitted so compilation continues collecting diagnostics, while the E601
+   blocks a successful compile. *)
+let resolve_lineage (ctx : context) (tr : Ast.transition_decl)
+    ~(sources : string list) ~(tr_name : string) (rate : Ir.expr) : Ir.transition_lineage option =
+  if not tr.trlineage then None
+  else begin
+    let cls = Lineage.classify_parents ~sources rate in
+    match cls.Lineage.nonlinear with
+    | Some nl ->
+      Diagnostics.error ctx.diags
+        ~code:"E601"
+        ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
+        ~message:(Printf.sprintf
+          "lineage tracking on transition '%s' requires linear \
+           dependence on parent compartments. Found nonlinear use \
+           of '%s' in the rate expression (inside %s)."
+          tr_name nl.Lineage.comp
+          (Pp_expr.to_string nl.Lineage.context))
+        ~hint:"options: (1) rewrite the rate so the parent appears \
+               as a top-level linear factor, absorbing the \
+               nonlinearity into other parameters; (2) remove the \
+               #[lineage] annotation — v1 lineage tracking does not \
+               support nonlinear parent dependence; (3) wait for \
+               Phase 4 lineage support (nonlinear rates with \
+               explicit attribution semantics)."
+        ();
+      Some { Ir.is_lineage_event = true; Ir.parent_pool_weights = [] }
+    | None ->
+      let weights = Lineage.parent_pool_weights ~sources rate in
+      Some { Ir.is_lineage_event = true; Ir.parent_pool_weights = weights }
+  end
+
 let expand_transitions_counted ctx =
   let filtered = ref 0 in
   let expanded = List.concat_map (fun tr ->
@@ -4165,29 +4230,9 @@ let expand_transitions_counted ctx =
             List.map (fun n -> (n, -1)) src_names
             @ List.map (fun n -> (n,  1)) dst_names
           in
-          let collapse entries =
-            let order = ref [] in
-            let tbl = Hashtbl.create 8 in
-            List.iter (fun (n, d) ->
-              if not (Hashtbl.mem tbl n) then order := n :: !order;
-              let prev = try Hashtbl.find tbl n with Not_found -> 0 in
-              Hashtbl.replace tbl n (prev + d)
-            ) entries;
-            List.filter_map (fun n ->
-              let d = Hashtbl.find tbl n in
-              if d = 0 then None else Some (n, d)
-            ) (List.rev !order)
-          in
-          let stoich = collapse raw_entries in
-          let sole_with_sign sign =
-            let matches = List.filter (fun (_, d) ->
-              if sign < 0 then d < 0 else d > 0) stoich in
-            match matches with
-            | [(n, _)] -> Some n
-            | _        -> None
-          in
-          let src_meta = sole_with_sign (-1) in
-          let dst_meta = sole_with_sign   1  in
+          let stoich = collapse_stoichiometry raw_entries in
+          let src_meta = sole_with_sign stoich (-1) in
+          let dst_meta = sole_with_sign stoich   1  in
           if stoich = [] && (src_names <> [] || dst_names <> []) then begin
             Diagnostics.error ctx.diags
               ~code:"E310"
@@ -4209,43 +4254,7 @@ let expand_transitions_counted ctx =
             | None -> base_name
             | Some s -> base_name ^ "_" ^ s
           in
-          (* Lineage analysis (#[lineage], 2026-05-19 proposal). Runs on
-             the resolved/normalized IR rate so Pop names are fully
-             qualified after stratification, and the source set is the
-             expanded source compartments. A nonlinear use of a parent
-             count is rejected with E601 pointing at the transition. *)
-          let lineage =
-            if not tr.trlineage then None
-            else begin
-              let cls = Lineage.classify_parents ~sources:src_names rate in
-              match cls.Lineage.nonlinear with
-              | Some nl ->
-                Diagnostics.error ctx.diags
-                  ~code:"E601"
-                  ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
-                  ~message:(Printf.sprintf
-                    "lineage tracking on transition '%s' requires linear \
-                     dependence on parent compartments. Found nonlinear use \
-                     of '%s' in the rate expression (inside %s)."
-                    tr_name nl.Lineage.comp
-                    (Pp_expr.to_string nl.Lineage.context))
-                  ~hint:"options: (1) rewrite the rate so the parent appears \
-                         as a top-level linear factor, absorbing the \
-                         nonlinearity into other parameters; (2) remove the \
-                         #[lineage] annotation — v1 lineage tracking does not \
-                         support nonlinear parent dependence; (3) wait for \
-                         Phase 4 lineage support (nonlinear rates with \
-                         explicit attribution semantics)."
-                  ();
-                (* Emit a structurally-valid lineage record so compilation
-                   continues to collect further diagnostics; the error above
-                   blocks a successful compile. *)
-                Some { Ir.is_lineage_event = true; Ir.parent_pool_weights = [] }
-              | None ->
-                let weights = Lineage.parent_pool_weights ~sources:src_names rate in
-                Some { Ir.is_lineage_event = true; Ir.parent_pool_weights = weights }
-            end
-          in
+          let lineage = resolve_lineage ctx tr ~sources:src_names ~tr_name rate in
           {
             Ir.name            = tr_name;
             Ir.stoichiometry   = stoich;
