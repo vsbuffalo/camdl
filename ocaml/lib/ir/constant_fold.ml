@@ -152,7 +152,7 @@ let fold_model (m : model) : model =
         List.map
           (fun (t : transition) ->
             { t with rate = fe t.rate;
-                     rate_grad = List.map (fun (p, g) -> (p, fe g)) t.rate_grad;
+                     rate_grad = fold_grad_map fe t.rate_grad;
                      draw_method = fold_draw_method fe t.draw_method })
           m.transitions;
       bindings = List.map (fun (b : binding) -> { b with bexpr = fe b.bexpr }) m.bindings;

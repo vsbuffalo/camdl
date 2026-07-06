@@ -379,8 +379,16 @@ pub fn coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<String>
     // an `Unsupported` entry is the preflight's refusal, not a usable gradient).
     let mut has_grad: HashSet<&str> = HashSet::new();
     for t in &model.transitions {
-        for name in t.rate_grad.keys() {
-            has_grad.insert(name.as_str());
+        for (name, entry) in &t.rate_grad {
+            // Only a real `Grad` is a usable gradient. Post-gh#342 a rate
+            // coefficient the compiler could not differentiate (tier-2b Periodic/
+            // `lag`/non-const table index) serialises an `Unsupported` here; it
+            // must NOT enter `has_grad` (that would let coeff_guard admit a fit
+            // whose forcing gradient is missing — the exact silent-mis-estimate
+            // this guard exists to prevent), mirroring the σ²/obs branches.
+            if matches!(entry, DerivEntry::Grad(_)) {
+                has_grad.insert(name.as_str());
+            }
         }
         if let DrawMethod::Overdispersed { sigma_sq_grad, .. } = &t.draw_method {
             for (name, entry) in sigma_sq_grad {
@@ -531,7 +539,7 @@ mod tests {
         // `alpha` is not in the rate body (the forcing is opaque there), but the
         // compiler emitted a derivative entry for it.
         let mut rate_grad = HashMap::new();
-        rate_grad.insert("alpha".to_string(), Expr::pop("S"));
+        rate_grad.insert("alpha".to_string(), DerivEntry::Grad(Expr::pop("S")));
         m.transitions = vec![ir::transition::Transition {
             name: "infection".into(),
             stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
@@ -580,7 +588,7 @@ mod tests {
         // `wpeak` also appears directly in a rate, with a (partial) rate_grad
         // entry for that body appearance — but it misses the forcing part.
         let mut rate_grad = HashMap::new();
-        rate_grad.insert("wpeak".to_string(), Expr::pop("S"));
+        rate_grad.insert("wpeak".to_string(), DerivEntry::Grad(Expr::pop("S")));
         m.transitions = vec![ir::transition::Transition {
             name: "infection".into(),
             stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
@@ -611,7 +619,7 @@ mod tests {
         // `tau` also appears directly in a rate, with a (partial) rate_grad
         // entry for that body appearance — but it misses the forcing's lag part.
         let mut rate_grad = HashMap::new();
-        rate_grad.insert("tau".to_string(), Expr::pop("S"));
+        rate_grad.insert("tau".to_string(), DerivEntry::Grad(Expr::pop("S")));
         m.transitions = vec![ir::transition::Transition {
             name: "decay".into(),
             stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],

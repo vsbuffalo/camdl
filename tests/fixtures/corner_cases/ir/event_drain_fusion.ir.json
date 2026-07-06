@@ -1,9 +1,9 @@
-{"ir_version":"0.25","validated_by":"ocaml-compiler-v0.25","model":{"name":"event_drain_fusion","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.26","validated_by":"ocaml-compiler-v0.26","model":{"name":"event_drain_fusion","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"A","kind":"integer"},
 {"name":"B","kind":"integer"},
 {"name":"C","kind":"integer"}
 ],"transitions":[
-{"name":"drain","stoichiometry":[["A",-1],["B",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"A"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"A","dest_compartment":"B"},"rate_grad":{"k":{"pop":"A"}}}
+{"name":"drain","stoichiometry":[["A",-1],["B",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"A"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"A","dest_compartment":"B"},"rate_grad":{"k":{"grad":{"pop":"A"}}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[
 {"name":"leak","fire":{"scheduled":{"recurring":{"start":1.0,"period":1.0,"end":20.0}}},"actions":[{"fraction_transfer":{"src":"A","dst":"C","fraction":{"param":"f"}}}],"kind":"event"}
 ],"observations":[],"parameters":[

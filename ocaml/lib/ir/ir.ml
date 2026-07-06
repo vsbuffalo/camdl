@@ -167,7 +167,7 @@ type transition = {
   rate:            expr;
   metadata:        transition_metadata option;
   draw_method:     draw_method;
-  rate_grad:       (string * expr) list;  (** ∂rate/∂param for each estimated param. Empty if not computed. *)
+  rate_grad:       (string * deriv_entry) list;  (** ∂rate/∂param, classified [Grad | Unsupported] (a [grad_map]); empty if not computed. A live-but-omitted coefficient is a serialized [DEUnsupported] the fit gate refuses on (gh#342). *)
   lineage:         transition_lineage option;  (** Some iff `#[lineage]`; None for ordinary transitions. *)
 }
 

@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.25",
-  "validated_by": "ocaml-compiler-v0.25",
+  "ir_version": "0.26",
+  "validated_by": "ocaml-compiler-v0.26",
   "model": {
     "name": "yule",
     "version": "0.3",
@@ -23,7 +23,7 @@
           "source_compartment": null,
           "dest_compartment": "Y"
         },
-        "rate_grad": { "lambda": { "pop": "Y" } },
+        "rate_grad": {"lambda":{"grad":{"pop":"Y"}}},
         "lineage": {
           "is_lineage_event": true,
           "parent_pool_weights": [["Y", { "param": "lambda" }]]

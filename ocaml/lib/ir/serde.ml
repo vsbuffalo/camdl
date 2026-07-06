@@ -373,9 +373,7 @@ let transition_to_json (t : transition) : Yojson.Safe.t =
     @ (match t.draw_method with
        | DrawPoisson -> []
        | dm          -> [("draw_method", draw_method_to_json dm)])
-    @ (match t.rate_grad with
-       | [] -> []
-       | grads -> [("rate_grad", obj (List.map (fun (p, e) -> (p, expr_to_json e)) grads))])
+    @ grad_field "rate_grad" t.rate_grad
     @ (match t.lineage with
        | None   -> []
        | Some l -> [("lineage", transition_lineage_to_json l)])
@@ -393,9 +391,7 @@ let transition_of_json j =
                     | Some dm -> draw_method_of_json dm);
     rate_grad    = (match member_opt "rate_grad" j with
                     | None | Some `Null -> []
-                    | Some (`Assoc pairs) ->
-                      List.map (fun (name, expr_j) -> (name, expr_of_json expr_j)) pairs
-                    | Some _ -> []);
+                    | Some g -> grad_map_of_json g);
     lineage      = (match member_opt "lineage" j with
                     | None | Some `Null -> None
                     | Some l -> Some (transition_lineage_of_json l));

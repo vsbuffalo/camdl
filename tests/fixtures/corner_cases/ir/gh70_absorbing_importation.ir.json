@@ -1,8 +1,8 @@
-{"ir_version":"0.25","validated_by":"ocaml-compiler-v0.25","model":{"name":"gh70_absorbing_importation","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.26","validated_by":"ocaml-compiler-v0.26","model":{"name":"gh70_absorbing_importation","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
 ],"transitions":[
-{"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"k":{"pop":"I"}}}
+{"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"k":{"grad":{"pop":"I"}}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[
 {"name":"importation","fire":{"scheduled":{"at_times":[10.0]}},"actions":[{"add":{"compartment":"I","count":{"const":5.0}}}],"kind":"event"}
 ],"observations":[],"parameters":[

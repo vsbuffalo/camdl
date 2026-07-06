@@ -69,7 +69,9 @@ fn count_per_eval_refs(m: &ir::Model) -> usize {
     for t in &m.transitions {
         n += in_expr(&t.rate);
         for (_p, g) in &t.rate_grad {
-            n += in_expr(g);
+            if let ir::deriv::DerivEntry::Grad(e) = g {
+                n += in_expr(e);
+            }
         }
     }
     for eq in &m.ode_equations {
@@ -218,9 +220,17 @@ fn gate_licm_is_byte_identical() {
         .enumerate()
     {
         let off_map: HashMap<usize, u64> = g_off.iter()
-            .map(|(p, e)| (*p, sim::resolved_expr::eval_resolved(e, &ctx_off).to_bits())).collect();
+            .filter_map(|(p, entry)| match entry {
+                sim::resolved_expr::ResolvedDerivEntry::Grad(e) =>
+                    Some((*p, sim::resolved_expr::eval_resolved(e, &ctx_off).to_bits())),
+                sim::resolved_expr::ResolvedDerivEntry::Unsupported { .. } => None,
+            }).collect();
         let on_map: HashMap<usize, u64> = g_on.iter()
-            .map(|(p, e)| (*p, sim::resolved_expr::eval_resolved(e, &ctx_on).to_bits())).collect();
+            .filter_map(|(p, entry)| match entry {
+                sim::resolved_expr::ResolvedDerivEntry::Grad(e) =>
+                    Some((*p, sim::resolved_expr::eval_resolved(e, &ctx_on).to_bits())),
+                sim::resolved_expr::ResolvedDerivEntry::Unsupported { .. } => None,
+            }).collect();
         assert_eq!(
             off_map.len(), on_map.len(),
             "rate_grad term count differs at transition {ti} (off={}, on={})",
@@ -284,8 +294,10 @@ fn gate_licm_is_byte_identical() {
         check(rate, &format!("rate transition {ti}"));
     }
     for g in &compiled_on.resolved.rate_grads_indexed {
-        for (_p, e) in g {
-            check(e, "rate_grad");
+        for (_p, entry) in g {
+            if let sim::resolved_expr::ResolvedDerivEntry::Grad(e) = entry {
+                check(e, "rate_grad");
+            }
         }
     }
     for d in &compiled_on.resolved.ode_derivatives {

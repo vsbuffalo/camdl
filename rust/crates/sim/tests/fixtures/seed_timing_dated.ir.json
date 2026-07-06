@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.25",
-  "validated_by": "ocaml-compiler-v0.25",
+  "ir_version": "0.26",
+  "validated_by": "ocaml-compiler-v0.26",
   "model": {
     "name": "seed_timing_dated",
     "version": "0.3",
@@ -43,26 +43,50 @@
         },
         "rate_grad": {
           "beta": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": { "pop": "S" },
-                      "right": { "pop": "I" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "pop": "S"
+                        },
+                        "right": {
+                          "pop": "I"
+                        }
+                      }
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S",
+                        "I",
+                        "R"
+                      ]
                     }
-                  },
-                  "right": { "pop_sum": ["S", "I", "R"] }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": { "pop_sum": ["S", "I", "R"] },
-                  "right": { "pop_sum": ["S", "I", "R"] }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "pop_sum": [
+                        "S",
+                        "I",
+                        "R"
+                      ]
+                    },
+                    "right": {
+                      "pop_sum": [
+                        "S",
+                        "I",
+                        "R"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -105,7 +129,7 @@
           "source_compartment": "I",
           "dest_compartment": "R"
         },
-        "rate_grad": { "gamma": { "pop": "I" } }
+        "rate_grad": {"gamma":{"grad":{"pop":"I"}}}
       },
       {
         "name": "seed",
@@ -152,50 +176,66 @@
         },
         "rate_grad": {
           "tau": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "un_op": {
-                  "op": "neg",
-                  "arg": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": { "param": "lambda" },
-                      "right": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "un_op": {
-                              "op": "exp",
-                              "arg": {
-                                "bin_op": {
-                                  "op": "div",
-                                  "left": {
-                                    "un_op": {
-                                      "op": "neg",
-                                      "arg": {
-                                        "bin_op": {
-                                          "op": "sub",
-                                          "left": { "time": null },
-                                          "right": { "param": "tau" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "un_op": {
+                    "op": "neg",
+                    "arg": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "param": "lambda"
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "un_op": {
+                                "op": "exp",
+                                "arg": {
+                                  "bin_op": {
+                                    "op": "div",
+                                    "left": {
+                                      "un_op": {
+                                        "op": "neg",
+                                        "arg": {
+                                          "bin_op": {
+                                            "op": "sub",
+                                            "left": {
+                                              "time": null
+                                            },
+                                            "right": {
+                                              "param": "tau"
+                                            }
+                                          }
                                         }
                                       }
+                                    },
+                                    "right": {
+                                      "param": "w"
                                     }
-                                  },
-                                  "right": { "param": "w" }
+                                  }
                                 }
                               }
-                            }
-                          },
-                          "right": {
-                            "bin_op": {
-                              "op": "div",
-                              "left": { "param": "w" },
-                              "right": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": { "param": "w" },
-                                  "right": { "param": "w" }
+                            },
+                            "right": {
+                              "bin_op": {
+                                "op": "div",
+                                "left": {
+                                  "param": "w"
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "param": "w"
+                                    },
+                                    "right": {
+                                      "param": "w"
+                                    }
+                                  }
                                 }
                               }
                             }
@@ -204,63 +244,79 @@
                       }
                     }
                   }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "add",
-                      "left": { "const": 1.0 },
-                      "right": {
-                        "un_op": {
-                          "op": "exp",
-                          "arg": {
-                            "bin_op": {
-                              "op": "div",
-                              "left": {
-                                "un_op": {
-                                  "op": "neg",
-                                  "arg": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "time": null },
-                                      "right": { "param": "tau" }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "add",
+                        "left": {
+                          "const": 1.0
+                        },
+                        "right": {
+                          "un_op": {
+                            "op": "exp",
+                            "arg": {
+                              "bin_op": {
+                                "op": "div",
+                                "left": {
+                                  "un_op": {
+                                    "op": "neg",
+                                    "arg": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "time": null
+                                        },
+                                        "right": {
+                                          "param": "tau"
+                                        }
+                                      }
                                     }
                                   }
+                                },
+                                "right": {
+                                  "param": "w"
                                 }
-                              },
-                              "right": { "param": "w" }
+                              }
                             }
                           }
                         }
                       }
-                    }
-                  },
-                  "right": {
-                    "bin_op": {
-                      "op": "add",
-                      "left": { "const": 1.0 },
-                      "right": {
-                        "un_op": {
-                          "op": "exp",
-                          "arg": {
-                            "bin_op": {
-                              "op": "div",
-                              "left": {
-                                "un_op": {
-                                  "op": "neg",
-                                  "arg": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "time": null },
-                                      "right": { "param": "tau" }
+                    },
+                    "right": {
+                      "bin_op": {
+                        "op": "add",
+                        "left": {
+                          "const": 1.0
+                        },
+                        "right": {
+                          "un_op": {
+                            "op": "exp",
+                            "arg": {
+                              "bin_op": {
+                                "op": "div",
+                                "left": {
+                                  "un_op": {
+                                    "op": "neg",
+                                    "arg": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "time": null
+                                        },
+                                        "right": {
+                                          "param": "tau"
+                                        }
+                                      }
                                     }
                                   }
+                                },
+                                "right": {
+                                  "param": "w"
                                 }
-                              },
-                              "right": { "param": "w" }
+                              }
                             }
                           }
                         }
@@ -272,92 +328,118 @@
             }
           },
           "lambda": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "bin_op": {
-                  "op": "add",
-                  "left": { "const": 1.0 },
-                  "right": {
-                    "un_op": {
-                      "op": "exp",
-                      "arg": {
-                        "bin_op": {
-                          "op": "div",
-                          "left": {
-                            "un_op": {
-                              "op": "neg",
-                              "arg": {
-                                "bin_op": {
-                                  "op": "sub",
-                                  "left": { "time": null },
-                                  "right": { "param": "tau" }
-                                }
-                              }
-                            }
-                          },
-                          "right": { "param": "w" }
-                        }
-                      }
-                    }
-                  }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "add",
-                      "left": { "const": 1.0 },
-                      "right": {
-                        "un_op": {
-                          "op": "exp",
-                          "arg": {
-                            "bin_op": {
-                              "op": "div",
-                              "left": {
-                                "un_op": {
-                                  "op": "neg",
-                                  "arg": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "time": null },
-                                      "right": { "param": "tau" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "bin_op": {
+                    "op": "add",
+                    "left": {
+                      "const": 1.0
+                    },
+                    "right": {
+                      "un_op": {
+                        "op": "exp",
+                        "arg": {
+                          "bin_op": {
+                            "op": "div",
+                            "left": {
+                              "un_op": {
+                                "op": "neg",
+                                "arg": {
+                                  "bin_op": {
+                                    "op": "sub",
+                                    "left": {
+                                      "time": null
+                                    },
+                                    "right": {
+                                      "param": "tau"
                                     }
                                   }
                                 }
-                              },
-                              "right": { "param": "w" }
+                              }
+                            },
+                            "right": {
+                              "param": "w"
                             }
                           }
                         }
                       }
                     }
-                  },
-                  "right": {
-                    "bin_op": {
-                      "op": "add",
-                      "left": { "const": 1.0 },
-                      "right": {
-                        "un_op": {
-                          "op": "exp",
-                          "arg": {
-                            "bin_op": {
-                              "op": "div",
-                              "left": {
-                                "un_op": {
-                                  "op": "neg",
-                                  "arg": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "time": null },
-                                      "right": { "param": "tau" }
+                  }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "add",
+                        "left": {
+                          "const": 1.0
+                        },
+                        "right": {
+                          "un_op": {
+                            "op": "exp",
+                            "arg": {
+                              "bin_op": {
+                                "op": "div",
+                                "left": {
+                                  "un_op": {
+                                    "op": "neg",
+                                    "arg": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "time": null
+                                        },
+                                        "right": {
+                                          "param": "tau"
+                                        }
+                                      }
                                     }
                                   }
+                                },
+                                "right": {
+                                  "param": "w"
                                 }
-                              },
-                              "right": { "param": "w" }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "right": {
+                      "bin_op": {
+                        "op": "add",
+                        "left": {
+                          "const": 1.0
+                        },
+                        "right": {
+                          "un_op": {
+                            "op": "exp",
+                            "arg": {
+                              "bin_op": {
+                                "op": "div",
+                                "left": {
+                                  "un_op": {
+                                    "op": "neg",
+                                    "arg": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "time": null
+                                        },
+                                        "right": {
+                                          "param": "tau"
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
+                                "right": {
+                                  "param": "w"
+                                }
+                              }
                             }
                           }
                         }
@@ -369,66 +451,84 @@
             }
           },
           "w": {
-            "bin_op": {
-              "op": "div",
-              "left": {
-                "un_op": {
-                  "op": "neg",
-                  "arg": {
-                    "bin_op": {
-                      "op": "mul",
-                      "left": { "param": "lambda" },
-                      "right": {
-                        "bin_op": {
-                          "op": "mul",
-                          "left": {
-                            "un_op": {
-                              "op": "exp",
-                              "arg": {
-                                "bin_op": {
-                                  "op": "div",
-                                  "left": {
-                                    "un_op": {
-                                      "op": "neg",
-                                      "arg": {
-                                        "bin_op": {
-                                          "op": "sub",
-                                          "left": { "time": null },
-                                          "right": { "param": "tau" }
+            "grad": {
+              "bin_op": {
+                "op": "div",
+                "left": {
+                  "un_op": {
+                    "op": "neg",
+                    "arg": {
+                      "bin_op": {
+                        "op": "mul",
+                        "left": {
+                          "param": "lambda"
+                        },
+                        "right": {
+                          "bin_op": {
+                            "op": "mul",
+                            "left": {
+                              "un_op": {
+                                "op": "exp",
+                                "arg": {
+                                  "bin_op": {
+                                    "op": "div",
+                                    "left": {
+                                      "un_op": {
+                                        "op": "neg",
+                                        "arg": {
+                                          "bin_op": {
+                                            "op": "sub",
+                                            "left": {
+                                              "time": null
+                                            },
+                                            "right": {
+                                              "param": "tau"
+                                            }
+                                          }
                                         }
                                       }
+                                    },
+                                    "right": {
+                                      "param": "w"
                                     }
-                                  },
-                                  "right": { "param": "w" }
+                                  }
                                 }
                               }
-                            }
-                          },
-                          "right": {
-                            "bin_op": {
-                              "op": "div",
-                              "left": {
-                                "un_op": {
-                                  "op": "neg",
-                                  "arg": {
-                                    "un_op": {
-                                      "op": "neg",
-                                      "arg": {
-                                        "bin_op": {
-                                          "op": "sub",
-                                          "left": { "time": null },
-                                          "right": { "param": "tau" }
+                            },
+                            "right": {
+                              "bin_op": {
+                                "op": "div",
+                                "left": {
+                                  "un_op": {
+                                    "op": "neg",
+                                    "arg": {
+                                      "un_op": {
+                                        "op": "neg",
+                                        "arg": {
+                                          "bin_op": {
+                                            "op": "sub",
+                                            "left": {
+                                              "time": null
+                                            },
+                                            "right": {
+                                              "param": "tau"
+                                            }
+                                          }
                                         }
                                       }
                                     }
                                   }
-                                }
-                              },
-                              "right": {
-                                "bin_op": {
-                                  "op": "mul",
-                                  "left": { "param": "w" },
-                                  "right": { "param": "w" }
+                                },
+                                "right": {
+                                  "bin_op": {
+                                    "op": "mul",
+                                    "left": {
+                                      "param": "w"
+                                    },
+                                    "right": {
+                                      "param": "w"
+                                    }
+                                  }
                                 }
                               }
                             }
@@ -437,63 +537,79 @@
                       }
                     }
                   }
-                }
-              },
-              "right": {
-                "bin_op": {
-                  "op": "mul",
-                  "left": {
-                    "bin_op": {
-                      "op": "add",
-                      "left": { "const": 1.0 },
-                      "right": {
-                        "un_op": {
-                          "op": "exp",
-                          "arg": {
-                            "bin_op": {
-                              "op": "div",
-                              "left": {
-                                "un_op": {
-                                  "op": "neg",
-                                  "arg": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "time": null },
-                                      "right": { "param": "tau" }
+                },
+                "right": {
+                  "bin_op": {
+                    "op": "mul",
+                    "left": {
+                      "bin_op": {
+                        "op": "add",
+                        "left": {
+                          "const": 1.0
+                        },
+                        "right": {
+                          "un_op": {
+                            "op": "exp",
+                            "arg": {
+                              "bin_op": {
+                                "op": "div",
+                                "left": {
+                                  "un_op": {
+                                    "op": "neg",
+                                    "arg": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "time": null
+                                        },
+                                        "right": {
+                                          "param": "tau"
+                                        }
+                                      }
                                     }
                                   }
+                                },
+                                "right": {
+                                  "param": "w"
                                 }
-                              },
-                              "right": { "param": "w" }
+                              }
                             }
                           }
                         }
                       }
-                    }
-                  },
-                  "right": {
-                    "bin_op": {
-                      "op": "add",
-                      "left": { "const": 1.0 },
-                      "right": {
-                        "un_op": {
-                          "op": "exp",
-                          "arg": {
-                            "bin_op": {
-                              "op": "div",
-                              "left": {
-                                "un_op": {
-                                  "op": "neg",
-                                  "arg": {
-                                    "bin_op": {
-                                      "op": "sub",
-                                      "left": { "time": null },
-                                      "right": { "param": "tau" }
+                    },
+                    "right": {
+                      "bin_op": {
+                        "op": "add",
+                        "left": {
+                          "const": 1.0
+                        },
+                        "right": {
+                          "un_op": {
+                            "op": "exp",
+                            "arg": {
+                              "bin_op": {
+                                "op": "div",
+                                "left": {
+                                  "un_op": {
+                                    "op": "neg",
+                                    "arg": {
+                                      "bin_op": {
+                                        "op": "sub",
+                                        "left": {
+                                          "time": null
+                                        },
+                                        "right": {
+                                          "param": "tau"
+                                        }
+                                      }
                                     }
                                   }
+                                },
+                                "right": {
+                                  "param": "w"
                                 }
-                              },
-                              "right": { "param": "w" }
+                              }
                             }
                           }
                         }

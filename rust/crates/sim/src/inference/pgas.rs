@@ -2446,7 +2446,7 @@ pub fn run_pgas(
     // Pre-resolve rate_grad indices once for the entire run (avoids O(n_params)
     // string scans per gradient term per substep in the NUTS hot path).
     // model_to_estimated[model_param_idx] = estimated_param_idx, or None if fixed.
-    let rate_grads_for_run: Vec<Vec<(usize, crate::resolved_expr::ResolvedExpr)>> = {
+    let rate_grads_for_run: Vec<crate::resolved_expr::ResolvedGradMap> = {
         let n_model_params = model.model.parameters.len();
         let mut model_to_estimated: Vec<Option<usize>> = vec![None; n_model_params];
         for (est_idx, spec) in if2_params.iter().enumerate() {

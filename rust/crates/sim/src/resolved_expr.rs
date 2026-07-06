@@ -854,11 +854,12 @@ pub(crate) fn resolve_grad_map(
     for (name, entry) in grad {
         let model_idx = *ctx.param_index.get(name.as_str()).ok_or_else(|| {
             SimError::Validation(format!(
-                "observation/σ² gradient references unknown parameter '{}' — every \
-                 grad key must be a declared model parameter. A dropped gradient \
-                 component is silently treated as zero by gradient-based inference \
-                 (NUTS), which then optimizes a different model than the simulator. \
-                 This is a malformed IR (likely a typo'd or stale autodiff key).",
+                "a compiler-emitted gradient (rate/observation/σ²) references unknown \
+                 parameter '{}' — every grad key must be a declared model parameter. \
+                 A dropped gradient component is silently treated as zero by \
+                 gradient-based inference (NUTS), which then optimizes a different \
+                 model than the simulator. This is a malformed IR (likely a typo'd \
+                 or stale autodiff key).",
                 name
             ))
         })?;
@@ -894,20 +895,30 @@ pub(crate) fn eval_emitted_grad(
     ctx: &EvalCtx<'_>,
 ) -> f64 {
     match grad.iter().find(|(mi, _)| *mi == model_idx) {
-        Some((_, ResolvedDerivEntry::Grad(e))) => eval_resolved(e, ctx),
-        Some((_, ResolvedDerivEntry::Unsupported { code })) => {
-            // `code` is read here (surfacing which refusal leaked) so it is not a
-            // dead field in P4; P5's fit-time preflight consumes it as the user
-            // message and makes this branch unreachable-by-construction.
+        Some((_, entry)) => eval_deriv_entry(entry, ctx),
+        None => 0.0,
+    }
+}
+
+/// Evaluate a single resolved gradient entry to a number. A real `Grad` is the
+/// value evaluator; an `Unsupported` is **unreachable on a gated path** (the
+/// fit-time preflight refused any estimated parameter it covers before a gradient
+/// was taken), so it trips a `debug_assert!` in tests and falls back to `0.0` in
+/// release. The rate path iterates its (already est-indexed) entries and calls
+/// this directly; the obs/σ² path reaches it via [`eval_emitted_grad`]'s
+/// find-by-index — so the `Grad`/`Unsupported` policy lives in exactly one place.
+#[inline]
+pub(crate) fn eval_deriv_entry(entry: &ResolvedDerivEntry, ctx: &EvalCtx<'_>) -> f64 {
+    match entry {
+        ResolvedDerivEntry::Grad(e) => eval_resolved(e, ctx),
+        ResolvedDerivEntry::Unsupported { code } => {
             debug_assert!(
                 false,
-                "ungated Unsupported obs/σ² gradient ({code:?}) reached eval for \
-                 model param {model_idx} — the P5 fit-time preflight invariant was \
-                 violated"
+                "ungated Unsupported gradient ({code:?}) reached eval — the fit-time \
+                 preflight invariant (coeff_guard/P4 for rate, P5 for obs/σ²) was violated"
             );
             0.0
         }
-        None => 0.0,
     }
 }
 

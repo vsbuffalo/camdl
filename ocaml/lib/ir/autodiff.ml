@@ -502,34 +502,37 @@ let simplify_fixpoint (e : expr) : expr =
   in
   go e
 
-(** Differentiate a rate expression w.r.t. each estimated parameter.
+(** Differentiate a rate expression w.r.t. each estimated parameter, producing a
+    classified [grad_map].
 
-    Returns [Ok assoc] — an association list [(param_name, derivative_expr)] —
-    or [Error msg] if any parameter's derivative is [Unsupported] (the caller
-    turns that into a compile-time diagnostic). Parameters whose derivative is
-    a proven [Const 0.0] (absent from the rate), or whose forcing/table
-    coefficient is live-but-omitted ([Omitted]: Periodic, [lag], inline-table
-    value via non-constant index), are dropped; the Rust backend treats a
-    missing entry as a zero gradient, and the NUTS coeff_guard refuses a fit
-    that depends on such a dropped rate coefficient. [Omitted] and a proven
-    zero are handled identically here, so rate gradients are byte-stable. The
-    [Unsupported] path is the only one that raises an error. *)
+    Returns [Ok grad_map] — [(param_name, deriv_entry)] pairs — or [Error msg] if
+    any parameter's derivative is [Unsupported] (a structural coefficient a param
+    cannot drive: spline/interp/piecewise knot; the caller turns it into a
+    compile-time E600). The classification mirrors the obs driver, differing only
+    in the [Unsupported] arm (rate → E600; obs → a serialized refusal):
+
+    - [Known] folding to [Const 0.0] → dropped (absent key = genuine zero).
+    - [Known d'] → [DEGrad d'].
+    - [Omitted] (live-but-omitted: Periodic step/period, [lag], inline-table value
+      via a non-constant index) → [DEUnsupported {node; code}] — was DROPPED
+      pre-3b; now serialized so the fit-time preflight refuses on it, subsuming the
+      old [coeff_guard] (gh#342). Forward sim / IF2 / PF still use the live value;
+      only a gradient-based (NUTS) fit is refused.
+    - [Unsupported] → [Error] → E600 (tier-3 is non-runnable regardless of method,
+      so the earliest, source-located rejection is best; §3 of the 3b proposal). *)
 let differentiate_rate (rate : expr) (param_names : string list)
     (tfs : time_function list) (tbls : table list) :
-    ((string * expr) list, string) result =
+    ((string * deriv_entry) list, string) result =
   let rec go acc = function
     | [] -> Ok (List.rev acc)
     | p :: rest ->
       (match differentiate rate p tfs tbls with
        | Unsupported u -> Error (Printf.sprintf "%s: %s" u.node u.reason)
-       (* Live-but-omitted rate coefficient: drop the param, exactly as a proven
-          zero is dropped. Forward sim and IF2/PF use the live value; the NUTS
-          coeff_guard refuses a fit that depends on the missing gradient. *)
-       | Omitted _ -> go acc rest
+       | Omitted { node; code; _ } -> go ((p, DEUnsupported { node; code }) :: acc) rest
        | Known dexpr ->
          (match simplify_fixpoint dexpr with
           | Const 0.0 -> go acc rest
-          | d' -> go ((p, d') :: acc) rest))
+          | d' -> go ((p, DEGrad d') :: acc) rest))
   in
   go [] param_names
 
