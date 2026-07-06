@@ -2399,8 +2399,15 @@ pub fn run_pgas(
             }
         }
 
-        // (b) σ² overdispersion gradients.
+        // (b) Transition rate gradients + σ² overdispersion gradients. A
+        //     live-but-omitted rate coefficient (Periodic step/period, `lag`,
+        //     non-const table index) serialises a `DerivEntry::Unsupported` in
+        //     `rate_grad` (gh#342 P3); refusing it here at the `run_pgas` boundary
+        //     subsumes the old CLI-only `coeff_guard` for the rate domain and, for
+        //     the first time, protects every direct `run_pgas` caller (tests, API,
+        //     ODE-NUTS), not just the CLI `fit` path.
         for t in &model.model.transitions {
+            note_unsupported(&t.rate_grad, &mut refused);
             if let DrawMethod::Overdispersed { sigma_sq_grad, .. } = &t.draw_method {
                 note_unsupported(sigma_sq_grad, &mut refused);
             }
@@ -2434,10 +2441,10 @@ pub fn run_pgas(
                 .collect();
             return Err(SimError::Validation(format!(
                 "PGAS+NUTS cannot estimate parameter(s) whose gradient the compiler \
-                 could not emit for an observation or overdispersion term — NUTS would \
-                 sample against an incomplete (silently biased) gradient. Refused: {}. \
-                 Estimate these with a gradient-free method (IF2 or PMMH), run PGAS with \
-                 --no-nuts, or fix them (`[fixed.X]` in fit.toml).",
+                 could not emit for a rate, observation, or overdispersion term — NUTS \
+                 would sample against an incomplete (silently biased) gradient. Refused: \
+                 {}. Estimate these with a gradient-free method (IF2 or PMMH), run PGAS \
+                 with --no-nuts, or fix them (`[fixed.X]` in fit.toml).",
                 details.join("; ")
             )));
         }
