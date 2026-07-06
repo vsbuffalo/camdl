@@ -985,6 +985,49 @@ let test_parameterised_table () =
             (Serde.model_to_string
                { m with Ir.tables = [{tbl with Ir.source = Ir.Inline [other]}] })))
 
+(* ── ASCII `*` as an alias for `×` in dimension position ─────────────────────
+   The dimension-product separator (table shapes `d × d`, typed `let` shapes)
+   accepts both the canonical Unicode `×` and the ASCII `*`, so a model can be
+   typed by hand without the glyph. The separator is purely syntactic — it names
+   which dimensions a table ranges over — so `×` and `*` must yield byte-
+   identical IR. Docs recommend `×` for readability; `*` is the typeable escape
+   hatch. *)
+let dim_sep_table_src sep = Printf.sprintf {|
+    dimensions { sex = [m, f] }
+    compartments { S, I, R }
+    stratify(by = sex)
+    parameters {
+      beta_mf : rate
+      beta_fm : rate
+      gamma   : rate
+      N0      : count
+      I0      : count
+    }
+    tables {
+      B_sex : sex %s sex = [[0.0, beta_mf], [beta_fm, 0.0]]
+    }
+    let N = S_m + I_m + R_m + S_f + I_f + R_f
+    transitions {
+      infection[a in sex] : S[a] --> I[a]
+        @ sum(b in sex, B_sex[a, b] * I[b]) / N
+      recovery[a in sex]  : I[a] --> R[a]  @ gamma * I[a]
+    }
+    init {
+      S_m = N0 - I0
+      I_m = I0
+      S_f = N0
+    }
+    simulate { from = 0 'days  to = 120 'days }
+  |} sep
+
+let test_dim_sep_asterisk_equals_cross () =
+  let s_cross = Serde.model_to_string (compile_expect_ok (dim_sep_table_src "×")) in
+  let s_star  = Serde.model_to_string (compile_expect_ok (dim_sep_table_src "*")) in
+  if not (String.equal s_cross s_star) then
+    Alcotest.failf
+      "IR differs between `×` and `*` dim separators:\n× =\n%s\n\n* =\n%s"
+      s_cross s_star
+
 (* ── Table unit conversion (spec §6.1) ───────────────────────────────────────
    `tables { x : dim 'unit = [...] }` annotations must scale inline values
    from the declared unit to the model's `time_unit`. Pre-fix, the unit was
@@ -8634,6 +8677,10 @@ let () =
     ];
     "parameterised_tables", [
       Alcotest.test_case "param survives as Ir.Param" `Quick test_parameterised_table;
+    ];
+    "dim_separator", [
+      Alcotest.test_case "ASCII `*` and Unicode `×` yield byte-identical IR"
+        `Quick test_dim_sep_asterisk_equals_cross;
     ];
     "table_unit_conversion", [
       Alcotest.test_case "'years table scales to days"

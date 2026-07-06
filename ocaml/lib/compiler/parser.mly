@@ -434,8 +434,17 @@ table_decl:
   | name = IDENT EQ v = expr
       { { tnames = [name]; tdims = []; tcell_kind = None; tvalue = v } }
 
+(* Dimension-product separator. The canonical form is the Unicode `×` (CROSS);
+   the ASCII `*` (STAR) is accepted as a hand-typeable alias so a model can be
+   written without the glyph. Purely syntactic — both name the same Cartesian
+   product of index sets, so they lower identically. (This mirrors expressions,
+   where `×` and `*` are already interchangeable as `Mul`.) *)
+dim_sep:
+  | CROSS { () }
+  | STAR  { () }
+
 table_dims_nonempty:
-  | ds = separated_nonempty_list(CROSS, table_dim_entry) { ds }
+  | ds = separated_nonempty_list(dim_sep, table_dim_entry) { ds }
 
 table_dim_entry:
   | name = IDENT { TDim name }
@@ -589,7 +598,7 @@ where_clause_opt:
 
 let_shape_opt:
   | (* empty *) { None }
-  | COLON ds = separated_nonempty_list(CROSS, IDENT) { Some ds }
+  | COLON ds = separated_nonempty_list(dim_sep, IDENT) { Some ds }
 
 transition_body:
   | kvs = list(transition_body_entry)

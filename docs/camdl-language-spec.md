@@ -927,6 +927,14 @@ consistency when table values appear in expressions.
 Multi-dimensional: `: age × sex × risk` for 3D tables. Inline via nested
 brackets. For large tables, use `read(...)` (see §6.2).
 
+**Separator: `×` or `*`.** The dimension product is written with `×` (the
+Unicode multiplication sign, U+00D7). For hand-authoring without the glyph, the
+ASCII `*` is accepted as an exact alias: `age * age` compiles identically to
+`age × age` (the separator is purely syntactic — it names the axes, nothing
+else). Prefer `×` in committed models for readability; the compiler treats them
+the same, and the same equivalence already holds in rate expressions, where `×`
+and `*` both mean multiplication.
+
 ### 6.2 Loading from Files: `read`
 
 All file-based tables use **long format** (one row per observation, index

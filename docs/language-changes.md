@@ -13,6 +13,26 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-07-05 — ASCII `*` accepted as an alias for the `×` dimension separator
+
+**What.** The dimension-product separator — in table shapes
+(`C_age : age × age`) and typed `let` shapes (`: patch × patch`) — now accepts
+the ASCII `*` as an exact alias for the Unicode `×`. `age * age` compiles
+identically to `age × age`; the separator is purely syntactic (it names the
+axes), so the choice never affects the IR. This mirrors rate expressions, where
+`×` and `*` are already interchangeable as multiplication.
+
+**Migration.** None — additive and backward-compatible. Every existing model
+compiles unchanged. `×` stays canonical and is recommended in committed models
+for readability; `*` is a hand-authoring escape hatch for keyboards without the
+glyph.
+
+**Diagnostic.** None — the grammar is strictly more permissive. Previously
+`age * age` in dimension position produced **E001** (syntax error); it is now
+accepted.
+
+---
+
 ## 2026-06-29 — reserved no-overlay scenario sentinel renamed `as_fitted` → `fitted`
 
 **What.** The reserved scenario name for the no-overlay row in
