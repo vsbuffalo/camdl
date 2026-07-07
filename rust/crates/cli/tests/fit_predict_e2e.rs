@@ -953,6 +953,88 @@ cooling = 0.7
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// The distinct `n_draws` values on the free_forward rows of a predictive TSV.
+fn free_forward_n_draws(path: &Path) -> std::collections::BTreeSet<usize> {
+    let txt = std::fs::read_to_string(path).unwrap();
+    let mut lines = txt.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let hz = header.iter().position(|c| *c == "horizon").unwrap();
+    let nd = header.iter().position(|c| *c == "n_draws").unwrap();
+    lines
+        .filter(|l| l.split('\t').nth(hz) == Some("free_forward"))
+        .map(|l| l.split('\t').nth(nd).unwrap().parse::<usize>().unwrap())
+        .collect()
+}
+
+#[test]
+fn fit_predict_free_forward_honors_n_draws() {
+    // gh#387: the free-forward horizon must honor `--n-draws` via an even
+    // subsample of the posterior cloud, not silently replay EVERY draw. Before
+    // the fix, free-forward built its replay from the full cloud and reported
+    // `posterior.n_draws()` regardless of `--n-draws` — so a long-burn-in ODE
+    // fit (thousands of ~seconds-each solves) never finished and the
+    // `predictive/` artifact was never written. Red→green: pre-fix the capped
+    // run reports the full cloud (≠ 10); post-fix it reports exactly 10.
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_predict_ndraws_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+
+    let pgas = r#"[stages.posterior]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 2
+particles = 200
+sweeps = 60
+burn_in = 20
+thin = 1
+"#;
+    std::fs::write(tmp.join("fit.toml"), fit_toml(pgas, "results")).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    // (1) No cap → the default (200) ≥ the cloud, so free-forward replays the
+    // whole cloud and reports its full size ( > 10 ). Establishes the baseline
+    // and confirms the cloud is bigger than the cap we test with.
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    assert!(out.status.success(), "uncapped predict failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+    let pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
+        .expect("predictive/weekly_cases.tsv (uncapped) must be written");
+    let full = free_forward_n_draws(&pred);
+    assert_eq!(full.len(), 1, "one n_draws value across free_forward rows, got {full:?}");
+    let full_n = *full.iter().next().unwrap();
+    assert!(full_n > 10, "the posterior cloud ({full_n}) must exceed the --n-draws cap for this test");
+
+    // (2) --n-draws 10 → free-forward replays exactly 10 draws and reports 10.
+    let out = run(&bin, &tmp, &[
+        "fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward", "--n-draws", "10",
+    ]);
+    assert!(
+        out.status.success(),
+        "capped predict failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
+        .expect("predictive/weekly_cases.tsv (capped) must be written");
+    let capped = free_forward_n_draws(&pred);
+    assert_eq!(
+        capped,
+        [10].into_iter().collect(),
+        "free_forward must honor --n-draws 10 (report the subsample count, not the full cloud), got {capped:?}"
+    );
+    // The artifact IS written and carries data rows (the watcher's Predictive tab
+    // is no longer empty).
+    let pred_txt = std::fs::read_to_string(&pred).unwrap();
+    let ff_rows = pred_txt.lines().filter(|l| l.split('\t').nth(2) == Some("free_forward")).count();
+    assert!(ff_rows > 0, "capped predictive artifact must have free_forward data rows");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn fit_predict_refuses_an_optimizer_fit() {
     let bin = skip_if_missing_binary();
