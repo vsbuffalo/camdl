@@ -194,7 +194,8 @@ let licm_model (m : model) : model =
       (fun (t : transition) ->
         { t with
           rate = rw ctx t.rate;
-          rate_grad = List.map (fun (p, de) -> (p, rw_deriv_entry ctx de)) t.rate_grad })
+          rate_grad = List.map (fun (p, de) -> (p, rw_deriv_entry ctx de)) t.rate_grad;
+          rate_state_grad = List.map (fun (c, de) -> (c, rw_deriv_entry ctx de)) t.rate_state_grad })
       m.transitions
   in
   let ode_equations =

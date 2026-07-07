@@ -2,7 +2,7 @@
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
 ],"transitions":[
-{"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"k":{"grad":{"pop":"I"}}}}
+{"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"k":{"grad":{"pop":"I"}}},"rate_state_grad":{"I":{"grad":{"param":"k"}}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[
 {"name":"importation","fire":{"scheduled":{"at_times":[10.0]}},"actions":[{"add":{"compartment":"I","count":{"const":5.0}}}],"kind":"event"}
 ],"observations":[],"parameters":[
