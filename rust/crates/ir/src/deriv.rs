@@ -49,6 +49,11 @@ pub enum UnsupportedReason {
     /// The parameter reaches a Binomial/BetaBinomial `n`, which is rounded to an
     /// integer and must be θ-independent.
     ParametricN,
+    /// gh#275: a nonsmooth function of state — `floor`/`ceil`/`abs`/`min`/`max` of
+    /// a compartment — reached while differentiating a rate w.r.t. state (WrtPop).
+    /// Its state derivative is not smooth, so a gradient method (ODE-NUTS) is
+    /// refused. (Append-only, tier 2b: forward sim / IF2 / PF are unaffected.)
+    NonsmoothState,
 }
 
 impl UnsupportedReason {
@@ -76,6 +81,10 @@ impl UnsupportedReason {
             UnsupportedReason::ParametricN =>
                 "reaches a Binomial/BetaBinomial `n`, which must be θ-independent — a \
                  constant or an observed data column (it is rounded to an integer)",
+            UnsupportedReason::NonsmoothState =>
+                "reaches a nonsmooth function of state (`floor`, `ceil`, `abs`, `min`, \
+                 or `max` of a compartment); its state derivative is not smooth, so a \
+                 gradient method cannot use it — reformulate with a smooth expression",
         }
     }
 }

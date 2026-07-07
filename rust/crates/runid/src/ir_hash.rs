@@ -91,6 +91,7 @@ impl ContentAddressed for UnsupportedReason {
             UnsupportedReason::NonConstTableIndex => 3,
             UnsupportedReason::Mod => 4,
             UnsupportedReason::ParametricN => 5,
+            UnsupportedReason::NonsmoothState => 6,
         };
         h.write_u32(idx);
     }
