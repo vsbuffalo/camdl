@@ -90,6 +90,45 @@ let rec mentions (param : string) (e : expr) : bool =
   | BindingRef _ -> false   (* hoisted bindings are param-free (state-only) *)
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
+(** What [differentiate] differentiates with respect to (gh#275). The engine is
+    one recursion; only the leaves and the nonsmooth ops branch on the target:
+    - [WrtParam p] — ∂/∂param (the [rate_grad] path): state ([Pop]/[PopSum]) is
+      constant (fixed in the θ|X step), bindings are param-free (zero).
+    - [WrtPop c]   — ∂/∂compartment (the new [rate_state_grad] / ODE-sensitivity
+      path): parameters are constant, forcings are state-free, and bindings are
+      state-bearing (the premise inverts — recurse into their bodies). *)
+type diff_target =
+  | WrtParam of string
+  | WrtPop of string
+
+(** Does compartment [c]'s state reach [e] — directly ([Pop c] or a [PopSum]
+    containing [c]) or through a hoisted binding's body? The [WrtPop] analogue of
+    [mentions]: forcings and const-indexed table cells are state-free, so a
+    non-mention proves ∂e/∂Pop(c) = 0, and a mention inside a nonsmooth op
+    (Mod/Floor/Ceil/Abs/Min/Max) is the [WrtPop] refusal trigger. Bindings are
+    acyclic by construction (topo-ordered; enforced at validate/dimcheck), so the
+    binding recursion terminates. *)
+let rec mentions_pop (bindings : binding list) (c : string) (e : expr) : bool =
+  match e with
+  | Pop n -> n = c
+  | PopSum members -> List.mem c members
+  | Param _ | Const _ | Time | Dt | Projected | ObsColumnRef _ -> false
+  | TimeFunc _ -> false   (* forcings are state-free *)
+  | BindingRef name ->
+    (match List.find_opt (fun (b : binding) -> b.bname = name) bindings with
+     | Some b -> mentions_pop bindings c b.bexpr
+     | None -> false)
+  | TableLookup (_, args) -> List.exists (mentions_pop bindings c) args
+  | BinOp b -> mentions_pop bindings c b.left || mentions_pop bindings c b.right
+  | UnOp u -> mentions_pop bindings c u.arg
+  | Cond cc ->
+    mentions_pop bindings c cc.pred
+    || mentions_pop bindings c cc.then_
+    || mentions_pop bindings c cc.else_
+  | Reduce terms -> List.exists (mentions_pop bindings c) terms
+  | UncheckedDim u -> mentions_pop bindings c u.inner
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
+
 (** Coefficient expressions of a forcing kind — used to decide whether an
     unsupported kind actually depends on the differentiation parameter. *)
 let forcing_coeff_exprs (k : time_func_kind) : expr list =
@@ -168,14 +207,14 @@ let fourier_closed ?lag (f : fourier) : expr =
 
     [tfs]/[tbls] let the [TimeFunc]/[TableLookup] arms reach the forcing/table
     definitions (the IR carries only their names at the use site). *)
-let differentiate (top : expr) (param : string)
+let differentiate ?(bindings = []) (top : expr) (target : diff_target)
     (tfs : time_function list) (tbls : table list) : deriv =
-  let forcing_mentions fname =
+  let forcing_mentions param fname =
     match List.find_opt (fun (tf : time_function) -> tf.name = fname) tfs with
     | Some tf -> List.exists (mentions param) (forcing_coeff_exprs tf.kind)
     | None -> false
   in
-  let table_value_mentions name =
+  let table_value_mentions param name =
     match List.find_opt (fun (t : table) -> t.name = name) tbls with
     | Some { source = Inline vals; _ } -> List.exists (mentions param) vals
     | _ -> false
@@ -183,19 +222,41 @@ let differentiate (top : expr) (param : string)
   (* Does [param] drive the forcing's evaluation-time shift ([lag], gh#314)?
      The closed forms below differentiate against bare [Time], not [Time − lag],
      so a param in the lag has a live derivative none of them emit. *)
-  let lag_mentions (tf : time_function) =
+  let lag_mentions param (tf : time_function) =
     match tf.lag with Some l -> mentions param l | None -> false
+  in
+  (* WrtPop only: does the target compartment reach [e] (through bindings too)?
+     A non-mention proves ∂e/∂Pop = 0, and a mention inside a nonsmooth op is the
+     refusal trigger. *)
+  let hits_state e =
+    match target with WrtParam _ -> false | WrtPop c -> mentions_pop bindings c e
   in
   let rec d (e : expr) : deriv =
     match e with
-    (* Constants in the θ|X step — derivative is zero. *)
-    | Const _ | Pop _ | PopSum _ | Time | Dt | Projected | ObsColumnRef _ -> Known (Const 0.0)
+    (* Constant leaves — zero for both targets. *)
+    | Const _ | Time | Dt | Projected | ObsColumnRef _ -> Known (Const 0.0)
 
     (* Dimensional escape: differentiate the inner, drop the wrapper. *)
     | UncheckedDim u -> d u.inner
 
-    (* Parameter reference — 1 if it's the target, 0 otherwise. *)
-    | Param p -> Known (if p = param then Const 1.0 else Const 0.0)
+    (* State. Constant in the θ|X step (WrtParam); a Kronecker delta w.r.t. the
+       target compartment (WrtPop) — the source of the on-diagonal J_x, and via
+       PopSum the off-diagonal coupling (force of infection). *)
+    | Pop n ->
+      (match target with
+       | WrtParam _ -> Known (Const 0.0)
+       | WrtPop c -> Known (Const (if n = c then 1.0 else 0.0)))
+    | PopSum members ->
+      (match target with
+       | WrtParam _ -> Known (Const 0.0)
+       | WrtPop c -> Known (Const (if List.mem c members then 1.0 else 0.0)))
+
+    (* Parameter reference — 1 if it's the target param (WrtParam); constant
+       w.r.t. state (WrtPop). *)
+    | Param p ->
+      (match target with
+       | WrtParam param -> Known (if p = param then Const 1.0 else Const 0.0)
+       | WrtPop _ -> Known (Const 0.0))
 
     (* Forcing. Cases, in order:
        - lag guard (any kind): if [param] drives the forcing's evaluation-time
@@ -220,8 +281,11 @@ let differentiate (top : expr) (param : string)
          live coefficient at all. Hard compile error (the Rust runtime also
          rejects it at IR-load via `eval_structural`). *)
     | TimeFunc fname ->
+      (match target with
+       | WrtPop _ -> Known (Const 0.0)   (* forcings are state-free: ∂forcing/∂x = 0 *)
+       | WrtParam param ->
       (match List.find_opt (fun (tf : time_function) -> tf.name = fname) tfs with
-       | Some tf when lag_mentions tf ->
+       | Some tf when lag_mentions param tf ->
          Omitted
            { code = URLag;
              node = Printf.sprintf "forcing `%s`" fname;
@@ -234,7 +298,7 @@ let differentiate (top : expr) (param : string)
        | Some ({ kind = Sinusoidal s; _ } as tf) -> d (sinusoidal_closed ?lag:tf.lag s)
        | Some ({ kind = Fourier f; _ } as tf) -> d (fourier_closed ?lag:tf.lag f)
        | Some { kind = Periodic _; _ } ->
-         if forcing_mentions fname then
+         if forcing_mentions param fname then
            Omitted
              { code = URPeriodicCoeff;
                node = Printf.sprintf "forcing `%s`" fname;
@@ -247,7 +311,7 @@ let differentiate (top : expr) (param : string)
                   refused" param fname }
          else Known (Const 0.0)
        | Some { kind = (Piecewise _ | Interpolated _ | PeriodicSpline _) as kind; _ } ->
-         if forcing_mentions fname then
+         if forcing_mentions param fname then
            Unsupported
              { code = URStructuralForcing;
                node = Printf.sprintf "forcing `%s`" fname;
@@ -260,7 +324,7 @@ let differentiate (top : expr) (param : string)
                   sinusoidal, fourier, or periodic forcing (whose coefficients \
                   are live)" param (kind_label kind) }
          else Known (Const 0.0)
-       | None -> Known (Const 0.0))
+       | None -> Known (Const 0.0)))
 
     (* Table lookup. A constant index selects one cell, so we differentiate the
        selected value expression — this is how per-stratum parameter tables
@@ -277,6 +341,8 @@ let differentiate (top : expr) (param : string)
           | None -> Known (Const 0.0))  (* OOB — surfaced by validate/runtime *)
        | _ -> Known (Const 0.0))  (* external table: values are runtime data *)
     | TableLookup (name, args) ->
+      (match target with
+       | WrtParam param ->
       if List.exists (mentions param) args then
         (* The parameter is in a non-constant LOOKUP INDEX — it selects which
            cell, so the lookup is undifferentiable and the index is not a live
@@ -290,7 +356,7 @@ let differentiate (top : expr) (param : string)
                `%s`; the lookup selects a cell by its value, so it is not \
                differentiable. Index the table by a constant or a compartment, \
                not by an estimated parameter" param name }
-      else if table_value_mentions name then
+      else if table_value_mentions param name then
         (* The parameter is an inline-table VALUE selected by a non-constant
            index. The value is a live coefficient (the Rust runtime resolves it),
            but the gradient through a runtime-chosen cell is not yet emitted
@@ -307,6 +373,20 @@ let differentiate (top : expr) (param : string)
                use the live value; a NUTS fit that depends on this gradient is \
                refused" param name }
       else Known (Const 0.0)
+       | WrtPop c ->
+        (* WrtPop: a non-constant index that reads compartment state is a
+           discrete cell-selection by the count — undifferentiable w.r.t. state.
+           Otherwise the table is state-free at this use (its values are
+           const/param coefficients), so ∂/∂compartment = 0. *)
+        if List.exists (mentions_pop bindings c) args then
+          Unsupported
+            { code = URNonConstTableIndex;
+              node = Printf.sprintf "table `%s`" name;
+              reason = Printf.sprintf
+                "table `%s` is indexed by compartment state — a discrete \
+                 cell-selection whose derivative w.r.t. the state is not defined, \
+                 so a gradient method cannot use it" name }
+        else Known (Const 0.0))
 
     (* Binary operations — standard calculus rules; Unsupported propagates. *)
     | BinOp b -> begin match b.op with
@@ -336,26 +416,60 @@ let differentiate (top : expr) (param : string)
                       right = BinOp { op = Mul; left = b.right;
                                       right = BinOp { op = Div; left = df;
                                                       right = b.left } } } })
-      (* Min/Max: subgradient — differentiate the active branch. *)
-      | Min -> map2 (d b.left) (d b.right)
-                 (fun dl dr -> Cond { pred = BinOp { op = Lt; left = b.left; right = b.right };
-                                      then_ = dl; else_ = dr })
-      | Max -> map2 (d b.left) (d b.right)
-                 (fun dl dr -> Cond { pred = BinOp { op = Gt; left = b.left; right = b.right };
-                                      then_ = dl; else_ = dr })
+      (* Min/Max: subgradient — differentiate the active branch (WrtParam). For
+         WrtPop, a min/max OF STATE is nonsmooth at the crossover — refuse (§1h);
+         state-free min/max has ∂/∂compartment = 0. *)
+      | Min ->
+        (match target with
+         | WrtParam _ ->
+           map2 (d b.left) (d b.right)
+             (fun dl dr -> Cond { pred = BinOp { op = Lt; left = b.left; right = b.right };
+                                  then_ = dl; else_ = dr })
+         | WrtPop _ ->
+           if hits_state b.left || hits_state b.right then
+             Unsupported
+               { code = URNonsmoothState; node = "min expression";
+                 reason = "derivative of `min` w.r.t. compartment state is not \
+                           smooth (a kink at the crossover); a gradient method \
+                           cannot use it" }
+           else Known (Const 0.0))
+      | Max ->
+        (match target with
+         | WrtParam _ ->
+           map2 (d b.left) (d b.right)
+             (fun dl dr -> Cond { pred = BinOp { op = Gt; left = b.left; right = b.right };
+                                  then_ = dl; else_ = dr })
+         | WrtPop _ ->
+           if hits_state b.left || hits_state b.right then
+             Unsupported
+               { code = URNonsmoothState; node = "max expression";
+                 reason = "derivative of `max` w.r.t. compartment state is not \
+                           smooth (a kink at the crossover); a gradient method \
+                           cannot use it" }
+           else Known (Const 0.0))
       (* Mod: derivative needs floor, absent from the grammar. A genuine 0 when
-         neither operand depends on the param; otherwise Unsupported (was a
-         failwith — M4 in the 2026-04-19 compiler review). *)
+         neither operand depends on the differentiation variable; otherwise
+         Unsupported (was a failwith — M4 in the 2026-04-19 compiler review). *)
       | Mod ->
-        if mentions param b.left || mentions param b.right then
-          Unsupported
-            { code = URMod;
-              node = "mod expression";
-              reason = Printf.sprintf
-                "derivative of `mod` w.r.t. parameter '%s' is not representable \
-                 in the IR grammar (floor is needed); replace mod with a \
-                 conditional guard" param }
-        else Known (Const 0.0)
+        (match target with
+         | WrtParam param ->
+           if mentions param b.left || mentions param b.right then
+             Unsupported
+               { code = URMod;
+                 node = "mod expression";
+                 reason = Printf.sprintf
+                   "derivative of `mod` w.r.t. parameter '%s' is not representable \
+                    in the IR grammar (floor is needed); replace mod with a \
+                    conditional guard" param }
+           else Known (Const 0.0)
+         | WrtPop _ ->
+           if hits_state b.left || hits_state b.right then
+             Unsupported
+               { code = URMod; node = "mod expression";
+                 reason = "derivative of `mod` w.r.t. compartment state is not \
+                           representable (floor is needed) and is nonsmooth at the \
+                           wraps; a gradient method cannot use it" }
+           else Known (Const 0.0))
       (* Comparison ops: piecewise constant, derivative is 0. *)
       | Eq | Neq | Lt | Gt | Le | Ge -> Known (Const 0.0)
       end
@@ -371,16 +485,38 @@ let differentiate (top : expr) (param : string)
                      right = BinOp { op = Mul; left = Const 2.0;
                                      right = UnOp { op = Sqrt; arg = u.arg } } })
       | Neg -> map1 (d u.arg) (fun da -> UnOp { op = Neg; arg = da })
-      (* d|f| = f' · sign(f), sign(0) := 0 (n1 in the 2026-04-19 review). *)
+      (* d|f| = f' · sign(f), sign(0) := 0 (n1 in the 2026-04-19 review). For
+         WrtPop, |state| is nonsmooth at 0 — refuse (§1h). *)
       | Abs ->
-        let sign =
-          Cond { pred = BinOp { op = Gt; left = u.arg; right = Const 0.0 };
-                 then_ = Const 1.0;
-                 else_ = Cond { pred = BinOp { op = Lt; left = u.arg; right = Const 0.0 };
-                                then_ = Const (-1.0); else_ = Const 0.0 } }
-        in
-        map1 (d u.arg) (fun da -> BinOp { op = Mul; left = da; right = sign })
-      | Floor | Ceil -> Known (Const 0.0)
+        (match target with
+         | WrtParam _ ->
+           let sign =
+             Cond { pred = BinOp { op = Gt; left = u.arg; right = Const 0.0 };
+                    then_ = Const 1.0;
+                    else_ = Cond { pred = BinOp { op = Lt; left = u.arg; right = Const 0.0 };
+                                   then_ = Const (-1.0); else_ = Const 0.0 } }
+           in
+           map1 (d u.arg) (fun da -> BinOp { op = Mul; left = da; right = sign })
+         | WrtPop _ ->
+           if hits_state u.arg then
+             Unsupported
+               { code = URNonsmoothState; node = "abs expression";
+                 reason = "derivative of `abs` w.r.t. compartment state is not \
+                           smooth (a kink at 0); a gradient method cannot use it" }
+           else Known (Const 0.0))
+      (* Floor/Ceil: derivative 0 a.e. w.r.t. a parameter; but w.r.t. STATE it is
+         a step function (nonsmooth at each integer) — refuse for WrtPop (§1h). *)
+      | Floor | Ceil ->
+        (match target with
+         | WrtParam _ -> Known (Const 0.0)
+         | WrtPop _ ->
+           if hits_state u.arg then
+             Unsupported
+               { code = URNonsmoothState; node = "floor/ceil expression";
+                 reason = "derivative of `floor`/`ceil` w.r.t. compartment state \
+                           is not smooth (a step at each integer); a gradient \
+                           method cannot use it" }
+           else Known (Const 0.0))
       | Sin -> map1 (d u.arg)
                  (fun da -> BinOp { op = Mul; left = UnOp { op = Cos; arg = u.arg }; right = da })
       | Cos -> map1 (d u.arg)
@@ -418,8 +554,20 @@ let differentiate (top : expr) (param : string)
       in
       collect [] None terms
 
-    (* Hoisted FOI bindings are param-free (state-only): d/dp BindingRef = 0. *)
-    | BindingRef _ -> Known (Const 0.0)
+    (* Hoisted bindings are param-free (state-only), so ∂/∂param = 0 (WrtParam).
+       For WrtPop the premise INVERTS — a binding body is a function of state (a
+       hoisted force-of-infection is exactly where the coupling lives), so we
+       resolve the reference and recurse into its body. Bindings are acyclic by
+       construction (topo-ordered; enforced at validate/dimcheck), so the
+       recursion terminates; an unresolved name (never emitted for a valid model)
+       is a genuine zero. *)
+    | BindingRef name ->
+      (match target with
+       | WrtParam _ -> Known (Const 0.0)
+       | WrtPop _ ->
+         (match List.find_opt (fun (b : binding) -> b.bname = name) bindings with
+          | Some b -> d b.bexpr
+          | None -> Known (Const 0.0)))
     | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   in
   d top
@@ -526,7 +674,7 @@ let differentiate_rate (rate : expr) (param_names : string list)
   let rec go acc = function
     | [] -> Ok (List.rev acc)
     | p :: rest ->
-      (match differentiate rate p tfs tbls with
+      (match differentiate rate (WrtParam p) tfs tbls with
        | Unsupported u -> Error (Printf.sprintf "%s: %s" u.node u.reason)
        | Omitted { node; code; _ } -> go ((p, DEUnsupported { node; code }) :: acc) rest
        | Known dexpr ->
@@ -535,6 +683,32 @@ let differentiate_rate (rate : expr) (param_names : string list)
           | d' -> go ((p, DEGrad d') :: acc) rest))
   in
   go [] param_names
+
+(** ∂rate/∂compartment for each compartment name, producing the transition's
+    [rate_state_grad] map — [J_x]'s ingredient for the ODE forward sensitivities
+    (gh#275). The [WrtPop] sibling of [differentiate_rate].
+
+    The compile-vs-defer POLICY differs from [differentiate_rate]: there an
+    [Unsupported] coefficient is a compile-time E600 (tier-3 is non-runnable by
+    any method). Here BOTH [Omitted] and [Unsupported] become a serialized
+    [DEUnsupported] the fit-time gradient gate refuses on — a rate with a
+    nonsmooth-of-state term (floor/ceil/abs/min/max of a compartment, a
+    state-indexed table) must still forward-simulate and fit by the gradient-free
+    IF2/PF; only a gradient method (ODE-NUTS) is refused. This mirrors the obs/σ²
+    driver, not the rate-θ driver. An absent key is a genuine zero. *)
+let differentiate_rate_state (rate : expr) (compartments : string list)
+    (tfs : time_function list) (tbls : table list) (bindings : binding list)
+    : (string * deriv_entry) list =
+  let entry_of c =
+    match differentiate ~bindings rate (WrtPop c) tfs tbls with
+    | Known dexpr ->
+      (match simplify_fixpoint dexpr with
+       | Const 0.0 -> None                              (* genuine zero — drop *)
+       | d' -> Some (c, DEGrad d'))
+    | Omitted { node; code; _ } -> Some (c, DEUnsupported { node; code })
+    | Unsupported { node; code; _ } -> Some (c, DEUnsupported { node; code })
+  in
+  List.filter_map entry_of compartments
 
 
 (* ── Observation / σ² gradient driver (proposal 2026-07-03, P3) ───────────────
@@ -606,7 +780,7 @@ let differentiate_obs_arg (proj : projection) (arg : expr)
   let inlined = inline_projection proj arg in
   List.filter_map
     (fun p ->
-      match obs_deriv_entry (differentiate inlined p tfs tbls) with
+      match obs_deriv_entry (differentiate inlined (WrtParam p) tfs tbls) with
       | Some de -> Some (p, de)
       | None -> None)
     param_names
@@ -668,7 +842,7 @@ let differentiate_overdispersion (transitions : transition list)
         let sigma_sq_grad =
           List.filter_map
             (fun p ->
-              match obs_deriv_entry (differentiate sigma_sq p tfs tbls) with
+              match obs_deriv_entry (differentiate sigma_sq (WrtParam p) tfs tbls) with
               | Some de -> Some (p, de)
               | None -> None)
             param_names

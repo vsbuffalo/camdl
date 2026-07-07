@@ -3054,6 +3054,56 @@ let test_trig_autodiff_matches_finite_diff () =
       "∂(b*sin(c))/∂b = sin(c)" (sin c) v
   | Some _ -> Alcotest.failf "expected DEGrad (Const), got a non-constant or refused derivative"
 
+(* ── gh#275: WrtPop — ∂rate/∂compartment (rate_state_grad, the J_x ingredient) ── *)
+
+let test_rate_state_grad_smooth () =
+  (* Rate = beta * S * I. ∂/∂S = beta*I, ∂/∂I = beta*S (both nonzero), ∂/∂R = 0
+     (dropped). differentiate_rate_state must emit exactly S and I, as real
+     gradients — the on-diagonal J_x. *)
+  let rate = Ir.BinOp { op = Ir.Mul;
+                        left  = Ir.BinOp { op = Ir.Mul; left = Ir.Param "beta"; right = Ir.Pop "S" };
+                        right = Ir.Pop "I" } in
+  let grads = Autodiff.differentiate_rate_state rate [ "S"; "I"; "R" ] [] [] [] in
+  Alcotest.(check (list string))
+    "rate_state_grad emits S and I (nonzero), not R"
+    [ "S"; "I" ] (List.map fst grads);
+  List.iter (fun (c, de) -> match de with
+    | Ir.DEGrad _ -> ()
+    | Ir.DEUnsupported _ ->
+      Alcotest.failf "∂rate/∂%s was refused; expected a real gradient" c) grads
+
+let test_rate_state_grad_nonsmooth_refused () =
+  (* Rate = floor(S) * beta. ∂/∂S reaches floor(state) — nonsmooth (a step at
+     each integer) — so it must be a loud DEUnsupported (URNonsmoothState), never
+     a silent zero or a bogus gradient. *)
+  let rate = Ir.BinOp { op = Ir.Mul;
+                        left  = Ir.UnOp { op = Ir.Floor; arg = Ir.Pop "S" };
+                        right = Ir.Param "beta" } in
+  let grads = Autodiff.differentiate_rate_state rate [ "S" ] [] [] [] in
+  match List.assoc_opt "S" grads with
+  | Some (Ir.DEUnsupported { code = Ir.URNonsmoothState; _ }) -> ()
+  | Some (Ir.DEGrad _) ->
+    Alcotest.failf "floor(S) must be refused, not silently differentiated"
+  | Some (Ir.DEUnsupported { code; _ }) ->
+    Alcotest.failf "expected URNonsmoothState, got %s" (Ir.unsupported_reason_name code)
+  | None -> Alcotest.failf "floor(S) ∂/∂S was dropped; must be a loud DEUnsupported"
+
+let test_rate_state_grad_through_binding () =
+  (* The subtle arm: a hoisted binding N = PopSum[S;I;R] (a force-of-infection
+     normalizer), rate = beta * S * I / N. ∂rate/∂S must see BOTH the direct S
+     and N's dependence on S (∂N/∂S = 1, via the binding recursion). It must be a
+     real gradient — proving BindingRef inverts to state-bearing under WrtPop. *)
+  let bindings = [ { Ir.bname = "N"; bexpr = Ir.PopSum [ "S"; "I"; "R" ] } ] in
+  let rate = Ir.BinOp { op = Ir.Div;
+    left  = Ir.BinOp { op = Ir.Mul;
+              left  = Ir.BinOp { op = Ir.Mul; left = Ir.Param "beta"; right = Ir.Pop "S" };
+              right = Ir.Pop "I" };
+    right = Ir.BindingRef "N" } in
+  let grads = Autodiff.differentiate_rate_state rate [ "S" ] [] [] bindings in
+  match List.assoc_opt "S" grads with
+  | Some (Ir.DEGrad _) -> ()
+  | _ -> Alcotest.failf "∂rate/∂S through binding N must be a real gradient (binding recursion)"
+
 let test_fourier_autodiff_emitted () =
   (* gh#119/gh#59: a parameter that is a Fourier harmonic coefficient must get
      a real derivative through the forcing closed form (not a dropped/silent
@@ -8856,6 +8906,9 @@ let () =
       Alcotest.test_case "cos(dimensionless) compiles"              `Quick test_trig_cos_compiles_and_dimchecks;
       Alcotest.test_case "cos(t) rejected with E301"                `Quick test_trig_cos_rejects_dimensional_arg;
       Alcotest.test_case "autodiff emits rate_grad for sin(...)"    `Quick test_trig_autodiff_matches_finite_diff;
+      Alcotest.test_case "rate_state_grad: ∂/∂compartment emits nonzero comps (gh#275)" `Quick test_rate_state_grad_smooth;
+      Alcotest.test_case "rate_state_grad: nonsmooth-of-state (floor) is refused (gh#275)" `Quick test_rate_state_grad_nonsmooth_refused;
+      Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
       Alcotest.test_case "autodiff emits rate_grad for a Fourier coef" `Quick test_fourier_autodiff_emitted;
       Alcotest.test_case "periodic step-value param compiles, gradient is a coded refusal (gh#342)" `Quick test_periodic_forcing_coeff_omitted;
       Alcotest.test_case "structural forcing-coeff param is a compile error (gh#215)" `Quick test_structural_forcing_coeff_errors;

@@ -91,6 +91,9 @@ type unsupported_reason =
   | URNonConstTableIndex
   | URMod
   | URParametricN
+  | URNonsmoothState   (* gh#275: a nonsmooth function of state (floor/ceil/abs/
+                          min/max of a compartment) in a WrtPop derivative — the
+                          derivative is not smooth, so a gradient method is refused *)
 
 type deriv_entry =
   | DEGrad of expr
@@ -105,6 +108,7 @@ let unsupported_reason_name = function
   | URNonConstTableIndex -> "non_const_table_index"
   | URMod                -> "mod"
   | URParametricN        -> "parametric_n"
+  | URNonsmoothState     -> "nonsmooth_state"
 
 let unsupported_reason_of_name = function
   | "lag"                   -> Some URLag
@@ -113,6 +117,7 @@ let unsupported_reason_of_name = function
   | "non_const_table_index" -> Some URNonConstTableIndex
   | "mod"                   -> Some URMod
   | "parametric_n"          -> Some URParametricN
+  | "nonsmooth_state"       -> Some URNonsmoothState
   | _                       -> None
 
 (* ── Compartment ─────────────────────────────────────────────────────────────── *)
