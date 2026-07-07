@@ -3,7 +3,7 @@
 {"name":"B","kind":"integer"},
 {"name":"C","kind":"integer"}
 ],"transitions":[
-{"name":"drain","stoichiometry":[["A",-1],["B",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"A"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"A","dest_compartment":"B"},"rate_grad":{"k":{"grad":{"pop":"A"}}}}
+{"name":"drain","stoichiometry":[["A",-1],["B",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"A"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"A","dest_compartment":"B"},"rate_grad":{"k":{"grad":{"pop":"A"}}},"rate_state_grad":{"A":{"grad":{"param":"k"}}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[
 {"name":"bump_b","fire":{"scheduled":{"at_times":[5.0]}},"actions":[{"add":{"compartment":"B","count":{"const":20.0}}}]},
 {"name":"bump_c","fire":{"scheduled":{"at_times":[5.0]}},"actions":[{"add":{"compartment":"C","count":{"const":30.0}}}]}

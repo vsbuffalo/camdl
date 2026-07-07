@@ -1996,6 +1996,11 @@ mod tests {
             .get("beta")
             .expect("infection has a beta gradient")
             .clone();
+        // sir_basic now carries compiler-EMITTED rate_state_grad ({S,I,R} over
+        // N=PopSum); clear it so this test isolates the KEY resolution mechanic
+        // (a single compartment key → its compartment index) rather than the
+        // emitted map's size.
+        model.transitions[inf_pos].rate_state_grad.0.clear();
         model.transitions[inf_pos]
             .rate_state_grad
             .0
