@@ -24,6 +24,7 @@ pub mod fit_summary;
 pub use fit_summary::cmd_fit_summary;
 pub mod pmmh;
 pub mod pgas;
+pub mod nuts;  // gh#275 Phase 2: nuts on ode
 pub mod trace_writer;
 pub mod synthetic;
 pub mod gating;
@@ -1450,6 +1451,34 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     stage_best_chain = Some(fs.best_chain);
                 }
             }
+            Stage::Nuts { .. } => {
+                // Gradient-based Bayesian sampling of the deterministic ODE
+                // marginal likelihood (gh#275 Phase 2) via `det_grad` + NUTS.
+                let mut nuts_opts = nuts::NutsStageOpts::from_stage(stage)
+                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                if let Some(d) = a.max_tree_depth { nuts_opts.max_tree_depth = d; }
+                if a.diagonal_mass { nuts_opts.dense_mass = false; }
+                if let Some(m) = cli_init_method.clone() { nuts_opts.init_method = m; }
+                if let Some(ref p) = cli_survey_path { nuts_opts.survey_path = Some(p.clone()); }
+                if let Some(k) = cli_survey_top_k { nuts_opts.survey_top_k_n = Some(k); }
+
+                nuts::run_stage(
+                    &sweep_config,
+                    stage_name,
+                    stage,
+                    &stage_dir,
+                    nuts_opts,
+                    seed, force,
+                    a.resume.is_some(),
+                ).unwrap_or_else(|e| {
+                    eprintln!("error running nuts stage '{}': {}", stage_name, e);
+                    std::process::exit(1);
+                });
+                if let Ok(fs) = state::FitState::load(&stage_dir.to_string_lossy()) {
+                    stage_best_loglik = Some(fs.best_loglik);
+                    stage_best_chain = Some(fs.best_chain);
+                }
+            }
             Stage::NlSbplx(_) | Stage::NlBobyqa(_) => {
                 #[cfg(feature = "ode")]
                 {
@@ -1661,6 +1690,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations }),
             Stage::Mh { chains, iterations, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "iterations": iterations }),
+            Stage::Nuts { chains, warmup, samples, .. } =>
+                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "warmup": warmup, "samples": samples }),
             Stage::PFilter { particles, replicates, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "particles": particles, "replicates": replicates }),
             Stage::NlSbplx(c) | Stage::NlBobyqa(c) =>
