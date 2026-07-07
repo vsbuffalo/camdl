@@ -2841,6 +2841,7 @@ mod tests {
 
         // SIR model: beta (estimated), gamma (fixed), N0 (fixed)
         let model = Model {
+            ic_grad: Default::default(),
             name: "test".into(),
             version: "0.3".into(),
             time_unit: "days".into(),
@@ -2852,6 +2853,7 @@ mod tests {
             ],
             transitions: vec![
                 Transition {
+                    rate_state_grad: Default::default(),
                     name: "infection".into(),
                     stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
                     rate: Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
@@ -2863,6 +2865,7 @@ mod tests {
                     rate_grad: Default::default(), lineage: None,
                 },
                 Transition {
+                    rate_state_grad: Default::default(),
                     name: "recovery".into(),
                     stoichiometry: vec![StoichiometryEntry("I".into(), -1), StoichiometryEntry("R".into(), 1)],
                     rate: Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
@@ -3043,6 +3046,7 @@ mod tests {
         // Compartments are required because CompiledModel::new validates
         // them, but the simulation isn't run.
         let model = ir::Model {
+            ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
             compartments: vec![
@@ -3147,6 +3151,7 @@ mod tests {
             transform: Transform::None, ivp: false,
         }];
         let model = ir::Model {
+            ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
             compartments: vec![
@@ -3292,6 +3297,7 @@ mod tests {
         let beta_with_ir_prior = Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: None, bounds: Some((0.01, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::LogNormal(LogNormalPrior { mu: -1.0, sigma: 0.5 })), transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None };
         let gamma_no_prior = Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Estimated { init: None, bounds: Some((0.05, 1.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None };
         let model = ir::Model {
+            ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
             compartments: vec![], transitions: vec![], ode_equations: vec![],
@@ -3358,6 +3364,7 @@ mod tests {
     #[cfg(test)]
     fn model_with_param(p: ir::parameter::Parameter) -> ir::Model {
         ir::Model {
+            ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
             compartments: vec![], transitions: vec![], ode_equations: vec![],
@@ -4002,6 +4009,7 @@ dt = 1.0
             parameter::Parameter,
         };
         let model = ir::Model {
+            ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
             compartments: vec![Compartment { name: "S".into(), kind: CompartmentKind::Integer }],
@@ -4469,6 +4477,7 @@ dt = 1.0
         // Daily output schedule so a snapshot lands on every obs time
         // (compute_ode_loglik requires a snapshot at each obs time).
         let m = Model {
+            ic_grad: Default::default(),
             name: "ode_hole_reset".into(),
             version: "0.3".into(),
             time_unit: "days".into(),
@@ -4479,6 +4488,7 @@ dt = 1.0
             ],
             transitions: vec![
                 Transition {
+                    rate_state_grad: Default::default(),
                     name: "inflow".into(),
                     stoichiometry: vec![StoichiometryEntry("R".into(), 1)],
                     rate: Expr::Const(ConstExpr { value: k }),

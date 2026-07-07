@@ -3664,6 +3664,7 @@ mod tests {
 
     fn mk_model(ivs: Vec<Intervention>) -> ir::Model {
         ir::Model {
+            ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
             compartments: vec![], transitions: vec![], ode_equations: vec![],
@@ -3858,6 +3859,7 @@ mod tests {
     /// field is zero/empty/default.
     fn model_with_one_param(value: Option<f64>, bounds: Option<(f64, f64)>) -> ir::Model {
         ir::Model {
+            ic_grad: Default::default(),
             name: "fixture".into(),
             version: "0.0".into(),
             time_unit: "days".into(),

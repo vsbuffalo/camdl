@@ -182,6 +182,7 @@ fn test_overdispersion_variance_chain_binomial() {
     use ir::expr::{BinOpExpr, BinOpWrap, BinOp, PopExpr};
 
     let model = Model {
+        ic_grad: Default::default(),
         name: "od_test".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -193,6 +194,7 @@ fn test_overdispersion_variance_chain_binomial() {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "infection".into(),
                 stoichiometry: vec![
                     StoichiometryEntry("S".into(), -1),
@@ -304,6 +306,7 @@ fn test_fraction_transfer_edge_cases() {
             })],
         };
         let model = Model {
+            ic_grad: Default::default(),
             name: "test".into(),
             version: "0.3".into(),
             time_unit: "days".into(),

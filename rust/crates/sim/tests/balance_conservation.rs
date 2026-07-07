@@ -56,6 +56,7 @@ fn pop(p: &str) -> Expr { Expr::Pop(PopExpr { pop: p.into() }) }
 /// R = N0 − S − I; a scheduled cull moves 20% of S into R at t=5.
 fn balance_model() -> CompiledModel {
     let model = Model {
+        ic_grad: Default::default(),
         name: "balance_conservation".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -67,6 +68,7 @@ fn balance_model() -> CompiledModel {
             Compartment { name: "R".into(), kind: CompartmentKind::Integer },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "infect".into(),
             stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
             rate: mul(param("beta"), pop("S")), // beta * S

@@ -194,6 +194,15 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub per_eval_bindings:  Vec<Binding>,
     pub initial_conditions: InitialConditions,
+    /// ∂(initial_state)/∂θ per parameterized initial-condition compartment — the
+    /// forward-sensitivity seed `S(t_start)` for the ODE gradient (gh#275), keyed
+    /// `compartment → (param → DerivEntry)`. A `WrtParam` differentiation of the
+    /// `InitialConditions::Parameterized` expressions; parameter-keyed (hence
+    /// [`crate::deriv::ParamGradMap`]), the `rate_grad` analogue for the IC map.
+    /// Empty (and omitted) until the OCaml pass emits it and for gradient-free
+    /// backends — so golden-neutral until Phase 1's WrtParam-over-init emission.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub ic_grad:            std::collections::HashMap<String, crate::deriv::ParamGradMap>,
     pub output:             OutputConfig,
     pub simulation:         SimulationConfig,
     #[serde(default, rename = "scenarios")]

@@ -1,4 +1,4 @@
-{"ir_version":"0.26","validated_by":"ocaml-compiler-v0.26","model":{"name":"sia_anchored_dates","version":"0.3","time_unit":"days","description":null,"origin":"2013-01-01","origin_rata_die":41272,"compartments":[
+{"ir_version":"0.27","validated_by":"ocaml-compiler-v0.27","model":{"name":"sia_anchored_dates","version":"0.3","time_unit":"days","description":null,"origin":"2013-01-01","origin_rata_die":41272,"compartments":[
 {"name":"S_north","kind":"integer"},
 {"name":"S_south","kind":"integer"},
 {"name":"I_north","kind":"integer"},

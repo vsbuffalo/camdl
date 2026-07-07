@@ -78,6 +78,7 @@ let empty_model
     bindings;
     per_eval_bindings = [];
     initial_conditions;
+    ic_grad = [];
     output = {
       times = OutRegular { start = 0.0; step = 1.0 };
       format = "tsv";
@@ -108,7 +109,7 @@ let mk_param ?(kind = None) name : parameter =
 
 let mk_transition ?(stoich = []) ?(metadata = None) name rate : transition =
   { name; stoichiometry = stoich; rate; metadata;
-    draw_method = DrawPoisson; rate_grad = []; lineage = None }
+    draw_method = DrawPoisson; rate_grad = []; rate_state_grad = []; lineage = None }
 
 (* Expression shorthands *)
 let pop s = Pop s

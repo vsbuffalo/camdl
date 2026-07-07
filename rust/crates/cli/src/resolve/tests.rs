@@ -14,6 +14,7 @@ use ir::model::{
 
 fn tiny_model() -> Model {
     Model {
+        ic_grad: Default::default(),
         name: "sir".into(),
         version: "1".into(),
         time_unit: "days".into(),

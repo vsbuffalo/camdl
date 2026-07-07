@@ -54,6 +54,7 @@ impl ObservationModel<ParticleState> for PoissonPrevalenceObs {
 /// Same model used in particle_filter.rs tests.
 fn pure_death_model() -> (CompiledModel, Vec<f64>) {
     let model = Model {
+        ic_grad: Default::default(),
         name: "pure_death_pmmh".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -64,6 +65,7 @@ fn pure_death_model() -> (CompiledModel, Vec<f64>) {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "death".into(),
                 stoichiometry: vec![StoichiometryEntry("N".into(), -1)],
                 rate: Expr::BinOp(BinOpWrap {

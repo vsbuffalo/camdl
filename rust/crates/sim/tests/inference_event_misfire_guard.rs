@@ -82,6 +82,7 @@ fn death_model(event_times: Option<Vec<f64>>) -> CompiledModel {
         None => vec![],
     };
     let model = Model {
+        ic_grad: Default::default(),
         name: "death_event_guard".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -89,6 +90,7 @@ fn death_model(event_times: Option<Vec<f64>>) -> CompiledModel {
         origin: None, origin_rata_die: None,
         compartments: vec![Compartment { name: "N".into(), kind: CompartmentKind::Integer }],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "death".into(),
             stoichiometry: vec![StoichiometryEntry("N".into(), -1)],
             rate: Expr::BinOp(BinOpWrap {

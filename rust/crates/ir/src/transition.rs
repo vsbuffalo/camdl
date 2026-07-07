@@ -132,7 +132,16 @@ pub struct Transition {
     /// old `coeff_guard` (gh#342). A structural coefficient is still an E600 at
     /// compile time (never reaches here).
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub rate_grad:      crate::deriv::GradMap,
+    pub rate_grad:      crate::deriv::ParamGradMap,
+    /// ∂rate/∂compartment for each compartment the rate depends on, classified
+    /// `Grad | Unsupported` (`J_x`'s ingredient for the ODE forward sensitivities,
+    /// gh#275). The `rate_grad` sibling, but keyed by **compartment** — hence the
+    /// distinct [`crate::deriv::CompGradMap`] type, which cannot be resolved by the
+    /// parameter resolver. Populated by the OCaml `WrtPop` autodiff pass; empty
+    /// (and omitted) until then and for gradient-free backends, absent key ⇒
+    /// genuine zero.
+    #[serde(default, skip_serializing_if = "crate::deriv::CompGradMap::is_empty")]
+    pub rate_state_grad: crate::deriv::CompGradMap,
     /// Lineage annotation for `#[lineage]` transitions. `None` for ordinary
     /// transitions (the common case), and omitted from the JSON then.
     #[serde(default, skip_serializing_if = "Option::is_none")]

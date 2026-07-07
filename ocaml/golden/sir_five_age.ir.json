@@ -1,4 +1,4 @@
-{"ir_version":"0.26","validated_by":"ocaml-compiler-v0.26","model":{"name":"sir_five_age","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.27","validated_by":"ocaml-compiler-v0.27","model":{"name":"sir_five_age","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_age_0_5","kind":"integer"},
 {"name":"S_age_5_15","kind":"integer"},
 {"name":"S_age_15_50","kind":"integer"},

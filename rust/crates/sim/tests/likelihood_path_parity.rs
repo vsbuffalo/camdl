@@ -46,6 +46,7 @@ use sim::{
 /// projection (`IntCompSum` over `I`) reads counts too.
 fn model() -> Arc<CompiledModel> {
     let m = Model {
+        ic_grad: Default::default(),
         name: "likelihood_path_parity".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -58,6 +59,7 @@ fn model() -> Arc<CompiledModel> {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "recovery".into(),
                 stoichiometry: vec![
                     StoichiometryEntry("I".into(), -1),

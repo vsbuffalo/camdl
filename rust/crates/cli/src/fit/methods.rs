@@ -883,6 +883,7 @@ mod tests {
             Expr::Pop(PopExpr { pop: c.into() }),
         );
         let tr = |name: &str, dst: &str, dm: DrawMethod, r: Expr| Transition {
+            rate_state_grad: Default::default(),
             name: name.into(),
             stoichiometry: vec![StoichiometryEntry("I".into(), -1), StoichiometryEntry(dst.into(), 1)],
             rate: r,
@@ -894,6 +895,7 @@ mod tests {
 
         // Source `I` mixes a deterministic recovery with a Poisson death.
         let model = Model {
+            ic_grad: Default::default(),
             name: "mixed_source_infer".into(),
             version: "0.3".into(),
             time_unit: "days".into(),
@@ -982,6 +984,7 @@ mod tests {
         // Build a one-transition S --> I model whose infection rate is `rate`.
         let build = |name: &str, rate: Expr| -> sim::CompiledModel {
             let model = Model {
+                ic_grad: Default::default(),
                 name: name.into(),
                 version: "0.3".into(),
                 time_unit: "days".into(),
@@ -993,6 +996,7 @@ mod tests {
                     .map(|c| Compartment { name: (*c).into(), kind: CompartmentKind::Integer })
                     .collect(),
                 transitions: vec![Transition {
+                    rate_state_grad: Default::default(),
                     name: "infect".into(),
                     stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
                     rate,

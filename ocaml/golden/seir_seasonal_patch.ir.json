@@ -1,4 +1,4 @@
-{"ir_version":"0.26","validated_by":"ocaml-compiler-v0.26","model":{"name":"seir_seasonal_patch","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.27","validated_by":"ocaml-compiler-v0.27","model":{"name":"seir_seasonal_patch","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_urban","kind":"integer"},
 {"name":"S_rural","kind":"integer"},
 {"name":"E_urban","kind":"integer"},

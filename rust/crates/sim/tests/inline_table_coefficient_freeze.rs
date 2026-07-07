@@ -40,6 +40,7 @@ fn table_lookup(table: &str, index: f64) -> Expr {
 /// `S --> D` with rate `table_lookup(k_tbl, 0) * S`; `k_tbl = [k]`.
 fn decay_model() -> Model {
     Model {
+        ic_grad: Default::default(),
         name: "table_decay".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -50,6 +51,7 @@ fn decay_model() -> Model {
             Compartment { name: "D".into(), kind: CompartmentKind::Integer },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "decay".into(),
             stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("D".into(), 1)],
             rate: Expr::bin_op(ir::expr::BinOp::Mul, table_lookup("k_tbl", 0.0), Expr::pop("S")),

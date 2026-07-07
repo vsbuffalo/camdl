@@ -55,6 +55,7 @@ fn seir_model() -> (CompiledModel, Vec<f64>) {
     let recovery_rate = Expr::bin_op(BinOp::Mul, Expr::param("gamma"), Expr::pop("I"));
 
     let tr = |name: &str, from: &str, to: &str, rate: Expr| Transition {
+        rate_state_grad: Default::default(),
         name: name.into(),
         stoichiometry: vec![
             StoichiometryEntry(from.into(), -1),
@@ -68,6 +69,7 @@ fn seir_model() -> (CompiledModel, Vec<f64>) {
     };
 
     let model = Model {
+        ic_grad: Default::default(),
         name: "seir_cpm".into(),
         version: "0.3".into(),
         time_unit: "days".into(),

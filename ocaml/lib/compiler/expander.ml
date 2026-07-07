@@ -4268,6 +4268,7 @@ let expand_transitions_counted ctx =
             };
             Ir.draw_method     = draw_method;
             Ir.rate_grad       = [];  (* populated later by autodiff pass *)
+            Ir.rate_state_grad = [];  (* populated later by the WrtPop pass (gh#275) *)
             Ir.lineage         = lineage;
           }
         in
@@ -8842,6 +8843,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
     Ir.bindings           = [];   (* filled below from ctx.hoisted_rev once all resolution is done *)
     Ir.per_eval_bindings  = [];   (* gh#272 LICM: empty until the LICM pass runs (post-autodiff) *)
     Ir.initial_conditions = expand_init ctx;
+    Ir.ic_grad            = [];
     Ir.output             = expand_output ctx;
     Ir.simulation         = expand_simulate ctx;
     Ir.presets            = expand_scenarios ctx;

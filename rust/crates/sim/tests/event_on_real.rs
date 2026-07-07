@@ -32,6 +32,7 @@ use sim::{
 /// constant by dW/dt = 0 except for the always-active event `topup`.
 fn model_with_real_event() -> CompiledModel {
     let model = Model {
+        ic_grad: Default::default(),
         name: "event_on_real".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -43,6 +44,7 @@ fn model_with_real_event() -> CompiledModel {
             Compartment { name: "W".into(), kind: CompartmentKind::Real },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "decay".into(),
             stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
             rate: Expr::BinOp(BinOpWrap {
