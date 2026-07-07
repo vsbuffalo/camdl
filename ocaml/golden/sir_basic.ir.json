@@ -10,7 +10,7 @@
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.001,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"N0","value":{"mode":"estimated","bounds":[100.0,100000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
 {"name":"I0","value":{"mode":"estimated","bounds":[1.0,1000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"parameterized":{"S":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}},"I":{"param":"I0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"parameterized":{"S":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}},"I":{"param":"I0"}}},"ic_grad":{"S":{"N0":{"grad":{"const":1.0}},"I0":{"grad":{"const":-1.0}}},"I":{"I0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"default  (R0 ≈ 3)","params":{"beta":0.3,"gamma":0.1,"N0":1000.0,"I0":10.0},"enable":[],"disable":[],"t_end":80.0},
 {"name":"high_r0","label":"high R0  (R0 = 5)","params":{"beta":0.5,"gamma":0.1,"N0":1000.0,"I0":5.0},"enable":[],"disable":[],"t_end":80.0}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[

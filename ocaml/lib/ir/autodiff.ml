@@ -877,6 +877,26 @@ let differentiate_obs_arg (proj : projection) (arg : expr)
       | None -> None)
     param_names
 
+(** ∂(initial-condition expression)/∂θ for every parameter — one compartment's
+    entry in the model's [ic_grad] map (compartment → param → ∂init/∂param), the
+    ODE forward-sensitivity seed S(t_start) (gh#275 §1c C-seed).
+
+    Same compile-vs-defer POLICY as the obs/σ² driver ([obs_deriv_entry], the
+    "natural seam"): a genuine zero is dropped (an absent key IS a genuine zero),
+    and an [Omitted] or [Unsupported] coefficient becomes a serialized
+    [DEUnsupported] the fit-time gradient gate refuses ODE-NUTS on — a nonsmooth
+    initial condition still forward-simulates and fits by the gradient-free
+    backends (IF2/PF), exactly as a nonsmooth rate does. No projection is involved
+    (an IC is not an observation argument), so nothing is inlined. *)
+let differentiate_ic (ic_expr : expr) (param_names : string list)
+    (tfs : time_function list) (tbls : table list) : grad_map =
+  List.filter_map
+    (fun p ->
+      match obs_deriv_entry (differentiate ic_expr (WrtParam p) tfs tbls) with
+      | Some de -> Some (p, de)
+      | None -> None)
+    param_names
+
 (** Differentiate one likelihood argument: keep its [expr] (raw — the projection
     is inlined only inside the gradient, never stored) and fill its [grad]. *)
 let differentiate_diffable (proj : projection) (d : diffable)
