@@ -22,8 +22,9 @@
 use crate::fit::config_v2::{CombineMode, DtCheckConfig};
 use crate::fit::loglik_eval::combine_with_se;
 use crate::fit::runner::{
-    compute_ode_loglik, run_quick_pfilter_with_dt, ruled_out_or_surface, FitRunConfig,
+    run_quick_pfilter_with_dt, ruled_out_or_surface, FitRunConfig,
 };
+use sim::inference::compute_ode_loglik;
 use crate::run_meta::InferenceBackend;
 use serde::{Deserialize, Serialize};
 

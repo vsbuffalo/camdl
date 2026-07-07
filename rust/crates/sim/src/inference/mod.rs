@@ -33,6 +33,7 @@ pub mod nuts;
 pub mod linalg;
 pub mod diagnostic;
 pub mod prequential;
+pub mod ode_loglik;
 #[cfg(feature = "ode")]
 pub mod deterministic;
 
@@ -47,6 +48,7 @@ pub use multi_stream_obs::{
     Severity,
 };
 pub use prior::Prior;
+pub use ode_loglik::compute_ode_loglik;
 
 /// gh#226. The absorbing-`-inf` backstop predicate: `true` when a
 /// log-likelihood value is not a finite anchor a fit can rest on.
