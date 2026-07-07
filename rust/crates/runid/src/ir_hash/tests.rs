@@ -308,6 +308,59 @@ fn ir_ic_grad_changes_hash() {
     );
 }
 
+/// gh#275: the OUTER `ic_grad` map is hand-sorted in `Model::hash_into` (unlike
+/// the inner param-maps, which ride `write_str_map`'s sort — pinned by
+/// `rate_grad_map_order_invariant`). Build the same two-compartment `ic_grad` in
+/// two insertion orders and assert an identical hash — pins that outer sort so a
+/// future refactor that drops it cannot make `run_id` depend on `HashMap`
+/// iteration order (the gh#160 non-determinism class).
+#[test]
+fn ic_grad_map_order_invariant() {
+    let grad_for = |p: &str| -> HashMap<String, ir::deriv::DerivEntry> {
+        let mut h = HashMap::new();
+        h.insert(p.to_string(), ir::deriv::DerivEntry::Grad(Expr::param("beta")));
+        h
+    };
+    let build = |order_ab: bool| -> Model {
+        let mut m = representative_model();
+        let a = ("I".to_string(), grad_for("beta"));
+        let b = ("R".to_string(), grad_for("gamma"));
+        if order_ab {
+            m.ic_grad.insert(a.0.clone(), a.1.clone());
+            m.ic_grad.insert(b.0.clone(), b.1.clone());
+        } else {
+            m.ic_grad.insert(b.0.clone(), b.1.clone());
+            m.ic_grad.insert(a.0.clone(), a.1.clone());
+        }
+        m
+    };
+    assert_eq!(
+        build(true).content_hash(),
+        build(false).content_hash(),
+        "ic_grad compartment insertion order must not change the model hash (the outer sort)"
+    );
+}
+
+/// gh#275: injectivity — two `ic_grad`s that differ (here by compartment key)
+/// must hash differently, not merely differ from empty. Pins that the outer
+/// compartment key is folded into the digest (the encoding is length-prefixed
+/// and thus injective; this locks that property).
+#[test]
+fn ic_grad_distinct_values_hash_differently() {
+    let mk = |comp: &str| {
+        let mut m = representative_model();
+        let mut inner = HashMap::new();
+        inner.insert("beta".to_string(), ir::deriv::DerivEntry::Grad(Expr::param("beta")));
+        m.ic_grad.insert(comp.to_string(), inner);
+        m.content_hash()
+    };
+    assert_ne!(
+        mk("I"),
+        mk("R"),
+        "ic_grad keyed by different compartments must hash differently"
+    );
+}
+
 /// Inverse polarity of `ir_per_eval_bindings_changes_hash`: a non-empty
 /// `quantities` must NOT change the model hash. Quantities (proposal 2026-06-25)
 /// are derived reports, deliberately excluded from `Model::hash_into` — the one
