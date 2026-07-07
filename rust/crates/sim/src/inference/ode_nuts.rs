@@ -21,37 +21,13 @@
 
 use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
-use crate::inference::nuts::{nuts_step, DualAveraging, MassMatrix, NUTSConfig};
+use crate::inference::nuts::{nuts_step, MassMetric, NUTSConfig, WarmupAdapter};
 use crate::inference::ode_grad::det_grad;
 use crate::inference::pgas::prior_log_density_and_grad_z;
 use crate::inference::pmmh::Prior;
 use crate::inference::types::EstimatedParam;
 use crate::inference::MultiStreamObsModel;
 use crate::rng::StatefulRng;
-
-/// Mass-matrix adaptation strategy for warm-up — Stan's `metric` (Stan Reference
-/// Manual, "HMC algorithm parameters"). Whether and how the sampler learns the
-/// posterior scale (and correlations) in the transformed `z`-space during
-/// warm-up. This is the single most important knob for ODE-NUTS cost: an
-/// unadapted (`Unit`) metric on an anisotropic posterior forces NUTS to build
-/// near-maximal trees — each sample then costs up to `2^max_tree_depth`
-/// augmented-ODE gradient solves — because the shared step size must be tiny
-/// enough to move the tightest-constrained parameter, so the loosest one barely
-/// moves per leapfrog step and a U-turn is never reached inside the cap.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MassMetric {
-    /// Identity mass, no adaptation (Stan's `unit_e`). Correct only when the
-    /// `z`-posterior is already isotropic; pathologically slow otherwise.
-    Unit,
-    /// Diagonal mass from the warm-up sample variances (Stan's default `diag_e`).
-    /// Rescales each parameter to ~unit posterior variance — the fix for the
-    /// scale-spread that pins trees at the depth cap.
-    Diagonal,
-    /// Dense mass from the warm-up sample covariance (Stan's `dense_e`). Also
-    /// absorbs parameter correlations (the identifiability ridge), at O(d²)
-    /// memory and one triangular solve per leapfrog step.
-    Dense,
-}
 
 /// ODE-NUTS run configuration.
 pub struct OdeNutsConfig {
@@ -276,33 +252,27 @@ pub fn run_ode_nuts_with_progress(
     }
 
     let mut rng = StatefulRng::new(config.seed);
-    let mut dual_avg = DualAveraging::new(config.init_step_size, config.target_accept);
-    let mut step_size = config.init_step_size;
-    let mut mass = MassMatrix::identity(d);
 
     // Natural-scale parameter vector at the current z (for progress rows).
     let natural = |z: &[f64]| -> Vec<f64> {
         estimated.iter().enumerate().map(|(i, ep)| ep.from_transformed(z[i])).collect()
     };
 
-    // Two-phase warm-up (Stan's windowed adaptation, collapsed to a single mass
-    // estimate at the 70% mark, matching PGAS's NUTS warm-up in `pgas.rs`):
-    // phase 1 adapts the step size AND accumulates the z-space mean/(co)variance
-    // via Welford; at the 70% mark the metric is frozen from those moments and the
-    // step-size adaptation is RESET to retune under the new geometry; phase 2
-    // finishes the step size. `Unit` skips the accumulation and keeps identity
-    // mass throughout. Without this the shared step size must be tiny enough to
-    // move the tightest parameter, so NUTS builds near-maximal trees on any
-    // anisotropic posterior (each an augmented-ODE solve per leapfrog step).
-    let adapt_mass = !matches!(config.metric, MassMetric::Unit);
-    let mass_adapt_end = (config.n_warmup as f64 * 0.7) as usize;
-    let mut w_n = 0.0f64;
-    let mut w_mean = vec![0.0; d];
-    let mut w_m2 = vec![0.0; d];
-    let mut w_cov = vec![0.0; if matches!(config.metric, MassMetric::Dense) { d * d } else { 0 }];
-
+    // Stan-style windowed warm-up (see [`WarmupAdapter`]): step-size dual
+    // averaging every sweep, with the mass matrix re-estimated over expanding
+    // windows so the covariance converges to the true posterior geometry instead
+    // of being frozen once from a poorly-mixed identity-mass phase. The adapter
+    // owns the schedule/Welford/dual-averaging; the loop just runs `nuts_step`
+    // under its current (step, metric) and feeds back the drawn position.
+    let mut adapter = WarmupAdapter::new(
+        config.metric, d, config.n_warmup, config.init_step_size, config.target_accept,
+    );
     for sweep in 0..config.n_warmup {
-        let cfg = NUTSConfig { max_tree_depth: config.max_tree_depth, step_size, mass_matrix: mass.clone() };
+        let cfg = NUTSConfig {
+            max_tree_depth: config.max_tree_depth,
+            step_size: adapter.step_size(),
+            mass_matrix: adapter.mass().clone(),
+        };
         let r = nuts_step(&z, log_p, &grad, &cfg, &nuts_target, &mut rng);
         if r.accepted {
             z = r.params;
@@ -314,58 +284,17 @@ pub fn run_ode_nuts_with_progress(
             cur_loglik = ll;
         }
 
-        if adapt_mass && sweep < mass_adapt_end {
-            step_size = dual_avg.update(r.mean_accept_prob);
-            // Welford accumulate the current z-position (whether or not this step
-            // accepted — on reject z is unchanged, the correct stationary sample).
-            w_n += 1.0;
-            let old_mean = w_mean.clone();
-            for i in 0..d {
-                let delta = z[i] - w_mean[i];
-                w_mean[i] += delta / w_n;
-                let delta2 = z[i] - w_mean[i];
-                w_m2[i] += delta * delta2;
-            }
-            if matches!(config.metric, MassMetric::Dense) {
-                for i in 0..d {
-                    for j in 0..d {
-                        w_cov[i * d + j] += (z[i] - old_mean[i]) * (z[j] - w_mean[j]);
-                    }
-                }
-            }
-        } else if adapt_mass && sweep == mass_adapt_end {
-            // Freeze the metric from the warm-up moments (needs enough samples for
-            // a stable estimate; else keep identity and let the step size carry it).
-            if w_n > 10.0 {
-                mass = match config.metric {
-                    MassMetric::Dense => {
-                        let cov: Vec<f64> = w_cov.iter().map(|c| c / (w_n - 1.0)).collect();
-                        MassMatrix::dense_from_covariance(&cov, d)
-                    }
-                    MassMetric::Diagonal => {
-                        let var: Vec<f64> =
-                            (0..d).map(|i| (w_m2[i] / (w_n - 1.0)).max(1e-10)).collect();
-                        MassMatrix::diagonal(var)
-                    }
-                    MassMetric::Unit => unreachable!("adapt_mass is false for Unit"),
-                };
-                if log::log_enabled!(log::Level::Info) {
-                    let sds: Vec<String> = (0..d)
-                        .map(|i| {
-                            format!("{}={:.4}", estimated[i].name,
-                                (w_m2[i] / (w_n - 1.0)).max(1e-10).sqrt())
-                        })
-                        .collect();
-                    log::info!(target: "nuts",
-                        "metric adapted at warmup {}/{}: z-sd [{}]",
-                        sweep, config.n_warmup, sds.join(", "));
-                }
-            }
-            // Reset step-size adaptation under the new metric.
-            step_size = config.init_step_size;
-            dual_avg = DualAveraging::new(step_size, config.target_accept);
-        } else {
-            step_size = dual_avg.update(r.mean_accept_prob);
+        let froze = adapter.observe(sweep, &z, r.mean_accept_prob);
+        if froze && log::log_enabled!(log::Level::Info) {
+            let sds = adapter.metric_sd();
+            let named: Vec<String> = estimated
+                .iter()
+                .zip(&sds)
+                .map(|(ep, sd)| format!("{}={:.4}", ep.name, sd))
+                .collect();
+            log::info!(target: "nuts",
+                "metric re-estimated at warmup {}/{}: z-sd [{}]",
+                sweep + 1, config.n_warmup, named.join(", "));
         }
 
         if let Some(cb) = on_iter {
@@ -375,14 +304,16 @@ pub fn run_ode_nuts_with_progress(
                 total: config.n_warmup,
                 tree_depth: r.tree_depth,
                 divergent: r.divergent,
-                step_size,
+                step_size: adapter.step_size(),
                 log_posterior: log_p,
                 loglik: f64::NAN,
                 params_natural: natural(&z),
             });
         }
     }
-    step_size = dual_avg.final_step_size();
+    adapter.finalize();
+    let step_size = adapter.step_size();
+    let mass = adapter.into_mass();
 
     // Sampling. `cur_loglik` (the trace's data-loglik column) was left current by
     // the last warm-up accept and is refreshed from the accept-path solve below —

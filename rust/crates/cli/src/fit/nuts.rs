@@ -155,9 +155,9 @@ pub fn run_stage(
                 // acceptance and frees the wide-posterior parameter (a2) that
                 // identity mass leaves stuck at its bound (gh#275).
                 metric: if opts.dense_mass {
-                    sim::inference::ode_nuts::MassMetric::Dense
+                    sim::inference::nuts::MassMetric::Dense
                 } else {
-                    sim::inference::ode_nuts::MassMetric::Diagonal
+                    sim::inference::nuts::MassMetric::Diagonal
                 },
                 dt,
                 // Independent chains: same start, distinct RNG stream.

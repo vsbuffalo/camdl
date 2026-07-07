@@ -468,3 +468,339 @@ impl DualAveraging {
         self.log_eps_bar.exp()
     }
 }
+
+/// Mass-matrix adaptation strategy — Stan's `metric` (Stan Reference Manual,
+/// "HMC algorithm parameters"): whether and how warm-up learns the posterior
+/// scale (and correlations) in the transformed `z`-space. The single most
+/// important knob for gradient-NUTS efficiency on an ill-conditioned posterior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MassMetric {
+    /// Identity mass, no adaptation (Stan's `unit_e`). Correct only when the
+    /// `z`-posterior is already isotropic; slow otherwise.
+    Unit,
+    /// Diagonal mass from the warm-up sample variances (Stan's default `diag_e`).
+    /// Rescales each parameter to ~unit variance — fixes scale spread, but not
+    /// correlations.
+    Diagonal,
+    /// Dense mass from the warm-up sample covariance (Stan's `dense_e`). Also
+    /// absorbs parameter correlations (the identifiability ridge), at O(d²) cost.
+    Dense,
+}
+
+/// Stan-style windowed warm-up schedule: `(init_buffer, term_buffer,
+/// window_ends)`. `init_buffer` sweeps at the front do step-size adaptation only
+/// (let the chain reach the typical set); the middle is a series of *expanding*
+/// (doubling) windows, each closing at a sweep in `window_ends` where the metric
+/// is re-estimated; `term_buffer` sweeps at the end refine the step under the
+/// final metric. Returns empty `window_ends` when `n_warmup` is too short to
+/// estimate a metric at all (step-size-only warm-up).
+fn warmup_schedule(n_warmup: usize) -> (usize, usize, Vec<usize>) {
+    if n_warmup < 20 {
+        return (n_warmup, 0, Vec::new());
+    }
+    let (mut init_buffer, mut term_buffer, mut base_window) = (75usize, 50usize, 25usize);
+    if init_buffer + base_window + term_buffer > n_warmup {
+        // Buffers don't fit: scale to Stan's fallback proportions.
+        init_buffer = ((0.15 * n_warmup as f64).ceil() as usize).max(1);
+        term_buffer = ((0.10 * n_warmup as f64).ceil() as usize).max(1);
+        base_window = n_warmup.saturating_sub(init_buffer + term_buffer).max(1);
+    }
+    let metric_end = n_warmup - term_buffer;
+    let mut ends = Vec::new();
+    let mut w_start = init_buffer;
+    let mut w = base_window;
+    while w_start < metric_end {
+        let next = w_start + w;
+        // If the *following* (doubled) window would overshoot the metric region,
+        // let this window absorb the remainder — matches Stan's last-window rule.
+        let this_end = if next + 2 * w > metric_end { metric_end } else { next };
+        ends.push(this_end);
+        w_start = this_end;
+        w *= 2;
+    }
+    (init_buffer, term_buffer, ends)
+}
+
+/// Windowed warm-up adaptation for NUTS (Stan's scheme): interleaves step-size
+/// dual averaging with mass-matrix estimation over expanding windows. The metric
+/// is re-estimated at each window boundary from *that window's* samples — which
+/// are drawn under the previous window's improved metric — so the covariance
+/// estimate converges to the true posterior covariance, instead of being frozen
+/// once from a poorly-mixed identity-mass phase (the failure mode that leaves a
+/// correlated posterior's ridge un-absorbed and caps NUTS's effective sample
+/// size). Owns the schedule, the Welford accumulators, and the dual averaging in
+/// one place so a forward model (`run_ode_nuts`) and a synthetic test drive the
+/// identical adaptation.
+pub struct WarmupAdapter {
+    d: usize,
+    metric: MassMetric,
+    init_buffer: usize,
+    metric_end: usize,
+    window_ends: Vec<usize>,
+    target_accept: f64,
+    dual_avg: DualAveraging,
+    step_size: f64,
+    mass: MassMatrix,
+    // Per-window Welford moments (reset at each window boundary).
+    w_n: f64,
+    w_mean: Vec<f64>,
+    w_m2: Vec<f64>,
+    w_cov: Vec<f64>, // dense only; empty otherwise
+}
+
+impl WarmupAdapter {
+    pub fn new(
+        metric: MassMetric,
+        d: usize,
+        n_warmup: usize,
+        init_step: f64,
+        target_accept: f64,
+    ) -> Self {
+        let (init_buffer, term_buffer, window_ends) = warmup_schedule(n_warmup);
+        let dense = matches!(metric, MassMetric::Dense);
+        WarmupAdapter {
+            d,
+            metric,
+            init_buffer,
+            metric_end: n_warmup.saturating_sub(term_buffer),
+            window_ends,
+            target_accept,
+            dual_avg: DualAveraging::new(init_step, target_accept),
+            step_size: init_step,
+            mass: MassMatrix::identity(d),
+            w_n: 0.0,
+            w_mean: vec![0.0; d],
+            w_m2: vec![0.0; d],
+            w_cov: vec![0.0; if dense { d * d } else { 0 }],
+        }
+    }
+
+    pub fn step_size(&self) -> f64 {
+        self.step_size
+    }
+    pub fn mass(&self) -> &MassMatrix {
+        &self.mass
+    }
+
+    /// Diagonal z-standard-deviations of the currently frozen metric (for
+    /// logging). Empty if the metric has not been estimated yet.
+    pub fn metric_sd(&self) -> Vec<f64> {
+        match &self.mass {
+            MassMatrix::Diagonal(v) if v.iter().any(|&x| x != 1.0) => {
+                v.iter().map(|&x| x.sqrt()).collect()
+            }
+            MassMatrix::Dense { dim, l_cov } => {
+                // diag(Σ) = row-sq-norms of L_cov (Σ = L L^T)
+                (0..*dim)
+                    .map(|i| (0..=i).map(|j| l_cov[i * dim + j].powi(2)).sum::<f64>().sqrt())
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Call once per warm-up sweep, after the `nuts_step`, with the current
+    /// position `z` and the sweep's mean acceptance probability. Advances the step
+    /// size every sweep and, at a window boundary, re-estimates the metric.
+    /// Returns `true` when the metric was re-frozen this sweep.
+    pub fn observe(&mut self, sweep: usize, z: &[f64], accept_prob: f64) -> bool {
+        // Step-size dual averaging runs on every warm-up sweep.
+        self.step_size = self.dual_avg.update(accept_prob);
+
+        let adapting = !matches!(self.metric, MassMetric::Unit);
+        // Accumulate metric statistics only inside the metric windows.
+        if adapting && sweep >= self.init_buffer && sweep < self.metric_end {
+            self.welford_add(z);
+        }
+        // At the close of a window, freeze the metric and restart the step search
+        // (the geometry just changed, so the previous step is no longer calibrated).
+        if adapting && self.window_ends.contains(&(sweep + 1)) {
+            let froze = self.freeze_metric();
+            self.reset_window();
+            let carry = self.dual_avg.final_step_size();
+            self.dual_avg = DualAveraging::new(carry, self.target_accept);
+            return froze;
+        }
+        false
+    }
+
+    /// Carry the smoothed step size out of warm-up (called once, after the loop).
+    pub fn finalize(&mut self) {
+        self.step_size = self.dual_avg.final_step_size();
+    }
+
+    /// The final adapted metric (consumes the adapter).
+    pub fn into_mass(self) -> MassMatrix {
+        self.mass
+    }
+
+    fn welford_add(&mut self, z: &[f64]) {
+        self.w_n += 1.0;
+        let old_mean = self.w_mean.clone();
+        for i in 0..self.d {
+            let delta = z[i] - self.w_mean[i];
+            self.w_mean[i] += delta / self.w_n;
+            let delta2 = z[i] - self.w_mean[i];
+            self.w_m2[i] += delta * delta2;
+        }
+        if !self.w_cov.is_empty() {
+            let d = self.d;
+            for i in 0..d {
+                for j in 0..d {
+                    self.w_cov[i * d + j] += (z[i] - old_mean[i]) * (z[j] - self.w_mean[j]);
+                }
+            }
+        }
+    }
+
+    fn freeze_metric(&mut self) -> bool {
+        // Need enough samples for a stable estimate; else keep the current metric.
+        if self.w_n <= (self.d as f64).max(10.0) {
+            return false;
+        }
+        let d = self.d;
+        self.mass = match self.metric {
+            MassMetric::Dense => {
+                let cov: Vec<f64> = self.w_cov.iter().map(|c| c / (self.w_n - 1.0)).collect();
+                MassMatrix::dense_from_covariance(&cov, d)
+            }
+            MassMetric::Diagonal => {
+                let var: Vec<f64> =
+                    (0..d).map(|i| (self.w_m2[i] / (self.w_n - 1.0)).max(1e-10)).collect();
+                MassMatrix::diagonal(var)
+            }
+            MassMetric::Unit => return false,
+        };
+        true
+    }
+
+    fn reset_window(&mut self) {
+        self.w_n = 0.0;
+        self.w_mean.iter_mut().for_each(|x| *x = 0.0);
+        self.w_m2.iter_mut().for_each(|x| *x = 0.0);
+        self.w_cov.iter_mut().for_each(|x| *x = 0.0);
+    }
+}
+
+#[cfg(test)]
+mod warmup_tests {
+    //! The windowed warm-up adapter must, starting from identity mass, converge a
+    //! metric good enough for NUTS to draw near-independent samples on a
+    //! *correlated* posterior — the case a single-freeze warm-up (frozen once from
+    //! a poorly-mixed identity-mass phase) leaves under-conditioned, capping
+    //! ESS/iter near ~0.4 (gh#275; garki friction F22/F24). This is the regression
+    //! guard for that fix: it fails if the adapter reverts to a bad metric.
+    use super::*;
+    use crate::rng::StatefulRng;
+
+    fn inv3(m: &[f64]) -> Vec<f64> {
+        let (a, b, c, d, e, f, g, h, i) =
+            (m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+        let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+        [
+            e * i - f * h, c * h - b * i, b * f - c * e,
+            f * g - d * i, a * i - c * g, c * d - a * f,
+            d * h - e * g, b * g - a * h, a * e - b * d,
+        ]
+        .iter()
+        .map(|x| x / det)
+        .collect()
+    }
+    fn matvec3(m: &[f64], z: &[f64]) -> Vec<f64> {
+        (0..3).map(|r| (0..3).map(|c| m[r * 3 + c] * z[c]).sum()).collect()
+    }
+    /// ESS/iter via Geyer's initial-positive-sequence estimator.
+    fn ess_per_iter(x: &[f64]) -> f64 {
+        let n = x.len();
+        let mean = x.iter().sum::<f64>() / n as f64;
+        let var = x.iter().map(|xi| (xi - mean).powi(2)).sum::<f64>() / n as f64;
+        if var == 0.0 {
+            return 0.0;
+        }
+        let rho = |k: usize| {
+            x[..n - k].iter().zip(&x[k..]).map(|(a, b)| (a - mean) * (b - mean)).sum::<f64>()
+                / (n as f64 * var)
+        };
+        let mut s = 1.0;
+        let mut k = 1;
+        while k < n - 1 {
+            let pk = rho(k);
+            if pk <= 0.0 {
+                break;
+            }
+            s += 2.0 * pk;
+            k += 1;
+        }
+        (n as f64 / s) / n as f64
+    }
+
+    #[test]
+    fn windowed_warmup_reaches_high_ess_on_correlated_gaussian() {
+        // Target N(0, Σ) with the garki-like correlation ridge
+        // (g-r1=+0.62, g-a2=+0.12, r1-a2=-0.48).
+        let sigma = [1.0, 0.62, 0.12, 0.62, 1.0, -0.48, 0.12, -0.48, 1.0];
+        let sinv = inv3(&sigma);
+        let target = |z: &[f64]| -> (f64, Vec<f64>) {
+            let sz = matvec3(&sinv, z);
+            let lp = -0.5 * z.iter().zip(&sz).map(|(a, b)| a * b).sum::<f64>();
+            (lp, sz.iter().map(|v| -v).collect())
+        };
+
+        // Windowed warm-up from IDENTITY mass — the adapter must learn Σ itself.
+        let mut rng = StatefulRng::new(20260707);
+        let mut z = vec![0.0; 3];
+        let (mut lp, mut g) = target(&z);
+        let mut adapter = WarmupAdapter::new(MassMetric::Dense, 3, 1000, 0.5, 0.8);
+        for sweep in 0..1000 {
+            let cfg = NUTSConfig {
+                max_tree_depth: 10,
+                step_size: adapter.step_size(),
+                mass_matrix: adapter.mass().clone(),
+            };
+            let r = nuts_step(&z, lp, &g, &cfg, &target, &mut rng);
+            if r.accepted {
+                z = r.params;
+                lp = r.log_posterior;
+                let (_, gg) = target(&z);
+                g = gg;
+            }
+            adapter.observe(sweep, &z, r.mean_accept_prob);
+        }
+        adapter.finalize();
+        let step = adapter.step_size();
+        let mass = adapter.into_mass();
+
+        // Sample under the adapted (step, metric).
+        let cfg = NUTSConfig { max_tree_depth: 10, step_size: step, mass_matrix: mass };
+        let n = 3000usize;
+        let mut cols = [
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+        ];
+        for _ in 0..n {
+            let r = nuts_step(&z, lp, &g, &cfg, &target, &mut rng);
+            if r.accepted {
+                z = r.params;
+                lp = r.log_posterior;
+                let (_, gg) = target(&z);
+                g = gg;
+            }
+            for j in 0..3 {
+                cols[j].push(z[j]);
+            }
+        }
+        let ess: Vec<f64> = (0..3).map(|j| ess_per_iter(&cols[j])).collect();
+        eprintln!("windowed-warmup ESS/iter on correlated Gaussian: {ess:?} (step={step:.3})");
+
+        // A single-freeze / mis-estimated metric caps this near ~0.4; a converged
+        // metric gives near-independent draws. Assert every dimension clears 0.6 —
+        // comfortably above the bad-metric ceiling, comfortably below the ~0.9 a
+        // converged dense metric delivers.
+        assert!(
+            ess.iter().all(|&e| e > 0.6),
+            "windowed warm-up should reach ESS/iter > 0.6 on all dims; got {ess:?} \
+             — the metric adaptation is not converging to the posterior covariance"
+        );
+    }
+}
