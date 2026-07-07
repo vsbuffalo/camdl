@@ -37,103 +37,6 @@ use crate::resolved_expr::eval_resolved;
 use crate::schedule::{Cursor, Schedule, StepPolicy};
 use crate::state::{IntState, RealState};
 
-/// Collect names of every `Param` referenced by an expression tree.
-/// Used by the narrowed C1 preflight gate (gh#76 follow-up) to detect
-/// estimated parameters reachable through a parametric `DerivedExpr`
-/// projection — the one obs-gradient arm that remains uncovered.
-fn collect_param_refs(e: &ir::expr::Expr, out: &mut std::collections::HashSet<String>) {
-    match e {
-        ir::expr::Expr::Param(p) => { out.insert(p.param.clone()); }
-        ir::expr::Expr::BinOp(w) => {
-            collect_param_refs(&w.bin_op.left,  out);
-            collect_param_refs(&w.bin_op.right, out);
-        }
-        ir::expr::Expr::UnOp(w) => collect_param_refs(&w.un_op.arg, out),
-        ir::expr::Expr::Cond(w) => {
-            collect_param_refs(&w.cond.pred,  out);
-            collect_param_refs(&w.cond.then,  out);
-            collect_param_refs(&w.cond.else_, out);
-        }
-        ir::expr::Expr::PopSum(_) | ir::expr::Expr::Pop(_)
-        | ir::expr::Expr::Const(_) | ir::expr::Expr::Time(_)
-        | ir::expr::Expr::Dt(_)   | ir::expr::Expr::TimeFunc(_)
-        | ir::expr::Expr::Projected(_)
-        // A per-observation aux column is data (∂/∂θ = 0): no param to collect.
-        | ir::expr::Expr::ObsColumnRef(_) => {}
-        ir::expr::Expr::TableLookup(w) => {
-            for ix in &w.table_lookup.indices {
-                collect_param_refs(ix, out);
-            }
-        }
-        ir::expr::Expr::UncheckedDim(w) => collect_param_refs(&w.unchecked_dim.inner, out),
-        // A param reachable only through a Reduce must still be collected, or the
-        // gate would let an unsupported obs-param through with a silent zero gradient.
-        ir::expr::Expr::Reduce(w) => {
-            for t in &w.reduce { collect_param_refs(t, out); }
-        }
-        // Hoisted bindings are param-free; nothing to collect.
-        ir::expr::Expr::BindingRef(_) => {}
-        // gh#272: this guard runs only on `DerivedExpr` obs projections, which LICM
-        // never rewrites, so a PerEvalRef cannot appear here. Panic enforces that
-        // scoping invariant rather than silently dropping a param (it is
-        // param-carrying — a silent skip would defeat the gh#76 guard).
-        ir::expr::Expr::PerEvalRef(_) =>
-            unreachable!("PerEvalRef reached collect_param_refs: LICM scoping invariant violated"),
-    }
-}
-
-/// Collect every `Param` an estimated coordinate could reach through a
-/// Binomial/BetaBinomial `n` expression, **with the projection inlined** exactly
-/// as the OCaml autodiff inlines it (`autodiff.ml`: `inline_projection`). At a
-/// `Projected` node a `DerivedExpr` projection contributes its own param refs
-/// (verbatim, non-recursive substitution); every other projection kind leaves
-/// `Projected` θ-independent given the fixed trajectory, so it adds nothing.
-///
-/// `n` carries no gradient field (§4.5) — it is rounded to an integer, so it must
-/// be θ-independent. This is the D-n scan feeding the P5 preflight: any estimated
-/// param found here is refused with [`ir::deriv::UnsupportedReason::ParametricN`].
-fn collect_n_param_refs(
-    n: &ir::expr::Expr,
-    projection: &ir::observation::Projection,
-    out: &mut std::collections::HashSet<String>,
-) {
-    use ir::expr::Expr;
-    match n {
-        // The one arm that differs from `collect_param_refs`: inline a
-        // parametric `DerivedExpr` projection so a param reaching `n` only
-        // through `projected` (e.g. `n = round(projected)`) is caught.
-        Expr::Projected(_) => {
-            if let ir::observation::Projection::DerivedExpr(e) = projection {
-                collect_param_refs(e, out);
-            }
-        }
-        Expr::Param(p) => { out.insert(p.param.clone()); }
-        Expr::BinOp(w) => {
-            collect_n_param_refs(&w.bin_op.left, projection, out);
-            collect_n_param_refs(&w.bin_op.right, projection, out);
-        }
-        Expr::UnOp(w) => collect_n_param_refs(&w.un_op.arg, projection, out),
-        Expr::Cond(w) => {
-            collect_n_param_refs(&w.cond.pred, projection, out);
-            collect_n_param_refs(&w.cond.then, projection, out);
-            collect_n_param_refs(&w.cond.else_, projection, out);
-        }
-        Expr::TableLookup(w) => {
-            for ix in &w.table_lookup.indices {
-                collect_n_param_refs(ix, projection, out);
-            }
-        }
-        Expr::UncheckedDim(w) => collect_n_param_refs(&w.unchecked_dim.inner, projection, out),
-        Expr::Reduce(w) => {
-            for t in &w.reduce { collect_n_param_refs(t, projection, out); }
-        }
-        Expr::PopSum(_) | Expr::Pop(_) | Expr::Const(_) | Expr::Time(_)
-        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ObsColumnRef(_)
-        | Expr::BindingRef(_) => {}
-        Expr::PerEvalRef(_) =>
-            unreachable!("PerEvalRef reached collect_n_param_refs: LICM scoping invariant violated"),
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -2367,72 +2270,20 @@ pub fn run_pgas(
     // never differentiates, so an Unsupported obs grad cannot bias it — gate on
     // `use_nuts`, matching the CLI `coeff_guard` site.
     if config.use_nuts {
-        use std::collections::{BTreeMap, HashSet};
-        use ir::deriv::{DerivEntry, UnsupportedReason};
-        use ir::observation::Likelihood;
-        use ir::transition::DrawMethod;
-        use ir::Differentiable;
+        use std::collections::HashSet;
 
         let estimated: HashSet<&str> = if2_params.iter().map(|s| s.name.as_str()).collect();
 
-        // param → refusal reason (deterministic ordering; first reason wins for a
-        // param uncovered on more than one surface).
-        let mut refused: BTreeMap<String, UnsupportedReason> = BTreeMap::new();
-        let note_unsupported = |grad: &std::collections::HashMap<String, DerivEntry>,
-                                refused: &mut BTreeMap<String, UnsupportedReason>| {
-            for (pname, entry) in grad {
-                if let DerivEntry::Unsupported { code, .. } = entry {
-                    if estimated.contains(pname.as_str()) {
-                        refused.entry(pname.clone()).or_insert(*code);
-                    }
-                }
-            }
-        };
-
-        // (a) Observation likelihood argument gradients (projection already inlined
-        //     by the compiler). Via the derived `diffables()` traversal — every
-        //     differentiable argument is scanned, so a new likelihood argument is
-        //     covered automatically rather than left silently unscanned.
-        for om in &model.model.observations {
-            for (_, d) in om.likelihood.diffables() {
-                note_unsupported(&d.grad, &mut refused);
-            }
-        }
-
-        // (b) Transition rate gradients + σ² overdispersion gradients. A
-        //     live-but-omitted rate coefficient (Periodic step/period, `lag`,
-        //     non-const table index) serialises a `DerivEntry::Unsupported` in
-        //     `rate_grad` (gh#342 P3); refusing it here at the `run_pgas` boundary
-        //     subsumes the old CLI-only `coeff_guard` for the rate domain and, for
-        //     the first time, protects every direct `run_pgas` caller (tests, API,
-        //     ODE-NUTS), not just the CLI `fit` path.
-        for t in &model.model.transitions {
-            note_unsupported(&t.rate_grad, &mut refused);
-            if let DrawMethod::Overdispersed { sigma_sq_grad, .. } = &t.draw_method {
-                note_unsupported(sigma_sq_grad, &mut refused);
-            }
-        }
-
-        // (c) D-n — an estimated param reaching a Binomial/BetaBinomial `n` (after
-        //     projection inlining). `n` carries no grad field, so the `Unsupported`
-        //     scan above cannot see it; scan the `n` expression directly. A silent
-        //     admission here would leave the param unconstrained under NUTS.
-        for om in &model.model.observations {
-            let n_expr = match &om.likelihood {
-                Likelihood::Binomial(l) => Some(&l.n),
-                Likelihood::BetaBinomial(l) => Some(&l.n),
-                _ => None,
-            };
-            if let Some(n) = n_expr {
-                let mut refs: HashSet<String> = HashSet::new();
-                collect_n_param_refs(n, &om.projection, &mut refs);
-                for pname in refs {
-                    if estimated.contains(pname.as_str()) {
-                        refused.entry(pname).or_insert(UnsupportedReason::ParametricN);
-                    }
-                }
-            }
-        }
+        // The COMMON gradient-coverage scan, shared with the ODE-NUTS gate (§1h):
+        // every estimated parameter whose gradient the compiler could not emit for
+        // a rate, obs argument, or σ² term, or that reaches a Binomial/BetaBinomial
+        // `n`. Lifting it into `gradient_capability` retires the old CLI-only
+        // `coeff_guard` for the rate domain, protects every direct `run_pgas` caller
+        // (tests, API), and keeps this and the ODE gate from drifting.
+        let refused = crate::inference::gradient_capability::scan_unsupported_gradients(
+            &model.model,
+            &estimated,
+        );
 
         if !refused.is_empty() {
             let details: Vec<String> = refused
