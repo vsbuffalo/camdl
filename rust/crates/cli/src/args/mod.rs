@@ -1185,10 +1185,12 @@ pub struct FitPredictArgs {
     #[arg(long, value_name = "HORIZON")]
     pub horizon: Option<crate::args::types::HorizonArg>,
 
-    /// Cap the posterior cloud subsample for the one-step horizon (default 200).
-    /// The one-step band pools `draws × particles` samples per cell, so a few
-    /// hundred draws is plenty for q05…q95; a larger cloud is evenly subsampled
-    /// (never silently run at full size). Ignored by the free-forward horizon.
+    /// Cap the posterior cloud subsample for BOTH horizons (default 200). Each
+    /// horizon pools plenty at a few hundred draws (one-step over
+    /// `draws × particles`, free-forward over one forward replay per draw), so a
+    /// larger cloud is evenly subsampled — a strided pick across the whole cloud,
+    /// never silently run at full size (a full free-forward replay of a
+    /// long-burn-in ODE fit is hours of solves).
     #[arg(long, value_name = "N")]
     pub n_draws: Option<usize>,
 

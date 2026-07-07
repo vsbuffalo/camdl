@@ -1061,6 +1061,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // in engine canonical order. `None` when the free-forward horizon was not
     // requested.
     let mut free_forward: Option<Vec<FreeForwardCell>> = None;
+    // Count of posterior draws the free-forward horizon actually replayed (the
+    // `--n-draws` subsample, or the full cloud when it is ≤ the cap). Carried
+    // onto each free-forward band section's `n_draws` diagnostic. Stays 0 when
+    // the horizon was not requested (that band section then never runs).
+    let mut ff_n_draws: usize = 0;
 
     // ── Free-forward horizon: replay the posterior forward under each scenario.
     //
@@ -1103,6 +1108,32 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         let mut quant_bodies: IndexMap<String, String> = IndexMap::new();
         let mut quant_manifest_entries: Vec<serde_json::Value> = Vec::new();
 
+        // ── Honor --n-draws on free-forward: an even, deterministic subsample of
+        // the whole posterior cloud (gh#387). Without it the free-forward path
+        // replays EVERY draw single-threaded, so a long-burn-in ODE fit
+        // (thousands of ~seconds-each solves) never finishes and no artifact is
+        // written. Same knob + default + strided pick the one-step horizon uses,
+        // so both horizons subsample identically. Computed ONCE — the subsample
+        // is scenario/sweep-independent.
+        let ff_cap = args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
+        let ff_draws = subsample_draws(posterior.draws(), ff_cap);
+        ff_n_draws = ff_draws.len();
+        if ff_n_draws < posterior.n_draws() {
+            eprintln!(
+                "fit predict: free_forward horizon — subsampling {ff_n_draws} of {} \
+                 posterior draws (raise with --n-draws)",
+                posterior.n_draws()
+            );
+        }
+        // Fan the (draws × scenarios) replay grid across Rayon. The engine seeds
+        // each cell by its planned `point_idx`/`rep` (`process_seed_for`),
+        // independent of execution order, so parallelism never perturbs a
+        // trajectory (engine.rs) — the bands are byte-identical to a sequential
+        // replay of the same subsample. `fit predict` has no thread-budget flag,
+        // so default to the machine width; `RAYON_NUM_THREADS` still caps the
+        // global pool.
+        let ff_parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+
         for sweep_pt in &sweep_points {
             // A FRESH sink per sweep-point keeps the sink scenario-keyed (no sink
             // rewrite); the sweep axis lives in this loop, not the sink. The
@@ -1122,11 +1153,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 // resolver applies the scenario's `set`/`scale`/`enable`/`disable`
                 // ON TOP — exactly once — and a scenario still wins over the sweep.
                 // No per-draw folding of `set`/`scale` (that would double-apply).
-                let rows: Vec<IndexMap<String, f64>> = posterior
-                    .draws()
+                let rows: Vec<IndexMap<String, f64>> = ff_draws
                     .iter()
                     .map(|d| {
-                        let mut r = d.clone();
+                        let mut r = (*d).clone();
                         for (name, val) in sweep_pt {
                             r.insert(name.clone(), *val);
                         }
@@ -1160,7 +1190,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     set_vec_entries: vec![],
                     table_files: vec![],
                     obs: crate::sim_job::ObsOutput::None,
-                    parallel: 1,
+                    parallel: ff_parallel,
                 };
                 crate::engine::run_job(&job, &mut sink)?;
             }
@@ -1231,7 +1261,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
 
     // ── One-step horizon: per-draw bootstrap filter over the data, pooled. Runs
     // only when the witness was built (a filterable fit and the horizon wanted).
-    let n_draws_cap = args.n_draws.unwrap_or(DEFAULT_ONE_STEP_DRAWS);
+    let n_draws_cap = args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
     let one_step: Option<(Vec<StreamBands>, usize)> = match &one_step_fit {
         Some(fit) => Some(one_step_bands(
             compiled.clone(),
@@ -1328,7 +1358,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 horizon: Horizon::FreeForward,
                 treatment: treatment_kind,
                 convergence: posterior.convergence,
-                n_draws: posterior.n_draws(),
+                n_draws: ff_n_draws,
                 rows: &s.rows,
             });
         }
@@ -1567,12 +1597,34 @@ fn assemble_predictive(
     Ok(streams)
 }
 
-// ── The one-step-ahead posterior predictive producer ───────────────────────
+// ── Posterior-cloud subsampling (shared by both horizons) ───────────────────
 
-/// Default posterior-cloud subsample for the one-step horizon. The band pools
-/// `draws × n_particles` samples per cell, so a few hundred draws saturate
-/// q05…q95; the full fit cloud at fit-grade N is never run silently.
-const DEFAULT_ONE_STEP_DRAWS: usize = 200;
+/// Default posterior-cloud subsample cap for `fit predict`, shared by both
+/// horizons. Neither needs the full fit-grade cloud: the one-step band pools
+/// `draws × n_particles` per cell and the free-forward band pools one forward
+/// replay per draw, so a few hundred draws saturate q05…q95. The full cloud is
+/// never replayed silently — a full free-forward replay of a long-burn-in ODE
+/// fit is thousands of ~seconds-each solves (gh#387).
+const DEFAULT_PREDICT_DRAWS: usize = 200;
+
+/// Evenly-spaced, deterministic subsample of a posterior cloud down to `cap`
+/// draws (the whole cloud when `cap >= len`, always at least one). Both horizons
+/// cap the cloud through this one seam, so a fit-grade cloud is never silently
+/// replayed at full size. The pick is STRIDED across the whole cloud
+/// (`idx = i * total / n_used`), never `take(cap)` of the front — a front-take
+/// would bias the band toward early sweeps / a single chain. Chosen draws are
+/// returned in cloud order.
+fn subsample_draws(draws: &[IndexMap<String, f64>], cap: usize) -> Vec<&IndexMap<String, f64>> {
+    let total = draws.len();
+    let n_used = cap.min(total).max(1);
+    if n_used >= total {
+        draws.iter().collect()
+    } else {
+        (0..n_used).map(|i| &draws[(i * total) / n_used]).collect()
+    }
+}
+
+// ── The one-step-ahead posterior predictive producer ───────────────────────
 
 /// Particle count for the one-step prediction filter. It need not match the
 /// fit's N — the band pools across draws too, and every particle's `ỹ` is
@@ -1680,18 +1732,8 @@ fn one_step_bands(
     // ── Subsample the posterior cloud (never silently run the full cloud).
     let draws = fit.draws().draws();
     let total = draws.len();
-    let n_used = n_draws_cap.min(total).max(1);
-    let chosen: Vec<&IndexMap<String, f64>> = if n_used >= total {
-        draws.iter().collect()
-    } else {
-        // Evenly-spaced subsample across the cloud.
-        (0..n_used)
-            .map(|i| {
-                let idx = (i * total) / n_used;
-                &draws[idx]
-            })
-            .collect()
-    };
+    let chosen = subsample_draws(draws, n_draws_cap);
+    let n_used = chosen.len();
     if n_used < total {
         eprintln!(
             "fit predict: one_step horizon — subsampling {n_used} of {total} posterior \
@@ -1939,6 +1981,45 @@ mod tests {
         assert!(band(&[1.0, f64::NAN, 3.0]).is_err());
         assert!(band(&[1.0, f64::INFINITY]).is_err());
         assert!(band(&[1.0, 2.0, 3.0]).is_ok());
+    }
+
+    /// A cloud of `n` draws tagged by a single `id` column = its cloud index, so
+    /// the subsample's chosen indices are recoverable from the returned draws.
+    fn cloud(n: usize) -> Vec<IndexMap<String, f64>> {
+        (0..n).map(|i| IndexMap::from([("id".to_string(), i as f64)])).collect()
+    }
+
+    #[test]
+    fn subsample_draws_is_strided_not_front_biased() {
+        // 80 draws capped to 10: the pick must SPAN the whole cloud (stride 8),
+        // not `take(10)` of the front (which would return ids 0..10 — the bias
+        // this guards against: early sweeps / a single chain).
+        let c = cloud(80);
+        let chosen: Vec<usize> =
+            subsample_draws(&c, 10).iter().map(|d| d["id"] as usize).collect();
+        assert_eq!(chosen, vec![0, 8, 16, 24, 32, 40, 48, 56, 64, 72]);
+        assert_ne!(chosen, (0..10).collect::<Vec<_>>(), "must not be a front-take");
+        // The span reaches the tail third of the cloud (front-take never would).
+        assert!(*chosen.last().unwrap() >= 2 * 80 / 3, "subsample must reach the cloud tail");
+    }
+
+    #[test]
+    fn subsample_draws_caps_and_floors() {
+        // cap ≥ len → the whole cloud, in order.
+        let c = cloud(5);
+        assert_eq!(subsample_draws(&c, 200).len(), 5);
+        assert_eq!(subsample_draws(&c, 5).len(), 5);
+        // cap < len → exactly cap draws.
+        assert_eq!(subsample_draws(&c, 3).len(), 3);
+        // cap 0 floors to one draw (an empty band is unrepresentable).
+        assert_eq!(subsample_draws(&c, 0).len(), 1);
+    }
+
+    #[test]
+    fn default_predict_draws_is_200() {
+        // Both horizons default to this cap; pin it so a silent drift is a test
+        // failure, not a surprise 9-hour predict.
+        assert_eq!(DEFAULT_PREDICT_DRAWS, 200);
     }
 
     fn cb() -> crate::args::types::ForwardBackend {
