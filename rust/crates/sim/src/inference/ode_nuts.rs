@@ -209,8 +209,11 @@ pub fn run_ode_nuts_with_progress(
     // The z-space posterior target: data term from det_grad, prior + Jacobian from
     // the shared PGAS authorities. det_grad runs the §1h capability gate on every
     // call — a static model scan, negligible beside the ODE solve — so an
-    // unsupported model is refused up front on the first evaluation.
-    let target = |z: &[f64]| -> Result<(f64, Vec<f64>), SimError> {
+    // unsupported model is refused up front on the first evaluation. Returns
+    // `(log_posterior, grad_z, data_loglik)`: the data loglik `ll` is the trace's
+    // `log_likelihood` column and comes free from the same solve that produced the
+    // gradient — so we never re-solve the ODE just to fill that column.
+    let target = |z: &[f64]| -> Result<(f64, Vec<f64>, f64), SimError> {
         let mut params = params_base.to_vec();
         for (i, ep) in estimated.iter().enumerate() {
             params[ep.index] = ep.from_transformed(z[i]);
@@ -235,26 +238,34 @@ pub fn run_ode_nuts_with_progress(
             log_p += estimated[i].log_jacobian(z_i);
             grad_z[i] += estimated[i].jacobian_grad(z_i);
         }
-        Ok((log_p, grad_z))
+        Ok((log_p, grad_z, ll))
     };
 
-    // A finite-fallback wrapper for the NUTS core (which takes a `Fn -> (f64,
-    // Vec)`): a non-finite target (a model that blew up at this θ, or a gate
-    // refusal on the first call) becomes `-inf`, steering the sampler away rather
-    // than crashing. The gate error is surfaced by the up-front probe below.
-    let target_or_neg_inf = |z: &[f64]| -> (f64, Vec<f64>) {
+    // A finite-fallback wrapper: a non-finite target (a model that blew up at this
+    // θ, or a gate refusal on the first call) becomes `-inf`, steering the sampler
+    // away rather than crashing. The gate error is surfaced by the up-front probe
+    // below. Carries the data loglik through for the accept-path trace column.
+    let target_or_neg_inf = |z: &[f64]| -> (f64, Vec<f64>, f64) {
         match target(z) {
-            Ok((lp, g)) if lp.is_finite() => (lp, g),
-            _ => (f64::NEG_INFINITY, vec![0.0; d]),
+            Ok((lp, g, ll)) if lp.is_finite() => (lp, g, ll),
+            _ => (f64::NEG_INFINITY, vec![0.0; d], f64::NEG_INFINITY),
         }
+    };
+
+    // The NUTS core takes a plain `Fn -> (log_p, grad)`; adapt by dropping the
+    // data-loglik component (the core never needs it).
+    let nuts_target = |z: &[f64]| -> (f64, Vec<f64>) {
+        let (lp, g, _) = target_or_neg_inf(z);
+        (lp, g)
     };
 
     // z at the estimated parameters' starting values.
     let mut z: Vec<f64> = estimated.iter().map(|e| e.to_transformed(e.initial)).collect();
 
     // Probe once so a capability-gate refusal (or a non-finite start) is a real
-    // error, not a silent all-divergent run.
-    let (mut log_p, mut grad) = target(&z)?;
+    // error, not a silent all-divergent run. `cur_loglik` (the trace's data-loglik
+    // column) is maintained from here on out of the accept-path solve.
+    let (mut log_p, mut grad, mut cur_loglik) = target(&z)?;
     if !log_p.is_finite() {
         return Err(SimError::Validation(
             "run_ode_nuts: the posterior is not finite at the initial parameters — the \
@@ -292,12 +303,15 @@ pub fn run_ode_nuts_with_progress(
 
     for sweep in 0..config.n_warmup {
         let cfg = NUTSConfig { max_tree_depth: config.max_tree_depth, step_size, mass_matrix: mass.clone() };
-        let r = nuts_step(&z, log_p, &grad, &cfg, &target_or_neg_inf, &mut rng);
+        let r = nuts_step(&z, log_p, &grad, &cfg, &nuts_target, &mut rng);
         if r.accepted {
             z = r.params;
             log_p = r.log_posterior;
-            let (_, g) = target_or_neg_inf(&z);
+            // One augmented solve at the accepted z yields both the gradient (for
+            // the next step) and the data loglik (kept current for sampling).
+            let (_, g, ll) = target_or_neg_inf(&z);
             grad = g;
+            cur_loglik = ll;
         }
 
         if adapt_mass && sweep < mass_adapt_end {
@@ -370,21 +384,9 @@ pub fn run_ode_nuts_with_progress(
     }
     step_size = dual_avg.final_step_size();
 
-    // The DATA log-likelihood `log p(y | θ(z))` at `z` (for the trace's loglik
-    // column, distinct from the posterior `log_p`). Recomputed only when `z`
-    // changes (on accept) — one extra ODE solve per accepted draw, negligible
-    // beside the sampler's leapfrog cost.
-    let data_loglik = |z: &[f64]| -> f64 {
-        let mut params = params_base.to_vec();
-        for (i, ep) in estimated.iter().enumerate() {
-            params[ep.index] = ep.from_transformed(z[i]);
-        }
-        det_grad(compiled, obs_model, obs_times, config.dt, &params, &estimated_to_model)
-            .map(|(ll, _)| ll)
-            .unwrap_or(f64::NEG_INFINITY)
-    };
-
-    // Sampling.
+    // Sampling. `cur_loglik` (the trace's data-loglik column) was left current by
+    // the last warm-up accept and is refreshed from the accept-path solve below —
+    // no separate ODE solve just to fill that column.
     let cfg = NUTSConfig { max_tree_depth: config.max_tree_depth, step_size, mass_matrix: mass };
     let mut samples: Vec<Vec<f64>> = Vec::with_capacity(config.n_samples);
     let mut sample_loglik: Vec<f64> = Vec::with_capacity(config.n_samples);
@@ -394,9 +396,8 @@ pub fn run_ode_nuts_with_progress(
     let mut accept_sum = 0.0f64;
     let mut tree_depth_sum = 0usize;
     let mut max_depth_hits = 0usize;
-    let mut cur_loglik = data_loglik(&z);
     for i in 0..config.n_samples {
-        let r = nuts_step(&z, log_p, &grad, &cfg, &target_or_neg_inf, &mut rng);
+        let r = nuts_step(&z, log_p, &grad, &cfg, &nuts_target, &mut rng);
         accept_sum += r.mean_accept_prob;
         tree_depth_sum += r.tree_depth;
         if r.tree_depth >= config.max_tree_depth {
@@ -409,9 +410,10 @@ pub fn run_ode_nuts_with_progress(
         if r.accepted {
             z = r.params;
             log_p = r.log_posterior;
-            let (_, g) = target_or_neg_inf(&z);
+            // One solve → gradient (for the next step) + data loglik (trace column).
+            let (_, g, ll) = target_or_neg_inf(&z);
             grad = g;
-            cur_loglik = data_loglik(&z);
+            cur_loglik = ll;
         }
         // Record the natural-scale parameter vector for this draw + diagnostics.
         let params_nat = natural(&z);
