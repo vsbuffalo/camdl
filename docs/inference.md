@@ -1,6 +1,7 @@
 # Inference in camdl
 
-How the particle filter, IF2, PGAS, and NUTS work, what the diagnostics mean,
+How the particle filter, IF2, PGAS, and NUTS work — including gradient-based and
+gradient-free Bayesian fitting on the ODE backend — what the diagnostics mean,
 and how the inference pipeline fits together.
 
 ---
@@ -117,6 +118,12 @@ IF2 finds the right basin quickly (global exploration via many particles). PGAS
 characterizes the posterior within that basin (exact likelihood, NUTS gradient
 proposals, posterior trajectory samples). Starting PGAS from IF2 results avoids
 the trajectory convergence problem that plagues random starts.
+
+These four methods all target the **stochastic-process** likelihood
+$p(y \mid \theta)$ on the chain-binomial backend. The ODE backend fits a
+different statistical object — the deterministic marginal likelihood — with its
+own two Bayesian samplers, gradient-free `mh` and gradient-based `nuts`; see
+**Gradient-based and gradient-free fitting on the ODE backend**, below.
 
 ## The particle filter
 
@@ -1125,6 +1132,125 @@ those parameters). The fix is to move the prior into the model `~` clause — th
 `from_prior` draws every parameter from its prior with no warning. (The same
 applies to `init = "from_posterior"` for parameters absent from the posterior
 source.)
+
+---
+
+## Gradient-based and gradient-free fitting on the ODE backend
+
+Everything above targets the **stochastic-process** likelihood
+$p(y_{1:T} \mid \theta)$ — the integral over latent trajectories that the
+particle filter estimates (PF, IF2, PMMH) or that PGAS conditions on. The ODE
+backend offers a different object. Integrate the mean-field system (see
+`camdl docs backends`, the ODE section) and there is exactly one trajectory per
+$\theta$; the latent-path integral collapses, and the likelihood is read off
+directly:
+
+$$p(y_{1:T} \mid \theta, \text{ODE}) = \prod_t p\bigl(y_t \mid \pi_t(x(\theta)), \theta\bigr)$$
+
+where $\pi_t(x(\theta))$ is the model's projection (incidence or prevalence) of
+the integrated state at observation $t$. There is no Monte Carlo and no filter
+variance — the same observation model (`neg_binomial`, discretized-normal, …) is
+scored against the ODE's projected value instead of a particle cloud's. This
+**deterministic marginal likelihood** is a genuinely different statistical
+object from $p(y \mid \theta)$: the two coincide only in the low-noise /
+large-population limit, where the mean field is a faithful stand-in for the
+stochastic process. Choosing `backend = "ode"` for a fit is choosing to target
+this object — appropriate for equilibrium or large-population models where
+demographic stochasticity is negligible and running a particle filter would be
+structurally redundant.
+
+Two Bayesian samplers run on this likelihood. Both are `[beta]`.
+
+**`mh` — gradient-free.** Adaptive Metropolis-Hastings on the deterministic
+marginal. It needs no gradient, so it runs on any ODE model the backend can
+integrate, and it is the robust default for identifiable or low-dimensional
+posteriors. It will _diagnose_ a difficult posterior — a weakly-identified ridge
+shows up as low effective sample size — but random-walk MH mixes poorly
+_through_ a curved ridge: adaptive covariance corrects a rotated Gaussian, not a
+banana. When MH is the bottleneck, that low ESS is the signal to reach for the
+gradient sampler.
+
+**`nuts` — gradient-based.** The No-U-Turn Sampler (Hoffman & Gelman 2014) on
+the same deterministic likelihood, using its gradient. The gradient is
+**symbolic**: the OCaml compiler differentiates the rate and observation
+expressions source-to-source (the same machinery behind PGAS's `rate_grad`; see
+"NUTS gradient proposals" above) and propagates it through the integrator by
+**forward sensitivities** — carrying $\partial x / \partial \theta$ alongside
+the state through fixed-step RK4. No runtime autodiff, no finite differences.
+NUTS then samples
+$p(\theta \mid y) \propto p(y \mid \theta, \text{ODE})\,\pi(\theta)$ directly —
+no CSMC, no discrete-event approximation, no Gibbs-sweep coupling — so it moves
+through the correlated, moderate-dimension posteriors that stall `mh`. This is a
+simpler statistical setup than the NUTS-inside-PGAS of the stochastic path:
+there NUTS proposes $\theta$ inside a Gibbs sweep conditioned on a sampled
+trajectory; here it samples the marginal $p(\theta \mid y)$ outright.
+
+**When to use which.** Start with `mh`; it carries no differentiability
+requirement and diagnoses the posterior geometry cheaply. Switch to `nuts` when
+MH mixing is the bottleneck — correlated or ridge-shaped posteriors at moderate
+dimension. On a **stochastic** backend neither applies: the marginal likelihood
+is an intractable integral with no closed-form gradient, so use `pgas` (which
+runs NUTS-on-θ inside a Gibbs sweep) or `pmmh`. Requesting an invalid pair — say
+`nuts` on `chain_binomial`, or `pgas` on `ode` — fails at config load with a
+message naming the right alternative.
+
+### The differentiability requirement
+
+`nuts` needs a closed-form gradient of the whole likelihood, so it accepts only
+a **differentiable model**. The capability gate refuses, before the chain starts
+and with a message naming the reason, a model that has:
+
+- a rate or observation term whose gradient the compiler cannot emit (a
+  live-but-undifferentiated coefficient — see the NUTS-refusal list in
+  `camdl docs features`);
+- an **adaptive integrator** (`rk45`) — its step sequence is data-dependent, so
+  the sensitivities have no fixed step to propagate through; use fixed-step
+  `rk4`;
+- a **scheduled effect** — an `interventions {}` or `events {}` entry, a
+  discrete state jump the smooth sensitivity flow cannot cross;
+- a **parameterized initial condition** (an `ivp` parameter) — camdl emits no
+  gradient for initial-condition expressions.
+
+Any of these is a hard error that points at the fix. A model that genuinely
+needs one of them — a mid-run campaign, an estimated $S_0$ — is fit either with
+gradient-free `mh` on the ODE backend, or with the stochastic-process methods,
+which handle scheduled effects and IVP parameters.
+
+### Running an ODE Bayesian fit
+
+`mh` and `nuts` are stages like any other: pick the algorithm, set
+`backend = "ode"`, and give each estimated parameter a prior (Bayesian stages
+require one — see "Priors and precedence").
+
+```toml
+[stages.posterior]
+algorithm = "nuts" # gradient-based; needs a differentiable model
+backend = "ode"
+chains = 4
+warmup = 500 # step-size adaptation draws (discarded)
+samples = 500 # posterior draws kept per chain
+```
+
+Gradient-free `mh` takes `iterations` (total MCMC steps) with an optional
+`burn_in`, in place of NUTS's `warmup` / `samples`:
+
+```toml
+[stages.posterior]
+algorithm = "mh"
+backend = "ode"
+chains = 4
+iterations = 4000
+burn_in = 1000
+```
+
+```bash
+camdl fit run fit.toml --stage posterior
+```
+
+`camdl fit methods` prints the live registry — the one-liner, the "use for", and
+the beta caveat for every `(algorithm, backend)` pair. The two backends compute
+different objects (`chain_binomial → p(y|θ)`; `ode → p(y|θ, ODE skeleton)`), so
+read that guidance before choosing which likelihood a fit should target.
 
 ---
 

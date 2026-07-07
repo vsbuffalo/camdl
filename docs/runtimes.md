@@ -342,6 +342,29 @@ important ways:
    at random states. For compartmental models this is typically a small
    correction, but it can matter for highly variable forcing functions.
 
+### The ODE backend as an inference backend
+
+The ODE skeleton is not only a forward simulator — it is a fitting backend.
+Because integrating the mean-field system yields one trajectory per parameter
+point, the latent-trajectory integral collapses and the likelihood
+`p(y | θ, ODE skeleton)` can be evaluated directly, with no particle filter.
+`camdl fit` fits this deterministic likelihood two ways:
+
+- **`nl-sbplx` / `nl-bobyqa`** — gradient-free maximum likelihood (NLopt
+  deterministic optimizers).
+- **`mh` / `nuts`** — Bayesian posteriors. `mh` is gradient-free adaptive
+  Metropolis-Hastings; `nuts` is gradient-based, driving the No-U-Turn Sampler
+  with symbolic forward sensitivities (`∂x/∂θ` carried through fixed-step
+  `rk4`), and requires a differentiable model.
+
+This targets a different statistical object than the stochastic backends
+(`chain_binomial → p(y | θ)` under process noise; `ode → p(y | θ, ODE skeleton)`
+— the Jensen's-inequality difference above), appropriate when demographic
+stochasticity is negligible. See `camdl docs inference` (the ODE-backend fitting
+section) for when to pick which, and `camdl fit methods` for the live
+`(algorithm, backend)` matrix. Adaptive `rk45` is refused by `nuts` (no fixed
+step for the sensitivities); use `rk4`.
+
 ---
 
 ## Comparison table

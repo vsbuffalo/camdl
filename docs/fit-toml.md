@@ -71,10 +71,14 @@ estimating. camdl requires every declared parameter to be either estimated or
 fixed.
 
 **`[stages.<name>]`** — stages are **user-named**, and the order they appear in
-the file is the order they run. `algorithm` picks the method; `backend` the
-simulator (`chain_binomial` for fits — needed for chain-binomial process noise
-and `balance`). A downstream stage warm-starts from an upstream one with
-`init_mle = "<stage-name>"`.
+the file is the order they run. `algorithm` picks the method and `backend` the
+simulator it fits against: `chain_binomial` for the stochastic-process methods
+(`if2`, `pgas`, `pmmh`, `pfilter` — the ones that need chain-binomial process
+noise and `balance`), or `ode` for the deterministic-likelihood methods
+(`nl-sbplx` / `nl-bobyqa` MLE and the Bayesian `mh` / `nuts`). Each algorithm is
+valid on exactly one backend — `camdl fit methods` lists the pairs, and an
+invalid pair is rejected at load. A downstream stage warm-starts from an
+upstream one with `init_mle = "<stage-name>"`.
 
 **`[config]`** — fit-wide simulator settings: `dt` (the integrator step, default
 `1.0`). The `dt` you care about lives here; a `dt` written at the top level of
@@ -189,12 +193,34 @@ purpose" without the warning.
 
 ## Stage algorithms
 
-| `algorithm` | role                                              | key fields                                                                            |
-| ----------- | ------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `if2`       | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50) |
-| `pgas`      | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `tempering`, `max_tree_depth`)  |
-| `pmmh`      | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                   |
-| `pfilter`   | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                             |
+| `algorithm`              | backend          | role                                              | key fields                                                                            |
+| ------------------------ | ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50) |
+| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `tempering`, `max_tree_depth`)  |
+| `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                   |
+| `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                             |
+| `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                    |
+| `mh`                     | `ode`            | MH on the deterministic ODE marginal → posterior  | `chains`, `iterations` (+ `burn_in`, `thin`, `adapt`, `adapt_start`)                  |
+| `nuts`                   | `ode`            | gradient NUTS (forward sensitivities) → posterior | `chains`, `warmup`, `samples` (+ `max_tree_depth`, `target_accept`, `dense_mass`)     |
+
+The `ode`-backend Bayesian samplers (`mh`, `nuts`) fit the **deterministic
+marginal likelihood** `p(y | θ, ODE skeleton)` rather than the stochastic
+`p(y | θ)` — a different statistical object, appropriate for equilibrium or
+large-population models. `nuts` requires a differentiable model (the capability
+gate refuses an undifferentiable gradient, an adaptive `rk45` integrator, a
+scheduled effect, or an `ivp` parameter); `mh` is gradient-free and carries no
+such requirement. See `camdl docs inference` (the ODE-backend fitting section)
+for when to pick which.
+
+```toml
+# A gradient-based Bayesian fit on the ODE skeleton.
+[stages.posterior]
+algorithm = "nuts" # or "mh" for the gradient-free sampler (`iterations` + `burn_in`)
+backend = "ode"
+chains = 4
+warmup = 500 # step-size adaptation draws (discarded)
+samples = 500 # posterior draws kept per chain
+```
 
 Common to every stage:
 
