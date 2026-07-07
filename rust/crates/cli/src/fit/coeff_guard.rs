@@ -578,7 +578,7 @@ mod tests {
             stratum: vec![],
             projection: Projection::CumulativeFlow("infection".into()),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
-                rate: ir::Diffable { expr: rate, grad: HashMap::new() },
+                rate: ir::Diffable { expr: rate, grad: HashMap::new(), proj_grad: None },
             }),
         }
     }

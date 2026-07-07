@@ -90,16 +90,42 @@ let rec mentions (param : string) (e : expr) : bool =
   | BindingRef _ -> false   (* hoisted bindings are param-free (state-only) *)
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
+(** Does [e] reference the projection output ([Projected])? The [WrtProjected]
+    analogue of [mentions]: used to detect a nonsmooth function OF the projection
+    ([floor]/[min]/… of [projected]) — undifferentiable w.r.t. the projected value.
+    [Projected] only appears in likelihood argument expressions, so bindings /
+    forcings / tables never carry it. *)
+let rec mentions_projected (e : expr) : bool =
+  match e with
+  | Projected -> true
+  | Param _ | Const _ | Pop _ | PopSum _ | Time | Dt | ObsColumnRef _ -> false
+  | BinOp b -> mentions_projected b.left || mentions_projected b.right
+  | UnOp u -> mentions_projected u.arg
+  | Cond c -> mentions_projected c.pred || mentions_projected c.then_ || mentions_projected c.else_
+  | TimeFunc _ -> false
+  | TableLookup (_, args) -> List.exists mentions_projected args
+  | UncheckedDim u -> mentions_projected u.inner
+  | Reduce terms -> List.exists mentions_projected terms
+  | BindingRef _ -> false
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
+
 (** What [differentiate] differentiates with respect to (gh#275). The engine is
     one recursion; only the leaves and the nonsmooth ops branch on the target:
     - [WrtParam p] — ∂/∂param (the [rate_grad] path): state ([Pop]/[PopSum]) is
       constant (fixed in the θ|X step), bindings are param-free (zero).
     - [WrtPop c]   — ∂/∂compartment (the new [rate_state_grad] / ODE-sensitivity
       path): parameters are constant, forcings are state-free, and bindings are
-      state-bearing (the premise inverts — recurse into their bodies). *)
+      state-bearing (the premise inverts — recurse into their bodies).
+    - [WrtProjected] — ∂/∂projection-output (the observation FACTOR-2 chain,
+      gh#275): differentiates a likelihood ARGUMENT (a [diffable]'s [expr]) w.r.t.
+      the [Projected] leaf, so [∂arg/∂projected] can chain the obs score against
+      [∂projected/∂θ]. [Projected] is the target; parameters, state, forcings, and
+      bindings are all constant w.r.t. it. Only valid inside a likelihood
+      argument (only there does [Projected] appear). *)
 type diff_target =
   | WrtParam of string
   | WrtPop of string
+  | WrtProjected
 
 (** Does compartment [c]'s state reach [e] — directly ([Pop c] or a [PopSum]
     containing [c]) or through a hoisted binding's body? The [WrtPop] analogue of
@@ -229,34 +255,45 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
      A non-mention proves ∂e/∂Pop = 0, and a mention inside a nonsmooth op is the
      refusal trigger. *)
   let hits_state e =
-    match target with WrtParam _ -> false | WrtPop c -> mentions_pop bindings c e
+    match target with
+    | WrtParam _ | WrtProjected -> false
+    | WrtPop c -> mentions_pop bindings c e
   in
   let rec d (e : expr) : deriv =
     match e with
-    (* Constant leaves — zero for both targets. *)
-    | Const _ | Time | Dt | Projected | ObsColumnRef _ -> Known (Const 0.0)
+    (* Constant leaves — zero for every target. *)
+    | Const _ | Time | Dt | ObsColumnRef _ -> Known (Const 0.0)
+
+    (* The projection output. The target leaf under [WrtProjected] (∂projected/∂projected
+       = 1, the source of the observation factor-2 chain); constant w.r.t. a
+       parameter or a compartment (it is an independent input to the likelihood). *)
+    | Projected ->
+      (match target with
+       | WrtProjected -> Known (Const 1.0)
+       | WrtParam _ | WrtPop _ -> Known (Const 0.0))
 
     (* Dimensional escape: differentiate the inner, drop the wrapper. *)
     | UncheckedDim u -> d u.inner
 
-    (* State. Constant in the θ|X step (WrtParam); a Kronecker delta w.r.t. the
-       target compartment (WrtPop) — the source of the on-diagonal J_x, and via
-       PopSum the off-diagonal coupling (force of infection). *)
+    (* State. Constant in the θ|X step (WrtParam) and w.r.t. the projection output
+       (WrtProjected); a Kronecker delta w.r.t. the target compartment (WrtPop) —
+       the source of the on-diagonal J_x, and via PopSum the off-diagonal coupling
+       (force of infection). *)
     | Pop n ->
       (match target with
-       | WrtParam _ -> Known (Const 0.0)
+       | WrtParam _ | WrtProjected -> Known (Const 0.0)
        | WrtPop c -> Known (Const (if n = c then 1.0 else 0.0)))
     | PopSum members ->
       (match target with
-       | WrtParam _ -> Known (Const 0.0)
+       | WrtParam _ | WrtProjected -> Known (Const 0.0)
        | WrtPop c -> Known (Const (if List.mem c members then 1.0 else 0.0)))
 
     (* Parameter reference — 1 if it's the target param (WrtParam); constant
-       w.r.t. state (WrtPop). *)
+       w.r.t. state (WrtPop) and w.r.t. the projection output (WrtProjected). *)
     | Param p ->
       (match target with
        | WrtParam param -> Known (if p = param then Const 1.0 else Const 0.0)
-       | WrtPop _ -> Known (Const 0.0))
+       | WrtPop _ | WrtProjected -> Known (Const 0.0))
 
     (* Forcing. Cases, in order:
        - lag guard (any kind): if [param] drives the forcing's evaluation-time
@@ -282,7 +319,9 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
          rejects it at IR-load via `eval_structural`). *)
     | TimeFunc fname ->
       (match target with
-       | WrtPop _ -> Known (Const 0.0)   (* forcings are state-free: ∂forcing/∂x = 0 *)
+       (* forcings are state-free (∂forcing/∂x = 0) and projection-free
+          (∂forcing/∂projected = 0). *)
+       | WrtPop _ | WrtProjected -> Known (Const 0.0)
        | WrtParam param ->
       (match List.find_opt (fun (tf : time_function) -> tf.name = fname) tfs with
        | Some tf when lag_mentions param tf ->
@@ -386,6 +425,18 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                 "table `%s` is indexed by compartment state — a discrete \
                  cell-selection whose derivative w.r.t. the state is not defined, \
                  so a gradient method cannot use it" name }
+        else Known (Const 0.0)
+       | WrtProjected ->
+        (* An index that reads the projection output is a discrete cell-selection
+           by the projected value — undifferentiable; otherwise ∂/∂projected = 0. *)
+        if List.exists mentions_projected args then
+          Unsupported
+            { code = URNonConstTableIndex;
+              node = Printf.sprintf "table `%s`" name;
+              reason = Printf.sprintf
+                "table `%s` is indexed by the projection output — a discrete \
+                 cell-selection whose derivative w.r.t. the projected value is not \
+                 defined, so a gradient method cannot use it" name }
         else Known (Const 0.0))
 
     (* Binary operations — standard calculus rules; Unsupported propagates. *)
@@ -432,6 +483,14 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                  reason = "derivative of `min` w.r.t. compartment state is not \
                            smooth (a kink at the crossover); a gradient method \
                            cannot use it" }
+           else Known (Const 0.0)
+         | WrtProjected ->
+           if mentions_projected b.left || mentions_projected b.right then
+             Unsupported
+               { code = URNonsmoothState; node = "min expression";
+                 reason = "derivative of `min` w.r.t. the projection output is not \
+                           smooth (a kink at the crossover); a gradient method \
+                           cannot use it" }
            else Known (Const 0.0))
       | Max ->
         (match target with
@@ -444,6 +503,14 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
              Unsupported
                { code = URNonsmoothState; node = "max expression";
                  reason = "derivative of `max` w.r.t. compartment state is not \
+                           smooth (a kink at the crossover); a gradient method \
+                           cannot use it" }
+           else Known (Const 0.0)
+         | WrtProjected ->
+           if mentions_projected b.left || mentions_projected b.right then
+             Unsupported
+               { code = URNonsmoothState; node = "max expression";
+                 reason = "derivative of `max` w.r.t. the projection output is not \
                            smooth (a kink at the crossover); a gradient method \
                            cannot use it" }
            else Known (Const 0.0))
@@ -467,6 +534,14 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
              Unsupported
                { code = URMod; node = "mod expression";
                  reason = "derivative of `mod` w.r.t. compartment state is not \
+                           representable (floor is needed) and is nonsmooth at the \
+                           wraps; a gradient method cannot use it" }
+           else Known (Const 0.0)
+         | WrtProjected ->
+           if mentions_projected b.left || mentions_projected b.right then
+             Unsupported
+               { code = URMod; node = "mod expression";
+                 reason = "derivative of `mod` w.r.t. the projection output is not \
                            representable (floor is needed) and is nonsmooth at the \
                            wraps; a gradient method cannot use it" }
            else Known (Const 0.0))
@@ -503,6 +578,13 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                { code = URNonsmoothState; node = "abs expression";
                  reason = "derivative of `abs` w.r.t. compartment state is not \
                            smooth (a kink at 0); a gradient method cannot use it" }
+           else Known (Const 0.0)
+         | WrtProjected ->
+           if mentions_projected u.arg then
+             Unsupported
+               { code = URNonsmoothState; node = "abs expression";
+                 reason = "derivative of `abs` w.r.t. the projection output is not \
+                           smooth (a kink at 0); a gradient method cannot use it" }
            else Known (Const 0.0))
       (* Floor/Ceil: derivative 0 a.e. w.r.t. a parameter; but w.r.t. STATE it is
          a step function (nonsmooth at each integer) — refuse for WrtPop (§1h). *)
@@ -516,6 +598,14 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                  reason = "derivative of `floor`/`ceil` w.r.t. compartment state \
                            is not smooth (a step at each integer); a gradient \
                            method cannot use it" }
+           else Known (Const 0.0)
+         | WrtProjected ->
+           if mentions_projected u.arg then
+             Unsupported
+               { code = URNonsmoothState; node = "floor/ceil expression";
+                 reason = "derivative of `floor`/`ceil` w.r.t. the projection \
+                           output is not smooth (a step at each integer); a \
+                           gradient method cannot use it" }
            else Known (Const 0.0))
       | Sin -> map1 (d u.arg)
                  (fun da -> BinOp { op = Mul; left = UnOp { op = Cos; arg = u.arg }; right = da })
@@ -563,7 +653,9 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
        is a genuine zero. *)
     | BindingRef name ->
       (match target with
-       | WrtParam _ -> Known (Const 0.0)
+       (* Bindings are dynamics surfaces: param-free under WrtParam, and never
+          carry the observation-only [Projected] node under WrtProjected. *)
+       | WrtParam _ | WrtProjected -> Known (Const 0.0)
        | WrtPop _ ->
          (match List.find_opt (fun (b : binding) -> b.bname = name) bindings with
           | Some b -> d b.bexpr
@@ -791,7 +883,12 @@ let differentiate_diffable (proj : projection) (d : diffable)
     (param_names : string list) (tfs : time_function list) (tbls : table list)
     : diffable =
   { expr = d.expr;
-    grad = differentiate_obs_arg proj d.expr param_names tfs tbls }
+    grad = differentiate_obs_arg proj d.expr param_names tfs tbls;
+    (* ∂arg/∂projected (gh#275 factor 2): differentiate the argument w.r.t. the
+       [Projected] leaf directly — NO projection inlining (that is [grad]'s job,
+       for ∂arg/∂θ). A genuine [Const 0.0] (the argument does not read the
+       projection output) collapses to [None]. *)
+    proj_grad = obs_deriv_entry (differentiate d.expr WrtProjected tfs tbls) }
 
 (** Fill every differentiable position of a likelihood by FULL RECONSTRUCTION
     (not a functional update): a new [diffable] field is a compile error here

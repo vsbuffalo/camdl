@@ -86,8 +86,8 @@ mod tests {
     use crate::inference::multi_stream_obs::{StreamProjection, StreamSpec};
     use crate::inference::{dense_cells, BoundObs, MultiStreamObsModel};
     use ir::deriv::DerivEntry;
-    use ir::expr::{ConstExpr, Expr, ParamExpr, ProjectedExpr};
-    use ir::observation::{Likelihood, NegBinomialLikelihood, PoissonLikelihood};
+    use ir::expr::{ConstExpr, Expr, ProjectedExpr};
+    use ir::observation::{Likelihood, PoissonLikelihood};
     use ir::Diffable;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -95,22 +95,24 @@ mod tests {
     fn projected() -> Expr {
         Expr::Projected(ProjectedExpr { projected: () })
     }
-    fn grad1(param: &str, e: Expr) -> HashMap<String, DerivEntry> {
-        HashMap::from([(param.to_string(), DerivEntry::Grad(e))])
-    }
 
-    /// `seir_observations` made ODE-gradient-testable. Its `rate_state_grad` is
-    /// the compiler-EMITTED J_x — `infection = beta·S·I/N` with `N = S+E+I+R` (a
-    /// hoisted `PopSum` binding), so `∂rate/∂{S,E,I,R}` carries the full
-    /// product/quotient rule through the binding, exactly the WrtPop autodiff the
-    /// emission wires. The initial condition is made explicit (so
-    /// `S(t_start)=∂init/∂θ=0`, det_grad v1), and the two obs streams are rewritten
-    /// so their `projected`-bearing argument IS exactly `projected`:
+    /// `seir_observations` made ODE-gradient-testable, using the compiler-EMITTED
+    /// gradients throughout — the full pipeline, not hand-installed derivatives:
     ///
-    /// - `weekly_cases`: `negbin(mean = incidence, dispersion = k)` — the incidence
-    ///   `FlowSum` factor-2 (`k` also exercises factor-1, the θ-direct term).
-    /// - `detection`: `poisson(rate = I)` — the prevalence `IntCompSum` factor-2
-    ///   (`∂g/∂x · S`).
+    /// - `rate_state_grad` (J_x) is emitted: `infection = beta·S·I/N` with
+    ///   `N = S+E+I+R` (a hoisted `PopSum` binding), so `∂rate/∂{S,E,I,R}` carries
+    ///   the full product/quotient rule through the binding.
+    /// - `weekly_cases` is the NATIVE `negbin(mean = rho·incidence, dispersion = k)`
+    ///   — a reporting-rate model. Its emitted `mean_grad[rho] = incidence` (factor 1
+    ///   for the obs param `rho`) and its emitted `mean_proj = rho` (`∂mean/∂projected`,
+    ///   the WrtProjected factor-2 coefficient) are BOTH exercised. `k` is a second
+    ///   factor-1 obs param.
+    /// - `detection` is rewritten to `poisson(rate = I)` — a prevalence stream whose
+    ///   argument IS `projected`, exercising the `IntCompSum` factor-2 chain
+    ///   (`∂g/∂x·S`). Its `proj_grad` is `∂(projected)/∂projected = 1`, matching what
+    ///   the compiler emits for a bare `Projected` argument.
+    ///
+    /// The initial condition is made explicit (`S(t_start)=∂init/∂θ=0`, det_grad v1).
     fn seir_ode_grad_fixture() -> ir::Model {
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let path = std::path::PathBuf::from(&manifest)
@@ -120,11 +122,22 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("parse: {e}"));
 
-        // The emitted J_x must be present — this test validates it end-to-end.
+        // The emitted J_x and the native weekly_cases mean-projection derivative must
+        // be present — this test validates them end-to-end.
         assert!(
             model.transitions.iter().any(|t| !t.rate_state_grad.0.is_empty()),
             "seir_observations must carry emitted rate_state_grad (run make update-golden)"
         );
+        let weekly = model.observations.iter().find(|o| o.name == "weekly_cases").unwrap();
+        if let Likelihood::NegBinomial(nb) = &weekly.likelihood {
+            assert!(
+                nb.mean.proj_grad.is_some(),
+                "native weekly_cases mean (rho·projected) must carry an emitted proj_grad \
+                 (run make update-golden)"
+            );
+        } else {
+            panic!("weekly_cases must be the native NegBinomial");
+        }
 
         // Explicit (constant) initial condition: ∂init/∂θ = 0.
         model.initial_conditions = ir::model::InitialConditions::Explicit(HashMap::from([
@@ -134,24 +147,17 @@ mod tests {
             ("R".to_string(), 0.0),
         ]));
 
-        // Rewrite obs likelihoods so `projected` enters directly.
+        // Keep the native weekly_cases (rho·incidence). Rewrite detection to a
+        // prevalence poisson whose argument IS `projected` (proj_grad = 1).
         for om in &mut model.observations {
-            match om.name.as_str() {
-                "weekly_cases" => {
-                    om.likelihood = Likelihood::NegBinomial(NegBinomialLikelihood {
-                        mean: Diffable { expr: projected(), grad: HashMap::new() },
-                        dispersion: Diffable {
-                            expr: Expr::Param(ParamExpr { param: "k".to_string() }),
-                            grad: grad1("k", Expr::Const(ConstExpr { value: 1.0 })),
-                        },
-                    });
-                }
-                "detection" => {
-                    om.likelihood = Likelihood::Poisson(PoissonLikelihood {
-                        rate: Diffable { expr: projected(), grad: HashMap::new() },
-                    });
-                }
-                other => panic!("unexpected obs stream {other}"),
+            if om.name == "detection" {
+                om.likelihood = Likelihood::Poisson(PoissonLikelihood {
+                    rate: Diffable {
+                        expr: projected(),
+                        grad: HashMap::new(),
+                        proj_grad: Some(DerivEntry::Grad(Expr::Const(ConstExpr { value: 1.0 }))),
+                    },
+                });
             }
         }
         model
@@ -217,6 +223,7 @@ mod tests {
             compiled.param_index["beta"],
             compiled.param_index["gamma"],
             compiled.param_index["k"],
+            compiled.param_index["rho"],
         ];
 
         // Synthesize obs data = the projected value at the true params (near the
@@ -262,7 +269,7 @@ mod tests {
         assert_eq!(grad.len(), est.len());
 
         let eps = 1e-6;
-        let names = ["beta", "gamma", "k"];
+        let names = ["beta", "gamma", "k", "rho"];
         for (i, &midx) in est.iter().enumerate() {
             let mut pp = params.clone();
             let mut pm = params.clone();

@@ -249,6 +249,9 @@ mod tests {
                 mean: Diffable {
                     expr: Expr::Projected(ProjectedExpr { projected: () }),
                     grad: HashMap::new(),
+                    // mean IS projected → ∂mean/∂projected = 1 (what the compiler emits
+                    // for a bare `Projected` argument).
+                    proj_grad: Some(DerivEntry::Grad(Expr::Const(ConstExpr { value: 1.0 }))),
                 },
                 dispersion: Diffable {
                     expr: Expr::Param(ParamExpr { param: "k".to_string() }),
@@ -256,6 +259,7 @@ mod tests {
                         "k".to_string(),
                         DerivEntry::Grad(Expr::Const(ConstExpr { value: 1.0 })),
                     )]),
+                    proj_grad: None,
                 },
             });
         }

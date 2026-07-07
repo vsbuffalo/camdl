@@ -109,7 +109,8 @@ let fold_grad_map fe (gm : grad_map) : grad_map =
 (* Fold a differentiable likelihood argument: its expression and its gradient
    map. *)
 let fold_diffable fe (d : diffable) : diffable =
-  { expr = fe d.expr; grad = fold_grad_map fe d.grad }
+  { expr = fe d.expr; grad = fold_grad_map fe d.grad;
+    proj_grad = Option.map (fold_deriv_entry fe) d.proj_grad }
 
 (* Overdispersion σ² and its gradient (proposal 2026-07-03 §4.5). *)
 let fold_draw_method fe (dm : draw_method) : draw_method =

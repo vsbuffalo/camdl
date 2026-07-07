@@ -716,6 +716,7 @@ mod tests {
                 resolved: ResolvedLikelihood::Poisson {
                     rate: crate::resolved_expr::ResolvedExpr::Const(1.0),
                     rate_grad: Vec::new(),
+                    rate_proj: None,
                 },
                 interval_flows: vec![0],
                 emit_times: vec![7.0, 14.0],
@@ -742,6 +743,7 @@ mod tests {
                 resolved: ResolvedLikelihood::Poisson {
                     rate: crate::resolved_expr::ResolvedExpr::Const(1.0),
                     rate_grad: Vec::new(),
+                    rate_proj: None,
                 },
                 interval_flows: vec![0],
                 emit_times: vec![7.0],

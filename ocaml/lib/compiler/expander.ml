@@ -6695,7 +6695,7 @@ let expand_observations ctx =
     (* Each differentiable argument is a [diffable] with an EMPTY grad here; the
        obs/σ² autodiff driver (a later pass) populates the grads. `n` is a bare
        expr — θ-independent, no grad. *)
-    let diff e : Ir.diffable = { Ir.expr = e; Ir.grad = [] } in
+    let diff e : Ir.diffable = { Ir.expr = e; Ir.grad = []; Ir.proj_grad = None } in
     let likelihood = match lik_v with
       | LikNegBinomial kwargs ->
         Ir.NegBinomial {
