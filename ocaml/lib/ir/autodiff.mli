@@ -23,6 +23,16 @@ val differentiate_rate :
   expr -> string list -> time_function list -> table list ->
   ((string * deriv_entry) list, string) result
 
+(** ∂rate/∂compartment for each compartment name — the transition's
+    [rate_state_grad] map ([J_x]'s ingredient for the ODE forward sensitivities,
+    gh#275). Both a live-but-omitted and a nonsmooth-of-state coefficient become a
+    [DEUnsupported] the fit-time gradient gate refuses on (unlike the rate-θ
+    driver's E600); an absent key is a genuine zero. The [binding list] is threaded
+    because a hoisted binding body is state-bearing under [WrtPop]. *)
+val differentiate_rate_state :
+  expr -> string list -> time_function list -> table list -> binding list ->
+  (string * deriv_entry) list
+
 (** Attach per-parameter gradients to a single likelihood's arguments. *)
 val differentiate_likelihood :
   projection -> likelihood -> string list -> time_function list -> table list ->
