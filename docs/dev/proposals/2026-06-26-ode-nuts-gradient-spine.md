@@ -1,5 +1,5 @@
 ---
-status: proposal
+status: implemented
 date: 2026-06-26
 tracking: gh#275
 supersedes: docs/dev/proposals/2026-06-15-ode-gradient-inference.md (Phases 0–1 shipped; this is the gradient half)
@@ -10,6 +10,17 @@ code-baseline: this proposal targets the post-gh#342 (3b) tree — PR #385 / bra
 ---
 
 # ODE + NUTS: the gradient spine and a gradient-based Bayesian sampler
+
+**Status: implemented** on branch `gh275-ode-nuts-gradient-spine` (not yet
+merged). The Phase 1 gradient spine, Phase 2 `nuts`-on-`ode`, and the CLI method
+are shipped; all four Risks are closed — the `ic_grad` seed (estimating initial
+conditions) was the last, in `8620f5ac` (Rust consumer) and `d113a764` (OCaml
+emission). A well-specified ODE model now fits by NUTS with pgas-parity on
+trajectory, observation, and initial-condition parameters. Two follow-ups
+remain, both tracked: gh#390 (§1g event-jump sensitivity — models with scheduled
+interventions still refuse `nuts`) and gh#374 (the `Log{lo,hi}`
+bounded-parameter Jacobian at the clamp, a pre-existing cross-method transform
+issue).
 
 ## TL;DR
 
