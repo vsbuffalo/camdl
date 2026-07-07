@@ -92,7 +92,7 @@ mod tests {
     use crate::inference::multi_stream_obs::{StreamProjection, StreamSpec};
     use crate::inference::{dense_cells, BoundObs, MultiStreamObsModel};
     use ir::deriv::DerivEntry;
-    use ir::expr::{BinOp, ConstExpr, Expr, ParamExpr, ProjectedExpr};
+    use ir::expr::{ConstExpr, Expr, ParamExpr, ProjectedExpr};
     use ir::observation::{Likelihood, NegBinomialLikelihood, PoissonLikelihood};
     use ir::Diffable;
     use std::collections::HashMap;
@@ -105,12 +105,13 @@ mod tests {
         HashMap::from([(param.to_string(), DerivEntry::Grad(e))])
     }
 
-    /// `seir_observations` made ODE-gradient-testable. The compiler does not yet
-    /// emit `rate_state_grad`, so it is hand-installed here (the linear/bilinear
-    /// SEIR rates make `∂rate/∂x` trivial — `N0` is a parameter, so `infection`'s
-    /// state derivatives carry no quotient rule). The initial condition is made
-    /// explicit (so `S(t_start)=∂init/∂θ=0`, det_grad v1), and the two obs streams
-    /// are rewritten so their `projected`-bearing argument IS exactly `projected`:
+    /// `seir_observations` made ODE-gradient-testable. Its `rate_state_grad` is
+    /// the compiler-EMITTED J_x — `infection = beta·S·I/N` with `N = S+E+I+R` (a
+    /// hoisted `PopSum` binding), so `∂rate/∂{S,E,I,R}` carries the full
+    /// product/quotient rule through the binding, exactly the WrtPop autodiff the
+    /// emission wires. The initial condition is made explicit (so
+    /// `S(t_start)=∂init/∂θ=0`, det_grad v1), and the two obs streams are rewritten
+    /// so their `projected`-bearing argument IS exactly `projected`:
     ///
     /// - `weekly_cases`: `negbin(mean = incidence, dispersion = k)` — the incidence
     ///   `FlowSum` factor-2 (`k` also exercises factor-1, the θ-direct term).
@@ -125,6 +126,12 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("parse: {e}"));
 
+        // The emitted J_x must be present — this test validates it end-to-end.
+        assert!(
+            model.transitions.iter().any(|t| !t.rate_state_grad.0.is_empty()),
+            "seir_observations must carry emitted rate_state_grad (run make update-golden)"
+        );
+
         // Explicit (constant) initial condition: ∂init/∂θ = 0.
         model.initial_conditions = ir::model::InitialConditions::Explicit(HashMap::from([
             ("S".to_string(), 9990.0),
@@ -132,43 +139,6 @@ mod tests {
             ("I".to_string(), 10.0),
             ("R".to_string(), 0.0),
         ]));
-
-        // Hand-installed rate_state_grad (J_x).
-        for tr in &mut model.transitions {
-            match tr.name.as_str() {
-                "infection" => {
-                    // ∂(beta·S·I/N0)/∂S = beta·I/N0
-                    tr.rate_state_grad.0.insert(
-                        "S".to_string(),
-                        DerivEntry::Grad(Expr::bin_op(
-                            BinOp::Div,
-                            Expr::bin_op(BinOp::Mul, Expr::param("beta"), Expr::pop("I")),
-                            Expr::param("N0"),
-                        )),
-                    );
-                    // ∂(beta·S·I/N0)/∂I = beta·S/N0
-                    tr.rate_state_grad.0.insert(
-                        "I".to_string(),
-                        DerivEntry::Grad(Expr::bin_op(
-                            BinOp::Div,
-                            Expr::bin_op(BinOp::Mul, Expr::param("beta"), Expr::pop("S")),
-                            Expr::param("N0"),
-                        )),
-                    );
-                }
-                "progression" => {
-                    tr.rate_state_grad
-                        .0
-                        .insert("E".to_string(), DerivEntry::Grad(Expr::param("sigma")));
-                }
-                "recovery" => {
-                    tr.rate_state_grad
-                        .0
-                        .insert("I".to_string(), DerivEntry::Grad(Expr::param("gamma")));
-                }
-                other => panic!("unexpected transition {other}"),
-            }
-        }
 
         // Rewrite obs likelihoods so `projected` enters directly.
         for om in &mut model.observations {

@@ -392,6 +392,15 @@ let run_lint (d : compile_detail) : Diagnostics.diagnostic list =
 let differentiate_transitions (d : compile_detail)
     : Ir.transition list * Diagnostics.diagnostic list =
   let param_names = List.map (fun (p : Ir.parameter) -> p.name) d.model.Ir.parameters in
+  (* gh#275: ∂rate/∂compartment (rate_state_grad, the J_x ingredient for the ODE
+     forward sensitivities). Computed alongside rate_grad from the same rate, over
+     the model's compartments; a hoisted binding body is state-bearing under WrtPop,
+     so the binding list is threaded. Unlike rate_grad it never errors (E600): a
+     live-but-omitted or nonsmooth-of-state coefficient becomes a serialized
+     DEUnsupported the fit-time gradient gate refuses on — the model still forward-
+     sims / IF2 / PF. *)
+  let comp_names = List.map (fun (c : Ir.compartment) -> c.name) d.model.Ir.compartments in
+  let bindings = d.model.Ir.bindings in
   let tr_loc name =
     (* Find the original (pre-expansion) transition declaration by prefix
        match: expanded name "infection_child" → base "infection". *)
@@ -405,9 +414,13 @@ let differentiate_transitions (d : compile_detail)
   let transitions =
     Passtime.time "autodiff" (fun () ->
       List.map (fun (t : Ir.transition) ->
+        let rate_state_grad =
+          Autodiff.differentiate_rate_state t.rate comp_names
+            d.model.Ir.time_functions d.model.Ir.tables bindings
+        in
         match Autodiff.differentiate_rate t.rate param_names
                 d.model.Ir.time_functions d.model.Ir.tables with
-        | Ok rate_grad -> { t with Ir.rate_grad }
+        | Ok rate_grad -> { t with Ir.rate_grad; Ir.rate_state_grad }
         | Error msg ->
           diags := Diagnostics.mk_error
                      ~code:"E600"
@@ -418,7 +431,7 @@ let differentiate_transitions (d : compile_detail)
                             non-constant lookup index; see \
                             `camdl docs language-changes`"
                      () :: !diags;
-          { t with Ir.rate_grad = [] }
+          { t with Ir.rate_grad = []; Ir.rate_state_grad }
       ) d.model.Ir.transitions)
   in
   (transitions, List.rev !diags)
