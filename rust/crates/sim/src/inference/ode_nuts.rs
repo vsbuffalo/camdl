@@ -66,6 +66,12 @@ pub struct OdeNutsResult {
     /// Post-warmup posterior draws on the NATURAL scale — one row per sample,
     /// columns in `estimated` order.
     pub samples: Vec<Vec<f64>>,
+    /// Data log-likelihood `log p(y | θ)` at each kept sample (trace column).
+    pub sample_loglik: Vec<f64>,
+    /// Log-posterior (data + prior + Jacobian) at each kept sample (trace column).
+    pub sample_logpost: Vec<f64>,
+    /// Whether each kept sample was a divergent transition (trace diagnostic).
+    pub sample_divergent: Vec<bool>,
     /// Number of divergent transitions among the KEPT samples (the E-BFMI /
     /// boundary canary — a nonzero count means the step is too large or the
     /// geometry is pathological).
@@ -180,15 +186,34 @@ pub fn run_ode_nuts(
     }
     step_size = dual_avg.final_step_size();
 
+    // The DATA log-likelihood `log p(y | θ(z))` at `z` (for the trace's loglik
+    // column, distinct from the posterior `log_p`). Recomputed only when `z`
+    // changes (on accept) — one extra ODE solve per accepted draw, negligible
+    // beside the sampler's leapfrog cost.
+    let data_loglik = |z: &[f64]| -> f64 {
+        let mut params = params_base.to_vec();
+        for (i, ep) in estimated.iter().enumerate() {
+            params[ep.index] = ep.from_transformed(z[i]);
+        }
+        det_grad(compiled, obs_model, obs_times, config.dt, &params, &estimated_to_model)
+            .map(|(ll, _)| ll)
+            .unwrap_or(f64::NEG_INFINITY)
+    };
+
     // Sampling.
     let cfg = NUTSConfig { max_tree_depth: config.max_tree_depth, step_size, mass_matrix: mass };
     let mut samples: Vec<Vec<f64>> = Vec::with_capacity(config.n_samples);
+    let mut sample_loglik: Vec<f64> = Vec::with_capacity(config.n_samples);
+    let mut sample_logpost: Vec<f64> = Vec::with_capacity(config.n_samples);
+    let mut sample_divergent: Vec<bool> = Vec::with_capacity(config.n_samples);
     let mut n_divergent = 0usize;
     let mut accept_sum = 0.0f64;
+    let mut cur_loglik = data_loglik(&z);
     for _ in 0..config.n_samples {
         let r = nuts_step(&z, log_p, &grad, &cfg, &target_or_neg_inf, &mut rng);
         accept_sum += r.mean_accept_prob;
-        if r.divergent {
+        let divergent = r.divergent;
+        if divergent {
             n_divergent += 1;
         }
         if r.accepted {
@@ -196,8 +221,9 @@ pub fn run_ode_nuts(
             log_p = r.log_posterior;
             let (_, g) = target_or_neg_inf(&z);
             grad = g;
+            cur_loglik = data_loglik(&z);
         }
-        // Record the natural-scale parameter vector for this draw.
+        // Record the natural-scale parameter vector for this draw + diagnostics.
         samples.push(
             estimated
                 .iter()
@@ -205,10 +231,16 @@ pub fn run_ode_nuts(
                 .map(|(i, ep)| ep.from_transformed(z[i]))
                 .collect(),
         );
+        sample_loglik.push(cur_loglik);
+        sample_logpost.push(log_p);
+        sample_divergent.push(divergent);
     }
 
     Ok(OdeNutsResult {
         samples,
+        sample_loglik,
+        sample_logpost,
+        sample_divergent,
         n_divergent,
         mean_accept: if config.n_samples > 0 { accept_sum / config.n_samples as f64 } else { 0.0 },
         step_size,
