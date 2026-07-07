@@ -42,25 +42,24 @@ pub fn det_grad(
     params: &[f64],
     estimated_to_model: &[usize],
 ) -> Result<(f64, Vec<f64>), SimError> {
-    let d = estimated_to_model.len();
-
     // §1h capability gate: the ONE place that answers "can this model be fit by the
     // ODE gradient?" — refusing (with the compiler's own reason where one exists)
     // an unsupported rate/obs/σ² gradient, a nonsmooth ∂rate/∂state, an adaptive
-    // integrator, a `dt`-in-rate model, a scheduled effect, a parameterized initial
-    // condition (the `ic_grad` seed is a follow-up), a DerivedExpr projection, and a
+    // integrator, a `dt`-in-rate model, a scheduled effect, a nonsmooth or
+    // real-compartment initial condition, a DerivedExpr projection, and a
     // `projected`-transforming likelihood argument. Run before any gradient is
     // taken, so a refusal is a single actionable message, not a mid-integration
-    // failure. The seed below is therefore zero: the gate has established the
-    // initial condition is explicit (`∂init/∂θ = 0`).
+    // failure.
     let estimated: std::collections::HashSet<&str> = estimated_to_model
         .iter()
         .map(|&i| compiled.model.parameters[i].name.as_str())
         .collect();
     crate::inference::gradient_capability::preflight_gradient_ode(compiled, params, &estimated)?;
 
-    let (int_s0, _) = compiled.initial_state(params)?;
-    let state_sens_0 = vec![0.0f64; int_s0.counts.len() * d];
+    // Forward-sensitivity seed S(t_start) = ∂(initial_state)/∂θ (`ic_grad`): zero
+    // for an explicit (constant) initial condition, nonzero for a parameterized
+    // one whose expression involves an estimated parameter (gh#275 §1c C-seed).
+    let state_sens_0 = compiled.ic_grad_seed(params, estimated_to_model)?;
 
     let cfg = OdeConfig {
         t_start: compiled.model.simulation.t_start,
@@ -86,7 +85,7 @@ mod tests {
     use crate::inference::multi_stream_obs::{StreamProjection, StreamSpec};
     use crate::inference::{dense_cells, BoundObs, MultiStreamObsModel};
     use ir::deriv::DerivEntry;
-    use ir::expr::{ConstExpr, Expr, ProjectedExpr};
+    use ir::expr::{BinOp, ConstExpr, Expr, ParamExpr, ProjectedExpr};
     use ir::observation::{Likelihood, PoissonLikelihood};
     use ir::Diffable;
     use std::collections::HashMap;
@@ -296,5 +295,117 @@ mod tests {
         // carry materially nonzero gradients, or the test proves little.
         assert!(grad[0].abs() > 1e-6, "∂/∂beta should be materially nonzero");
         assert!(grad[2].abs() > 1e-6, "∂/∂k should be materially nonzero");
+    }
+
+    /// The det_grad FD oracle for an **estimated initial-condition parameter**
+    /// (gh#275 §1c C-seed, Risk #1). A parameterized IC `S = N0 − I0`, `I = I0`
+    /// makes the initial epidemic size a function of the estimated `I0`; its
+    /// forward sensitivity must be seeded at `S(t_start) = ∂init/∂I0`
+    /// (`ic_grad[S][I0] = −1`, `ic_grad[I][I0] = +1`) and propagate through `J_x`
+    /// into every downstream observation. Without the seed the whole `∂/∂I0` chain
+    /// is identically zero, silently collapsing the initial-size marginal.
+    ///
+    /// RED-CHECK (verified during development): forcing `ic_grad_seed` to return
+    /// zeros makes analytic `∂/∂I0 = 0` while the central FD is ≈ +0.39 (the value
+    /// path is smooth in `I0` because the ODE gradient path uses the *continuous*
+    /// initial state), so the assertion fails with 100% relative error — the seed
+    /// is exactly what closes the gap.
+    #[test]
+    fn det_grad_matches_finite_difference_estimated_initial_condition() {
+        let mut model = seir_ode_grad_fixture();
+        set_defaults(&mut model);
+        model.simulation.t_end = 60.0;
+
+        // Parameterized IC: I0 sets the initial infected count and is drawn out of
+        // S so the total population is conserved. N0 stays fixed.
+        let param = |n: &str| Expr::Param(ParamExpr { param: n.to_string() });
+        model.initial_conditions = ir::model::InitialConditions::Parameterized(HashMap::from([
+            ("S".to_string(), Expr::bin_op(BinOp::Sub, param("N0"), param("I0"))),
+            ("E".to_string(), Expr::Const(ConstExpr { value: 0.0 })),
+            ("I".to_string(), param("I0")),
+            ("R".to_string(), Expr::Const(ConstExpr { value: 0.0 })),
+        ]));
+        // Emitted ∂init/∂I0: −1 for S (= ∂(N0−I0)/∂I0), +1 for I. N0 is fixed → no
+        // column. (What the OCaml WrtParam-over-init pass will emit.)
+        let grad1 = |v: f64| DerivEntry::Grad(Expr::Const(ConstExpr { value: v }));
+        model.ic_grad = HashMap::from([
+            ("S".to_string(), HashMap::from([("I0".to_string(), grad1(-1.0))])),
+            ("I".to_string(), HashMap::from([("I0".to_string(), grad1(1.0))])),
+        ]);
+
+        let compiled = Arc::new(CompiledModel::new(model).unwrap());
+        let n = compiled.param_index.len();
+        let mut params = vec![0.0; n];
+        for p in &compiled.model.parameters {
+            params[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+        }
+
+        let dt = 1.0;
+        let obs_times: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect();
+        // Estimate a rate param and the IC param together.
+        let est = vec![compiled.param_index["beta"], compiled.param_index["I0"]];
+
+        // Synthesize obs data at the true params (value path uses continuous init).
+        let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end: 60.0, dt };
+        let seed0 = compiled.ic_grad_seed(&params, &est).unwrap();
+        let recs =
+            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed0, &cfg, &obs_times)
+                .unwrap();
+        let projections: Vec<StreamProjection> = compiled
+            .model
+            .observations
+            .iter()
+            .map(|om| StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap())
+            .collect();
+        let per_stream: Vec<Vec<f64>> = projections
+            .iter()
+            .map(|proj| {
+                recs.iter()
+                    .map(|r| {
+                        let v: f64 = match proj {
+                            StreamProjection::FlowSum(idxs) => idxs.iter().map(|&i| r.inc[i]).sum(),
+                            StreamProjection::IntCompSum(idxs) => {
+                                idxs.iter().map(|&i| r.counts[i]).sum()
+                            }
+                            StreamProjection::Expr(_) => panic!("fixture has no Expr projection"),
+                        };
+                        v.round()
+                    })
+                    .collect()
+            })
+            .collect();
+        assert!(per_stream[0].iter().sum::<f64>() > 1.0, "incidence data must be nonzero");
+
+        let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est).unwrap();
+        assert!(ll.is_finite(), "det_grad loglik must be finite, got {ll}");
+
+        let eps = 1e-4; // I0 ~ 10, so a larger step keeps the FD well-conditioned.
+        let names = ["beta", "I0"];
+        for (i, &midx) in est.iter().enumerate() {
+            let mut pp = params.clone();
+            let mut pm = params.clone();
+            pp[midx] += eps;
+            pm[midx] -= eps;
+            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est).unwrap();
+            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est).unwrap();
+            let fd = (llp - llm) / (2.0 * eps);
+            let rel = if fd.abs() > 1e-8 {
+                (grad[i] - fd).abs() / fd.abs()
+            } else {
+                (grad[i] - fd).abs()
+            };
+            assert!(
+                rel < 1e-3,
+                "det_grad ∂/∂{} = {} vs FD {} (rel err {:.2e})",
+                names[i],
+                grad[i],
+                fd,
+                rel
+            );
+        }
+        // Non-vacuity: the IC-parameter gradient must be materially nonzero — this
+        // is the whole point (a zero seed would make it identically zero).
+        assert!(grad[1].abs() > 1e-3, "∂/∂I0 should be materially nonzero (the seed drives it)");
     }
 }
