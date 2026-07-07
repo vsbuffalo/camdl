@@ -4,7 +4,7 @@ use crate::{
     config::{OdeConfig, SimConfig},
     error::SimError,
     propensity::{eval_propensities, EvalCtx},
-    resolved_expr::eval_resolved,
+    resolved_expr::{eval_deriv_entry, eval_emitted_grad, eval_resolved},
     schedule::{Cursor, Schedule, MIN_STEP_EPS},
     simulate::Simulate,
     state::{Flows, IntState, RealState, Snapshot, Trajectory},
@@ -121,6 +121,61 @@ fn ode_derivs(
     Ok(())
 }
 
+/// Forward-sensitivity derivative `Ṡ = J_x·S + J_θ`, assembled **sparse and
+/// transitionwise** (gh#275 §1c) rather than as a dense `n×n` matmul — at
+/// national scale `n` is in the hundreds–thousands and the dense form is the
+/// bottleneck the sparse-coupling work exists to avoid.
+///
+/// `s[i*d + p] = S[compartment i, estimated-param p] = ∂(int_vals[i])/∂θ_p`, and
+/// `param_model_idx[p]` maps estimated param `p` to its MODEL parameter index (for
+/// the param-keyed `rate_grad` lookup). Fills `d_s` (also `n_int × d`, row-major)
+/// with `Ṡ`. The eval context is byte-identical to [`ode_derivs`] (propensities at
+/// the UNROUNDED float state via `int_float_override`), so `J_x`/`J_θ` are
+/// evaluated at exactly the state the integrator sees. Integer compartments only
+/// for now (transition-driven); real ODE-equation sensitivity is a follow-up.
+fn sensitivity_derivs(
+    model: &CompiledModel,
+    int_vals: &[f64],
+    real_vals: &[f64],
+    params: &[f64],
+    param_model_idx: &[usize],
+    t: f64,
+    dt: f64,
+    per_eval: Option<&[f64]>,
+    s: &[f64],
+    d_s: &mut [f64],
+) {
+    let d = param_model_idx.len();
+    let int_s = IntState::from_vec(vec![0_i64; int_vals.len()]);
+    let real_s = RealState::from_vec(real_vals.to_vec());
+    let ctx = EvalCtx {
+        model, int_s: &int_s, real_s: &real_s, params, t, dt,
+        projected: None,
+        aux: None,
+        int_float_override: Some(int_vals),
+        per_eval,
+    };
+    let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
+
+    for v in d_s.iter_mut() { *v = 0.0; }
+    for (tr_idx, stoich) in model.transition_stoich.iter().enumerate() {
+        let rate_grad = &model.resolved.rate_grads_indexed[tr_idx];            // param-keyed ∂rate/∂θ
+        let rate_state_grad = &model.resolved.rate_state_grads_indexed[tr_idx].0; // comp-keyed ∂rate/∂x
+        for p in 0..d {
+            // total_dr_dθ[p] = ∂rate/∂θ_p + Σ_j ∂rate/∂x_j · S[j, p]  (chain through state)
+            let mut total = eval_emitted_grad(rate_grad, param_model_idx[p], &ctx);
+            for (j, entry) in rate_state_grad {
+                total += eval_deriv_entry(entry, &ctx) * s[j * d + p];
+            }
+            // Ṡ[:, p] += stoich_r · total_dr_dθ[p]  — the state Jacobian THROUGH
+            // stoichiometry (distinct from the raw incidence-flow derivative).
+            for &(local, delta) in stoich {
+                d_s[local * d + p] += delta as f64 * total;
+            }
+        }
+    }
+}
+
 /// Single RK4 step over the combined (int_vals, real_vals) state, optionally
 /// carrying the augmented flow.
 ///
@@ -142,10 +197,18 @@ fn rk4_step(
     t: f64,
     dt: f64,
     per_eval: Option<&[f64]>,
+    // gh#275: optional forward sensitivity `S` (n_int × d, row-major), carried by
+    // the SAME four RK4 stages as the state so `J_x`, `J_θ`, and `S` advance in
+    // lockstep (the augmented `(x, S)` system). `None` ⇒ the value-only path,
+    // byte-identical to before (every x-line below is untouched). `param_model_idx`
+    // maps each of the `d` sensitivity columns to its model parameter index.
+    s: Option<&mut Vec<f64>>,
+    param_model_idx: &[usize],
 ) -> Result<(), SimError> {
     let ni = int_vals.len();
     let nr = real_vals.len();
     let nf = model.model.transitions.len();
+    let d = param_model_idx.len();
 
     let mut di = vec![0.0f64; ni];
     let mut dr = vec![0.0f64; nr];
@@ -181,6 +244,27 @@ fn rk4_step(
     let k4r = &dr;
     let k4f = &df;
 
+    // Sensitivity stage slopes k1s..k4s (gh#275): the augmented `(x, S)` system
+    // evaluated at the SAME four stage states as x — Ṡ at stage k uses the x-stage
+    // state (s{k}i, s{k}r) AND the S-stage state (S advanced by the previous
+    // slope). Read `int_vals` here, BEFORE the compartment combine mutates it.
+    let (k1s, k2s, k3s, k4s) = if let Some(ref s_vec) = s {
+        let mut ds = vec![0.0f64; ni * d];
+        sensitivity_derivs(model, int_vals, real_vals, params, param_model_idx, t, dt, per_eval, s_vec, &mut ds);
+        let k1s = ds.clone();
+        let s2s: Vec<f64> = s_vec.iter().zip(&k1s).map(|(x, k)| x + 0.5 * dt * k).collect();
+        sensitivity_derivs(model, &s2i, &s2r, params, param_model_idx, t + 0.5 * dt, dt, per_eval, &s2s, &mut ds);
+        let k2s = ds.clone();
+        let s3s: Vec<f64> = s_vec.iter().zip(&k2s).map(|(x, k)| x + 0.5 * dt * k).collect();
+        sensitivity_derivs(model, &s3i, &s3r, params, param_model_idx, t + 0.5 * dt, dt, per_eval, &s3s, &mut ds);
+        let k3s = ds.clone();
+        let s4s: Vec<f64> = s_vec.iter().zip(&k3s).map(|(x, k)| x + dt * k).collect();
+        sensitivity_derivs(model, &s4i, &s4r, params, param_model_idx, t + dt, dt, per_eval, &s4s, &mut ds);
+        (k1s, k2s, k3s, ds)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
+
     // Combine compartments (clamped ≥ 0).
     for i in 0..ni {
         int_vals[i] += dt / 6.0 * (k1i[i] + 2.0 * k2i[i] + 2.0 * k3i[i] + k4i[i]);
@@ -195,6 +279,16 @@ fn rk4_step(
     if let Some(flow) = flow {
         for i in 0..nf {
             flow[i] += dt / 6.0 * (k1f[i] + 2.0 * k2f[i] + 2.0 * k3f[i] + k4f[i]);
+        }
+    }
+
+    // Combine the sensitivity (NOT clamped — S = ∂x/∂θ is signed). The clamp on
+    // the state above is a nonsmooth operation S does not model (§1c clamp
+    // caveat); under `nuts` an active clamp is refused, so a valid gradient
+    // trajectory never clamps.
+    if let Some(s_vec) = s {
+        for k in 0..ni * d {
+            s_vec[k] += dt / 6.0 * (k1s[k] + 2.0 * k2s[k] + 2.0 * k3s[k] + k4s[k]);
         }
     }
 
@@ -276,12 +370,12 @@ impl OdeStepper for Rk4Fixed {
             for (i, &p) in propensities.iter().enumerate() {
                 state.flow[i] += p * h;
             }
-            rk4_step(model, &mut state.int, &mut state.real, None, params, t, h, per_eval)?;
+            rk4_step(model, &mut state.int, &mut state.real, None, params, t, h, per_eval, None, &[])?;
         } else {
             // Augmented flow (Q1B): `dc_i/dt = propensity_i` carried through the
             // SAME RK4 stages as the compartments — one mechanism, integrator-
             // order incidence, and no standalone 5th propensity eval.
-            rk4_step(model, &mut state.int, &mut state.real, Some(&mut state.flow), params, t, h, per_eval)?;
+            rk4_step(model, &mut state.int, &mut state.real, Some(&mut state.flow), params, t, h, per_eval, None, &[])?;
         }
         Ok(h)
     }
@@ -681,4 +775,246 @@ pub fn run_ode(
     });
 
     Ok(traj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ir::deriv::DerivEntry;
+    use ir::expr::Expr;
+
+    /// Load the `pure_death` golden and hand-set its θ- and state-gradients so the
+    /// sensitivity spine has a `rate_grad` (`∂rate/∂mu`) and a `rate_state_grad`
+    /// (`∂rate/∂N`) to consume. `pure_death` is the ideal oracle: one compartment
+    /// `N`, one parameter `mu`, one transition `N →∅` at rate `mu·N`, so
+    /// `dN/dt = -mu·N`, `N(t) = N0·e^{-mu·t}`, and `∂N/∂mu = -t·N(t)` in closed
+    /// form — with the two Jacobians `∂rate/∂mu = N` and `∂rate/∂N = mu` equally
+    /// trivial. The compiler does not yet EMIT these (WrtPop emission is the last
+    /// step of unit 1), so the test hand-installs them — validating the Rust
+    /// sensitivity assembly independently of, and ahead of, the OCaml emission.
+    fn compiled_pure_death() -> CompiledModel {
+        let mut model = load_golden("pure_death");
+        let death = &mut model.transitions[0];
+        // ∂(mu·N)/∂mu = N  (a Pop leaf — the param-keyed rate_grad, J_θ).
+        death
+            .rate_grad
+            .insert("mu".to_string(), DerivEntry::Grad(Expr::pop("N")));
+        // ∂(mu·N)/∂N = mu  (a Param leaf — the compartment-keyed rate_state_grad,
+        // J_x — resolved through the CompGradMap compartment resolver).
+        death
+            .rate_state_grad
+            .0
+            .insert("N".to_string(), DerivEntry::Grad(Expr::param("mu")));
+        CompiledModel::new(model).expect("pure_death with hand-set grads must compile")
+    }
+
+    /// `two_state`: A⇌B reversible linear reaction — forward `alpha·A`, backward
+    /// `beta_r·B` — hand-set with its (trivial, linear) θ- and state-gradients.
+    /// Unlike `pure_death` this has `d=2` parameters over `ni=2` compartments with
+    /// genuine off-diagonal coupling (the forward transition moves mass A→B, so
+    /// `∂B/∂alpha ≠ 0` even though `alpha` enters only the A-rate), so it exercises
+    /// the row-major `s[comp*d + param]` indexing a `d=1` oracle cannot.
+    fn compiled_two_state() -> CompiledModel {
+        let mut model = load_golden("two_state");
+        for tr in &mut model.transitions {
+            match tr.name.as_str() {
+                "forward" => {
+                    // rate = alpha·A
+                    tr.rate_grad
+                        .insert("alpha".to_string(), DerivEntry::Grad(Expr::pop("A")));
+                    tr.rate_state_grad
+                        .0
+                        .insert("A".to_string(), DerivEntry::Grad(Expr::param("alpha")));
+                }
+                "backward" => {
+                    // rate = beta_r·B
+                    tr.rate_grad
+                        .insert("beta_r".to_string(), DerivEntry::Grad(Expr::pop("B")));
+                    tr.rate_state_grad
+                        .0
+                        .insert("B".to_string(), DerivEntry::Grad(Expr::param("beta_r")));
+                }
+                other => panic!("unexpected two_state transition {other}"),
+            }
+        }
+        CompiledModel::new(model).expect("two_state with hand-set grads must compile")
+    }
+
+    fn load_golden(name: &str) -> ir::Model {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ir/golden")
+            .join(format!("{name}.ir.json"));
+        let contents =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        ir::from_str(&contents).unwrap_or_else(|e| panic!("parse {name}: {e}"))
+    }
+
+    /// Integrate the compartments `x` (and, when `with_sens`, the forward
+    /// sensitivity `S`, an `ni × d` row-major matrix `s[comp*d + param]`) from
+    /// `t=0` to `t_end` with fixed step `dt`. `params` is passed by value at eval
+    /// (read by index, no folding), so the value path can be re-evaluated at a
+    /// perturbed θ for the finite-difference oracle without recompiling. `S(0)=0`
+    /// (initial counts are constants, not functions of θ). Returns
+    /// `(x(t_end), S(t_end)?)`.
+    fn integrate(
+        cm: &CompiledModel,
+        params: &[f64],
+        init: &[f64],
+        param_model_idx: &[usize],
+        t_end: f64,
+        dt: f64,
+        with_sens: bool,
+    ) -> (Vec<f64>, Option<Vec<f64>>) {
+        let ni = init.len();
+        let d = param_model_idx.len();
+        let mut int = init.to_vec();
+        let mut real: Vec<f64> = vec![];
+        let mut s = vec![0.0f64; ni * d];
+
+        let n_steps = (t_end / dt).round() as usize;
+        let mut t = 0.0;
+        for _ in 0..n_steps {
+            if with_sens {
+                rk4_step(
+                    cm, &mut int, &mut real, None, params, t, dt, None,
+                    Some(&mut s), param_model_idx,
+                )
+                .expect("rk4_step");
+            } else {
+                rk4_step(cm, &mut int, &mut real, None, params, t, dt, None, None, &[])
+                    .expect("rk4_step");
+            }
+            t += dt;
+        }
+        (int, if with_sens { Some(s) } else { None })
+    }
+
+    /// The forward-sensitivity spine, validated end-to-end against BOTH a
+    /// finite-difference of the integrated trajectory and the closed-form
+    /// `∂N/∂mu = -t·N(t)`. This is the gate for the Rust sensitivity assembly
+    /// (`sensitivity_derivs` + the augmented `(x, S)` RK4 stages): it integrates
+    /// `x(t)` and `S(t) = ∂x/∂mu` together, then checks `S(t_end)` against a
+    /// central finite difference of `x(t_end)` under a `mu`-perturbation — which
+    /// validates the derivative assembly AND the integration coupling, not just
+    /// one rate evaluation.
+    #[test]
+    fn forward_sensitivity_matches_finite_difference_and_analytic() {
+        let cm = compiled_pure_death();
+        let mu = 0.1;
+        let n0 = 1000.0; // pure_death initial_conditions: {"explicit": {"N": 1000}}
+        let t_end = 5.0;
+        let dt = 0.01;
+        let pmi = [0usize]; // mu is model param index 0 (the only parameter)
+
+        // Integrate x and S together.
+        let (int, s) = integrate(&cm, &[mu], &[n0], &pmi, t_end, dt, true);
+        let n_final = int[0];
+        let s_final = s.unwrap()[0];
+
+        // Central finite difference of the SAME discrete integrator — S(t_end) is
+        // the exact derivative of the discrete N(t_end), so this matches to FD
+        // truncation (O(eps²)), far tighter than the analytic comparison.
+        let eps = 1e-5;
+        let (int_p, _) = integrate(&cm, &[mu + eps], &[n0], &pmi, t_end, dt, false);
+        let (int_m, _) = integrate(&cm, &[mu - eps], &[n0], &pmi, t_end, dt, false);
+        let s_fd = (int_p[0] - int_m[0]) / (2.0 * eps);
+
+        // Closed form: N(t) = N0·e^{-mu·t}, ∂N/∂mu = -t·N(t). Compared at a looser
+        // tolerance because it carries the RK4 discretization error the FD does not.
+        let n_analytic = n0 * (-mu * t_end).exp();
+        let s_analytic = -t_end * n_analytic;
+
+        // Sanity: the value path itself tracks the exponential (RK4, dt=0.01).
+        assert!(
+            (n_final - n_analytic).abs() < 1e-3 * n_analytic,
+            "N(t_end) {n_final} vs analytic {n_analytic}"
+        );
+
+        // S vs finite difference — the assembly + integration are self-consistent.
+        assert!(
+            (s_final - s_fd).abs() < 1e-4 * s_fd.abs(),
+            "S(t_end) {s_final} vs finite difference {s_fd} (rel err {})",
+            ((s_final - s_fd) / s_fd).abs()
+        );
+
+        // S vs analytic — the assembly integrates the RIGHT sensitivity, not just
+        // a self-consistent wrong one.
+        assert!(
+            (s_final - s_analytic).abs() < 1e-3 * s_analytic.abs(),
+            "S(t_end) {s_final} vs analytic {s_analytic} (rel err {})",
+            ((s_final - s_analytic) / s_analytic).abs()
+        );
+    }
+
+    /// The `d>1` / off-diagonal gate: on `two_state` (A⇌B, params alpha & beta_r)
+    /// the full `2×2` sensitivity `S[comp, param]` is integrated and checked
+    /// column-by-column against a central finite difference in each parameter
+    /// independently. This exercises the row-major `s[comp*d + param]` indexing and
+    /// the cross-compartment coupling (`∂B/∂alpha ≠ 0` though alpha enters only the
+    /// A-rate) — a transposition bug that `pure_death` (`d=ni=1`) cannot see.
+    #[test]
+    fn forward_sensitivity_two_state_offdiagonal_matches_fd() {
+        let cm = compiled_two_state();
+        let base = [0.5f64, 0.3]; // alpha, beta_r  (model param indices 0, 1)
+        let init = [80.0f64, 20.0]; // A, B          (compartment indices 0, 1)
+        let pmi = [0usize, 1];
+        let d = 2;
+        let t_end = 4.0;
+        let dt = 0.01;
+
+        let (_, s) = integrate(&cm, &base, &init, &pmi, t_end, dt, true);
+        let s = s.unwrap(); // [∂A/∂α, ∂A/∂β, ∂B/∂α, ∂B/∂β]
+
+        // Central FD in each parameter independently.
+        let eps = 1e-5;
+        let mut fd = [0.0f64; 4];
+        for (pk, _) in pmi.iter().enumerate() {
+            let mut pp = base;
+            let mut pm = base;
+            pp[pk] += eps;
+            pm[pk] -= eps;
+            let (xp, _) = integrate(&cm, &pp, &init, &pmi, t_end, dt, false);
+            let (xm, _) = integrate(&cm, &pm, &init, &pmi, t_end, dt, false);
+            for comp in 0..init.len() {
+                // FD[comp][pk] lands at the same row-major slot the assembly fills.
+                fd[comp * d + pk] = (xp[comp] - xm[comp]) / (2.0 * eps);
+            }
+        }
+
+        for k in 0..4 {
+            assert!(
+                (s[k] - fd[k]).abs() < 1e-4 * fd[k].abs().max(1.0),
+                "S[{k}] = {} vs finite difference {} (comp {}, param {})",
+                s[k],
+                fd[k],
+                k / d,
+                k % d
+            );
+        }
+        // Guard that the off-diagonals are genuinely non-trivial (else the test
+        // would pass on an all-zero S): ∂B/∂α (slot 2) must be materially nonzero.
+        assert!(
+            s[2].abs() > 1.0,
+            "off-diagonal ∂B/∂alpha should be materially nonzero, got {}",
+            s[2]
+        );
+    }
+
+    /// The value path (`S = None`) must be byte-identical after the augmented-RK4
+    /// change: integrating with `with_sens=false` reproduces the same `N(t_end)`
+    /// the sensitivity run produces for `x`, so carrying `S` never perturbs the
+    /// compartment trajectory (the augmented system is triangular — `dx/dt` does
+    /// not depend on `S`).
+    #[test]
+    fn value_path_unchanged_by_sensitivity_carry() {
+        let cm = compiled_pure_death();
+        let (with, _) = integrate(&cm, &[0.1], &[1000.0], &[0], 5.0, 0.01, true);
+        let (without, _) = integrate(&cm, &[0.1], &[1000.0], &[0], 5.0, 0.01, false);
+        assert_eq!(
+            with[0].to_bits(),
+            without[0].to_bits(),
+            "carrying S must not change the compartment trajectory bit-for-bit"
+        );
+    }
 }
