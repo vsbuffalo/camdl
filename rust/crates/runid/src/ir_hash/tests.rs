@@ -117,6 +117,7 @@ fn representative_model() -> Model {
             actions: vec![Action::Set(SetAction {
                 compartment: "I".into(),
                 value: Expr::const_(0.0),
+                value_grad: Default::default(),
             })],
             kind: ir::intervention::InterventionKind::Scenario,
         }],
@@ -249,7 +250,12 @@ fn model_golden_hash() {
     // representative model's Poisson `rate` (a bare `Projected` argument whose
     // proj_grad = 1) shifts the model hash once — a deliberate re-key on the obs
     // side, mirroring the `rate_grad`/`rate_state_grad` re-keys above.
-    const GOLDEN: &str = "dbdcd662b4a63f55ddca4f630512ec6399ce9fd85a871ed8539ffbd0aac190d4";
+    // gh#390 (ir/VERSION -> 0.29, §1g): the event-jump sensitivity spine adds
+    // `*_grad` (∂amount/∂θ) to `Add`/`Set`/`FractionTransfer` actions — hashed like
+    // `rate_grad` (an event-amount gradient changes the fit, so it must re-key). The
+    // representative model's scheduled action shifts the model hash once at the bump
+    // — a deliberate, version-bumped re-key (event-jump gradients are run identity).
+    const GOLDEN: &str = "8099e918a5cbb5b6bd3a216a436395cccdc98d28a428a0c032ec8c365bf6537f";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -333,6 +339,28 @@ fn ir_proj_grad_changes_hash() {
         base,
         m.content_hash(),
         "a non-empty proj_grad must change the model hash (obs gradients are run identity)"
+    );
+}
+
+/// gh#390: a non-empty action `*_grad` (∂amount/∂θ, the event-jump sensitivity
+/// source term) must change the model hash — an event-amount gradient alters a
+/// gradient fit's posterior, so it is run identity like `rate_grad`.
+#[test]
+fn ir_action_grad_changes_hash() {
+    use ir::deriv::DerivEntry;
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    match &mut m.interventions[0].actions[0] {
+        Action::Set(sa) => {
+            sa.value_grad
+                .insert("beta".to_string(), DerivEntry::Grad(Expr::param("beta")));
+        }
+        other => panic!("representative model's first action must be Set, got {other:?}"),
+    }
+    assert_ne!(
+        base,
+        m.content_hash(),
+        "a non-empty action amount grad must change the model hash (event-jump gradients are run identity)"
     );
 }
 

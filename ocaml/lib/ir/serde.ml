@@ -307,6 +307,11 @@ let grad_map_of_json = function
 let grad_field key (m : (string * deriv_entry) list) =
   match m with [] -> [] | _ -> [(key, grad_map_to_json m)]
 
+(* Read an optional grad_map field, defaulting to [] when absent — the inverse of
+   [grad_field]. *)
+let grad_field_of j key =
+  match member_opt key j with None -> [] | Some g -> grad_map_of_json g
+
 (* [ic_grad]: compartment -> (param -> deriv_entry), a nested map (gh#275). Each
    inner map serialises exactly like a [grad_map]; the outer object is keyed by
    compartment. Matches the Rust `HashMap<String, ParamGradMap>` wire shape. *)
@@ -616,11 +621,11 @@ let intervention_schedule_of_json j =
 let action_to_json (a : action) : Yojson.Safe.t =
   match a with
   | FractionTransfer ft ->
-    obj [("fraction_transfer", obj [
+    obj [("fraction_transfer", obj ([
       ("src",      str ft.src);
       ("dst",      str ft.dst);
       ("fraction", expr_to_json ft.fraction);
-    ])]
+    ] @ grad_field "fraction_grad" ft.fraction_grad))]
   | AbsoluteTransfer at_ ->
     obj [("absolute_transfer", obj [
       ("src",   str at_.src);
@@ -628,15 +633,15 @@ let action_to_json (a : action) : Yojson.Safe.t =
       ("count", expr_to_json at_.count);
     ])]
   | Set sa ->
-    obj [("set", obj [
+    obj [("set", obj ([
       ("compartment", str sa.compartment);
       ("value",       expr_to_json sa.value);
-    ])]
+    ] @ grad_field "value_grad" sa.value_grad))]
   | AddAction aa ->
-    obj [("add", obj [
+    obj [("add", obj ([
       ("compartment", str aa.add_compartment);
       ("count",       expr_to_json aa.add_count);
-    ])]
+    ] @ grad_field "add_count_grad" aa.add_count_grad))]
 
 let action_of_json j =
   match j with
@@ -644,9 +649,10 @@ let action_of_json j =
     match key with
     | "fraction_transfer" ->
       FractionTransfer {
-        src      = as_string (member "src" v);
-        dst      = as_string (member "dst" v);
-        fraction = expr_of_json (member "fraction" v);
+        src           = as_string (member "src" v);
+        dst           = as_string (member "dst" v);
+        fraction      = expr_of_json (member "fraction" v);
+        fraction_grad = grad_field_of v "fraction_grad";
       }
     | "absolute_transfer" ->
       AbsoluteTransfer {
@@ -658,11 +664,13 @@ let action_of_json j =
       Set {
         compartment = as_string (member "compartment" v);
         value       = expr_of_json (member "value" v);
+        value_grad  = grad_field_of v "value_grad";
       }
     | "add" ->
       AddAction {
         add_compartment = as_string (member "compartment" v);
         add_count       = expr_of_json (member "count" v);
+        add_count_grad  = grad_field_of v "add_count_grad";
       }
     | k -> fail "unknown action '%s'" k
   )

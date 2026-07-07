@@ -709,6 +709,7 @@ mod tests {
             actions: vec![Action::Set(SetAction {
                 compartment: "Q".into(), // not declared (model has S, I, R)
                 value: Expr::const_(0.0),
+                value_grad: Default::default(),
             })],
             kind: crate::intervention::InterventionKind::Scenario,
         });
@@ -734,6 +735,7 @@ mod tests {
                 src: "S".into(),         // declared
                 dst: "Nowhere".into(),   // not declared
                 fraction: Expr::const_(0.1),
+                fraction_grad: Default::default(),
             })],
             kind: crate::intervention::InterventionKind::Event,
         });

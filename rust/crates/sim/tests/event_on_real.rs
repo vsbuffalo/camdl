@@ -70,6 +70,7 @@ fn model_with_real_event() -> CompiledModel {
             actions: vec![Action::Add(AddAction {
                 compartment: "W".into(),
                 count: Expr::const_(2.5),
+                count_grad: Default::default(),
             })],
             kind: ir::intervention::InterventionKind::Event,
         }],

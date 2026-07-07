@@ -273,10 +273,18 @@ type intervention_schedule =
      stay byte-identical. *)
   | Recurring of recurring_schedule
 
-type fraction_transfer = { src: string; dst: string; fraction: expr }
+(* [*_grad] = ∂amount/∂θ, the event-jump sensitivity source term for the ODE
+   gradient (gh#275 §1g / gh#390) — the [rate_grad] analogue for a scheduled
+   action's amount. Empty for a constant amount; populated by [Autodiff]. Absent
+   on [absolute_transfer]: its [min] jump is nonsmooth, so it is refused by the
+   gradient gate rather than differentiated. *)
+type fraction_transfer = { src: string; dst: string; fraction: expr;
+                           fraction_grad: (string * deriv_entry) list }
 type absolute_transfer = { src: string; dst: string; count: expr }
-type set_action        = { compartment: string; value: expr }
-type add_action        = { add_compartment: string; add_count: expr }
+type set_action        = { compartment: string; value: expr;
+                           value_grad: (string * deriv_entry) list }
+type add_action        = { add_compartment: string; add_count: expr;
+                           add_count_grad: (string * deriv_entry) list }
 
 type action =
   | FractionTransfer of fraction_transfer

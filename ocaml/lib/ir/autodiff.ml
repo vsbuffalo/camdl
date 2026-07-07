@@ -877,25 +877,41 @@ let differentiate_obs_arg (proj : projection) (arg : expr)
       | None -> None)
     param_names
 
-(** ∂(initial-condition expression)/∂θ for every parameter — one compartment's
-    entry in the model's [ic_grad] map (compartment → param → ∂init/∂param), the
-    ODE forward-sensitivity seed S(t_start) (gh#275 §1c C-seed).
-
-    Same compile-vs-defer POLICY as the obs/σ² driver ([obs_deriv_entry], the
-    "natural seam"): a genuine zero is dropped (an absent key IS a genuine zero),
-    and an [Omitted] or [Unsupported] coefficient becomes a serialized
-    [DEUnsupported] the fit-time gradient gate refuses ODE-NUTS on — a nonsmooth
-    initial condition still forward-simulates and fits by the gradient-free
-    backends (IF2/PF), exactly as a nonsmooth rate does. No projection is involved
-    (an IC is not an observation argument), so nothing is inlined. *)
-let differentiate_ic (ic_expr : expr) (param_names : string list)
+(** ∂(smooth scalar expression)/∂θ over every parameter, with the obs/σ² defer
+    POLICY ([obs_deriv_entry]): a genuine zero is dropped (an absent key IS a
+    genuine zero), and an [Omitted]/[Unsupported] coefficient becomes a serialized
+    [DEUnsupported] the fit-time gradient gate refuses ODE-NUTS on (the coefficient
+    still forward-simulates and fits by gradient-free IF2/PF). The shared kernel
+    under both the IC seed and the event-jump source term — a coefficient that is
+    neither a rate, an obs argument, nor a projection, so nothing is inlined. *)
+let differentiate_coeff (e : expr) (param_names : string list)
     (tfs : time_function list) (tbls : table list) : grad_map =
   List.filter_map
     (fun p ->
-      match obs_deriv_entry (differentiate ic_expr (WrtParam p) tfs tbls) with
+      match obs_deriv_entry (differentiate e (WrtParam p) tfs tbls) with
       | Some de -> Some (p, de)
       | None -> None)
     param_names
+
+(** ∂(initial-condition expression)/∂θ — one compartment's entry in the model's
+    [ic_grad] map, the ODE forward-sensitivity seed S(t_start) (gh#275 §1c). *)
+let differentiate_ic = differentiate_coeff
+
+(** Fill a scheduled action's ∂amount/∂θ (`*_grad`) — the event-jump sensitivity
+    source term for the ODE gradient (gh#275 §1g / gh#390). [Add]/[Set]/
+    [FractionTransfer] carry a smooth jump map and are differentiated; the
+    [AbsoluteTransfer] [min] is nonsmooth (refused by the gradient gate), so it is
+    passed through untouched. *)
+let differentiate_action (param_names : string list)
+    (tfs : time_function list) (tbls : table list) (a : action) : action =
+  match a with
+  | FractionTransfer ft ->
+    FractionTransfer { ft with fraction_grad = differentiate_coeff ft.fraction param_names tfs tbls }
+  | Set sa ->
+    Set { sa with value_grad = differentiate_coeff sa.value param_names tfs tbls }
+  | AddAction aa ->
+    AddAction { aa with add_count_grad = differentiate_coeff aa.add_count param_names tfs tbls }
+  | AbsoluteTransfer _ -> a
 
 (** Differentiate one likelihood argument: keep its [expr] (raw — the projection
     is inlined only inside the gradient, never stored) and fill its [grad]. *)

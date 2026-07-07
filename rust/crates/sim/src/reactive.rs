@@ -792,9 +792,10 @@ mod tests {
         use ir::expr::Expr;
         let frac = Action::FractionTransfer(FractionTransfer {
             src: "S".into(), dst: "V".into(), fraction: Expr::const_(0.7),
+            fraction_grad: Default::default(),
         });
-        let set = Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(0.0) });
-        let add = Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(1.0) });
+        let set = Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(0.0), value_grad: Default::default() });
+        let add = Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(1.0), count_grad: Default::default() });
         assert_eq!(action_verbs(&[frac.clone()]), "transfer");
         assert_eq!(action_verbs(&[set.clone()]), "set");
         assert_eq!(action_verbs(&[add.clone()]), "add");

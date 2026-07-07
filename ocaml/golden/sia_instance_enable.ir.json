@@ -1,4 +1,4 @@
-{"ir_version":"0.28","validated_by":"ocaml-compiler-v0.28","model":{"name":"sia_instance_enable","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.29","validated_by":"ocaml-compiler-v0.29","model":{"name":"sia_instance_enable","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_north","kind":"integer"},
 {"name":"S_south","kind":"integer"},
 {"name":"I_north","kind":"integer"},
@@ -13,8 +13,8 @@
 {"name":"recovery_north","stoichiometry":[["I_north",-1],["R_north",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I_north"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I_north","dest_compartment":"R_north"},"rate_grad":{"gamma":{"grad":{"pop":"I_north"}}},"rate_state_grad":{"I_north":{"grad":{"param":"gamma"}}}},
 {"name":"recovery_south","stoichiometry":[["I_south",-1],["R_south",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I_south"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I_south","dest_compartment":"R_south"},"rate_grad":{"gamma":{"grad":{"pop":"I_south"}}},"rate_state_grad":{"I_south":{"grad":{"param":"gamma"}}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[
-{"name":"sia_north","base_name":"sia","fire":{"scheduled":{"at_times":[120.0]}},"actions":[{"fraction_transfer":{"src":"S_north","dst":"V_north","fraction":{"param":"vacc_cov"}}}]},
-{"name":"sia_south","base_name":"sia","fire":{"scheduled":{"at_times":[120.0]}},"actions":[{"fraction_transfer":{"src":"S_south","dst":"V_south","fraction":{"param":"vacc_cov"}}}]}
+{"name":"sia_north","base_name":"sia","fire":{"scheduled":{"at_times":[120.0]}},"actions":[{"fraction_transfer":{"src":"S_north","dst":"V_north","fraction":{"param":"vacc_cov"},"fraction_grad":{"vacc_cov":{"grad":{"const":1.0}}}}}]},
+{"name":"sia_south","base_name":"sia","fire":{"scheduled":{"at_times":[120.0]}},"actions":[{"fraction_transfer":{"src":"S_south","dst":"V_south","fraction":{"param":"vacc_cov"},"fraction_grad":{"vacc_cov":{"grad":{"const":1.0}}}}}]}
 ],"observations":[],"parameters":[
 {"name":"beta","value":{"mode":"estimated","bounds":[0.001,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},

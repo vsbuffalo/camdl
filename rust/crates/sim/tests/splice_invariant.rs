@@ -81,6 +81,7 @@ fn sir_model(output_times: Vec<f64>, t_end: f64) -> (CompiledModel, Vec<f64>) {
             src: "S".into(),
             dst: "V".into(),
             fraction: Expr::Const(ConstExpr { value: frac }),
+            fraction_grad: Default::default(),
         })],
     };
 

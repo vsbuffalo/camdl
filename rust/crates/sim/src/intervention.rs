@@ -448,7 +448,7 @@ mod tests {
     }
 
     fn set_v() -> Action {
-        Action::Set(SetAction { compartment: "V".into(), value: Expr::const_(0.0) })
+        Action::Set(SetAction { compartment: "V".into(), value: Expr::const_(0.0), value_grad: Default::default() })
     }
 
     /// Every non-finite kind must error before the cast. `NaN as i64 == 0`,

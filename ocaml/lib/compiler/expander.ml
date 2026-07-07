@@ -5944,7 +5944,7 @@ let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.a
       | Some e -> resolve_comp_name ctx env e | None -> "?" in
     (match List.assoc_opt "fraction" kwargs with
      | Some fe ->
-       [Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction = resolve_expr ctx env fe }]
+       [Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction = resolve_expr ctx env fe; Ir.fraction_grad = [] }]
      | None ->
        match List.assoc_opt "count" kwargs with
        | Some ce ->
@@ -5964,12 +5964,12 @@ let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.a
         ~hint:"check the compartments block, or fix the kwarg name \
                (e.g. fraction, count, from, to)"
         ();
-    [Ir.Set { Ir.compartment = concrete; Ir.value = resolve_expr ctx env expr }]
+    [Ir.Set { Ir.compartment = concrete; Ir.value = resolve_expr ctx env expr; Ir.value_grad = [] }]
   | AAdd (comp, idxs, expr) ->
     let idx_vals = List.map (index_item_to_str env) idxs in
     let concrete = if idx_vals = [] then comp
       else String.concat "_" (comp :: idx_vals) in
-    [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }]
+    [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr; Ir.add_count_grad = [] }]
 
 let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
   let t_start = match ctx.simulate with

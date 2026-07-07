@@ -42,6 +42,13 @@ val differentiate_ic :
   expr -> string list -> time_function list -> table list ->
   (string * deriv_entry) list
 
+(** Fill a scheduled action's ∂amount/∂θ (`*_grad`) — the event-jump sensitivity
+    source term (gh#275 §1g / gh#390). Add/Set/FractionTransfer are differentiated;
+    AbsoluteTransfer (nonsmooth [min], refused by the gradient gate) is passed
+    through unchanged. *)
+val differentiate_action :
+  string list -> time_function list -> table list -> action -> action
+
 (** Attach per-parameter gradients to a single likelihood's arguments. *)
 val differentiate_likelihood :
   projection -> likelihood -> string list -> time_function list -> table list ->

@@ -334,6 +334,7 @@ fn snapshot_reads_post_intervention_state() {
                 src: "S".into(),
                 dst: "V".into(),
                 fraction: Expr::Const(ConstExpr { value: 0.5 }),
+                fraction_grad: Default::default(),
             })],
         }],
         observations: vec![IrObservationModel {

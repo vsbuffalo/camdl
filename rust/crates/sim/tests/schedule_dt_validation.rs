@@ -195,6 +195,7 @@ fn model_with_recurring_period(period: f64) -> ir::Model {
         actions: vec![Action::Add(AddAction {
             compartment: "S".to_string(),
             count: ir::expr::Expr::const_(0.0),
+            count_grad: Default::default(),
         })],
         kind: Default::default(),
     });

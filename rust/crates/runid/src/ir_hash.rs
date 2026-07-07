@@ -924,6 +924,9 @@ impl ContentAddressed for Action {
                 h.write_str(&a.src);
                 h.write_str(&a.dst);
                 a.fraction.hash_into(h);
+                // ∂fraction/∂θ (gh#275 §1g): event-jump sensitivity source term,
+                // hashed like rate_grad (sorted by key). Empty ⇒ length-0 prefix.
+                h.write_str_map(a.fraction_grad.iter());
             }
             Action::AbsoluteTransfer(a) => {
                 h.write_u32(1);
@@ -935,11 +938,13 @@ impl ContentAddressed for Action {
                 h.write_u32(2);
                 h.write_str(&a.compartment);
                 a.value.hash_into(h);
+                h.write_str_map(a.value_grad.iter());
             }
             Action::Add(a) => {
                 h.write_u32(3);
                 h.write_str(&a.compartment);
                 a.count.hash_into(h);
+                h.write_str_map(a.count_grad.iter());
             }
         }
     }

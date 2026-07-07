@@ -86,6 +86,7 @@ fn balance_model() -> CompiledModel {
                 src: "S".into(),
                 dst: "R".into(),
                 fraction: Expr::const_(0.2),
+                fraction_grad: Default::default(),
             })],
             kind: ir::intervention::InterventionKind::Scenario,
         }],

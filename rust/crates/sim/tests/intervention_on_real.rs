@@ -37,6 +37,7 @@ fn intervention_set_on_real_compartment_is_exact() {
         actions: vec![Action::Set(SetAction {
             compartment: "W".into(),
             value: Expr::const_(42.5),
+            value_grad: Default::default(),
         })],
         kind: ir::intervention::InterventionKind::Scenario,
     });
@@ -83,6 +84,7 @@ fn intervention_set_negative_on_real_compartment_errors() {
         actions: vec![Action::Set(SetAction {
             compartment: "W".into(),
             value: Expr::const_(-5.0),
+            value_grad: Default::default(),
         })],
         kind: ir::intervention::InterventionKind::Scenario,
     });

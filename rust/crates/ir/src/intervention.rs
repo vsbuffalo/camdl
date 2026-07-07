@@ -35,6 +35,12 @@ pub struct FractionTransfer {
     pub src:      String,
     pub dst:      String,
     pub fraction: Expr,
+    /// ∂fraction/∂θ — the event-jump sensitivity source term for the ODE gradient
+    /// (gh#275 §1g / gh#390). The `rate_grad` analogue for a scheduled action's
+    /// amount; empty (omitted) for a constant fraction and on gradient-free
+    /// backends. Populated by the OCaml `differentiate_action` pass.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub fraction_grad: crate::deriv::ParamGradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,12 +54,18 @@ pub struct AbsoluteTransfer {
 pub struct SetAction {
     pub compartment: String,
     pub value:       Expr,
+    /// ∂value/∂θ — event-jump sensitivity source term (gh#275 §1g / gh#390).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub value_grad:  crate::deriv::ParamGradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AddAction {
     pub compartment: String,
     pub count:       Expr,
+    /// ∂count/∂θ — event-jump sensitivity source term (gh#275 §1g / gh#390).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub count_grad:  crate::deriv::ParamGradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

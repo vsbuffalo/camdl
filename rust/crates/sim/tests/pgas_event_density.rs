@@ -113,6 +113,7 @@ fn sir_with_seed_event() -> Model {
         actions: vec![Action::Add(AddAction {
             compartment: "I".into(),
             count: Expr::Const(ConstExpr { value: 5.0 }),
+            count_grad: Default::default(),
         })],
         kind: ir::intervention::InterventionKind::Event,
     };
@@ -197,6 +198,7 @@ fn seir_with_seed_event(n_seed: i64, tau: f64) -> Model {
         actions: vec![Action::Add(AddAction {
             compartment: "E".into(),
             count: Expr::Const(ConstExpr { value: n_seed as f64 }),
+            count_grad: Default::default(),
         })],
         kind: ir::intervention::InterventionKind::Event,
     };

@@ -508,7 +508,7 @@ fn within_dt_collision_single_intervention_add_fires_once() {
     let compiled = collision_model(vec![scheduled(
         "campaign",
         vec![2.3, 2.4],
-        Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+        Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
     )]);
     for (name, sim, cfg) in battery_backends(0.0, 5.0) {
         let (s, v) = collision_final_s_v(&compiled, &*sim, &cfg);
@@ -557,12 +557,12 @@ fn within_dt_collision_two_interventions_each_fire_once() {
         scheduled(
             "a",
             vec![2.3],
-            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
         ),
         scheduled(
             "b",
             vec![2.4],
-            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(100.0) }),
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(100.0), count_grad: Default::default() }),
         ),
     ]);
     for (name, sim, cfg) in battery_backends(0.0, 5.0) {
@@ -584,7 +584,7 @@ fn on_grid_intervention_still_fires_once() {
     let compiled = collision_model(vec![scheduled(
         "campaign",
         vec![3.0],
-        Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+        Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
     )]);
     for (name, sim, cfg) in battery_backends(0.0, 5.0) {
         let (s, v) = collision_final_s_v(&compiled, &*sim, &cfg);

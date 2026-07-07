@@ -120,13 +120,13 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
   List.iter (fun (iv : intervention) ->
     List.iter (fun (act : action) ->
       match act with
-      | FractionTransfer { src; dst; fraction } ->
+      | FractionTransfer { src; dst; fraction; _ } ->
         add src; add dst; add_expr fraction
       | AbsoluteTransfer { src; dst; count } ->
         add src; add dst; add_expr count
-      | Set { compartment; value } ->
+      | Set { compartment; value; _ } ->
         add compartment; add_expr value
-      | AddAction { add_compartment; add_count } ->
+      | AddAction { add_compartment; add_count; _ } ->
         add add_compartment; add_expr add_count
     ) iv.actions
   ) m.interventions;

@@ -1,4 +1,4 @@
-{"ir_version":"0.28","validated_by":"ocaml-compiler-v0.28","model":{"name":"polio_age","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.29","validated_by":"ocaml-compiler-v0.29","model":{"name":"polio_age","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_under5","kind":"integer"},
 {"name":"S_over5","kind":"integer"},
 {"name":"E_under5","kind":"integer"},
@@ -21,7 +21,7 @@
 ],"ode_equations":[],"time_functions":[],"tables":[
 {"name":"C_age","values":[{"const":8.0},{"const":3.0},{"const":3.0},{"const":6.0}],"out_of_bounds":"error"}
 ],"interventions":[
-{"name":"sia_round_1","fire":{"scheduled":{"at_times":[180.0,545.0,910.0]}},"actions":[{"fraction_transfer":{"src":"S_under5","dst":"V_under5","fraction":{"param":"vacc_frac"}}}]}
+{"name":"sia_round_1","fire":{"scheduled":{"at_times":[180.0,545.0,910.0]}},"actions":[{"fraction_transfer":{"src":"S_under5","dst":"V_under5","fraction":{"param":"vacc_frac"},"fraction_grad":{"vacc_frac":{"grad":{"const":1.0}}}}}]}
 ],"observations":[],"parameters":[
 {"name":"beta","value":{"mode":"estimated","bounds":[0.001,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},

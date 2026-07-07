@@ -566,11 +566,26 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
             ic_map)
       | Ir.Explicit _ | Ir.FromDistribution _ -> []
     in
+    (* Event/intervention action autodiff (gh#275 §1g / gh#390): ∂amount/∂θ for
+       each scheduled Add/Set/FractionTransfer, filling the action's [*_grad] — the
+       event-jump sensitivity source term. Uniform over all interventions (a
+       reactive or AbsoluteTransfer action still gets a grad here; the fit-time
+       gradient gate is the single place that refuses those cells). A constant
+       amount yields an empty grad and stays golden-neutral. *)
+    let interventions =
+      Passtime.time "autodiff-action" (fun () ->
+        List.map
+          (fun (iv : Ir.intervention) ->
+            { iv with Ir.actions =
+                List.map (Autodiff.differentiate_action param_names tfs tbls) iv.actions })
+          d.model.Ir.interventions)
+    in
     (* Write the resolved quantity dimensions (#5) back onto the model before the
        value-preserving transforms (constant-fold/LICM never touch quantities). *)
     let m = annotate_quantity_dims qdims
               { d.model with Ir.transitions = transitions;
                              Ir.observations = observations;
+                             Ir.interventions;
                              Ir.ic_grad } in
     Ok (maybe_licm (maybe_constant_fold m))
 
