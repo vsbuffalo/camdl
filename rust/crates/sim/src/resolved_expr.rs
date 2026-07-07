@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use ir::expr::{BinOp, Expr, UnOp};
-use ir::deriv::{DerivEntry, UnsupportedReason};
+use ir::deriv::{CompGradMap, DerivEntry, UnsupportedReason};
 use ir::table::OobPolicy;
 
 use crate::error::SimError;
@@ -871,6 +871,48 @@ pub(crate) fn resolve_grad_map(
         out.push((model_idx, resolved));
     }
     Ok(out)
+}
+
+/// A resolved compartment-keyed gradient map — `(compartment_idx,
+/// ResolvedDerivEntry)` pairs. The resolved form of `rate_state_grad`
+/// (∂rate/∂compartment, gh#275). A **newtype**, not an alias for
+/// [`ResolvedGradMap`], because its `usize`s are COMPARTMENT indices, not
+/// parameter indices — the two are structurally identical, so a swap into the
+/// parameter path would silently mis-index the ODE sensitivity assembly. Keeping
+/// them distinct types makes that a compile error.
+pub struct ResolvedCompGradMap(pub Vec<(usize, ResolvedDerivEntry)>);
+
+/// Resolve a [`CompGradMap`] (compartment → DerivEntry) into a
+/// [`ResolvedCompGradMap`]. Mirrors [`resolve_grad_map`], but resolves each key as
+/// a COMPARTMENT name via `ctx.comp_index` — the resolver the `CompGradMap`
+/// newtype forces (`ir::deriv`). A key that is not a declared compartment is a
+/// malformed IR: reject it loudly, exactly as the parameter path does (a dropped
+/// ∂rate/∂compartment component reads as zero to the ODE sensitivity, silently
+/// integrating a different `J_x` than the model's dynamics).
+pub(crate) fn resolve_comp_grad_map(
+    grad: &CompGradMap,
+    ctx: &ResolveCtx<'_>,
+) -> Result<ResolvedCompGradMap, SimError> {
+    let mut out = Vec::with_capacity(grad.0.len());
+    for (name, entry) in grad.iter() {
+        let comp_idx = *ctx.comp_index.get(name.as_str()).ok_or_else(|| {
+            SimError::Validation(format!(
+                "rate_state_grad references unknown compartment '{}' — every \
+                 ∂rate/∂compartment key must be a declared compartment. A dropped \
+                 component is silently treated as zero by the ODE forward \
+                 sensitivity, integrating a different J_x than the model's \
+                 dynamics. Malformed IR (likely a stale WrtPop autodiff key).",
+                name
+            ))
+        })?;
+        let resolved = match entry {
+            DerivEntry::Grad(e) => ResolvedDerivEntry::Grad(resolve_expr(e, ctx)?),
+            DerivEntry::Unsupported { code, .. } =>
+                ResolvedDerivEntry::Unsupported { code: *code },
+        };
+        out.push((comp_idx, resolved));
+    }
+    Ok(ResolvedCompGradMap(out))
 }
 
 /// The single shared seam that turns a compiler-emitted gradient map into a
