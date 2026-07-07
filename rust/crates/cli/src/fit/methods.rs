@@ -145,6 +145,23 @@ pub const METHODS: &[InferenceMethod] = &[
         use_for: "Bayesian posteriors on ODE/equilibrium models without gradients.",
         status_note: "",
     },
+    InferenceMethod {
+        algorithm: FitAlgorithm::Nuts,
+        backend: InferenceBackend::Ode,
+        category: MethodCategory::Inference,
+        status: MethodStatus::Beta,
+        one_liner: "No-U-Turn Sampler on the deterministic ODE marginal likelihood \
+                    (gradient-based, via forward sensitivities).",
+        use_for: "Bayesian posteriors on ODE/equilibrium models — the gradient \
+                  sampler; scales to correlated, moderate-dimension posteriors \
+                  better than the gradient-free `mh`.",
+        status_note:
+            "gh#275 Phase 2. Requires a differentiable model (the capability gate \
+             refuses an unsupported rate/observation gradient, an adaptive \
+             integrator, a scheduled effect, or a parameterized initial \
+             condition). On stochastic backends, use `pgas` (which runs NUTS on \
+             the conditioned trajectory).",
+    },
 ];
 
 /// Look up a method by (algorithm, backend). Returns `None` if the pair
@@ -197,6 +214,7 @@ fn parse_algorithm(s: &str) -> Option<FitAlgorithm> {
         "pgas" => FitAlgorithm::Pgas,
         "pmmh" => FitAlgorithm::Pmmh,
         "mh" => FitAlgorithm::Mh,
+        "nuts" => FitAlgorithm::Nuts,
         "pfilter" => FitAlgorithm::Pfilter,
         "nl-sbplx" => FitAlgorithm::NlSbplx,
         "nl-bobyqa" => FitAlgorithm::NlBobyqa,
@@ -270,10 +288,10 @@ fn rejection_reason(
              between θ updates. Under ODE all particles produce identical \
              trajectories per θ, so the CSMC step is degenerate.\n\n  \
              If you want Bayesian inference on the ODE backend, use:\n    \
-             algorithm = \"mh\"     vanilla MH on the deterministic \
-                                       likelihood (Phase 2)\n    \
              algorithm = \"nuts\"   gradient-based NUTS via forward \
-                                       sensitivity (Phase 3)",
+                                       sensitivities (the gradient sampler)\n    \
+             algorithm = \"mh\"     gradient-free MH on the deterministic \
+                                       likelihood",
         ),
         (A::Pmmh, B::Ode) => Some(
             "PMMH (Pseudo-Marginal Metropolis-Hastings) wraps a particle \
@@ -306,21 +324,14 @@ fn rejection_reason(
              algorithm = \"pgas\"   Particle Gibbs (default Bayesian path)\n    \
              algorithm = \"pmmh\"   Pseudo-marginal MH",
         ),
-        _ => None,
-    }
-}
-
-/// Tailored hint for a *known-but-unsupported* algorithm name that has no
-/// registry entry or dispatcher (so it never parses to [`FitAlgorithm`]) — it
-/// is surfaced at the parse boundary ([`parse_combo`]) rather than in
-/// `validate_combo`. `nuts` (Phase 3, planned) is the only such name today.
-fn unsupported_algorithm_hint(algorithm: &str) -> Option<&'static str> {
-    match algorithm {
-        "nuts" => Some(
-            "Vanilla NUTS on a stochastic likelihood is not a coherent \
-             algorithm — gradients are noisy under PF wrapping. PGAS \
-             handles this by integrating NUTS into a Gibbs sweep over \
-             trajectories.\n\n  \
+        (A::Nuts, B::ChainBinomial) => Some(
+            "NUTS needs a closed-form gradient of log p(y | θ), which only a \
+             directly-differentiable (deterministic) likelihood provides. \
+             Under the chain_binomial backend the marginal likelihood is an \
+             intractable integral over latent trajectories — its gradient is \
+             not available in closed form, so vanilla NUTS is not a coherent \
+             algorithm here. PGAS handles this by running NUTS-on-θ *inside* a \
+             Gibbs sweep, conditioned on a sampled trajectory.\n\n  \
              If you want gradient-based Bayesian inference on the \
              chain_binomial backend, use:\n    \
              algorithm = \"pgas\"   integrates NUTS-on-θ inside a Gibbs sweep",
@@ -356,8 +367,9 @@ fn render_invalid_combo(algorithm: FitAlgorithm, backend: InferenceBackend) -> S
 /// Render the structured error for an *unparsed* `(algorithm, backend)` string
 /// pair at the CLI boundary ([`parse_combo`]): an unknown algorithm and/or
 /// backend name. `parsed_*` carry the parse results so the message names which
-/// side failed. A known-but-unsupported algorithm name (`nuts`) gets its
-/// tailored hint here, since it never reaches the typed `validate_combo`.
+/// side failed. Every algorithm in the registry vocabulary parses, so a
+/// valid-but-unsupported *pair* (e.g. `nuts` + `chain_binomial`) is handled by
+/// [`validate_combo`]/[`rejection_reason`], not here.
 fn render_unknown_combo(
     algorithm: &str,
     backend: &str,
@@ -393,9 +405,6 @@ fn render_unknown_combo(
         }
         // Both parsed → a valid-but-unsupported pair, handled by validate_combo.
         (false, false) => {}
-    }
-    if let Some(hint) = unsupported_algorithm_hint(algorithm) {
-        append_indented(&mut out, hint);
     }
     append_matrix_footer(&mut out);
     out
@@ -536,7 +545,7 @@ pub fn resolve_obs_alignment(
         // PF algorithms (if2/pgas/pmmh/pfilter). The arm exists for exhaustiveness;
         // obs alignment is a particle-filter concept (ODE scores on the integrator
         // grid), so it is a clear error rather than a panic.
-        A::NlSbplx | A::NlBobyqa | A::Mh => Err(format!(
+        A::NlSbplx | A::NlBobyqa | A::Mh | A::Nuts => Err(format!(
             "obs_alignment does not apply to the ODE algorithm '{algorithm}' — \
              observations are scored on the integrator grid."
         )),
@@ -601,7 +610,7 @@ pub fn validate_ic_free(algorithm: FitAlgorithm, correlated: bool) -> Result<(),
              `ic_free = true` from the fit."
                 .into(),
         ),
-        A::NlSbplx | A::NlBobyqa | A::Mh => Err(format!(
+        A::NlSbplx | A::NlBobyqa | A::Mh | A::Nuts => Err(format!(
             "ic_free = true is not supported with the `{algorithm}` algorithm \
              (ODE backend). The deterministic likelihood (compute_ode_loglik) \
              sums over every observation time with no first-observation skip, so \
@@ -1195,15 +1204,25 @@ mod tests {
     }
 
     #[test]
-    fn nuts_is_rejected_at_the_parse_boundary_with_a_tailored_hint() {
-        // `nuts` is a known-but-unimplemented algorithm: it has no registry
-        // entry and no dispatcher, so it never parses to `FitAlgorithm`. The
-        // tailored "use pgas instead" hint must survive at the parse boundary
-        // (`parse_combo`) rather than degrade to a bare unknown-algorithm error.
+    fn nuts_on_ode_is_supported() {
+        // `nuts` is a real method on the ODE backend (gh#275 Phase 2): it parses
+        // to `FitAlgorithm::Nuts` and validates to the registry entry.
+        let m = parse_combo("nuts", "ode").expect("nuts+ode must be a supported method");
+        assert_eq!(m.algorithm, FitAlgorithm::Nuts);
+        assert_eq!(m.backend, InferenceBackend::Ode);
+    }
+
+    #[test]
+    fn nuts_on_stochastic_backend_steers_to_pgas() {
+        // `nuts` now *parses* (it is a known algorithm), so the stochastic-backend
+        // rejection is a valid-but-unsupported *typed pair* handled by
+        // `validate_combo` — NOT a bare "unknown algorithm" at the parse boundary.
+        // The tailored steer-to-pgas hint must survive there: vanilla NUTS has no
+        // closed-form gradient under PF wrapping, so the user is pointed at PGAS.
         let err = parse_combo("nuts", "chain_binomial").unwrap_err();
         assert!(
-            err.contains("Unknown algorithm \"nuts\""),
-            "names the unknown algorithm: {err}"
+            !err.contains("Unknown algorithm"),
+            "nuts parses now — must NOT degrade to an unknown-algorithm error: {err}"
         );
         assert!(err.contains("NUTS"), "carries the tailored NUTS explanation: {err}");
         assert!(err.contains("pgas"), "points the user at the supported alternative: {err}");

@@ -109,9 +109,10 @@ impl From<FitAlgorithm> for LoglikType {
             FitAlgorithm::Pmmh => LoglikType::Marginal,
             FitAlgorithm::Pfilter => LoglikType::Marginal,
             // Deterministic ODE-skeleton marginals.
-            FitAlgorithm::Mh | FitAlgorithm::NlSbplx | FitAlgorithm::NlBobyqa => {
-                LoglikType::OdeMarginal
-            }
+            FitAlgorithm::Mh
+            | FitAlgorithm::Nuts
+            | FitAlgorithm::NlSbplx
+            | FitAlgorithm::NlBobyqa => LoglikType::OdeMarginal,
         }
     }
 }

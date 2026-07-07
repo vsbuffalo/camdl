@@ -30,6 +30,7 @@ pub enum FitAlgorithm {
     #[serde(rename = "pgas")]     Pgas,
     #[serde(rename = "pmmh")]     Pmmh,
     #[serde(rename = "mh")]       Mh,
+    #[serde(rename = "nuts")]     Nuts,
     #[serde(rename = "pfilter")]  Pfilter,
     #[serde(rename = "nl-sbplx")] NlSbplx,
     #[serde(rename = "nl-bobyqa")] NlBobyqa,
@@ -44,6 +45,7 @@ impl FitAlgorithm {
             FitAlgorithm::Pgas     => "pgas",
             FitAlgorithm::Pmmh     => "pmmh",
             FitAlgorithm::Mh       => "mh",
+            FitAlgorithm::Nuts     => "nuts",
             FitAlgorithm::Pfilter  => "pfilter",
             FitAlgorithm::NlSbplx  => "nl-sbplx",
             FitAlgorithm::NlBobyqa => "nl-bobyqa",
@@ -57,7 +59,10 @@ impl FitAlgorithm {
     /// refusals — a sampler with no resolvable draws is *incomplete*, never an
     /// "optimizer fit" (gh#343).
     pub fn is_posterior_sampler(self) -> bool {
-        matches!(self, FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Mh)
+        matches!(
+            self,
+            FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Mh | FitAlgorithm::Nuts
+        )
     }
 
     /// An optimizer: it returns a single best-fit point (no posterior cloud), so

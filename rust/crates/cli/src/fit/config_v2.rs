@@ -1254,6 +1254,45 @@ pub enum Stage {
         record_prequential: bool,
     },
 
+    /// NUTS on the deterministic ODE marginal likelihood (gh#275 Phase 2) — a
+    /// gradient-based Bayesian sampler using forward sensitivities (`det_grad`).
+    /// Deterministic-likelihood, `ode`-only; on a stochastic backend gradient-NUTS
+    /// lives inside `pgas`. Leaner than `PGAS` — no particles, no CSMC, no
+    /// tempering; just NUTS warm-up (dual-averaging step size) and sampling.
+    #[serde(rename = "nuts")]
+    Nuts {
+        backend: crate::run_meta::InferenceBackend,
+        chains: usize,
+        /// NUTS warm-up (adaptation) iterations — the step size adapts via dual
+        /// averaging; these draws are discarded. Default 500.
+        #[serde(default = "default_nuts_warmup")]
+        warmup: usize,
+        /// Posterior draws KEPT per chain (post-warm-up). Default 500.
+        #[serde(default = "default_nuts_samples")]
+        samples: usize,
+        /// Toml-side spelling `init_mle` (see `Stage::PGAS`).
+        #[serde(default, rename = "init_mle")]
+        starts_from: StartsFrom,
+        /// Per-chain init draws (see `Stage::IF2`). Toml key `init`.
+        #[serde(default, rename = "init")]
+        init_method: super::init::InitMethod,
+        #[serde(default)]
+        survey_path: Option<std::path::PathBuf>,
+        #[serde(default)]
+        survey_top_k_n: Option<usize>,
+        /// Maximum NUTS tree depth (Hoffman & Gelman 2014). Default 10.
+        #[serde(default = "default_max_tree_depth")]
+        max_tree_depth: usize,
+        /// Target mean acceptance for dual averaging (Stan default 0.8).
+        #[serde(default = "default_target_accept")]
+        target_accept: f64,
+        /// NUTS mass matrix: `true` = dense (full covariance), `false` = diagonal.
+        /// Default true. (v1 warm-up uses identity mass; dense adaptation is a
+        /// tracked follow-up, so this currently only records intent.)
+        #[serde(default = "default_dense_mass")]
+        dense_mass: bool,
+    },
+
     /// NLopt Sbplx (subspace-searching simplex) — deterministic MLE on the
     /// ODE-skeleton likelihood. Default for ODE-backend MLE; robust to
     /// boundary non-smoothness. Phase 1 of the ODE-inference proposal.
@@ -1338,6 +1377,7 @@ impl Stage {
             | Stage::PGAS { starts_from, .. }
             | Stage::PMMH { starts_from, .. }
             | Stage::Mh { starts_from, .. }
+            | Stage::Nuts { starts_from, .. }
             | Stage::PFilter { starts_from, .. } => starts_from,
             Stage::NlSbplx(c) | Stage::NlBobyqa(c) => &c.starts_from,
         }
@@ -1354,6 +1394,7 @@ impl Stage {
             Stage::PGAS     { .. } => FitAlgorithm::Pgas,
             Stage::PMMH     { .. } => FitAlgorithm::Pmmh,
             Stage::Mh       { .. } => FitAlgorithm::Mh,
+            Stage::Nuts     { .. } => FitAlgorithm::Nuts,
             Stage::PFilter  { .. } => FitAlgorithm::Pfilter,
             Stage::NlSbplx  { .. } => FitAlgorithm::NlSbplx,
             Stage::NlBobyqa { .. } => FitAlgorithm::NlBobyqa,
@@ -1370,13 +1411,14 @@ impl Stage {
             | Stage::PGAS    { backend, .. }
             | Stage::PMMH    { backend, .. }
             | Stage::Mh      { backend, .. }
+            | Stage::Nuts    { backend, .. }
             | Stage::PFilter { backend, .. } => *backend,
             Stage::NlSbplx(c) | Stage::NlBobyqa(c) => c.backend,
         }
     }
 
     pub fn requires_priors(&self) -> bool {
-        matches!(self, Stage::PGAS { .. } | Stage::PMMH { .. } | Stage::Mh { .. })
+        matches!(self, Stage::PGAS { .. } | Stage::PMMH { .. } | Stage::Mh { .. } | Stage::Nuts { .. })
     }
 
     pub fn chains(&self) -> usize {
@@ -1385,6 +1427,7 @@ impl Stage {
             Stage::PGAS { chains, .. } => *chains,
             Stage::PMMH { chains, .. } => *chains,
             Stage::Mh { chains, .. } => *chains,
+            Stage::Nuts { chains, .. } => *chains,
             Stage::PFilter { .. } => 1,
             Stage::NlSbplx(c) | Stage::NlBobyqa(c) => c.chains,
         }
@@ -1398,7 +1441,8 @@ impl Stage {
             Stage::IF2 { init_method, .. }
             | Stage::PGAS { init_method, .. }
             | Stage::PMMH { init_method, .. }
-            | Stage::Mh { init_method, .. } => init_method.clone(),
+            | Stage::Mh { init_method, .. }
+            | Stage::Nuts { init_method, .. } => init_method.clone(),
             Stage::PFilter { .. } | Stage::NlSbplx(_) | Stage::NlBobyqa(_) => {
                 super::init::InitMethod::default()
             }
@@ -1417,6 +1461,7 @@ impl Stage {
             Stage::PGAS { sweeps, .. } => *sweeps as u64,
             Stage::PMMH { iterations, .. } => *iterations as u64,
             Stage::Mh { iterations, .. } => *iterations as u64,
+            Stage::Nuts { samples, .. } => *samples as u64,
             Stage::PFilter { .. } | Stage::NlSbplx(_) | Stage::NlBobyqa(_) => 0,
         }
     }
@@ -1537,6 +1582,29 @@ impl Stage {
                 "adapt": adapt,
                 "adapt_start": adapt_start,
             }),
+            // Nuts (deterministic ODE gradient sampler): omit ONLY `samples`
+            // (extension dimension, folded via `cas_target_length` like Mh's
+            // `iterations`). Every other field — warmup / max_tree_depth /
+            // target_accept / dense_mass AND the init selectors — is
+            // identity-defining, for the same reason as Mh.
+            Stage::Nuts {
+                backend, chains, warmup, starts_from,
+                init_method, survey_path, survey_top_k_n,
+                max_tree_depth, target_accept, dense_mass,
+                ..
+            } => json!({
+                "algorithm": "nuts",
+                "backend": backend,
+                "chains": chains,
+                "warmup": warmup,
+                "starts_from": starts_from,
+                "init_method": init_method,
+                "survey_path": survey_path,
+                "survey_top_k_n": survey_top_k_n,
+                "max_tree_depth": max_tree_depth,
+                "target_accept": target_accept,
+                "dense_mass": dense_mass,
+            }),
             // No extension dimension: hash the full stage. NLopt stages
             // also have no extension dimension — every knob (chains,
             // tolerance, max_evals, init_method, gate) is identity-
@@ -1561,7 +1629,8 @@ impl Stage {
             Stage::IF2 { init_method, survey_path, .. }
             | Stage::PGAS { init_method, survey_path, .. }
             | Stage::PMMH { init_method, survey_path, .. }
-            | Stage::Mh { init_method, survey_path, .. } => (init_method, survey_path),
+            | Stage::Mh { init_method, survey_path, .. }
+            | Stage::Nuts { init_method, survey_path, .. } => (init_method, survey_path),
             _ => return None,
         };
         match init {
@@ -1619,6 +1688,9 @@ fn default_csmc_sweeps_per_nuts() -> usize { 1 }
 fn default_n_trajectories() -> usize { 200 }
 fn default_dense_mass() -> bool { true }
 fn default_use_nuts() -> bool { true }
+fn default_nuts_warmup() -> usize { 500 }
+fn default_nuts_samples() -> usize { 500 }
+fn default_target_accept() -> f64 { 0.8 }
 
 // PMMH defaults
 fn default_pmmh_adapt() -> bool { true }
@@ -2149,7 +2221,7 @@ impl FitConfigV2 {
     pub fn single_init_multichain_warning(&self) -> Option<String> {
         use super::init::InitMethod;
         let offenders: Vec<String> = self.stages.iter()
-            .filter(|(_, s)| matches!(s, Stage::PGAS { .. } | Stage::PMMH { .. } | Stage::Mh { .. }))
+            .filter(|(_, s)| matches!(s, Stage::PGAS { .. } | Stage::PMMH { .. } | Stage::Mh { .. } | Stage::Nuts { .. }))
             .filter(|(_, s)| s.chains() > 1
                 && matches!(s.init_method(), InitMethod::Single))
             .map(|(name, s)| format!("'{}' ({}, chains = {})",
