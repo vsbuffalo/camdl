@@ -409,6 +409,41 @@ where it fails.
 
 ---
 
+## Gradient-based ODE fitting
+
+The ODE backend is a fitting backend, not only a forward simulator. Integrating
+the mean-field skeleton gives one trajectory per parameter point, so the
+deterministic likelihood `p(y | θ, ODE skeleton)` evaluates directly — no
+particle filter — and `camdl fit` samples the posterior on it two ways:
+
+- **`mh`** — gradient-free adaptive Metropolis-Hastings. Robust default; runs on
+  any ODE model the backend can integrate.
+- **`nuts`** — the No-U-Turn Sampler driven by **symbolic forward
+  sensitivities**. The compiler differentiates the rate and observation
+  expressions source-to-source and carries `∂x/∂θ` through fixed-step `rk4`, so
+  the gradient is exact — no finite differences. NUTS moves through the
+  correlated, ridge-shaped posteriors that stall gradient-free MH.
+
+```toml
+[stages.posterior]
+algorithm = "nuts" # or "mh" for the gradient-free sampler
+backend = "ode"
+chains = 4
+warmup = 500
+samples = 500
+```
+
+`nuts` needs a **differentiable model**: the capability gate refuses — naming
+the reason — an undifferentiable rate/observation gradient, an adaptive `rk45`
+integrator, a scheduled `interventions {}` / `events {}` effect, or a
+parameterized (`ivp`) initial condition; fit those with gradient-free `mh` or
+the stochastic-process methods instead. This targets a different statistical
+object than the stochastic backends — `p(y | θ, ODE skeleton)` rather than
+`p(y | θ)` — so see `camdl docs inference` (the ODE-backend fitting section) for
+when to pick which. Both samplers are `[beta]`.
+
+---
+
 ## Compiler diagnostics
 
 The compiler catches errors at compile time with domain-specific messages:
