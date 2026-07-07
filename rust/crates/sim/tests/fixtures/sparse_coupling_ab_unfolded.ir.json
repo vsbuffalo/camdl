@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.27",
-  "validated_by": "ocaml-compiler-v0.27",
+  "ir_version": "0.28",
+  "validated_by": "ocaml-compiler-v0.28",
   "model": {
     "name": "sparse_P8",
     "version": "0.3",

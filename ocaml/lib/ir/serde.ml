@@ -325,13 +325,21 @@ let ic_grad_of_json = function
    likelihood field `mean : diffable` therefore serialises as
    {"mean": {"expr": …, "grad": …}}. *)
 let diffable_to_json (d : diffable) : Yojson.Safe.t =
-  obj (("expr", expr_to_json d.expr) :: grad_field "grad" d.grad)
+  let proj_field =
+    match d.proj_grad with
+    | Some de -> [("proj_grad", deriv_entry_to_json de)]
+    | None -> []  (* absent = genuine zero (Rust `skip_serializing_if`) *)
+  in
+  obj (("expr", expr_to_json d.expr) :: (grad_field "grad" d.grad @ proj_field))
 
 let diffable_of_json j : diffable =
   { expr = expr_of_json (member "expr" j);
     grad = (match member_opt "grad" j with
             | None | Some `Null -> []
-            | Some g -> grad_map_of_json g) }
+            | Some g -> grad_map_of_json g);
+    proj_grad = (match member_opt "proj_grad" j with
+                 | None | Some `Null -> None
+                 | Some de -> Some (deriv_entry_of_json de)) }
 
 let draw_method_to_json (dm : draw_method) : Yojson.Safe.t =
   match dm with

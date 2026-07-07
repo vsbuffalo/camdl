@@ -118,30 +118,6 @@ pub fn references_state(expr: &ResolvedExpr) -> bool {
     }
 }
 
-/// Returns true if the expression references the observation projection
-/// (`ResolvedExpr::Projected`). gh#275: the ODE-gradient scorer needs `∂arg/∂projected`
-/// for a likelihood argument; it supports an argument that IS exactly `Projected`
-/// (`∂/∂projected = 1`, the `mean = projected` common case) and refuses an argument
-/// that references `Projected` in any more complex way (that needs the
-/// compiler-emitted `∂arg/∂Projected`, a follow-up). This walk distinguishes the two.
-pub fn references_projected(expr: &ResolvedExpr) -> bool {
-    match expr {
-        ResolvedExpr::Projected => true,
-        ResolvedExpr::BinOp { left, right, .. } =>
-            references_projected(left) || references_projected(right),
-        ResolvedExpr::UnOp { arg, .. } => references_projected(arg),
-        ResolvedExpr::Cond { pred, then_, else_ } =>
-            references_projected(pred) || references_projected(then_) || references_projected(else_),
-        ResolvedExpr::TableLookup { index, .. } => references_projected(index),
-        ResolvedExpr::UncheckedDim { inner } => references_projected(inner),
-        ResolvedExpr::Reduce(terms) => terms.iter().any(references_projected),
-        // Bindings are model dynamics surfaces — never observation-context, so
-        // they cannot carry `Projected` (it only appears in likelihood exprs).
-        ResolvedExpr::BindingRef(_) | ResolvedExpr::PerEvalRef(_) => false,
-        _ => false,
-    }
-}
-
 /// gh#284: the LICM per-eval staging contract, enforced in Rust as well as in
 /// the OCaml pass (`licm.ml is_invariant`). The body of per-eval binding `slot`
 /// is staged ONCE per θ-stable span (`stage_per_eval`, at `t_start` against a
@@ -1003,28 +979,48 @@ pub(crate) fn eval_deriv_entry(entry: &ResolvedDerivEntry, ctx: &EvalCtx<'_>) ->
 /// (Binomial/BetaBinomial) carries no gradient — it must be θ-independent.
 ///
 /// [`CompiledModel`]: crate::compiled_model::CompiledModel
+/// A resolved `∂arg/∂projected` (gh#275 obs factor 2): `None` = genuine zero (the
+/// argument does not read the projection output), `Some(entry)` = the derivative
+/// or a nonsmooth-of-projection refusal. Resolved once at construction; consumed
+/// by `dlogp_dprojected` (the obs FACTOR-2 chain).
+pub type ResolvedProjGrad = Option<ResolvedDerivEntry>;
+
 #[derive(Debug, Clone)]
 pub enum ResolvedLikelihood {
-    Poisson { rate: ResolvedExpr, rate_grad: ResolvedGradMap },
+    Poisson { rate: ResolvedExpr, rate_grad: ResolvedGradMap, rate_proj: ResolvedProjGrad },
     NegBinomial {
-        mean: ResolvedExpr, mean_grad: ResolvedGradMap,
-        dispersion: ResolvedExpr, dispersion_grad: ResolvedGradMap,
+        mean: ResolvedExpr, mean_grad: ResolvedGradMap, mean_proj: ResolvedProjGrad,
+        dispersion: ResolvedExpr, dispersion_grad: ResolvedGradMap, dispersion_proj: ResolvedProjGrad,
     },
     Normal {
-        mean: ResolvedExpr, mean_grad: ResolvedGradMap,
-        sd: ResolvedExpr, sd_grad: ResolvedGradMap,
+        mean: ResolvedExpr, mean_grad: ResolvedGradMap, mean_proj: ResolvedProjGrad,
+        sd: ResolvedExpr, sd_grad: ResolvedGradMap, sd_proj: ResolvedProjGrad,
     },
-    Binomial { n: ResolvedExpr, p: ResolvedExpr, p_grad: ResolvedGradMap },
+    Binomial { n: ResolvedExpr, p: ResolvedExpr, p_grad: ResolvedGradMap, p_proj: ResolvedProjGrad },
     BetaBinomial {
         n: ResolvedExpr,
-        alpha: ResolvedExpr, alpha_grad: ResolvedGradMap,
-        beta: ResolvedExpr, beta_grad: ResolvedGradMap,
+        alpha: ResolvedExpr, alpha_grad: ResolvedGradMap, alpha_proj: ResolvedProjGrad,
+        beta: ResolvedExpr, beta_grad: ResolvedGradMap, beta_proj: ResolvedProjGrad,
     },
-    Bernoulli { p: ResolvedExpr, p_grad: ResolvedGradMap },
+    Bernoulli { p: ResolvedExpr, p_grad: ResolvedGradMap, p_proj: ResolvedProjGrad },
 }
 
-/// Resolve a `Likelihood` into a `ResolvedLikelihood`, resolving both the
-/// argument expressions and their compiler-emitted gradient maps.
+/// Resolve a single argument's `∂arg/∂projected` (`Diffable::proj_grad`).
+fn resolve_proj_grad(
+    pg: &Option<DerivEntry>,
+    ctx: &ResolveCtx<'_>,
+) -> Result<ResolvedProjGrad, SimError> {
+    Ok(match pg {
+        None => None,
+        Some(DerivEntry::Grad(e)) => Some(ResolvedDerivEntry::Grad(resolve_expr(e, ctx)?)),
+        Some(DerivEntry::Unsupported { code, .. }) => {
+            Some(ResolvedDerivEntry::Unsupported { code: *code })
+        }
+    })
+}
+
+/// Resolve a `Likelihood` into a `ResolvedLikelihood`, resolving each argument
+/// expression, its `∂arg/∂θ` gradient map, and its `∂arg/∂projected` derivative.
 pub fn resolve_likelihood(
     lik: &ir::observation::Likelihood,
     ctx: &ResolveCtx<'_>,
@@ -1034,34 +1030,43 @@ pub fn resolve_likelihood(
         Likelihood::Poisson(p) => Ok(ResolvedLikelihood::Poisson {
             rate: resolve_expr(&p.rate.expr, ctx)?,
             rate_grad: resolve_grad_map(&p.rate.grad, ctx)?,
+            rate_proj: resolve_proj_grad(&p.rate.proj_grad, ctx)?,
         }),
         Likelihood::NegBinomial(nb) => Ok(ResolvedLikelihood::NegBinomial {
             mean: resolve_expr(&nb.mean.expr, ctx)?,
             mean_grad: resolve_grad_map(&nb.mean.grad, ctx)?,
+            mean_proj: resolve_proj_grad(&nb.mean.proj_grad, ctx)?,
             dispersion: resolve_expr(&nb.dispersion.expr, ctx)?,
             dispersion_grad: resolve_grad_map(&nb.dispersion.grad, ctx)?,
+            dispersion_proj: resolve_proj_grad(&nb.dispersion.proj_grad, ctx)?,
         }),
         Likelihood::Normal(n) => Ok(ResolvedLikelihood::Normal {
             mean: resolve_expr(&n.mean.expr, ctx)?,
             mean_grad: resolve_grad_map(&n.mean.grad, ctx)?,
+            mean_proj: resolve_proj_grad(&n.mean.proj_grad, ctx)?,
             sd: resolve_expr(&n.sd.expr, ctx)?,
             sd_grad: resolve_grad_map(&n.sd.grad, ctx)?,
+            sd_proj: resolve_proj_grad(&n.sd.proj_grad, ctx)?,
         }),
         Likelihood::Binomial(b) => Ok(ResolvedLikelihood::Binomial {
             n: resolve_expr(&b.n, ctx)?,
             p: resolve_expr(&b.p.expr, ctx)?,
             p_grad: resolve_grad_map(&b.p.grad, ctx)?,
+            p_proj: resolve_proj_grad(&b.p.proj_grad, ctx)?,
         }),
         Likelihood::BetaBinomial(bb) => Ok(ResolvedLikelihood::BetaBinomial {
             n: resolve_expr(&bb.n, ctx)?,
             alpha: resolve_expr(&bb.alpha.expr, ctx)?,
             alpha_grad: resolve_grad_map(&bb.alpha.grad, ctx)?,
+            alpha_proj: resolve_proj_grad(&bb.alpha.proj_grad, ctx)?,
             beta: resolve_expr(&bb.beta.expr, ctx)?,
             beta_grad: resolve_grad_map(&bb.beta.grad, ctx)?,
+            beta_proj: resolve_proj_grad(&bb.beta.proj_grad, ctx)?,
         }),
         Likelihood::Bernoulli(b) => Ok(ResolvedLikelihood::Bernoulli {
             p: resolve_expr(&b.p.expr, ctx)?,
             p_grad: resolve_grad_map(&b.p.grad, ctx)?,
+            p_proj: resolve_proj_grad(&b.p.proj_grad, ctx)?,
         }),
     }
 }

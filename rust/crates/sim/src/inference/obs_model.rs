@@ -8,7 +8,7 @@ use crate::compiled_model::CompiledModel;
 use crate::rng::StatefulRng;
 use crate::propensity::EvalCtx;
 use crate::resolved_expr::{
-    ResolvedExpr,
+    ResolvedDerivEntry, ResolvedProjGrad,
     ResolvedLikelihood, ResolveCtx, resolve_likelihood, eval_resolved, eval_emitted_grad,
 };
 use crate::state::{IntState, RealState};
@@ -180,7 +180,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
     let ctx = ctx_at(projected);
 
     match likelihood {
-        ResolvedLikelihood::NegBinomial { mean, mean_grad, dispersion, dispersion_grad } => {
+        ResolvedLikelihood::NegBinomial { mean, mean_grad, dispersion, dispersion_grad, .. } => {
             let m = eval_resolved(mean, &ctx);
             let k = eval_resolved(dispersion, &ctx);
             let (d_mu, d_k) = negbin_logpmf_grad(observed, m, k);
@@ -190,7 +190,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
                 grad[i] += d_mu * dm + d_k * dk;
             }
         }
-        ResolvedLikelihood::Normal { mean, mean_grad, sd, sd_grad } => {
+        ResolvedLikelihood::Normal { mean, mean_grad, sd, sd_grad, .. } => {
             // Discretized-normal in the implementation; gradients w.r.t.
             // (mean, variance) come from `discretized_normal_logpmf_grad`,
             // then chain-ruled to (mean, sd) via d(var)/d(sd) = 2·sd.
@@ -208,7 +208,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
                 grad[i] += d_mu * dm + d_sd * ds;
             }
         }
-        ResolvedLikelihood::Poisson { rate, rate_grad } => {
+        ResolvedLikelihood::Poisson { rate, rate_grad, .. } => {
             let r = eval_resolved(rate, &ctx);
             let d_rate = poisson_logpmf_grad(observed, r);
             for (i, &model_idx) in estimated_to_model.iter().enumerate() {
@@ -216,7 +216,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
                 grad[i] += d_rate * dr;
             }
         }
-        ResolvedLikelihood::Binomial { n, p, p_grad } => {
+        ResolvedLikelihood::Binomial { n, p, p_grad, .. } => {
             // log p(k|n,p) = log C(n,k) + k·log(p) + (n-k)·log(1-p)
             // n is integer-valued (rounded) and θ-independent (gated by P5);
             // it carries no gradient. d/dp = k/p - (n-k)/(1-p)
@@ -232,7 +232,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
                 }
             }
         }
-        ResolvedLikelihood::BetaBinomial { n, alpha, alpha_grad, beta, beta_grad } => {
+        ResolvedLikelihood::BetaBinomial { n, alpha, alpha_grad, beta, beta_grad, .. } => {
             // log L = log C(n,k) + lgamma(k+α) + lgamma(n−k+β) + lgamma(α+β)
             //         − lgamma(n+α+β) − lgamma(α) − lgamma(β)
             // n is integer-valued (rounded) and θ-independent (gated by P5); it
@@ -253,7 +253,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
                 grad[i] += d_alpha * da + d_beta * db;
             }
         }
-        ResolvedLikelihood::Bernoulli { p, p_grad } => {
+        ResolvedLikelihood::Bernoulli { p, p_grad, .. } => {
             // log L = log(p)         if observed > 0.5
             //       = log(1 - p)     otherwise
             // Outside [0,1] the clamp in eval_likelihood_resolved fires,
@@ -270,34 +270,24 @@ pub(crate) fn eval_likelihood_resolved_grad(
     }
 }
 
-/// `∂arg/∂projected` for a single resolved likelihood-argument expression, in the
-/// gh#275 ODE-gradient v1 scope. The value path evaluates each argument with
-/// `projected` bound in the context (`ctx.projected`), so an argument is a function
-/// of `projected`:
-///
-/// - the argument IS exactly `Projected` (`mean = projected`, `rate = projected`) →
-///   `∂/∂projected = 1`;
-/// - the argument does not reference `projected` (a constant, a parameter, a
-///   `time`-only reporting ramp) → `0`;
-/// - the argument references `projected` in any more complex way (`rho * projected`,
-///   a `He`-style mean-linked variance `sqrt(rho*C*(1-rho+psi²*rho*C))`) → **refuse**.
-///   That needs a compiler-emitted `∂arg/∂Projected` (a follow-up); returning a
-///   wrong or zero coefficient here would be a silent-wrong gradient.
-fn dproj_coeff(arg: &ResolvedExpr) -> Result<f64, crate::error::SimError> {
-    if matches!(arg, ResolvedExpr::Projected) {
-        Ok(1.0)
-    } else if !crate::resolved_expr::references_projected(arg) {
-        Ok(0.0)
-    } else {
-        Err(crate::error::SimError::Validation(
-            "ODE gradient (nuts) v1 supports a likelihood argument that is exactly \
-             `projected` (e.g. `mean = projected`); an argument that transforms \
-             `projected` (a reporting rate `rho * projected`, or a mean-linked \
-             variance) needs the compiler-emitted ∂arg/∂projected, a follow-up \
-             (gh#275). Use gradient-free `mh` on `ode`, or make the reporting scale \
-             part of the projection."
-                .to_string(),
-        ))
+/// Evaluate a resolved `∂arg/∂projected` ([`ResolvedProjGrad`]) to a number:
+/// `None` → 0 (the argument does not read the projection output), `Grad` → the
+/// value evaluator, `Unsupported` → **unreachable on a gated path** (the §1h gate
+/// refused any nonsmooth-of-projection argument before a gradient was taken), so a
+/// `debug_assert` surfaces a regression and release falls back to 0.
+#[inline]
+fn eval_proj_grad(proj: &ResolvedProjGrad, ctx: &EvalCtx<'_>) -> f64 {
+    match proj {
+        None => 0.0,
+        Some(ResolvedDerivEntry::Grad(e)) => eval_resolved(e, ctx),
+        Some(ResolvedDerivEntry::Unsupported { code }) => {
+            debug_assert!(
+                false,
+                "ungated Unsupported proj_grad ({code:?}) reached dlogp_dprojected — the \
+                 §1h gate invariant was violated"
+            );
+            0.0
+        }
     }
 }
 
@@ -305,10 +295,10 @@ fn dproj_coeff(arg: &ResolvedExpr) -> Result<f64, crate::error::SimError> {
 /// value, summed over every distribution argument that depends on `projected`
 /// (gh#275 §"chain rule"): `Σ_arg (∂logp/∂arg)·(∂arg/∂projected)`. The
 /// per-distribution `∂logp/∂arg` partials are the SAME irreducible runtime factors
-/// [`eval_likelihood_resolved_grad`] uses (`negbin_logpmf_grad`, …); only the
-/// chained factor changes from `∂arg/∂θ` to `∂arg/∂projected`. Returns an error if
-/// any argument depends on `projected` in a way v1 cannot differentiate
-/// ([`dproj_coeff`]).
+/// [`eval_likelihood_resolved_grad`] uses (`negbin_logpmf_grad`, …); the chained
+/// `∂arg/∂projected` factor is now the compiler-emitted `proj_grad` (via the
+/// `WrtProjected` autodiff), so a reporting rate `rho·projected` and the He
+/// mean-linked variance are supported — not just `arg = projected`.
 ///
 /// This is the ODE-gradient FACTOR 2 (the trajectory chain); FACTOR 1 (θ entering
 /// the distribution directly, `projected` held fixed) stays with
@@ -323,77 +313,60 @@ pub(crate) fn dlogp_dprojected(
     compiled: &CompiledModel,
     int_s: &IntState,
     real_s: &RealState,
-) -> Result<f64, crate::error::SimError> {
+) -> f64 {
     let ctx = EvalCtx {
         model: compiled, int_s, real_s, params, t, dt: 0.0,
         projected: Some(projected), aux: Some(aux), int_float_override: None, per_eval: None,
     };
     match likelihood {
-        ResolvedLikelihood::NegBinomial { mean, dispersion, .. } => {
+        ResolvedLikelihood::NegBinomial { mean, dispersion, mean_proj, dispersion_proj, .. } => {
             let m = eval_resolved(mean, &ctx);
             let k = eval_resolved(dispersion, &ctx);
             let (d_mu, d_k) = negbin_logpmf_grad(observed, m, k);
-            Ok(d_mu * dproj_coeff(mean)? + d_k * dproj_coeff(dispersion)?)
+            d_mu * eval_proj_grad(mean_proj, &ctx) + d_k * eval_proj_grad(dispersion_proj, &ctx)
         }
-        ResolvedLikelihood::Normal { mean, sd, .. } => {
+        ResolvedLikelihood::Normal { mean, sd, mean_proj, sd_proj, .. } => {
             let m = eval_resolved(mean, &ctx);
             let s = eval_resolved(sd, &ctx);
             let var = s * s;
             let (d_mu, d_var) = discretized_normal_logpmf_grad(observed, m, var, DEFAULT_TOL);
             let d_sd = d_var * 2.0 * s;
-            Ok(d_mu * dproj_coeff(mean)? + d_sd * dproj_coeff(sd)?)
+            d_mu * eval_proj_grad(mean_proj, &ctx) + d_sd * eval_proj_grad(sd_proj, &ctx)
         }
-        ResolvedLikelihood::Poisson { rate, .. } => {
+        ResolvedLikelihood::Poisson { rate, rate_proj, .. } => {
             let r = eval_resolved(rate, &ctx);
-            let d_rate = poisson_logpmf_grad(observed, r);
-            Ok(d_rate * dproj_coeff(rate)?)
+            poisson_logpmf_grad(observed, r) * eval_proj_grad(rate_proj, &ctx)
         }
-        ResolvedLikelihood::Binomial { n, p, .. } => {
-            // `n` must be projected-independent (a state/flow-dependent denominator
-            // has no smooth gradient — §1d); refuse if it reaches `projected`.
-            if crate::resolved_expr::references_projected(n) {
-                return Err(crate::error::SimError::Validation(
-                    "ODE gradient (nuts): a Binomial denominator `n` that depends on \
-                     `projected` is not differentiable (the count is rounded); make \
-                     `n` a constant or a data column (gh#275 §1d)"
-                        .to_string(),
-                ));
-            }
+        ResolvedLikelihood::Binomial { n, p, p_proj, .. } => {
+            // `n` is θ- AND projection-independent (the §1h gate refuses a `Projected`
+            // in `n`), so only `p`'s projection derivative contributes to factor 2.
             let n_val = eval_resolved(n, &ctx);
             let p_val = eval_resolved(p, &ctx);
             let n_int = n_val.round().max(0.0) as u64;
             let k_obs = observed.round().max(0.0) as u64;
             if p_val > 0.0 && p_val < 1.0 && k_obs <= n_int {
                 let d_p = k_obs as f64 / p_val - (n_int - k_obs) as f64 / (1.0 - p_val);
-                Ok(d_p * dproj_coeff(p)?)
+                d_p * eval_proj_grad(p_proj, &ctx)
             } else {
-                Ok(0.0)
+                0.0
             }
         }
-        ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
-            if crate::resolved_expr::references_projected(n) {
-                return Err(crate::error::SimError::Validation(
-                    "ODE gradient (nuts): a BetaBinomial denominator `n` that depends \
-                     on `projected` is not differentiable (the count is rounded); make \
-                     `n` a constant or a data column (gh#275 §1d)"
-                        .to_string(),
-                ));
-            }
+        ResolvedLikelihood::BetaBinomial { n, alpha, beta, alpha_proj, beta_proj, .. } => {
             let n_val = eval_resolved(n, &ctx);
             let alpha_val = eval_resolved(alpha, &ctx);
             let beta_val = eval_resolved(beta, &ctx);
             let n_round = n_val.round().max(0.0);
             let (d_alpha, d_beta) =
                 beta_binomial_logpmf_grad(observed, n_round, alpha_val, beta_val);
-            Ok(d_alpha * dproj_coeff(alpha)? + d_beta * dproj_coeff(beta)?)
+            d_alpha * eval_proj_grad(alpha_proj, &ctx) + d_beta * eval_proj_grad(beta_proj, &ctx)
         }
-        ResolvedLikelihood::Bernoulli { p, .. } => {
+        ResolvedLikelihood::Bernoulli { p, p_proj, .. } => {
             let p_val = eval_resolved(p, &ctx);
             if p_val > 0.0 && p_val < 1.0 {
                 let d_log = if observed > 0.5 { 1.0 / p_val } else { -1.0 / (1.0 - p_val) };
-                Ok(d_log * dproj_coeff(p)?)
+                d_log * eval_proj_grad(p_proj, &ctx)
             } else {
-                Ok(0.0)
+                0.0
             }
         }
     }
