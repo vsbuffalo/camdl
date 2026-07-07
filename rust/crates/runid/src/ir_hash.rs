@@ -119,9 +119,19 @@ impl ContentAddressed for Diffable {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::deriv::Diffable");
         self.expr.hash_into(h);
-        // The classified gradient map, sorted by key (mirrors the transition
-        // `rate_grad`); empty ⇒ length-0 prefix.
+        // The classified `∂arg/∂θ` gradient map, sorted by key (mirrors the
+        // transition `rate_grad`); empty ⇒ length-0 prefix.
         h.write_str_map(self.grad.iter());
+        // `∂arg/∂projected` (`proj_grad`, gh#275): `0` = absent (a genuine zero),
+        // else the classified entry. Hashed like `grad` so a `WrtProjected` autodiff
+        // change re-keys run_id, exactly as an `∂arg/∂θ` change does.
+        match &self.proj_grad {
+            None => h.write_u32(0),
+            Some(de) => {
+                h.write_u32(1);
+                de.hash_into(h);
+            }
+        }
     }
 }
 

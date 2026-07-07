@@ -1,4 +1,4 @@
-{"ir_version":"0.27","validated_by":"ocaml-compiler-v0.27","model":{"name":"sir_spatial_where","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.28","validated_by":"ocaml-compiler-v0.28","model":{"name":"sir_spatial_where","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_p0","kind":"integer"},
 {"name":"S_p1","kind":"integer"},
 {"name":"S_p2","kind":"integer"},

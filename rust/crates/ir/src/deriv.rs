@@ -155,12 +155,20 @@ pub struct Diffable {
     pub expr: Expr,
     #[serde(default, skip_serializing_if = "GradMap::is_empty")]
     pub grad: GradMap,
+    /// `∂expr/∂projected` — the observation FACTOR-2 chain ingredient (gh#275):
+    /// `None` = a genuine zero (this argument does not read the projection
+    /// output), `Some(Grad e)` = the derivative w.r.t. the projected value,
+    /// `Some(Unsupported)` = a nonsmooth-of-projection refusal the ODE-gradient
+    /// gate consumes. Sibling of `grad` (`∂expr/∂θ`); the two are the orthogonal
+    /// factors of the same argument along θ and along the projection output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proj_grad: Option<DerivEntry>,
 }
 
 impl Diffable {
     /// A position with no computed gradient yet (empty map = all genuine zeros).
     pub fn new(expr: Expr) -> Self {
-        Diffable { expr, grad: GradMap::new() }
+        Diffable { expr, grad: GradMap::new(), proj_grad: None }
     }
 }
 
@@ -308,7 +316,7 @@ mod tests {
 
         let mut grad = GradMap::new();
         grad.insert("beta".into(), DerivEntry::Grad(Expr::const_(1.0)));
-        let d = Diffable { expr: Expr::param("mu"), grad };
+        let d = Diffable { expr: Expr::param("mu"), grad, proj_grad: None };
         assert_eq!(
             serde_json::to_string(&d).unwrap(),
             r#"{"expr":{"param":"mu"},"grad":{"beta":{"grad":{"const":1.0}}}}"#

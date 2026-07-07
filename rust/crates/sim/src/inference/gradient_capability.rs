@@ -294,19 +294,40 @@ pub fn preflight_gradient_ode(
                 om.name
             )));
         }
-        // A likelihood argument that TRANSFORMS `projected` (a reporting rate
-        // `rho * projected`, a mean-linked variance) needs ∂arg/∂projected, a
-        // follow-up; v1 supports an argument that IS exactly `projected`.
+        // A likelihood argument that transforms `projected` (a reporting rate
+        // `rho·projected`, the He mean-linked variance) IS supported — the compiler
+        // emits `∂arg/∂projected` (`proj_grad`). What is refused is a NONSMOOTH
+        // function of the projection output (`floor`/`min`/… of `projected`), whose
+        // `proj_grad` the WrtProjected pass classifies `Unsupported`.
         for (arg, d) in om.likelihood.diffables() {
-            if expr_references_projected(&d.expr) && !matches!(d.expr, Expr::Projected(_)) {
+            if let Some(DerivEntry::Unsupported { code, .. }) = &d.proj_grad {
                 return Err(SimError::Validation(format!(
-                    "ODE gradient (nuts): observation stream `{}` uses `projected` inside a \
-                     transformed likelihood argument (`{}`) — a reporting rate or a \
-                     mean-linked variance. v1 supports an argument that IS exactly \
-                     `projected`; the transformed case needs the compiler-emitted \
-                     ∂arg/∂projected (a follow-up, gh#275). Make the reporting scale part of \
-                     the projection, or use gradient-free `mh` on `ode`.",
-                    om.name, arg
+                    "ODE gradient (nuts): observation stream `{}` argument `{}` is a nonsmooth \
+                     function of the projection output — it {}. Reformulate it with a smooth \
+                     expression, or use gradient-free `mh` on `ode`.",
+                    om.name,
+                    arg,
+                    code.reason_message()
+                )));
+            }
+        }
+        // A Binomial/BetaBinomial `n` that reads the projection output (§1d): `n`
+        // carries no `proj_grad` (it is not a differentiable position — it is
+        // rounded to an integer), so its projection dependence would be silently
+        // dropped by the factor-2 chain. Refuse.
+        let n_expr = match &om.likelihood {
+            Likelihood::Binomial(l) => Some(&l.n),
+            Likelihood::BetaBinomial(l) => Some(&l.n),
+            _ => None,
+        };
+        if let Some(n) = n_expr {
+            if expr_references_projected(n) {
+                return Err(SimError::Validation(format!(
+                    "ODE gradient (nuts): observation stream `{}` has a Binomial/BetaBinomial \
+                     denominator `n` that depends on the projection output — `n` is rounded to \
+                     an integer and carries no gradient, so its projection dependence cannot be \
+                     differentiated (gh#275 §1d). Make `n` a constant or an observed data column.",
+                    om.name
                 )));
             }
         }
@@ -351,19 +372,20 @@ mod tests {
             match om.name.as_str() {
                 "weekly_cases" => {
                     om.likelihood = Likelihood::NegBinomial(NegBinomialLikelihood {
-                        mean: Diffable { expr: projected(), grad: HashMap::new() },
+                        mean: Diffable { expr: projected(), grad: HashMap::new(), proj_grad: None },
                         dispersion: Diffable {
                             expr: Expr::Param(ParamExpr { param: "k".to_string() }),
                             grad: HashMap::from([(
                                 "k".to_string(),
                                 DerivEntry::Grad(Expr::Const(ConstExpr { value: 1.0 })),
                             )]),
+                            proj_grad: None,
                         },
                     });
                 }
                 "detection" => {
                     om.likelihood = Likelihood::Poisson(PoissonLikelihood {
-                        rate: Diffable { expr: projected(), grad: HashMap::new() },
+                        rate: Diffable { expr: projected(), grad: HashMap::new(), proj_grad: None },
                     });
                 }
                 _ => {}
@@ -484,8 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn refuses_projected_transforming_argument() {
-        // mean = -projected (references projected but isn't exactly it).
+    fn admits_transformed_projected_argument() {
+        // mean = -projected TRANSFORMS the projection output — now SUPPORTED (the
+        // compiler emits proj_grad = -1). The gate must ADMIT it (guards against
+        // the old over-refusal).
         let mut m = base_model();
         for om in &mut m.observations {
             if om.name == "weekly_cases" {
@@ -493,12 +517,47 @@ mod tests {
                     nb.mean = Diffable {
                         expr: Expr::un_op(UnOp::Neg, projected()),
                         grad: HashMap::new(),
+                        proj_grad: Some(DerivEntry::Grad(Expr::Const(ConstExpr { value: -1.0 }))),
+                    };
+                }
+            }
+        }
+        let cm = compile(m);
+        let params: Vec<f64> = cm
+            .model
+            .parameters
+            .iter()
+            .map(|p| p.value.resolved_value().unwrap())
+            .collect();
+        preflight_gradient_ode(&cm, &params, &est(&["beta"]))
+            .expect("a transformed `projected` argument (with emitted proj_grad) must be admitted");
+    }
+
+    #[test]
+    fn refuses_nonsmooth_projection_argument() {
+        // mean = floor(projected): a nonsmooth function of the projection output.
+        // The WrtProjected pass emits proj_grad = Unsupported{NonsmoothState}, and
+        // the gate refuses it (a genuine capability limit, unlike a smooth transform).
+        let mut m = base_model();
+        for om in &mut m.observations {
+            if om.name == "weekly_cases" {
+                if let Likelihood::NegBinomial(nb) = &mut om.likelihood {
+                    nb.mean = Diffable {
+                        expr: Expr::un_op(UnOp::Floor, projected()),
+                        grad: HashMap::new(),
+                        proj_grad: Some(DerivEntry::Unsupported {
+                            node: "floor/ceil expression".to_string(),
+                            code: UnsupportedReason::NonsmoothState,
+                        }),
                     };
                 }
             }
         }
         let msg = gate_err(m, &["beta"]);
-        assert!(msg.contains("transformed likelihood argument") && msg.contains("weekly_cases"), "{msg}");
+        assert!(
+            msg.contains("nonsmooth function of the projection output") && msg.contains("weekly_cases"),
+            "{msg}"
+        );
     }
 
     #[test]

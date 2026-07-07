@@ -243,7 +243,13 @@ fn model_golden_hash() {
     // re-key). They are empty until the WrtPop/WrtParam passes emit them, but the
     // two new length-0 prefixes shift the model hash once at the bump — a
     // deliberate, version-bumped re-key (state/IC gradients are run identity).
-    const GOLDEN: &str = "d62ed1b118c1724d50aa65f4bd0b5d373488b020af94fb0b155f65b23f37879f";
+    // gh#275 (∂arg/∂projected): `Diffable` gains `proj_grad` — the compiler-emitted
+    // observation FACTOR-2 derivative (∂arg/∂projected, via the WrtProjected pass).
+    // It is hashed like `grad` (an obs gradient change re-keys the fit), so the
+    // representative model's Poisson `rate` (a bare `Projected` argument whose
+    // proj_grad = 1) shifts the model hash once — a deliberate re-key on the obs
+    // side, mirroring the `rate_grad`/`rate_state_grad` re-keys above.
+    const GOLDEN: &str = "dbdcd662b4a63f55ddca4f630512ec6399ce9fd85a871ed8539ffbd0aac190d4";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -305,6 +311,28 @@ fn ir_ic_grad_changes_hash() {
         base,
         m.content_hash(),
         "a non-empty ic_grad must change the model hash (the IC sensitivity seed is run identity)"
+    );
+}
+
+/// gh#275: a non-empty `proj_grad` (∂arg/∂projected, the observation FACTOR-2
+/// derivative) must change the model hash — an obs gradient change alters a
+/// gradient fit's posterior, so it is run identity like `grad`/`rate_grad`.
+#[test]
+fn ir_proj_grad_changes_hash() {
+    use ir::deriv::DerivEntry;
+    use ir::observation::Likelihood;
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    match &mut m.observations[0].likelihood {
+        Likelihood::Poisson(p) => {
+            p.rate.proj_grad = Some(DerivEntry::Grad(Expr::const_(1.0)));
+        }
+        other => panic!("representative model's first obs must be Poisson, got {other:?}"),
+    }
+    assert_ne!(
+        base,
+        m.content_hash(),
+        "a non-empty proj_grad must change the model hash (obs gradients are run identity)"
     );
 }
 

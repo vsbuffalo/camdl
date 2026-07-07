@@ -367,7 +367,12 @@ type grad_map = (string * deriv_entry) list
    [diffable] — it is θ-independent and carries no gradient. On the wire a
    [diffable] is the nested shape [{"expr": …, "grad": …}] (grad omitted when
    empty), so a field [mean] serialises as [{"mean": {"expr": …, "grad": …}}]. *)
-type diffable = { expr: expr; grad: grad_map }
+(* [proj_grad] is ∂expr/∂[Projected] — the observation FACTOR-2 chain ingredient
+   (gh#275): [None] = a genuine zero (the argument does not depend on the
+   projection output), [Some (Grad e)] = the derivative, [Some (DEUnsupported _)]
+   = a nonsmooth-of-projection refusal the fit-time gate consumes. Sibling of
+   [grad] (∂expr/∂θ). *)
+type diffable = { expr: expr; grad: grad_map; proj_grad: deriv_entry option }
 type poisson_likelihood      = { rate: diffable }
 type neg_binomial_likelihood = { mean: diffable; dispersion: diffable }
 type normal_likelihood       = { mean: diffable; sd: diffable }

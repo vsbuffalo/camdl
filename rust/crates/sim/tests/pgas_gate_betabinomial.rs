@@ -121,7 +121,7 @@ fn build_parametric_derived_proj_block(scale_param: &str) -> ir::observation::Ob
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
         projection: Projection::DerivedExpr(projection_expr),
-        likelihood: Likelihood::Poisson(PoissonLikelihood { rate: ir::Diffable { expr: rate, grad: rate_grad } }),
+        likelihood: Likelihood::Poisson(PoissonLikelihood { rate: ir::Diffable { expr: rate, grad: rate_grad, proj_grad: None } }),
     }
 }
 

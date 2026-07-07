@@ -1337,7 +1337,7 @@ impl MultiStreamObsModel {
                         &s.resolved, t, projected, observed, &s.aux[local],
                         params, &self.compiled, int_s, &real_s,
                     )
-                })?;
+                });
                 for k in 0..d {
                     grad[k] += dl_dproj * dproj[k];
                 }
