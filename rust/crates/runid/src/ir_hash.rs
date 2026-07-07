@@ -308,7 +308,8 @@ impl ContentAddressed for Transition {
         self.rate.hash_into(h);
         self.metadata.hash_into(h);
         self.draw_method.hash_into(h);
-        // rate_grad: HashMap<String, Expr> — sorted by key.
+        // rate_grad: ParamGradMap (HashMap<String, DerivEntry>) — sorted by key;
+        // each entry hashes the stable Unsupported `code`, not the display node.
         h.write_str_map(self.rate_grad.iter());
         // rate_state_grad: ∂rate/∂compartment (gh#275), the compartment-keyed
         // sibling — hashed identically (sorted by key). Empty by default until
