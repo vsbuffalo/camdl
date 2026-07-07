@@ -3104,6 +3104,39 @@ let test_rate_state_grad_through_binding () =
   | Some (Ir.DEGrad _) -> ()
   | _ -> Alcotest.failf "∂rate/∂S through binding N must be a real gradient (binding recursion)"
 
+(* ── gh#275 §1c: WrtParam over initial conditions (ic_grad, the S(t_start) seed) ── *)
+
+let test_ic_grad_parameterized () =
+  (* Initial condition S = N0 - I0. ∂/∂N0 = +1, ∂/∂I0 = -1 — both real, nonzero
+     gradients; ∂/∂beta = 0 (dropped). differentiate_ic emits exactly N0, I0. *)
+  let ic = Ir.BinOp { op = Ir.Sub; left = Ir.Param "N0"; right = Ir.Param "I0" } in
+  let grads = Autodiff.differentiate_ic ic [ "N0"; "I0"; "beta" ] [] [] in
+  Alcotest.(check (list string))
+    "ic_grad emits N0 and I0 (nonzero), not beta"
+    [ "N0"; "I0" ] (List.map fst grads);
+  List.iter (fun (p, de) -> match de with
+    | Ir.DEGrad _ -> ()
+    | Ir.DEUnsupported _ ->
+      Alcotest.failf "∂init/∂%s was refused; expected a real gradient" p) grads
+
+let test_ic_grad_constant_dropped () =
+  (* A constant initial condition (I = 10) has no parameter dependence → empty
+     grad_map (an absent key is a genuine zero, exactly as for a rate). *)
+  let grads = Autodiff.differentiate_ic (Ir.Const 10.0) [ "N0"; "I0" ] [] [] in
+  Alcotest.(check (list string)) "constant IC → no ic_grad entries" [] (List.map fst grads)
+
+let test_ic_grad_floor_param_is_genuine_zero () =
+  (* floor(I0): ∂/∂I0 = 0 a.e. w.r.t. a PARAMETER (the deliberate WrtParam Floor
+     rule — same as a rate), so differentiate_ic drops it (an absent key is a
+     genuine zero). It is not emitted as a loud DEUnsupported here; the Rust
+     gradient gate is what refuses estimating such a parameter (I0 appears in the
+     IC expression but has no ic_grad entry), so the end-to-end behaviour is still
+     a refusal, never a silent-zero gradient. *)
+  let ic = Ir.UnOp { op = Ir.Floor; arg = Ir.Param "I0" } in
+  let grads = Autodiff.differentiate_ic ic [ "I0" ] [] [] in
+  Alcotest.(check (list string)) "floor(I0) → no ic_grad entry (∂/∂param = 0 a.e.)"
+    [] (List.map fst grads)
+
 let test_fourier_autodiff_emitted () =
   (* gh#119/gh#59: a parameter that is a Fourier harmonic coefficient must get
      a real derivative through the forcing closed form (not a dropped/silent
@@ -8909,6 +8942,9 @@ let () =
       Alcotest.test_case "rate_state_grad: ∂/∂compartment emits nonzero comps (gh#275)" `Quick test_rate_state_grad_smooth;
       Alcotest.test_case "rate_state_grad: nonsmooth-of-state (floor) is refused (gh#275)" `Quick test_rate_state_grad_nonsmooth_refused;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
+      Alcotest.test_case "ic_grad: ∂init/∂θ emits nonzero params (gh#275)" `Quick test_ic_grad_parameterized;
+      Alcotest.test_case "ic_grad: constant IC has no entries (gh#275)" `Quick test_ic_grad_constant_dropped;
+      Alcotest.test_case "ic_grad: floor(param) is a genuine zero, dropped (gh#275)" `Quick test_ic_grad_floor_param_is_genuine_zero;
       Alcotest.test_case "autodiff emits rate_grad for a Fourier coef" `Quick test_fourier_autodiff_emitted;
       Alcotest.test_case "periodic step-value param compiles, gradient is a coded refusal (gh#342)" `Quick test_periodic_forcing_coeff_omitted;
       Alcotest.test_case "structural forcing-coeff param is a compile error (gh#215)" `Quick test_structural_forcing_coeff_errors;

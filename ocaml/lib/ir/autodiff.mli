@@ -33,6 +33,15 @@ val differentiate_rate_state :
   expr -> string list -> time_function list -> table list -> binding list ->
   (string * deriv_entry) list
 
+(** ∂(initial-condition expression)/∂θ for each parameter — one compartment's
+    entry in the model's [ic_grad] map (the ODE forward-sensitivity seed
+    S(t_start), gh#275 §1c). Same defer POLICY as the obs/σ² driver: a genuine
+    zero is dropped, an [Omitted]/[Unsupported] coefficient becomes a
+    [DEUnsupported] the fit-time gradient gate refuses ODE-NUTS on. *)
+val differentiate_ic :
+  expr -> string list -> time_function list -> table list ->
+  (string * deriv_entry) list
+
 (** Attach per-parameter gradients to a single likelihood's arguments. *)
 val differentiate_likelihood :
   projection -> likelihood -> string list -> time_function list -> table list ->

@@ -138,13 +138,17 @@ mod tests {
             panic!("weekly_cases must be the native NegBinomial");
         }
 
-        // Explicit (constant) initial condition: ∂init/∂θ = 0.
+        // Explicit (constant) initial condition: ∂init/∂θ = 0. The golden now
+        // carries emitted `ic_grad` for its own parameterized IC, so clear it to
+        // stay consistent with this forced Explicit IC (the estimated-IC oracle
+        // below sets its own IC + ic_grad).
         model.initial_conditions = ir::model::InitialConditions::Explicit(HashMap::from([
             ("S".to_string(), 9990.0),
             ("E".to_string(), 0.0),
             ("I".to_string(), 10.0),
             ("R".to_string(), 0.0),
         ]));
+        model.ic_grad = HashMap::new();
 
         // Keep the native weekly_cases (rho·incidence). Rewrite detection to a
         // prevalence poisson whose argument IS `projected` (proj_grad = 1).
