@@ -121,16 +121,40 @@ fn ode_derivs(
     Ok(())
 }
 
-/// Forward-sensitivity derivative `Ṡ = J_x·S + J_θ`, assembled **sparse and
-/// transitionwise** (gh#275 §1c) rather than as a dense `n×n` matmul — at
-/// national scale `n` is in the hundreds–thousands and the dense form is the
-/// bottleneck the sparse-coupling work exists to avoid.
+/// The forward-sensitivity blocks carried alongside `(x, flow)` as augmented
+/// state (gh#275 §1c). `d` is the number of estimated parameters.
 ///
-/// `s[i*d + p] = S[compartment i, estimated-param p] = ∂(int_vals[i])/∂θ_p`, and
-/// `param_model_idx[p]` maps estimated param `p` to its MODEL parameter index (for
-/// the param-keyed `rate_grad` lookup). Fills `d_s` (also `n_int × d`, row-major)
-/// with `Ṡ`. The eval context is byte-identical to [`ode_derivs`] (propensities at
-/// the UNROUNDED float state via `int_float_override`), so `J_x`/`J_θ` are
+/// - `state[i*d + p] = ∂x_i/∂θ_p` — the compartment sensitivity `S`, chained
+///   against `∂g/∂x` for `Prevalence` (`Instant`) observation streams.
+/// - `flow[r*d + p]  = ∂(cumulative flow_r)/∂θ_p` — the **raw per-transition
+///   incidence-flow derivative** `acc_sens`, carrying NO stoichiometry (each
+///   transition owns its own flow slot `r`), which the `Incidence` (`Interval`)
+///   chain rule folds per stream. Structurally distinct from `state`'s
+///   stoich-weighted `Ṡ`: reusing `Ṡ` for the accumulator computes a
+///   net-compartment-change sensitivity, not an incidence-flow one — a
+///   silent-wrong gradient the two-`J` split exists to prevent (§1c).
+struct Sens {
+    state: Vec<f64>, // n_int × d, row-major
+    flow: Vec<f64>,  // n_transitions × d, row-major
+}
+
+/// Forward-sensitivity derivatives, assembled **sparse and transitionwise**
+/// (gh#275 §1c) rather than as a dense `n×n` matmul — at national scale `n` is in
+/// the hundreds–thousands and the dense form is the bottleneck the sparse-coupling
+/// work exists to avoid. For each transition `r`, its `total_dr_dθ[p]` chains the
+/// param-gradient with the state-gradient through `S`, then feeds **both** blocks:
+///
+/// ```text
+/// total_dr_dθ[p] = ∂rate_r/∂θ_p + Σ_j ∂rate_r/∂x_j · S[j,p]
+/// d_state[:, p] += stoich_r · total_dr_dθ[p]     # Ṡ — state Jacobian THROUGH stoich
+/// d_flow[r,  p]  = total_dr_dθ[p]                # ∂flow_r/∂θ — raw, NO stoich
+/// ```
+///
+/// `param_model_idx[p]` maps estimated param `p` to its MODEL parameter index (the
+/// param-keyed `rate_grad` lookup). `s` is `S` at the current stage state
+/// (`n_int × d`); `d_state` (`n_int × d`) and `d_flow` (`n_tr × d`) receive the
+/// derivatives. The eval context is byte-identical to [`ode_derivs`] (propensities
+/// at the UNROUNDED float state via `int_float_override`), so `J_x`/`J_θ` are
 /// evaluated at exactly the state the integrator sees. Integer compartments only
 /// for now (transition-driven); real ODE-equation sensitivity is a follow-up.
 fn sensitivity_derivs(
@@ -143,7 +167,8 @@ fn sensitivity_derivs(
     dt: f64,
     per_eval: Option<&[f64]>,
     s: &[f64],
-    d_s: &mut [f64],
+    d_state: &mut [f64],
+    d_flow: &mut [f64],
 ) {
     let d = param_model_idx.len();
     let int_s = IntState::from_vec(vec![0_i64; int_vals.len()]);
@@ -157,7 +182,7 @@ fn sensitivity_derivs(
     };
     let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
 
-    for v in d_s.iter_mut() { *v = 0.0; }
+    for v in d_state.iter_mut() { *v = 0.0; }
     for (tr_idx, stoich) in model.transition_stoich.iter().enumerate() {
         let rate_grad = &model.resolved.rate_grads_indexed[tr_idx];            // param-keyed ∂rate/∂θ
         let rate_state_grad = &model.resolved.rate_state_grads_indexed[tr_idx].0; // comp-keyed ∂rate/∂x
@@ -167,10 +192,14 @@ fn sensitivity_derivs(
             for (j, entry) in rate_state_grad {
                 total += eval_deriv_entry(entry, &ctx) * s[j * d + p];
             }
+            // ∂flow_r/∂θ_p = total_dr_dθ[p] — the raw per-transition flow
+            // derivative (dc_r/dt = rate_r, so d(∂c_r/∂θ)/dt = ∂rate_r/∂θ), NO
+            // stoichiometry: each transition owns flow slot `tr_idx`.
+            d_flow[tr_idx * d + p] = total;
             // Ṡ[:, p] += stoich_r · total_dr_dθ[p]  — the state Jacobian THROUGH
             // stoichiometry (distinct from the raw incidence-flow derivative).
             for &(local, delta) in stoich {
-                d_s[local * d + p] += delta as f64 * total;
+                d_state[local * d + p] += delta as f64 * total;
             }
         }
     }
@@ -197,12 +226,13 @@ fn rk4_step(
     t: f64,
     dt: f64,
     per_eval: Option<&[f64]>,
-    // gh#275: optional forward sensitivity `S` (n_int × d, row-major), carried by
-    // the SAME four RK4 stages as the state so `J_x`, `J_θ`, and `S` advance in
-    // lockstep (the augmented `(x, S)` system). `None` ⇒ the value-only path,
+    // gh#275: optional forward-sensitivity blocks `S = ∂x/∂θ` and `acc_sens =
+    // ∂flow/∂θ` ([`Sens`]), carried by the SAME four RK4 stages as the state so
+    // `J_x`, `J_θ`, `S`, and `acc_sens` advance in lockstep (the augmented
+    // `(x, flow, S, acc_sens)` system). `None` ⇒ the value-only path,
     // byte-identical to before (every x-line below is untouched). `param_model_idx`
     // maps each of the `d` sensitivity columns to its model parameter index.
-    s: Option<&mut Vec<f64>>,
+    sens: Option<&mut Sens>,
     param_model_idx: &[usize],
 ) -> Result<(), SimError> {
     let ni = int_vals.len();
@@ -244,25 +274,43 @@ fn rk4_step(
     let k4r = &dr;
     let k4f = &df;
 
-    // Sensitivity stage slopes k1s..k4s (gh#275): the augmented `(x, S)` system
-    // evaluated at the SAME four stage states as x — Ṡ at stage k uses the x-stage
-    // state (s{k}i, s{k}r) AND the S-stage state (S advanced by the previous
-    // slope). Read `int_vals` here, BEFORE the compartment combine mutates it.
-    let (k1s, k2s, k3s, k4s) = if let Some(ref s_vec) = s {
-        let mut ds = vec![0.0f64; ni * d];
-        sensitivity_derivs(model, int_vals, real_vals, params, param_model_idx, t, dt, per_eval, s_vec, &mut ds);
-        let k1s = ds.clone();
-        let s2s: Vec<f64> = s_vec.iter().zip(&k1s).map(|(x, k)| x + 0.5 * dt * k).collect();
-        sensitivity_derivs(model, &s2i, &s2r, params, param_model_idx, t + 0.5 * dt, dt, per_eval, &s2s, &mut ds);
-        let k2s = ds.clone();
-        let s3s: Vec<f64> = s_vec.iter().zip(&k2s).map(|(x, k)| x + 0.5 * dt * k).collect();
-        sensitivity_derivs(model, &s3i, &s3r, params, param_model_idx, t + 0.5 * dt, dt, per_eval, &s3s, &mut ds);
-        let k3s = ds.clone();
-        let s4s: Vec<f64> = s_vec.iter().zip(&k3s).map(|(x, k)| x + dt * k).collect();
-        sensitivity_derivs(model, &s4i, &s4r, params, param_model_idx, t + dt, dt, per_eval, &s4s, &mut ds);
-        (k1s, k2s, k3s, ds)
+    // Sensitivity stage slopes (gh#275): the augmented `(x, flow, S, acc_sens)`
+    // system evaluated at the SAME four stage states as x — the sensitivity at
+    // stage k uses the x-stage state (s{k}i, s{k}r) AND the S-stage state (S
+    // advanced by the previous slope). `acc_sens` (flow sensitivity) does not feed
+    // back — `d(∂flow/∂θ)/dt` depends on `S` and θ, never on `acc_sens` itself —
+    // so it needs no stage perturbation, exactly like the value `flow`; its stage
+    // slopes are the `d_flow` each `sensitivity_derivs` returns. Read `int_vals`
+    // here, BEFORE the compartment combine mutates it.
+    let stage_state = ni * d;
+    let stage_flow = nf * d;
+    let (ks_state, ks_flow) = if let Some(ref s) = sens {
+        let mut d_state = vec![0.0f64; stage_state];
+        let mut d_flow = vec![0.0f64; stage_flow];
+        let mut ks_state = [const { Vec::new() }; 4];
+        let mut ks_flow = [const { Vec::new() }; 4];
+
+        // k1 at the entry S.
+        sensitivity_derivs(model, int_vals, real_vals, params, param_model_idx, t, dt, per_eval, &s.state, &mut d_state, &mut d_flow);
+        ks_state[0] = d_state.clone();
+        ks_flow[0] = d_flow.clone();
+        // k2, k3 at the half-step x-stages, with S advanced by the previous slope.
+        let s2s: Vec<f64> = s.state.iter().zip(&ks_state[0]).map(|(x, k)| x + 0.5 * dt * k).collect();
+        sensitivity_derivs(model, &s2i, &s2r, params, param_model_idx, t + 0.5 * dt, dt, per_eval, &s2s, &mut d_state, &mut d_flow);
+        ks_state[1] = d_state.clone();
+        ks_flow[1] = d_flow.clone();
+        let s3s: Vec<f64> = s.state.iter().zip(&ks_state[1]).map(|(x, k)| x + 0.5 * dt * k).collect();
+        sensitivity_derivs(model, &s3i, &s3r, params, param_model_idx, t + 0.5 * dt, dt, per_eval, &s3s, &mut d_state, &mut d_flow);
+        ks_state[2] = d_state.clone();
+        ks_flow[2] = d_flow.clone();
+        // k4 at the full-step x-stage.
+        let s4s: Vec<f64> = s.state.iter().zip(&ks_state[2]).map(|(x, k)| x + dt * k).collect();
+        sensitivity_derivs(model, &s4i, &s4r, params, param_model_idx, t + dt, dt, per_eval, &s4s, &mut d_state, &mut d_flow);
+        ks_state[3] = d_state;
+        ks_flow[3] = d_flow;
+        (ks_state, ks_flow)
     } else {
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        (Default::default(), Default::default())
     };
 
     // Combine compartments (clamped ≥ 0).
@@ -282,13 +330,18 @@ fn rk4_step(
         }
     }
 
-    // Combine the sensitivity (NOT clamped — S = ∂x/∂θ is signed). The clamp on
-    // the state above is a nonsmooth operation S does not model (§1c clamp
-    // caveat); under `nuts` an active clamp is refused, so a valid gradient
-    // trajectory never clamps.
-    if let Some(s_vec) = s {
-        for k in 0..ni * d {
-            s_vec[k] += dt / 6.0 * (k1s[k] + 2.0 * k2s[k] + 2.0 * k3s[k] + k4s[k]);
+    // Combine the sensitivity blocks (NOT clamped — S and acc_sens are signed).
+    // The clamp on the state above is a nonsmooth operation S does not model (§1c
+    // clamp caveat); under `nuts` an active clamp is refused, so a valid gradient
+    // trajectory never clamps. `acc_sens` mirrors the value `flow` combine.
+    if let Some(s) = sens {
+        let [k1, k2, k3, k4] = &ks_state;
+        for k in 0..stage_state {
+            s.state[k] += dt / 6.0 * (k1[k] + 2.0 * k2[k] + 2.0 * k3[k] + k4[k]);
+        }
+        let [k1, k2, k3, k4] = &ks_flow;
+        for k in 0..stage_flow {
+            s.flow[k] += dt / 6.0 * (k1[k] + 2.0 * k2[k] + 2.0 * k3[k] + k4[k]);
         }
     }
 
@@ -850,13 +903,14 @@ mod tests {
         ir::from_str(&contents).unwrap_or_else(|e| panic!("parse {name}: {e}"))
     }
 
-    /// Integrate the compartments `x` (and, when `with_sens`, the forward
-    /// sensitivity `S`, an `ni × d` row-major matrix `s[comp*d + param]`) from
-    /// `t=0` to `t_end` with fixed step `dt`. `params` is passed by value at eval
-    /// (read by index, no folding), so the value path can be re-evaluated at a
-    /// perturbed θ for the finite-difference oracle without recompiling. `S(0)=0`
-    /// (initial counts are constants, not functions of θ). Returns
-    /// `(x(t_end), S(t_end)?)`.
+    /// Integrate the compartments `x` and cumulative flow (and, when `with_sens`,
+    /// the forward sensitivities [`Sens`]: `state[comp*d+param]=∂x/∂θ` and
+    /// `flow[tr*d+param]=∂(cumulative flow)/∂θ`) from `t=0` to `t_end` with fixed
+    /// step `dt`. `params` is passed by value at eval (read by index, no folding),
+    /// so the value path can be re-evaluated at a perturbed θ for the
+    /// finite-difference oracle without recompiling. `S(0)=0` and `acc_sens(0)=0`
+    /// (initial counts/flows are constants, not functions of θ). Returns
+    /// `(x(t_end), cumulative flow(t_end), Sens(t_end)?)`.
     fn integrate(
         cm: &CompiledModel,
         params: &[f64],
@@ -865,29 +919,31 @@ mod tests {
         t_end: f64,
         dt: f64,
         with_sens: bool,
-    ) -> (Vec<f64>, Option<Vec<f64>>) {
+    ) -> (Vec<f64>, Vec<f64>, Option<Sens>) {
         let ni = init.len();
+        let nf = cm.model.transitions.len();
         let d = param_model_idx.len();
         let mut int = init.to_vec();
         let mut real: Vec<f64> = vec![];
-        let mut s = vec![0.0f64; ni * d];
+        let mut flow = vec![0.0f64; nf];
+        let mut sens = Sens { state: vec![0.0f64; ni * d], flow: vec![0.0f64; nf * d] };
 
         let n_steps = (t_end / dt).round() as usize;
         let mut t = 0.0;
         for _ in 0..n_steps {
             if with_sens {
                 rk4_step(
-                    cm, &mut int, &mut real, None, params, t, dt, None,
-                    Some(&mut s), param_model_idx,
+                    cm, &mut int, &mut real, Some(&mut flow), params, t, dt, None,
+                    Some(&mut sens), param_model_idx,
                 )
                 .expect("rk4_step");
             } else {
-                rk4_step(cm, &mut int, &mut real, None, params, t, dt, None, None, &[])
+                rk4_step(cm, &mut int, &mut real, Some(&mut flow), params, t, dt, None, None, &[])
                     .expect("rk4_step");
             }
             t += dt;
         }
-        (int, if with_sens { Some(s) } else { None })
+        (int, flow, if with_sens { Some(sens) } else { None })
     }
 
     /// The forward-sensitivity spine, validated end-to-end against BOTH a
@@ -908,16 +964,16 @@ mod tests {
         let pmi = [0usize]; // mu is model param index 0 (the only parameter)
 
         // Integrate x and S together.
-        let (int, s) = integrate(&cm, &[mu], &[n0], &pmi, t_end, dt, true);
+        let (int, _flow, sens) = integrate(&cm, &[mu], &[n0], &pmi, t_end, dt, true);
         let n_final = int[0];
-        let s_final = s.unwrap()[0];
+        let s_final = sens.unwrap().state[0];
 
         // Central finite difference of the SAME discrete integrator — S(t_end) is
         // the exact derivative of the discrete N(t_end), so this matches to FD
         // truncation (O(eps²)), far tighter than the analytic comparison.
         let eps = 1e-5;
-        let (int_p, _) = integrate(&cm, &[mu + eps], &[n0], &pmi, t_end, dt, false);
-        let (int_m, _) = integrate(&cm, &[mu - eps], &[n0], &pmi, t_end, dt, false);
+        let (int_p, _, _) = integrate(&cm, &[mu + eps], &[n0], &pmi, t_end, dt, false);
+        let (int_m, _, _) = integrate(&cm, &[mu - eps], &[n0], &pmi, t_end, dt, false);
         let s_fd = (int_p[0] - int_m[0]) / (2.0 * eps);
 
         // Closed form: N(t) = N0·e^{-mu·t}, ∂N/∂mu = -t·N(t). Compared at a looser
@@ -947,6 +1003,48 @@ mod tests {
         );
     }
 
+    /// The flow-sensitivity (`acc_sens = ∂(cumulative flow)/∂θ`) validated against
+    /// both a finite difference of the integrated cumulative flow and the closed
+    /// form. For pure_death the single transition's cumulative flow is
+    /// `∫ mu·N dt = N0(1−e^{−mu·t}) = N0 − N(t)`, so `∂flow/∂mu = N0·t·e^{−mu·t} =
+    /// −∂N/∂mu` — the flow sensitivity is the negative of the state sensitivity,
+    /// an independent check on the raw (no-stoich) `d_flow` accumulator.
+    #[test]
+    fn flow_sensitivity_matches_finite_difference_and_analytic() {
+        let cm = compiled_pure_death();
+        let mu = 0.1;
+        let n0 = 1000.0;
+        let t_end = 5.0;
+        let dt = 0.01;
+        let pmi = [0usize];
+
+        let (_, flow, sens) = integrate(&cm, &[mu], &[n0], &pmi, t_end, dt, true);
+        let flow_final = flow[0];
+        let flow_sens = sens.unwrap().flow[0];
+
+        // Central FD of the cumulative flow.
+        let eps = 1e-5;
+        let (_, fp, _) = integrate(&cm, &[mu + eps], &[n0], &pmi, t_end, dt, false);
+        let (_, fm, _) = integrate(&cm, &[mu - eps], &[n0], &pmi, t_end, dt, false);
+        let flow_fd = (fp[0] - fm[0]) / (2.0 * eps);
+
+        let flow_analytic = n0 * (1.0 - (-mu * t_end).exp());
+        let flow_sens_analytic = n0 * t_end * (-mu * t_end).exp();
+
+        assert!(
+            (flow_final - flow_analytic).abs() < 1e-3 * flow_analytic,
+            "cumulative flow {flow_final} vs analytic {flow_analytic}"
+        );
+        assert!(
+            (flow_sens - flow_fd).abs() < 1e-4 * flow_fd.abs(),
+            "∂flow/∂mu {flow_sens} vs finite difference {flow_fd}"
+        );
+        assert!(
+            (flow_sens - flow_sens_analytic).abs() < 1e-3 * flow_sens_analytic,
+            "∂flow/∂mu {flow_sens} vs analytic {flow_sens_analytic}"
+        );
+    }
+
     /// The `d>1` / off-diagonal gate: on `two_state` (A⇌B, params alpha & beta_r)
     /// the full `2×2` sensitivity `S[comp, param]` is integrated and checked
     /// column-by-column against a central finite difference in each parameter
@@ -963,41 +1061,63 @@ mod tests {
         let t_end = 4.0;
         let dt = 0.01;
 
-        let (_, s) = integrate(&cm, &base, &init, &pmi, t_end, dt, true);
-        let s = s.unwrap(); // [∂A/∂α, ∂A/∂β, ∂B/∂α, ∂B/∂β]
+        let (_, _, sens) = integrate(&cm, &base, &init, &pmi, t_end, dt, true);
+        let sens = sens.unwrap();
+        let s = &sens.state; // [∂A/∂α, ∂A/∂β, ∂B/∂α, ∂B/∂β]
+        let fs = &sens.flow; // [∂flow_fwd/∂α, ∂flow_fwd/∂β, ∂flow_bwd/∂α, ∂flow_bwd/∂β]
 
-        // Central FD in each parameter independently.
+        // Central FD in each parameter independently, for BOTH the state and the
+        // cumulative-flow trajectories (nf=2 transitions, d=2 params).
         let eps = 1e-5;
-        let mut fd = [0.0f64; 4];
+        let mut fd_state = [0.0f64; 4];
+        let mut fd_flow = [0.0f64; 4];
         for (pk, _) in pmi.iter().enumerate() {
             let mut pp = base;
             let mut pm = base;
             pp[pk] += eps;
             pm[pk] -= eps;
-            let (xp, _) = integrate(&cm, &pp, &init, &pmi, t_end, dt, false);
-            let (xm, _) = integrate(&cm, &pm, &init, &pmi, t_end, dt, false);
+            let (xp, flp, _) = integrate(&cm, &pp, &init, &pmi, t_end, dt, false);
+            let (xm, flm, _) = integrate(&cm, &pm, &init, &pmi, t_end, dt, false);
             for comp in 0..init.len() {
                 // FD[comp][pk] lands at the same row-major slot the assembly fills.
-                fd[comp * d + pk] = (xp[comp] - xm[comp]) / (2.0 * eps);
+                fd_state[comp * d + pk] = (xp[comp] - xm[comp]) / (2.0 * eps);
+            }
+            for tr in 0..2 {
+                fd_flow[tr * d + pk] = (flp[tr] - flm[tr]) / (2.0 * eps);
             }
         }
 
         for k in 0..4 {
             assert!(
-                (s[k] - fd[k]).abs() < 1e-4 * fd[k].abs().max(1.0),
+                (s[k] - fd_state[k]).abs() < 1e-4 * fd_state[k].abs().max(1.0),
                 "S[{k}] = {} vs finite difference {} (comp {}, param {})",
                 s[k],
-                fd[k],
+                fd_state[k],
+                k / d,
+                k % d
+            );
+            assert!(
+                (fs[k] - fd_flow[k]).abs() < 1e-4 * fd_flow[k].abs().max(1.0),
+                "flow_sens[{k}] = {} vs finite difference {} (transition {}, param {})",
+                fs[k],
+                fd_flow[k],
                 k / d,
                 k % d
             );
         }
         // Guard that the off-diagonals are genuinely non-trivial (else the test
-        // would pass on an all-zero S): ∂B/∂α (slot 2) must be materially nonzero.
+        // would pass on an all-zero S): ∂B/∂α (slot 2) must be materially nonzero,
+        // and likewise the forward flow must depend on beta_r (slot 1) through the
+        // backward-transition coupling.
         assert!(
             s[2].abs() > 1.0,
             "off-diagonal ∂B/∂alpha should be materially nonzero, got {}",
             s[2]
+        );
+        assert!(
+            fs[1].abs() > 1.0,
+            "off-diagonal ∂flow_fwd/∂beta_r should be materially nonzero, got {}",
+            fs[1]
         );
     }
 
@@ -1009,8 +1129,8 @@ mod tests {
     #[test]
     fn value_path_unchanged_by_sensitivity_carry() {
         let cm = compiled_pure_death();
-        let (with, _) = integrate(&cm, &[0.1], &[1000.0], &[0], 5.0, 0.01, true);
-        let (without, _) = integrate(&cm, &[0.1], &[1000.0], &[0], 5.0, 0.01, false);
+        let (with, _, _) = integrate(&cm, &[0.1], &[1000.0], &[0], 5.0, 0.01, true);
+        let (without, _, _) = integrate(&cm, &[0.1], &[1000.0], &[0], 5.0, 0.01, false);
         assert_eq!(
             with[0].to_bits(),
             without[0].to_bits(),
