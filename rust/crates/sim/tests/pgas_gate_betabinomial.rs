@@ -70,6 +70,7 @@ fn build_betabinomial_obs_block(alpha_param: &str) -> ir::observation::Observati
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
         projection: Projection::CumulativeFlow("infection".into()),
+        projection_state_grad: Default::default(),
         likelihood: Likelihood::BetaBinomial(BetaBinomialLikelihood {
             n, alpha: ir::Diffable::new(alpha), beta: ir::Diffable::new(beta),
         }),
@@ -121,6 +122,7 @@ fn build_parametric_derived_proj_block(scale_param: &str) -> ir::observation::Ob
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
         projection: Projection::DerivedExpr(projection_expr),
+        projection_state_grad: Default::default(),
         likelihood: Likelihood::Poisson(PoissonLikelihood { rate: ir::Diffable { expr: rate, grad: rate_grad, proj_grad: None } }),
     }
 }

@@ -3104,6 +3104,31 @@ let test_rate_state_grad_through_binding () =
   | Some (Ir.DEGrad _) -> ()
   | _ -> Alcotest.failf "∂rate/∂S through binding N must be a real gradient (binding recursion)"
 
+(* ── gh#275 §1h: ∂projection/∂compartment for a DerivedExpr projection ── *)
+
+let test_differentiate_projection_derivedexpr () =
+  (* A nonlinear prevalence projection I/N with N = PopSum[S;I;R] (a binding).
+     ∂(I/N)/∂{S,I,R} are all real (quotient rule through the binding) —
+     differentiate_projection must emit them, reusing differentiate_rate_state. *)
+  let bindings = [ { Ir.bname = "N"; bexpr = Ir.PopSum [ "S"; "I"; "R" ] } ] in
+  let proj = Ir.DerivedExpr (Ir.BinOp { op = Ir.Div; left = Ir.Pop "I"; right = Ir.BindingRef "N" }) in
+  let grads = Autodiff.differentiate_projection proj [ "S"; "I"; "R" ] [] [] bindings in
+  Alcotest.(check (list string))
+    "∂(I/N)/∂compartment emits S, I, R"
+    [ "S"; "I"; "R" ] (List.map fst grads);
+  List.iter (fun (c, de) -> match de with
+    | Ir.DEGrad _ -> ()
+    | Ir.DEUnsupported _ ->
+      Alcotest.failf "∂(I/N)/∂%s was refused; expected a real gradient" c) grads
+
+let test_differentiate_projection_linear_is_empty () =
+  (* A linear projection (CurrentPop) is a trivial selection, not a nonlinear
+     function of state — differentiate_projection emits nothing (the factor-2
+     chain handles it directly). *)
+  let grads = Autodiff.differentiate_projection (Ir.CurrentPop "I") [ "S"; "I" ] [] [] [] in
+  Alcotest.(check (list string)) "linear projection → no projection gradient"
+    [] (List.map fst grads)
+
 (* ── gh#275 §1c: WrtParam over initial conditions (ic_grad, the S(t_start) seed) ── *)
 
 let test_ic_grad_parameterized () =
@@ -8942,6 +8967,8 @@ let () =
       Alcotest.test_case "rate_state_grad: ∂/∂compartment emits nonzero comps (gh#275)" `Quick test_rate_state_grad_smooth;
       Alcotest.test_case "rate_state_grad: nonsmooth-of-state (floor) is refused (gh#275)" `Quick test_rate_state_grad_nonsmooth_refused;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
+      Alcotest.test_case "projection_state_grad: DerivedExpr ∂/∂compartment emitted (gh#275 §1h)" `Quick test_differentiate_projection_derivedexpr;
+      Alcotest.test_case "projection_state_grad: linear projection emits nothing (gh#275 §1h)" `Quick test_differentiate_projection_linear_is_empty;
       Alcotest.test_case "ic_grad: ∂init/∂θ emits nonzero params (gh#275)" `Quick test_ic_grad_parameterized;
       Alcotest.test_case "ic_grad: constant IC has no entries (gh#275)" `Quick test_ic_grad_constant_dropped;
       Alcotest.test_case "ic_grad: floor(param) is a genuine zero, dropped (gh#275)" `Quick test_ic_grad_floor_param_is_genuine_zero;

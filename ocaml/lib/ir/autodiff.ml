@@ -802,6 +802,22 @@ let differentiate_rate_state (rate : expr) (compartments : string list)
   in
   List.filter_map entry_of compartments
 
+(** ∂projection/∂compartment for an observation projection — the model's
+    [projection_state_grad], consumed by the ODE observation gradient's factor-2
+    chain (`∂proj/∂θ = Σ_j ∂proj/∂x_j · S[j]`, gh#275 §1h). Only a [DerivedExpr]
+    (a nonlinear function of state) has a non-trivial state gradient; it reuses
+    [differentiate_rate_state] verbatim (∂expr/∂compartment via [WrtPop], same
+    defer POLICY — a nonsmooth-of-state projection like `floor(I/N)` becomes a
+    [DEUnsupported] the gradient gate refuses on). The linear projections
+    ([CurrentPop*]/[CumulativeFlow*]) are trivial selections the factor-2 chain
+    handles directly, so they emit nothing. *)
+let differentiate_projection (proj : projection) (compartments : string list)
+    (tfs : time_function list) (tbls : table list) (bindings : binding list)
+    : (string * deriv_entry) list =
+  match proj with
+  | DerivedExpr e -> differentiate_rate_state e compartments tfs tbls bindings
+  | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ -> []
+
 
 (* ── Observation / σ² gradient driver (proposal 2026-07-03, P3) ───────────────
 

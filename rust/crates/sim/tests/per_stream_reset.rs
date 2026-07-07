@@ -127,6 +127,7 @@ fn ir_incidence_obs(name: &str) -> IrObs {
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
         projection: Projection::CumulativeFlow("inflow".into()),
+        projection_state_grad: Default::default(),
         likelihood: Likelihood::Normal(NormalLikelihood {
             mean: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
             sd: ir::Diffable::new(Expr::Const(ConstExpr { value: 50.0 })),

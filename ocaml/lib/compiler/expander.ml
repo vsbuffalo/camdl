@@ -6751,6 +6751,7 @@ let expand_observations ctx =
       Ir.emit_schedule = emit_schedule;
       Ir.stratum;
       Ir.projection;
+      Ir.projection_state_grad = [];
       Ir.likelihood;
     }
     ) combos

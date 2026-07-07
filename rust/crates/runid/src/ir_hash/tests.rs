@@ -135,6 +135,7 @@ fn representative_model() -> Model {
             })),
             stratum: vec![],
             projection: Projection::CumulativeFlow("infection".into()),
+            projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: ir::Diffable::new(Expr::bin_op(
                     BinOp::Mul,
@@ -249,7 +250,13 @@ fn model_golden_hash() {
     // representative model's Poisson `rate` (a bare `Projected` argument whose
     // proj_grad = 1) shifts the model hash once — a deliberate re-key on the obs
     // side, mirroring the `rate_grad`/`rate_state_grad` re-keys above.
-    const GOLDEN: &str = "dbdcd662b4a63f55ddca4f630512ec6399ce9fd85a871ed8539ffbd0aac190d4";
+    // gh#275 (∂projection/∂compartment, §1h): `ObservationModel` gains
+    // `projection_state_grad` — the WrtPop gradient of a `DerivedExpr` (nonlinear)
+    // projection, the factor-2 ingredient. Hashed like `rate_state_grad` (a
+    // projection-gradient change re-keys a gradient fit); empty on the
+    // representative model, so its length-0 prefix shifts the hash once at the
+    // 0.29 bump — a deliberate, version-bumped re-key.
+    const GOLDEN: &str = "1210b8fc04716225aa43c2e7a010490ef0f6270eaa2c0cffefc601d99d1d96bd";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -333,6 +340,26 @@ fn ir_proj_grad_changes_hash() {
         base,
         m.content_hash(),
         "a non-empty proj_grad must change the model hash (obs gradients are run identity)"
+    );
+}
+
+/// gh#275 §1h: a non-empty `projection_state_grad` (∂projection/∂compartment, the
+/// DerivedExpr factor-2 ingredient) must change the model hash — a
+/// projection-gradient change alters a gradient fit's posterior, so it is run
+/// identity like `rate_state_grad`.
+#[test]
+fn ir_projection_state_grad_changes_hash() {
+    use ir::deriv::DerivEntry;
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    m.observations[0]
+        .projection_state_grad
+        .0
+        .insert("I".to_string(), DerivEntry::Grad(Expr::param("beta")));
+    assert_ne!(
+        base,
+        m.content_hash(),
+        "a non-empty projection_state_grad must change the model hash (projection gradients are run identity)"
     );
 }
 

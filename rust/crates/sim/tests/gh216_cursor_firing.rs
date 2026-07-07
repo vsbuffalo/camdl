@@ -602,6 +602,7 @@ fn pgas_obs_model(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> MultiStre
             scored: "m_obs".into(),
             emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
             projection: ir::observation::Projection::CurrentPop("M".into()),
+            projection_state_grad: Default::default(),
             likelihood: ir::observation::Likelihood::Poisson(ir::observation::PoissonLikelihood {
                 rate: ir::Diffable::new(ir::expr::Expr::BinOp(ir::expr::BinOpWrap {
                     bin_op: ir::expr::BinOpExpr {

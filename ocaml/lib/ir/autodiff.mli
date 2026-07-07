@@ -33,6 +33,14 @@ val differentiate_rate_state :
   expr -> string list -> time_function list -> table list -> binding list ->
   (string * deriv_entry) list
 
+(** ∂projection/∂compartment for an observation projection — the model's
+    [projection_state_grad] (gh#275 §1h), the ODE observation gradient's factor-2
+    ingredient. Only a [DerivedExpr] projection has a non-trivial state gradient
+    (reuses [differentiate_rate_state]); linear projections emit nothing. *)
+val differentiate_projection :
+  projection -> string list -> time_function list -> table list -> binding list ->
+  (string * deriv_entry) list
+
 (** ∂(initial-condition expression)/∂θ for each parameter — one compartment's
     entry in the model's [ic_grad] map (the ODE forward-sensitivity seed
     S(t_start), gh#275 §1c). Same defer POLICY as the obs/σ² driver: a genuine

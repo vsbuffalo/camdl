@@ -1936,6 +1936,7 @@ mod tests {
             emit_schedule: None,
             stratum: vec![StratumKey { dim: "patch".into(), level: level.into() }],
             projection: Projection::CumulativeFlow(format!("infection_{level}")),
+            projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: ir::Diffable::new(ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () })),
             }),

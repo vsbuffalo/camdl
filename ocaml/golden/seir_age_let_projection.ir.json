@@ -1,4 +1,4 @@
-{"ir_version":"0.28","validated_by":"ocaml-compiler-v0.28","model":{"name":"seir_age_let_projection","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.29","validated_by":"ocaml-compiler-v0.29","model":{"name":"seir_age_let_projection","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_child","kind":"integer"},
 {"name":"S_adult","kind":"integer"},
 {"name":"E_child","kind":"integer"},
@@ -17,7 +17,7 @@
 ],"ode_equations":[],"time_functions":[],"tables":[
 {"name":"C_age","values":[{"const":12.0},{"const":4.0},{"const":4.0},{"const":8.0}],"out_of_bounds":"error"}
 ],"interventions":[],"observations":[
-{"name":"prevalence_total","source":"prevalence_total","columns":[{"name":"time","role":"time"},{"name":"prevalence_total","role":{"value":"count"}}],"scored":"prevalence_total","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":100.0}},"projection":{"derived_expr":{"pop_sum":["I_child","I_adult"]}},"likelihood":{"neg_binomial":{"mean":{"expr":{"projected":null},"proj_grad":{"grad":{"const":1.0}}},"dispersion":{"expr":{"param":"k"},"grad":{"k":{"grad":{"const":1.0}}}}}}}
+{"name":"prevalence_total","source":"prevalence_total","columns":[{"name":"time","role":"time"},{"name":"prevalence_total","role":{"value":"count"}}],"scored":"prevalence_total","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":100.0}},"projection":{"derived_expr":{"pop_sum":["I_child","I_adult"]}},"projection_state_grad":{"I_child":{"grad":{"const":1.0}},"I_adult":{"grad":{"const":1.0}}},"likelihood":{"neg_binomial":{"mean":{"expr":{"projected":null},"proj_grad":{"grad":{"const":1.0}}},"dispersion":{"expr":{"param":"k"},"grad":{"k":{"grad":{"const":1.0}}}}}}}
 ],"parameters":[
 {"name":"beta","value":{"mode":"estimated","bounds":[0.001,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},

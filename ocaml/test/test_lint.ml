@@ -198,6 +198,7 @@ let test_observation_only_not_dead () =
       emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
       stratum = [];
       projection = CurrentPop "R";
+      projection_state_grad = [];
       likelihood = Poisson { rate = { expr = Projected; grad = []; proj_grad = None } } } in
   let m = empty_model
     ~compartments:sir_compartments
@@ -225,6 +226,7 @@ let test_derived_observation_only_not_dead () =
       emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
       stratum = [];
       projection = DerivedExpr (pop "R" /. (pop "S" +. pop "I" +. pop "R"));
+      projection_state_grad = [];
       likelihood = Normal { mean = { expr = Projected; grad = []; proj_grad = None };
                             sd = { expr = const 1.0; grad = []; proj_grad = None } } } in
   let m = empty_model
