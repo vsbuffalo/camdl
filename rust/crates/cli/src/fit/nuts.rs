@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use sim::compiled_model::CompiledModel;
-use sim::inference::ode_nuts::{run_ode_nuts, OdeNutsConfig};
+use sim::inference::ode_nuts::OdeNutsConfig;
 use sim::inference::pmmh::Prior;
 
 use crate::cas::iso8601_utc;
@@ -129,6 +129,7 @@ pub fn run_stage(
     struct ChainOut {
         chain_id: usize,
         n_divergent: usize,
+        max_depth_hits: usize,
         best_loglik: f64,
         best_params: Vec<f64>,
         status: String,
@@ -146,18 +147,26 @@ pub fn run_stage(
                 max_tree_depth: opts.max_tree_depth,
                 target_accept: opts.target_accept,
                 init_step_size: 0.1,
+                // Warm-up adapts a mass matrix (Stan's `metric`): diagonal by
+                // default (rescales each parameter to ~unit posterior variance),
+                // or dense (`dense_mass = true`) to also absorb parameter
+                // correlations — the identifiability ridge. On the anisotropic
+                // Garki posterior, diagonal takes ~7× larger steps at the same
+                // acceptance and frees the wide-posterior parameter (a2) that
+                // identity mass leaves stuck at its bound (gh#275).
+                metric: if opts.dense_mass {
+                    sim::inference::ode_nuts::MassMetric::Dense
+                } else {
+                    sim::inference::ode_nuts::MassMetric::Diagonal
+                },
                 dt,
                 // Independent chains: same start, distinct RNG stream.
                 seed: seed.wrapping_add(chain_id as u64),
             };
-            let result = run_ode_nuts(
-                &compiled, &obs_model, &obs_times, &config.base_params,
-                &config.estimated_params, &priors, &cfg,
-            )
-            .map_err(|e| format!("nuts chain {} error: {}", chain_id + 1, e))?;
 
-            // Trace: one row per draw — data loglik, log posterior, per-draw
-            // divergence flag, then the estimated parameters (natural scale).
+            // Stream each posterior draw to `chain_N/trace.tsv` as it is produced,
+            // so a long run fills the file incrementally (a watcher can `tail -f`
+            // and plot) instead of the chain dir staying empty until the very end.
             // `TraceWriter` writes `draw`, `log_likelihood`, `log_posterior` as its
             // three fixed leading columns; `divergent` is the only extra.
             let trace_path = chain_dir.join("trace.tsv");
@@ -169,11 +178,49 @@ pub fn run_stage(
                 &param_names,
                 /* append */ false,
             );
+            // Throttle the progress log to ~10 lines per phase (per chain).
+            let warmup_every = opts.warmup.max(1).div_ceil(10);
+            let sample_every = opts.samples.max(1).div_ceil(10);
+            let on_iter = {
+                use sim::inference::ode_nuts::{NutsIter, NutsPhase};
+                // Borrows `writer` (not `move`): the callback streams rows through
+                // it, and it must remain live to flush after the run.
+                |it: &NutsIter| match it.phase {
+                    NutsPhase::Sampling => {
+                        let div = if it.divergent { "1" } else { "0" };
+                        writer.write_row(
+                            it.iter, it.loglik, it.log_posterior, &[div], &it.params_natural,
+                        );
+                        if it.iter % sample_every == 0 || it.iter + 1 == it.total {
+                            log::info!(target: "nuts",
+                                "chain {} sampling {}/{} · depth={} · logpost={:.1}{}",
+                                chain_id + 1, it.iter + 1, it.total, it.tree_depth,
+                                it.log_posterior, if it.divergent { " · DIVERGENT" } else { "" });
+                        }
+                    }
+                    NutsPhase::Warmup => {
+                        if it.iter % warmup_every == 0 || it.iter + 1 == it.total {
+                            log::info!(target: "nuts",
+                                "chain {} warmup {}/{} · depth={} · step={:.4}",
+                                chain_id + 1, it.iter + 1, it.total, it.tree_depth, it.step_size);
+                        }
+                    }
+                }
+            };
+            let result = sim::inference::ode_nuts::run_ode_nuts_with_progress(
+                &compiled, &obs_model, &obs_times, &config.base_params,
+                &config.estimated_params, &priors, &cfg, Some(&on_iter),
+            )
+            .map_err(|e| format!("nuts chain {} error: {}", chain_id + 1, e))?;
+            // `on_iter`'s borrow of `writer` ends at the call above (its last use),
+            // so the writer can now be flushed to disk.
+            drop(writer); // flush the buffered trace to disk
+
+            // Best draw (point estimate) from the returned samples — the rows were
+            // already streamed to disk by the callback above.
             let mut best_loglik = f64::NEG_INFINITY;
             let mut best_params = config.base_params.clone();
             for (i, sample) in result.samples.iter().enumerate() {
-                let div = if result.sample_divergent[i] { "1" } else { "0" };
-                writer.write_row(i, result.sample_loglik[i], result.sample_logpost[i], &[div], sample);
                 if result.sample_loglik[i] > best_loglik {
                     best_loglik = result.sample_loglik[i];
                     let mut p = config.base_params.clone();
@@ -183,19 +230,25 @@ pub fn run_stage(
                     best_params = p;
                 }
             }
-            drop(writer); // flush the buffered trace to disk
 
             let status = format!(
-                "chain {} · {} draws · {} divergent · accept={:.2} · step={:.4}",
+                "chain {} · {} draws · {} divergent · accept={:.2} · step={:.4} · tree_depth={:.1}{}",
                 chain_id + 1,
                 result.samples.len(),
                 result.n_divergent,
                 result.mean_accept,
-                result.step_size
+                result.step_size,
+                result.mean_tree_depth,
+                if result.max_depth_hits > 0 {
+                    format!(" · {} max-depth hits", result.max_depth_hits)
+                } else {
+                    String::new()
+                },
             );
             Ok(ChainOut {
                 chain_id,
                 n_divergent: result.n_divergent,
+                max_depth_hits: result.max_depth_hits,
                 best_loglik,
                 best_params,
                 status,
@@ -229,6 +282,15 @@ pub fn run_stage(
             "{} divergent transition(s) across chains — the posterior geometry may be \
              difficult; consider a lower dt or reparameterizing.",
             total_divergent
+        ));
+    }
+    let total_max_depth: usize = chain_outs.iter().map(|c| c.max_depth_hits).sum();
+    if total_max_depth > 0 {
+        crate::status::hint(format!(
+            "{} draw(s) hit the max tree depth ({}) — the sampler is building maximal \
+             trees (slow, and effective sample size suffers). Set `dense_mass = true` in \
+             the stage for a correlated posterior, raise `max_tree_depth`, or reparameterize.",
+            total_max_depth, opts.max_tree_depth,
         ));
     }
 
