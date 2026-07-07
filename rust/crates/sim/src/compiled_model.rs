@@ -619,6 +619,14 @@ pub struct ResolvedModel {
     /// the shared `resolve_grad_map`, which rejects an unknown-parameter key
     /// loudly (a dropped gradient reads as zero to NUTS — gh#128).
     pub rate_grads_indexed: Vec<crate::resolved_expr::ResolvedGradMap>,
+    /// Per-transition resolved ∂rate/∂compartment map, COMPARTMENT-indexed
+    /// (`ResolvedCompGradMap`, the `J_x` ingredient for the ODE forward
+    /// sensitivities, gh#275). Empty for every transition until the WrtPop
+    /// emission is wired into the compiler; then consumed by `det_grad`'s
+    /// augmented-sensitivity integration via `eval_deriv_entry`. Built via the
+    /// shared `resolve_comp_grad_map`, which rejects an unknown-compartment key
+    /// loudly (a dropped component reads as zero to the sensitivity).
+    pub rate_state_grads_indexed: Vec<crate::resolved_expr::ResolvedCompGradMap>,
     /// Per-ODE-equation resolved derivative expression.
     pub ode_derivatives: Vec<ResolvedExpr>,
     /// Per-intervention, per-action resolved expression (count/fraction/value).
@@ -1441,6 +1449,19 @@ impl CompiledModel {
                         format!("transition '{}' rate_grad: {}", tr.name, e))))
                 .collect::<Result<_, _>>()?;
 
+        // Resolve each transition's ∂rate/∂compartment map to its
+        // compartment-indexed form via `resolve_comp_grad_map` (gh#275). Empty for
+        // every transition until the WrtPop emission is wired; a state-dependent
+        // rate then carries `J_x`'s ingredient for the ODE forward sensitivities.
+        // The `CompGradMap` newtype forces the compartment resolver here (not the
+        // parameter one); an unknown-compartment key is rejected loudly.
+        let rate_state_grads_indexed: Vec<crate::resolved_expr::ResolvedCompGradMap> =
+            model.transitions.iter()
+                .map(|tr| crate::resolved_expr::resolve_comp_grad_map(&tr.rate_state_grad, &resolve_ctx)
+                    .map_err(|e| SimError::Validation(
+                        format!("transition '{}' rate_state_grad: {}", tr.name, e))))
+                .collect::<Result<_, _>>()?;
+
         // Resolve ODE derivatives
         let ode_derivatives: Vec<ResolvedExpr> = model.ode_equations.iter()
             .map(|eq| resolve_expr(&eq.derivative, &resolve_ctx))
@@ -1516,6 +1537,7 @@ impl CompiledModel {
             overdispersion,
             overdispersion_grad,
             rate_grads_indexed,
+            rate_state_grads_indexed,
             ode_derivatives,
             intervention_exprs,
             intervention_at_time_exprs,
@@ -1941,6 +1963,85 @@ mod tests {
         assert!(
             msg.contains("not_a_real_param"),
             "error must name the unknown rate_grad key; got: {msg}"
+        );
+        assert!(
+            msg.contains("infection"),
+            "error must name the offending transition; got: {msg}"
+        );
+    }
+
+    /// gh#275: a `rate_state_grad` keyed by a valid compartment resolves to that
+    /// compartment's index — via the compartment resolver the `CompGradMap`
+    /// newtype forces (not the parameter resolver) — and is stored in
+    /// `rate_state_grads_indexed`, the `J_x` ingredient the sensitivity assembly
+    /// consumes. Reuses `beta`'s (resolvable) grad expression re-keyed under a
+    /// compartment, so the test exercises the KEY resolution, not the expr.
+    #[test]
+    fn rate_state_grad_resolves_to_compartment_index() {
+        let mut model = load_with_params("sir_basic");
+        let comp_idx: std::collections::HashMap<String, usize> = model
+            .compartments
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name.clone(), i))
+            .collect();
+        let s_idx = comp_idx["S"];
+        let inf_pos = model
+            .transitions
+            .iter()
+            .position(|t| t.name == "infection")
+            .expect("sir_basic has an `infection` transition");
+        let grad_expr = model.transitions[inf_pos]
+            .rate_grad
+            .get("beta")
+            .expect("infection has a beta gradient")
+            .clone();
+        model.transitions[inf_pos]
+            .rate_state_grad
+            .0
+            .insert("S".to_string(), grad_expr);
+
+        let cm = CompiledModel::new(model)
+            .expect("a rate_state_grad keyed by a valid compartment must compile");
+        let rsg = &cm.resolved.rate_state_grads_indexed[inf_pos].0;
+        assert_eq!(rsg.len(), 1, "one ∂rate/∂S entry expected");
+        assert_eq!(
+            rsg[0].0, s_idx,
+            "rate_state_grad key 'S' must resolve to S's COMPARTMENT index"
+        );
+    }
+
+    /// gh#275: a `rate_state_grad` keyed on an unknown compartment must be
+    /// rejected at compile time (naming the compartment and the transition), not
+    /// silently dropped — a dropped ∂rate/∂compartment reads as zero to the ODE
+    /// forward sensitivity, integrating a different `J_x` than the dynamics.
+    #[test]
+    fn unknown_rate_state_grad_compartment_is_rejected() {
+        let mut model = load_with_params("sir_basic");
+        let inf = model
+            .transitions
+            .iter_mut()
+            .find(|t| t.name == "infection")
+            .expect("sir_basic has an `infection` transition");
+        let grad_expr = inf
+            .rate_grad
+            .get("beta")
+            .expect("infection has a beta gradient")
+            .clone();
+        inf.rate_state_grad
+            .0
+            .insert("not_a_compartment".to_string(), grad_expr);
+
+        let err = match CompiledModel::new(model) {
+            Ok(_) => panic!(
+                "a rate_state_grad keyed on an unknown compartment must be rejected, not dropped"
+            ),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not_a_compartment"),
+            "error must name the unknown compartment; got: {msg}"
         );
         assert!(
             msg.contains("infection"),
