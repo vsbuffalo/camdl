@@ -1758,8 +1758,10 @@ pub fn patch_population(
 ///
 /// Delegates the density computation to `Prior::log_density` and computes
 /// only the gradient part here. The chain rule converts d(log prior)/dθ
-/// to d/dz via `param.transform_deriv(z)`.
-fn prior_log_density_and_grad_z(
+/// to d/dz via `param.transform_deriv(z)`. `pub(crate)` so the ODE-NUTS target
+/// (`ode_nuts`) reuses the SAME prior-gradient authority PGAS's NUTS target uses,
+/// rather than re-deriving it (gh#275 Phase 2).
+pub(crate) fn prior_log_density_and_grad_z(
     prior: &Prior, param: &EstimatedParam, theta: f64, z: f64,
 ) -> (f64, f64) {
     let lp = prior.log_density(theta, z);

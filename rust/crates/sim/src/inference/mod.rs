@@ -36,6 +36,7 @@ pub mod prequential;
 pub mod ode_loglik;
 pub mod ode_grad;
 pub mod gradient_capability;
+pub mod ode_nuts;
 #[cfg(feature = "ode")]
 pub mod deterministic;
 
