@@ -55,6 +55,7 @@ const T_END: f64 = 6.0;
 /// EVENT that transfers ALL of A → B at t=5.
 fn codrain_model() -> CompiledModel {
     let model = Model {
+        ic_grad: Default::default(),
         name: "event_transition_codrain".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -67,6 +68,7 @@ fn codrain_model() -> CompiledModel {
             Compartment { name: "I".into(), kind: CompartmentKind::Integer },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "drain".into(),
             stoichiometry: vec![StoichiometryEntry("A".into(), -1), StoichiometryEntry("I".into(), 1)],
             // r * A
@@ -275,6 +277,7 @@ fn codrain_cross_backend_agreement() {
 /// residual phase, which would still be 100 here but the test pins the wiring).
 fn inflow_model() -> CompiledModel {
     let model = Model {
+        ic_grad: Default::default(),
         name: "event_transition_inflow".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -287,6 +290,7 @@ fn inflow_model() -> CompiledModel {
             Compartment { name: "V".into(), kind: CompartmentKind::Integer },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "drain".into(),
             stoichiometry: vec![StoichiometryEntry("A".into(), -1), StoichiometryEntry("I".into(), 1)],
             rate: Expr::BinOp(BinOpWrap {

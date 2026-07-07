@@ -46,6 +46,7 @@ fn minimal_model_with_interventions(
     interventions: Vec<Intervention>,
 ) -> Model {
     Model {
+        ic_grad: Default::default(),
         name: "test".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -181,6 +182,7 @@ fn chain_binomial_fires_scheduled_intervention_exactly_once() {
     init.insert("S".to_string(), 1000.0);
     init.insert("V".to_string(), 0.0);
     let model = Model {
+        ic_grad: Default::default(),
         name: "double_fire_regression".into(),
         version: "0.3".into(),
         time_unit: "days".into(),

@@ -48,6 +48,7 @@ fn model_with_obs(
     projection: Projection,
 ) -> Model {
     Model {
+        ic_grad: Default::default(),
         name: "snapshot_projection_test".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -314,6 +315,7 @@ fn snapshot_reads_post_intervention_state() {
     init.insert("S".into(), 1000.0);
     init.insert("V".into(),    0.0);
     let model = Model {
+        ic_grad: Default::default(),
         name: "snap_intv".into(),
         version: "0.3".into(),
         time_unit: "days".into(),

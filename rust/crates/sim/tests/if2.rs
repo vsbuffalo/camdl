@@ -48,6 +48,7 @@ impl ObservationModel<ParticleState> for NegBinFlowObs {
 
 fn sir_model() -> (CompiledModel, Vec<f64>) {
     let model = Model {
+        ic_grad: Default::default(),
         name: "sir_if2_test".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -60,6 +61,7 @@ fn sir_model() -> (CompiledModel, Vec<f64>) {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "infection".into(),
                 stoichiometry: vec![
                     StoichiometryEntry("S".into(), -1),
@@ -82,6 +84,7 @@ fn sir_model() -> (CompiledModel, Vec<f64>) {
                 draw_method: DrawMethod::Poisson, rate_grad: Default::default(), lineage: None,
             },
             Transition {
+                rate_state_grad: Default::default(),
                 name: "recovery".into(),
                 stoichiometry: vec![
                     StoichiometryEntry("I".into(), -1),

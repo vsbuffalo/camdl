@@ -36,6 +36,7 @@ use sim::{
 /// observation block — the dynamics are irrelevant here.
 fn model() -> Arc<CompiledModel> {
     let m = Model {
+        ic_grad: Default::default(),
         name: "obs_time_dependence".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -46,6 +47,7 @@ fn model() -> Arc<CompiledModel> {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "death".into(),
                 stoichiometry: vec![StoichiometryEntry("N".into(), -1)],
                 rate: Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {

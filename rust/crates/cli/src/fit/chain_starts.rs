@@ -989,6 +989,7 @@ mod tests {
             }
         }).collect();
         let model = ir::Model {
+            ic_grad: Default::default(),
             name: "test".into(),
             version: "0.3".into(),
             time_unit: "days".into(),

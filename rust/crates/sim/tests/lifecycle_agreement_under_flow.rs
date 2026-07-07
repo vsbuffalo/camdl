@@ -53,6 +53,7 @@ const S0: i64 = 1000;
 /// `infect : S --> I @ beta*S` is the only transition; V is untouched by it.
 fn flow_model() -> CompiledModel {
     let model = Model {
+        ic_grad: Default::default(),
         name: "lifecycle_agreement_under_flow".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -64,6 +65,7 @@ fn flow_model() -> CompiledModel {
             Compartment { name: "V".into(), kind: CompartmentKind::Integer },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "infect".into(),
             stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
             // beta * S

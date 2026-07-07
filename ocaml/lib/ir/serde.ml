@@ -307,6 +307,17 @@ let grad_map_of_json = function
 let grad_field key (m : (string * deriv_entry) list) =
   match m with [] -> [] | _ -> [(key, grad_map_to_json m)]
 
+(* [ic_grad]: compartment -> (param -> deriv_entry), a nested map (gh#275). Each
+   inner map serialises exactly like a [grad_map]; the outer object is keyed by
+   compartment. Matches the Rust `HashMap<String, ParamGradMap>` wire shape. *)
+let ic_grad_to_json (m : (string * (string * deriv_entry) list) list) : Yojson.Safe.t =
+  obj (List.map (fun (comp, g) -> (comp, grad_map_to_json g)) m)
+
+let ic_grad_of_json = function
+  | `Assoc pairs -> List.map (fun (comp, g_j) -> (comp, grad_map_of_json g_j)) pairs
+  | `Null -> []
+  | _ -> []
+
 (* A [diffable] serialises as the nested Rust `Diffable` shape:
      {"expr": <expr>}                              (grad empty)
      {"expr": <expr>, "grad": {param → deriv_entry}}   (grad non-empty)
@@ -374,6 +385,7 @@ let transition_to_json (t : transition) : Yojson.Safe.t =
        | DrawPoisson -> []
        | dm          -> [("draw_method", draw_method_to_json dm)])
     @ grad_field "rate_grad" t.rate_grad
+    @ grad_field "rate_state_grad" t.rate_state_grad
     @ (match t.lineage with
        | None   -> []
        | Some l -> [("lineage", transition_lineage_to_json l)])
@@ -390,6 +402,9 @@ let transition_of_json j =
                     | None | Some `Null -> Ir.DrawPoisson
                     | Some dm -> draw_method_of_json dm);
     rate_grad    = (match member_opt "rate_grad" j with
+                    | None | Some `Null -> []
+                    | Some g -> grad_map_of_json g);
+    rate_state_grad = (match member_opt "rate_state_grad" j with
                     | None | Some `Null -> []
                     | Some g -> grad_map_of_json g);
     lineage      = (match member_opt "lineage" j with
@@ -1574,6 +1589,10 @@ let model_to_json (m : model) : Yojson.Safe.t =
     ("observations",       arr (List.map observation_model_to_json m.observations));
     ("parameters",         arr (List.map parameter_to_json m.parameters));
     ("initial_conditions", initial_conditions_to_json m.initial_conditions);
+  ] @ (match m.ic_grad with
+       | [] -> []
+       | g  -> [("ic_grad", ic_grad_to_json g)])
+    @ [
     ("output",             output_config_to_json m.output);
     ("simulation",         simulation_config_to_json m.simulation);
     ("scenarios",          arr (List.map preset_to_json m.presets));
@@ -1621,6 +1640,9 @@ let model_of_json (j : Yojson.Safe.t) : model =
     per_eval_bindings  = (match member_opt "per_eval_bindings" j with
                           | Some (`List v) -> List.map binding_of_json v | _ -> []);
     initial_conditions = initial_conditions_of_json (member "initial_conditions" j);
+    ic_grad            = (match member_opt "ic_grad" j with
+                          | None | Some `Null -> []
+                          | Some g -> ic_grad_of_json g);
     output             = output_config_of_json     (member "output"     j);
     simulation         = simulation_config_of_json (member "simulation" j);
     presets            = (match member_opt "scenarios" j with

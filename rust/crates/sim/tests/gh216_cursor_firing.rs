@@ -111,6 +111,7 @@ fn no_intervention_model() -> CompiledModel {
 
 fn build_model(interventions: Vec<Intervention>) -> CompiledModel {
     let model = Model {
+        ic_grad: Default::default(),
         name: "gh216_firing".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -122,6 +123,7 @@ fn build_model(interventions: Vec<Intervention>) -> CompiledModel {
             Compartment { name: "M".into(), kind: CompartmentKind::Integer },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "death".into(),
             stoichiometry: vec![StoichiometryEntry("N".into(), -1)],
             // rate = mu * N, with mu fixed at 0 → no death, fully deterministic.

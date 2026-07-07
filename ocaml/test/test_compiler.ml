@@ -3221,7 +3221,7 @@ let test_sigma_sq_grad_emitted () =
   let t : Ir.transition =
     { name = "inf"; stoichiometry = []; rate = Ir.Const 1.0; metadata = None;
       draw_method = Ir.DrawOverdispersed { sigma_sq; sigma_sq_grad = [] };
-      rate_grad = []; lineage = None } in
+      rate_grad = []; rate_state_grad = []; lineage = None } in
   match Autodiff.differentiate_overdispersion [ t ] [ "phi"; "beta" ] [] [] with
   | [ { draw_method = Ir.DrawOverdispersed { sigma_sq_grad; _ }; _ } ] ->
     (match List.assoc_opt "phi" sigma_sq_grad with

@@ -37,6 +37,7 @@ use sim::{
 /// is that `k` is a PARAMETER (index into the params array), not a constant.
 fn model_with_obs_param() -> (Arc<CompiledModel>, Vec<f64>) {
     let model = Model {
+        ic_grad: Default::default(),
         name: "obs_param_test".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -47,6 +48,7 @@ fn model_with_obs_param() -> (Arc<CompiledModel>, Vec<f64>) {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "death".into(),
                 stoichiometry: vec![StoichiometryEntry("N".into(), -1)],
                 rate: Expr::BinOp(BinOpWrap {

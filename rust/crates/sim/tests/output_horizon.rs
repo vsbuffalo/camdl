@@ -44,6 +44,7 @@ fn pop(p: &str) -> Expr { Expr::Pop(PopExpr { pop: p.into() }) }
 /// test can pick the horizon; the schedule carries only `start` + `step`.
 fn model(t_end: f64, step: f64) -> CompiledModel {
     let m = Model {
+        ic_grad: Default::default(),
         name: "output_horizon".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -54,6 +55,7 @@ fn model(t_end: f64, step: f64) -> CompiledModel {
             Compartment { name: "I".into(), kind: CompartmentKind::Integer },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "infect".into(),
             stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
             rate: mul(param("beta"), pop("S")),

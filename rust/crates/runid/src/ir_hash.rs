@@ -310,6 +310,11 @@ impl ContentAddressed for Transition {
         self.draw_method.hash_into(h);
         // rate_grad: HashMap<String, Expr> — sorted by key.
         h.write_str_map(self.rate_grad.iter());
+        // rate_state_grad: ∂rate/∂compartment (gh#275), the compartment-keyed
+        // sibling — hashed identically (sorted by key). Empty by default until
+        // the WrtPop emission, so its length-0 prefix re-keys at the 0.27 bump
+        // (a deliberate, version-bumped re-key, pinned by the distinctness test).
+        h.write_str_map(self.rate_state_grad.iter());
         self.lineage.hash_into(h);
     }
 }
@@ -1121,6 +1126,19 @@ impl ContentAddressed for Model {
         // distinctness test in this module.
         self.per_eval_bindings.hash_into(h);
         self.initial_conditions.hash_into(h);
+        // ic_grad: compartment → (param → DerivEntry) — ∂(initial_state)/∂θ, the
+        // forward-sensitivity seed (gh#275). A nested map: sort the outer map by
+        // compartment for canonicity, then hash each inner param-map via
+        // `write_str_map` (which sorts by param). Empty by default — golden- and
+        // hash-neutral until the WrtParam-over-init emission — but the outer
+        // length-0 prefix re-keys at the 0.27 bump; pinned by the distinctness test.
+        let mut ic_grads: Vec<_> = self.ic_grad.iter().collect();
+        ic_grads.sort_by(|a, b| a.0.cmp(b.0));
+        h.write_len(ic_grads.len() as u64);
+        for (compartment, grad) in ic_grads {
+            h.write_str(compartment);
+            h.write_str_map(grad.iter());
+        }
         self.output.hash_into(h);
         self.simulation.hash_into(h);
         self.presets.hash_into(h);

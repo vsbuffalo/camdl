@@ -1618,6 +1618,7 @@ mod hole_scoring_tests {
     /// (flows, counts) lets us isolate the hole-vs-observed-zero behaviour.
     fn model() -> Arc<CompiledModel> {
         let m = Model {
+            ic_grad: Default::default(),
             name: "hole_scoring".into(),
             version: "0.3".into(),
             time_unit: "days".into(),
@@ -1630,6 +1631,7 @@ mod hole_scoring_tests {
             ],
             transitions: vec![
                 Transition {
+                    rate_state_grad: Default::default(),
                     name: "recovery".into(),
                     stoichiometry: vec![
                         StoichiometryEntry("I".into(), -1),

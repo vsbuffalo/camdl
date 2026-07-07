@@ -54,6 +54,7 @@ fn fixed(name: &str, value: f64) -> Parameter {
 }
 fn determ(name: &str, src: &str, dst: &str, rate: Expr) -> Transition {
     Transition {
+        rate_state_grad: Default::default(),
         name: name.into(),
         stoichiometry: vec![StoichiometryEntry(src.into(), -1), StoichiometryEntry(dst.into(), 1)],
         rate,
@@ -65,6 +66,7 @@ fn determ(name: &str, src: &str, dst: &str, rate: Expr) -> Transition {
 }
 fn poisson(name: &str, src: &str, dst: &str, rate: Expr) -> Transition {
     Transition {
+        rate_state_grad: Default::default(),
         name: name.into(),
         stoichiometry: vec![StoichiometryEntry(src.into(), -1), StoichiometryEntry(dst.into(), 1)],
         rate,
@@ -84,6 +86,7 @@ fn build(
     t_end: f64,
 ) -> Model {
     Model {
+        ic_grad: Default::default(),
         name: name.into(),
         version: "0.3".into(),
         time_unit: "days".into(),

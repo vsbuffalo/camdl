@@ -22,6 +22,7 @@ use sim::{
 
 fn minimal_model(compartments: Vec<Compartment>, params: Vec<Parameter>) -> Model {
     Model {
+        ic_grad: Default::default(),
         name: "test".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -98,6 +99,7 @@ fn test_runtime_oob_table_lookup_returns_err_not_panic() {
         cell_kind: None,
     });
     m.transitions.push(Transition {
+        rate_state_grad: Default::default(),
         name: "leave_S".into(),
         stoichiometry: vec![StoichiometryEntry("S".into(), -1)],
         rate: Expr::TableLookup(TableLookupWrap {

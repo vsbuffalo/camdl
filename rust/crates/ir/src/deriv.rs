@@ -96,10 +96,41 @@ pub enum DerivEntry {
     Unsupported { node: String, code: UnsupportedReason },
 }
 
-/// `param → DerivEntry` for one differentiable position, keyed by parameter name.
-/// An **absent** key is a genuine zero; a present key is either a real gradient
+/// `String → DerivEntry` — the raw shape shared by both keyings below. An
+/// **absent** key is a genuine zero; a present key is either a real gradient
 /// ([`DerivEntry::Grad`]) or a coded refusal ([`DerivEntry::Unsupported`]).
 pub type GradMap = HashMap<String, DerivEntry>;
+
+/// A **parameter**-keyed gradient map — `parameter → DerivEntry`. The keying
+/// `rate_grad`, `ic_grad`, and every obs/σ² gradient use; resolved by
+/// `resolve_grad_map`, whose keys become model-**parameter** indices. An alias,
+/// not a newtype: all parameter-keyed maps share one resolver and one index
+/// space, so there is no illegal state among them to prevent.
+pub type ParamGradMap = GradMap;
+
+/// A **compartment**-keyed gradient map — `compartment → DerivEntry` — carrying
+/// `∂rate/∂compartment` (`rate_state_grad`, the `J_x` ingredient, gh#275). A
+/// **newtype**, not an alias, and deliberately so: it must NOT be resolved by
+/// `resolve_grad_map`, whose keys are looked up as *parameters*. A compartment
+/// map needs the compartment-index resolver; the distinct type makes reaching for
+/// the wrong resolver a **compile error** — the illegal state being that a
+/// compartment map silently mis-indexes through the parameter path. Serialises
+/// transparently (as the bare inner map), so the wire shape matches `rate_grad`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CompGradMap(pub GradMap);
+
+impl CompGradMap {
+    /// Empty ⇒ the compiler emitted no state gradient for this transition (the
+    /// pre-WrtPop state and the genuine all-zero case both). Drives
+    /// `skip_serializing_if`, so an empty map is omitted and golden-neutral.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, String, DerivEntry> {
+        self.0.iter()
+    }
+}
 
 /// A differentiable position: an expression paired with its per-parameter
 /// classified gradient. Bundling the two into one value means a derivative can
