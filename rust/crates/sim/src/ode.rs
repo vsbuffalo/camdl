@@ -919,8 +919,11 @@ pub(crate) fn integrate_obs_sensitivity(
 
     let per_eval: Option<Vec<f64>> =
         crate::resolved_expr::stage_per_eval(model, params, cfg.t_start, cfg.dt);
-    let (int_s0, real_s0) = model.initial_state(params)?;
-    let ni = int_s0.counts.len();
+    // Continuous (un-rounded) initial state: the ODE gradient path must start
+    // from the smooth initial value so value and forward-sensitivity are
+    // consistent in θ (§1c; see `CompiledModel::initial_state_continuous`).
+    let (int_s0, real_s0) = model.initial_state_continuous(params)?;
+    let ni = int_s0.len();
     debug_assert_eq!(
         state_sens_0.len(),
         ni * d,
@@ -929,8 +932,8 @@ pub(crate) fn integrate_obs_sensitivity(
 
     let mut st = AugState {
         ode: OdeState {
-            int: int_s0.counts.iter().map(|&c| c as f64).collect(),
-            real: real_s0.values.clone(),
+            int: int_s0,
+            real: real_s0,
             flow: vec![0.0; n_tr],
         },
         sens: Sens {
