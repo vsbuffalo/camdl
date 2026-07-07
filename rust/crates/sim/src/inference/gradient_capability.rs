@@ -357,10 +357,12 @@ pub fn preflight_gradient_ode(
                         None => {
                             return Err(SimError::Validation(format!(
                                 "ODE gradient (nuts): estimated parameter `{pname}` enters the \
-                                 initial condition of `{comp}`, but the compiler emitted no \
-                                 ∂(initial {comp})/∂{pname} (`ic_grad` is absent) — its gradient \
-                                 would be silently zero. Recompile with a camdlc that emits \
-                                 ic_grad (gh#275 §1c), or use gradient-free `mh` on `ode`."
+                                 initial condition of `{comp}`, but there is no usable \
+                                 ∂(initial {comp})/∂{pname} — either the initial condition is not \
+                                 differentiable in `{pname}` (e.g. a floor/round of it), or this \
+                                 model was compiled before ic_grad emission (gh#275 §1c). Its \
+                                 gradient would be silently zero. Reformulate the initial \
+                                 condition, recompile, or use gradient-free `mh` on `ode`."
                             )));
                         }
                     }
@@ -454,6 +456,10 @@ mod tests {
             ("I".to_string(), 10.0),
             ("R".to_string(), 0.0),
         ]));
+        // The golden now carries emitted `ic_grad` for its own parameterized IC;
+        // this base forces an Explicit IC, so its ∂init/∂θ must be empty. Each IC
+        // test sets `ic_grad` explicitly to model the scenario it exercises.
+        model.ic_grad = std::collections::HashMap::new();
         for om in &mut model.observations {
             match om.name.as_str() {
                 "weekly_cases" => {

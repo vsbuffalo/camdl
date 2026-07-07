@@ -19,6 +19,6 @@
 {"name":"alpha","value":{"mode":"required"},"param_kind":"positive","param_dim":null},
 {"name":"amp","value":{"mode":"required"},"param_kind":"real","param_dim":null},
 {"name":"I0","value":{"mode":"required"},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"parameterized":{"S":{"const":999000.0},"I":{"param":"I0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":1095.7275,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"parameterized":{"S":{"const":999000.0},"I":{"param":"I0"}}},"ic_grad":{"I":{"I0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":1095.7275,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"α-mixing SEIRS (He 2010 style)","params":{"sigma":0.2,"gamma":0.1,"omega":0.01,"iota":5.0,"alpha":0.97,"amp":0.15,"I0":100.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"E":[],"I":[],"R":[]},"base_compartments":["S","E","I","R"],"transmission_transitions":[],"infectious_compartments":[]}}}

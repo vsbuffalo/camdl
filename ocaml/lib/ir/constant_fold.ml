@@ -166,4 +166,8 @@ let fold_model (m : model) : model =
             { o with projection = fold_projection fe o.projection;
                      likelihood = fold_likelihood fe o.likelihood })
           m.observations;
+      (* ∂init/∂θ seed (gh#275): fold each compartment's grad_map like a rate's,
+         so a table lookup surviving into an IC derivative collapses consistently
+         with the rest of the model. *)
+      ic_grad = List.map (fun (c, gm) -> (c, fold_grad_map fe gm)) m.ic_grad;
     }

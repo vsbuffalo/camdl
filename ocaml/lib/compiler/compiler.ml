@@ -547,10 +547,31 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
     let observations =
       Passtime.time "autodiff-obs"
         (fun () -> Autodiff.differentiate_observations d.model.Ir.observations param_names tfs tbls) in
+    (* Initial-condition autodiff (gh#275 §1c C-seed): ∂(initial_state)/∂θ for a
+       PARAMETERIZED initial condition, filling the model's [ic_grad] map — the
+       ODE forward-sensitivity seed S(t_start). Explicit (constant) and
+       from-distribution ICs contribute nothing (∂init/∂θ = 0 / not a gradient
+       method's concern). A compartment whose expression has no parameter
+       dependence is dropped (empty grad_map), so a mixed init emits only the
+       parameter-bearing compartments. *)
+    let ic_grad =
+      match d.model.Ir.initial_conditions with
+      | Ir.Parameterized ic_map ->
+        Passtime.time "autodiff-ic" (fun () ->
+          List.filter_map
+            (fun (comp, expr) ->
+              match Autodiff.differentiate_ic expr param_names tfs tbls with
+              | [] -> None
+              | grad -> Some (comp, grad))
+            ic_map)
+      | Ir.Explicit _ | Ir.FromDistribution _ -> []
+    in
     (* Write the resolved quantity dimensions (#5) back onto the model before the
        value-preserving transforms (constant-fold/LICM never touch quantities). *)
     let m = annotate_quantity_dims qdims
-              { d.model with Ir.transitions = transitions; Ir.observations = observations } in
+              { d.model with Ir.transitions = transitions;
+                             Ir.observations = observations;
+                             Ir.ic_grad } in
     Ok (maybe_licm (maybe_constant_fold m))
 
 let compile ?(name = "model") ?(filename = "<input>") (src : string) : (Ir.model, string) result =
