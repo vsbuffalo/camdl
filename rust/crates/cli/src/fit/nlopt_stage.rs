@@ -25,7 +25,8 @@ use crate::fit::dt_check;
 use crate::fit::init::{build_chain_param_vecs, InitMethod};
 use crate::fit::loglik::LoglikType;
 use crate::fit::methods::check_model_capabilities;
-use crate::fit::runner::{compute_ode_loglik, ode_step_dt, FitRunConfig};
+use crate::fit::runner::{ode_step_dt, FitRunConfig};
+use sim::inference::compute_ode_loglik;
 use crate::fit::state::FitState;
 use crate::fit::provenance;
 

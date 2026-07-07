@@ -315,7 +315,7 @@ pub fn run_stage(
         // the initial loglik for the FitState, exactly as PMMH reports its mean.
         let obs_model = ode_obs_model.as_ref()
             .expect("ode_obs_model built on the is_ode_mh path");
-        ll_mean = match runner::compute_ode_loglik(
+        ll_mean = match sim::inference::compute_ode_loglik(
             &config.compiled, obs_model, &ode_obs_times, ode_dt, &base,
         ) {
             Ok(ll) => ll,
@@ -590,7 +590,7 @@ pub fn run_stage(
                 // proceeds — MH's accept/reject handles an uninformative init.
                 let obs_model = ode_obs_model.as_ref()
                     .expect("ode_obs_model built on the is_ode_mh path");
-                match runner::compute_ode_loglik(
+                match sim::inference::compute_ode_loglik(
                     &config.compiled, obs_model, &ode_obs_times, ode_dt,
                     &chain_starts[chain_id],
                 ) {
@@ -707,7 +707,7 @@ pub fn run_stage(
                     Box::new(|params: &[f64], _seed: u64| -> Result<f64, sim::error::SimError> {
                         let obs_model = ode_obs_model.as_ref()
                             .expect("ode_obs_model built on the is_ode_mh path");
-                        match runner::compute_ode_loglik(
+                        match sim::inference::compute_ode_loglik(
                             &config.compiled, obs_model, &ode_obs_times, ode_dt, params,
                         ) {
                             Ok(ll) => Ok(ll),

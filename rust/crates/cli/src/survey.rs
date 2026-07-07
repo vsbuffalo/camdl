@@ -1096,7 +1096,7 @@ fn eval_point_simulate(
     // trajectory difference is larger and the user should prefer
     // `--eval pfilter`. SE remains undefined (single deterministic
     // trajectory; no replicates) → reported as 0.0.
-    let loglik = crate::fit::runner::compute_ode_loglik(
+    let loglik = sim::inference::compute_ode_loglik(
         compiled, obs_model, obs_times, dt, params,
     )
     .unwrap_or(f64::NEG_INFINITY);
