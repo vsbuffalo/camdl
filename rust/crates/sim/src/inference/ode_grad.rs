@@ -44,26 +44,20 @@ pub fn det_grad(
 ) -> Result<(f64, Vec<f64>), SimError> {
     let d = estimated_to_model.len();
 
-    // The forward sensitivity is seeded at `S(t_start) = ∂(initial_state)/∂θ`
-    // (§1c C-seed). For an Explicit (constant) initial condition that derivative
-    // is identically zero, so the seed is zero. A Parameterized initial condition
-    // may depend on an estimated parameter (`i0`/`e0`/`s0`), giving a nonzero seed
-    // the `ic_grad` map would supply — but that emission/evaluation is a follow-up.
-    // Seeding zero for such a model is a SILENT-WRONG zero gradient for exactly the
-    // parameters incidence data informs, so refuse it (never seed zero blindly).
-    match &compiled.model.initial_conditions {
-        ir::model::InitialConditions::Explicit(_) => {}
-        _ => {
-            return Err(SimError::Validation(
-                "ODE gradient (nuts) v1 supports only explicit (constant) initial \
-                 conditions. A parameterized initial condition may depend on an \
-                 estimated parameter, whose forward sensitivity must be seeded at \
-                 S(t_start) = ∂(initial_state)/∂θ (the `ic_grad` seed, gh#275 §1c) — a \
-                 follow-up. Use gradient-free `mh` on `ode` for such a model."
-                    .to_string(),
-            ));
-        }
-    }
+    // §1h capability gate: the ONE place that answers "can this model be fit by the
+    // ODE gradient?" — refusing (with the compiler's own reason where one exists)
+    // an unsupported rate/obs/σ² gradient, a nonsmooth ∂rate/∂state, an adaptive
+    // integrator, a `dt`-in-rate model, a scheduled effect, a parameterized initial
+    // condition (the `ic_grad` seed is a follow-up), a DerivedExpr projection, and a
+    // `projected`-transforming likelihood argument. Run before any gradient is
+    // taken, so a refusal is a single actionable message, not a mid-integration
+    // failure. The seed below is therefore zero: the gate has established the
+    // initial condition is explicit (`∂init/∂θ = 0`).
+    let estimated: std::collections::HashSet<&str> = estimated_to_model
+        .iter()
+        .map(|&i| compiled.model.parameters[i].name.as_str())
+        .collect();
+    crate::inference::gradient_capability::preflight_gradient_ode(compiled, params, &estimated)?;
 
     let (int_s0, _) = compiled.initial_state(params)?;
     let state_sens_0 = vec![0.0f64; int_s0.counts.len() * d];
