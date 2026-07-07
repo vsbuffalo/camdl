@@ -1674,6 +1674,146 @@ impl CompiledModel {
 
         Ok((IntState::from_vec(int_counts), RealState::from_vec(real_values)))
     }
+
+    /// Continuous initial compartment values for the ODE **gradient** path
+    /// (gh#275 §1c): the un-rounded initial state, returned as
+    /// `(int_as_f64, real)`.
+    ///
+    /// [`Self::initial_state`] rounds/truncates integer compartments to `i64`,
+    /// correct for the discrete backends. The deterministic ODE forward
+    /// sensitivity must instead start from the *continuous* initial value:
+    /// rounding a `Parameterized` initial condition to an integer makes the
+    /// likelihood piecewise-constant in the IC parameter, which contradicts the
+    /// `∂init/∂θ` seed (`ic_grad`) and would make the reported gradient
+    /// inconsistent with the value it differentiates (an FD of the rounded value
+    /// is ~0 or a boundary spike, never the analytic seed). For `Explicit`
+    /// (constant) ICs this returns exactly `initial_state`'s values; the two
+    /// paths diverge only for a `Parameterized` IC that evaluates to a
+    /// non-integer, where the continuous value is the correct one for the ODE
+    /// skeleton. The eval context mirrors `initial_state`'s parameterized arm
+    /// (zero state, `t = 0`, `dt = 0`), so the two stay in lockstep.
+    pub fn initial_state_continuous(
+        &self,
+        params: &[f64],
+    ) -> Result<(Vec<f64>, Vec<f64>), SimError> {
+        use ir::model::InitialConditions;
+        use crate::propensity::{eval_expr, EvalCtx};
+
+        let n_int = self.int_local_to_global.len();
+        let n_real = self.real_local_to_global.len();
+        let mut int_values = vec![0.0f64; n_int];
+        let mut real_values = vec![0.0f64; n_real];
+        let zero_int = IntState::new(n_int);
+        let zero_real = RealState::new(n_real);
+
+        // Place a continuous initial value into the int- or real-compartment slot
+        // (unrounded, unlike `initial_state`'s `as i64` / `.round()`).
+        macro_rules! place {
+            ($name:expr, $v:expr) => {{
+                let global = self.comp_index.get($name.as_str())
+                    .copied()
+                    .ok_or_else(|| SimError::UnknownCompartment($name.clone()))?;
+                if let Some(local) = self.global_to_int[global] {
+                    int_values[local] = $v;
+                } else if let Some(local) = self.global_to_real[global] {
+                    real_values[local] = $v;
+                }
+            }};
+        }
+
+        match &self.model.initial_conditions {
+            InitialConditions::Explicit(map) => {
+                for (name, val) in map {
+                    place!(name, *val);
+                }
+            }
+            InitialConditions::Parameterized(map) => {
+                let ctx = EvalCtx { model: self, int_s: &zero_int, real_s: &zero_real, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+                for (name, expr) in map {
+                    let v = eval_expr(expr, &ctx)?;
+                    place!(name, v);
+                }
+            }
+            InitialConditions::FromDistribution(_) => {
+                return Err(SimError::Validation(
+                    "initial_conditions::from_distribution is not yet supported at the \
+                     sim layer; draw initial values via the inference pipeline and pass \
+                     them in as explicit initial_conditions instead".to_string()
+                ));
+            }
+        }
+        Ok((int_values, real_values))
+    }
+
+    /// The forward-sensitivity seed `S(t_start) = ∂(initial_state)/∂θ` (`ic_grad`,
+    /// gh#275 §1c C-seed), laid out as the `n_int × d` row-major block the ODE
+    /// gradient path expects (`state_sens_0`), where `d = estimated.len()` and the
+    /// column order matches `estimated_to_model`.
+    ///
+    /// Reads the compiler-emitted [`ir::Model::ic_grad`] (`compartment → param →
+    /// ∂init/∂param`). Zero everywhere for an `Explicit` (constant) IC or a
+    /// gradient-free build (empty `ic_grad`). A `Parameterized` IC contributes
+    /// `seed[comp_local·d + pos] = ∂(initial comp)/∂param` for each estimated
+    /// `param`; a **fixed** parameter in an IC expression contributes no column
+    /// (it has no sensitivity to seed). The compartment key is validated against
+    /// the int-compartment index — a real compartment (whose ODE-equation
+    /// sensitivity is a separate follow-up) or an unknown name is a hard error,
+    /// not a silently-dropped seed (schema-review flag B2).
+    pub fn ic_grad_seed(
+        &self,
+        params: &[f64],
+        estimated_to_model: &[usize],
+    ) -> Result<Vec<f64>, SimError> {
+        use crate::propensity::{eval_expr, EvalCtx};
+        use ir::deriv::DerivEntry;
+
+        let d = estimated_to_model.len();
+        let n_int = self.int_local_to_global.len();
+        let mut seed = vec![0.0f64; n_int * d];
+        if self.model.ic_grad.is_empty() {
+            return Ok(seed); // Explicit IC or no emission → ∂init/∂θ ≡ 0.
+        }
+
+        // Estimated-parameter name → seed column (position in `estimated_to_model`).
+        let est_pos: std::collections::HashMap<&str, usize> = estimated_to_model
+            .iter()
+            .enumerate()
+            .map(|(pos, &midx)| (self.model.parameters[midx].name.as_str(), pos))
+            .collect();
+
+        let zero_int = IntState::new(n_int);
+        let zero_real = RealState::new(self.real_local_to_global.len());
+        let ctx = EvalCtx { model: self, int_s: &zero_int, real_s: &zero_real, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+
+        for (comp_name, param_map) in &self.model.ic_grad {
+            let global = self.comp_index.get(comp_name.as_str())
+                .copied()
+                .ok_or_else(|| SimError::UnknownCompartment(comp_name.clone()))?;
+            let comp_local = self.global_to_int[global].ok_or_else(|| {
+                SimError::Validation(format!(
+                    "ODE gradient (nuts): parameterized initial condition on real \
+                     compartment `{comp_name}` — real-compartment forward sensitivity is \
+                     not yet supported (gh#275 §1c). Use gradient-free `mh` on `ode`."
+                ))
+            })?;
+            for (param_name, entry) in param_map {
+                // A fixed parameter in an IC expression has no seed column.
+                let Some(&pos) = est_pos.get(param_name.as_str()) else { continue };
+                let v = match entry {
+                    DerivEntry::Grad(expr) => eval_expr(expr, &ctx)?,
+                    DerivEntry::Unsupported { code, .. } => {
+                        return Err(SimError::Validation(format!(
+                            "ODE gradient (nuts): ∂(initial {comp_name})/∂{param_name} is \
+                             not differentiable — it {}. Use gradient-free `mh` on `ode`.",
+                            code.reason_message()
+                        )));
+                    }
+                };
+                seed[comp_local * d + pos] = v;
+            }
+        }
+        Ok(seed)
+    }
 }
 
 #[cfg(test)]
