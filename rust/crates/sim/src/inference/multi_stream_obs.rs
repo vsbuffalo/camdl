@@ -62,7 +62,7 @@ use super::traits::ObservationModel;
 use super::types::ParticleState;
 use super::obs_model::{
     resolve_likelihood_from_model, eval_likelihood_resolved,
-    eval_likelihood_resolved_grad,
+    eval_likelihood_resolved_grad, dlogp_dprojected,
     sample_obs_resolved, eval_obs_mean_resolved,
 };
 
@@ -1221,6 +1221,129 @@ impl MultiStreamObsModel {
             });
         }
         grad
+    }
+
+    /// The deterministic ODE likelihood AND its `∇_θ`, scored from the
+    /// forward-sensitivity records (gh#275 det_grad, the obs half). For each obs
+    /// time and each stream:
+    ///
+    /// - `value += log p(y | projected)`, with `projected` computed **continuously**
+    ///   from the record (§1d — the incidence `inc` or the prevalence `counts`, both
+    ///   unrounded), so the value is smooth in θ;
+    /// - `grad += factor1 + factor2`, where **factor 1** is the θ-direct term
+    ///   ([`eval_likelihood_resolved_grad`], `projected` held fixed — the same seam
+    ///   PGAS uses) and **factor 2** is the trajectory chain
+    ///   `(∂logp/∂projected)·(∂projected/∂θ)`, with `∂projected/∂θ` read off the
+    ///   record: `Σ_selected inc_sens` for an `Interval` (incidence / `FlowSum`)
+    ///   stream, `Σ_selected state_sens` for an `Instant` (prevalence / `IntCompSum`)
+    ///   stream. The `Sensitivity`-kind split is enforced by the projection variant.
+    ///
+    /// Refuses (gh#275 §1h) a `DerivedExpr` prevalence projection and a
+    /// `projected`-transforming likelihood argument ([`dlogp_dprojected`]) — v1
+    /// supports linear selections and `arg = projected`.
+    ///
+    /// `records[i]` corresponds to `obs_times[i]` (the recorder emits one per obs
+    /// time, in order). `estimated_to_model` maps each of the `d` gradient columns
+    /// to its model parameter index.
+    pub(crate) fn ode_loglik_and_grad(
+        &self,
+        records: &[crate::ode::ObsSensitivity],
+        params: &[f64],
+        estimated_to_model: &[usize],
+    ) -> Result<(f64, Vec<f64>), crate::error::SimError> {
+        use crate::error::SimError;
+        let d = estimated_to_model.len();
+        if records.len() != self.obs_times.len() {
+            return Err(SimError::Validation(format!(
+                "ODE gradient: {} sensitivity records but {} observation times",
+                records.len(),
+                self.obs_times.len()
+            )));
+        }
+        let mut total_ll = 0.0;
+        let mut grad = vec![0.0; d];
+        for (obs_idx, rec) in records.iter().enumerate() {
+            let t = self.obs_times[obs_idx];
+            // The recorder emits one record per obs time, in order; a mismatch means
+            // the output grid drifted from the obs grid (a caller bug the recorder's
+            // own overshoot check should already have caught).
+            debug_assert!(
+                (rec.t - t).abs() < 1e-9,
+                "record {obs_idx} at t={} does not match obs time {t}",
+                rec.t
+            );
+            // Rounded int-state scratch for any likelihood arg that reads a `Pop`
+            // directly (rare); the prevalence PROJECTION below uses the continuous
+            // `rec.counts`, so §1d smoothness is preserved where it matters. The
+            // real-compartment state is the trajectory's value at this obs time.
+            let counts_i64: Vec<i64> =
+                rec.counts.iter().map(|&c| c.round().max(0.0) as i64).collect();
+            let real_s = RealState::from_vec(rec.real.clone());
+            for si in 0..self.streams.len() {
+                let s = &self.streams[si];
+                let local = match s.at_union[obs_idx] {
+                    Some(l) => l,
+                    None => continue,
+                };
+                let observed = match s.observations[local] {
+                    Some(ObsCell::Scalar(v)) => v,
+                    None => continue,
+                };
+                // Continuous `projected` and `∂projected/∂θ`, read off the record.
+                let (projected, dproj): (f64, Vec<f64>) = match &s.projection {
+                    StreamProjection::FlowSum(idxs) => {
+                        let p = idxs.iter().map(|&i| rec.inc[i]).sum();
+                        let mut dp = vec![0.0; d];
+                        for &i in idxs {
+                            for k in 0..d {
+                                dp[k] += rec.inc_sens[i * d + k];
+                            }
+                        }
+                        (p, dp)
+                    }
+                    StreamProjection::IntCompSum(idxs) => {
+                        let p = idxs.iter().map(|&i| rec.counts[i]).sum();
+                        let mut dp = vec![0.0; d];
+                        for &i in idxs {
+                            for k in 0..d {
+                                dp[k] += rec.state_sens[i * d + k];
+                            }
+                        }
+                        (p, dp)
+                    }
+                    StreamProjection::Expr(_) => {
+                        return Err(SimError::Validation(
+                            "ODE gradient (nuts) does not support a DerivedExpr \
+                             (nonlinear) prevalence projection: its ∂projection/∂state \
+                             is a compiler-emitted object not yet built (gh#275 §1h). \
+                             Use gradient-free `mh` on `ode`."
+                                .to_string(),
+                        ));
+                    }
+                };
+                // value + factor 1 inside the scratch; factor 2 (which can refuse)
+                // returns ∂logp/∂projected for chaining by ∂projected/∂θ.
+                let dl_dproj = with_scratch_int_from_counts(&counts_i64, |int_s| {
+                    total_ll += eval_likelihood_resolved(
+                        &s.resolved, t, projected, observed, &s.aux[local],
+                        params, &self.compiled, int_s, &real_s,
+                    );
+                    eval_likelihood_resolved_grad(
+                        &s.resolved, t, projected, observed, &s.aux[local],
+                        params, &self.compiled, int_s, &real_s,
+                        estimated_to_model, &mut grad,
+                    );
+                    dlogp_dprojected(
+                        &s.resolved, t, projected, observed, &s.aux[local],
+                        params, &self.compiled, int_s, &real_s,
+                    )
+                })?;
+                for k in 0..d {
+                    grad[k] += dl_dproj * dproj[k];
+                }
+            }
+        }
+        Ok((total_ll, grad))
     }
 }
 
