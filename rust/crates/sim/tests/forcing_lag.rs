@@ -53,6 +53,7 @@ fn param(name: &str, value: f64) -> Parameter {
 /// `lag`, plus any parameters the lag references.
 fn model_with_lag(lag: Option<Expr>, params: Vec<Parameter>) -> Model {
     Model {
+        ic_grad: Default::default(),
         name: "lag_test".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -180,6 +181,7 @@ fn flat_eval_matches_standard_path_for_lagged_forcing() {
     // Model with one transition whose rate is the lagged forcing `vc`.
     let mut model = model_with_lag(Some(Expr::const_(5.0)), vec![]);
     model.transitions = vec![Transition {
+        rate_state_grad: Default::default(),
         name: "self".into(),
         stoichiometry: vec![StoichiometryEntry("S".into(), 0)],
         rate: Expr::TimeFunc(TimeFuncWrap { time_func: TimeFuncRef { name: "vc".into() } }),

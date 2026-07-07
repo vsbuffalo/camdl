@@ -55,6 +55,7 @@ fn representative_model() -> Model {
     compartment_dims.insert("S".into(), vec!["age".into()]);
 
     Model {
+        ic_grad: Default::default(),
         name: "sir_seasonal".into(),
         version: "1.0".into(),
         time_unit: "days".into(),
@@ -67,6 +68,7 @@ fn representative_model() -> Model {
             Compartment { name: "R".into(), kind: CompartmentKind::Real },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "infection".into(),
             stoichiometry: vec![
                 StoichiometryEntry("S".into(), -1),
@@ -234,7 +236,14 @@ fn model_golden_hash() {
     // + expr) instead of the bare expr. The representative model's `rate_grad`
     // (∂/∂beta) shifts the model hash once more — the same deliberate,
     // version-bumped re-key on the rate side.
-    const GOLDEN: &str = "df9c33c6a947dff87ddbf9f7219021321cfacb8a9604b823ac5d1ee4d685e10d";
+    // gh#275 (ir/VERSION -> 0.27): the ODE gradient spine adds two compiler-emitted
+    // derivative fields — `Transition::rate_state_grad` (∂rate/∂compartment, `J_x`)
+    // and `Model::ic_grad` (∂init/∂θ, the sensitivity seed). Both are hashed into
+    // run identity like `rate_grad` (a state gradient changes the fit, so it must
+    // re-key). They are empty until the WrtPop/WrtParam passes emit them, but the
+    // two new length-0 prefixes shift the model hash once at the bump — a
+    // deliberate, version-bumped re-key (state/IC gradients are run identity).
+    const GOLDEN: &str = "d62ed1b118c1724d50aa65f4bd0b5d373488b020af94fb0b155f65b23f37879f";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -257,6 +266,45 @@ fn ir_per_eval_bindings_changes_hash() {
         m.content_hash(),
         "a non-empty per_eval_bindings must change the model hash (else flipping LICM \
          on would collide run_id with the off-form)"
+    );
+}
+
+/// gh#275: a non-empty `rate_state_grad` (∂rate/∂compartment, `J_x`) must change
+/// the model hash. Same blocker as `per_eval_bindings`: adding the struct field +
+/// the `hash_into` line is invisible to `model_golden_hash` on its own (an empty
+/// map hashes the same folded or not). This pins that the field is genuinely read,
+/// so a model that computes a state gradient cannot collide `run_id` with one that
+/// does not — a state gradient changes the fit and must re-key.
+#[test]
+fn ir_rate_state_grad_changes_hash() {
+    use ir::deriv::{CompGradMap, DerivEntry};
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    let mut g = std::collections::HashMap::new();
+    g.insert("S".to_string(), DerivEntry::Grad(Expr::param("beta")));
+    m.transitions[0].rate_state_grad = CompGradMap(g);
+    assert_ne!(
+        base,
+        m.content_hash(),
+        "a non-empty rate_state_grad must change the model hash (state gradients are run identity)"
+    );
+}
+
+/// gh#275: a non-empty `ic_grad` (∂init/∂θ, the forward-sensitivity seed) must
+/// change the model hash — the IC/state sensitivity axis is run identity for the
+/// same reason as `rate_grad`.
+#[test]
+fn ir_ic_grad_changes_hash() {
+    use ir::deriv::DerivEntry;
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    let mut inner = std::collections::HashMap::new();
+    inner.insert("beta".to_string(), DerivEntry::Grad(Expr::param("beta")));
+    m.ic_grad.insert("I".to_string(), inner);
+    assert_ne!(
+        base,
+        m.content_hash(),
+        "a non-empty ic_grad must change the model hash (the IC sensitivity seed is run identity)"
     );
 }
 

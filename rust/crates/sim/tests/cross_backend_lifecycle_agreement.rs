@@ -405,6 +405,7 @@ fn battery_integer_exact_cross_backend_final_agreement() {
 /// snapshot is the post-intervention state.
 fn collision_model(interventions: Vec<Intervention>) -> CompiledModel {
     let m = Model {
+        ic_grad: Default::default(),
         name: "gh198_within_dt_collision".into(),
         version: "0.1".into(),
         time_unit: "days".into(),
@@ -416,6 +417,7 @@ fn collision_model(interventions: Vec<Intervention>) -> CompiledModel {
             Compartment { name: "V".into(), kind: CompartmentKind::Integer },
         ],
         transitions: vec![Transition {
+            rate_state_grad: Default::default(),
             name: "noop".into(),
             stoichiometry: vec![
                 StoichiometryEntry("S".into(), -1),

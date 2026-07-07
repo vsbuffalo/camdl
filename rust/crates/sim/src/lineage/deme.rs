@@ -274,6 +274,7 @@ mod tests {
 
     fn minimal_model() -> ir::Model {
         ir::Model {
+            ic_grad: Default::default(),
             name: "t".into(),
             version: "0".into(),
             time_unit: "days".into(),

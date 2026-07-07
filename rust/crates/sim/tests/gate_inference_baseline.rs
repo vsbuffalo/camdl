@@ -74,6 +74,7 @@ fn param(name: &str, value: f64) -> Parameter {
 }
 fn transition(name: &str, sto: Vec<StoichiometryEntry>, rate: Expr) -> Transition {
     Transition {
+        rate_state_grad: Default::default(),
         name: name.into(), stoichiometry: sto, rate, metadata: None,
         draw_method: DrawMethod::Poisson, rate_grad: Default::default(), lineage: None,
     }
@@ -87,6 +88,7 @@ fn transition(name: &str, sto: Vec<StoichiometryEntry>, rate: Expr) -> Transitio
 fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, Vec<f64>) {
     let n = Expr::PopSum(PopSumExpr { pop_sum: vec!["S".into(), "I".into(), "R".into()] });
     let m = Model {
+        ic_grad: Default::default(),
         name: "sir_weekly_negbin".into(),
         version: "0.3".into(),
         time_unit: "days".into(),

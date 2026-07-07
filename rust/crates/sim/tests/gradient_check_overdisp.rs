@@ -432,6 +432,7 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
     };
 
     let m = Model {
+        ic_grad: Default::default(),
         name: "det_inflow_spine".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -444,6 +445,7 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
         transitions: vec![
             // Stochastic, source-bearing → grouped. Shared density both paths compute.
             Transition {
+                rate_state_grad: Default::default(),
                 name: "recovery".into(),
                 stoichiometry: vec![
                     StoichiometryEntry("S".into(), -1),
@@ -460,6 +462,7 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
             },
             // Deterministic, SOURCE-LESS inflow → ungrouped. The gh#200 trigger.
             Transition {
+                rate_state_grad: Default::default(),
                 name: "birth".into(),
                 stoichiometry: vec![StoichiometryEntry("S".into(), 1)],
                 rate: Expr::Param(ParamExpr { param: "k".into() }),

@@ -82,6 +82,7 @@ let model_with_bindings bs =
     time_functions = []; tables = []; interventions = []; observations = [];
     parameters = []; bindings = bs; per_eval_bindings = [];
     initial_conditions = Explicit [];
+    ic_grad = [];
     output = { times = OutAtTimes []; format = "tsv";
                trajectory = true; observations = true };
     simulation = { t_start = 0.0; t_end = 1.0; time_semantics = "continuous";

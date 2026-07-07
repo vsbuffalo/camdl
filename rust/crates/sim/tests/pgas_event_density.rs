@@ -62,6 +62,7 @@ fn param(name: &str, value: f64) -> Parameter {
 
 fn mk_transition(name: &str, src: &str, dst: &str, rate: Expr) -> Transition {
     Transition {
+        rate_state_grad: Default::default(),
         name: name.into(),
         stoichiometry: vec![
             StoichiometryEntry(src.into(), -1),
@@ -122,6 +123,7 @@ fn sir_with_seed_event() -> Model {
     init.insert("R".into(),   0.0);
 
     Model {
+        ic_grad: Default::default(),
         name: "sir_seed_event".into(),
         version: "0.3".into(), time_unit: "days".into(),
         description: None, origin: None, origin_rata_die: None,
@@ -206,6 +208,7 @@ fn seir_with_seed_event(n_seed: i64, tau: f64) -> Model {
     init.insert("R".into(),    0.0);
 
     Model {
+        ic_grad: Default::default(),
         name: "seir_seed_event".into(),
         version: "0.3".into(), time_unit: "days".into(),
         description: None, origin: None, origin_rata_die: None,

@@ -168,6 +168,7 @@ type transition = {
   metadata:        transition_metadata option;
   draw_method:     draw_method;
   rate_grad:       (string * deriv_entry) list;  (** ∂rate/∂param, classified [Grad | Unsupported] (a [grad_map]); empty if not computed. A live-but-omitted coefficient is a serialized [DEUnsupported] the fit gate refuses on (gh#342). *)
+  rate_state_grad: (string * deriv_entry) list;  (** ∂rate/∂compartment, the [rate_grad] sibling keyed by compartment ([J_x]'s ingredient for the ODE forward sensitivities, gh#275). Empty until the [WrtPop] autodiff pass emits it. *)
   lineage:         transition_lineage option;  (** Some iff `#[lineage]`; None for ordinary transitions. *)
 }
 
@@ -831,6 +832,12 @@ type model = {
   per_eval_bindings:  binding list;       (* gh#272 LICM: param/table-only loop-invariant bindings,
                                              topo-ordered; produced by the LICM pass, empty by default *)
   initial_conditions: initial_conditions;
+  ic_grad:            (string * (string * deriv_entry) list) list;
+                      (** ∂(initial_state)/∂θ per parameterized IC compartment — the
+                          forward-sensitivity seed [S(t_start)] for the ODE gradient
+                          (gh#275). Keyed [compartment -> (param -> deriv_entry)];
+                          the [rate_grad] analogue for the init map, empty until the
+                          [WrtParam]-over-init pass emits it. *)
   output:             output_config;
   simulation:         simulation_config;
   presets:            preset list;

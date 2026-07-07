@@ -84,6 +84,7 @@ fn periodic_xfer_model(at_day: f64, period: f64, end: f64, model_dt: Option<f64>
     };
 
     Model {
+        ic_grad: Default::default(),
         name: "test".into(),
         version: "0.3".into(),
         time_unit: "days".into(),

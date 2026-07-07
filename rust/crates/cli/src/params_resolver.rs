@@ -1046,6 +1046,7 @@ mod tests {
     /// the argument; everything else is empty-but-valid.
     fn mk_model(parameters: Vec<Parameter>) -> ir::Model {
         ir::Model {
+            ic_grad: Default::default(),
             name: "test".into(),
             version: "0.3".into(),
             time_unit: "days".into(),

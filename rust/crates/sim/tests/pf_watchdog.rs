@@ -96,6 +96,7 @@ fn pathological_sir_model() -> (CompiledModel, Vec<f64>) {
     }});
 
     let model = Model {
+        ic_grad: Default::default(),
         name: "pathological_sir_pf".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -108,6 +109,7 @@ fn pathological_sir_model() -> (CompiledModel, Vec<f64>) {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "infection".into(),
                 stoichiometry: vec![
                     StoichiometryEntry("S".into(), -1),
@@ -120,6 +122,7 @@ fn pathological_sir_model() -> (CompiledModel, Vec<f64>) {
                 lineage: None,
             },
             Transition {
+                rate_state_grad: Default::default(),
                 name: "recovery".into(),
                 stoichiometry: vec![
                     StoichiometryEntry("I".into(), -1),
@@ -325,6 +328,7 @@ fn healthy_sir_model() -> (CompiledModel, Vec<f64>) {
     }});
 
     let model = Model {
+        ic_grad: Default::default(),
         name: "healthy_sir_pf".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -337,6 +341,7 @@ fn healthy_sir_model() -> (CompiledModel, Vec<f64>) {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "infection".into(),
                 stoichiometry: vec![
                     StoichiometryEntry("S".into(), -1),
@@ -349,6 +354,7 @@ fn healthy_sir_model() -> (CompiledModel, Vec<f64>) {
                 lineage: None,
             },
             Transition {
+                rate_state_grad: Default::default(),
                 name: "recovery".into(),
                 stoichiometry: vec![
                     StoichiometryEntry("I".into(), -1),

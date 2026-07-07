@@ -61,6 +61,7 @@ fn union_axis(obs: &MultiStreamObsModel) -> Vec<f64> {
 /// flow per substep is exactly `nearbyint(K·dt)`.
 fn model(k_per_unit: f64) -> Arc<CompiledModel> {
     let m = Model {
+        ic_grad: Default::default(),
         name: "per_stream_reset".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -71,6 +72,7 @@ fn model(k_per_unit: f64) -> Arc<CompiledModel> {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "inflow".into(),
                 stoichiometry: vec![StoichiometryEntry("R".into(), 1)],
                 rate: Expr::Const(ConstExpr { value: k_per_unit }),

@@ -59,6 +59,7 @@ fn sir_model(output_times: Vec<f64>, t_end: f64) -> (CompiledModel, Vec<f64>) {
     let recovery_rate = Expr::bin_op(BinOp::Mul, Expr::param("gamma"), Expr::pop("I"));
 
     let tr = |name: &str, from: &str, to: &str, rate: Expr| Transition {
+        rate_state_grad: Default::default(),
         name: name.into(),
         stoichiometry: vec![
             StoichiometryEntry(from.into(), -1),
@@ -86,6 +87,7 @@ fn sir_model(output_times: Vec<f64>, t_end: f64) -> (CompiledModel, Vec<f64>) {
     let int_comp = |name: &str| Compartment { name: name.into(), kind: CompartmentKind::Integer };
 
     let model = Model {
+        ic_grad: Default::default(),
         name: "sir_splice".into(),
         version: "0.3".into(),
         time_unit: "days".into(),

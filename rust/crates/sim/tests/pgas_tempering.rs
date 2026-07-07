@@ -30,6 +30,7 @@ use sim::{
 /// Build a pure death model: N → dead at rate mu*N.
 fn pure_death_model() -> (Arc<CompiledModel>, Vec<f64>) {
     let model = Model {
+        ic_grad: Default::default(),
         name: "pure_death_tempering".into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -40,6 +41,7 @@ fn pure_death_model() -> (Arc<CompiledModel>, Vec<f64>) {
         ],
         transitions: vec![
             Transition {
+                rate_state_grad: Default::default(),
                 name: "death".into(),
                 stoichiometry: vec![StoichiometryEntry("N".into(), -1)],
                 rate: Expr::BinOp(BinOpWrap {

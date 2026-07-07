@@ -49,6 +49,7 @@ fn fixed(name: &str, value: f64) -> Parameter {
 /// A two-source Poisson transition `src_a + src_b --> dst @ rate`.
 fn multi_source(name: &str, src_a: &str, src_b: &str, dst: &str, rate: Expr) -> Transition {
     Transition {
+        rate_state_grad: Default::default(),
         name: name.into(),
         stoichiometry: vec![
             StoichiometryEntry(src_a.into(), -1),
@@ -64,6 +65,7 @@ fn multi_source(name: &str, src_a: &str, src_b: &str, dst: &str, rate: Expr) -> 
 }
 fn poisson(name: &str, src: &str, dst: &str, rate: Expr) -> Transition {
     Transition {
+        rate_state_grad: Default::default(),
         name: name.into(),
         stoichiometry: vec![StoichiometryEntry(src.into(), -1), StoichiometryEntry(dst.into(), 1)],
         rate,
@@ -83,6 +85,7 @@ fn build(
     t_end: f64,
 ) -> Model {
     Model {
+        ic_grad: Default::default(),
         name: name.into(),
         version: "0.3".into(),
         time_unit: "days".into(),
@@ -218,6 +221,7 @@ fn single_source_model_is_accepted_on_chain_binomial() {
 #[test]
 fn single_source_as_duplicate_entries_is_accepted() {
     let dup_entry = Transition {
+        rate_state_grad: Default::default(),
         name: "react".into(),
         stoichiometry: vec![
             StoichiometryEntry("S".into(), -1),

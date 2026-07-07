@@ -468,6 +468,7 @@ mod tests {
 
     fn base_model() -> ir::Model {
         ir::Model {
+            ic_grad: Default::default(),
             name: "t".into(),
             version: "0.3".into(),
             time_unit: "days".into(),
@@ -550,6 +551,7 @@ mod tests {
     /// forcing rate-referenced (moving it into the preflight's domain).
     fn rate_transition(rate: Expr, rate_grad: &[(&str, DerivEntry)]) -> ir::transition::Transition {
         ir::transition::Transition {
+            rate_state_grad: Default::default(),
             name: "infection".into(),
             stoichiometry: vec![ir::transition::StoichiometryEntry("S".into(), -1)],
             rate,
