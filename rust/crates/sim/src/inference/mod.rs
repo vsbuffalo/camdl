@@ -34,6 +34,7 @@ pub mod linalg;
 pub mod diagnostic;
 pub mod prequential;
 pub mod ode_loglik;
+pub mod ode_grad;
 #[cfg(feature = "ode")]
 pub mod deterministic;
 

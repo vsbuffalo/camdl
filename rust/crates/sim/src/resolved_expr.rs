@@ -118,6 +118,30 @@ pub fn references_state(expr: &ResolvedExpr) -> bool {
     }
 }
 
+/// Returns true if the expression references the observation projection
+/// (`ResolvedExpr::Projected`). gh#275: the ODE-gradient scorer needs `∂arg/∂projected`
+/// for a likelihood argument; it supports an argument that IS exactly `Projected`
+/// (`∂/∂projected = 1`, the `mean = projected` common case) and refuses an argument
+/// that references `Projected` in any more complex way (that needs the
+/// compiler-emitted `∂arg/∂Projected`, a follow-up). This walk distinguishes the two.
+pub fn references_projected(expr: &ResolvedExpr) -> bool {
+    match expr {
+        ResolvedExpr::Projected => true,
+        ResolvedExpr::BinOp { left, right, .. } =>
+            references_projected(left) || references_projected(right),
+        ResolvedExpr::UnOp { arg, .. } => references_projected(arg),
+        ResolvedExpr::Cond { pred, then_, else_ } =>
+            references_projected(pred) || references_projected(then_) || references_projected(else_),
+        ResolvedExpr::TableLookup { index, .. } => references_projected(index),
+        ResolvedExpr::UncheckedDim { inner } => references_projected(inner),
+        ResolvedExpr::Reduce(terms) => terms.iter().any(references_projected),
+        // Bindings are model dynamics surfaces — never observation-context, so
+        // they cannot carry `Projected` (it only appears in likelihood exprs).
+        ResolvedExpr::BindingRef(_) | ResolvedExpr::PerEvalRef(_) => false,
+        _ => false,
+    }
+}
+
 /// gh#284: the LICM per-eval staging contract, enforced in Rust as well as in
 /// the OCaml pass (`licm.ml is_invariant`). The body of per-eval binding `slot`
 /// is staged ONCE per θ-stable span (`stage_per_eval`, at `t_start` against a

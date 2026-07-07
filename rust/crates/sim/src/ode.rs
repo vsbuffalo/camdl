@@ -830,6 +830,262 @@ pub fn run_ode(
     Ok(traj)
 }
 
+/// One observation time's continuous state and forward sensitivities, recorded
+/// by [`integrate_obs_sensitivity`] for the ODE-NUTS gradient scorer (gh#275).
+/// This is the sensitivity analogue of a `compute_ode_loglik` snapshot: it
+/// carries the UNROUNDED f64 state (§1d continuous prevalence) plus the two
+/// sensitivity blocks the chain rule consumes — `state_sens` for `Prevalence`
+/// streams, `inc_sens` for `Incidence` streams.
+pub(crate) struct ObsSensitivity {
+    pub t: f64,
+    /// Continuous int-compartment state `x(t)` (unrounded, §1d).
+    pub counts: Vec<f64>,
+    /// Real-compartment state.
+    pub real: Vec<f64>,
+    /// `S = ∂counts/∂θ` at this obs time (`n_int × d`, row-major).
+    pub state_sens: Vec<f64>,
+    /// Per-transition cumulative flow since the previous obs time (`n_tr`) — the
+    /// incidence over this observation interval (pomp accumulator semantics).
+    pub inc: Vec<f64>,
+    /// `∂inc/∂θ` (`n_tr × d`, row-major) — the incidence sensitivity over this
+    /// interval, folded per stream by the scorer.
+    pub inc_sens: Vec<f64>,
+}
+
+/// The augmented state carried through the boundary walk: the value `OdeState`
+/// plus its forward sensitivities. Generic parameter `S` of [`Schedule::arrive`]
+/// is instantiated at this type, so the shared boundary authority
+/// (effects-then-output ordering, coincident batching, terminal drain) is reused
+/// verbatim while the closures add sensitivity behavior (gh#275 architecture: own
+/// thin driver over the shared `Schedule`/`rk4_step` seams, `run_ode` untouched).
+struct AugState {
+    ode: OdeState,
+    sens: Sens,
+}
+
+/// Drive the fixed-step RK4 integration carrying the augmented `(x, flow, S,
+/// acc_sens)` system, recording the continuous state and forward sensitivities at
+/// each observation time (gh#275 §1c/§1d). The integration half of `det_grad`:
+/// the returned records feed the obs-score chain rule (a separate step).
+///
+/// Routes every boundary decision through the shared `Schedule` authority
+/// (`next_stop` / `arrive` / `MIN_STEP_EPS`) exactly as `run_ode` does — only the
+/// per-step dynamics (`rk4_step` WITH sensitivity) and the per-boundary recording
+/// differ. Scores on the OUTPUT grid (obs times must coincide with output
+/// snapshots), matching `compute_ode_loglik`, so the two remain reconcilable.
+///
+/// `state_sens_0` is the `S(t_start) = ∂(initial_state)/∂θ` seed (`ic_grad`, §1c
+/// C-seed): zero for a parameter that does not enter an initial condition, nonzero
+/// for an `ivp` parameter. Passed in (not derived here) so the seed computation is
+/// a separate, independently-tested concern.
+///
+/// Refuses (hard error, §1c/§1h) an adaptive integrator, a `dt`-in-rate
+/// (RUNTIME_DT) model, and any scheduled effect — none of which have a defined
+/// fixed-step forward sensitivity in v1.
+pub(crate) fn integrate_obs_sensitivity(
+    model: &CompiledModel,
+    params: &[f64],
+    param_model_idx: &[usize],
+    state_sens_0: &[f64],
+    cfg: &OdeConfig,
+    obs_times: &[f64],
+) -> Result<Vec<ObsSensitivity>, SimError> {
+    let d = param_model_idx.len();
+    let n_tr = model.model.transitions.len();
+
+    model.validate_schedule(cfg.dt, params)?;
+
+    // §1c: fixed-step RK4 only. An adaptive integrator sizes steps from the state
+    // error alone (S under-resolved) and its step sequence is discontinuous in θ
+    // (loglik only piecewise-smooth) — a silent value/gradient mismatch.
+    if !matches!(model.model.simulation.integrator, ir::model::Integrator::Rk4) {
+        return Err(SimError::Validation(
+            "ODE gradient (nuts) requires integrator = rk4 (fixed step); an adaptive \
+             integrator (rk45) is refused — its step sequence is discontinuous in θ, \
+             breaking the forward-sensitivity/loglik consistency NUTS needs (gh#275 §1c)"
+                .to_string(),
+        ));
+    }
+    // §1c: a `dt`-in-rate model keeps the first-order Euler flow, which has no
+    // augmented sensitivity — refuse rather than emit an inconsistent gradient.
+    if model.required_capabilities().contains(crate::Capabilities::RUNTIME_DT) {
+        return Err(SimError::Validation(
+            "ODE gradient (nuts) cannot differentiate a model that references `dt` in a \
+             rate (Expr::Dt): its flow uses the first-order Euler scheme, which carries \
+             no augmented sensitivity (gh#275 §1c)"
+                .to_string(),
+        ));
+    }
+
+    let per_eval: Option<Vec<f64>> =
+        crate::resolved_expr::stage_per_eval(model, params, cfg.t_start, cfg.dt);
+    let (int_s0, real_s0) = model.initial_state(params)?;
+    let ni = int_s0.counts.len();
+    debug_assert_eq!(
+        state_sens_0.len(),
+        ni * d,
+        "S(t_start) seed must be n_int × d"
+    );
+
+    let mut st = AugState {
+        ode: OdeState {
+            int: int_s0.counts.iter().map(|&c| c as f64).collect(),
+            real: real_s0.values.clone(),
+            flow: vec![0.0; n_tr],
+        },
+        sens: Sens {
+            state: state_sens_0.to_vec(),
+            flow: vec![0.0; n_tr * d],
+        },
+    };
+
+    let schedule = Schedule::exact_forward(
+        cfg.dt,
+        cfg.t_end,
+        OutputTimes::from_model(model)?,
+        EffectTimes::from_model(model, params)?,
+    );
+    let mut cursor = Cursor::default();
+    let fire_steps = model.resolve_fire_steps(cfg.dt, params);
+
+    // Running incidence (and its sensitivity) accumulated across output snapshots
+    // since the previous obs time — reset per obs, exactly as `compute_ode_loglik`
+    // bridges a fine output grid to a sparse obs grid.
+    let mut cum_flow = vec![0.0; n_tr];
+    let mut cum_flow_sens = vec![0.0; n_tr * d];
+    let mut records = Vec::with_capacity(obs_times.len());
+    let mut next_obs = 0usize;
+    let n_obs = obs_times.len();
+
+    // Record the current boundary as an obs time if it matches, then reset the
+    // running incidence. Returns whether an obs was recorded (for the overshoot
+    // check). `t` is the boundary time; `st`/`cum_*` are read at their post-effect,
+    // post-output-reset values.
+    let try_record = |t: f64,
+                          st: &AugState,
+                          cum_flow: &mut [f64],
+                          cum_flow_sens: &mut [f64],
+                          records: &mut Vec<ObsSensitivity>,
+                          next_obs: &mut usize|
+     -> bool {
+        if *next_obs < n_obs && (t - obs_times[*next_obs]).abs() < 1e-9 {
+            records.push(ObsSensitivity {
+                t,
+                counts: st.ode.int.clone(),
+                real: st.ode.real.clone(),
+                state_sens: st.sens.state.clone(),
+                inc: cum_flow.to_vec(),
+                inc_sens: cum_flow_sens.to_vec(),
+            });
+            cum_flow.fill(0.0);
+            cum_flow_sens.fill(0.0);
+            *next_obs += 1;
+            true
+        } else {
+            false
+        }
+    };
+
+    let mut t = cfg.t_start;
+
+    // Initial boundary at t_start (zero incidence). Mirror run_ode's cursor
+    // management: record-if-obs, then pass the output so the walk is aligned.
+    if schedule.output_due_at(&cursor, t) {
+        try_record(t, &st, &mut cum_flow, &mut cum_flow_sens, &mut records, &mut next_obs);
+        cursor.pass_output();
+    }
+
+    while let Some(stop) = schedule.next_stop(&cursor, t) {
+        let h_max = stop.t - t;
+        if h_max > MIN_STEP_EPS {
+            // Fixed RK4 substep, clipped to the boundary; re-entered until arrival.
+            let h = cfg.dt.min(h_max);
+            rk4_step(
+                model,
+                &mut st.ode.int,
+                &mut st.ode.real,
+                Some(&mut st.ode.flow),
+                params,
+                t,
+                h,
+                per_eval.as_deref(),
+                Some(&mut st.sens),
+                param_model_idx,
+            )?;
+            t += h;
+            continue;
+        }
+
+        // Arrived: dispatch effects-then-output through the shared `arrive` seam.
+        // The output closure accumulates this interval's flow (and its sensitivity)
+        // into the running cum, then resets — mirroring run_ode's per-output flow
+        // reset, extended to `acc_sens`.
+        schedule.arrive(
+            &mut cursor,
+            &stop,
+            t,
+            &mut st,
+            |_st, bt| {
+                let mut batch = crate::schedule::EffectBatch::default();
+                crate::effects::due_effects(model, &fire_steps, bt, cfg.dt, &mut batch);
+                if !batch.is_empty() {
+                    // §1g: fixed-time θ-magnitude event sensitivity is a follow-up;
+                    // v1 refuses any scheduled effect under the gradient path rather
+                    // than emit a jump-term-only (silent-wrong) gradient.
+                    return Err(SimError::Validation(
+                        "ODE gradient (nuts) does not yet support scheduled interventions \
+                         or events: their event-jump sensitivity is a follow-up (gh#275 \
+                         §1g). Use gradient-free `mh` on `ode` for models with effects."
+                            .to_string(),
+                    ));
+                }
+                Ok(())
+            },
+            |st, _ot| {
+                for i in 0..n_tr {
+                    cum_flow[i] += st.ode.flow[i];
+                }
+                for k in 0..n_tr * d {
+                    cum_flow_sens[k] += st.sens.flow[k];
+                }
+                st.ode.flow.fill(0.0);
+                st.sens.flow.fill(0.0);
+            },
+        )?;
+
+        let recorded = try_record(
+            t,
+            &st,
+            &mut cum_flow,
+            &mut cum_flow_sens,
+            &mut records,
+            &mut next_obs,
+        );
+        if !recorded && next_obs < n_obs && t > obs_times[next_obs] + 1e-9 {
+            return Err(SimError::Validation(format!(
+                "ODE output grid has no snapshot at obs time {} (integration reached \
+                 t = {} without landing on it); the [output] schedule must include \
+                 every observation time (gh#275 scores on the output grid)",
+                obs_times[next_obs], t
+            )));
+        }
+
+        if stop.is_end() {
+            break;
+        }
+    }
+
+    if next_obs < n_obs {
+        return Err(SimError::Validation(format!(
+            "ODE trajectory ended at t = {} before reaching obs time {}; simulate.to \
+             must extend at least to the last obs time",
+            t, obs_times[next_obs]
+        )));
+    }
+
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1118,6 +1374,99 @@ mod tests {
             fs[1].abs() > 1.0,
             "off-diagonal ∂flow_fwd/∂beta_r should be materially nonzero, got {}",
             fs[1]
+        );
+    }
+
+    /// The schedule-driven recorder (`integrate_obs_sensitivity`) — the det_grad
+    /// integration half — validated over ≥2 obs reset intervals (the gh#187
+    /// silent-gap gate: a prevalence-only or single-interval check passes with the
+    /// incidence-reset bugged). On two_state (A⇌B) with obs at t=10,20,30:
+    ///
+    /// - `state_sens` and per-interval `inc_sens` are checked against central
+    ///   finite differences of the recorder's own `counts`/`inc` — validating the
+    ///   schedule-driven sensitivity carry + the `arrive` reuse.
+    /// - a mass-balance identity `A(30) = A0 − Σinc_fwd + Σinc_bwd` checks the
+    ///   incidence RESET independently: a broken reset makes both `inc` and
+    ///   `inc_sens` consistently wrong (so FD alone can't see it), but over-counts
+    ///   the summed incidence and fails the balance.
+    #[test]
+    fn obs_sensitivity_recorder_matches_fd_over_reset_intervals() {
+        let cm = compiled_two_state();
+        let base = [0.5f64, 0.3];
+        let pmi = [0usize, 1];
+        let d = 2;
+        let ni = 2; // A, B
+        let n_tr = 2; // forward, backward
+        let cfg = OdeConfig { t_start: 0.0, t_end: 30.0, dt: 0.25 };
+        let obs = [10.0f64, 20.0, 30.0];
+        let seed = vec![0.0f64; ni * d]; // params don't enter two_state's initial counts
+
+        let recs = integrate_obs_sensitivity(&cm, &base, &pmi, &seed, &cfg, &obs).unwrap();
+        assert_eq!(recs.len(), 3, "one record per obs time");
+
+        // Central FD in each parameter (hoisted: perturbation depends on the param,
+        // not the record).
+        let eps = 1e-5;
+        let perturbed: Vec<(Vec<ObsSensitivity>, Vec<ObsSensitivity>)> = (0..d)
+            .map(|pk| {
+                let mut pp = base;
+                let mut pm = base;
+                pp[pk] += eps;
+                pm[pk] -= eps;
+                (
+                    integrate_obs_sensitivity(&cm, &pp, &pmi, &seed, &cfg, &obs).unwrap(),
+                    integrate_obs_sensitivity(&cm, &pm, &pmi, &seed, &cfg, &obs).unwrap(),
+                )
+            })
+            .collect();
+
+        for (ri, rec) in recs.iter().enumerate() {
+            // The record is tagged with its obs time, and two_state has no
+            // real-valued compartments (the recorder still carries the block).
+            assert!((rec.t - obs[ri]).abs() < 1e-9, "record {ri} tagged t={}", rec.t);
+            assert!(rec.real.is_empty(), "two_state has no real compartments");
+            for pk in 0..d {
+                let (rp, rm) = &perturbed[pk];
+                for comp in 0..ni {
+                    let fd = (rp[ri].counts[comp] - rm[ri].counts[comp]) / (2.0 * eps);
+                    let sym = rec.state_sens[comp * d + pk];
+                    assert!(
+                        (sym - fd).abs() < 1e-4 * fd.abs().max(1.0),
+                        "state_sens rec{ri} comp{comp} p{pk}: {sym} vs FD {fd}"
+                    );
+                }
+                for tr in 0..n_tr {
+                    let fd = (rp[ri].inc[tr] - rm[ri].inc[tr]) / (2.0 * eps);
+                    let sym = rec.inc_sens[tr * d + pk];
+                    assert!(
+                        (sym - fd).abs() < 1e-4 * fd.abs().max(1.0),
+                        "inc_sens rec{ri} tr{tr} p{pk}: {sym} vs FD {fd}"
+                    );
+                }
+            }
+        }
+
+        // Independent reset check: mass balance over the whole [0,30] window.
+        // forward removes A, backward adds A; the per-interval incidences must sum
+        // to the total flow, so A(30) = A0 − Σinc_fwd + Σinc_bwd.
+        let sum_fwd: f64 = recs.iter().map(|r| r.inc[0]).sum();
+        let sum_bwd: f64 = recs.iter().map(|r| r.inc[1]).sum();
+        let a_final = recs.last().unwrap().counts[0];
+        let a0 = 80.0;
+        assert!(
+            (a_final - (a0 - sum_fwd + sum_bwd)).abs() < 1e-6,
+            "mass balance A(30)={a_final} vs A0−Σfwd+Σbwd={}",
+            a0 - sum_fwd + sum_bwd
+        );
+        // The reset is genuinely exercised: per-interval forward incidence must
+        // DECREASE across intervals (A relaxes toward equilibrium), which a
+        // never-reset cumulative accumulator would violate (it would increase).
+        assert!(
+            recs[2].inc[0] < recs[0].inc[0],
+            "per-interval forward incidence should decrease (reset working): \
+             {} !< {}",
+            recs[2].inc[0],
+            recs[0].inc[0]
         );
     }
 
