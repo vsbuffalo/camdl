@@ -71,6 +71,7 @@ fn model_with_obs(
             emit_schedule: Some(ObservationSchedule::AtTimes(vec![5.0])),
             stratum: vec![],
             projection,
+            projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 // rate = projected + 0.1 (floor to avoid Poisson(0) → -inf)
                 rate: ir::Diffable::new(Expr::BinOp(BinOpWrap {
@@ -347,6 +348,7 @@ fn snapshot_reads_post_intervention_state() {
             emit_schedule: Some(ObservationSchedule::AtTimes(vec![5.0])),
             stratum: vec![],
             projection: Projection::CurrentPop("S".into()),
+            projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: ir::Diffable::new(Expr::BinOp(BinOpWrap {
                     bin_op: BinOpExpr {

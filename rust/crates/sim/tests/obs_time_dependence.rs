@@ -110,6 +110,7 @@ fn time_varying_obs(compiled: &Arc<CompiledModel>, obs_times: Vec<f64>, observat
                 emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
                 projection: ir::observation::Projection::CumulativeFlow("death".into()),
+                projection_state_grad: Default::default(),
                 likelihood: ir::observation::Likelihood::Poisson(
                     ir::observation::PoissonLikelihood { rate: ir::Diffable::new(rate) },
                 ),

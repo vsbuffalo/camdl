@@ -127,6 +127,7 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
             emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
             stratum: vec![],
             projection: Projection::CumulativeFlow("infection".into()),
+            projection_state_grad: Default::default(),
             likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {
                 mean: ir::Diffable::new(mul(p("rho"), Expr::Projected(ProjectedExpr { projected: () }))),
                 dispersion: ir::Diffable::new(p("k")),

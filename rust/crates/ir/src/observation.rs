@@ -218,6 +218,15 @@ pub struct ObservationModel {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stratum:       Vec<StratumKey>,
     pub projection:    Projection,
+    /// ∂projection/∂compartment for a `DerivedExpr` (nonlinear) projection — the
+    /// WrtPop differentiation the ODE observation gradient's factor-2 chain
+    /// consumes (`∂proj/∂θ = Σ_j ∂proj/∂x_j · S[j]`, gh#275 §1h). Empty (and
+    /// omitted) for a linear projection (`CurrentPop*`/`CumulativeFlow*` — a
+    /// trivial selection, not a nonlinear function of state) and on gradient-free
+    /// backends; populated by the OCaml WrtPop pass (the `rate_state_grad`
+    /// analogue for a projection expression).
+    #[serde(default, skip_serializing_if = "crate::deriv::CompGradMap::is_empty")]
+    pub projection_state_grad: crate::deriv::CompGradMap,
     pub likelihood:    Likelihood,
 }
 

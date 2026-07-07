@@ -1,4 +1,4 @@
-{"ir_version":"0.28","validated_by":"ocaml-compiler-v0.28","model":{"name":"ebola_outcome_hyper","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.29","validated_by":"ocaml-compiler-v0.29","model":{"name":"ebola_outcome_hyper","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"E","kind":"integer"},
 {"name":"R","kind":"integer"},

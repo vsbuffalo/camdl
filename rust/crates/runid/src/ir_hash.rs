@@ -648,6 +648,11 @@ impl ContentAddressed for ObservationModel {
             self.stratum.hash_into(h);
         }
         self.projection.hash_into(h);
+        // ∂projection/∂compartment (gh#275 §1h): the DerivedExpr projection's
+        // WrtPop gradient, hashed like rate_state_grad (sorted by key). A
+        // projection-gradient change alters a gradient fit's posterior, so it is
+        // run identity. Empty ⇒ length-0 prefix (linear projections unchanged).
+        h.write_str_map(self.projection_state_grad.iter());
         self.likelihood.hash_into(h);
     }
 }

@@ -547,6 +547,22 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
     let observations =
       Passtime.time "autodiff-obs"
         (fun () -> Autodiff.differentiate_observations d.model.Ir.observations param_names tfs tbls) in
+    (* Projection autodiff (gh#275 §1h): ∂projection/∂compartment for a
+       [DerivedExpr] (nonlinear) projection, filling each obs model's
+       [projection_state_grad] — the factor-2 ingredient the ODE observation
+       gradient consumes. The linear projection families (current-pop /
+       cumulative-flow) emit nothing (a trivial selection handled directly).
+       WrtPop, so it threads the compartments + bindings, like [rate_state_grad]. *)
+    let observations =
+      let comp_names = List.map (fun (c : Ir.compartment) -> c.name) d.model.Ir.compartments in
+      let bindings = d.model.Ir.bindings in
+      Passtime.time "autodiff-projection" (fun () ->
+        List.map
+          (fun (om : Ir.observation_model) ->
+            { om with Ir.projection_state_grad =
+                Autodiff.differentiate_projection om.projection comp_names tfs tbls bindings })
+          observations)
+    in
     (* Initial-condition autodiff (gh#275 §1c C-seed): ∂(initial_state)/∂θ for a
        PARAMETERIZED initial condition, filling the model's [ic_grad] map — the
        ODE forward-sensitivity seed S(t_start). Explicit (constant) and

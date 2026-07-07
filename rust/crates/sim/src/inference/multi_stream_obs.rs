@@ -346,6 +346,113 @@ fn resolve_int_comp(compiled: &CompiledModel, name: &str) -> Option<usize> {
     compiled.global_to_int[global]
 }
 
+/// Resolve a `DerivedExpr` projection's `∂proj/∂compartment` (IR [`CompGradMap`],
+/// compartment-name → derivative) into the int-local-indexed, eval-ready form the
+/// ODE observation gradient's factor-2 chain consumes (gh#275 §1h): a list of
+/// `(int_local_comp, ∂proj/∂comp)` — the compartment index matches `state_sens`.
+/// A nonsmooth (`DerivEntry::Unsupported`) entry is dropped: the gradient gate
+/// refuses such a model before scoring, so the dropped term is never reached.
+/// Empty in ⇒ empty out (a linear projection carries no state gradient).
+fn resolve_projection_state_grad(
+    grad: &ir::deriv::CompGradMap,
+    compiled: &CompiledModel,
+) -> Result<Vec<(usize, ResolvedExpr)>, crate::error::SimError> {
+    use crate::error::SimError;
+    use crate::resolved_expr::{resolve_expr, ResolveCtx};
+    if grad.0.is_empty() {
+        return Ok(Vec::new());
+    }
+    let table_meta: Vec<(ir::table::OobPolicy, usize)> = compiled.model.tables.iter()
+        .zip(&compiled.table_values_cache)
+        .map(|(t, cached)| (t.out_of_bounds.clone(), cached.len()))
+        .collect();
+    let ctx = ResolveCtx {
+        comp_index: &compiled.comp_index,
+        param_index: &compiled.param_index,
+        time_func_index: &compiled.time_func_index,
+        table_index: &compiled.table_index,
+        global_to_int: &compiled.global_to_int,
+        global_to_real: &compiled.global_to_real,
+        table_meta: &table_meta,
+        binding_index: &compiled.binding_index,
+        per_eval_index: &compiled.per_eval_index,
+    };
+    let mut out = Vec::with_capacity(grad.0.len());
+    for (comp_name, entry) in grad.0.iter() {
+        match entry {
+            ir::deriv::DerivEntry::Grad(expr) => {
+                // A ∂proj/∂(real compartment) entry is dropped, not an error: real
+                // compartments carry no int-local forward sensitivity, and the
+                // gradient gate refuses any REAL_COMPARTMENTS model for ODE-NUTS,
+                // so this entry is never consumed on the gradient path. Erroring
+                // here would break the shared obs-model constructor for the
+                // gradient-FREE methods (`mh`/`pgas`/…), which never read it.
+                let Some(local) = resolve_int_comp(compiled, comp_name) else {
+                    continue;
+                };
+                let resolved = resolve_expr(expr, &ctx).map_err(|e| SimError::Validation(
+                    format!("cannot resolve ∂projection/∂{comp_name}: {e:?}")))?;
+                out.push((local, resolved));
+            }
+            // Nonsmooth projection gradient — refused by the capability gate; skip.
+            ir::deriv::DerivEntry::Unsupported { .. } => {}
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod projection_state_grad_tests {
+    use super::resolve_projection_state_grad;
+    use crate::compiled_model::CompiledModel;
+    use ir::deriv::{CompGradMap, DerivEntry};
+    use ir::expr::{ConstExpr, Expr};
+    use ir::model::CompartmentKind;
+    use std::collections::HashMap;
+
+    /// A `∂proj/∂(real compartment)` entry is DROPPED, not an error (gh#275 §1h
+    /// review): real compartments carry no int-local forward sensitivity, and the
+    /// gradient gate refuses any REAL_COMPARTMENTS model for ODE-NUTS, so the entry
+    /// is never scored. Erroring here would break the shared obs-model constructor
+    /// for the gradient-FREE methods (`mh`/`pgas`/…), which never read it.
+    /// `sir_reservoir` has a real reservoir compartment.
+    #[test]
+    fn resolve_drops_real_compartment_entries_without_error() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/sir_reservoir.ir.json");
+        let mut model: ir::Model =
+            ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Fill any unresolved parameter so CompiledModel::new resolves (the value
+        // is irrelevant — this test resolves only constant gradient expressions).
+        for p in &mut model.parameters {
+            if p.value.resolved_value().is_none() {
+                p.value = p.value.with_value(0.5);
+            }
+        }
+        let compiled = CompiledModel::new(model).unwrap();
+
+        // Find an int compartment and the real (reservoir) compartment by kind, so
+        // the test doesn't hard-code names.
+        let int_comp = compiled.model.compartments.iter()
+            .find(|c| matches!(c.kind, CompartmentKind::Integer)).unwrap().name.clone();
+        let real_comp = compiled.model.compartments.iter()
+            .find(|c| matches!(c.kind, CompartmentKind::Real)).unwrap().name.clone();
+
+        // A mixed projection gradient touching both.
+        let mut inner: HashMap<String, DerivEntry> = HashMap::new();
+        inner.insert(int_comp.clone(), DerivEntry::Grad(Expr::Const(ConstExpr { value: 1.0 })));
+        inner.insert(real_comp, DerivEntry::Grad(Expr::Const(ConstExpr { value: 2.0 })));
+
+        let resolved = resolve_projection_state_grad(&CompGradMap(inner), &compiled)
+            .expect("a real-compartment gradient entry must be dropped, not an error");
+        // Only the int compartment survives; the real one is skipped.
+        assert_eq!(resolved.len(), 1, "the real compartment entry must be dropped");
+        let expected = compiled.global_to_int[compiled.comp_index[int_comp.as_str()]].unwrap();
+        assert_eq!(resolved[0].0, expected, "the surviving entry is the int compartment");
+    }
+}
+
 /// Severity of a [`Finding`] emitted by [`BoundObs::bind`]. `Error` is fatal
 /// (no `BoundObs` escapes); `Warn`/`Info` are advisory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -718,6 +825,13 @@ struct Stream {
     /// labels). Persisted from `StreamSpec.ir_model.name`.
     name: String,
     projection: StreamProjection,
+    /// ∂projection/∂compartment for a `DerivedExpr` (nonlinear) projection,
+    /// resolved and keyed by int-local compartment index (matching `state_sens`).
+    /// The ODE observation gradient's factor-2 chain (`∂proj/∂θ = Σ_j ∂proj/∂x_j
+    /// · S[j]`, gh#275 §1h) evaluates each at the trajectory state and dots it
+    /// with the forward sensitivity. Empty for linear projections (a trivial
+    /// selection the factor-2 chain handles directly) and gradient-free builds.
+    projection_state_grad: Vec<(usize, ResolvedExpr)>,
     /// Resolved likelihood expression tree (pre-resolved at construction,
     /// but evaluates with params at call time — no baked-in values).
     resolved: ResolvedLikelihood,
@@ -843,9 +957,12 @@ impl MultiStreamObsModel {
             let resolved = resolve_likelihood_from_model(
                 &spec.ir_model.likelihood, &compiled,
             )?;
+            let projection_state_grad =
+                resolve_projection_state_grad(&spec.ir_model.projection_state_grad, &compiled)?;
             streams.push(Stream {
                 name: spec.ir_model.name.clone(),
                 projection: spec.projection,
+                projection_state_grad,
                 resolved,
                 at_union: spec.at_union,
                 observations: spec.cells,
@@ -1311,14 +1428,43 @@ impl MultiStreamObsModel {
                         }
                         (p, dp)
                     }
-                    StreamProjection::Expr(_) => {
-                        return Err(SimError::Validation(
-                            "ODE gradient (nuts) does not support a DerivedExpr \
-                             (nonlinear) prevalence projection: its ∂projection/∂state \
-                             is a compiler-emitted object not yet built (gh#275 §1h). \
-                             Use gradient-free `mh` on `ode`."
-                                .to_string(),
-                        ));
+                    StreamProjection::Expr(value_expr) => {
+                        // Continuous eval at the trajectory state (`rec.counts`,
+                        // unrounded), so the projected value is smooth in θ. Its
+                        // ∂/∂compartment chains through the forward sensitivity S:
+                        // ∂projected/∂θ_k = Σ_j (∂proj/∂x_j) · state_sens[j,k]
+                        // (gh#275 §1h). The int-state is a placeholder — the
+                        // continuous state rides `int_float_override`.
+                        //
+                        // Co-located silent-zero guard: an empty resolved gradient
+                        // here would make the entire factor-2 zero. The capability
+                        // gate refuses a DerivedExpr with no ∂proj/∂compartment
+                        // (and `det_grad` is `ode_loglik_and_grad`'s only caller and
+                        // runs the gate first), so this cannot fire — but assert it
+                        // next to the risk so a future caller/reorder can't silently
+                        // reintroduce a zero gradient.
+                        debug_assert!(
+                            !s.projection_state_grad.is_empty(),
+                            "DerivedExpr stream '{}' reached ODE scoring with an empty projection \
+                             gradient — the capability gate should have refused it (silent-zero \
+                             factor-2)",
+                            s.name
+                        );
+                        let placeholder = crate::state::IntState::new(rec.counts.len());
+                        let ctx = crate::propensity::EvalCtx {
+                            model: &self.compiled, int_s: &placeholder, real_s: &real_s,
+                            params, t, dt: 0.0, projected: None, aux: None,
+                            int_float_override: Some(&rec.counts), per_eval: None,
+                        };
+                        let p = eval_resolved(value_expr, &ctx);
+                        let mut dp = vec![0.0; d];
+                        for (j, dproj_dcomp) in &s.projection_state_grad {
+                            let g = eval_resolved(dproj_dcomp, &ctx);
+                            for k in 0..d {
+                                dp[k] += g * rec.state_sens[j * d + k];
+                            }
+                        }
+                        (p, dp)
                     }
                 };
                 // value + factor 1 inside the scratch; factor 2 (which can refuse)
@@ -1501,6 +1647,7 @@ mod bind_tests {
             emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
             stratum: vec![],
             projection: Projection::CumulativeFlow("inc".into()),
+            projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
             }),
@@ -1785,6 +1932,7 @@ mod hole_scoring_tests {
                     emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                     stratum: vec![],
                     projection: Projection::CumulativeFlow("recovery".into()),
+                    projection_state_grad: Default::default(),
                     likelihood: Likelihood::Poisson(PoissonLikelihood {
                         // rate = rho * projected
                         rate: ir::Diffable::new(Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {

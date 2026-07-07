@@ -962,10 +962,10 @@ let observation_model_to_json (om : observation_model) : Yojson.Safe.t =
     | [] -> []
     | ss -> [("stratum", arr (List.map stratum_key_to_json ss))]
   in
-  obj (base @ sched @ stratum @ [
-    ("projection",  projection_to_json om.projection);
-    ("likelihood",  likelihood_to_json om.likelihood);
-  ])
+  obj (base @ sched @ stratum
+       @ [("projection", projection_to_json om.projection)]
+       @ grad_field "projection_state_grad" om.projection_state_grad
+       @ [("likelihood", likelihood_to_json om.likelihood)])
 
 let observation_model_of_json j =
   { name          = as_string (member "name"   j);
@@ -979,6 +979,9 @@ let observation_model_of_json j =
                      | Some `Null | None -> []
                      | Some s -> List.map stratum_key_of_json (as_list s));
     projection    = projection_of_json  (member "projection" j);
+    projection_state_grad = (match member_opt "projection_state_grad" j with
+                             | Some `Null | None -> []
+                             | Some g -> grad_map_of_json g);
     likelihood    = likelihood_of_json  (member "likelihood" j);
   }
 

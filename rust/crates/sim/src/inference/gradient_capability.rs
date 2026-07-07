@@ -287,6 +287,23 @@ pub fn preflight_gradient_ode(
                 .to_string(),
         ));
     }
+    // ── Real-valued compartments: the forward sensitivity is integer-compartment
+    //    only (`sensitivity_derivs`). A real ODE-equation compartment's ∂x/∂θ is
+    //    not tracked, so any rate or projection that reads it would get a
+    //    silently-incomplete gradient; worse, for a mixed int/real model the
+    //    `rate_state_grad` keys (global compartment index) would mis-index the
+    //    int-local sensitivity buffer. Refuse until real-compartment forward
+    //    sensitivity is built (gh#275 §1c follow-up) — a hard error, never a
+    //    silent-wrong gradient.
+    if model.required_capabilities().contains(crate::Capabilities::REAL_COMPARTMENTS) {
+        return Err(SimError::Validation(
+            "ODE gradient (nuts) does not support real-valued compartments (ODE-equation \
+             compartments): the forward sensitivity is integer-compartment only, so a real \
+             compartment's ∂x/∂θ is not tracked (gh#275 §1c). Use gradient-free `mh` on \
+             `ode` for models with real compartments."
+                .to_string(),
+        ));
+    }
     // ── Scheduled effects: event-jump sensitivity is a follow-up (§1g) ──────────
     if !EffectTimes::from_model(model, params)?.into_vec().is_empty() {
         return Err(SimError::Validation(
@@ -372,15 +389,38 @@ pub fn preflight_gradient_ode(
     }
     // ── Observation projections + likelihood arguments ──────────────────────────
     for om in &m.observations {
-        // A DerivedExpr (nonlinear) prevalence projection needs ∂projection/∂state,
-        // a compiler-emitted object not yet built (§1h).
-        if let Projection::DerivedExpr(_) = om.projection {
-            return Err(SimError::Validation(format!(
-                "ODE gradient (nuts) does not support the DerivedExpr (nonlinear) projection \
-                 of observation stream `{}`: its ∂projection/∂state is a compiler-emitted \
-                 object not yet built (gh#275 §1h). Use gradient-free `mh` on `ode`.",
-                om.name
-            )));
+        // A DerivedExpr (nonlinear) prevalence projection IS supported — the
+        // compiler emits `∂projection/∂compartment` (`projection_state_grad`, the
+        // factor-2 ingredient, §1h). What is refused is a NONSMOOTH function of
+        // state in the projection (`floor(I/N)`, a `Cond` on `Pop`, a state-indexed
+        // table), whose WrtPop gradient the pass serializes as `Unsupported` — the
+        // forward-sensitivity chain would otherwise silently drop a real term.
+        if matches!(om.projection, Projection::DerivedExpr(_)) {
+            // A DerivedExpr is a nonlinear function of state, so its
+            // ∂projection/∂compartment must be emitted — an empty map means the
+            // factor-2 chain would silently drop the whole ∂projected/∂θ term.
+            if om.projection_state_grad.is_empty() {
+                return Err(SimError::Validation(format!(
+                    "ODE gradient (nuts): the DerivedExpr projection of observation stream `{}` \
+                     carries no ∂projection/∂compartment — its factor-2 gradient would be \
+                     silently zero. Recompile with a camdlc that emits projection_state_grad \
+                     (gh#275 §1h). (If the projection genuinely does not depend on compartment \
+                     state, it is not an identifiable observation of the trajectory — it cannot \
+                     inform a gradient fit; use gradient-free `mh` on `ode`.)",
+                    om.name
+                )));
+            }
+            for (comp, entry) in om.projection_state_grad.iter() {
+                if let DerivEntry::Unsupported { code, .. } = entry {
+                    return Err(SimError::Validation(format!(
+                        "ODE gradient (nuts): the projection of observation stream `{}` is a \
+                         nonsmooth function of compartment `{}` — it {}. The ∂projection/∂state \
+                         chain is undefined. Reformulate the projection with a smooth \
+                         expression, or use gradient-free `mh` on `ode`.",
+                        om.name, comp, code.reason_message()
+                    )));
+                }
+            }
         }
         // A likelihood argument that transforms `projected` (a reporting rate
         // `rho·projected`, the He mean-linked variance) IS supported — the compiler
@@ -562,6 +602,21 @@ mod tests {
     }
 
     #[test]
+    fn refuses_real_compartments() {
+        // sir_reservoir has a real-valued reservoir compartment (ODE-equation
+        // driven). The forward sensitivity is integer-compartment only, so its
+        // ∂x/∂θ is untracked (silent-wrong / mis-indexed). The gate must refuse —
+        // a hard error, not a silent gradient.
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/sir_reservoir.ir.json");
+        let m: ir::Model =
+            ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let msg = gate_err(m, &["beta"]);
+        assert!(msg.contains("real-valued compartments"), "{msg}");
+    }
+
+    #[test]
     fn refuses_adaptive_integrator() {
         let mut m = base_model();
         m.simulation.integrator = ir::model::Integrator::Rk45 { atol: None, rtol: None };
@@ -662,21 +717,66 @@ mod tests {
         assert!(msg.contains("from_distribution") && msg.contains("ivp"), "{msg}");
     }
 
-    #[test]
-    fn refuses_derivedexpr_projection() {
-        let mut m = base_model();
-        // A nonlinear prevalence projection on the detection stream.
+    /// Set the `detection` stream to a nonlinear prevalence projection `I / S`.
+    fn detection_derivedexpr(m: &mut ir::Model) {
         for om in &mut m.observations {
             if om.name == "detection" {
                 om.projection = ir::observation::Projection::DerivedExpr(Expr::bin_op(
-                    ir::expr::BinOp::Div,
-                    Expr::pop("I"),
-                    Expr::pop("S"),
+                    ir::expr::BinOp::Div, Expr::pop("I"), Expr::pop("S"),
                 ));
             }
         }
+    }
+
+    #[test]
+    fn refuses_derivedexpr_projection_without_emitted_gradient() {
+        // A DerivedExpr projection with no ∂proj/∂compartment emitted → the
+        // factor-2 chain would be silently zero. Refuse (Risk #3 silent-zero).
+        let mut m = base_model();
+        detection_derivedexpr(&mut m); // projection_state_grad left empty
         let msg = gate_err(m, &["beta"]);
-        assert!(msg.contains("DerivedExpr") && msg.contains("detection"), "{msg}");
+        assert!(msg.contains("silently zero") && msg.contains("detection"), "{msg}");
+    }
+
+    #[test]
+    fn admits_derivedexpr_projection_with_emitted_gradient() {
+        // A DerivedExpr with a smooth emitted ∂proj/∂compartment is SUPPORTED now
+        // (guards against over-refusal — the whole point of this change).
+        let mut m = base_model();
+        detection_derivedexpr(&mut m);
+        for om in &mut m.observations {
+            if om.name == "detection" {
+                om.projection_state_grad.0.insert(
+                    "I".to_string(), DerivEntry::Grad(Expr::const_(0.5)));
+                om.projection_state_grad.0.insert(
+                    "S".to_string(), DerivEntry::Grad(Expr::const_(-0.5)));
+            }
+        }
+        let cm = compile(m);
+        let params: Vec<f64> = cm.model.parameters.iter()
+            .map(|p| p.value.resolved_value().unwrap()).collect();
+        preflight_gradient_ode(&cm, &params, &est(&["beta"]))
+            .expect("a DerivedExpr with an emitted smooth projection gradient must be admitted");
+    }
+
+    #[test]
+    fn refuses_nonsmooth_derivedexpr_projection() {
+        // A nonsmooth-of-state projection (e.g. floor(I/N)) → the WrtPop pass emits
+        // an Unsupported ∂proj/∂compartment. Refuse (the chain is undefined).
+        let mut m = base_model();
+        detection_derivedexpr(&mut m);
+        for om in &mut m.observations {
+            if om.name == "detection" {
+                om.projection_state_grad.0.insert(
+                    "I".to_string(),
+                    DerivEntry::Unsupported {
+                        node: "floor(I/S)".to_string(),
+                        code: UnsupportedReason::NonsmoothState,
+                    });
+            }
+        }
+        let msg = gate_err(m, &["beta"]);
+        assert!(msg.contains("nonsmooth") && msg.contains("detection"), "{msg}");
     }
 
     #[test]

@@ -205,6 +205,7 @@ fn poisson_obs_with_grad(param: &str, entry: DerivEntry) -> ir::observation::Obs
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
         projection: Projection::CumulativeFlow("infection".into()),
+        projection_state_grad: Default::default(),
         likelihood: Likelihood::Poisson(PoissonLikelihood {
             rate: ir::Diffable { expr: Expr::Projected(ProjectedExpr { projected: () }), grad: HashMap::from([(param.to_string(), entry)]), proj_grad: None },
         }),
@@ -224,6 +225,7 @@ fn benign_obs() -> ir::observation::ObservationModel {
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
         projection: Projection::CumulativeFlow("infection".into()),
+        projection_state_grad: Default::default(),
         likelihood: Likelihood::Poisson(PoissonLikelihood {
             rate: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
         }),
@@ -435,6 +437,7 @@ fn binomial_obs_with_n(n: ir::expr::Expr, projection: ir::observation::Projectio
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
         projection,
+        projection_state_grad: Default::default(),
         likelihood: Likelihood::Binomial(BinomialLikelihood {
             n,
             p: ir::Diffable::new(Expr::Const(ConstExpr { value: 0.5 })),

@@ -466,6 +466,11 @@ type observation_model = {
      whose [stratum] matches the row's `: dim` column values BY NAME. *)
   stratum:       (string * string) list;
   projection:    projection;
+  (* ∂projection/∂compartment for a [DerivedExpr] (nonlinear) projection — the
+     WrtPop differentiation the ODE observation gradient's factor-2 chain consumes
+     (gh#275 §1h). Empty for a linear projection (CurrentPop*/CumulativeFlow* — a
+     trivial selection). The [rate_state_grad] analogue for a projection. *)
+  projection_state_grad: (string * deriv_entry) list;
   likelihood:    likelihood;
 }
 

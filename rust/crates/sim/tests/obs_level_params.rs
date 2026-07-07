@@ -79,6 +79,7 @@ fn model_with_obs_param() -> (Arc<CompiledModel>, Vec<f64>) {
                 emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
                 projection: Projection::CumulativeFlow("death".into()),
+                projection_state_grad: Default::default(),
                 likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {
                     // mean = projected (cumulative deaths)
                     mean: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),

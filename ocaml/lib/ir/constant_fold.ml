@@ -164,6 +164,7 @@ let fold_model (m : model) : model =
         List.map
           (fun (o : observation_model) ->
             { o with projection = fold_projection fe o.projection;
+                     projection_state_grad = fold_grad_map fe o.projection_state_grad;
                      likelihood = fold_likelihood fe o.likelihood })
           m.observations;
       (* ∂init/∂θ seed (gh#275): fold each compartment's grad_map like a rate's,

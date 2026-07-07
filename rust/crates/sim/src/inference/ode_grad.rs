@@ -301,6 +301,110 @@ mod tests {
         assert!(grad[2].abs() > 1e-6, "∂/∂k should be materially nonzero");
     }
 
+    /// The det_grad FD oracle for a **DerivedExpr (nonlinear) projection**
+    /// (gh#275 §1h). The detection stream projects `√I + √R` — a nonlinear function
+    /// of TWO compartments — so its observation factor-2 term is
+    /// `∂projected/∂θ = (0.5/√I)·S[I] + (0.5/√R)·S[R]`: the compiler-shaped
+    /// projection gradient `∂proj/∂x_j`, evaluated at the trajectory, weighting the
+    /// forward sensitivity `S` and SUMMED over the compartments. This is the whole
+    /// point — a linear `IntCompSum` uses weight `1`; a DerivedExpr uses the
+    /// state-dependent `∂proj/∂x`, and the multi-compartment case exercises the
+    /// `Σ_j` accumulation (catching an entry-ordering / stride bug). `∂(√x)/∂x =
+    /// 0.5/√x` is unambiguous, so the hand-installed `{I: 0.5/√I, R: 0.5/√R}` is
+    /// verified end-to-end here. (`√`, not `I²`: it keeps the projected value
+    /// O(100) so the central FD does not lose precision to cancellation.)
+    ///
+    /// RED-CHECK (verified during development): zeroing the projection gradient
+    /// drops the stream's entire factor-2, and analytic `∂/∂beta` lands at rel err
+    /// ≈ 1e-2 vs the central FD — well above the 1e-4 gate. (Not larger because the
+    /// co-located incidence stream still contributes correctly, so beta's total is
+    /// only partly wrong; the `√I+√R` term is what closes the gap.)
+    #[test]
+    fn det_grad_matches_finite_difference_derivedexpr_projection() {
+        use ir::expr::UnOp;
+        let mut model = seir_ode_grad_fixture();
+        set_defaults(&mut model);
+        model.simulation.t_end = 60.0;
+        // Rewrite `detection` to a MULTI-compartment DerivedExpr projection √I + √R,
+        // poisson(rate=projected). Two state-dependent terms exercise the factor-2
+        // `Σ_j (∂proj/∂x_j)·S[j]` accumulation over more than one compartment —
+        // catching an entry-ordering or stride bug the single-term case can't.
+        let sqrt = |c: &str| Expr::un_op(UnOp::Sqrt, Expr::pop(c));
+        let half_over_sqrt = |c: &str| DerivEntry::Grad(Expr::bin_op(
+            BinOp::Div, Expr::Const(ConstExpr { value: 0.5 }), sqrt(c)));
+        for om in &mut model.observations {
+            if om.name == "detection" {
+                om.projection = ir::observation::Projection::DerivedExpr(
+                    Expr::bin_op(BinOp::Add, sqrt("I"), sqrt("R")));
+                // ∂(√I + √R)/∂I = 0.5/√I, ∂/∂R = 0.5/√R
+                om.projection_state_grad = ir::deriv::CompGradMap(HashMap::from([
+                    ("I".to_string(), half_over_sqrt("I")),
+                    ("R".to_string(), half_over_sqrt("R")),
+                ]));
+                om.likelihood = Likelihood::Poisson(PoissonLikelihood {
+                    rate: Diffable {
+                        expr: projected(),
+                        grad: HashMap::new(),
+                        proj_grad: Some(DerivEntry::Grad(Expr::Const(ConstExpr { value: 1.0 }))),
+                    },
+                });
+            }
+        }
+        let compiled = Arc::new(CompiledModel::new(model).unwrap());
+        let n = compiled.param_index.len();
+        let mut params = vec![0.0; n];
+        for p in &compiled.model.parameters {
+            params[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+        }
+        let i_idx = compiled.global_to_int[compiled.comp_index["I"]].unwrap();
+        let r_idx = compiled.global_to_int[compiled.comp_index["R"]].unwrap();
+
+        let dt = 1.0;
+        let obs_times: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect();
+        let est = vec![compiled.param_index["beta"], compiled.param_index["gamma"]];
+
+        // Synthesize obs data at the true params: weekly = incidence, detection = √I+√R.
+        let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end: 60.0, dt };
+        let seed = vec![0.0; compiled.initial_state(&params).unwrap().0.counts.len() * est.len()];
+        let recs =
+            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed, &cfg, &obs_times)
+                .unwrap();
+        let flow_idx = 0usize; // weekly_cases is the incidence stream (FlowSum)
+        let weekly: Vec<f64> = recs.iter().map(|r| r.inc[flow_idx].round()).collect();
+        let detection: Vec<f64> = recs.iter()
+            .map(|r| (r.counts[i_idx].max(0.0).sqrt() + r.counts[r_idx].max(0.0).sqrt()).round())
+            .collect();
+        assert!(detection.iter().sum::<f64>() > 1.0, "√I+√R detection data must be nonzero");
+
+        let obs_model = build_obs_model(compiled.clone(), &obs_times, vec![weekly, detection]);
+        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est).unwrap();
+        assert!(ll.is_finite(), "det_grad loglik must be finite, got {ll}");
+
+        let eps = 1e-6;
+        let names = ["beta", "gamma"];
+        for (i, &midx) in est.iter().enumerate() {
+            let mut pp = params.clone();
+            let mut pm = params.clone();
+            pp[midx] += eps;
+            pm[midx] -= eps;
+            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est).unwrap();
+            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est).unwrap();
+            let fd = (llp - llm) / (2.0 * eps);
+            let rel = if fd.abs() > 1e-8 {
+                (grad[i] - fd).abs() / fd.abs()
+            } else {
+                (grad[i] - fd).abs()
+            };
+            assert!(
+                rel < 1e-4,
+                "det_grad ∂/∂{} = {} vs FD {} (rel err {:.2e})",
+                names[i], grad[i], fd, rel
+            );
+        }
+        // Non-vacuity: beta drives I, so the I² factor-2 must be materially nonzero.
+        assert!(grad[0].abs() > 1e-6, "∂/∂beta should be materially nonzero (the projection factor-2)");
+    }
+
     /// The det_grad FD oracle for an **estimated initial-condition parameter**
     /// (gh#275 §1c C-seed, Risk #1). A parameterized IC `S = N0 − I0`, `I = I0`
     /// makes the initial epidemic size a function of the estimated `I0`; its

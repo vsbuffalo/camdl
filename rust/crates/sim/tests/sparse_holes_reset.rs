@@ -85,6 +85,7 @@ fn model(k_per_unit: f64) -> Arc<CompiledModel> {
                 emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
                 projection: Projection::CumulativeFlow("inflow".into()),
+                projection_state_grad: Default::default(),
                 likelihood: Likelihood::Normal(NormalLikelihood {
                     // mean = projected (the weekly incidence tally)
                     mean: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),

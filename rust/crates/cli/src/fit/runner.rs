@@ -4514,6 +4514,7 @@ dt = 1.0
                     emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                     stratum: vec![],
                     projection: Projection::CumulativeFlow("inflow".into()),
+                    projection_state_grad: Default::default(),
                     likelihood: Likelihood::Normal(NormalLikelihood {
                         mean: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
                         sd: ir::Diffable::new(Expr::Const(ConstExpr { value: sd })),

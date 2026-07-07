@@ -90,6 +90,7 @@ fn model() -> Arc<CompiledModel> {
                 emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
                 projection: Projection::CurrentPop("I".into()),
+                projection_state_grad: Default::default(),
                 likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {
                     // mean = rho * I  (Pop ref → reads counts)
                     mean: ir::Diffable::new(Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {

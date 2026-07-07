@@ -1139,6 +1139,7 @@ mod tests {
                 .map(|(d, l)| StratumKey { dim: d.to_string(), level: l.to_string() })
                 .collect(),
             projection: Projection::CumulativeFlow("inc".into()),
+            projection_state_grad: Default::default(),
             likelihood,
         }
     }
