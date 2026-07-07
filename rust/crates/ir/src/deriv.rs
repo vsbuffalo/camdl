@@ -241,6 +241,25 @@ mod tests {
         );
     }
 
+    /// gh#275: `CompGradMap` is `#[serde(transparent)]` over the inner map, so a
+    /// one-entry compartment map serialises as the BARE object — byte-identical
+    /// to `rate_grad`'s wire, NOT wrapped in a newtype array/object. Pins the
+    /// transparent attr (and the round-trip) before WrtPop starts emitting
+    /// `rate_state_grad`, so the cross-language wire shape is locked in advance.
+    #[test]
+    fn comp_grad_map_wire_shape_is_transparent() {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("S".to_string(), DerivEntry::Grad(Expr::param("beta")));
+        let cg = CompGradMap(inner);
+        assert_eq!(
+            serde_json::to_string(&cg).unwrap(),
+            r#"{"S":{"grad":{"param":"beta"}}}"#
+        );
+        let back: CompGradMap =
+            serde_json::from_str(&serde_json::to_string(&cg).unwrap()).unwrap();
+        assert_eq!(cg, back);
+    }
+
     #[test]
     fn unsupported_reason_wire_names() {
         for (r, s) in [
