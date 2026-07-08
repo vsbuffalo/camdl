@@ -268,27 +268,6 @@ struct MethodView {
     params: BTreeMap<String, f64>,
 }
 
-/// ESS/iteration — the algorithm-comparison metric: minimum-parameter ESS per
-/// raw sampling step. `n_samples` (kept draws) × `thin` = raw iterations, so
-/// this is invariant to thinning and iteration count. `None` on no positive ESS.
-fn min_ess_per_iter(ess: &BTreeMap<String, f64>, n_samples: usize, thin: usize) -> Option<f64> {
-    let raw = n_samples.saturating_mul(thin.max(1));
-    if raw == 0 {
-        return None;
-    }
-    let min_ess = ess.values().copied().reduce(f64::min)?;
-    Some(min_ess / raw as f64)
-}
-
-/// ESS/second — the runtime metric: minimum-parameter ESS per second of stage
-/// wall-clock. Thinning-invariant but hardware-dependent (estimates
-/// runtime-to-target on this machine). `None` on no wall-time or no positive ESS.
-fn min_ess_per_sec(ess: &BTreeMap<String, f64>, wall_secs: Option<f64>) -> Option<f64> {
-    let secs = wall_secs.filter(|s| *s > 0.0)?;
-    let min_ess = ess.values().copied().reduce(f64::min)?;
-    Some(min_ess / secs)
-}
-
 impl MethodView {
     fn from(r: &MethodResult) -> Self {
         match r {
@@ -351,33 +330,35 @@ impl MethodView {
     }
 
     fn from_pgas(r: &PgasStageResult) -> Self {
+        let d = &r.diagnostics;
         Self {
-            converged: r.max_rhat < 1.05,
+            converged: d.max_rhat() < 1.05,
             gate_verdict: "n/a".into(),
             best_loglik: None,
             max_chain_agreement: None,
-            max_rhat: Some(r.max_rhat),
+            max_rhat: Some(d.max_rhat()),
             acceptance_rate: None,
             ess_at_mle: None,
-            ess_posterior: Some(r.ess_per_param.clone()),
-            ess_per_iter: min_ess_per_iter(&r.ess_per_param, r.n_samples, r.thin),
-            ess_per_sec: min_ess_per_sec(&r.ess_per_param, r.wall_time_secs),
+            ess_posterior: Some(d.ess_per_param.clone()),
+            ess_per_iter: d.ess_per_iter(),
+            ess_per_sec: d.ess_per_sec(),
             params: r.posterior_mean.clone(),
         }
     }
 
     fn from_pmmh(r: &PmmhStageResult) -> Self {
+        let d = &r.diagnostics;
         Self {
-            converged: r.max_rhat < 1.05,
+            converged: d.max_rhat() < 1.05,
             gate_verdict: "n/a".into(),
             best_loglik: Some(r.map_loglik),
             max_chain_agreement: None,
-            max_rhat: Some(r.max_rhat),
+            max_rhat: Some(d.max_rhat()),
             acceptance_rate: Some(r.acceptance_rate),
             ess_at_mle: None,
-            ess_posterior: Some(r.ess.clone()),
-            ess_per_iter: min_ess_per_iter(&r.ess, r.n_samples, r.thin),
-            ess_per_sec: min_ess_per_sec(&r.ess, r.wall_time_secs),
+            ess_posterior: Some(d.ess_per_param.clone()),
+            ess_per_iter: d.ess_per_iter(),
+            ess_per_sec: d.ess_per_sec(),
             params: r.posterior_mean.clone(),
         }
     }

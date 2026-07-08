@@ -100,30 +100,93 @@ pub struct EssSummary {
     pub ess_min_step: Option<usize>,
 }
 
-/// PGAS-stage result: posterior approximation.
+/// Posterior convergence + efficiency diagnostics, shared by every Bayesian
+/// sampler (PGAS, PMMH, mh, NUTS). Every sampler computes these the same way
+/// — per-param R̂ and Geyer ESS via [`crate::fit::runner::compute_rhat_ess`]
+/// — and every renderer reads the same accessors below. Adding a new Bayesian
+/// method means *filling this struct*, not re-deriving efficiency metrics per
+/// method (the divergence that let a per-method allowlist drop `mh`, and that
+/// leaves `nuts` unable to report ESS at all until it fills this too).
+///
+/// Map fields use [`BTreeMap`] so any serialization is lexicographically
+/// ordered (consistent with the rest of `method_result`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PosteriorDiagnostics {
+    /// Gelman-Rubin R̂ per estimated param. **R̂, not the IF2 Â** — see the
+    /// comment on `If2StageResult.max_chain_agreement`. Kept as the full map
+    /// (not just the max) so a renderer can surface per-param convergence.
+    pub rhat_per_param: BTreeMap<String, f64>,
+    /// Geyer effective sample size per estimated param. The *minimum* over
+    /// params bounds the usable ESS (the slowest-mixing param is the limit).
+    pub ess_per_param: BTreeMap<String, f64>,
+    /// Number of post-burn-in thinned posterior samples across all chains (as
+    /// written to `draws.tsv`).
+    pub n_samples: usize,
+    /// Thinning factor (keep every Nth sweep). `n_samples × thin` = raw
+    /// sampling iterations — the thinning-invariant denominator for
+    /// ESS/iteration.
+    #[serde(default = "default_thin")]
+    pub thin: usize,
+    /// Stage wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
+    /// `None` on older runs that predate the field. Denominator for ESS/second.
+    #[serde(default)]
+    pub wall_time_secs: Option<f64>,
+    /// Number of chains. R̂ requires ≥2; part of "how this posterior was
+    /// sampled", so it lives here rather than on each stage result.
+    pub n_chains: usize,
+}
+
+impl PosteriorDiagnostics {
+    /// Maximum R̂ over estimated params (0.0 when there are none). The
+    /// convergence headline; **R̂, not IF2's Â**.
+    pub fn max_rhat(&self) -> f64 {
+        self.rhat_per_param.values().copied().fold(0.0_f64, f64::max)
+    }
+
+    /// Minimum ESS over estimated params — the slowest param bounds the usable
+    /// ESS. `None` when no params have an ESS.
+    pub fn min_ess(&self) -> Option<f64> {
+        self.ess_per_param.values().copied().reduce(f64::min)
+    }
+
+    /// Raw sampling iterations = `n_samples × thin`. Recovers the raw sampling
+    /// steps from the kept (thinned) draws, making the two efficiency metrics
+    /// invariant to thinning + iteration count.
+    pub fn raw_iters(&self) -> usize {
+        self.n_samples.saturating_mul(self.thin.max(1))
+    }
+
+    /// ESS per raw sampling iteration = `min_ess / (n_samples × thin)`. The
+    /// **algorithm-quality** metric: hardware-independent, the number to
+    /// compare samplers with. `None` when there are no samples/params.
+    pub fn ess_per_iter(&self) -> Option<f64> {
+        let raw = self.raw_iters();
+        if raw == 0 {
+            return None;
+        }
+        Some(self.min_ess()? / raw as f64)
+    }
+
+    /// ESS per wall-clock second = `min_ess / wall_time`. The **runtime**
+    /// metric: thinning-invariant but hardware-dependent (runtime-to-target).
+    /// `None` when wall-time is absent/zero or there are no params.
+    pub fn ess_per_sec(&self) -> Option<f64> {
+        let secs = self.wall_time_secs.filter(|s| *s > 0.0)?;
+        Some(self.min_ess()? / secs)
+    }
+}
+
+/// PGAS-stage result: posterior approximation. Convergence + efficiency
+/// diagnostics live in the shared [`PosteriorDiagnostics`]; the fields here are
+/// PGAS-specific (posterior moments + per-param acceptance from its inner
+/// Gibbs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PgasStageResult {
-    /// Number of post-burn-in thinned posterior samples (across all
-    /// chains, as written to `draws.tsv`).
-    pub n_samples: usize,
+    pub diagnostics: PosteriorDiagnostics,
     pub posterior_mean: BTreeMap<String, f64>,
     pub posterior_q025: BTreeMap<String, f64>,
     pub posterior_q975: BTreeMap<String, f64>,
-    pub ess_per_param: BTreeMap<String, f64>,
-    /// Maximum Gelman-Rubin R̂ over estimated params. **R̂, not the
-    /// IF2 Â** — see the comment on `If2StageResult.max_chain_agreement`.
-    pub max_rhat: f64,
     pub acceptance_per_param: BTreeMap<String, f64>,
-    pub n_chains: usize,
-    /// Stage wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
-    /// `None` on older runs that predate the field. Denominator for the
-    /// thinning-invariant ESS/second efficiency metric.
-    #[serde(default)]
-    pub wall_time_secs: Option<f64>,
-    /// Thinning factor (keep every Nth sweep). `n_samples × thin` = raw sampling
-    /// iterations, the thinning-invariant denominator for ESS/iteration.
-    #[serde(default = "default_thin")]
-    pub thin: usize,
 }
 
 /// Default thinning factor (1 = unthinned) for older runs whose summary JSON
@@ -157,26 +220,17 @@ pub struct NloptStageResult {
     pub n_chains: usize,
 }
 
-/// PMMH-stage result: posterior approximation + scalar acceptance.
+/// PMMH-stage result: posterior approximation + scalar acceptance. Convergence
+/// + efficiency diagnostics live in the shared [`PosteriorDiagnostics`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PmmhStageResult {
-    pub n_samples: usize,
+    pub diagnostics: PosteriorDiagnostics,
     pub posterior_mean: BTreeMap<String, f64>,
-    pub ess: BTreeMap<String, f64>,
-    pub max_rhat: f64,
     /// Scalar across chains (mean of per-chain rates). PGAS reports
     /// per-parameter rates because its inner Gibbs proposes parameters
     /// one at a time; PMMH proposes the full vector each step.
     pub acceptance_rate: f64,
     pub map_loglik: f64,
-    pub n_chains: usize,
-    /// Stage wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
-    /// `None` on older runs. Denominator for ESS/second.
-    #[serde(default)]
-    pub wall_time_secs: Option<f64>,
-    /// Thinning factor. `n_samples × thin` = raw sampling iterations → ESS/iteration.
-    #[serde(default = "default_thin")]
-    pub thin: usize,
 }
 
 /// Errors loading a `MethodResult` from a stage directory.
@@ -558,19 +612,19 @@ impl PgasStageResult {
             }
         };
 
-        let max_rhat = rhat_map.values().copied().fold(0.0_f64, f64::max);
-
         Ok(PgasStageResult {
-            n_samples,
+            diagnostics: PosteriorDiagnostics {
+                rhat_per_param: rhat_map,
+                ess_per_param: ess_map,
+                n_samples,
+                thin,
+                wall_time_secs,
+                n_chains,
+            },
             posterior_mean,
             posterior_q025,
             posterior_q975,
-            ess_per_param: ess_map,
-            max_rhat,
             acceptance_per_param,
-            n_chains,
-            wall_time_secs,
-            thin,
         })
     }
 }
@@ -629,18 +683,19 @@ impl PmmhStageResult {
             .get("map_loglik")
             .and_then(|v| v.as_f64())
             .unwrap_or(f64::NEG_INFINITY);
-        let max_rhat = rhat_map.values().copied().fold(0.0_f64, f64::max);
 
         Ok(PmmhStageResult {
-            n_samples,
+            diagnostics: PosteriorDiagnostics {
+                rhat_per_param: rhat_map,
+                ess_per_param: ess_map,
+                n_samples,
+                thin,
+                wall_time_secs,
+                n_chains,
+            },
             posterior_mean,
-            ess: ess_map,
-            max_rhat,
             acceptance_rate,
             map_loglik,
-            n_chains,
-            wall_time_secs,
-            thin,
         })
     }
 }
@@ -966,17 +1021,17 @@ mod tests {
         .unwrap();
 
         let r = PgasStageResult::load(dir).unwrap();
-        assert_eq!(r.n_chains, 2);
-        assert_eq!(r.n_samples, 4);
+        assert_eq!(r.diagnostics.n_chains, 2);
+        assert_eq!(r.diagnostics.n_samples, 4);
         // BTreeMap order: alphabetic. R0 first, sigma second.
         let r0 = r.posterior_mean["R0"];
         assert!((r0 - (56.8 + 57.1 + 56.5 + 57.3) / 4.0).abs() < 1e-9);
         // R̂ map present, max captured.
-        assert!((r.max_rhat - 1.04).abs() < 1e-9);
+        assert!((r.diagnostics.max_rhat() - 1.04).abs() < 1e-9);
         // Acceptance per param: chain-mean. R0 col 0: (0.32 + 0.28)/2 = 0.30.
         assert!((r.acceptance_per_param["R0"] - 0.30).abs() < 1e-9);
         // ESS comes through.
-        assert!((r.ess_per_param["sigma"] - 412.0).abs() < 1e-9);
+        assert!((r.diagnostics.ess_per_param["sigma"] - 412.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1012,13 +1067,13 @@ mod tests {
         .unwrap();
 
         let r = PmmhStageResult::load(dir).unwrap();
-        assert_eq!(r.n_chains, 2);
-        assert_eq!(r.n_samples, 2);
+        assert_eq!(r.diagnostics.n_chains, 2);
+        assert_eq!(r.diagnostics.n_samples, 2);
         // Mean over the two posterior samples for R0.
         assert!((r.posterior_mean["R0"] - 57.25).abs() < 1e-9);
         assert!((r.acceptance_rate - 0.25).abs() < 1e-9);
         assert!((r.map_loglik - (-3801.4)).abs() < 1e-9);
-        assert!((r.max_rhat - 1.03).abs() < 1e-9);
+        assert!((r.diagnostics.max_rhat() - 1.03).abs() < 1e-9);
     }
 
     #[test]
@@ -1042,6 +1097,66 @@ mod tests {
             MethodResultError::UnknownMethod { method, .. } => assert_eq!(method, "if4"),
             other => panic!("expected UnknownMethod, got {:?}", other),
         }
+    }
+
+    fn diag(ess: &[(&str, f64)], n_samples: usize, thin: usize, wall: Option<f64>) -> PosteriorDiagnostics {
+        PosteriorDiagnostics {
+            rhat_per_param: [("R0", 1.02), ("sigma", 1.04)]
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+            ess_per_param: ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            n_samples,
+            thin,
+            wall_time_secs: wall,
+            n_chains: 2,
+        }
+    }
+
+    #[test]
+    fn diagnostics_max_rhat_and_min_ess_off_the_slowest_param() {
+        let d = diag(&[("R0", 850.0), ("sigma", 412.0)], 500, 1, Some(11.8));
+        assert!((d.max_rhat() - 1.04).abs() < 1e-12, "max R̂ is the larger of the two");
+        assert!((d.min_ess().unwrap() - 412.0).abs() < 1e-12, "min ESS is the slower param");
+    }
+
+    /// ESS/iteration is the algorithm-quality metric — it MUST be invariant to
+    /// thinning: (500 draws, thin 1) and (50 draws, thin 10) are the same 500
+    /// raw sampling iterations, so the same slowest-param ESS yields the same
+    /// ESS/iter. This is the exact confound the metric was introduced to kill.
+    #[test]
+    fn ess_per_iter_is_thinning_invariant() {
+        let unthinned = diag(&[("R0", 850.0), ("sigma", 145.0)], 500, 1, None);
+        let thinned = diag(&[("R0", 850.0), ("sigma", 145.0)], 50, 10, None);
+        let a = unthinned.ess_per_iter().unwrap();
+        let b = thinned.ess_per_iter().unwrap();
+        assert!((a - b).abs() < 1e-12, "ESS/iter invariant under thinning: {a} vs {b}");
+        assert!((a - 145.0 / 500.0).abs() < 1e-12, "ESS/iter = min-param ESS / raw iters");
+    }
+
+    #[test]
+    fn ess_per_sec_needs_positive_wall_time() {
+        let d = diag(&[("R0", 850.0), ("sigma", 145.0)], 500, 1, Some(11.8));
+        assert!((d.ess_per_sec().unwrap() - 145.0 / 11.8).abs() < 1e-9);
+        // Absent or zero wall-time → None (older runs, or a zero-duration stub).
+        assert!(diag(&[("R0", 145.0)], 500, 1, None).ess_per_sec().is_none());
+        assert!(diag(&[("R0", 145.0)], 500, 1, Some(0.0)).ess_per_sec().is_none());
+    }
+
+    #[test]
+    fn empty_diagnostics_yield_none_not_nan() {
+        let d = PosteriorDiagnostics {
+            rhat_per_param: BTreeMap::new(),
+            ess_per_param: BTreeMap::new(),
+            n_samples: 0,
+            thin: 1,
+            wall_time_secs: Some(5.0),
+            n_chains: 1,
+        };
+        assert_eq!(d.max_rhat(), 0.0, "no params → 0.0, not NaN");
+        assert!(d.min_ess().is_none());
+        assert!(d.ess_per_iter().is_none(), "no samples → None, no divide-by-zero");
+        assert!(d.ess_per_sec().is_none());
     }
 
     /// The proposal pins `gate_verdict` strings to `pass` / `fail_a`
