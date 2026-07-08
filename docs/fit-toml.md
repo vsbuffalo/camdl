@@ -193,15 +193,15 @@ purpose" without the warning.
 
 ## Stage algorithms
 
-| `algorithm`              | backend          | role                                              | key fields                                                                            |
-| ------------------------ | ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50) |
-| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `tempering`, `max_tree_depth`)  |
-| `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                   |
-| `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                             |
-| `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                    |
-| `mh`                     | `ode`            | MH on the deterministic ODE marginal → posterior  | `chains`, `iterations` (+ `burn_in`, `thin`, `adapt`, `adapt_start`)                  |
-| `nuts`                   | `ode`            | gradient NUTS (forward sensitivities) → posterior | `chains`, `warmup`, `samples` (+ `max_tree_depth`, `target_accept`, `dense_mass`)     |
+| `algorithm`              | backend          | role                                              | key fields                                                                                      |
+| ------------------------ | ---------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50)           |
+| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `tempering`, `max_tree_depth`)            |
+| `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                             |
+| `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                                       |
+| `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                              |
+| `mh`                     | `ode`            | MH on the deterministic ODE marginal → posterior  | `chains`, `iterations` (+ `burn_in`, `thin`, `adapt`, `adapt_start`)                            |
+| `nuts`                   | `ode`            | gradient NUTS (forward sensitivities) → posterior | `chains`, `warmup`, `samples` (+ `max_tree_depth`, `target_accept`, `dense_mass`, `warm_start`) |
 
 The `ode`-backend Bayesian samplers (`mh`, `nuts`) fit the **deterministic
 marginal likelihood** `p(y | θ, ODE skeleton)` rather than the stochastic
@@ -211,6 +211,32 @@ gate refuses an undifferentiable gradient, an adaptive `rk45` integrator, a
 scheduled effect, or an `ivp` parameter); `mh` is gradient-free and carries no
 such requirement. See `camdl docs inference` (the ODE-backend fitting section)
 for when to pick which.
+
+### Periodic-equilibrium warm-start (`nuts` on `ode`)
+
+A seasonally-forced model with a long spin-up to its endemic cycle (e.g. an
+`origin` decades before the data) pays the entire transient on _every_ gradient
+evaluation, which can make a fit take days. When the pre-data dynamics settle to
+a **periodic** equilibrium, `warm_start = "equilibrium"` skips the transient: it
+solves the seasonal limit cycle directly at the data-window start and seeds the
+integration there, with the exact parameter sensitivity the sampler needs.
+
+```toml
+[stages.posterior]
+algorithm = "nuts"
+backend = "ode"
+warm_start = "equilibrium" # default "none"
+warm_start_period = 365.25 # forcing fundamental period P (required); model time units
+warm_start_at = 1970.0 # T_eq anchor (absolute model time); default = earliest observation
+```
+
+`warm_start_period` is required (a table/`interpolated` forcing carries no
+declared period). The fit refuses up front if the forcing is not `P`-periodic
+over the burn-in window, or if the model has no isolated stable seasonal cycle
+at the current parameters (non-endemic). Only the transient-shaping dynamics
+must be periodic; interventions and non-periodic forcing _after_ `T_eq` are
+unaffected. Closed (population-conserving) models are handled correctly.
+`warm_start` is identity-defining — changing it re-keys the run.
 
 ```toml
 # A gradient-based Bayesian fit on the ODE skeleton.

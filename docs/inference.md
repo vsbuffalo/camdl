@@ -1252,6 +1252,14 @@ the beta caveat for every `(algorithm, backend)` pair. The two backends compute
 different objects (`chain_binomial → p(y|θ)`; `ode → p(y|θ, ODE skeleton)`), so
 read that guidance before choosing which likelihood a fit should target.
 
+**Long seasonal spin-up?** If a `nuts`-on-`ode` model has a decades-long burn-in
+to its endemic cycle (an `origin` far before the data), each gradient
+re-integrates that whole transient — a fit can take days. When the pre-data
+dynamics are periodic, `warm_start = "equilibrium"` on the `nuts` stage solves
+the seasonal limit cycle directly and starts the integration there, cutting the
+per-gradient cost dramatically. See the periodic-equilibrium warm-start section
+of `camdl docs fit-toml` for the `warm_start_period` / `warm_start_at` options.
+
 ---
 
 ## Diagnostic interpretation guide
