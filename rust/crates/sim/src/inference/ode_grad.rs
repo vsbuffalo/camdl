@@ -71,6 +71,7 @@ pub fn det_grad(
         compiled,
         params,
         estimated_to_model,
+        None,
         &state_sens_0,
         &cfg,
         obs_times,
@@ -236,7 +237,7 @@ mod tests {
         let (int_s0, _) = compiled.initial_state(&params).unwrap();
         let seed = vec![0.0; int_s0.counts.len() * est.len()];
         let recs =
-            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed, &cfg, &obs_times)
+            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, None, &seed, &cfg, &obs_times)
                 .unwrap();
         let projections: Vec<StreamProjection> = compiled
             .model
@@ -367,7 +368,7 @@ mod tests {
         let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end: 60.0, dt };
         let seed = vec![0.0; compiled.initial_state(&params).unwrap().0.counts.len() * est.len()];
         let recs =
-            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed, &cfg, &obs_times)
+            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, None, &seed, &cfg, &obs_times)
                 .unwrap();
         let flow_idx = 0usize; // weekly_cases is the incidence stream (FlowSum)
         let weekly: Vec<f64> = recs.iter().map(|r| r.inc[flow_idx].round()).collect();
@@ -457,7 +458,7 @@ mod tests {
         let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end: 60.0, dt };
         let seed0 = compiled.ic_grad_seed(&params, &est).unwrap();
         let recs =
-            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed0, &cfg, &obs_times)
+            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, None, &seed0, &cfg, &obs_times)
                 .unwrap();
         let projections: Vec<StreamProjection> = compiled
             .model

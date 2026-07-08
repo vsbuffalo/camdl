@@ -136,6 +136,12 @@ fn ode_derivs(
 struct Sens {
     state: Vec<f64>, // n_int × d, row-major
     flow: Vec<f64>,  // n_transitions × d, row-major
+    /// Whether the `∂rate/∂θ` forcing term is active (gh#396). `true` for the
+    /// parameter-sensitivity paths (`S = ∂x/∂θ`, seeded by `ic_grad` or zero);
+    /// `false` for the **monodromy** path (`S = ∂x/∂x₀`, identity-seeded), where
+    /// the columns are compartments, not parameters, so the param-keyed forcing
+    /// summand must be dropped rather than mis-indexed into `param_model_idx`.
+    forcing: bool,
 }
 
 /// Forward-sensitivity derivatives, assembled **sparse and transitionwise**
@@ -163,6 +169,10 @@ fn sensitivity_derivs(
     real_vals: &[f64],
     params: &[f64],
     param_model_idx: &[usize],
+    // gh#396: when `false`, the param-keyed `∂rate/∂θ` forcing summand is dropped
+    // so this integrates the pure state-Jacobian chain `Ṡ = J_x·S` — the monodromy
+    // variational equation. `true` restores the full `Ṡ = J_x·S + J_θ`.
+    forcing: bool,
     t: f64,
     dt: f64,
     per_eval: Option<&[f64]>,
@@ -187,8 +197,14 @@ fn sensitivity_derivs(
         let rate_grad = &model.resolved.rate_grads_indexed[tr_idx];            // param-keyed ∂rate/∂θ
         let rate_state_grad = &model.resolved.rate_state_grads_indexed[tr_idx].0; // comp-keyed ∂rate/∂x
         for p in 0..d {
-            // total_dr_dθ[p] = ∂rate/∂θ_p + Σ_j ∂rate/∂x_j · S[j, p]  (chain through state)
-            let mut total = eval_emitted_grad(rate_grad, param_model_idx[p], &ctx);
+            // total_dr_dθ[p] = ∂rate/∂θ_p + Σ_j ∂rate/∂x_j · S[j, p]  (chain through state).
+            // Monodromy mode (`forcing = false`): drop the ∂rate/∂θ_p term → pure
+            // `Ṡ = J_x·S`, so S(T) = ∂x(T)/∂x₀ when seeded S(0) = I (gh#396).
+            let mut total = if forcing {
+                eval_emitted_grad(rate_grad, param_model_idx[p], &ctx)
+            } else {
+                0.0
+            };
             for (j, entry) in rate_state_grad {
                 total += eval_deriv_entry(entry, &ctx) * s[j * d + p];
             }
@@ -289,23 +305,24 @@ fn rk4_step(
         let mut d_flow = vec![0.0f64; stage_flow];
         let mut ks_state = [const { Vec::new() }; 4];
         let mut ks_flow = [const { Vec::new() }; 4];
+        let forcing = s.forcing;
 
         // k1 at the entry S.
-        sensitivity_derivs(model, int_vals, real_vals, params, param_model_idx, t, dt, per_eval, &s.state, &mut d_state, &mut d_flow);
+        sensitivity_derivs(model, int_vals, real_vals, params, param_model_idx, forcing, t, dt, per_eval, &s.state, &mut d_state, &mut d_flow);
         ks_state[0] = d_state.clone();
         ks_flow[0] = d_flow.clone();
         // k2, k3 at the half-step x-stages, with S advanced by the previous slope.
         let s2s: Vec<f64> = s.state.iter().zip(&ks_state[0]).map(|(x, k)| x + 0.5 * dt * k).collect();
-        sensitivity_derivs(model, &s2i, &s2r, params, param_model_idx, t + 0.5 * dt, dt, per_eval, &s2s, &mut d_state, &mut d_flow);
+        sensitivity_derivs(model, &s2i, &s2r, params, param_model_idx, forcing, t + 0.5 * dt, dt, per_eval, &s2s, &mut d_state, &mut d_flow);
         ks_state[1] = d_state.clone();
         ks_flow[1] = d_flow.clone();
         let s3s: Vec<f64> = s.state.iter().zip(&ks_state[1]).map(|(x, k)| x + 0.5 * dt * k).collect();
-        sensitivity_derivs(model, &s3i, &s3r, params, param_model_idx, t + 0.5 * dt, dt, per_eval, &s3s, &mut d_state, &mut d_flow);
+        sensitivity_derivs(model, &s3i, &s3r, params, param_model_idx, forcing, t + 0.5 * dt, dt, per_eval, &s3s, &mut d_state, &mut d_flow);
         ks_state[2] = d_state.clone();
         ks_flow[2] = d_flow.clone();
         // k4 at the full-step x-stage.
         let s4s: Vec<f64> = s.state.iter().zip(&ks_state[2]).map(|(x, k)| x + dt * k).collect();
-        sensitivity_derivs(model, &s4i, &s4r, params, param_model_idx, t + dt, dt, per_eval, &s4s, &mut d_state, &mut d_flow);
+        sensitivity_derivs(model, &s4i, &s4r, params, param_model_idx, forcing, t + dt, dt, per_eval, &s4s, &mut d_state, &mut d_flow);
         ks_state[3] = d_state;
         ks_flow[3] = d_flow;
         (ks_state, ks_flow)
@@ -346,6 +363,70 @@ fn rk4_step(
     }
 
     Ok(())
+}
+
+/// gh#396: integrate the augmented `(x, S)` system over one forcing period
+/// `[t_start, t_start + period]`, returning `(x(end), S(end))` — the building
+/// block of the periodic-equilibrium solver.
+///
+/// - `x0` seeds `x(t_start)` (integer compartments; real compartments are refused
+///   on the gradient path).
+/// - `s0` seeds `S(t_start)` (`n_int × d`, row-major). With `forcing = false` and
+///   `s0 = Iₙ` (so `d = n_int`), `S(end)` is the **monodromy** `M = ∂x(end)/∂x₀`.
+///   With `forcing = true` and `s0 = 0` (`d = n_params`), `S(end)` is the
+///   **partial** `∂Φ_P/∂θ` (initial state held fixed).
+/// - `param_model_idx` maps the `d` columns to model parameters (ignored when
+///   `forcing = false`).
+///
+/// Fixed-step RK4, last step clipped to land exactly on the period endpoint. No
+/// effects/output/obs recording: the validity gate guarantees `[t_start, t_start
+/// + period]` is effect-free and `P`-periodic, and the forcing is read at absolute
+/// `t` so the stroboscopic phase is correct. `per_eval` is `t`-inert, so staging it
+/// at `t_start` is exact.
+///
+/// Caveat: `rk4_step` clamps the value state at 0 but not `S` (§1c). On a genuinely
+/// endemic (interior) cycle the clamp is inactive and `M` is exact; the solver's
+/// oracles (equilibrium == burn-in, sensitivity three-way) are the gate that a
+/// clamped iterate did not corrupt the result.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn period_flow(
+    model: &CompiledModel,
+    params: &[f64],
+    x0: &[f64],
+    s0: &[f64],
+    param_model_idx: &[usize],
+    forcing: bool,
+    t_start: f64,
+    period: f64,
+    dt: f64,
+) -> Result<(Vec<f64>, Vec<f64>), SimError> {
+    let ni = x0.len();
+    let d = param_model_idx.len();
+    debug_assert_eq!(s0.len(), ni * d, "S(t_start) seed must be n_int × d");
+    let n_tr = model.model.transitions.len();
+    let per_eval = crate::resolved_expr::stage_per_eval(model, params, t_start, dt);
+    let mut int_vals = x0.to_vec();
+    let mut real_vals: Vec<f64> = Vec::new();
+    let mut sens = Sens { state: s0.to_vec(), flow: vec![0.0; n_tr * d], forcing };
+    let t_end = t_start + period;
+    let mut t = t_start;
+    while t < t_end - MIN_STEP_EPS {
+        let h = dt.min(t_end - t);
+        rk4_step(
+            model,
+            &mut int_vals,
+            &mut real_vals,
+            None, // no flow accumulation — the solver needs only x and S
+            params,
+            t,
+            h,
+            per_eval.as_deref(),
+            Some(&mut sens),
+            param_model_idx,
+        )?;
+        t += h;
+    }
+    Ok((int_vals, sens.state))
 }
 
 /// One integrated ODE state: the integer- and real-compartment values plus the
@@ -886,6 +967,12 @@ pub(crate) fn integrate_obs_sensitivity(
     model: &CompiledModel,
     params: &[f64],
     param_model_idx: &[usize],
+    // gh#396 Phase A: injected start state x(t_start). `None` → build it from the
+    // model (`initial_state_continuous`, today's behaviour). `Some` → begin from
+    // this continuous integer-compartment state (the periodic-equilibrium warm
+    // start; real compartments are refused on the gradient path). The `state_sens_0`
+    // seed and `cfg.t_start` were already caller-supplied.
+    x0: Option<&[f64]>,
     state_sens_0: &[f64],
     cfg: &OdeConfig,
     obs_times: &[f64],
@@ -922,7 +1009,13 @@ pub(crate) fn integrate_obs_sensitivity(
     // Continuous (un-rounded) initial state: the ODE gradient path must start
     // from the smooth initial value so value and forward-sensitivity are
     // consistent in θ (§1c; see `CompiledModel::initial_state_continuous`).
-    let (int_s0, real_s0) = model.initial_state_continuous(params)?;
+    let (int_s0, real_s0) = match x0 {
+        // Phase A: warm-start from an injected continuous state. Real compartments
+        // are refused on this path (`gradient_capability.rs`), so the injected
+        // state is integer-compartments only and `real` starts empty.
+        Some(x) => (x.to_vec(), Vec::new()),
+        None => model.initial_state_continuous(params)?,
+    };
     let ni = int_s0.len();
     debug_assert_eq!(
         state_sens_0.len(),
@@ -939,6 +1032,7 @@ pub(crate) fn integrate_obs_sensitivity(
         sens: Sens {
             state: state_sens_0.to_vec(),
             flow: vec![0.0; n_tr * d],
+            forcing: true,
         },
     };
 
@@ -1185,7 +1279,7 @@ mod tests {
         let mut int = init.to_vec();
         let mut real: Vec<f64> = vec![];
         let mut flow = vec![0.0f64; nf];
-        let mut sens = Sens { state: vec![0.0f64; ni * d], flow: vec![0.0f64; nf * d] };
+        let mut sens = Sens { state: vec![0.0f64; ni * d], flow: vec![0.0f64; nf * d], forcing: true };
 
         let n_steps = (t_end / dt).round() as usize;
         let mut t = 0.0;
@@ -1404,7 +1498,7 @@ mod tests {
         let obs = [10.0f64, 20.0, 30.0];
         let seed = vec![0.0f64; ni * d]; // params don't enter two_state's initial counts
 
-        let recs = integrate_obs_sensitivity(&cm, &base, &pmi, &seed, &cfg, &obs).unwrap();
+        let recs = integrate_obs_sensitivity(&cm, &base, &pmi, None, &seed, &cfg, &obs).unwrap();
         assert_eq!(recs.len(), 3, "one record per obs time");
 
         // Central FD in each parameter (hoisted: perturbation depends on the param,
@@ -1417,8 +1511,8 @@ mod tests {
                 pp[pk] += eps;
                 pm[pk] -= eps;
                 (
-                    integrate_obs_sensitivity(&cm, &pp, &pmi, &seed, &cfg, &obs).unwrap(),
-                    integrate_obs_sensitivity(&cm, &pm, &pmi, &seed, &cfg, &obs).unwrap(),
+                    integrate_obs_sensitivity(&cm, &pp, &pmi, None, &seed, &cfg, &obs).unwrap(),
+                    integrate_obs_sensitivity(&cm, &pm, &pmi, None, &seed, &cfg, &obs).unwrap(),
                 )
             })
             .collect();

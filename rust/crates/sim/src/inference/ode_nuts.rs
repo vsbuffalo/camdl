@@ -336,7 +336,7 @@ mod tests {
         let (int_s0, _) = cm.initial_state(&true_params).unwrap();
         let seed = vec![0.0; int_s0.counts.len()];
         let recs = crate::ode::integrate_obs_sensitivity(
-            &cm, &true_params, &[beta_idx], &seed, &crate::config::OdeConfig {
+            &cm, &true_params, &[beta_idx], None, &seed, &crate::config::OdeConfig {
                 t_start: 0.0, t_end: 60.0, dt,
             }, &obs_times,
         )

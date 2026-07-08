@@ -19,6 +19,11 @@ numerics = { path = "../numerics" }
 # probabilities for AFP-style rare-event surveillance).
 libm = "0.2"
 log = "0.4"
+# gh#396: dense linear algebra for the periodic-equilibrium warm-start solver —
+# SVD (numerical conservation-law detection) and the bordered LU + reciprocal
+# condition estimate (Newton on the seasonal Poincaré fixed point). Pure Rust,
+# no system BLAS/LAPACK. Used only by the ODE gradient path.
+nalgebra = "0.33"
 nlopt = { version = "0.8", optional = true }
 parquet = { version = "53", optional = true, default-features = false, features = ["arrow"] }
 rand = "0.8"
