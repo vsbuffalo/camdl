@@ -1286,10 +1286,14 @@ pub enum Stage {
         /// Target mean acceptance for dual averaging (Stan default 0.8).
         #[serde(default = "default_target_accept")]
         target_accept: f64,
-        /// NUTS mass matrix: `true` = dense (full covariance), `false` = diagonal.
-        /// Default true. (v1 warm-up uses identity mass; dense adaptation is a
-        /// tracked follow-up, so this currently only records intent.)
-        #[serde(default = "default_dense_mass")]
+        /// NUTS mass matrix: `false` = diagonal (Stan's default `diag_e`;
+        /// rescales each parameter by its warm-up posterior variance), `true` =
+        /// dense (`dense_e`; full covariance, also absorbs parameter
+        /// correlations at O(d²) cost and needs more warm-up to estimate). The
+        /// warm-up adapts the metric from the sample moments — on an anisotropic
+        /// posterior this takes far larger steps at the same acceptance and
+        /// frees wide-posterior parameters that identity mass leaves stuck.
+        #[serde(default = "default_nuts_dense_mass")]
         dense_mass: bool,
     },
 
@@ -1687,6 +1691,10 @@ fn default_max_tree_depth() -> usize { 10 }
 fn default_csmc_sweeps_per_nuts() -> usize { 1 }
 fn default_n_trajectories() -> usize { 200 }
 fn default_dense_mass() -> bool { true }
+/// NUTS-on-ODE defaults to a *diagonal* metric (Stan's `diag_e`): cheaper and
+/// needs less warm-up than dense, and sufficient for scale-spread anisotropy.
+/// Opt into dense (`dense_mass = true`) for a correlated posterior.
+fn default_nuts_dense_mass() -> bool { false }
 fn default_use_nuts() -> bool { true }
 fn default_nuts_warmup() -> usize { 500 }
 fn default_nuts_samples() -> usize { 500 }

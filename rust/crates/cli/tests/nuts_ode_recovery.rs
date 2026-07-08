@@ -133,6 +133,10 @@ backend = "ode"
 chains = 2
 warmup = {WARMUP}
 samples = 250
+# Controlled recovery from the declared start (like mh_ode_recovery): the default
+# init is UniformUnconstrained (dispersed), which is right for a real fit but adds
+# variance a short-warmup recovery check shouldn't depend on.
+init = "single"
 "#, out = out_dir.display(), ir = ir.display(), data = data.display())).unwrap();
 
     let status = Command::new(&bin)
