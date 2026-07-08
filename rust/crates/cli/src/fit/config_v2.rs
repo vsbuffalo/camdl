@@ -1291,6 +1291,22 @@ pub enum Stage {
         /// tracked follow-up, so this currently only records intent.)
         #[serde(default = "default_dense_mass")]
         dense_mass: bool,
+        /// gh#396 periodic-equilibrium warm-start (ODE backend). `"none"` (default)
+        /// integrates from the model origin; `"equilibrium"` seeds each gradient
+        /// from the seasonal limit cycle solved at `warm_start_at`, skipping the
+        /// spin-up transient.
+        #[serde(default)]
+        warm_start: WarmStartKind,
+        /// The forcing fundamental period `P` (model time units) — required for
+        /// `warm_start = "equilibrium"` (an `interpolated` forcing carries no
+        /// declared period).
+        #[serde(default)]
+        warm_start_period: Option<f64>,
+        /// The warm-start anchor time `T_eq` (absolute model time). Default: the
+        /// earliest observation time across streams (equilibrate at the data-window
+        /// start).
+        #[serde(default)]
+        warm_start_at: Option<f64>,
     },
 
     /// NLopt Sbplx (subspace-searching simplex) — deterministic MLE on the
@@ -1591,6 +1607,7 @@ impl Stage {
                 backend, chains, warmup, starts_from,
                 init_method, survey_path, survey_top_k_n,
                 max_tree_depth, target_accept, dense_mass,
+                warm_start, warm_start_period, warm_start_at,
                 ..
             } => json!({
                 "algorithm": "nuts",
@@ -1604,6 +1621,10 @@ impl Stage {
                 "max_tree_depth": max_tree_depth,
                 "target_accept": target_accept,
                 "dense_mass": dense_mass,
+                // gh#396: warm-start changes the scored trajectory ⇒ identity-defining.
+                "warm_start": warm_start,
+                "warm_start_period": warm_start_period,
+                "warm_start_at": warm_start_at,
             }),
             // No extension dimension: hash the full stage. NLopt stages
             // also have no extension dimension — every knob (chains,
@@ -1680,6 +1701,17 @@ fn default_loglik_eval_replicates() -> usize { 8 }
 /// Pomp's `cooling.fraction.50` default: cooling fraction is reached
 /// at iteration 50, then continues at the noise floor.
 fn default_cooling_target_iters() -> usize { 50 }
+
+/// gh#396 warm-start selector for the ODE gradient stages (`nuts`, and later
+/// `mh`). `Equilibrium` solves the seasonal limit cycle at `warm_start_at` each
+/// eval and seeds the integration from it, skipping the spin-up transient.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmStartKind {
+    #[default]
+    None,
+    Equilibrium,
+}
 
 // PGAS defaults
 fn default_pgas_tempering() -> Vec<f64> { vec![1.0] }

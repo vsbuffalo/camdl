@@ -45,6 +45,9 @@ pub struct OdeNutsConfig {
     pub dt: f64,
     /// RNG seed.
     pub seed: u64,
+    /// gh#396: periodic-equilibrium warm-start. `Some` skips the spin-up transient
+    /// by seeding each gradient from the equilibrium solved at `T_eq`.
+    pub warm_start: Option<crate::ode_equilibrium::WarmStart>,
 }
 
 impl Default for OdeNutsConfig {
@@ -57,6 +60,7 @@ impl Default for OdeNutsConfig {
             init_step_size: 0.1,
             dt: 1.0,
             seed: 0,
+            warm_start: None,
         }
     }
 }
@@ -117,8 +121,15 @@ pub fn run_ode_nuts(
         for (i, ep) in estimated.iter().enumerate() {
             params[ep.index] = ep.from_transformed(z[i]);
         }
-        let (ll, ll_grad_theta) =
-            det_grad(compiled, obs_model, obs_times, config.dt, &params, &estimated_to_model)?;
+        let (ll, ll_grad_theta) = det_grad(
+            compiled,
+            obs_model,
+            obs_times,
+            config.dt,
+            &params,
+            &estimated_to_model,
+            config.warm_start.as_ref(),
+        )?;
 
         let mut log_p = ll;
         let mut grad_z = vec![0.0; d];
@@ -195,9 +206,17 @@ pub fn run_ode_nuts(
         for (i, ep) in estimated.iter().enumerate() {
             params[ep.index] = ep.from_transformed(z[i]);
         }
-        det_grad(compiled, obs_model, obs_times, config.dt, &params, &estimated_to_model)
-            .map(|(ll, _)| ll)
-            .unwrap_or(f64::NEG_INFINITY)
+        det_grad(
+            compiled,
+            obs_model,
+            obs_times,
+            config.dt,
+            &params,
+            &estimated_to_model,
+            config.warm_start.as_ref(),
+        )
+        .map(|(ll, _)| ll)
+        .unwrap_or(f64::NEG_INFINITY)
     };
 
     // Sampling.
@@ -384,6 +403,7 @@ mod tests {
             init_step_size: 0.2,
             dt,
             seed: 20260707,
+            warm_start: None,
         };
         let result =
             run_ode_nuts(&cm, &obs_model, &obs_times, &base, &estimated, &priors, &config).unwrap();

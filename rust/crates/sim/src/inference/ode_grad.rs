@@ -41,6 +41,11 @@ pub fn det_grad(
     dt: f64,
     params: &[f64],
     estimated_to_model: &[usize],
+    // gh#396: when `Some`, replace the `[origin, t_end]` transient with the
+    // periodic equilibrium solved at `T_eq` — the equilibrium state `X*(θ)` and its
+    // exact sensitivity `∂X*/∂θ` seed the `[T_eq, t_end]` integration, so the long
+    // spin-up is never integrated. `None` → today's path (from the model `t_start`).
+    warm_start: Option<&crate::ode_equilibrium::WarmStart>,
 ) -> Result<(f64, Vec<f64>), SimError> {
     // §1h capability gate: the ONE place that answers "can this model be fit by the
     // ODE gradient?" — refusing (with the compiler's own reason where one exists)
@@ -59,10 +64,33 @@ pub fn det_grad(
     // Forward-sensitivity seed S(t_start) = ∂(initial_state)/∂θ (`ic_grad`): zero
     // for an explicit (constant) initial condition, nonzero for a parameterized
     // one whose expression involves an estimated parameter (gh#275 §1c C-seed).
-    let state_sens_0 = compiled.ic_grad_seed(params, estimated_to_model)?;
+    let ic_grad = compiled.ic_grad_seed(params, estimated_to_model)?;
+
+    // gh#396: warm-start replaces the transient with the equilibrium at T_eq;
+    // otherwise integrate from the model's t_start with the ic_grad seed.
+    let (x0, state_sens_0, t_start) = match warm_start {
+        Some(ws) => {
+            let eq = crate::ode_equilibrium::solve_equilibrium(
+                compiled,
+                params,
+                estimated_to_model,
+                &ic_grad,
+                ws.t_eq,
+                ws.period,
+                dt,
+            )?;
+            log::debug!(
+                "ode warm-start: equilibrium in {} Newton iters, {} conserved direction(s)",
+                eq.iters,
+                eq.n_conserved
+            );
+            (Some(eq.x_star), eq.x_star_sens, ws.t_eq)
+        }
+        None => (None, ic_grad, compiled.model.simulation.t_start),
+    };
 
     let cfg = OdeConfig {
-        t_start: compiled.model.simulation.t_start,
+        t_start,
         t_end: compiled.model.simulation.t_end,
         dt,
     };
@@ -71,7 +99,7 @@ pub fn det_grad(
         compiled,
         params,
         estimated_to_model,
-        None,
+        x0.as_deref(),
         &state_sens_0,
         &cfg,
         obs_times,
@@ -268,7 +296,7 @@ mod tests {
 
         let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
 
-        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est).unwrap();
+        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est, None).unwrap();
         assert!(ll.is_finite(), "det_grad loglik must be finite, got {ll}");
         assert_eq!(grad.len(), est.len());
 
@@ -279,8 +307,8 @@ mod tests {
             let mut pm = params.clone();
             pp[midx] += eps;
             pm[midx] -= eps;
-            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est).unwrap();
-            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est).unwrap();
+            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est, None).unwrap();
+            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est, None).unwrap();
             let fd = (llp - llm) / (2.0 * eps);
             let rel = if fd.abs() > 1e-8 {
                 (grad[i] - fd).abs() / fd.abs()
@@ -378,7 +406,7 @@ mod tests {
         assert!(detection.iter().sum::<f64>() > 1.0, "√I+√R detection data must be nonzero");
 
         let obs_model = build_obs_model(compiled.clone(), &obs_times, vec![weekly, detection]);
-        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est).unwrap();
+        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est, None).unwrap();
         assert!(ll.is_finite(), "det_grad loglik must be finite, got {ll}");
 
         let eps = 1e-6;
@@ -388,8 +416,8 @@ mod tests {
             let mut pm = params.clone();
             pp[midx] += eps;
             pm[midx] -= eps;
-            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est).unwrap();
-            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est).unwrap();
+            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est, None).unwrap();
+            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est, None).unwrap();
             let fd = (llp - llm) / (2.0 * eps);
             let rel = if fd.abs() > 1e-8 {
                 (grad[i] - fd).abs() / fd.abs()
@@ -486,7 +514,7 @@ mod tests {
         assert!(per_stream[0].iter().sum::<f64>() > 1.0, "incidence data must be nonzero");
 
         let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
-        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est).unwrap();
+        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est, None).unwrap();
         assert!(ll.is_finite(), "det_grad loglik must be finite, got {ll}");
 
         let eps = 1e-4; // I0 ~ 10, so a larger step keeps the FD well-conditioned.
@@ -496,8 +524,8 @@ mod tests {
             let mut pm = params.clone();
             pp[midx] += eps;
             pm[midx] -= eps;
-            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est).unwrap();
-            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est).unwrap();
+            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est, None).unwrap();
+            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est, None).unwrap();
             let fd = (llp - llm) / (2.0 * eps);
             let rel = if fd.abs() > 1e-8 {
                 (grad[i] - fd).abs() / fd.abs()

@@ -48,6 +48,19 @@ const TOL_EQ: f64 = 1e-8;
 /// exhausting this signals a marginally-stable (near-non-endemic) cycle.
 const MAX_NEWTON: usize = 60;
 
+/// Fit-time configuration for periodic-equilibrium warm-start. Threaded from the
+/// fit config (CLI/TOML) through to [`super::inference::ode_grad::det_grad`].
+#[derive(Clone, Copy, Debug)]
+pub struct WarmStart {
+    /// The warm-start anchor time `T_eq` (absolute model time): integration begins
+    /// here from the solved equilibrium instead of from `origin`. A single scalar
+    /// `≤ min(first_obs)`, decoupled from the per-stream conditioning window.
+    pub t_eq: f64,
+    /// The forcing fundamental period `P` (model time units) — declared, since an
+    /// `interpolated`/table forcing carries no period.
+    pub period: f64,
+}
+
 /// The solved seasonal equilibrium at `T_eq` and its parameter sensitivity.
 pub struct Equilibrium {
     /// `X*` at `T_eq`: `n_int` continuous compartment values.

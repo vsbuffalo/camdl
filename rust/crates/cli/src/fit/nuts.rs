@@ -31,6 +31,9 @@ pub struct NutsStageOpts {
     pub init_method: super::init::InitMethod,
     pub survey_path: Option<std::path::PathBuf>,
     pub survey_top_k_n: Option<usize>,
+    pub warm_start: super::config_v2::WarmStartKind,
+    pub warm_start_period: Option<f64>,
+    pub warm_start_at: Option<f64>,
 }
 
 impl NutsStageOpts {
@@ -38,7 +41,8 @@ impl NutsStageOpts {
         match stage {
             super::config_v2::Stage::Nuts {
                 chains, warmup, samples, max_tree_depth, target_accept, dense_mass,
-                init_method, survey_path, survey_top_k_n, ..
+                init_method, survey_path, survey_top_k_n,
+                warm_start, warm_start_period, warm_start_at, ..
             } => Ok(NutsStageOpts {
                 n_chains: *chains,
                 warmup: *warmup,
@@ -49,6 +53,9 @@ impl NutsStageOpts {
                 init_method: init_method.clone(),
                 survey_path: survey_path.clone(),
                 survey_top_k_n: *survey_top_k_n,
+                warm_start: *warm_start,
+                warm_start_period: *warm_start_period,
+                warm_start_at: *warm_start_at,
             }),
             other => Err(format!(
                 "NutsStageOpts::from_stage: expected Stage::Nuts, got {}",
@@ -121,6 +128,32 @@ pub fn run_stage(
     let param_names: Vec<String> =
         config.estimated_params.iter().map(|s| s.name.clone()).collect();
 
+    // gh#396: resolve the periodic-equilibrium warm-start once (Copy, so each
+    // parallel chain reuses it). T_eq defaults to the earliest observation.
+    let warm_start: Option<sim::ode_equilibrium::WarmStart> = match opts.warm_start {
+        super::config_v2::WarmStartKind::None => None,
+        super::config_v2::WarmStartKind::Equilibrium => {
+            let period = opts.warm_start_period.ok_or_else(|| {
+                "warm_start = \"equilibrium\" requires `warm_start_period` (the forcing \
+                 fundamental period P, in model time units — e.g. 365.25 for an annual \
+                 cycle)"
+                    .to_string()
+            })?;
+            if !(period > 0.0) {
+                return Err(format!("warm_start_period must be positive, got {period}"));
+            }
+            let t_eq = match opts.warm_start_at {
+                Some(t) => t,
+                None => obs_times.iter().cloned().fold(f64::INFINITY, f64::min),
+            };
+            if !t_eq.is_finite() {
+                return Err("warm-start: no observations to anchor T_eq; set `warm_start_at`"
+                    .to_string());
+            }
+            Some(sim::ode_equilibrium::WarmStart { t_eq, period })
+        }
+    };
+
     // Chains are independent (own seed, own RNG, own trace file) and their outputs
     // reduce order-independently (max-loglik chain + summed divergences), so run
     // them in parallel across the rayon pool — the same pattern PGAS/PMMH/IF2 use.
@@ -149,6 +182,7 @@ pub fn run_stage(
                 dt,
                 // Independent chains: same start, distinct RNG stream.
                 seed: seed.wrapping_add(chain_id as u64),
+                warm_start,
             };
             let result = run_ode_nuts(
                 &compiled, &obs_model, &obs_times, &config.base_params,

@@ -17,7 +17,7 @@ pub mod ode_integrator;
 pub mod gillespie;
 pub mod chain_binomial;
 pub mod ode;
-pub(crate) mod ode_equilibrium;
+pub mod ode_equilibrium;
 pub mod intervention;
 pub mod lifecycle;
 pub mod effects;
