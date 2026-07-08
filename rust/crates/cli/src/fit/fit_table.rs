@@ -514,7 +514,7 @@ fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
     // `loglik_type` is appended last (gh#280), then any `--quantity`
     // columns: CSV is positional, so a new column never shifts an
     // existing one out from under a consumer.
-    let mut head = String::from("fit_id,fit_hash,label,stem,model_identity,method,stages,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale,loglik_type");
+    let mut head = String::from("fit_id,fit_hash,label,stem,model_identity,method,stages,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale,loglik_type,ess_per_iter,ess_per_sec");
     for q in quantities {
         head.push(',');
         head.push_str(&csv_field(q));
@@ -534,8 +534,10 @@ fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
             .unwrap_or_default();
         let max_r = r.max_rhat.map(|v| format!("{}", v)).unwrap_or_default();
         let acc = r.acceptance_rate.map(|v| format!("{}", v)).unwrap_or_default();
+        let epi = r.ess_per_iter.map(|v| format!("{}", v)).unwrap_or_default();
+        let eps = r.ess_per_sec.map(|v| format!("{}", v)).unwrap_or_default();
         let mut line = format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             r.fit_id,
             r.fit_hash,
             label,
@@ -554,6 +556,8 @@ fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
             r.created_at,
             r.stale,
             super::loglik::LoglikType::tag_or_unknown(r.loglik_type),
+            epi,
+            eps,
         );
         for q in quantities {
             // An absent (uncomputable) cell is an empty field, matching the
@@ -671,6 +675,8 @@ mod tests {
             acceptance_rate: None,
             ess_at_mle: None,
             ess_posterior: None,
+            ess_per_iter: None,
+            ess_per_sec: None,
             params: std::collections::BTreeMap::new(),
             delta_ll_vs_best: 0.0,
             age_seconds: 0,
@@ -689,18 +695,20 @@ mod tests {
     fn csv_appends_loglik_type_column() {
         let csv = render_csv(&[row_with_type(Some(crate::fit::loglik::LoglikType::CompleteData))], &[]);
         let header = csv.lines().next().unwrap();
-        assert!(header.ends_with(",loglik_type"),
-            "loglik_type must be the last (appended) column: {header}");
-        // best_loglik stays where it was — the column count grew by exactly 1.
+        // `loglik_type` (gh#280) then the two efficiency columns are all APPENDED,
+        // in order, so no earlier column ever shifts out from under a consumer.
+        assert!(header.ends_with(",loglik_type,ess_per_iter,ess_per_sec"),
+            "appended columns come last, in order: {header}");
+        // best_loglik stays where it was — the column count grew, header == row.
         assert_eq!(header.split(',').count(),
             csv.lines().nth(1).unwrap().split(',').count(),
             "header and row must have the same field count");
         let row = csv.lines().nth(1).unwrap();
-        assert!(row.ends_with(",complete_data"),
-            "PGAS row's appended column carries the joint tag: {row}");
+        assert!(row.contains(",complete_data,"),
+            "PGAS row's loglik_type column carries the joint tag: {row}");
         // A legacy row with no type renders `unknown`, never inferred.
         let csv2 = render_csv(&[row_with_type(None)], &[]);
-        assert!(csv2.lines().nth(1).unwrap().ends_with(",unknown"),
+        assert!(csv2.lines().nth(1).unwrap().contains(",unknown,"),
             "absent type renders `unknown`: {csv2}");
     }
 

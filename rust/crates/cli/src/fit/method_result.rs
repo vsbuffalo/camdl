@@ -115,6 +115,21 @@ pub struct PgasStageResult {
     pub max_rhat: f64,
     pub acceptance_per_param: BTreeMap<String, f64>,
     pub n_chains: usize,
+    /// Stage wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
+    /// `None` on older runs that predate the field. Denominator for the
+    /// thinning-invariant ESS/second efficiency metric.
+    #[serde(default)]
+    pub wall_time_secs: Option<f64>,
+    /// Thinning factor (keep every Nth sweep). `n_samples × thin` = raw sampling
+    /// iterations, the thinning-invariant denominator for ESS/iteration.
+    #[serde(default = "default_thin")]
+    pub thin: usize,
+}
+
+/// Default thinning factor (1 = unthinned) for older runs whose summary JSON
+/// predates the `thin` field.
+fn default_thin() -> usize {
+    1
 }
 
 /// NLopt-stage result: deterministic MLE on the ODE skeleton (Phase 1
@@ -155,6 +170,13 @@ pub struct PmmhStageResult {
     pub acceptance_rate: f64,
     pub map_loglik: f64,
     pub n_chains: usize,
+    /// Stage wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
+    /// `None` on older runs. Denominator for ESS/second.
+    #[serde(default)]
+    pub wall_time_secs: Option<f64>,
+    /// Thinning factor. `n_samples × thin` = raw sampling iterations → ESS/iteration.
+    #[serde(default = "default_thin")]
+    pub thin: usize,
 }
 
 /// Errors loading a `MethodResult` from a stage directory.
@@ -458,12 +480,15 @@ fn read_ess_at_mle(stage_dir: &Path) -> Option<EssSummary> {
 
 impl PgasStageResult {
     pub fn load(stage_dir: &Path) -> Result<Self, MethodResultError> {
-        let n_chains = inputs_n_chains(&read_stage_inputs(stage_dir)?);
+        let inputs = read_stage_inputs(stage_dir)?;
+        let n_chains = inputs_n_chains(&inputs);
+        let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
 
         // Estimated parameter names from algorithm config — pgas
         // doesn't store them directly. Fall back to "every column in
         // draws.tsv" if not in algorithm.
         let summary = read_summary_json(stage_dir, "pgas_summary.json")?;
+        let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let rhat_map: BTreeMap<String, f64> = summary
             .get("rhat")
@@ -544,6 +569,8 @@ impl PgasStageResult {
             max_rhat,
             acceptance_per_param,
             n_chains,
+            wall_time_secs,
+            thin,
         })
     }
 }
@@ -552,8 +579,11 @@ impl PgasStageResult {
 
 impl PmmhStageResult {
     pub fn load(stage_dir: &Path) -> Result<Self, MethodResultError> {
-        let n_chains = inputs_n_chains(&read_stage_inputs(stage_dir)?);
+        let inputs = read_stage_inputs(stage_dir)?;
+        let n_chains = inputs_n_chains(&inputs);
+        let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
         let summary = read_summary_json(stage_dir, "pmmh_summary.json")?;
+        let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let rhat_map: BTreeMap<String, f64> = summary
             .get("rhat")
@@ -609,6 +639,8 @@ impl PmmhStageResult {
             acceptance_rate,
             map_loglik,
             n_chains,
+            wall_time_secs,
+            thin,
         })
     }
 }
