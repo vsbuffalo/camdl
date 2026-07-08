@@ -25,7 +25,7 @@ use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
 use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
-    If2StageResult, MethodResult, PgasStageResult, PmmhStageResult, PosteriorDiagnostics,
+    If2StageResult, MethodResult, NutsStageResult, PgasStageResult, PmmhStageResult,
 };
 use crate::fit::state::FitState;
 use crate::fit::table_row::{self, TableRow};
@@ -409,6 +409,14 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
                 prev_loglik = Some(pmmh.map_loglik);
                 prev_stage_name = Some(resolved.stage.clone());
             }
+            MethodResult::Nuts(nuts) => {
+                print!(
+                    "{}",
+                    fmt.bayesian_block(&resolved.stage, "nuts", BayesianView::Nuts(nuts))
+                );
+                prev_loglik = Some(nuts.map_loglik);
+                prev_stage_name = Some(resolved.stage.clone());
+            }
             MethodResult::Nlopt(r) => {
                 // NLopt stages are point-estimate (like IF2) but with no
                 // FitState-rendered IF2 gate to display. Print a compact
@@ -500,6 +508,7 @@ fn format_latex(dir: &str, _args: &FitSummaryArgs, stages: &[ResolvedStage], str
 enum BayesianView<'a> {
     Pgas(&'a PgasStageResult),
     Pmmh(&'a PmmhStageResult),
+    Nuts(&'a NutsStageResult),
 }
 
 // ── Formatting layer ────────────────────────────────────────────────
@@ -835,6 +844,9 @@ impl Formatter {
                 Some(r.acceptance_rate),
                 Some(r.map_loglik),
             ),
+            // nuts realized-acceptance is a dual-averaging target, not an M-H
+            // accept rate — omit it rather than mislabel; MAP loglik does apply.
+            BayesianView::Nuts(r) => (&r.diagnostics, &r.posterior_mean, None::<f64>, Some(r.map_loglik)),
         };
         let ess = &diag.ess_per_param;
         let max_rhat = diag.max_rhat();
@@ -1247,15 +1259,19 @@ fn build_summary_doc(dir: &str, stages: &[ResolvedStage]) -> FitSummaryDoc {
                 prev_loglik = Some(state.best_loglik);
                 r
             }
-            (Some(MethodResult::Pgas(_)), _) | (Some(MethodResult::Pmmh(_)), _) => {
+            (Some(MethodResult::Pgas(_)), _)
+            | (Some(MethodResult::Pmmh(_)), _)
+            | (Some(MethodResult::Nuts(_)), _) => {
                 let r = bayesian_stage_report(
                     &resolved.stage,
                     &resolved.method,
                     typed.clone(),
                     &cal,
                 );
-                if let Some(MethodResult::Pmmh(p)) = &typed {
-                    prev_loglik = Some(p.map_loglik);
+                match &typed {
+                    Some(MethodResult::Pmmh(p)) => prev_loglik = Some(p.map_loglik),
+                    Some(MethodResult::Nuts(p)) => prev_loglik = Some(p.map_loglik),
+                    _ => {}
                 }
                 r
             }
@@ -1344,6 +1360,7 @@ fn bayesian_stage_report(
     let (n_chains, best_loglik) = match &method_result {
         Some(MethodResult::Pgas(r)) => (r.diagnostics.n_chains, None),
         Some(MethodResult::Pmmh(r)) => (r.diagnostics.n_chains, Some(r.map_loglik)),
+        Some(MethodResult::Nuts(r)) => (r.diagnostics.n_chains, Some(r.map_loglik)),
         _ => (0, None),
     };
     // Date-annotate instant-kind posterior means (keyed off the
@@ -1356,6 +1373,7 @@ fn bayesian_stage_report(
     let param_dates: BTreeMap<String, String> = match &method_result {
         Some(MethodResult::Pgas(r)) => dates_from(&r.posterior_mean),
         Some(MethodResult::Pmmh(r)) => dates_from(&r.posterior_mean),
+        Some(MethodResult::Nuts(r)) => dates_from(&r.posterior_mean),
         _ => BTreeMap::new(),
     };
     let loglik_type = method_result.as_ref().map(crate::fit::loglik::LoglikType::from);
@@ -1648,6 +1666,23 @@ fn render_md_stage(stage: &StageReport) -> String {
             s.push_str(&format!("| `{}` | {} | {} |\n", name, mean_cell, ess));
         }
         s.push('\n');
+    } else if let Some(MethodResult::Nuts(p)) = &stage.method_result {
+        s.push_str(&format!(
+            "### Posterior summary (NUTS, max R̂ = {:.3}, divergences = {})\n\n",
+            p.diagnostics.max_rhat(), p.n_divergent
+        ));
+        s.push_str("| param | mean | q025 | q975 | ESS |\n|---|---|---|---|---|\n");
+        for (name, mean) in &p.posterior_mean {
+            let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
+            let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
+            let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "—".into());
+            let mean_cell = match stage.param_dates.get(name) {
+                Some(date) => format!("{:.6} ({})", mean, date),
+                None => format!("{:.6}", mean),
+            };
+            s.push_str(&format!("| `{}` | {} | {} | {} | {} |\n", name, mean_cell, q025, q975, ess));
+        }
+        s.push('\n');
     }
 
     // IF2 parameter table.
@@ -1837,6 +1872,27 @@ fn render_latex_stage(stage: &StageReport) -> String {
             ));
         }
         s.push_str("\\bottomrule\n\\end{tabular}\n\n");
+    } else if let Some(MethodResult::Nuts(p)) = &stage.method_result {
+        s.push_str(&format!(
+            "Posterior summary (max $\\hat R$ = {:.3}; divergences = {}):\n\n",
+            p.diagnostics.max_rhat(), p.n_divergent
+        ));
+        s.push_str("\\begin{tabular}{lrrrr}\n\\toprule\n");
+        s.push_str("Parameter & Mean & $q_{0.025}$ & $q_{0.975}$ & ESS \\\\\n\\midrule\n");
+        for (name, mean) in &p.posterior_mean {
+            let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
+            let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
+            let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "---".into());
+            let mean_cell = match stage.param_dates.get(name) {
+                Some(date) => format!("{:.6} ({})", mean, date),
+                None => format!("{:.6}", mean),
+            };
+            s.push_str(&format!(
+                "\\texttt{{{}}} & {} & {} & {} & {} \\\\\n",
+                escape_latex(name), mean_cell, q025, q975, ess,
+            ));
+        }
+        s.push_str("\\bottomrule\n\\end{tabular}\n\n");
     }
 
     s
@@ -1934,6 +1990,7 @@ fn dump_params_only(
 mod tests {
     use super::*;
     use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
+    use crate::fit::method_result::PosteriorDiagnostics;
     use std::collections::HashMap;
 
     fn synthetic_fit_state() -> FitState {

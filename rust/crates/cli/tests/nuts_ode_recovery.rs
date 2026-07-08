@@ -155,4 +155,55 @@ init = "single"
         (mean - TRUE_BETA).abs() < 0.1,
         "nuts+ode did not recover beta: posterior mean {mean:.4}, true {TRUE_BETA}"
     );
+
+    // gh#275: nuts is a first-class Bayesian cell — it must render in
+    // `fit table` / `fit summary` with ESS/iteration, not error with "unknown
+    // fit-stage method `nuts`". This is the cross-cutting matrix check that the
+    // runner's `nuts_summary.json` + `draws.tsv` and the `MethodResult::Nuts`
+    // loader are wired end-to-end. (Before this, nuts wrote no posterior
+    // summary and had no loader arm, so both commands dropped the stage.)
+    let fits_dir = out_dir.join("fits");
+    let table = Command::new(&bin)
+        .args(["fit", "table"]).arg(&fits_dir)
+        .args(["--format", "csv"])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().unwrap();
+    assert!(
+        table.status.success(),
+        "fit table on a nuts fit must succeed: {}",
+        String::from_utf8_lossy(&table.stderr)
+    );
+    let table_txt = String::from_utf8_lossy(&table.stdout);
+    let header = table_txt.lines().next().expect("csv header");
+    let epi_col = header.split(',').position(|c| c == "ess_per_iter")
+        .expect("fit table csv must carry an ess_per_iter column");
+    let nuts_has_ess = table_txt.lines().skip(1).any(|row| {
+        row.split(',').nth(epi_col)
+            .and_then(|c| c.parse::<f64>().ok())
+            .map(|v| v > 0.0)
+            .unwrap_or(false)
+    });
+    assert!(nuts_has_ess,
+        "the nuts row must report a positive ess_per_iter off its posterior:\n{table_txt}");
+
+    // The single fit dir under fits/ (there is exactly one fit here).
+    let fit_dir = std::fs::read_dir(&fits_dir).unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.is_dir())
+        .expect("a fit dir under fits/");
+    let summary = Command::new(&bin)
+        .args(["fit", "summary"]).arg(&fit_dir)
+        .args(["--format", "text", "--no-color"])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().unwrap();
+    assert!(
+        summary.status.success(),
+        "fit summary on a nuts fit must succeed: {}",
+        String::from_utf8_lossy(&summary.stderr)
+    );
+    let summary_txt = String::from_utf8_lossy(&summary.stdout);
+    assert!(summary_txt.contains("ESS/iter"),
+        "nuts fit summary must report ESS/iter off the posterior:\n{summary_txt}");
+    assert!(summary_txt.contains("[nuts]"),
+        "nuts fit summary must render the nuts posterior block:\n{summary_txt}");
 }

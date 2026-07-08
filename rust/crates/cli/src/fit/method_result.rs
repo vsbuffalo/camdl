@@ -32,6 +32,7 @@ pub enum MethodResult {
     If2(If2StageResult),
     Pgas(PgasStageResult),
     Pmmh(PmmhStageResult),
+    Nuts(NutsStageResult),
     #[serde(rename = "nl-sbplx", alias = "nl-bobyqa")]
     Nlopt(NloptStageResult),
 }
@@ -233,6 +234,23 @@ pub struct PmmhStageResult {
     pub map_loglik: f64,
 }
 
+/// NUTS-stage result: gradient-based Bayesian posterior on the ODE marginal
+/// likelihood (gh#275). Same shared [`PosteriorDiagnostics`] as PGAS/PMMH — so
+/// it reports ESS/iteration + ESS/second through the same accessors — plus the
+/// nuts-specific MAP (best-draw) loglik and divergence count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NutsStageResult {
+    pub diagnostics: PosteriorDiagnostics,
+    pub posterior_mean: BTreeMap<String, f64>,
+    pub posterior_q025: BTreeMap<String, f64>,
+    pub posterior_q975: BTreeMap<String, f64>,
+    pub map_loglik: f64,
+    /// Divergent transitions summed across chains — the headline NUTS
+    /// health diagnostic (a divergence means the leapfrog integrator left the
+    /// typical set; more than a handful invalidates the posterior geometry).
+    pub n_divergent: usize,
+}
+
 /// Errors loading a `MethodResult` from a stage directory.
 #[derive(Debug)]
 pub enum MethodResultError {
@@ -257,7 +275,7 @@ impl std::fmt::Display for MethodResultError {
             MethodResultError::UnknownMethod { method, stage_dir } => write!(
                 f,
                 "unknown fit-stage method `{}` at {} (expected if2, pgas, \
-                 pmmh, mh, nl-sbplx, or nl-bobyqa)",
+                 pmmh, mh, nuts, nl-sbplx, or nl-bobyqa)",
                 method,
                 stage_dir.display()
             ),
@@ -284,6 +302,7 @@ impl MethodResult {
             // entirely ("unknown fit-stage method `mh`") — a per-method allowlist
             // that excluded a method the rest of the system supports.
             "pmmh" | "mh" => Ok(MethodResult::Pmmh(PmmhStageResult::load(stage_dir)?)),
+            "nuts" => Ok(MethodResult::Nuts(NutsStageResult::load(stage_dir)?)),
             "nl-sbplx" | "nl-bobyqa" => Ok(MethodResult::Nlopt(
                 NloptStageResult::load(stage_dir, method)?,
             )),
@@ -544,24 +563,8 @@ impl PgasStageResult {
         let summary = read_summary_json(stage_dir, "pgas_summary.json")?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
-        let rhat_map: BTreeMap<String, f64> = summary
-            .get("rhat")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let ess_map: BTreeMap<String, f64> = summary
-            .get("ess")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let rhat_map = read_f64_map(&summary, "rhat");
+        let ess_map = read_f64_map(&summary, "ess");
 
         // Posterior moments: average each estimated-param column in
         // draws.tsv. The estimated-param key set is rhat_map's keys
@@ -639,24 +642,8 @@ impl PmmhStageResult {
         let summary = read_summary_json(stage_dir, "pmmh_summary.json")?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
-        let rhat_map: BTreeMap<String, f64> = summary
-            .get("rhat")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let ess_map: BTreeMap<String, f64> = summary
-            .get("ess")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let rhat_map = read_f64_map(&summary, "rhat");
+        let ess_map = read_f64_map(&summary, "ess");
         let est_names: Vec<String> = if !rhat_map.is_empty() {
             rhat_map.keys().cloned().collect()
         } else {
@@ -700,11 +687,73 @@ impl PmmhStageResult {
     }
 }
 
+// ── NutsStageResult ─────────────────────────────────────────────────
+
+impl NutsStageResult {
+    pub fn load(stage_dir: &Path) -> Result<Self, MethodResultError> {
+        let inputs = read_stage_inputs(stage_dir)?;
+        let n_chains = inputs_n_chains(&inputs);
+        let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
+        let summary = read_summary_json(stage_dir, "nuts_summary.json")?;
+        let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
+        let n_divergent = summary.get("n_divergent").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+        let rhat_map = read_f64_map(&summary, "rhat");
+        let ess_map = read_f64_map(&summary, "ess");
+        let est_names: Vec<String> = if !rhat_map.is_empty() {
+            rhat_map.keys().cloned().collect()
+        } else {
+            ess_map.keys().cloned().collect()
+        };
+        let (n_samples, posterior_mean, posterior_q025, posterior_q975) =
+            posterior_summaries(stage_dir, &est_names);
+
+        // MAP loglik = best-draw marginal loglik, persisted to fit_state.toml
+        // by the nuts runner (`best_loglik`).
+        let map_loglik = FitState::load(&stage_dir.to_string_lossy())
+            .map(|s| s.best_loglik)
+            .unwrap_or(f64::NEG_INFINITY);
+
+        Ok(NutsStageResult {
+            diagnostics: PosteriorDiagnostics {
+                rhat_per_param: rhat_map,
+                ess_per_param: ess_map,
+                n_samples,
+                thin,
+                wall_time_secs,
+                n_chains,
+            },
+            posterior_mean,
+            posterior_q025,
+            posterior_q975,
+            map_loglik,
+            n_divergent,
+        })
+    }
+}
+
 // ── shared helpers ──────────────────────────────────────────────────
 
+/// Extract a `{ "<param>": f64 }` object from a summary value into a
+/// `BTreeMap`. Non-finite entries (a NaN ESS serialized as JSON `null`) are
+/// dropped — `v.as_f64()` yields `None`, so an ungated diagnostic reads as
+/// absent rather than poisoning the map. Shared by the PGAS/PMMH/NUTS loaders'
+/// `rhat` + `ess` extraction.
+fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64> {
+    summary
+        .get(key)
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Read a stage's summary JSON (`pgas_summary.json` /
-/// `pmmh_summary.json`) into a serde value. These files are written
-/// by the runners and persist scalar diagnostics that aren't in
+/// `pmmh_summary.json` / `nuts_summary.json`) into a serde value. These files
+/// are written by the runners and persist scalar diagnostics that aren't in
 /// fit_state.toml.
 fn read_summary_json(
     stage_dir: &Path,
@@ -1074,6 +1123,86 @@ mod tests {
         assert!((r.acceptance_rate - 0.25).abs() < 1e-9);
         assert!((r.map_loglik - (-3801.4)).abs() < 1e-9);
         assert!((r.diagnostics.max_rhat() - 1.03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loads_nuts_stage_result() {
+        let tmp = tempdir("nuts");
+        let dir = tmp.path();
+        // run.json with method=nuts AND wall_time_seconds — nuts gets wall-time
+        // from the stage-dispatch wrapper uniformly with pgas/pmmh, so the
+        // loader reads ESS/second off it too. (write_stage_run omits wall-time,
+        // so this test writes its own record to exercise that path.)
+        let rec = serde_json::json!({
+            "format_version": 1,
+            "kind": "fit_stage",
+            "run_id": "deadbeef".repeat(8),
+            "hash_version": 1,
+            "ir_version": "0.7",
+            "engine_version": "0.1.0+test",
+            "levels": [
+                {"name": "fit",   "label": "fit",   "hash": "f00d".repeat(16), "schema_version": 1},
+                {"name": "stage", "label": "01-posterior", "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
+                {"name": "seed",  "label": "seed_1", "hash": "06cbd6b300000000000000000000000000000000000000000000000000000000", "schema_version": 1}
+            ],
+            "status": "completed",
+            "artifacts": {},
+            "inputs": {
+                "stage": "posterior",
+                "method": "nuts",
+                "backend": "ode",
+                "seed": 1,
+                "n_chains": 2,
+                "wall_time_seconds": 8.0
+            },
+            "provenance": {"created_at": "2026-04-27T00:00:00Z", "argv": ["camdl"]}
+        });
+        std::fs::write(dir.join("run.json"), serde_json::to_string(&rec).unwrap()).unwrap();
+        // nuts_summary.json exactly as `write_nuts_summary` emits it.
+        std::fs::write(
+            dir.join("nuts_summary.json"),
+            serde_json::to_string(&serde_json::json!({
+                "stage": "nuts",
+                "n_chains": 2,
+                "rhat": {"beta": 1.01, "gamma": 1.03},
+                "ess": {"beta": 300.0, "gamma": 150.0},
+                "n_divergent": 2,
+                "thin": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // draws.tsv exactly as `write_nuts_draws` emits it (chain/draw key cols
+        // + estimated params). 4 rows across 2 chains.
+        std::fs::write(
+            dir.join("draws.tsv"),
+            "chain\tdraw\tbeta\tgamma\n\
+             0\t0\t2.0\t0.5\n\
+             0\t1\t2.2\t0.4\n\
+             1\t0\t1.9\t0.6\n\
+             1\t1\t2.1\t0.5\n",
+        )
+        .unwrap();
+        // fit_state.toml supplies the MAP loglik (best-draw marginal loglik).
+        synthetic_if2_state().save(&dir.to_string_lossy()).unwrap();
+
+        let r = NutsStageResult::load(dir).unwrap();
+        assert_eq!(r.diagnostics.n_chains, 2);
+        assert_eq!(r.diagnostics.n_samples, 4);
+        assert_eq!(r.n_divergent, 2);
+        assert!((r.diagnostics.max_rhat() - 1.03).abs() < 1e-9);
+        // min-param ESS is gamma (150) → ESS/iter = 150 / (4 draws × thin 1).
+        assert!((r.diagnostics.ess_per_iter().unwrap() - 150.0 / 4.0).abs() < 1e-9);
+        // wall-time from run.json inputs → ESS/sec = 150 / 8.0 s.
+        assert!((r.diagnostics.ess_per_sec().unwrap() - 150.0 / 8.0).abs() < 1e-9);
+        // MAP loglik reads fit_state.toml best_loglik.
+        assert!((r.map_loglik - (-3804.9)).abs() < 1e-9);
+        // posterior_mean averages the draws.tsv beta column.
+        assert!((r.posterior_mean["beta"] - (2.0 + 2.2 + 1.9 + 2.1) / 4.0).abs() < 1e-9);
+
+        // And it dispatches through the public entry point on the "nuts" tag.
+        let via = MethodResult::load_from(dir, "nuts").unwrap();
+        assert!(matches!(via, MethodResult::Nuts(_)));
     }
 
     #[test]
