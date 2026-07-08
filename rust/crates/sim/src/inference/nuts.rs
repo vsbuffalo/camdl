@@ -511,11 +511,19 @@ fn warmup_schedule(n_warmup: usize) -> (usize, usize, Vec<usize>) {
     let mut w = base_window;
     while w_start < metric_end {
         let next = w_start + w;
-        // If the *following* (doubled) window would overshoot the metric region,
-        // let this window absorb the remainder — matches Stan's last-window rule.
-        let this_end = if next + 2 * w > metric_end { metric_end } else { next };
-        ends.push(this_end);
-        w_start = this_end;
+        // Each window closes at its natural doubling boundary; the final window
+        // (whose boundary reaches or passes the metric region) absorbs the
+        // remainder. (Stan clamps one window earlier via a `next + 2·w` look-ahead,
+        // which for mid-size `n_warmup` collapses to a single freeze; keeping the
+        // natural boundary yields one extra late-window re-estimate at worst, and
+        // a window too small to estimate simply doesn't re-freeze — see
+        // `freeze_metric`'s sample guard — so nothing degrades.)
+        if next >= metric_end {
+            ends.push(metric_end);
+            break;
+        }
+        ends.push(next);
+        w_start = next;
         w *= 2;
     }
     (init_buffer, term_buffer, ends)
@@ -541,6 +549,7 @@ pub struct WarmupAdapter {
     dual_avg: DualAveraging,
     step_size: f64,
     mass: MassMatrix,
+    observed: bool,
     // Per-window Welford moments (reset at each window boundary).
     w_n: f64,
     w_mean: Vec<f64>,
@@ -568,6 +577,7 @@ impl WarmupAdapter {
             dual_avg: DualAveraging::new(init_step, target_accept),
             step_size: init_step,
             mass: MassMatrix::identity(d),
+            observed: false,
             w_n: 0.0,
             w_mean: vec![0.0; d],
             w_m2: vec![0.0; d],
@@ -605,6 +615,7 @@ impl WarmupAdapter {
     /// Returns `true` when the metric was re-frozen this sweep.
     pub fn observe(&mut self, sweep: usize, z: &[f64], accept_prob: f64) -> bool {
         // Step-size dual averaging runs on every warm-up sweep.
+        self.observed = true;
         self.step_size = self.dual_avg.update(accept_prob);
 
         let adapting = !matches!(self.metric, MassMetric::Unit);
@@ -614,19 +625,29 @@ impl WarmupAdapter {
         }
         // At the close of a window, freeze the metric and restart the step search
         // (the geometry just changed, so the previous step is no longer calibrated).
+        // Only when the metric actually changed: a window too small to estimate
+        // (`freeze_metric` → false) must NOT 10×-kick the step or discard its
+        // samples — instead the samples carry into the next window until there are
+        // enough (matters for dense metrics in high dimension).
         if adapting && self.window_ends.contains(&(sweep + 1)) {
             let froze = self.freeze_metric();
-            self.reset_window();
-            let carry = self.dual_avg.final_step_size();
-            self.dual_avg = DualAveraging::new(carry, self.target_accept);
+            if froze {
+                self.reset_window();
+                let carry = self.dual_avg.final_step_size();
+                self.dual_avg = DualAveraging::new(carry, self.target_accept);
+            }
             return froze;
         }
         false
     }
 
     /// Carry the smoothed step size out of warm-up (called once, after the loop).
+    /// With zero warm-up sweeps the dual averager never ran, so keep the configured
+    /// initial step rather than its unadapted default.
     pub fn finalize(&mut self) {
-        self.step_size = self.dual_avg.final_step_size();
+        if self.observed {
+            self.step_size = self.dual_avg.final_step_size();
+        }
     }
 
     /// The final adapted metric (consumes the adapter).

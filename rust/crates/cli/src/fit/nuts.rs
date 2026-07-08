@@ -121,6 +121,24 @@ pub fn run_stage(
     let param_names: Vec<String> =
         config.estimated_params.iter().map(|s| s.name.clone()).collect();
 
+    // Per-chain starting points. Honors the stage's `init` method: a dispersed
+    // method (`uniform_unconstrained` / `lhs`) gives each chain its own
+    // over-dispersed start — Stan's basis for a meaningful between-chain R-hat and
+    // the standard defense against all chains sharing one warm-up pathology (a bad
+    // early metric that builds runaway trees). `single` (default) keeps the shared
+    // start. Reuses the tested init machinery (same as PGAS/PMMH); unsupported
+    // methods (survey / warm-start) error actionably here rather than being
+    // silently ignored.
+    let chain_starts: Vec<Vec<f64>> = super::init::build_chain_param_vecs(
+        &opts.init_method,
+        &config.estimated_params,
+        &config.base_params,
+        opts.n_chains,
+        seed,
+    )
+    .map_err(|e| format!("nuts: {}", e))?
+    .unwrap_or_else(|| vec![config.base_params.clone(); opts.n_chains]);
+
     // Chains are independent (own seed, own RNG, own trace file) and their outputs
     // reduce order-independently (max-loglik chain + summed divergences), so run
     // them in parallel across the rayon pool — the same pattern PGAS/PMMH/IF2 use.
@@ -130,6 +148,7 @@ pub fn run_stage(
         chain_id: usize,
         n_divergent: usize,
         max_depth_hits: usize,
+        warmup_max_depth_hits: usize,
         best_loglik: f64,
         best_params: Vec<f64>,
         status: String,
@@ -160,21 +179,37 @@ pub fn run_stage(
                     sim::inference::nuts::MassMetric::Diagonal
                 },
                 dt,
-                // Independent chains: same start, distinct RNG stream.
+                // Independent chains: own dispersed start (below) + distinct RNG.
                 seed: seed.wrapping_add(chain_id as u64),
             };
+
+            // This chain's start: fixed params at their values, estimated params at
+            // this chain's (possibly dispersed) initial. `run_ode_nuts` seeds its
+            // starting `z` from `EstimatedParam::initial`, so overwrite those.
+            let chain_start = &chain_starts[chain_id];
+            let chain_estimated: Vec<sim::inference::types::EstimatedParam> = config
+                .estimated_params
+                .iter()
+                .map(|ep| {
+                    let mut e = ep.clone();
+                    e.initial = chain_start[ep.index];
+                    e
+                })
+                .collect();
 
             // Stream each posterior draw to `chain_N/trace.tsv` as it is produced,
             // so a long run fills the file incrementally (a watcher can `tail -f`
             // and plot) instead of the chain dir staying empty until the very end.
             // `TraceWriter` writes `draw`, `log_likelihood`, `log_posterior` as its
-            // three fixed leading columns; `divergent` is the only extra.
+            // three fixed leading columns; `divergent` and `tree_depth` are the
+            // extras. `tree_depth` lets a watcher tell a slow-but-progressing chain
+            // from one pinned at the depth cap (the runaway/hung signature).
             let trace_path = chain_dir.join("trace.tsv");
             let writer = super::trace_writer::TraceWriter::new(
                 &trace_path.to_string_lossy(),
                 "draw",
                 "log_likelihood",
-                &["divergent"],
+                &["divergent", "tree_depth"],
                 &param_names,
                 /* append */ false,
             );
@@ -188,8 +223,10 @@ pub fn run_stage(
                 |it: &NutsIter| match it.phase {
                     NutsPhase::Sampling => {
                         let div = if it.divergent { "1" } else { "0" };
+                        let depth = it.tree_depth.to_string();
                         writer.write_row(
-                            it.iter, it.loglik, it.log_posterior, &[div], &it.params_natural,
+                            it.iter, it.loglik, it.log_posterior, &[div, &depth],
+                            &it.params_natural,
                         );
                         if it.iter % sample_every == 0 || it.iter + 1 == it.total {
                             log::info!(target: "nuts",
@@ -208,8 +245,8 @@ pub fn run_stage(
                 }
             };
             let result = sim::inference::ode_nuts::run_ode_nuts_with_progress(
-                &compiled, &obs_model, &obs_times, &config.base_params,
-                &config.estimated_params, &priors, &cfg, Some(&on_iter),
+                &compiled, &obs_model, &obs_times, chain_start,
+                &chain_estimated, &priors, &cfg, Some(&on_iter),
             )
             .map_err(|e| format!("nuts chain {} error: {}", chain_id + 1, e))?;
             // `on_iter`'s borrow of `writer` ends at the call above (its last use),
@@ -219,11 +256,11 @@ pub fn run_stage(
             // Best draw (point estimate) from the returned samples — the rows were
             // already streamed to disk by the callback above.
             let mut best_loglik = f64::NEG_INFINITY;
-            let mut best_params = config.base_params.clone();
+            let mut best_params = chain_start.clone();
             for (i, sample) in result.samples.iter().enumerate() {
                 if result.sample_loglik[i] > best_loglik {
                     best_loglik = result.sample_loglik[i];
-                    let mut p = config.base_params.clone();
+                    let mut p = chain_start.clone();
                     for (j, ep) in config.estimated_params.iter().enumerate() {
                         p[ep.index] = sample[j];
                     }
@@ -231,6 +268,12 @@ pub fn run_stage(
                 }
             }
 
+            // A chain stuck at max depth through warm-up never reaches sampling
+            // (the "hung" case), so surface the warm-up hit count too.
+            let depth_note = match (result.warmup_max_depth_hits, result.max_depth_hits) {
+                (0, 0) => String::new(),
+                (w, s) => format!(" · max-depth hits: {w} warmup / {s} sampling"),
+            };
             let status = format!(
                 "chain {} · {} draws · {} divergent · accept={:.2} · step={:.4} · tree_depth={:.1}{}",
                 chain_id + 1,
@@ -239,16 +282,13 @@ pub fn run_stage(
                 result.mean_accept,
                 result.step_size,
                 result.mean_tree_depth,
-                if result.max_depth_hits > 0 {
-                    format!(" · {} max-depth hits", result.max_depth_hits)
-                } else {
-                    String::new()
-                },
+                depth_note,
             );
             Ok(ChainOut {
                 chain_id,
                 n_divergent: result.n_divergent,
                 max_depth_hits: result.max_depth_hits,
+                warmup_max_depth_hits: result.warmup_max_depth_hits,
                 best_loglik,
                 best_params,
                 status,
@@ -285,12 +325,16 @@ pub fn run_stage(
         ));
     }
     let total_max_depth: usize = chain_outs.iter().map(|c| c.max_depth_hits).sum();
-    if total_max_depth > 0 {
+    let total_warmup_max_depth: usize =
+        chain_outs.iter().map(|c| c.warmup_max_depth_hits).sum();
+    if total_max_depth + total_warmup_max_depth > 0 {
         crate::status::hint(format!(
-            "{} draw(s) hit the max tree depth ({}) — the sampler is building maximal \
-             trees (slow, and effective sample size suffers). Set `dense_mass = true` in \
-             the stage for a correlated posterior, raise `max_tree_depth`, or reparameterize.",
-            total_max_depth, opts.max_tree_depth,
+            "max tree depth ({}) hit on {} warm-up + {} sampling step(s) across chains — \
+             the sampler is building maximal trees (slow; a chain pinned through warm-up is \
+             the \"hung\" case). Set `dense_mass = true` for a correlated posterior, use a \
+             dispersed `init` (e.g. `uniform_unconstrained`), raise `max_tree_depth`, or \
+             reparameterize.",
+            opts.max_tree_depth, total_warmup_max_depth, total_max_depth,
         ));
     }
 

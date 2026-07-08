@@ -93,6 +93,11 @@ pub struct OdeNutsResult {
     /// within the allowed doublings). Nonzero ⇒ slow + biased; raise the cap or
     /// improve the metric/reparameterization.
     pub max_depth_hits: usize,
+    /// Warm-up sweeps that hit the `max_tree_depth` cap. Counted separately
+    /// because a chain stuck at max depth *through warm-up* (each an expensive
+    /// augmented-ODE solve) is the "hung chain" symptom — and it never reaches
+    /// sampling, so `max_depth_hits` alone would report a healthy-looking zero.
+    pub warmup_max_depth_hits: usize,
 }
 
 /// Which phase a [`NutsProgress`] tick comes from.
@@ -267,6 +272,7 @@ pub fn run_ode_nuts_with_progress(
     let mut adapter = WarmupAdapter::new(
         config.metric, d, config.n_warmup, config.init_step_size, config.target_accept,
     );
+    let mut warmup_max_depth_hits = 0usize;
     for sweep in 0..config.n_warmup {
         let cfg = NUTSConfig {
             max_tree_depth: config.max_tree_depth,
@@ -274,6 +280,9 @@ pub fn run_ode_nuts_with_progress(
             mass_matrix: adapter.mass().clone(),
         };
         let r = nuts_step(&z, log_p, &grad, &cfg, &nuts_target, &mut rng);
+        if r.tree_depth >= config.max_tree_depth {
+            warmup_max_depth_hits += 1;
+        }
         if r.accepted {
             z = r.params;
             log_p = r.log_posterior;
@@ -381,6 +390,7 @@ pub fn run_ode_nuts_with_progress(
             0.0
         },
         max_depth_hits,
+        warmup_max_depth_hits,
     })
 }
 
