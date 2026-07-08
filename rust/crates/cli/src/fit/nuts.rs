@@ -7,7 +7,7 @@
 //! fit_state output. On a stochastic backend, gradient-NUTS lives inside `pgas`,
 //! so this path is `ode`-only (routed by the method registry).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -162,6 +162,11 @@ pub fn run_stage(
         warmup_max_depth_hits: usize,
         best_loglik: f64,
         best_params: Vec<f64>,
+        /// This chain's post-warmup posterior draws, one row per sample, columns
+        /// in `config.estimated_params` order. Kept (not discarded) so the stage
+        /// can compute shared R̂/ESS diagnostics + write a combined `draws.tsv`,
+        /// exactly as PGAS/PMMH do.
+        samples: Vec<Vec<f64>>,
         status: String,
     }
     let chain_outs: Vec<ChainOut> = (0..opts.n_chains)
@@ -302,6 +307,7 @@ pub fn run_stage(
                 warmup_max_depth_hits: result.warmup_max_depth_hits,
                 best_loglik,
                 best_params,
+                samples: result.samples,
                 status,
             })
         })
@@ -349,6 +355,22 @@ pub fn run_stage(
         ));
     }
 
+    // Shared posterior diagnostics + a combined draws.tsv — the same artifacts
+    // PGAS/PMMH write, so nuts loads through the same `MethodResult` path and
+    // reports ESS/iteration + ESS/second instead of erroring in `fit summary` /
+    // `fit table`. Chains are visited in deterministic id order so the diagnostic
+    // (and draws.tsv row order) is reproducible regardless of completion order.
+    let mut ordered: Vec<&ChainOut> = chain_outs.iter().collect();
+    ordered.sort_by_key(|c| c.chain_id);
+    let chain_samples: Vec<&Vec<Vec<f64>>> = ordered.iter().map(|c| &c.samples).collect();
+    let diag = nuts_diagnostics(&config.estimated_params, &chain_samples);
+    write_nuts_summary(stage_dir, opts.n_chains, &diag, total_divergent)?;
+    write_nuts_draws(
+        stage_dir,
+        &config.estimated_params,
+        ordered.iter().map(|c| (c.chain_id, &c.samples)),
+    )?;
+
     let start_values: HashMap<String, f64> = config
         .estimated_params
         .iter()
@@ -387,4 +409,96 @@ pub fn run_stage(
         .map_err(|e| format!("cannot write fit_state.toml: {e}"))?;
 
     Ok(())
+}
+
+/// Per-estimated-param R̂ + Geyer ESS from the chains' posterior draws, computed
+/// through the shared [`crate::fit::runner::compute_rhat_ess`] every Bayesian
+/// method routes through. `chain_samples[chain][draw][param]`, columns in
+/// `estimated_params` order. Mirrors PGAS's `compute_diagnostics`; the only
+/// nuts-specific part is the draw layout.
+struct NutsDiag {
+    rhat: BTreeMap<String, f64>,
+    ess: BTreeMap<String, f64>,
+    ess_per_chain: BTreeMap<String, Vec<f64>>,
+}
+
+fn nuts_diagnostics(
+    estimated_params: &[sim::inference::types::EstimatedParam],
+    chain_samples: &[&Vec<Vec<f64>>],
+) -> NutsDiag {
+    let mut rhat = BTreeMap::new();
+    let mut ess = BTreeMap::new();
+    let mut ess_per_chain = BTreeMap::new();
+    for (j, ep) in estimated_params.iter().enumerate() {
+        // Column j of each chain's draw matrix = this param's per-chain trace.
+        let chains: Vec<Vec<f64>> = chain_samples
+            .iter()
+            .map(|draws| draws.iter().map(|row| row[j]).collect())
+            .collect();
+        let d = super::runner::compute_rhat_ess(&chains);
+        // R̂ is NaN below the structural minimum (≥2 chains, ≥4 samples); only
+        // record it when finite, matching PGAS. ESS is always recorded (the
+        // gate on the *joint* sum lives inside `compute_rhat_ess`; a NaN ess
+        // serializes to null → the loader reads it as absent).
+        if d.rhat.is_finite() {
+            rhat.insert(ep.name.clone(), d.rhat);
+        }
+        ess.insert(ep.name.clone(), d.ess_total);
+        if !d.ess_per_chain.is_empty() {
+            ess_per_chain.insert(ep.name.clone(), d.ess_per_chain);
+        }
+    }
+    NutsDiag { rhat, ess, ess_per_chain }
+}
+
+/// Write `nuts_summary.json` — the R̂/ESS/thin the `MethodResult` loader reads.
+/// nuts does not thin, so `thin = 1` (`n_samples × 1` = raw sampling iters).
+fn write_nuts_summary(
+    dir: &Path,
+    n_chains: usize,
+    diag: &NutsDiag,
+    n_divergent: usize,
+) -> Result<(), String> {
+    let summary = serde_json::json!({
+        "stage": "nuts",
+        "n_chains": n_chains,
+        "rhat": diag.rhat,
+        "ess": diag.ess,
+        "ess_per_chain": diag.ess_per_chain,
+        "n_divergent": n_divergent,
+        // nuts draws are unthinned: n_samples (kept) × thin = raw sampling iters.
+        "thin": 1,
+    });
+    let path = dir.join("nuts_summary.json");
+    let contents =
+        serde_json::to_string_pretty(&summary).map_err(|e| format!("json error: {}", e))?;
+    std::fs::write(&path, contents)
+        .map_err(|e| format!("cannot write {}: {}", path.display(), e))
+}
+
+/// Write the combined `draws.tsv` (post-warmup posterior draws, all chains).
+/// Leading `chain` `draw` key columns match the PGAS/PMMH layout; the shared
+/// draws loader keys on the estimated-param columns by name. nuts emits only
+/// the estimated params (it writes no trajectories to join fixed params to).
+fn write_nuts_draws<'a>(
+    dir: &Path,
+    estimated_params: &[sim::inference::types::EstimatedParam],
+    chains: impl Iterator<Item = (usize, &'a Vec<Vec<f64>>)>,
+) -> Result<(), String> {
+    use std::io::Write;
+    let path = dir.join("draws.tsv");
+    let mut f = std::io::BufWriter::new(
+        std::fs::File::create(&path).map_err(|e| format!("cannot create {}: {}", path.display(), e))?,
+    );
+    let names: Vec<&str> = estimated_params.iter().map(|s| s.name.as_str()).collect();
+    writeln!(f, "chain\tdraw\t{}", names.join("\t")).unwrap();
+    for (chain_id, draws) in chains {
+        for (draw_idx, row) in draws.iter().enumerate() {
+            let vals: Vec<String> = row.iter().map(|v| format!("{:.17e}", v)).collect();
+            writeln!(f, "{}\t{}\t{}", chain_id, draw_idx, vals.join("\t")).unwrap();
+        }
+    }
+    // Explicit flush: BufWriter swallows write errors on drop.
+    f.flush()
+        .map_err(|e| format!("cannot write {}: {}", path.display(), e))
 }

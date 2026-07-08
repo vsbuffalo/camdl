@@ -32,6 +32,7 @@ pub enum MethodResult {
     If2(If2StageResult),
     Pgas(PgasStageResult),
     Pmmh(PmmhStageResult),
+    Nuts(NutsStageResult),
     #[serde(rename = "nl-sbplx", alias = "nl-bobyqa")]
     Nlopt(NloptStageResult),
 }
@@ -100,30 +101,93 @@ pub struct EssSummary {
     pub ess_min_step: Option<usize>,
 }
 
-/// PGAS-stage result: posterior approximation.
+/// Posterior convergence + efficiency diagnostics, shared by every Bayesian
+/// sampler (PGAS, PMMH, mh, NUTS). Every sampler computes these the same way
+/// — per-param R̂ and Geyer ESS via [`crate::fit::runner::compute_rhat_ess`]
+/// — and every renderer reads the same accessors below. Adding a new Bayesian
+/// method means *filling this struct*, not re-deriving efficiency metrics per
+/// method (the divergence that let a per-method allowlist drop `mh`, and that
+/// leaves `nuts` unable to report ESS at all until it fills this too).
+///
+/// Map fields use [`BTreeMap`] so any serialization is lexicographically
+/// ordered (consistent with the rest of `method_result`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PosteriorDiagnostics {
+    /// Gelman-Rubin R̂ per estimated param. **R̂, not the IF2 Â** — see the
+    /// comment on `If2StageResult.max_chain_agreement`. Kept as the full map
+    /// (not just the max) so a renderer can surface per-param convergence.
+    pub rhat_per_param: BTreeMap<String, f64>,
+    /// Geyer effective sample size per estimated param. The *minimum* over
+    /// params bounds the usable ESS (the slowest-mixing param is the limit).
+    pub ess_per_param: BTreeMap<String, f64>,
+    /// Number of post-burn-in thinned posterior samples across all chains (as
+    /// written to `draws.tsv`).
+    pub n_samples: usize,
+    /// Thinning factor (keep every Nth sweep). `n_samples × thin` = raw
+    /// sampling iterations — the thinning-invariant denominator for
+    /// ESS/iteration.
+    #[serde(default = "default_thin")]
+    pub thin: usize,
+    /// Stage wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
+    /// `None` on older runs that predate the field. Denominator for ESS/second.
+    #[serde(default)]
+    pub wall_time_secs: Option<f64>,
+    /// Number of chains. R̂ requires ≥2; part of "how this posterior was
+    /// sampled", so it lives here rather than on each stage result.
+    pub n_chains: usize,
+}
+
+impl PosteriorDiagnostics {
+    /// Maximum R̂ over estimated params (0.0 when there are none). The
+    /// convergence headline; **R̂, not IF2's Â**.
+    pub fn max_rhat(&self) -> f64 {
+        self.rhat_per_param.values().copied().fold(0.0_f64, f64::max)
+    }
+
+    /// Minimum ESS over estimated params — the slowest param bounds the usable
+    /// ESS. `None` when no params have an ESS.
+    pub fn min_ess(&self) -> Option<f64> {
+        self.ess_per_param.values().copied().reduce(f64::min)
+    }
+
+    /// Raw sampling iterations = `n_samples × thin`. Recovers the raw sampling
+    /// steps from the kept (thinned) draws, making the two efficiency metrics
+    /// invariant to thinning + iteration count.
+    pub fn raw_iters(&self) -> usize {
+        self.n_samples.saturating_mul(self.thin.max(1))
+    }
+
+    /// ESS per raw sampling iteration = `min_ess / (n_samples × thin)`. The
+    /// **algorithm-quality** metric: hardware-independent, the number to
+    /// compare samplers with. `None` when there are no samples/params.
+    pub fn ess_per_iter(&self) -> Option<f64> {
+        let raw = self.raw_iters();
+        if raw == 0 {
+            return None;
+        }
+        Some(self.min_ess()? / raw as f64)
+    }
+
+    /// ESS per wall-clock second = `min_ess / wall_time`. The **runtime**
+    /// metric: thinning-invariant but hardware-dependent (runtime-to-target).
+    /// `None` when wall-time is absent/zero or there are no params.
+    pub fn ess_per_sec(&self) -> Option<f64> {
+        let secs = self.wall_time_secs.filter(|s| *s > 0.0)?;
+        Some(self.min_ess()? / secs)
+    }
+}
+
+/// PGAS-stage result: posterior approximation. Convergence + efficiency
+/// diagnostics live in the shared [`PosteriorDiagnostics`]; the fields here are
+/// PGAS-specific (posterior moments + per-param acceptance from its inner
+/// Gibbs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PgasStageResult {
-    /// Number of post-burn-in thinned posterior samples (across all
-    /// chains, as written to `draws.tsv`).
-    pub n_samples: usize,
+    pub diagnostics: PosteriorDiagnostics,
     pub posterior_mean: BTreeMap<String, f64>,
     pub posterior_q025: BTreeMap<String, f64>,
     pub posterior_q975: BTreeMap<String, f64>,
-    pub ess_per_param: BTreeMap<String, f64>,
-    /// Maximum Gelman-Rubin R̂ over estimated params. **R̂, not the
-    /// IF2 Â** — see the comment on `If2StageResult.max_chain_agreement`.
-    pub max_rhat: f64,
     pub acceptance_per_param: BTreeMap<String, f64>,
-    pub n_chains: usize,
-    /// Stage wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
-    /// `None` on older runs that predate the field. Denominator for the
-    /// thinning-invariant ESS/second efficiency metric.
-    #[serde(default)]
-    pub wall_time_secs: Option<f64>,
-    /// Thinning factor (keep every Nth sweep). `n_samples × thin` = raw sampling
-    /// iterations, the thinning-invariant denominator for ESS/iteration.
-    #[serde(default = "default_thin")]
-    pub thin: usize,
 }
 
 /// Default thinning factor (1 = unthinned) for older runs whose summary JSON
@@ -157,26 +221,34 @@ pub struct NloptStageResult {
     pub n_chains: usize,
 }
 
-/// PMMH-stage result: posterior approximation + scalar acceptance.
+/// PMMH-stage result: posterior approximation + scalar acceptance. Convergence
+/// + efficiency diagnostics live in the shared [`PosteriorDiagnostics`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PmmhStageResult {
-    pub n_samples: usize,
+    pub diagnostics: PosteriorDiagnostics,
     pub posterior_mean: BTreeMap<String, f64>,
-    pub ess: BTreeMap<String, f64>,
-    pub max_rhat: f64,
     /// Scalar across chains (mean of per-chain rates). PGAS reports
     /// per-parameter rates because its inner Gibbs proposes parameters
     /// one at a time; PMMH proposes the full vector each step.
     pub acceptance_rate: f64,
     pub map_loglik: f64,
-    pub n_chains: usize,
-    /// Stage wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
-    /// `None` on older runs. Denominator for ESS/second.
-    #[serde(default)]
-    pub wall_time_secs: Option<f64>,
-    /// Thinning factor. `n_samples × thin` = raw sampling iterations → ESS/iteration.
-    #[serde(default = "default_thin")]
-    pub thin: usize,
+}
+
+/// NUTS-stage result: gradient-based Bayesian posterior on the ODE marginal
+/// likelihood (gh#275). Same shared [`PosteriorDiagnostics`] as PGAS/PMMH — so
+/// it reports ESS/iteration + ESS/second through the same accessors — plus the
+/// nuts-specific MAP (best-draw) loglik and divergence count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NutsStageResult {
+    pub diagnostics: PosteriorDiagnostics,
+    pub posterior_mean: BTreeMap<String, f64>,
+    pub posterior_q025: BTreeMap<String, f64>,
+    pub posterior_q975: BTreeMap<String, f64>,
+    pub map_loglik: f64,
+    /// Divergent transitions summed across chains — the headline NUTS
+    /// health diagnostic (a divergence means the leapfrog integrator left the
+    /// typical set; more than a handful invalidates the posterior geometry).
+    pub n_divergent: usize,
 }
 
 /// Errors loading a `MethodResult` from a stage directory.
@@ -203,7 +275,7 @@ impl std::fmt::Display for MethodResultError {
             MethodResultError::UnknownMethod { method, stage_dir } => write!(
                 f,
                 "unknown fit-stage method `{}` at {} (expected if2, pgas, \
-                 pmmh, mh, nl-sbplx, or nl-bobyqa)",
+                 pmmh, mh, nuts, nl-sbplx, or nl-bobyqa)",
                 method,
                 stage_dir.display()
             ),
@@ -230,6 +302,7 @@ impl MethodResult {
             // entirely ("unknown fit-stage method `mh`") — a per-method allowlist
             // that excluded a method the rest of the system supports.
             "pmmh" | "mh" => Ok(MethodResult::Pmmh(PmmhStageResult::load(stage_dir)?)),
+            "nuts" => Ok(MethodResult::Nuts(NutsStageResult::load(stage_dir)?)),
             "nl-sbplx" | "nl-bobyqa" => Ok(MethodResult::Nlopt(
                 NloptStageResult::load(stage_dir, method)?,
             )),
@@ -490,24 +563,8 @@ impl PgasStageResult {
         let summary = read_summary_json(stage_dir, "pgas_summary.json")?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
-        let rhat_map: BTreeMap<String, f64> = summary
-            .get("rhat")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let ess_map: BTreeMap<String, f64> = summary
-            .get("ess")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let rhat_map = read_f64_map(&summary, "rhat");
+        let ess_map = read_f64_map(&summary, "ess");
 
         // Posterior moments: average each estimated-param column in
         // draws.tsv. The estimated-param key set is rhat_map's keys
@@ -558,19 +615,19 @@ impl PgasStageResult {
             }
         };
 
-        let max_rhat = rhat_map.values().copied().fold(0.0_f64, f64::max);
-
         Ok(PgasStageResult {
-            n_samples,
+            diagnostics: PosteriorDiagnostics {
+                rhat_per_param: rhat_map,
+                ess_per_param: ess_map,
+                n_samples,
+                thin,
+                wall_time_secs,
+                n_chains,
+            },
             posterior_mean,
             posterior_q025,
             posterior_q975,
-            ess_per_param: ess_map,
-            max_rhat,
             acceptance_per_param,
-            n_chains,
-            wall_time_secs,
-            thin,
         })
     }
 }
@@ -585,24 +642,8 @@ impl PmmhStageResult {
         let summary = read_summary_json(stage_dir, "pmmh_summary.json")?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
-        let rhat_map: BTreeMap<String, f64> = summary
-            .get("rhat")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let ess_map: BTreeMap<String, f64> = summary
-            .get("ess")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let rhat_map = read_f64_map(&summary, "rhat");
+        let ess_map = read_f64_map(&summary, "ess");
         let est_names: Vec<String> = if !rhat_map.is_empty() {
             rhat_map.keys().cloned().collect()
         } else {
@@ -629,27 +670,90 @@ impl PmmhStageResult {
             .get("map_loglik")
             .and_then(|v| v.as_f64())
             .unwrap_or(f64::NEG_INFINITY);
-        let max_rhat = rhat_map.values().copied().fold(0.0_f64, f64::max);
 
         Ok(PmmhStageResult {
-            n_samples,
+            diagnostics: PosteriorDiagnostics {
+                rhat_per_param: rhat_map,
+                ess_per_param: ess_map,
+                n_samples,
+                thin,
+                wall_time_secs,
+                n_chains,
+            },
             posterior_mean,
-            ess: ess_map,
-            max_rhat,
             acceptance_rate,
             map_loglik,
-            n_chains,
-            wall_time_secs,
-            thin,
+        })
+    }
+}
+
+// ── NutsStageResult ─────────────────────────────────────────────────
+
+impl NutsStageResult {
+    pub fn load(stage_dir: &Path) -> Result<Self, MethodResultError> {
+        let inputs = read_stage_inputs(stage_dir)?;
+        let n_chains = inputs_n_chains(&inputs);
+        let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
+        let summary = read_summary_json(stage_dir, "nuts_summary.json")?;
+        let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
+        let n_divergent = summary.get("n_divergent").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+        let rhat_map = read_f64_map(&summary, "rhat");
+        let ess_map = read_f64_map(&summary, "ess");
+        let est_names: Vec<String> = if !rhat_map.is_empty() {
+            rhat_map.keys().cloned().collect()
+        } else {
+            ess_map.keys().cloned().collect()
+        };
+        let (n_samples, posterior_mean, posterior_q025, posterior_q975) =
+            posterior_summaries(stage_dir, &est_names);
+
+        // MAP loglik = best-draw marginal loglik, persisted to fit_state.toml
+        // by the nuts runner (`best_loglik`).
+        let map_loglik = FitState::load(&stage_dir.to_string_lossy())
+            .map(|s| s.best_loglik)
+            .unwrap_or(f64::NEG_INFINITY);
+
+        Ok(NutsStageResult {
+            diagnostics: PosteriorDiagnostics {
+                rhat_per_param: rhat_map,
+                ess_per_param: ess_map,
+                n_samples,
+                thin,
+                wall_time_secs,
+                n_chains,
+            },
+            posterior_mean,
+            posterior_q025,
+            posterior_q975,
+            map_loglik,
+            n_divergent,
         })
     }
 }
 
 // ── shared helpers ──────────────────────────────────────────────────
 
+/// Extract a `{ "<param>": f64 }` object from a summary value into a
+/// `BTreeMap`. Non-finite entries (a NaN ESS serialized as JSON `null`) are
+/// dropped — `v.as_f64()` yields `None`, so an ungated diagnostic reads as
+/// absent rather than poisoning the map. Shared by the PGAS/PMMH/NUTS loaders'
+/// `rhat` + `ess` extraction.
+fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64> {
+    summary
+        .get(key)
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Read a stage's summary JSON (`pgas_summary.json` /
-/// `pmmh_summary.json`) into a serde value. These files are written
-/// by the runners and persist scalar diagnostics that aren't in
+/// `pmmh_summary.json` / `nuts_summary.json`) into a serde value. These files
+/// are written by the runners and persist scalar diagnostics that aren't in
 /// fit_state.toml.
 fn read_summary_json(
     stage_dir: &Path,
@@ -966,17 +1070,17 @@ mod tests {
         .unwrap();
 
         let r = PgasStageResult::load(dir).unwrap();
-        assert_eq!(r.n_chains, 2);
-        assert_eq!(r.n_samples, 4);
+        assert_eq!(r.diagnostics.n_chains, 2);
+        assert_eq!(r.diagnostics.n_samples, 4);
         // BTreeMap order: alphabetic. R0 first, sigma second.
         let r0 = r.posterior_mean["R0"];
         assert!((r0 - (56.8 + 57.1 + 56.5 + 57.3) / 4.0).abs() < 1e-9);
         // R̂ map present, max captured.
-        assert!((r.max_rhat - 1.04).abs() < 1e-9);
+        assert!((r.diagnostics.max_rhat() - 1.04).abs() < 1e-9);
         // Acceptance per param: chain-mean. R0 col 0: (0.32 + 0.28)/2 = 0.30.
         assert!((r.acceptance_per_param["R0"] - 0.30).abs() < 1e-9);
         // ESS comes through.
-        assert!((r.ess_per_param["sigma"] - 412.0).abs() < 1e-9);
+        assert!((r.diagnostics.ess_per_param["sigma"] - 412.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1012,13 +1116,93 @@ mod tests {
         .unwrap();
 
         let r = PmmhStageResult::load(dir).unwrap();
-        assert_eq!(r.n_chains, 2);
-        assert_eq!(r.n_samples, 2);
+        assert_eq!(r.diagnostics.n_chains, 2);
+        assert_eq!(r.diagnostics.n_samples, 2);
         // Mean over the two posterior samples for R0.
         assert!((r.posterior_mean["R0"] - 57.25).abs() < 1e-9);
         assert!((r.acceptance_rate - 0.25).abs() < 1e-9);
         assert!((r.map_loglik - (-3801.4)).abs() < 1e-9);
-        assert!((r.max_rhat - 1.03).abs() < 1e-9);
+        assert!((r.diagnostics.max_rhat() - 1.03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loads_nuts_stage_result() {
+        let tmp = tempdir("nuts");
+        let dir = tmp.path();
+        // run.json with method=nuts AND wall_time_seconds — nuts gets wall-time
+        // from the stage-dispatch wrapper uniformly with pgas/pmmh, so the
+        // loader reads ESS/second off it too. (write_stage_run omits wall-time,
+        // so this test writes its own record to exercise that path.)
+        let rec = serde_json::json!({
+            "format_version": 1,
+            "kind": "fit_stage",
+            "run_id": "deadbeef".repeat(8),
+            "hash_version": 1,
+            "ir_version": "0.7",
+            "engine_version": "0.1.0+test",
+            "levels": [
+                {"name": "fit",   "label": "fit",   "hash": "f00d".repeat(16), "schema_version": 1},
+                {"name": "stage", "label": "01-posterior", "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
+                {"name": "seed",  "label": "seed_1", "hash": "06cbd6b300000000000000000000000000000000000000000000000000000000", "schema_version": 1}
+            ],
+            "status": "completed",
+            "artifacts": {},
+            "inputs": {
+                "stage": "posterior",
+                "method": "nuts",
+                "backend": "ode",
+                "seed": 1,
+                "n_chains": 2,
+                "wall_time_seconds": 8.0
+            },
+            "provenance": {"created_at": "2026-04-27T00:00:00Z", "argv": ["camdl"]}
+        });
+        std::fs::write(dir.join("run.json"), serde_json::to_string(&rec).unwrap()).unwrap();
+        // nuts_summary.json exactly as `write_nuts_summary` emits it.
+        std::fs::write(
+            dir.join("nuts_summary.json"),
+            serde_json::to_string(&serde_json::json!({
+                "stage": "nuts",
+                "n_chains": 2,
+                "rhat": {"beta": 1.01, "gamma": 1.03},
+                "ess": {"beta": 300.0, "gamma": 150.0},
+                "n_divergent": 2,
+                "thin": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // draws.tsv exactly as `write_nuts_draws` emits it (chain/draw key cols
+        // + estimated params). 4 rows across 2 chains.
+        std::fs::write(
+            dir.join("draws.tsv"),
+            "chain\tdraw\tbeta\tgamma\n\
+             0\t0\t2.0\t0.5\n\
+             0\t1\t2.2\t0.4\n\
+             1\t0\t1.9\t0.6\n\
+             1\t1\t2.1\t0.5\n",
+        )
+        .unwrap();
+        // fit_state.toml supplies the MAP loglik (best-draw marginal loglik).
+        synthetic_if2_state().save(&dir.to_string_lossy()).unwrap();
+
+        let r = NutsStageResult::load(dir).unwrap();
+        assert_eq!(r.diagnostics.n_chains, 2);
+        assert_eq!(r.diagnostics.n_samples, 4);
+        assert_eq!(r.n_divergent, 2);
+        assert!((r.diagnostics.max_rhat() - 1.03).abs() < 1e-9);
+        // min-param ESS is gamma (150) → ESS/iter = 150 / (4 draws × thin 1).
+        assert!((r.diagnostics.ess_per_iter().unwrap() - 150.0 / 4.0).abs() < 1e-9);
+        // wall-time from run.json inputs → ESS/sec = 150 / 8.0 s.
+        assert!((r.diagnostics.ess_per_sec().unwrap() - 150.0 / 8.0).abs() < 1e-9);
+        // MAP loglik reads fit_state.toml best_loglik.
+        assert!((r.map_loglik - (-3804.9)).abs() < 1e-9);
+        // posterior_mean averages the draws.tsv beta column.
+        assert!((r.posterior_mean["beta"] - (2.0 + 2.2 + 1.9 + 2.1) / 4.0).abs() < 1e-9);
+
+        // And it dispatches through the public entry point on the "nuts" tag.
+        let via = MethodResult::load_from(dir, "nuts").unwrap();
+        assert!(matches!(via, MethodResult::Nuts(_)));
     }
 
     #[test]
@@ -1042,6 +1226,66 @@ mod tests {
             MethodResultError::UnknownMethod { method, .. } => assert_eq!(method, "if4"),
             other => panic!("expected UnknownMethod, got {:?}", other),
         }
+    }
+
+    fn diag(ess: &[(&str, f64)], n_samples: usize, thin: usize, wall: Option<f64>) -> PosteriorDiagnostics {
+        PosteriorDiagnostics {
+            rhat_per_param: [("R0", 1.02), ("sigma", 1.04)]
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+            ess_per_param: ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            n_samples,
+            thin,
+            wall_time_secs: wall,
+            n_chains: 2,
+        }
+    }
+
+    #[test]
+    fn diagnostics_max_rhat_and_min_ess_off_the_slowest_param() {
+        let d = diag(&[("R0", 850.0), ("sigma", 412.0)], 500, 1, Some(11.8));
+        assert!((d.max_rhat() - 1.04).abs() < 1e-12, "max R̂ is the larger of the two");
+        assert!((d.min_ess().unwrap() - 412.0).abs() < 1e-12, "min ESS is the slower param");
+    }
+
+    /// ESS/iteration is the algorithm-quality metric — it MUST be invariant to
+    /// thinning: (500 draws, thin 1) and (50 draws, thin 10) are the same 500
+    /// raw sampling iterations, so the same slowest-param ESS yields the same
+    /// ESS/iter. This is the exact confound the metric was introduced to kill.
+    #[test]
+    fn ess_per_iter_is_thinning_invariant() {
+        let unthinned = diag(&[("R0", 850.0), ("sigma", 145.0)], 500, 1, None);
+        let thinned = diag(&[("R0", 850.0), ("sigma", 145.0)], 50, 10, None);
+        let a = unthinned.ess_per_iter().unwrap();
+        let b = thinned.ess_per_iter().unwrap();
+        assert!((a - b).abs() < 1e-12, "ESS/iter invariant under thinning: {a} vs {b}");
+        assert!((a - 145.0 / 500.0).abs() < 1e-12, "ESS/iter = min-param ESS / raw iters");
+    }
+
+    #[test]
+    fn ess_per_sec_needs_positive_wall_time() {
+        let d = diag(&[("R0", 850.0), ("sigma", 145.0)], 500, 1, Some(11.8));
+        assert!((d.ess_per_sec().unwrap() - 145.0 / 11.8).abs() < 1e-9);
+        // Absent or zero wall-time → None (older runs, or a zero-duration stub).
+        assert!(diag(&[("R0", 145.0)], 500, 1, None).ess_per_sec().is_none());
+        assert!(diag(&[("R0", 145.0)], 500, 1, Some(0.0)).ess_per_sec().is_none());
+    }
+
+    #[test]
+    fn empty_diagnostics_yield_none_not_nan() {
+        let d = PosteriorDiagnostics {
+            rhat_per_param: BTreeMap::new(),
+            ess_per_param: BTreeMap::new(),
+            n_samples: 0,
+            thin: 1,
+            wall_time_secs: Some(5.0),
+            n_chains: 1,
+        };
+        assert_eq!(d.max_rhat(), 0.0, "no params → 0.0, not NaN");
+        assert!(d.min_ess().is_none());
+        assert!(d.ess_per_iter().is_none(), "no samples → None, no divide-by-zero");
+        assert!(d.ess_per_sec().is_none());
     }
 
     /// The proposal pins `gate_verdict` strings to `pass` / `fail_a`

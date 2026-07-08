@@ -125,6 +125,9 @@ impl From<&MethodResult> for LoglikType {
             MethodResult::If2(_) => LoglikType::If2,
             MethodResult::Pgas(_) => LoglikType::CompleteData,
             MethodResult::Pmmh(_) => LoglikType::Marginal,
+            // nuts samples the deterministic ODE marginal likelihood (same kind
+            // as mh-on-ode / the NLopt ODE optimizer).
+            MethodResult::Nuts(_) => LoglikType::OdeMarginal,
             MethodResult::Nlopt(_) => LoglikType::OdeMarginal,
         }
     }
