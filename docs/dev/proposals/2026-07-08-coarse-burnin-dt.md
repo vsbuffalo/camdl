@@ -1,11 +1,34 @@
 # Coarse burn-in step for ODE gradient fits — cheap, faithful transient integration
 
-Status: spec — trial-first (Phase 0 validates on garki before the Phase 1 spine
-change). Follows: gh#396 (the periodic-equilibrium warm-start, shelved for
-densely-coupled models — see PR #399). High-risk in Phase 1 only: adds a
+Status: Phase 0 implemented (this branch); Phase 1 (general `ForcingTimes`
+version) is spec. Follows: gh#396 (the periodic-equilibrium warm-start, shelved
+for densely-coupled models — see PR #399). High-risk in Phase 1 only: adds a
 boundary source to the shared scheduling spine — read `schedule.rs` +
 `boundary_times.rs` and gate on golden-neutrality. Rust-only (a fit-time runtime
 option); no IR/schema change. Knots are extracted from the existing forcing IR.
+
+Phase 0 — landed as `burnin_dt` on `[stages.<nuts>]`, wired into
+`nuts`-on-`ode`, with three deviations/findings recorded during implementation:
+
+- **Split at `first_obs`, no `condition_from` required** (narrower than the
+  proposal's "requires a `condition_from`"). The unscored warm-up is
+  `[t_start, first_obs)` regardless, so for a **prevalence** (state-scored)
+  stream `first_obs` is exactly the split `condition_from` would name.
+  **Incidence** (interval) streams are refused: their first scored bin
+  accumulates flow from `t_start`, which coarsening would bias, and the upstream
+  wide-gap guard only catches windows > 5 cadences — so the safe rule (refuse
+  incidence in Phase 0) is gated on stream temporal kind. The multi-stream split
+  is the global `min(first_obs)` (coarse only where no stream is scored).
+- **Clamp-refusal guard added first** (separate commit). The augmented
+  `rk4_step` clamps the state to `>= 0` but not the signed sensitivity `S`; when
+  the clamp fires, value and gradient diverge. The comment/capability-gate long
+  _claimed_ this was refused under `nuts` — it was not (a doc-vs-code lie).
+  Coarse steps make the overshoot materially more likely, so the latent
+  silent-wrong hole is now a hard error (propagated to the NUTS target as `-inf`
+  / an up-front probe error).
+- **Non-finite-gradient guard** in the ODE-NUTS target: a stiff/coarse step that
+  blows `S` to `inf`/`NaN` while the value stays finite now falls to `-inf`
+  (clean rejection) instead of poisoning the leapfrog trajectory.
 
 ## Problem
 

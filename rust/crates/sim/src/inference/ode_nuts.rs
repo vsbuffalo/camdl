@@ -46,6 +46,11 @@ pub struct OdeNutsConfig {
     pub metric: MassMetric,
     /// Fixed RK4 step for the ODE integration inside `det_grad`.
     pub dt: f64,
+    /// Coarse RK4 step for the unscored warm-up `[t_start, first_obs)` (gh#396
+    /// follow-on). `burnin_dt <= dt` disables it (fine step throughout); a larger
+    /// value integrates the transient in big steps (state + sensitivity together,
+    /// so the gradient stays consistent) for the burn-in speed-up.
+    pub burnin_dt: f64,
     /// RNG seed.
     pub seed: u64,
 }
@@ -60,6 +65,7 @@ impl Default for OdeNutsConfig {
             init_step_size: 0.1,
             metric: MassMetric::Diagonal,
             dt: 1.0,
+            burnin_dt: 1.0, // = dt ⇒ off
             seed: 0,
         }
     }
@@ -199,8 +205,10 @@ pub fn run_ode_nuts_with_progress(
         for (i, ep) in estimated.iter().enumerate() {
             params[ep.index] = ep.from_transformed(z[i]);
         }
-        let (ll, ll_grad_theta) =
-            det_grad(compiled, obs_model, obs_times, config.dt, &params, &estimated_to_model)?;
+        let (ll, ll_grad_theta) = det_grad(
+            compiled, obs_model, obs_times, config.dt, config.burnin_dt, &params,
+            &estimated_to_model,
+        )?;
 
         let mut log_p = ll;
         let mut grad_z = vec![0.0; d];
@@ -226,9 +234,13 @@ pub fn run_ode_nuts_with_progress(
     // θ, or a gate refusal on the first call) becomes `-inf`, steering the sampler
     // away rather than crashing. The gate error is surfaced by the up-front probe
     // below. Carries the data loglik through for the accept-path trace column.
+    // BOTH the value AND every gradient component must be finite: a coarse/stiff
+    // step can blow the (signed, unclamped) sensitivity to inf/NaN while the
+    // clamped value stays finite; passing that gradient to the leapfrog integrator
+    // poisons the momentum (NaN trajectory) instead of yielding a clean rejection.
     let target_or_neg_inf = |z: &[f64]| -> (f64, Vec<f64>, f64) {
         match target(z) {
-            Ok((lp, g, ll)) if lp.is_finite() => (lp, g, ll),
+            Ok((lp, g, ll)) if lp.is_finite() && g.iter().all(|x| x.is_finite()) => (lp, g, ll),
             _ => (f64::NEG_INFINITY, vec![0.0; d], f64::NEG_INFINITY),
         }
     };
@@ -485,7 +497,7 @@ mod tests {
         let recs = crate::ode::integrate_obs_sensitivity(
             &cm, &true_params, &[beta_idx], &seed, &crate::config::OdeConfig {
                 t_start: 0.0, t_end: 60.0, dt,
-            }, &obs_times,
+            }, &obs_times, dt,
         )
         .unwrap();
         let infection_idx = cm.model.transitions.iter().position(|t| t.name == "infection").unwrap();
@@ -531,6 +543,7 @@ mod tests {
             init_step_size: 0.2,
             metric: MassMetric::Diagonal,
             dt,
+            burnin_dt: dt, // off
             seed: 20260707,
         };
         let result =
@@ -581,7 +594,7 @@ mod tests {
         let seed = vec![0.0; int_s0.counts.len()];
         let recs = crate::ode::integrate_obs_sensitivity(
             &cm, &true_params, &[beta_idx], &seed,
-            &crate::config::OdeConfig { t_start: 0.0, t_end: 60.0, dt }, &obs_times,
+            &crate::config::OdeConfig { t_start: 0.0, t_end: 60.0, dt }, &obs_times, dt,
         )
         .unwrap();
         let inf_idx = cm.model.transitions.iter().position(|t| t.name == "infection").unwrap();
@@ -621,7 +634,7 @@ mod tests {
         let run = |metric: MassMetric| {
             let config = OdeNutsConfig {
                 n_warmup: 300, n_samples: 200, max_tree_depth: 10,
-                target_accept: 0.8, init_step_size: 0.2, metric, dt, seed: 20260707,
+                target_accept: 0.8, init_step_size: 0.2, metric, dt, burnin_dt: dt, seed: 20260707,
             };
             run_ode_nuts(&cm, &obs_model, &obs_times, &base, &estimated, &priors, &config).unwrap()
         };

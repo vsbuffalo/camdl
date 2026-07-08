@@ -19,6 +19,13 @@ use crate::{
 /// `1e-9` absolute for sub-unit compartments. See the clamp check in `rk4_step`.
 const NEG_STATE_CLAMP_EPS: f64 = 1e-9;
 
+/// Tolerance for treating two times as coincident on the ODE gradient recorder's
+/// obs grid: an integration boundary within this of an observation time counts as
+/// *at* that obs (record + reset), and the coarse-burn-in output filter keeps an
+/// output sitting within this of its coincident obs. One name for the one concept
+/// (was a bare `1e-9` at the record-match and overshoot-guard sites).
+const OBS_COINCIDENCE_EPS: f64 = 1e-9;
+
 pub struct OdeSim;
 
 impl Simulate for OdeSim {
@@ -942,6 +949,16 @@ struct AugState {
 /// Refuses (hard error, §1c/§1h) an adaptive integrator, a `dt`-in-rate
 /// (RUNTIME_DT) model, and any scheduled effect — none of which have a defined
 /// fixed-step forward sensitivity in v1.
+///
+/// `burnin_dt` is the coarse RK4 step for the *unscored* warm-up
+/// `[t_start, first_obs)` (gh#396 follow-on): when `burnin_dt > cfg.dt` the
+/// integrator takes big steps there (state AND sensitivity together, so the
+/// gradient stays consistent with the coarsely-computed value) and clips onto
+/// `first_obs`, then integrates the scored window at the exact `cfg.dt`. The
+/// dense burn-in output boundaries are dropped from the schedule so a coarse step
+/// is not clipped back to the fine grid — sound because no obs lies before
+/// `first_obs`. `burnin_dt <= cfg.dt` (or no warm-up region) ⇒ exactly the
+/// fine-step path, byte-identical.
 pub(crate) fn integrate_obs_sensitivity(
     model: &CompiledModel,
     params: &[f64],
@@ -949,6 +966,7 @@ pub(crate) fn integrate_obs_sensitivity(
     state_sens_0: &[f64],
     cfg: &OdeConfig,
     obs_times: &[f64],
+    burnin_dt: f64,
 ) -> Result<Vec<ObsSensitivity>, SimError> {
     let d = param_model_idx.len();
     let n_tr = model.model.transitions.len();
@@ -1002,10 +1020,27 @@ pub(crate) fn integrate_obs_sensitivity(
         },
     };
 
+    // Coarse burn-in (gh#396 follow-on): the warm-up/scored split is the first
+    // observation. Active only when `burnin_dt > cfg.dt` AND there is a warm-up
+    // window (`cond_from > t_start`); otherwise this is the ordinary fine path.
+    let cond_from = obs_times.first().copied().unwrap_or(cfg.t_start);
+    let use_coarse = burnin_dt > cfg.dt + MIN_STEP_EPS && cond_from > cfg.t_start;
+
+    let output_times = OutputTimes::from_model(model)?;
+    let output_times = if use_coarse {
+        // Drop the dense unscored burn-in output boundaries so a coarse step runs
+        // to `cond_from` instead of being clipped to the fine output grid. Neutral
+        // for scoring (no obs before `cond_from`; the incidence those boundaries
+        // accumulate is additive). Phase 0 — the forcing-knot-aware, all-backends
+        // version is Phase 1 (`ForcingTimes` in the shared schedule spine).
+        output_times.retained_from(cond_from - OBS_COINCIDENCE_EPS)
+    } else {
+        output_times
+    };
     let schedule = Schedule::exact_forward(
         cfg.dt,
         cfg.t_end,
-        OutputTimes::from_model(model)?,
+        output_times,
         EffectTimes::from_model(model, params)?,
     );
     let mut cursor = Cursor::default();
@@ -1031,7 +1066,7 @@ pub(crate) fn integrate_obs_sensitivity(
                           records: &mut Vec<ObsSensitivity>,
                           next_obs: &mut usize|
      -> bool {
-        if *next_obs < n_obs && (t - obs_times[*next_obs]).abs() < 1e-9 {
+        if *next_obs < n_obs && (t - obs_times[*next_obs]).abs() < OBS_COINCIDENCE_EPS {
             records.push(ObsSensitivity {
                 t,
                 counts: st.ode.int.clone(),
@@ -1061,8 +1096,20 @@ pub(crate) fn integrate_obs_sensitivity(
     while let Some(stop) = schedule.next_stop(&cursor, t) {
         let h_max = stop.t - t;
         if h_max > MIN_STEP_EPS {
-            // Fixed RK4 substep, clipped to the boundary; re-entered until arrival.
-            let h = cfg.dt.min(h_max);
+            // Region-aware fixed RK4 substep, clipped to the boundary and
+            // re-entered until arrival. Coarse `burnin_dt` on the unscored warm-up
+            // `[t_start, cond_from)`, exact `cfg.dt` on the scored window. The
+            // clip lands the last coarse step exactly on `cond_from` (a surviving
+            // output boundary). `burnin_dt` is a fixed config scalar, so the whole
+            // step sequence is θ-independent — the augmented `(x, S)` system stays
+            // a smooth composition and `S` is its exact derivative (the same §1c
+            // reason fixed-RK4 is sound and adaptive rk45 is refused).
+            let nominal = if use_coarse && t < cond_from - MIN_STEP_EPS {
+                burnin_dt
+            } else {
+                cfg.dt
+            };
+            let h = nominal.min(h_max);
             rk4_step(
                 model,
                 &mut st.ode.int,
@@ -1124,7 +1171,7 @@ pub(crate) fn integrate_obs_sensitivity(
             &mut records,
             &mut next_obs,
         );
-        if !recorded && next_obs < n_obs && t > obs_times[next_obs] + 1e-9 {
+        if !recorded && next_obs < n_obs && t > obs_times[next_obs] + OBS_COINCIDENCE_EPS {
             return Err(SimError::Validation(format!(
                 "ODE output grid has no snapshot at obs time {} (integration reached \
                  t = {} without landing on it); the [output] schedule must include \
@@ -1529,7 +1576,7 @@ mod tests {
         let obs = [10.0f64, 20.0, 30.0];
         let seed = vec![0.0f64; ni * d]; // params don't enter two_state's initial counts
 
-        let recs = integrate_obs_sensitivity(&cm, &base, &pmi, &seed, &cfg, &obs).unwrap();
+        let recs = integrate_obs_sensitivity(&cm, &base, &pmi, &seed, &cfg, &obs, cfg.dt).unwrap();
         assert_eq!(recs.len(), 3, "one record per obs time");
 
         // Central FD in each parameter (hoisted: perturbation depends on the param,
@@ -1542,8 +1589,8 @@ mod tests {
                 pp[pk] += eps;
                 pm[pk] -= eps;
                 (
-                    integrate_obs_sensitivity(&cm, &pp, &pmi, &seed, &cfg, &obs).unwrap(),
-                    integrate_obs_sensitivity(&cm, &pm, &pmi, &seed, &cfg, &obs).unwrap(),
+                    integrate_obs_sensitivity(&cm, &pp, &pmi, &seed, &cfg, &obs, cfg.dt).unwrap(),
+                    integrate_obs_sensitivity(&cm, &pm, &pmi, &seed, &cfg, &obs, cfg.dt).unwrap(),
                 )
             })
             .collect();

@@ -26,7 +26,11 @@ use crate::inference::MultiStreamObsModel;
 /// parameters `estimated_to_model` (each entry a model parameter index).
 ///
 /// `obs_times` must lie on the model's output grid (the recorder scores on the
-/// output grid, matching `compute_ode_loglik`). `dt` is the fixed RK4 step.
+/// output grid, matching `compute_ode_loglik`). `dt` is the fixed RK4 step;
+/// `burnin_dt` is the coarse step for the unscored warm-up `[t_start, first_obs)`
+/// (gh#396 follow-on) — `burnin_dt <= dt` disables it (fine step throughout). The
+/// coarse region integrates state and sensitivity together, so the returned
+/// gradient stays consistent with the coarsely-computed value.
 ///
 /// Refuses (hard error) the cases v1 cannot differentiate soundly, each with a
 /// reason: an adaptive integrator, a `dt`-in-rate model, a scheduled effect
@@ -34,11 +38,13 @@ use crate::inference::MultiStreamObsModel;
 /// (needs the `ic_grad` seed, below); a `DerivedExpr` prevalence projection or a
 /// `projected`-transforming likelihood argument
 /// ([`MultiStreamObsModel::ode_loglik_and_grad`]).
+#[allow(clippy::too_many_arguments)]
 pub fn det_grad(
     compiled: &CompiledModel,
     obs_model: &MultiStreamObsModel,
     obs_times: &[f64],
     dt: f64,
+    burnin_dt: f64,
     params: &[f64],
     estimated_to_model: &[usize],
 ) -> Result<(f64, Vec<f64>), SimError> {
@@ -74,6 +80,7 @@ pub fn det_grad(
         &state_sens_0,
         &cfg,
         obs_times,
+        burnin_dt,
     )?;
 
     obs_model.ode_loglik_and_grad(&records, params, estimated_to_model)
@@ -236,7 +243,7 @@ mod tests {
         let (int_s0, _) = compiled.initial_state(&params).unwrap();
         let seed = vec![0.0; int_s0.counts.len() * est.len()];
         let recs =
-            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed, &cfg, &obs_times)
+            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed, &cfg, &obs_times, cfg.dt)
                 .unwrap();
         let projections: Vec<StreamProjection> = compiled
             .model
@@ -267,7 +274,7 @@ mod tests {
 
         let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
 
-        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est).unwrap();
+        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &params, &est).unwrap();
         assert!(ll.is_finite(), "det_grad loglik must be finite, got {ll}");
         assert_eq!(grad.len(), est.len());
 
@@ -278,8 +285,8 @@ mod tests {
             let mut pm = params.clone();
             pp[midx] += eps;
             pm[midx] -= eps;
-            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est).unwrap();
-            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est).unwrap();
+            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &pp, &est).unwrap();
+            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &pm, &est).unwrap();
             let fd = (llp - llm) / (2.0 * eps);
             let rel = if fd.abs() > 1e-8 {
                 (grad[i] - fd).abs() / fd.abs()
@@ -297,6 +304,138 @@ mod tests {
         }
         // Non-vacuity: beta (factor-2 through both chains) and k (factor-1) must
         // carry materially nonzero gradients, or the test proves little.
+        assert!(grad[0].abs() > 1e-6, "∂/∂beta should be materially nonzero");
+        assert!(grad[2].abs() > 1e-6, "∂/∂k should be materially nonzero");
+    }
+
+    /// The COARSE-`burnin_dt` FD oracle (gh#396 follow-on) — the correctness gate
+    /// for the burn-in feature. Integrate the augmented `(x, S)` system with a
+    /// coarse RK4 step on the unscored warm-up `[t_start, first_obs)` and the exact
+    /// `dt` on the scored window, then check that the returned gradient is the exact
+    /// derivative of the *coarsely-computed* value: `det_grad(burnin_dt=K).grad` vs
+    /// a central finite difference of `det_grad(burnin_dt=K).value`. This proves the
+    /// central claim — the sensitivity flows through the coarse region so value and
+    /// gradient stay mutually consistent (unlike a frozen checkpoint, whose
+    /// `∂x*/∂θ ≡ 0` would make the gradient miss the warm-up entirely).
+    ///
+    /// A slow epidemic (`beta = 0.15`, `R0 = 1.5`) keeps incidence/prevalence
+    /// materially nonzero across the scored window and the coarse `dt = 5` steps
+    /// well within RK4 stability for the fastest (5-day latent) compartment, so no
+    /// clamp fires (the clamp refusal is a separate test). `first_obs = 50` gives a
+    /// real `[0, 50)` warm-up = ten coarse steps that land exactly on 50.
+    ///
+    /// The `ll_coarse != ll_fine` assertion is the non-vacuity guard: it proves the
+    /// coarse path actually integrated differently than the fine one, so the
+    /// gradient it matches is genuinely the coarse gradient (a bug that silently
+    /// ignored `burnin_dt` would leave `grad` = the fine gradient, which would then
+    /// NOT match the coarse FD). RED-CHECK (verified during development): resetting
+    /// `S` to zero at `cond_from` — the frozen-checkpoint failure mode — drops the
+    /// warm-up sensitivity and `∂/∂beta` lands far above the 1e-4 gate vs the FD.
+    #[test]
+    fn det_grad_matches_finite_difference_under_coarse_burnin_dt() {
+        let mut model = seir_ode_grad_fixture();
+        set_defaults(&mut model);
+        model.simulation.t_start = 0.0;
+        model.simulation.t_end = 150.0;
+        let compiled = Arc::new(CompiledModel::new(model).unwrap());
+
+        let n = compiled.param_index.len();
+        let mut params = vec![0.0; n];
+        for p in &compiled.model.parameters {
+            params[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+        }
+        // Slow epidemic so it stays active in the scored window and the coarse
+        // steps stay well within RK4 stability.
+        params[compiled.param_index["beta"]] = 0.15;
+
+        let dt = 1.0;
+        let burnin_dt = 5.0;
+        // first obs = 50 ⇒ warm-up [0, 50) integrated coarsely (10 steps of 5).
+        let obs_times: Vec<f64> = (5..=15).map(|w| (w * 10) as f64).collect(); // 50..150
+        let est = vec![
+            compiled.param_index["beta"],
+            compiled.param_index["gamma"],
+            compiled.param_index["k"],
+            compiled.param_index["rho"],
+        ];
+
+        // Synthesize data with the SAME coarse integration at the true params, so the
+        // FD is well-conditioned (data near the coarse-likelihood mode).
+        let cfg = OdeConfig { t_start: 0.0, t_end: 150.0, dt };
+        let (int_s0, _) = compiled.initial_state(&params).unwrap();
+        let seed = vec![0.0; int_s0.counts.len() * est.len()];
+        let recs = crate::ode::integrate_obs_sensitivity(
+            &compiled, &params, &est, &seed, &cfg, &obs_times, burnin_dt,
+        )
+        .unwrap();
+        let projections: Vec<StreamProjection> = compiled
+            .model
+            .observations
+            .iter()
+            .map(|om| StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap())
+            .collect();
+        let per_stream: Vec<Vec<f64>> = projections
+            .iter()
+            .map(|proj| {
+                recs.iter()
+                    .map(|r| {
+                        let v: f64 = match proj {
+                            StreamProjection::FlowSum(idxs) => idxs.iter().map(|&i| r.inc[i]).sum(),
+                            StreamProjection::IntCompSum(idxs) => {
+                                idxs.iter().map(|&i| r.counts[i]).sum()
+                            }
+                            StreamProjection::Expr(_) => panic!("fixture has no Expr projection"),
+                        };
+                        v.round()
+                    })
+                    .collect()
+            })
+            .collect();
+        assert!(per_stream[0].iter().sum::<f64>() > 1.0, "coarse incidence data must be nonzero");
+        assert!(per_stream[1].iter().sum::<f64>() > 1.0, "coarse prevalence data must be nonzero");
+
+        let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+
+        // The coarse gradient + value.
+        let (ll_coarse, grad) =
+            det_grad(&compiled, &obs_model, &obs_times, dt, burnin_dt, &params, &est).unwrap();
+        assert!(ll_coarse.is_finite(), "coarse det_grad loglik must be finite, got {ll_coarse}");
+
+        // Non-vacuity: the coarse path must integrate DIFFERENTLY than the fine one —
+        // otherwise `grad` is the fine gradient and matching the coarse FD proves
+        // nothing.
+        let (ll_fine, _) =
+            det_grad(&compiled, &obs_model, &obs_times, dt, dt, &params, &est).unwrap();
+        assert!(
+            (ll_coarse - ll_fine).abs() > 1e-6,
+            "coarse burn-in must change the value vs fine dt (ll_coarse {ll_coarse} vs \
+             ll_fine {ll_fine}); the test is vacuous otherwise"
+        );
+
+        // The gradient is the exact derivative of the coarse value.
+        let eps = 1e-6;
+        let names = ["beta", "gamma", "k", "rho"];
+        for (i, &midx) in est.iter().enumerate() {
+            let mut pp = params.clone();
+            let mut pm = params.clone();
+            pp[midx] += eps;
+            pm[midx] -= eps;
+            let (llp, _) =
+                det_grad(&compiled, &obs_model, &obs_times, dt, burnin_dt, &pp, &est).unwrap();
+            let (llm, _) =
+                det_grad(&compiled, &obs_model, &obs_times, dt, burnin_dt, &pm, &est).unwrap();
+            let fd = (llp - llm) / (2.0 * eps);
+            let rel = if fd.abs() > 1e-8 {
+                (grad[i] - fd).abs() / fd.abs()
+            } else {
+                (grad[i] - fd).abs()
+            };
+            assert!(
+                rel < 1e-4,
+                "coarse det_grad ∂/∂{} = {} vs FD {} (rel err {:.2e})",
+                names[i], grad[i], fd, rel
+            );
+        }
         assert!(grad[0].abs() > 1e-6, "∂/∂beta should be materially nonzero");
         assert!(grad[2].abs() > 1e-6, "∂/∂k should be materially nonzero");
     }
@@ -367,7 +506,7 @@ mod tests {
         let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end: 60.0, dt };
         let seed = vec![0.0; compiled.initial_state(&params).unwrap().0.counts.len() * est.len()];
         let recs =
-            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed, &cfg, &obs_times)
+            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed, &cfg, &obs_times, cfg.dt)
                 .unwrap();
         let flow_idx = 0usize; // weekly_cases is the incidence stream (FlowSum)
         let weekly: Vec<f64> = recs.iter().map(|r| r.inc[flow_idx].round()).collect();
@@ -377,7 +516,7 @@ mod tests {
         assert!(detection.iter().sum::<f64>() > 1.0, "√I+√R detection data must be nonzero");
 
         let obs_model = build_obs_model(compiled.clone(), &obs_times, vec![weekly, detection]);
-        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est).unwrap();
+        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &params, &est).unwrap();
         assert!(ll.is_finite(), "det_grad loglik must be finite, got {ll}");
 
         let eps = 1e-6;
@@ -387,8 +526,8 @@ mod tests {
             let mut pm = params.clone();
             pp[midx] += eps;
             pm[midx] -= eps;
-            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est).unwrap();
-            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est).unwrap();
+            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &pp, &est).unwrap();
+            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &pm, &est).unwrap();
             let fd = (llp - llm) / (2.0 * eps);
             let rel = if fd.abs() > 1e-8 {
                 (grad[i] - fd).abs() / fd.abs()
@@ -457,7 +596,7 @@ mod tests {
         let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end: 60.0, dt };
         let seed0 = compiled.ic_grad_seed(&params, &est).unwrap();
         let recs =
-            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed0, &cfg, &obs_times)
+            crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed0, &cfg, &obs_times, cfg.dt)
                 .unwrap();
         let projections: Vec<StreamProjection> = compiled
             .model
@@ -485,7 +624,7 @@ mod tests {
         assert!(per_stream[0].iter().sum::<f64>() > 1.0, "incidence data must be nonzero");
 
         let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
-        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, &params, &est).unwrap();
+        let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &params, &est).unwrap();
         assert!(ll.is_finite(), "det_grad loglik must be finite, got {ll}");
 
         let eps = 1e-4; // I0 ~ 10, so a larger step keeps the FD well-conditioned.
@@ -495,8 +634,8 @@ mod tests {
             let mut pm = params.clone();
             pp[midx] += eps;
             pm[midx] -= eps;
-            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pp, &est).unwrap();
-            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, &pm, &est).unwrap();
+            let (llp, _) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &pp, &est).unwrap();
+            let (llm, _) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &pm, &est).unwrap();
             let fd = (llp - llm) / (2.0 * eps);
             let rel = if fd.abs() > 1e-8 {
                 (grad[i] - fd).abs() / fd.abs()

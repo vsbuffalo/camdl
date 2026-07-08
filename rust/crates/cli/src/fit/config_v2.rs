@@ -1295,6 +1295,17 @@ pub enum Stage {
         /// frees wide-posterior parameters that identity mass leaves stuck.
         #[serde(default = "default_nuts_dense_mass")]
         dense_mass: bool,
+        /// Coarse RK4 step for the *unscored* warm-up `[t_start, first_obs)` on
+        /// the ODE gradient path (gh#396 follow-on). `None` (default) or a value
+        /// `<= dt` disables it — the whole trajectory integrates at `dt`. A larger
+        /// value takes big steps on the transient (state + sensitivity together,
+        /// so the NUTS gradient stays consistent with the coarsely-computed value),
+        /// cutting the per-gradient cost of a model whose origin is long before the
+        /// data. Prevalence (state-scored) streams only in this release; an
+        /// incidence stream is refused (its first bin would be coarsened). Identity-
+        /// defining: it changes the scored trajectory, so it re-keys the run.
+        #[serde(default)]
+        burnin_dt: Option<f64>,
     },
 
     /// NLopt Sbplx (subspace-searching simplex) — deterministic MLE on the
@@ -1589,12 +1600,15 @@ impl Stage {
             // Nuts (deterministic ODE gradient sampler): omit ONLY `samples`
             // (extension dimension, folded via `cas_target_length` like Mh's
             // `iterations`). Every other field — warmup / max_tree_depth /
-            // target_accept / dense_mass AND the init selectors — is
-            // identity-defining, for the same reason as Mh.
+            // target_accept / dense_mass / burnin_dt AND the init selectors — is
+            // identity-defining, for the same reason as Mh. `burnin_dt` changes the
+            // coarsely-integrated warm-up → the scored trajectory → the draws, so it
+            // MUST be listed here (leaving it swept into `..` would silently collide
+            // two fits that differ only in burnin_dt — the count-in-the-key rule).
             Stage::Nuts {
                 backend, chains, warmup, starts_from,
                 init_method, survey_path, survey_top_k_n,
-                max_tree_depth, target_accept, dense_mass,
+                max_tree_depth, target_accept, dense_mass, burnin_dt,
                 ..
             } => json!({
                 "algorithm": "nuts",
@@ -1608,6 +1622,7 @@ impl Stage {
                 "max_tree_depth": max_tree_depth,
                 "target_accept": target_accept,
                 "dense_mass": dense_mass,
+                "burnin_dt": burnin_dt,
             }),
             // No extension dimension: hash the full stage. NLopt stages
             // also have no extension dimension — every knob (chains,
