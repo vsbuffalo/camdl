@@ -137,7 +137,18 @@ pub fn run_stage(
         seed,
     )
     .map_err(|e| format!("nuts: {}", e))?
-    .unwrap_or_else(|| vec![config.base_params.clone(); opts.n_chains]);
+    .unwrap_or_else(|| {
+        // `Single` (and other non-dispersing methods): every chain starts at the
+        // estimated parameters' declared `initial` values — NOT whatever
+        // `base_params` holds at those indices (which can be a resolved/data
+        // value, not the fit's starting point). `run_ode_nuts` seeds `z` from
+        // these, so getting them wrong starts the chain at the wrong parameter.
+        let mut single = config.base_params.clone();
+        for ep in &config.estimated_params {
+            single[ep.index] = ep.initial;
+        }
+        vec![single; opts.n_chains]
+    });
 
     // Chains are independent (own seed, own RNG, own trace file) and their outputs
     // reduce order-independently (max-loglik chain + summed divergences), so run
