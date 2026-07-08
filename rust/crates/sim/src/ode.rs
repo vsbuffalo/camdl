@@ -10,6 +10,15 @@ use crate::{
     state::{Flows, IntState, RealState, Snapshot, Trajectory},
 };
 
+/// Relative threshold below which a compartment's post-step value counts as a
+/// *meaningful* negative excursion (a real RK4 overshoot), versus float roundoff
+/// on a near-zero compartment. Under the ODE gradient path a real clamp
+/// (`int_vals.max(0)`) is a nonsmooth operation the forward sensitivity does not
+/// model, so it is refused; roundoff clamps (scale·~1e-15, far below this) are
+/// tolerated. Compared against `max(|compartment|, 1)`, so it also floors at
+/// `1e-9` absolute for sub-unit compartments. See the clamp check in `rk4_step`.
+const NEG_STATE_CLAMP_EPS: f64 = 1e-9;
+
 pub struct OdeSim;
 
 impl Simulate for OdeSim {
@@ -335,14 +344,42 @@ fn rk4_step(
         (Default::default(), Default::default())
     };
 
-    // Combine compartments (clamped ≥ 0).
+    // Combine compartments (clamped ≥ 0). Under the gradient path (`sens` present),
+    // a compartment driven meaningfully below zero trips the clamp — a nonsmooth
+    // operation the forward sensitivity `S` does NOT model, so the returned
+    // `(value, gradient)` pair would be inconsistent (a silent-wrong gradient NUTS
+    // would sample against). Refuse the step instead; the value-only path
+    // (`sens = None`, forward sim) keeps clamping silently and stays byte-identical.
+    // The relative `NEG_STATE_CLAMP_EPS` tolerates float roundoff on a near-zero
+    // compartment while catching a real RK4 overshoot (which is O(compartment
+    // scale) once the step exceeds a fast transition's stability limit — coarse
+    // `burnin_dt` steps make this reachable, so the check the old comment here
+    // *claimed* but never implemented finally exists).
+    let grad_path = sens.is_some();
+    let mut clamped_negative = false;
     for i in 0..ni {
-        int_vals[i] += dt / 6.0 * (k1i[i] + 2.0 * k2i[i] + 2.0 * k3i[i] + k4i[i]);
-        int_vals[i] = int_vals[i].max(0.0);
+        let combined = int_vals[i] + dt / 6.0 * (k1i[i] + 2.0 * k2i[i] + 2.0 * k3i[i] + k4i[i]);
+        if grad_path && combined < -NEG_STATE_CLAMP_EPS * int_vals[i].abs().max(1.0) {
+            clamped_negative = true;
+        }
+        int_vals[i] = combined.max(0.0);
     }
     for i in 0..nr {
-        real_vals[i] += dt / 6.0 * (k1r[i] + 2.0 * k2r[i] + 2.0 * k3r[i] + k4r[i]);
-        real_vals[i] = real_vals[i].max(0.0);
+        let combined = real_vals[i] + dt / 6.0 * (k1r[i] + 2.0 * k2r[i] + 2.0 * k3r[i] + k4r[i]);
+        if grad_path && combined < -NEG_STATE_CLAMP_EPS * real_vals[i].abs().max(1.0) {
+            clamped_negative = true;
+        }
+        real_vals[i] = combined.max(0.0);
+    }
+    if clamped_negative {
+        return Err(SimError::Validation(
+            "ODE gradient (nuts): a compartment was driven below zero and clamped to 0 \
+             during integration — a nonsmooth operation the forward sensitivity does not \
+             model, so the value and its gradient would be inconsistent. The step is too \
+             large for a fast (short-residence) transition; reduce `dt`, or lower \
+             `burnin_dt` if the clamp is in the coarse warm-up window (gh#275 §1c)."
+                .to_string(),
+        ));
     }
 
     // Combine augmented flow (NOT clamped).
@@ -354,8 +391,9 @@ fn rk4_step(
 
     // Combine the sensitivity blocks (NOT clamped — S and acc_sens are signed).
     // The clamp on the state above is a nonsmooth operation S does not model (§1c
-    // clamp caveat); under `nuts` an active clamp is refused, so a valid gradient
-    // trajectory never clamps. `acc_sens` mirrors the value `flow` combine.
+    // clamp caveat); a gradient step that actually clamps is refused by the guard
+    // above (returned before we reach here), so a valid gradient trajectory never
+    // clamps. `acc_sens` mirrors the value `flow` combine.
     if let Some(s) = sens {
         let [k1, k2, k3, k4] = &ks_state;
         for k in 0..stage_state {
@@ -1172,6 +1210,71 @@ mod tests {
             }
         }
         CompiledModel::new(model).expect("two_state with hand-set grads must compile")
+    }
+
+    /// `pure_death` rewired to a CONSTANT-rate outflow: `rate = mu` (independent of
+    /// its source compartment `N`), so `dN/dt = -mu` and `N(t) = N0 - mu·t` crosses
+    /// zero at `t = N0/mu`. Unlike the self-limiting `mu·N` (whose RK4 stability
+    /// polynomial `R(z)` is positive for every real `z`, so it never goes negative),
+    /// a zeroth-order outflow overshoots below zero under a step larger than the
+    /// compartment can supply — the canonical trigger for the state clamp
+    /// (`int_vals.max(0)`). The value path clamps; the forward sensitivity `S`
+    /// does not model that clamp, so past the crossing `(value, gradient)` are
+    /// inconsistent — which the gradient path must refuse.
+    fn compiled_constant_drain() -> CompiledModel {
+        let mut model = load_golden("pure_death");
+        let death = &mut model.transitions[0];
+        death.rate = Expr::param("mu");
+        death.rate_grad.clear();
+        death.rate_grad.insert("mu".to_string(), DerivEntry::Grad(Expr::const_(1.0)));
+        death.rate_state_grad.0.clear(); // ∂(mu)/∂N = 0
+        CompiledModel::new(model).expect("constant-drain pure_death must compile")
+    }
+
+    /// A gradient step (`sens = Some`) that clamps a compartment negative is
+    /// REFUSED, not silently taken. `dN/dt = -mu` with `mu = 1`, `N0 = 100`, one
+    /// step of `dt = 200` drives `N` to `100 - 200 = -100`; the value path clamps
+    /// it to 0 but the sensitivity `S = ∂N/∂mu` keeps its unclamped slope, so the
+    /// returned `(value, gradient)` pair would be inconsistent — a silent-wrong
+    /// gradient NUTS would sample against. The forward-sim path (`sens = None`) is
+    /// unchanged: it still clamps, since a stochastic-adjacent ODE state at zero
+    /// is fine when no gradient consistency is required. (Coarse `burnin_dt` steps
+    /// make this overshoot materially more likely, which is why the guard the
+    /// S-combine comment long claimed — but never implemented — matters now.)
+    #[test]
+    fn rk4_gradient_step_refuses_clamping_a_compartment_negative() {
+        let cm = compiled_constant_drain();
+        let mu_idx = cm.model.parameters.iter().position(|p| p.name == "mu").unwrap();
+        let mut params = vec![0.0; cm.model.parameters.len()];
+        params[mu_idx] = 1.0;
+        let pmi = [mu_idx];
+        let nf = cm.model.transitions.len();
+
+        // Gradient path: refused.
+        let mut int = vec![100.0];
+        let mut real: Vec<f64> = vec![];
+        let mut flow = vec![0.0; nf];
+        let mut sens = Sens { state: vec![0.0; 1 * pmi.len()], flow: vec![0.0; nf * pmi.len()] };
+        let res = rk4_step(
+            &cm, &mut int, &mut real, Some(&mut flow), &params, 0.0, 200.0, None,
+            Some(&mut sens), &pmi,
+        );
+        assert!(
+            res.is_err(),
+            "a gradient step that clamps N negative must be refused (value/gradient \
+             would be inconsistent), got Ok with N = {}",
+            int[0]
+        );
+
+        // Forward-sim path: unchanged — clamps to 0, no error.
+        let mut int2 = vec![100.0];
+        let mut real2: Vec<f64> = vec![];
+        let mut flow2 = vec![0.0; nf];
+        let res2 = rk4_step(
+            &cm, &mut int2, &mut real2, Some(&mut flow2), &params, 0.0, 200.0, None, None, &[],
+        );
+        assert!(res2.is_ok(), "the forward-sim (value-only) path still clamps silently");
+        assert_eq!(int2[0], 0.0, "forward sim clamps N to 0");
     }
 
     fn load_golden(name: &str) -> ir::Model {
