@@ -945,7 +945,7 @@ pub fn run_stage(
         .unwrap();
 
     // Write summary JSON
-    write_summary(stage_dir, &results, &config, &diagnostics)?;
+    write_summary(stage_dir, &results, &config, thin, &diagnostics)?;
 
     // Write fit_state.toml
     let mut start_values = HashMap::new();
@@ -1247,6 +1247,7 @@ fn write_summary(
     dir: &Path,
     results: &[(usize, PMMHResult)],
     config: &FitRunConfig,
+    thin: usize,
     diagnostics: &Diagnostics,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<f64> = results.iter().map(|(_, r)| r.acceptance_rate).collect();
@@ -1270,6 +1271,8 @@ fn write_summary(
         "map_loglik": map_result.map_loglik,
         "map_chain": map_chain + 1,
         "map_params": map_params,
+        // n_samples (kept) × thin = raw sampling iterations → ESS/iteration.
+        "thin": thin,
     });
 
     let path = dir.join("pmmh_summary.json");

@@ -916,7 +916,7 @@ pub fn run_stage(
     }
 
     // Write summary JSON
-    write_summary(stage_dir, &all_results, &config, &diagnostics)?;
+    write_summary(stage_dir, &all_results, &config, thin, &diagnostics)?;
 
     // No-op resume: every chain already reached the target sweep count
     // before this invocation. There are no new sweeps to aggregate
@@ -1145,6 +1145,7 @@ fn write_summary(
     dir: &Path,
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     _config: &FitRunConfig,
+    thin: usize,
     diagnostics: &Diagnostics,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<Vec<f64>> = results.iter()
@@ -1158,6 +1159,9 @@ fn write_summary(
         "rhat": diagnostics.rhat,
         "ess": diagnostics.ess,
         "ess_per_chain": diagnostics.ess_per_chain,
+        // Thinning factor: `n_samples` (kept draws) × `thin` = raw sampling
+        // iterations, the thinning-invariant denominator for ESS/iteration.
+        "thin": thin,
     });
 
     let path = dir.join("pgas_summary.json");

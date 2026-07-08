@@ -103,6 +103,14 @@ pub struct TableRow {
     pub ess_at_mle: Option<EssSummary>,
     /// Posterior chain ESS per parameter. PGAS / PMMH only.
     pub ess_posterior: Option<BTreeMap<String, f64>>,
+    /// ESS/iteration — the algorithm-comparison metric: min-parameter ESS per raw
+    /// sampling step (thinning-invariant, hardware-independent). PGAS / PMMH only.
+    #[serde(default)]
+    pub ess_per_iter: Option<f64>,
+    /// ESS/second — the runtime metric: min-parameter ESS per second of stage
+    /// wall-clock (thinning-invariant but hardware-dependent). PGAS / PMMH only.
+    #[serde(default)]
+    pub ess_per_sec: Option<f64>,
     /// Estimated parameters. IF2 → θ̂ (clean-eval winner); PGAS / PMMH
     /// → posterior mean. The full estimated set is included; renderers
     /// truncate.
@@ -232,6 +240,8 @@ pub fn build_row(
         acceptance_rate: mview.acceptance_rate,
         ess_at_mle: mview.ess_at_mle,
         ess_posterior: mview.ess_posterior,
+        ess_per_iter: mview.ess_per_iter,
+        ess_per_sec: mview.ess_per_sec,
         params: mview.params,
         delta_ll_vs_best,
         age_seconds,
@@ -253,7 +263,30 @@ struct MethodView {
     acceptance_rate: Option<f64>,
     ess_at_mle: Option<EssSummary>,
     ess_posterior: Option<BTreeMap<String, f64>>,
+    ess_per_iter: Option<f64>,
+    ess_per_sec: Option<f64>,
     params: BTreeMap<String, f64>,
+}
+
+/// ESS/iteration — the algorithm-comparison metric: minimum-parameter ESS per
+/// raw sampling step. `n_samples` (kept draws) × `thin` = raw iterations, so
+/// this is invariant to thinning and iteration count. `None` on no positive ESS.
+fn min_ess_per_iter(ess: &BTreeMap<String, f64>, n_samples: usize, thin: usize) -> Option<f64> {
+    let raw = n_samples.saturating_mul(thin.max(1));
+    if raw == 0 {
+        return None;
+    }
+    let min_ess = ess.values().copied().reduce(f64::min)?;
+    Some(min_ess / raw as f64)
+}
+
+/// ESS/second — the runtime metric: minimum-parameter ESS per second of stage
+/// wall-clock. Thinning-invariant but hardware-dependent (estimates
+/// runtime-to-target on this machine). `None` on no wall-time or no positive ESS.
+fn min_ess_per_sec(ess: &BTreeMap<String, f64>, wall_secs: Option<f64>) -> Option<f64> {
+    let secs = wall_secs.filter(|s| *s > 0.0)?;
+    let min_ess = ess.values().copied().reduce(f64::min)?;
+    Some(min_ess / secs)
 }
 
 impl MethodView {
@@ -291,6 +324,8 @@ impl MethodView {
             acceptance_rate: None,
             ess_at_mle: None,
             ess_posterior: None,
+            ess_per_iter: None,
+            ess_per_sec: None,
             params: r.theta_hat.clone(),
         }
     }
@@ -309,6 +344,8 @@ impl MethodView {
             acceptance_rate: None,
             ess_at_mle: r.ess_at_mle.clone(),
             ess_posterior: None,
+            ess_per_iter: None,
+            ess_per_sec: None,
             params: r.theta_hat.clone(),
         }
     }
@@ -323,6 +360,8 @@ impl MethodView {
             acceptance_rate: None,
             ess_at_mle: None,
             ess_posterior: Some(r.ess_per_param.clone()),
+            ess_per_iter: min_ess_per_iter(&r.ess_per_param, r.n_samples, r.thin),
+            ess_per_sec: min_ess_per_sec(&r.ess_per_param, r.wall_time_secs),
             params: r.posterior_mean.clone(),
         }
     }
@@ -337,6 +376,8 @@ impl MethodView {
             acceptance_rate: Some(r.acceptance_rate),
             ess_at_mle: None,
             ess_posterior: Some(r.ess.clone()),
+            ess_per_iter: min_ess_per_iter(&r.ess, r.n_samples, r.thin),
+            ess_per_sec: min_ess_per_sec(&r.ess, r.wall_time_secs),
             params: r.posterior_mean.clone(),
         }
     }

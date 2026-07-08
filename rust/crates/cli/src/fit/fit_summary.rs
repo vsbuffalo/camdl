@@ -824,7 +824,7 @@ impl Formatter {
             "═".repeat(74_usize.saturating_sub(stage.len() + method.len() + 3))
         ));
 
-        let (n_chains, n_samples, posterior_mean, ess, max_rhat, acceptance_summary, map_loglik) =
+        let (n_chains, n_samples, posterior_mean, ess, max_rhat, acceptance_summary, map_loglik, wall_time, thin) =
             match view {
                 BayesianView::Pgas(r) => (
                     r.n_chains,
@@ -834,6 +834,8 @@ impl Formatter {
                     r.max_rhat,
                     None::<f64>,
                     None::<f64>,
+                    r.wall_time_secs,
+                    r.thin,
                 ),
                 BayesianView::Pmmh(r) => (
                     r.n_chains,
@@ -843,6 +845,8 @@ impl Formatter {
                     r.max_rhat,
                     Some(r.acceptance_rate),
                     Some(r.map_loglik),
+                    r.wall_time_secs,
+                    r.thin,
                 ),
             };
 
@@ -867,6 +871,29 @@ impl Formatter {
         ));
         if let Some(acc) = acceptance_summary {
             s.push_str(&format!("    acceptance = {:.3} (mean across chains)\n", acc));
+        }
+        let min_ess = ess.values().copied().reduce(f64::min);
+        // ESS/iteration — the ALGORITHM-comparison metric: min-parameter ESS per
+        // raw sampling step. `n_samples` is KEPT (thinned) draws, so `× thin`
+        // recovers the raw iterations, making this invariant to thinning and
+        // iteration count. Hardware-independent: "this sampler mixes N× better per
+        // step" holds on any machine. Min over params — the slowest bounds usable ESS.
+        let raw_iters = n_samples.saturating_mul(thin.max(1));
+        if let Some(min_ess) = min_ess.filter(|_| raw_iters > 0) {
+            s.push_str(&format!(
+                "    ESS/iter = {:.3}  (min-param ESS {:.0} / {} raw sampling iters)\n",
+                min_ess / raw_iters as f64, min_ess, raw_iters
+            ));
+        }
+        // ESS/second — the RUNTIME metric: min-parameter ESS per second of wall-
+        // clock. Also thinning-invariant, but hardware/implementation-dependent, so
+        // it estimates runtime-to-target on THIS machine rather than comparing
+        // algorithms. `None` wall-time (older runs) simply omits it.
+        if let (Some(secs), Some(min_ess)) = (wall_time.filter(|s| *s > 0.0), min_ess) {
+            s.push_str(&format!(
+                "    ESS/sec  = {:.2}  (min-param ESS {:.0} / {:.1}s wall)\n",
+                min_ess / secs, min_ess, secs
+            ));
         }
         s.push('\n');
 
@@ -1302,6 +1329,8 @@ fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
                 acceptance_rate: None,
                 ess_at_mle: None,
                 ess_posterior: None,
+                ess_per_iter: None,
+                ess_per_sec: None,
                 params: BTreeMap::new(),
                 delta_ll_vs_best: 0.0,
                 age_seconds: 0,
@@ -2038,6 +2067,54 @@ mod tests {
     }
 
     #[test]
+    fn bayesian_block_reports_ess_per_second_off_the_slowest_param() {
+        use std::collections::BTreeMap;
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let mk = |wall: Option<f64>, n_samples: usize, thin: usize| PgasStageResult {
+            n_samples,
+            posterior_mean: BTreeMap::from([("a2".to_string(), 0.5), ("g".to_string(), 1.0)]),
+            posterior_q025: BTreeMap::new(),
+            posterior_q975: BTreeMap::new(),
+            // a2 mixes worst → it, not the mean, bounds usable ESS.
+            ess_per_param: BTreeMap::from([("a2".to_string(), 145.0), ("g".to_string(), 300.0)]),
+            max_rhat: 1.01,
+            acceptance_per_param: BTreeMap::new(),
+            n_chains: 4,
+            wall_time_secs: wall,
+            thin,
+        };
+        // min-param ESS (145) / wall (11.8 s) = 12.29 ESS/sec — thinning-invariant.
+        let with = fmt.bayesian_block("posterior", "pgas", BayesianView::Pgas(&mk(Some(11.8), 500, 1)));
+        assert!(
+            with.contains("ESS/sec  = 12.29"),
+            "must report ESS/sec off the slowest param (145/11.8): {with}"
+        );
+        // ESS/iteration = 145 / (n_samples 500 × thin 1) = 0.290, per raw sampling step.
+        assert!(
+            with.contains("ESS/iter = 0.290"),
+            "must report ESS/iteration off raw sampling steps (145/500): {with}"
+        );
+        // Thinning-invariance: (n_samples 50 × thin 10) is the SAME 500 raw steps,
+        // so ESS/iter is identical — the whole point.
+        let thinned = fmt.bayesian_block("posterior", "pgas", BayesianView::Pgas(&mk(Some(5.0), 50, 10)));
+        assert!(
+            thinned.contains("ESS/iter = 0.290"),
+            "ESS/iter must be invariant to thinning (50×10 == 500 raw): {thinned}"
+        );
+        // No wall-time (older run) → no ESS/sec line, but ESS/iter still shows
+        // (it needs only n_samples×thin, not wall-time).
+        let without = fmt.bayesian_block("posterior", "pgas", BayesianView::Pgas(&mk(None, 500, 1)));
+        assert!(
+            !without.contains("ESS/sec"),
+            "no wall-time must omit the ESS/sec line: {without}"
+        );
+        assert!(
+            without.contains("ESS/iter = 0.290"),
+            "ESS/iter does not need wall-time and must still show: {without}"
+        );
+    }
+
+    #[test]
     fn provenance_block_passes_when_params_match() {
         let dir = crate::test_support::unique_temp_dir("summary_prov_ok");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2495,6 +2572,8 @@ mod tests {
             max_rhat: 1.02,
             acceptance_per_param: BTreeMap::new(),
             n_chains: 4,
+            wall_time_secs: None,
+            thin: 1,
         })
     }
 
@@ -2507,6 +2586,8 @@ mod tests {
             acceptance_rate: 0.24,
             map_loglik: -3801.2,
             n_chains: 4,
+            wall_time_secs: None,
+            thin: 1,
         })
     }
 
