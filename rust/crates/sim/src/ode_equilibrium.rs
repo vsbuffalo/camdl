@@ -272,6 +272,60 @@ fn build_bordered(m: &DMatrix<f64>, c: &DMatrix<f64>, ni: usize, k: usize) -> DM
     bordered
 }
 
+/// Relative mismatch above which the vector field is deemed non-`P`-periodic.
+const FORCING_PERIOD_EPS: f64 = 1e-6;
+
+/// Validity gate (gh#396): verify the vector field is `P`-periodic over the last
+/// burn-in period `[T_eq − P, T_eq]`, so the stroboscopic fixed point is the real
+/// seasonal cycle rather than a spurious fixed point of a non-periodic map. A
+/// table / `interpolated` forcing carries no declared period, so periodicity is
+/// checked **numerically**: `dx/dt` at a fixed reference state must repeat with
+/// period `P`. Refuse (hard error) otherwise — the alternative is a silently
+/// wrong warm-start. Called once at fit setup (periodicity is θ-shape-independent).
+pub fn check_periodicity(
+    compiled: &CompiledModel,
+    params: &[f64],
+    t_eq: f64,
+    period: f64,
+    dt: f64,
+) -> Result<(), SimError> {
+    if !(period > 0.0) {
+        return Err(SimError::Validation(format!(
+            "warm-start period must be positive, got {period}"
+        )));
+    }
+    // Reference state with every compartment positive, so all forcing-dependent
+    // rates are active and any t-dependence of the forcing is visible in dx/dt.
+    let (int_s0, _) = compiled.initial_state_continuous(params)?;
+    let x_ref: Vec<f64> = int_s0.iter().map(|v| v.max(1.0)).collect();
+
+    const N_SAMPLES: usize = 8;
+    let mut max_rel = 0.0_f64;
+    for s in 0..N_SAMPLES {
+        let t = t_eq - period + (s as f64 / N_SAMPLES as f64) * period;
+        let d0 = crate::ode::derivs_at(compiled, params, &x_ref, t, dt)?;
+        let d1 = crate::ode::derivs_at(compiled, params, &x_ref, t + period, dt)?;
+        let scale = d0
+            .iter()
+            .chain(&d1)
+            .fold(0.0_f64, |m, v| m.max(v.abs()))
+            .max(1e-300);
+        for (a, b) in d0.iter().zip(&d1) {
+            max_rel = max_rel.max((a - b).abs() / scale);
+        }
+    }
+    if max_rel > FORCING_PERIOD_EPS {
+        return Err(SimError::Validation(format!(
+            "warm-start: the model's dynamics are not periodic with period {period} near \
+             T_eq = {t_eq} (relative mismatch {max_rel:.2e} between the vector field at t \
+             and t+P). Periodic-equilibrium warm-start requires a P-periodic forcing over \
+             the burn-in window — check `warm_start_period` / `warm_start_at`, or fit \
+             without warm-start for a non-periodic transient (gh#396)."
+        )));
+    }
+    Ok(())
+}
+
 fn non_endemic_err() -> SimError {
     SimError::Validation(
         "periodic-equilibrium warm-start: no isolated stable seasonal cycle at these \
@@ -446,6 +500,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn periodicity_gate_accepts_correct_period_and_refuses_wrong() {
+        let cm = load_model();
+        let params = baseline_params(&cm);
+        // The sinusoidal seasonal forcing has period 365.25 → the P-periodicity
+        // check passes at the true period.
+        assert!(
+            check_periodicity(&cm, &params, 0.0, P, DT).is_ok(),
+            "true period should pass the periodicity gate"
+        );
+        // A wrong period (the forcing is 365.25-periodic, not 100-periodic) → refused.
+        assert!(
+            check_periodicity(&cm, &params, 0.0, 100.0, DT).is_err(),
+            "wrong period should be refused"
+        );
+        // Non-positive period → refused.
+        assert!(check_periodicity(&cm, &params, 0.0, 0.0, DT).is_err());
     }
 
     #[test]

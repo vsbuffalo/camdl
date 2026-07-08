@@ -429,6 +429,38 @@ pub(crate) fn period_flow(
     Ok((int_vals, sens.state))
 }
 
+/// gh#396: the integer-compartment derivative field `dx/dt` at a reference state
+/// and absolute time `t`. Used by the warm-start periodicity gate to test that
+/// the vector field (hence the forcing) is `P`-periodic near `T_eq` — a table /
+/// `interpolated` forcing carries no declared period, so periodicity is checked
+/// numerically rather than read off the forcing kind.
+pub(crate) fn derivs_at(
+    model: &CompiledModel,
+    params: &[f64],
+    int_vals: &[f64],
+    t: f64,
+    dt: f64,
+) -> Result<Vec<f64>, SimError> {
+    let per_eval = crate::resolved_expr::stage_per_eval(model, params, t, dt);
+    let real_vals: Vec<f64> = Vec::new();
+    let mut di = vec![0.0; int_vals.len()];
+    let mut dr = vec![0.0; real_vals.len()];
+    let mut df = vec![0.0; model.model.transitions.len()];
+    ode_derivs(
+        model,
+        int_vals,
+        &real_vals,
+        params,
+        t,
+        dt,
+        per_eval.as_deref(),
+        &mut di,
+        &mut dr,
+        &mut df,
+    )?;
+    Ok(di)
+}
+
 /// One integrated ODE state: the integer- and real-compartment values plus the
 /// cumulative per-transition flow integrals. `flow` is `∫ rate dt` accumulated
 /// since the last output reset (reset to 0 at each output boundary so

@@ -153,6 +153,12 @@ pub fn run_stage(
             Some(sim::ode_equilibrium::WarmStart { t_eq, period })
         }
     };
+    // gh#396: refuse a non-P-periodic forcing over the burn-in window up front —
+    // a silently-wrong equilibrium would otherwise bias every gradient.
+    if let Some(ws) = &warm_start {
+        sim::ode_equilibrium::check_periodicity(&compiled, &config.base_params, ws.t_eq, ws.period, dt)
+            .map_err(|e| e.to_string())?;
+    }
 
     // Chains are independent (own seed, own RNG, own trace file) and their outputs
     // reduce order-independently (max-loglik chain + summed divergences), so run
