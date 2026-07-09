@@ -6635,7 +6635,10 @@ let expand_observations ctx =
       | LikPoisson _      -> ["rate"]
       | LikNormal _       -> ["mean"; "sd"]
       | LikBinomial _     -> ["n"; "p"]
-      | LikBetaBinomial _ -> ["n"; "alpha"; "beta"]
+      (* Two accepted parameterizations (gh#402): raw (alpha, beta) or the
+         (mean, concentration) sugar that lowers to them. The construction site
+         below enforces exclusivity (E252) and the per-form required args (E250). *)
+      | LikBetaBinomial _ -> ["n"; "alpha"; "beta"; "mean"; "concentration"]
       | LikBernoulli _    -> ["p"]
     in
     let current_kwargs = match lik_v with
@@ -6715,11 +6718,45 @@ let expand_observations ctx =
           Ir.p = diff (resolve_kw kwargs "p");
         }
       | LikBetaBinomial kwargs ->
-        Ir.BetaBinomial {
-          Ir.n     = resolve_kw kwargs "n";
-          Ir.alpha = diff (resolve_kw kwargs "alpha");
-          Ir.beta  = diff (resolve_kw kwargs "beta");
-        }
+        (* Two parameterizations, same {n, alpha, beta} IR:
+             raw:   beta_binomial(n, alpha, beta)
+             sugar: beta_binomial(n, mean, concentration)
+                    -> alpha = mean * concentration
+                       beta  = (1 - mean) * concentration
+           The sugar lowers here, so the obs-autodiff already threads d/dtheta
+           through alpha/beta (the concentration included: d alpha/d conc = mean).
+           No IR/schema change. NOTE (see gh#402): we deliberately do NOT invent a
+           dispersion-scale transform/prior — that is the modeler's parameterization
+           choice (Stan does the same); reciprocal-dispersion is a docs convention. *)
+        let n = resolve_kw kwargs "n" in
+        let has k = List.mem_assoc k kwargs in
+        let raw   = has "alpha" || has "beta" in
+        let sugar = has "mean"  || has "concentration" in
+        if raw && sugar then begin
+          Diagnostics.error ctx.diags ~code:"E252" ~loc:Diagnostics.no_loc
+            ~message:(Printf.sprintf
+              "observation '%s': beta_binomial mixes parameterizations — give either \
+               (alpha, beta) or (mean, concentration), not both" od.oname)
+            ~hint:"e.g. beta_binomial(n = n_examined, mean = p, concentration = phi)" ();
+          Ir.BetaBinomial { Ir.n; Ir.alpha = diff (Ir.Const 0.0); Ir.beta = diff (Ir.Const 0.0) }
+        end
+        else if sugar then begin
+          let mean = resolve_kw kwargs "mean" in
+          let conc = resolve_kw kwargs "concentration" in
+          let mul l r = Ir.BinOp { op = Ir.Mul; left = l; right = r } in
+          let sub l r = Ir.BinOp { op = Ir.Sub; left = l; right = r } in
+          Ir.BetaBinomial {
+            Ir.n;
+            Ir.alpha = diff (mul mean conc);
+            Ir.beta  = diff (mul (sub (Ir.Const 1.0) mean) conc);
+          }
+        end
+        else
+          Ir.BetaBinomial {
+            Ir.n;
+            Ir.alpha = diff (resolve_kw kwargs "alpha");
+            Ir.beta  = diff (resolve_kw kwargs "beta");
+          }
       | LikBernoulli kwargs ->
         Ir.Bernoulli { Ir.p = diff (resolve_kw kwargs "p") }
     in

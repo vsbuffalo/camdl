@@ -53,6 +53,13 @@
  (libraries compiler ir alcotest yojson)
  (deps (source_tree ../golden)))
 
+; gh#402 beta_binomial (mean, concentration) sugar: lowering shape, raw-form
+; regression, and the E252 (mixed) / E250 (missing) guards.
+(test
+ (name test_beta_binomial_params)
+ (modules test_beta_binomial_params)
+ (libraries compiler ir alcotest))
+
 ; Phase-4 staged-residence `via hyper_erlang(...)` lowering. A finite mixture of
 ; Erlang chains, branched at entry → flat per-branch compartments + parallel
 ; chains. The polio (same endpoint) and Ebola (per-branch endpoints, no arrow)
