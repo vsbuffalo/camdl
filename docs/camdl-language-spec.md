@@ -4057,10 +4057,12 @@ camdl profile MODEL \
 ```
 
 The projection and likelihood for each data stream come from the model's
-`observations { ... }` block (§12); inference commands do not take `--flow` /
-`--obs-model` flags. To score a specific stream when the model declares more
-than one, pass `--stream NAME` to select. The legacy `--flow` / `--obs-model`
-flags were removed in the 2026-05-25 CLI UX revision.
+`observations { ... }` block (§12); inference commands do not take a `--flow` /
+`--obs-model` projection override. When a single positional `--data FILE` is
+bound and the model declares more than one observation stream, pass `--obs NAME`
+to say which stream (or indexed family) the file is. The legacy `--flow` /
+`--obs-model` projection-override flags were removed in the 2026-05-25 CLI UX
+revision.
 
 **`--rw-sd`** (`camdl profile`): Perturbation scale per parameter. Three modes:
 
