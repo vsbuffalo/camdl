@@ -939,11 +939,12 @@ impl Formatter {
 
     /// Per-chain log-likelihood breakdown for a Bayesian stage (gh#406).
     /// Reads each `chain_N/trace.tsv`, computes the per-chain mean post-burn-in
-    /// loglik and its z-score against the between-chain spread, and flags the
-    /// outliers by name — so a user with a minority of chains stuck in a side
-    /// mode sees *which* chains without opening every trace by hand. Uniform
-    /// across mh / pmmh / pgas / nuts (all write the same per-chain trace
-    /// layout). When no per-chain traces exist, says so rather than skipping.
+    /// loglik and its robust modified z-score (median/MAD) against the
+    /// between-chain spread, and flags the outliers by name — so a user with a
+    /// minority of chains stuck in a side mode sees *which* chains without
+    /// opening every trace by hand. Uniform across mh / pmmh / pgas / nuts (all
+    /// write the same per-chain trace layout). When no per-chain traces exist,
+    /// says so rather than skipping.
     fn bayesian_chain_loglik_table(&self, stage_dir: &Path, n_chains_expected: usize) -> String {
         use super::chain_diagnostics as cd;
         let mut s = String::new();
@@ -956,7 +957,7 @@ impl Formatter {
         };
         if means.len() < 2 {
             s.push_str(&format!("    {}\n\n", self.dim(
-                "(need ≥2 chains with traces for a cross-chain outlier z-score)")));
+                "(need ≥2 chains with traces for a cross-chain outlier score)")));
             return s;
         }
         if n_chains_expected != 0 && means.len() != n_chains_expected {
@@ -964,9 +965,9 @@ impl Formatter {
                 "(found traces for {} of {} chains)", means.len(), n_chains_expected))));
         }
 
-        let scores = cd::chain_loglik_zscores(&means);
+        let scores = cd::chain_loglik_mod_zscores(&means);
         s.push_str(&format!("    {:6} {:>14}  {:>7}   {}\n",
-            "chain", "mean loglik", "z", "flag"));
+            "chain", "mean loglik", "mod-z", "flag"));
         for sc in &scores {
             let flag = if sc.is_outlier {
                 self.err("← outlier")
@@ -978,14 +979,20 @@ impl Formatter {
             } else {
                 format!("{:>14}", "—")
             };
-            s.push_str(&format!("    {:6} {}  {:>7.2}   {}\n",
-                sc.chain, ll, sc.z, flag));
+            // A non-finite mod-z (unreadable trace) renders `—`, never a fake 0.
+            let z = if sc.mod_z.is_finite() {
+                format!("{:>7.2}", sc.mod_z)
+            } else {
+                format!("{:>7}", "—")
+            };
+            s.push_str(&format!("    {:6} {}  {}   {}\n", sc.chain, ll, z, flag));
         }
 
         let flagged = cd::outlier_labels(&scores);
         if !flagged.is_empty() {
-            // The one-line nudge: a large |z| gap between chains is the classic
-            // near-unidentified-parameter (flat-ridge) signature.
+            // The one-line nudge: chains in a distinctly different part of the
+            // likelihood surface is the near-unidentified-parameter (flat-ridge)
+            // signature.
             s.push_str(&format!("    {}\n", self.warn(&format!(
                 "⚠ chains disagree ({} in a different mode) — is a parameter \
                  weakly identified? Inspect its per-chain posterior.",
@@ -2245,10 +2252,14 @@ mod tests {
                 "step\tlog_likelihood\tlog_posterior\n1\t-900.0\t-905.0\n2\t-880.0\t-885.0\n{kept}");
             std::fs::write(cd.join("trace.tsv"), body).unwrap();
         };
-        for c in 1..=5 {
-            write_trace(c, "3\t-50.0\t-52.0\n4\t-51.0\t-53.0\n5\t-49.0\t-51.0\n");
-        }
-        write_trace(6, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n");
+        // Good chains carry realistic jitter (distinct means ≈ -50) so the robust
+        // MAD is non-zero; chain 6 is the lone stuck chain at ≈ -300.
+        write_trace(1, "3\t-50.0\t-52.0\n4\t-50.0\t-52.0\n5\t-50.0\t-52.0\n"); // mean -50.0
+        write_trace(2, "3\t-50.5\t-52.0\n4\t-50.5\t-52.0\n5\t-50.5\t-52.0\n"); // mean -50.5
+        write_trace(3, "3\t-49.5\t-51.0\n4\t-49.5\t-51.0\n5\t-49.5\t-51.0\n"); // mean -49.5
+        write_trace(4, "3\t-50.2\t-52.0\n4\t-50.2\t-52.0\n5\t-50.2\t-52.0\n"); // mean -50.2
+        write_trace(5, "3\t-49.8\t-51.0\n4\t-49.8\t-51.0\n5\t-49.8\t-51.0\n"); // mean -49.8
+        write_trace(6, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n"); // stuck -300
         let mut draws = String::from("chain\tdraw\tbeta\n");
         for c in 0..6 {
             for d in 0..3 {
