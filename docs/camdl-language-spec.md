@@ -2537,9 +2537,16 @@ neg_binomial(mean = EXPR, r = EXPR)            overdispersed counts
 poisson(rate = EXPR)                           Poisson counts
 normal(mean = EXPR, sd = EXPR)                 continuous
 binomial(n = EXPR, p = EXPR)                   bounded counts
-beta_binomial(n = EXPR, alpha = EXPR, beta = EXPR)
+beta_binomial(n = EXPR, alpha = EXPR, beta = EXPR)          overdispersed prevalence (raw)
+beta_binomial(n = EXPR, mean = EXPR, concentration = EXPR)  overdispersed prevalence (mean/concentration)
 bernoulli(p = EXPR)                            binary outcome
 ```
+
+The two `beta_binomial` spellings are equivalent: `mean`/`concentration` lowers to
+`alpha = mean · concentration`, `beta = (1 − mean) · concentration`. Use whichever
+reads better; mixing the two forms in one call is an error (E252). For a
+sampler-friendly parameterization of the `concentration` (overdispersion) parameter,
+see the reparameterization guidance in `camdl docs inference`.
 
 ### 12.2.1 Diagnostic-test likelihood sugar
 
