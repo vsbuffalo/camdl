@@ -21,12 +21,12 @@ use ir::{
         OutputSchedule, SimulationConfig,
     },
     observation::{
-        BinomialLikelihood, Likelihood, ObsColumn, ObservationModel as IrObs,
-        ObservationSchedule, Projection,
+        BinomialLikelihood, ColumnRole, Likelihood, ObsColumn,
+        ObservationModel as IrObs, ObservationSchedule, Projection,
     },
     parameter::{ParamValue, Parameter},
     transition::{DrawMethod, StoichiometryEntry, Transition},
-    ColumnRole, Diffable, Model,
+    Diffable, Model,
 };
 use sim::{compiled_model::CompiledModel, rng::StatefulRng};
 
