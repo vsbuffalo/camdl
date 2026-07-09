@@ -395,7 +395,7 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
             MethodResult::Pgas(pgas) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&resolved.stage, "pgas", BayesianView::Pgas(pgas))
+                    fmt.bayesian_block(&resolved.stage, "pgas", &resolved.stage_dir, BayesianView::Pgas(pgas))
                 );
                 prev_stage_name = Some(resolved.stage.clone());
                 // Bayesian rows have no scalar best_loglik to chain
@@ -404,7 +404,7 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
             MethodResult::Pmmh(pmmh) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&resolved.stage, "pmmh", BayesianView::Pmmh(pmmh))
+                    fmt.bayesian_block(&resolved.stage, "pmmh", &resolved.stage_dir, BayesianView::Pmmh(pmmh))
                 );
                 prev_loglik = Some(pmmh.map_loglik);
                 prev_stage_name = Some(resolved.stage.clone());
@@ -412,7 +412,7 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
             MethodResult::Nuts(nuts) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&resolved.stage, "nuts", BayesianView::Nuts(nuts))
+                    fmt.bayesian_block(&resolved.stage, "nuts", &resolved.stage_dir, BayesianView::Nuts(nuts))
                 );
                 prev_loglik = Some(nuts.map_loglik);
                 prev_stage_name = Some(resolved.stage.clone());
@@ -824,7 +824,7 @@ impl Formatter {
     /// Gelman-Rubin R̂, ESS, and (for PMMH only) a scalar acceptance
     /// rate. The IF2 compound gate doesn't apply; convergence keys on
     /// `max R̂ < 1.05`.
-    fn bayesian_block(&self, stage: &str, method: &str, view: BayesianView<'_>) -> String {
+    fn bayesian_block(&self, stage: &str, method: &str, stage_dir: &Path, view: BayesianView<'_>) -> String {
         let mut s = String::new();
         s.push_str(&format!(
             "══ {} {} {}\n",
@@ -899,6 +899,11 @@ impl Formatter {
         }
         s.push('\n');
 
+        // Per-chain loglik outlier diagnostic (gh#406). R̂/ESS above say WHETHER
+        // the chains agreed; this says WHICH chain didn't. Same for every
+        // Bayesian sampler (mh/pmmh/pgas/nuts) — read from the per-chain traces.
+        s.push_str(&self.bayesian_chain_loglik_table(stage_dir, diag.n_chains));
+
         // Posterior parameter table.
         s.push_str(&format!("  {}\n", self.bold("posterior summary")));
         if posterior_mean.is_empty() {
@@ -927,6 +932,64 @@ impl Formatter {
                     date_marker
                 ));
             }
+        }
+        s.push('\n');
+        s
+    }
+
+    /// Per-chain log-likelihood breakdown for a Bayesian stage (gh#406).
+    /// Reads each `chain_N/trace.tsv`, computes the per-chain mean post-burn-in
+    /// loglik and its z-score against the between-chain spread, and flags the
+    /// outliers by name — so a user with a minority of chains stuck in a side
+    /// mode sees *which* chains without opening every trace by hand. Uniform
+    /// across mh / pmmh / pgas / nuts (all write the same per-chain trace
+    /// layout). When no per-chain traces exist, says so rather than skipping.
+    fn bayesian_chain_loglik_table(&self, stage_dir: &Path, n_chains_expected: usize) -> String {
+        use super::chain_diagnostics as cd;
+        let mut s = String::new();
+        s.push_str(&format!("  {}\n", self.bold("per-chain log-likelihood")));
+
+        let Some(means) = cd::read_chain_mean_logliks(stage_dir) else {
+            s.push_str(&format!("    {}\n\n", self.dim(
+                "(per-chain traces unavailable — cannot break down by chain)")));
+            return s;
+        };
+        if means.len() < 2 {
+            s.push_str(&format!("    {}\n\n", self.dim(
+                "(need ≥2 chains with traces for a cross-chain outlier z-score)")));
+            return s;
+        }
+        if n_chains_expected != 0 && means.len() != n_chains_expected {
+            s.push_str(&format!("    {}\n", self.dim(&format!(
+                "(found traces for {} of {} chains)", means.len(), n_chains_expected))));
+        }
+
+        let scores = cd::chain_loglik_zscores(&means);
+        s.push_str(&format!("    {:6} {:>14}  {:>7}   {}\n",
+            "chain", "mean loglik", "z", "flag"));
+        for sc in &scores {
+            let flag = if sc.is_outlier {
+                self.err("← outlier")
+            } else {
+                String::new()
+            };
+            let ll = if sc.mean_loglik.is_finite() {
+                format!("{:>14.2}", sc.mean_loglik)
+            } else {
+                format!("{:>14}", "—")
+            };
+            s.push_str(&format!("    {:6} {}  {:>7.2}   {}\n",
+                sc.chain, ll, sc.z, flag));
+        }
+
+        let flagged = cd::outlier_labels(&scores);
+        if !flagged.is_empty() {
+            // The one-line nudge: a large |z| gap between chains is the classic
+            // near-unidentified-parameter (flat-ridge) signature.
+            s.push_str(&format!("    {}\n", self.warn(&format!(
+                "⚠ chains disagree ({} in a different mode) — is a parameter \
+                 weakly identified? Inspect its per-chain posterior.",
+                flagged.join(", ")))));
         }
         s.push('\n');
         s
@@ -2132,8 +2195,11 @@ mod tests {
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
         };
+        // No chain traces on disk for this in-memory result → the per-chain
+        // table degrades to "unavailable"; the ESS lines under test are unaffected.
+        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
         // min-param ESS (145) / wall (11.8 s) = 12.29 ESS/sec — thinning-invariant.
-        let with = fmt.bayesian_block("posterior", "pgas", BayesianView::Pgas(&mk(Some(11.8), 500, 1)));
+        let with = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(11.8), 500, 1)));
         assert!(
             with.contains("ESS/sec  = 12.29"),
             "must report ESS/sec off the slowest param (145/11.8): {with}"
@@ -2145,14 +2211,14 @@ mod tests {
         );
         // Thinning-invariance: (n_samples 50 × thin 10) is the SAME 500 raw steps,
         // so ESS/iter is identical — the whole point.
-        let thinned = fmt.bayesian_block("posterior", "pgas", BayesianView::Pgas(&mk(Some(5.0), 50, 10)));
+        let thinned = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(5.0), 50, 10)));
         assert!(
             thinned.contains("ESS/iter = 0.290"),
             "ESS/iter must be invariant to thinning (50×10 == 500 raw): {thinned}"
         );
         // No wall-time (older run) → no ESS/sec line, but ESS/iter still shows
         // (it needs only n_samples×thin, not wall-time).
-        let without = fmt.bayesian_block("posterior", "pgas", BayesianView::Pgas(&mk(None, 500, 1)));
+        let without = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(None, 500, 1)));
         assert!(
             !without.contains("ESS/sec"),
             "no wall-time must omit the ESS/sec line: {without}"
@@ -2161,6 +2227,102 @@ mod tests {
             without.contains("ESS/iter = 0.290"),
             "ESS/iter does not need wall-time and must still show: {without}"
         );
+    }
+
+    /// gh#406: the per-chain loglik table names the stuck chain in a Bayesian
+    /// summary. Six-chain stage dir (five near -50, chain 6 stuck at -300) with
+    /// per-chain traces + a draws.tsv manifest → the table flags chain 6 and the
+    /// nudge fires.
+    #[test]
+    fn bayesian_chain_loglik_table_names_the_stuck_chain() {
+        let dir = crate::test_support::unique_temp_dir("summary_chain_diag");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write_trace = |c: usize, kept: &str| {
+            let cd = dir.join(format!("chain_{c}"));
+            std::fs::create_dir_all(&cd).unwrap();
+            // Two warm-up rows (must be stripped by the last-K_c rule) + 3 kept.
+            let body = format!(
+                "step\tlog_likelihood\tlog_posterior\n1\t-900.0\t-905.0\n2\t-880.0\t-885.0\n{kept}");
+            std::fs::write(cd.join("trace.tsv"), body).unwrap();
+        };
+        for c in 1..=5 {
+            write_trace(c, "3\t-50.0\t-52.0\n4\t-51.0\t-53.0\n5\t-49.0\t-51.0\n");
+        }
+        write_trace(6, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n");
+        let mut draws = String::from("chain\tdraw\tbeta\n");
+        for c in 0..6 {
+            for d in 0..3 {
+                draws.push_str(&format!("{c}\t{d}\t0.5\n"));
+            }
+        }
+        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.bayesian_chain_loglik_table(&dir, 6);
+        assert!(table.contains("per-chain log-likelihood"), "header present:\n{table}");
+        assert!(table.contains("← outlier"), "stuck chain must be flagged:\n{table}");
+        assert!(table.contains("chains disagree (chain 6"), "nudge must name chain 6:\n{table}");
+        // The stuck chain's mean must reflect the post-burn-in draws (≈ -300),
+        // not the stripped warm-up (≈ -900).
+        assert!(table.contains("-300.00"), "chain 6 mean ≈ -300 (warm-up stripped):\n{table}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#406 negative control: a well-mixed six-chain stage flags no outlier and
+    /// prints no "disagree" nudge — not a vacuous pass (the table still renders
+    /// every chain with a finite z).
+    #[test]
+    fn bayesian_chain_loglik_table_clean_when_well_mixed() {
+        let dir = crate::test_support::unique_temp_dir("summary_chain_diag_clean");
+        std::fs::create_dir_all(&dir).unwrap();
+        for c in 1..=6 {
+            let cd = dir.join(format!("chain_{c}"));
+            std::fs::create_dir_all(&cd).unwrap();
+            // All chains ≈ -50, tiny spread.
+            let jitter = (c as f64) * 0.1;
+            std::fs::write(
+                cd.join("trace.tsv"),
+                format!("step\tlog_likelihood\tlog_posterior\n0\t{:.2}\t-52.0\n1\t{:.2}\t-52.0\n",
+                    -50.0 + jitter, -50.1 + jitter),
+            )
+            .unwrap();
+        }
+        let mut draws = String::from("chain\tdraw\tbeta\n");
+        for c in 0..6 {
+            for d in 0..2 {
+                draws.push_str(&format!("{c}\t{d}\t0.5\n"));
+            }
+        }
+        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.bayesian_chain_loglik_table(&dir, 6);
+        assert!(table.contains("per-chain log-likelihood"), "header present:\n{table}");
+        assert!(!table.contains("← outlier"), "well-mixed must flag nothing:\n{table}");
+        assert!(!table.contains("chains disagree"), "no nudge when well-mixed:\n{table}");
+        // Not vacuous: all six chain rows render (each data row starts, after
+        // its indent, with the chain number; the header row starts with "chain").
+        let data_rows = table
+            .lines()
+            .filter(|l| l.trim_start().chars().next().is_some_and(|c| c.is_ascii_digit()))
+            .count();
+        assert_eq!(data_rows, 6, "six per-chain rows must render:\n{table}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#406: a stage with no per-chain traces says so rather than silently
+    /// omitting the section (no-silent-gap).
+    #[test]
+    fn bayesian_chain_loglik_table_reports_unavailable() {
+        let dir = crate::test_support::unique_temp_dir("summary_chain_diag_none");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.bayesian_chain_loglik_table(&dir, 4);
+        assert!(table.contains("per-chain traces unavailable"),
+            "must say traces are unavailable, not skip:\n{table}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

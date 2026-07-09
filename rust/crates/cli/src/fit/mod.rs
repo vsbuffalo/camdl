@@ -28,6 +28,7 @@ pub mod nuts;  // gh#275 Phase 2: nuts on ode
 pub mod trace_writer;
 pub mod synthetic;
 pub mod gating;
+pub mod chain_diagnostics;  // gh#406: per-chain loglik outlier z-scores (read-side)
 pub mod dt_check;
 pub mod init;
 pub mod chain_starts;
