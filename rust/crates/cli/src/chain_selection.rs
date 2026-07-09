@@ -38,7 +38,8 @@
 //! non-quietable warning naming the dropped chains, and the primary remedy
 //! (is a parameter unidentified?) is surfaced first.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use crate::KeyedDraw;
 
@@ -227,6 +228,111 @@ impl SubsetInfo {
             .collect::<Vec<_>>()
             .join(",")
     }
+}
+
+/// The convergence diagnostics recomputed over a chain SUBSET — the shared
+/// output of applying `--exclude-chains` and re-running the fit's own
+/// [`compute_rhat_ess`](crate::fit::runner::compute_rhat_ess) on the retained
+/// chains.
+///
+/// `fit summary` consumes the whole struct (it also derives posterior means from
+/// [`kept`](Self::kept)); `fit predict` reduces it to a band label (max R̂ / min
+/// ESS). Both routing through [`recompute_subset_diagnostics`] is what keeps the
+/// two from ever disagreeing on the same fit + selection — the divergence that
+/// let a chain-subset predictive band carry the polluted full-cloud R̂.
+pub struct SubsetDiagnostics {
+    /// Provenance: which chains were dropped / kept.
+    pub info: SubsetInfo,
+    /// The retained draw rows (chain-keyed), for any per-row derivation the
+    /// caller needs (e.g. `fit summary`'s posterior means).
+    pub kept: Vec<KeyedDraw>,
+    /// Per-param Gelman–Rubin R̂ over the retained chains — FINITE entries only.
+    /// A constant / fixed param yields a non-finite R̂ and is omitted, so a `max`
+    /// over this map is the max R̂ across the *estimated* params (mirrors
+    /// `PosteriorDiagnostics::max_rhat`).
+    pub rhat_per_param: BTreeMap<String, f64>,
+    /// Per-param ESS over the retained chains — one entry per scored param. A
+    /// param whose R̂ is non-finite (or > 1.1) carries a non-finite ESS, which
+    /// `f64::min` skips, so a `min` over this map is the min ESS across the
+    /// finite-R̂ params (mirrors `PosteriorDiagnostics::min_ess`).
+    pub ess_per_param: BTreeMap<String, f64>,
+    /// Retained draw count (rows kept).
+    pub n_samples: usize,
+    /// Retained chain count.
+    pub n_chains: usize,
+}
+
+/// Drop the selected chains from a stage's `draws.tsv` and recompute the
+/// per-param R̂ / ESS over the RETAINED chains, using the SAME
+/// [`compute_rhat_ess`](crate::fit::runner::compute_rhat_ess) the fit used at
+/// completion and the SAME [`apply_keyed`](ChainSelection::apply_keyed) filter.
+///
+/// This is the one recompute both `fit summary --exclude-chains` and
+/// `fit predict --exclude-chains` call — so the diagnostics a chain-subset band
+/// carries are the diagnostics the summary reports for the same subset, never
+/// the stored full-cloud value that includes the dropped chains.
+///
+/// `params` selects the columns to score: `Some(names)` scores exactly that set
+/// (`fit summary` passes the estimated params its table iterates, keeping the
+/// table shape unchanged); `None` scores every param column present in the
+/// retained cloud (`fit predict`) — the extra fixed columns yield a non-finite
+/// R̂ / ESS that `max` / `min` skip, so the reduced max-R̂ / min-ESS agree with
+/// an estimated-only score.
+pub fn recompute_subset_diagnostics(
+    draws_path: &Path,
+    selection: &ChainSelection,
+    params: Option<&[String]>,
+) -> Result<SubsetDiagnostics, String> {
+    let keyed = crate::load_draws_tsv_keyed(&draws_path.to_string_lossy())?;
+    let (kept, info) = selection.apply_keyed(keyed)?;
+
+    // Group the retained rows by 0-based chain (BTreeMap → ascending order).
+    let mut grouped: BTreeMap<usize, Vec<&KeyedDraw>> = BTreeMap::new();
+    for d in &kept {
+        if let Some(c) = d.chain {
+            grouped.entry(c).or_default().push(d);
+        }
+    }
+
+    // The param set to score. `None` → the union of every param column present
+    // in the retained cloud, sorted for determinism.
+    let all_cols: Vec<String>;
+    let param_names: &[String] = match params {
+        Some(p) => p,
+        None => {
+            let mut set: BTreeSet<&str> = BTreeSet::new();
+            for d in &kept {
+                for name in d.params.keys() {
+                    set.insert(name.as_str());
+                }
+            }
+            all_cols = set.into_iter().map(String::from).collect();
+            &all_cols
+        }
+    };
+
+    let mut rhat_per_param = BTreeMap::new();
+    let mut ess_per_param = BTreeMap::new();
+    for p in param_names {
+        let chains: Vec<Vec<f64>> = grouped
+            .values()
+            .map(|rows| rows.iter().filter_map(|r| r.params.get(p).copied()).collect())
+            .collect();
+        let d = crate::fit::runner::compute_rhat_ess(&chains);
+        if d.rhat.is_finite() {
+            rhat_per_param.insert(p.clone(), d.rhat);
+        }
+        ess_per_param.insert(p.clone(), d.ess_total);
+    }
+
+    Ok(SubsetDiagnostics {
+        info,
+        n_samples: kept.len(),
+        n_chains: grouped.len(),
+        kept,
+        rhat_per_param,
+        ess_per_param,
+    })
 }
 
 /// The two load-bearing caveat lines, single-sourced so the per-fit

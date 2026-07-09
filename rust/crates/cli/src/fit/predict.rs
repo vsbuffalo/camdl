@@ -593,7 +593,18 @@ impl FitResult {
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| segment.to_path_buf());
-                let convergence = read_convergence(&stage_dir, pref.method);
+                // Convergence for the band. With NO chain selection this is the
+                // stage's stored full-cloud summary. With `--exclude-chains`
+                // active the stored summary describes the WHOLE cloud (including
+                // the dropped chains), so it must not label a subset band — a
+                // band drawn from the clean chains would carry a "did not
+                // converge" verdict about a subset that did. Recompute R̂ / ESS
+                // over the RETAINED chains through the same seam `fit summary`
+                // uses, so the two agree on the same fit + selection (gh#409).
+                let convergence = match &pref.chain_selection {
+                    Some(sel) => subset_convergence(&pref.draws_path, sel)?,
+                    None => read_convergence(&stage_dir, pref.method),
+                };
                 // Replay on the SAME backend the stage ran on; default only when
                 // a bare stage dir was passed (no fit view to read it from).
                 let backend = pref
@@ -662,6 +673,37 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
         .or_else(|| try_read("pgas_summary.json"))
         .or_else(|| try_read("pmmh_summary.json"))
         .unwrap_or(ConvergenceStatus::NotAssessed)
+}
+
+/// Recompute a band's convergence over the RETAINED chains of a
+/// `--exclude-chains` selection, so a chain-subset predictive band is labelled
+/// with the R̂ / ESS of the subset it was drawn from — never the stored
+/// full-cloud summary (which includes the dropped chains). Uses the ONE shared
+/// recompute seam ([`crate::chain_selection::recompute_subset_diagnostics`] →
+/// `runner::compute_rhat_ess` over the same `apply_keyed` filter) that
+/// `fit summary --exclude-chains` uses, so the two agree on the same fit +
+/// selection (gh#409).
+///
+/// Scores every param column (`None`); fixed columns yield a non-finite R̂ / ESS
+/// that the `max` / `min` skip. Reduces to max R̂ / min ESS the same way
+/// [`crate::fit::method_result::PosteriorDiagnostics::max_rhat`] /
+/// [`min_ess`](crate::fit::method_result::PosteriorDiagnostics::min_ess) do —
+/// [`ConvergenceStatus::NotAssessed`] when no param has a finite R̂ (e.g. a
+/// single retained chain), rather than a falsely-converged band.
+fn subset_convergence(
+    draws_path: &Path,
+    selection: &ChainSelection,
+) -> Result<ConvergenceStatus, String> {
+    let sub = crate::chain_selection::recompute_subset_diagnostics(draws_path, selection, None)?;
+    let rhat_max = sub.rhat_per_param.values().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !rhat_max.is_finite() {
+        return Ok(ConvergenceStatus::NotAssessed);
+    }
+    // Min ESS over the scored params; non-finite entries (non-finite-R̂ / R̂ > 1.1
+    // params) are skipped by `f64::min`, matching `min_ess`. `None` (no params)
+    // cannot occur here — a finite `rhat_max` proves at least one scored param.
+    let ess_min = sub.ess_per_param.values().copied().reduce(f64::min).unwrap_or(f64::INFINITY);
+    Ok(ConvergenceStatus::Reported { rhat_max, ess_min })
 }
 
 // ── The engine sink: sample y_rep per draw at the observed cadence ─────────
