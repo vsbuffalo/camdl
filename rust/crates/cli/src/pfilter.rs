@@ -17,7 +17,6 @@ use sim::{
         ChainBinomialProcess,
         BoundObs,
         MultiStreamObsModel,
-        multi_stream_obs::StreamSpec,
     },
 };
 use std::collections::HashMap;
@@ -161,110 +160,34 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         format: a.inference.time_format,
     };
 
-    // Build per-stream Observation vectors. Every stream binds its value
-    // column by NAME — the data column header must match the model's
-    // `observe` name exactly. There is no positional fallback: a typo'd
-    // or wrong-cased header is a located error, not a silent bind to the
-    // positionally-first value column (G1). A single-stream `time\tcases`
-    // file still loads because `cases` matches the header by name.
-    //
-    // Sparse/holes: the value column may contain the missing-value token
-    // `NA`, which loads as a HOLE — its time stays in the observation grid
-    // (so the incidence accumulator still resets there) but it carries no
-    // value (no likelihood term). `per_stream_cells` is the authoritative
-    // per-grid-time cell vector threaded into the obs model; `per_stream_obs`
-    // is a dense placeholder view (holes → 0.0) consumed only by the
-    // diagnostic/time paths (schedule validation, origin checks, trace
-    // timestamps) where a hole's value is not load-bearing.
-    let n_streams = bound_streams.len();
-    let mut per_stream_obs: Vec<Vec<Observation>> = Vec::with_capacity(n_streams);
-    let mut per_stream_cells: Vec<Vec<Option<sim::inference::ObsCell>>> =
-        Vec::with_capacity(n_streams);
-    // Per-observation auxiliary data (binomial `n = tested`, person-time offset)
-    // bound by name alongside the scored value (§3, §6.1).
-    let mut per_stream_aux: Vec<Vec<Vec<(String, f64)>>> = Vec::with_capacity(n_streams);
-    for (sname, spath) in &bound_streams {
-        let path_str = spath.to_string_lossy().into_owned();
-        // Bind columns BY NAME from the stream's `columns { }`: the declared
-        // `time` column is the axis (by-name-time flip), `scored` is the value.
-        let obs_block = model.observations.iter()
-            .find(|o| &o.name == sname)
-            .unwrap_or_else(|| {
-                eprintln!("error: no observation block named '{}'", sname);
-                std::process::exit(1);
-            });
-        // DISPATCH: a stratified (long-form) stream — its `columns { }` declares
-        // at least one `: dim` column — loads via the long-form router, which
-        // routes file rows to the matching stratum leaf BY NAME and builds the
-        // partial-coverage union axis. An unstratified stream keeps the existing
-        // wide/by-name path UNCHANGED (one value column per file).
-        let (times, cells, aux) = if is_long_form_stream(obs_block) {
-            let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
-                .filter(|o| o.source == obs_block.source)
-                .collect();
-            load_long_form_stream(&path_str, obs_block, &siblings, &time_opts)
-                .unwrap_or_else(|e| {
-                    eprintln!("error: cannot load long-form data for stream '{}' from {}: {}",
-                        sname, path_str, e);
-                    std::process::exit(1);
-                })
-        } else {
-            let time_col = obs_time_column(obs_block).unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            });
-            let (times, mut cells) =
-                load_data_tsv_column_cells(&path_str, time_col, &obs_block.scored, &time_opts)
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: cannot load data column '{}' from {}: {}",
-                            sname, path_str, e);
-                        std::process::exit(1);
-                    });
-            // Load the stream's aux columns (Stage 2). A row where the scored
-            // value OR any referenced aux is `NA` is a hole (present-together-
-            // or-hole) — clear the aux for a hole.
-            let aux_cols = stream_aux_columns(obs_block);
-            let (mut aux, force_hole) =
-                load_stream_aux(&path_str, &aux_cols, cells.len())
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: cannot load aux data for stream '{}' from {}: {}",
-                            sname, path_str, e);
-                        std::process::exit(1);
-                    });
-            for r in 0..cells.len() {
-                if force_hole[r] {
-                    cells[r] = None;
-                }
-                if cells[r].is_none() {
-                    aux[r].clear();
-                }
-            }
-            (times, cells, aux)
-        };
-        // Dense placeholder view (holes → 0.0) for diagnostics/time.
-        let obs: Vec<Observation> = times.iter().zip(cells.iter())
-            .map(|(&time, cell)| Observation {
-                time,
-                value: match cell {
-                    Some(sim::inference::ObsCell::Scalar(v)) => *v,
-                    None => 0.0,
-                },
-            }).collect();
-        per_stream_obs.push(obs);
-        per_stream_cells.push(cells);
-        per_stream_aux.push(aux);
-    }
+    // Resolve the bound observation streams (BY SOURCE) and load each one's
+    // per-observation values + aux via the single shared seam that `fit run`
+    // and `profile` also route through (`fit::runner::resolve_and_load_obs_streams`).
+    // The seam filters `model.observations` by `source`, dispatches long-form vs
+    // wide loading (holes + aux), resolves each projection, and runs the per-
+    // stream origin / first-window guards — so a stratified family bound by its
+    // ROOT (`[data.observations] cases = FILE`, source `cases`) fans out to all
+    // its leaves exactly as `fit run` binds them. `bound_streams` (the CLI/toml
+    // key-space bindings) is mapped to the by-source `effective` map at the
+    // boundary; it is retained below only for the CAS data-hash + the unbound-
+    // streams warning, whose key-space (leaf name / family root) must not change.
+    let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
+        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    let streams = crate::fit::runner::resolve_and_load_obs_streams(
+        &model, &compiled, &effective, dt, &time_opts,
+    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    let n_streams = streams.len();
 
     // Holes (missing observations via `NA`) are correct for the filter
     // log-likelihood — a hole contributes no term but still resets the bin
-    // (the authoritative `per_stream_cells` carry `None`). But the prequential
+    // (the authoritative per-stream cells carry `None`). But the prequential
     // and `--trace` outputs read the dense placeholder view, where a hole shows
     // as 0: prequential would score elpd/CRPS/PIT against a fictitious observed
     // 0, and the trace's `observed` column would report 0 at a missing week.
     // Rather than emit a silently-wrong diagnostic, reject the combination until
     // those paths thread holes through (follow-up). The plain filter loglik is
     // unaffected.
-    let has_holes = per_stream_cells.iter().any(|cells| cells.iter().any(|c| c.is_none()));
+    let has_holes = streams.iter().any(|s| s.cells.iter().any(|c| c.is_none()));
     if let Err(e) = check_holes_output_compat(
         has_holes, save_prequential.is_some(), trace_path.is_some(),
     ) {
@@ -279,12 +202,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // only where a stream is scheduled. Downstream single-stream code paths
     // (trace, prequential, save_filtering, save_paths, save_final_state) consume
     // `obs.time` (the union grid) and `obs.value` (a never-scored placeholder
-    // 0.0 — the per-stream scored values live in `per_stream_cells`). The old
+    // 0.0 — the per-stream scored values live in each stream's cells). The old
     // "must share identical observation times" guard was the no-silent-gaps
     // stance for machinery that did not yet exist; it now exists.
     let observations: Vec<Observation> = {
-        let mut times: Vec<f64> = per_stream_obs.iter()
-            .flat_map(|obs| obs.iter().map(|o| o.time))
+        let mut times: Vec<f64> = streams.iter()
+            .flat_map(|s| s.data.iter().map(|o| o.time))
             .collect();
         times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
         times.dedup();
@@ -294,42 +217,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     eprintln!("pfilter: {} observations × {} streams, {} particles, dt={}, seed={}",
         observations.len(), n_streams, n_particles, dt, seed);
     if n_streams > 1 {
-        eprintln!("  streams: {}", bound_streams.iter()
-            .map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "));
+        eprintln!("  streams: {}", streams.iter()
+            .map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
     }
 
-    // ── Resolve IR observation models for each bound stream ──────────
-    //
-    // Each bound stream resolves to one IR observation block by exact
-    // name match. Family-root expansion already happened in the resolver.
-    let mut bound_ir: Vec<ir::observation::ObservationModel> =
-        Vec::with_capacity(n_streams);
-    for (sname, _) in &bound_streams {
-        match model.observations.iter().find(|o| &o.name == sname) {
-            Some(o) => bound_ir.push(o.clone()),
-            None => {
-                eprintln!("error: bound stream '{}' has no matching IR \
-                    observation block (the resolver should have caught \
-                    this; this is a bug). Available: {}", sname,
-                    model.observations.iter().map(|o| o.name.as_str())
-                        .collect::<Vec<_>>().join(", "));
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // Each stream's projection comes from its `observations { }` block (the
-    // modern observation system, as `fit run` resolves it) — no `--flow`
-    // projection override.
-    let projections: Vec<sim::inference::multi_stream_obs::StreamProjection> =
-        bound_ir.iter().map(|o| {
-            sim::inference::multi_stream_obs::StreamProjection::from_ir(
-                &o.projection, &compiled, &o.name,
-            ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
-        }).collect();
-
-    eprintln!("pfilter: bound streams: {}", bound_ir.iter()
-        .map(|o| format!("{}({})", o.name, match &o.likelihood {
+    eprintln!("pfilter: bound streams: {}", streams.iter()
+        .map(|s| format!("{}({})", s.name, match &s.obs_model_ir.likelihood {
             ir::observation::Likelihood::NegBinomial(_)  => "neg_binomial",
             ir::observation::Likelihood::Normal(_)       => "normal",
             ir::observation::Likelihood::Poisson(_)      => "poisson",
@@ -338,13 +231,15 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             ir::observation::Likelihood::Bernoulli(_)    => "bernoulli",
         })).collect::<Vec<_>>().join(", "));
 
-    // gh#90: emit unbound-streams warning if a multi-block model
-    // is only partially covered by the resolved bindings.
+    // gh#90: emit unbound-streams warning if a multi-block model is only
+    // partially covered. The bound set is the RESOLVED leaf names (a family root
+    // fans out to its leaves), not the raw binding keys — else an indexed family
+    // bound by its root would look entirely unbound and false-warn.
     {
         let all_names: Vec<String> = model.observations.iter()
             .map(|o| o.name.clone()).collect();
-        let bound_names: Vec<String> = bound_streams.iter()
-            .map(|(n, _)| n.clone()).collect();
+        let bound_names: Vec<String> = streams.iter()
+            .map(|s| s.name.clone()).collect();
         if let Some(w) = crate::util::format_unbound_streams_warning(
             "pfilter", &all_names, &bound_names,
         ) {
@@ -352,56 +247,14 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         }
     }
 
-    // gh#174: reject a positive incidence observation at the model origin
-    // (zero-width first window → -Inf masquerading as filter degeneracy).
-    // Checked per stream before the filter runs, against the stream's own IR
-    // projection.
-    let t_start = compiled.model.simulation.t_start;
-    for (stream_obs, ir_obs) in per_stream_obs.iter().zip(bound_ir.iter()) {
-        let times: Vec<f64> = stream_obs.iter().map(|o| o.time).collect();
-        // F4: an observation strictly before the model origin can never be
-        // propagated to — its window yields zero substeps yet it is still
-        // scored (a silent wrong answer). Reject loudly before the filter runs.
-        if let Err(e) = crate::util::check_obs_before_origin(&ir_obs.name, t_start, &times) {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-        let first_value = stream_obs.first().map(|o| o.value).unwrap_or(0.0);
-        if let Err(e) = crate::util::check_incidence_origin_window(
-            &ir_obs.name, &ir_obs.projection, t_start, &times, first_value,
-        ) {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-    }
-
-    // Build process + observation model via traits
+    // Build process + observation model via traits. The `ObsStream -> StreamSpec`
+    // mapping is the single shared builder (`stream_specs_from_obs_streams`):
+    // authoritative per-grid-time cells (holes = `None`) + survey denominators
+    // (`aux`), each stream fed its OWN schedule; `bind` re-merges to the union
+    // and validates aux — identical to how `fit run` builds its obs model.
     let compiled = std::sync::Arc::new(compiled);
     let process = ChainBinomialProcess::new(compiled.clone());
-
-    // Authoritative per-stream cells (holes = `None`) thread into the obs
-    // model; `per_stream_obs` is only the dense placeholder view for
-    // diagnostics. A hole contributes no likelihood term but still resets the
-    // incidence accumulator at its grid index (the filter loop reset is
-    // per-obs-index, not gated on value presence).
-    //
-    // Multi-cadence (§3.3): each stream feeds `bind` its OWN schedule (derived
-    // from `per_stream_obs`, the per-stream time vector), NOT the union
-    // `obs_times`. `bind` re-merges them to the union and records per-stream
-    // `at_union` membership. `cells.len()` == this stream's own obs_times.len().
-    let per_stream_times: Vec<Vec<f64>> = per_stream_obs.iter()
-        .map(|obs| obs.iter().map(|o| o.time).collect())
-        .collect();
-    let stream_specs: Vec<StreamSpec> = bound_ir.iter().zip(projections.into_iter())
-        .zip(per_stream_cells.into_iter()).zip(per_stream_aux.into_iter())
-        .zip(per_stream_times.into_iter())
-        .map(|((((o, projection), cells), aux), stream_times)| StreamSpec {
-            projection,
-            ir_model: o.clone(),
-            observations: cells,
-            obs_times: stream_times,
-            aux,
-        }).collect();
+    let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
     let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
         eprintln!("error: observation data invalid:\n{}", report.render());
         std::process::exit(1);
