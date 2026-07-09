@@ -1228,6 +1228,67 @@ pub(crate) fn load_observations(
     Ok((observations, cells, aux))
 }
 
+/// Convert a resolved data-binding list (`resolve_data_specs` for the CLI
+/// `--data NAME=PATH` form, or `load_data_observations_from_fit_toml` for the
+/// fit-toml `[data.observations]` form) into the by-SOURCE `effective` map that
+/// [`resolve_and_load_obs_streams`] consumes.
+///
+/// This is the boundary adapter between the CLI/toml key spaces and the seam.
+/// Each binding key is resolved to a stream `source`: a key equal to a stream's
+/// `source` (the fit-toml family-root / `[data.observations]` form) is used
+/// directly; a key equal to a leaf NAME (the CLI form, where `resolve_data_specs`
+/// has already expanded a family root to its leaf names) resolves to that leaf's
+/// source. Because a stratified family's leaves share one source, several leaf
+/// bindings to the same file dedup to one `(source → path)` entry, so the seam
+/// binds every leaf of the source from that one long-form file.
+///
+/// Errors:
+/// - a key matching neither a source nor a leaf name (a typo, not a silent
+///   no-op);
+/// - the same source bound to two DIFFERENT files (the seam loads one file per
+///   source — a stratified family shares one long-form file; split files across
+///   one source cannot be honoured).
+pub(crate) fn data_bindings_to_effective(
+    model: &ir::Model,
+    bindings: &[(String, std::path::PathBuf)],
+) -> Result<indexmap::IndexMap<String, String>, String> {
+    let mut effective: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+    for (key, path) in bindings {
+        let path_str = path.to_string_lossy().into_owned();
+        // Match by SOURCE first, then by leaf NAME — the same precedence
+        // `profile`'s prior fan-out used (`k == o.source || k == o.name`). Both
+        // realistic forms (a source family root, a CLI-expanded leaf name)
+        // resolve to the same source regardless of precedence.
+        let source = model.observations.iter()
+            .find(|o| &o.source == key)
+            .or_else(|| model.observations.iter().find(|o| &o.name == key))
+            .map(|o| o.source.clone());
+        let source = match source {
+            Some(s) => s,
+            None => {
+                let mut avail: Vec<&str> = model.observations.iter()
+                    .map(|o| o.source.as_str()).collect();
+                avail.sort_unstable();
+                avail.dedup();
+                return Err(format!(
+                    "data binding '{}' matches no observation stream (by source \
+                     or name). Available sources: {}", key, avail.join(", ")));
+            }
+        };
+        if let Some(existing) = effective.get(&source) {
+            if existing != &path_str {
+                return Err(format!(
+                    "observation source '{}' is bound to two different files \
+                     ('{}' and '{}'). A stratified family shares one long-form \
+                     file; split files across one source are not supported.",
+                    source, existing, path_str));
+            }
+        }
+        effective.insert(source, path_str);
+    }
+    Ok(effective)
+}
+
 /// Resolve the DATA-bound observation streams (BY SOURCE) and load each one's
 /// per-observation values + aux, returning one [`ObsStream`] per bound leaf.
 ///
