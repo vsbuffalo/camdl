@@ -437,16 +437,17 @@ pub struct InferenceCore {
     pub pf_max_substeps: Option<u64>,
 }
 
-/// `--obs NAME` + `--flow NAME`
+/// Stream selection for the inference commands. The projection and
+/// likelihood for every stream come from the model's `observations { }` block
+/// (the modern observation system, as `fit run` uses) — there is no `--flow` /
+/// `--obs-model` projection override. `--obs` only selects WHICH declared
+/// stream (family) a single positional `--data FILE` binds to.
 #[derive(Args, Clone, Default)]
-pub struct FlowProjection {
-    /// Observation block name (required when model has more than one)
+pub struct StreamSelection {
+    /// Observation stream/family name a bare `--data FILE` binds to
+    /// (required when the model declares more than one).
     #[arg(long)]
     pub obs: Option<String>,
-
-    /// Flow name for incidence projection (overrides obs model default)
-    #[arg(long)]
-    pub flow: Option<String>,
 }
 
 // ─── simulate ─────────────────────────────────────────────────────────────────
@@ -1474,7 +1475,7 @@ pub struct PfilterArgs {
     pub inference: InferenceCore,
 
     #[command(flatten)]
-    pub flow: FlowProjection,
+    pub stream: StreamSelection,
 
     /// Observation data TSV (with time column).
     ///
@@ -1657,7 +1658,7 @@ pub struct ProfileArgs {
     pub inference: InferenceCore,
 
     #[command(flatten)]
-    pub flow: FlowProjection,
+    pub stream: StreamSelection,
 
     /// Observation data TSV.
     ///

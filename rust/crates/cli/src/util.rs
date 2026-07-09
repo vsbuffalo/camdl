@@ -1084,31 +1084,6 @@ pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// Resolve flow indices for a named transition (or all transmission transitions).
-/// Used by pfilter, if2, profile for --flow NAME.
-pub fn resolve_flow_indices(model: &ir::Model, flow_name: Option<&str>) -> Result<Vec<usize>, String> {
-    if let Some(name) = flow_name {
-        let indices: Vec<usize> = model.transitions.iter().enumerate()
-            .filter(|(_, tr)| tr.name == name || tr.name.starts_with(&format!("{}_", name)))
-            .map(|(i, _)| i)
-            .collect();
-        if indices.is_empty() {
-            return Err(format!("no transition named '{}'. Available: {}",
-                name, model.transitions.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")));
-        }
-        Ok(indices)
-    } else {
-        let indices: Vec<usize> = model.transitions.iter().enumerate()
-            .filter(|(_, tr)| tr.metadata.as_ref()
-                .and_then(|m| m.origin_kind.as_deref()) == Some("transmission"))
-            .map(|(i, _)| i)
-            .collect();
-        if indices.is_empty() {
-            return Err("no transmission transitions found. Use --flow NAME to specify.".into());
-        }
-        Ok(indices)
-    }
-}
 
 // ─── Multi-stream binding diagnostics (gh#90) ───────────────────────────────
 

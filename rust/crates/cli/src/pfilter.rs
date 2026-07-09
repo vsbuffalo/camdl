@@ -41,8 +41,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let scenario_name = a.scenario.scenario.clone();
     let adhoc_enable = a.scenario.enable.clone();
     let adhoc_disable = a.scenario.disable.clone();
-    let obs_name = a.flow.obs.clone();
-    let flow_name = a.flow.flow.clone();
+    let obs_name = a.stream.obs.clone();
 
     // Load model (supports .camdl via camdlc)
     let (model_in, _model_json) = crate::util::load_model(&ir_path)
@@ -302,9 +301,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // ── Resolve IR observation models for each bound stream ──────────
     //
     // Each bound stream resolves to one IR observation block by exact
-    // name match. Family-root expansion already happened in the
-    // resolver. For the single-stream + --flow override path we
-    // additionally rewrite the projection to a flow-sum below.
+    // name match. Family-root expansion already happened in the resolver.
     let mut bound_ir: Vec<ir::observation::ObservationModel> =
         Vec::with_capacity(n_streams);
     for (sname, _) in &bound_streams {
@@ -321,40 +318,15 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         }
     }
 
-    // --flow override: only valid for single-stream pfilter. Building
-    // a flow override for a multi-stream invocation would silently
-    // overwrite each stream's per-block projection with the same flow
-    // sum, which is rarely what the user wants.
-    if n_streams > 1 && flow_name.is_some() {
-        eprintln!(
-            "error: --flow <NAME> is incompatible with multi-stream --data \
-             ({} streams bound). --flow rewrites a single stream's \
-             projection; for multi-stream pfilter, each stream uses its \
-             own IR projection.", n_streams);
-        std::process::exit(1);
-    }
-
+    // Each stream's projection comes from its `observations { }` block (the
+    // modern observation system, as `fit run` resolves it) — no `--flow`
+    // projection override.
     let projections: Vec<sim::inference::multi_stream_obs::StreamProjection> =
-        if let Some(ref name) = flow_name {
-            // Single-stream path with --flow override.
-            let indices: Vec<usize> = model.transitions.iter().enumerate()
-                .filter(|(_, tr)| tr.name == *name || tr.name.starts_with(&format!("{}_", name)))
-                .map(|(i, _)| i)
-                .collect();
-            if indices.is_empty() {
-                eprintln!("error: no transition named '{}' found. Available: {}",
-                    name, model.transitions.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "));
-                std::process::exit(1);
-            }
-            eprintln!("pfilter: --flow override → incidence({}) ({} transitions)", name, indices.len());
-            vec![sim::inference::multi_stream_obs::StreamProjection::FlowSum(indices)]
-        } else {
-            bound_ir.iter().map(|o| {
-                sim::inference::multi_stream_obs::StreamProjection::from_ir(
-                    &o.projection, &compiled, &o.name,
-                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
-            }).collect()
-        };
+        bound_ir.iter().map(|o| {
+            sim::inference::multi_stream_obs::StreamProjection::from_ir(
+                &o.projection, &compiled, &o.name,
+            ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+        }).collect();
 
     eprintln!("pfilter: bound streams: {}", bound_ir.iter()
         .map(|o| format!("{}({})", o.name, match &o.likelihood {
@@ -382,9 +354,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
 
     // gh#174: reject a positive incidence observation at the model origin
     // (zero-width first window → -Inf masquerading as filter degeneracy).
-    // Checked per stream before the filter runs. The --flow override rewrites
-    // the single stream's projection to an incidence flow-sum regardless of
-    // the IR block, so treat that case as incidence explicitly.
+    // Checked per stream before the filter runs, against the stream's own IR
+    // projection.
     let t_start = compiled.model.simulation.t_start;
     for (stream_obs, ir_obs) in per_stream_obs.iter().zip(bound_ir.iter()) {
         let times: Vec<f64> = stream_obs.iter().map(|o| o.time).collect();
@@ -396,14 +367,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             std::process::exit(1);
         }
         let first_value = stream_obs.first().map(|o| o.value).unwrap_or(0.0);
-        let incidence_override = ir::observation::Projection::CumulativeFlow(String::new());
-        let effective_projection = if flow_name.is_some() {
-            &incidence_override
-        } else {
-            &ir_obs.projection
-        };
         if let Err(e) = crate::util::check_incidence_origin_window(
-            &ir_obs.name, effective_projection, t_start, &times, first_value,
+            &ir_obs.name, &ir_obs.projection, t_start, &times, first_value,
         ) {
             eprintln!("error: {}", e);
             std::process::exit(1);
@@ -490,13 +455,11 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             .collect();
         let scored: Vec<(String, f64)> = resolved.params.iter()
             .map(|p| (p.name.clone(), p.value)).collect();
-        // `--flow` override transition indices (empty for the default
-        // per-stream projection); same selection logic as the projection.
-        let flow_indices: Vec<u32> = flow_name.as_ref().map(|name|
-            model.transitions.iter().enumerate()
-                .filter(|(_, tr)| tr.name == *name || tr.name.starts_with(&format!("{}_", name)))
-                .map(|(i, _)| i as u32).collect()
-        ).unwrap_or_default();
+        // Projection comes from each stream's `observations { }` block, so there
+        // is no CLI flow override. These stay empty (their pre-`--flow`-removal
+        // no-flow value) to keep the content-addressed `run_id` stable — the
+        // hash of a `--flow`-free pfilter run is unchanged by this removal.
+        let flow_indices: Vec<u32> = Vec::new();
         let stem = crate::hashing::path_stem_slug(&ir_path).unwrap_or_else(|| "model".to_string());
         let ir_version_str = ir::IR_VERSION.trim().to_string();
         let ctx = crate::pfilter_cas::PfilterCtx {
@@ -509,7 +472,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             particles: n_particles as u32,
             replicates: n_reps as u32,
             dt,
-            obs_block: flow_name.as_deref().unwrap_or(""),
+            obs_block: "",
             flow_indices: &flow_indices,
             seed,
         };

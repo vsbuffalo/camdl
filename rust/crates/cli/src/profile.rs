@@ -1,4 +1,5 @@
-//! `camdl profile` — profile likelihood via parallel IF2 runs.
+//! `camdl profile` — profile likelihood via parallel per-cell optimization
+//! (IF2, PMMH, or deterministic nl-* MLE, per `--algorithm`).
 //!
 //! For one or more focal parameters, fix them at a grid of values and
 //! run IF2 to maximise over the remaining parameters at each grid
@@ -169,8 +170,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // PMMH per-cell knobs (ignored when --algorithm is not pmmh).
     let pmmh_steps = a.pmmh_steps;
     let pmmh_particles = a.pmmh_particles;
-    // Per spec: `--pmmh-rho 0.0` (or any non-positive) disables CPM.
-    let pmmh_rho_opt: Option<f64> = if a.pmmh_rho > 0.0 {
+    // The CPM correlated-noise machinery belongs to `--algorithm pmmh` only.
+    // For if2 / nl-* the knob is inert — a deterministic (nl-*) or bootstrap-PF
+    // (if2) profile must NOT be dragged through the CPM uniform-window preflight
+    // by a default rho. Per spec, `--pmmh-rho 0.0` (or non-positive) also
+    // disables CPM within pmmh.
+    let is_pmmh = matches!(profile_algo, ProfileAlgo::Pmmh);
+    let pmmh_rho_opt: Option<f64> = if is_pmmh && a.pmmh_rho > 0.0 {
         if !(a.pmmh_rho < 1.0) {
             eprintln!(
                 "error: --pmmh-rho = {} must be in [0, 1). Use 0.0 (or negative) \
@@ -185,7 +191,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     };
     let output_tsv_path: Option<String> = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
     let scenario_name = a.scenario.scenario.clone();
-    let flow_name = a.flow.flow.clone();
     let label_arg: Option<String> = match a.label.as_deref() {
         Some(raw) => match crate::fit::validate_label(raw) {
             Ok(l) => Some(l),
@@ -392,7 +397,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // fit-toml fallback: when no `--data` flags supplied AND `--fit`
     // is, read `[data]` / `[data.observations]` from the toml. CLI
     // flags always win when both are supplied.
-    let obs_name_arg = a.flow.obs.clone();
+    let obs_name_arg = a.stream.obs.clone();
     let model_obs_names: Vec<String> = model.observations.iter()
         .map(|o| o.name.clone()).collect();
     let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
@@ -465,16 +470,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
     if resolved_obs.is_empty() {
         eprintln!("error: zero observation streams resolved from --data / --fit toml.");
-        std::process::exit(1);
-    }
-
-    if resolved_obs.len() > 1 && flow_name.is_some() {
-        eprintln!(
-            "error: --flow <NAME> is incompatible with multi-stream --data \
-             ({} streams bound). --flow rewrites a single stream's projection; \
-             for multi-stream profile each stream uses its own IR projection.",
-            resolved_obs.len(),
-        );
         std::process::exit(1);
     }
 
@@ -580,10 +575,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         times.into_iter().map(|time| Observation { time, value: 0.0 }).collect()
     };
     let observations = Arc::new(observations);
-
-    let flow_indices = crate::util::resolve_flow_indices(&model, flow_name.as_deref())
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    let flow_indices = Arc::new(flow_indices);
 
     for sw in &a.sweep {
         let idx = compiled.param_index.get(sw.name.as_str()).copied()
@@ -796,12 +787,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         };
 
     let process = Arc::new(ChainBinomialProcess::new(compiled.clone()));
-    // Build one StreamSpec per resolved IR observation. For
-    // single-stream profiles `--flow <name>` overrides the IR
-    // projection (forces incidence over the named transition family);
-    // for multi-stream we always use each stream's IR projection
-    // (the `--flow` + multi-stream combination was already rejected
-    // upstream).
+    // Build one StreamSpec per resolved IR observation. Each stream's
+    // projection + likelihood come from its `observations { }` block (the
+    // modern observation system, exactly as `fit run` / `pfilter` resolve them)
+    // — there is no `--flow` projection override.
     // Concrete `Arc<MultiStreamObsModel>` — the IF2 per-cell call site
     // accepts `&dyn ObservationModel<ParticleState>` (auto-coerced from
     // `&MultiStreamObsModel`); the NLopt path needs the concrete type
@@ -828,15 +817,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let obs_model_obj: Arc<MultiStreamObsModel> = {
         let mut stream_specs = Vec::with_capacity(resolved_obs.len());
         for ((obs, cells, aux), obs_model) in loaded.iter().zip(resolved_obs.iter()) {
-            let projection = if resolved_obs.len() == 1 && flow_name.is_some() {
-                sim::inference::multi_stream_obs::StreamProjection::FlowSum(
-                    flow_indices.to_vec(),
-                )
-            } else {
-                sim::inference::multi_stream_obs::StreamProjection::from_ir(
-                    &obs_model.projection, &compiled, &obs_model.name,
-                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
-            };
+            let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
+                &obs_model.projection, &compiled, &obs_model.name,
+            ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
             // Authoritative per-grid-time cells (holes = `None`, skipped in the
             // likelihood) + survey denominators (`aux`), exactly as
             // `FitRunConfig::build_obs_model` constructs them — so an indexed
@@ -1103,17 +1086,26 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let dim_str = focal_grids.iter()
         .map(|fg| format!("{}={}", fg.name, fg.values.len()))
         .collect::<Vec<_>>().join(" × ");
-    // Banner shape preserved from the IF2/NLopt era; PMMH lands the
-    // accurate per-cell budget through a second one-line summary
-    // below so we don't reshape this format for callers that grep
-    // "IF2 runs". (PMMH banner is additive.)
-    eprintln!("profile: {} grid ({}) × {} starts × {} seeds = {} IF2 runs ({} particles × {} iter each)",
-        grid_points.len(), dim_str, n_starts, seeds.len(), total_jobs,
-        n_particles, n_iterations);
-    if matches!(profile_algo, ProfileAlgo::Pmmh) {
-        eprintln!("profile: PMMH per cell = {} particles × {} MCMC steps (rho = {})",
+    // Banner names the actual per-cell optimizer + its real budget — a
+    // deterministic nl-* cell has no particles/iterations, so labelling every
+    // run "IF2 (N particles × M iter)" was misleading.
+    let algo_label = match profile_algo {
+        ProfileAlgo::If2 => "IF2",
+        ProfileAlgo::Pmmh => "PMMH",
+        ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx) => "nl-sbplx",
+        ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa) => "nl-bobyqa",
+    };
+    eprintln!("profile: {} grid ({}) × {} starts × {} seeds = {} {} runs",
+        grid_points.len(), dim_str, n_starts, seeds.len(), total_jobs, algo_label);
+    match profile_algo {
+        ProfileAlgo::If2 => eprintln!(
+            "profile: IF2 per cell = {} particles × {} iterations", n_particles, n_iterations),
+        ProfileAlgo::Nlopt(_) => eprintln!(
+            "profile: deterministic ODE MLE per cell (no particle filter)"),
+        ProfileAlgo::Pmmh => eprintln!(
+            "profile: PMMH per cell = {} particles × {} MCMC steps (rho = {})",
             pmmh_particles, pmmh_steps,
-            pmmh_rho_opt.map(|r| r.to_string()).unwrap_or_else(|| "off".into()));
+            pmmh_rho_opt.map(|r| r.to_string()).unwrap_or_else(|| "off".into())),
     }
 
     // ── Progress + cache scan ─────────────────────────────────────────
