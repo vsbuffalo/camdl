@@ -1,8 +1,8 @@
 # Observation-seam consolidation
 
-Date: 2026-07-08 Status: Phase 0 implemented (`refactor/observation-seam`);
-Phases 1–3 gated on review Tags: observations, inference, cli, seam,
-consolidation
+Date: 2026-07-08 Status: Implemented on `refactor/observation-seam-v2` — Phase 0
+wired into fit-runner; Phases 1–3 route pfilter/profile/predict through the seam
+Tags: observations, inference, cli, seam, consolidation
 
 ## Problem
 
@@ -20,17 +20,28 @@ forked per command, drifting.
 The fix is ONE shared seam every command routes through, so a data-column
 feature cannot be live in one command and silently absent in another.
 
-## Non-goal / scope note (verified)
+## Scope note (verified against the implementation branch)
 
-The three stopgap fixes the driving memo assumed had landed are NOT on HEAD
-(`20db1260`): profile does not call `load_observations`; `--flow` is still
-present in pfilter/profile; `compile_obs_sample_pf` has no aux argument (map §
-"Divergence from the driving memo"). Consequently, routing pfilter/profile onto
-the shared by-source seam is **not** byte-identical — it fixes real bugs and,
-for profile, adds long-form/aux/holes support. This proposal classifies each
-phase as _pure_ (byte-identical) or _behaviour-change (bug fix)_ so the
-maintainer can sign off deliberately. Phase 0 (pure) is implemented; Phases 1–3
-(behaviour-changing) are specified here and gated on review.
+On the implementation branch base (`7830baec`), PR#404 already landed inline the
+behaviour the original phasing treated as unlanded: `profile` resolves and loads
+via `load_observations` (long-form + aux + holes), `--flow` is removed from
+pfilter/profile, and `compile_obs_sample_pf` takes a per-eval `aux` (so
+`fit predict` threads the observed survey denominator). Consequently, on this
+branch:
+
+- **Phase 1 (pfilter)** is the one remaining behaviour fix — a fit-toml
+  `[data.observations] <root> = FILE` indexed family still failed to bind under
+  pfilter (`no observation block named '<root>'`) because pfilter resolved by
+  exact leaf name; #404 fixed only profile. Red→green in the implementing
+  commit.
+- **Phases 2–3 (profile, predict)** are behaviour-preserving refactors: they
+  route the per-command forks through the single seam and delete the inline
+  copies, verified byte-identical (same profile run_id trees + best_logliks at a
+  fixed engine version; predict e2e/sweep/aux tests green).
+
+The by-source resolution divergence the map documents still stands as the design
+rationale for the seam; only the per-phase _pure vs behaviour-change_ labels
+shift because #404 moved the starting line.
 
 ## The single seam
 
