@@ -1108,6 +1108,17 @@ pub struct FitSummaryArgs {
     /// cargo / pytest convention. See proposal §1, §6.
     #[arg(long)]
     pub strict: bool,
+
+    /// Recompute the posterior diagnostics (R̂ / ESS / mean) over a SUBSET of
+    /// the MCMC chains, dropping the named 1-based chain ids (comma-separated,
+    /// e.g. `--exclude-chains 3,5`). A view only — nothing on disk changes. The
+    /// header then reads `chains: K of N (excluded 3,5)`. Post-hoc exclusion
+    /// BIASES the posterior toward the retained mode and always prints a
+    /// warning; a chain id not in the fit, or excluding every chain, is a hard
+    /// error. Incompatible with `--params-only` (a single winner θ̂ is not a
+    /// chain average, so there is nothing to subset).
+    #[arg(long, value_name = "IDS", conflicts_with = "params_only")]
+    pub exclude_chains: Option<String>,
 }
 
 #[derive(Args)]
@@ -1376,6 +1387,16 @@ pub struct FitTableArgs {
     /// (IF2 / NLopt) have no posterior cloud, so their cell renders `—`.
     #[arg(long = "quantity", value_name = "NAME")]
     pub quantities: Vec<String>,
+
+    /// Drop the named 1-based MCMC chains (comma-separated, e.g.
+    /// `--exclude-chains 3,5`) from each fit's posterior cloud when DERIVING a
+    /// `--quantity` cell. Only affects derived cells, so it requires
+    /// `--quantity`; the same drop set is applied to every fit in the cohort
+    /// (chain 3 of fit A is unrelated to chain 3 of fit B — pair with `--hash`
+    /// to project to one fit). Post-hoc exclusion BIASES the posterior toward
+    /// the retained mode and always prints a warning.
+    #[arg(long, value_name = "IDS", requires = "quantities")]
+    pub exclude_chains: Option<String>,
 }
 
 #[derive(Args)]

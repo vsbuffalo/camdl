@@ -1,5 +1,5 @@
-//! End-to-end acceptance for `camdl fit predict --exclude-chains` — read-side
-//! chain selection over a posterior cloud.
+//! End-to-end acceptance for read-side chain selection (`--exclude-chains`) on
+//! `fit predict` and `fit summary`.
 //!
 //! Proposal: docs/dev/proposals/2026-07-09-chain-selection-read-side.md
 //!
@@ -8,8 +8,8 @@
 //! a controlled 4-chain cloud — three tight chains plus one deliberate outlier
 //! (0-based chain 3 = the user's `chain 4`, with a much larger `beta`). This
 //! gives a KNOWN outlier chain deterministically, which a converging sampler
-//! would not reliably produce. `fit predict` then reads that cloud through the
-//! one filter.
+//! would not reliably produce. The read-side commands then read that cloud
+//! through the one filter.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -65,6 +65,10 @@ observations {
   }
 }
 
+quantities {
+  peak = max(I / N)   # value scalar — the outlier chain's fast epidemic peaks high
+}
+
 simulate {
   from = 0 'days
   to   = 80 'days
@@ -83,22 +87,29 @@ const DRAWS_PER_CHAIN: usize = 30;
 /// tight around a SLOW epidemic (`beta ≈ 0.35`); chain 3 (the user's `chain 4`)
 /// is a stuck outlier at a FAST epidemic (`beta ≈ 0.85`), so dropping it must
 /// move the free-forward bands sharply — and dropping a tight chain must not.
-/// Columns are the exact model params (estimated first, then fixed), keyed by
-/// the 0-based `chain` / `draw`. Values carry a small deterministic jitter so
-/// the tight chains are not numerically identical (as real MCMC never is).
+///
+/// The tight chains carry a zero-mean cyclic jitter with a per-chain PHASE
+/// shift: they are non-identical (as real MCMC is) but share the SAME mean, so
+/// their between-chain variance is ~0 and the subset R̂ is healthy (~1). The
+/// outlier is the only thing that inflates R̂ over the full cloud — exactly the
+/// case `--exclude-chains` exists for. Columns are the exact model params
+/// (estimated first, then fixed), keyed by the 0-based `chain` / `draw`.
 fn build_cloud() -> String {
     let mut s = String::from("chain\tdraw\tbeta\tgamma\tN0\tI0\trho\tk\n");
+    let n = DRAWS_PER_CHAIN;
     for chain in 0..4 {
-        for draw in 0..DRAWS_PER_CHAIN {
-            let jitter = ((draw % 7) as f64 - 3.0) * 0.003; // in [-0.009, 0.009]
+        for draw in 0..n {
+            // Cyclic phase shift: over a full period each chain sees the same
+            // multiset of jitters → identical means, different sequences.
+            let i = (draw + chain) % n;
+            let jitter = ((i % 11) as f64 - 5.0) * 0.002; // in [-0.01, 0.01]
             let (beta, gamma) = if chain == 3 {
                 (0.85 + jitter, 0.05) // the stuck outlier: fast epidemic
             } else {
-                let base = 0.35 + (chain as f64 - 1.0) * 0.004; // 0.346 / 0.350 / 0.354
-                (base + jitter, 0.14)
+                (0.35 + jitter, 0.14 + jitter * 0.1)
             };
             s.push_str(&format!(
-                "{chain}\t{draw}\t{beta:.4}\t{gamma:.3}\t10000\t10\t0.6\t10\n"
+                "{chain}\t{draw}\t{beta:.4}\t{gamma:.4}\t10000\t10\t0.6\t10\n"
             ));
         }
     }
@@ -413,6 +424,173 @@ fn excluding_every_chain_hard_errors() {
     assert!(
         stderr.contains("empty posterior"),
         "error explains the empty-posterior refusal, got:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── fit summary --exclude-chains ────────────────────────────────────────────
+
+#[test]
+fn summary_subset_shows_header_recomputes_and_warns() {
+    let bin = skip_if_missing_binary();
+    let (tmp, seg) = setup(&bin, "summary");
+    let seg_str = seg.to_string_lossy().into_owned();
+
+    // Text summary over the chain subset (drop the outlier chain 4).
+    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "4", "--no-color"]);
+    assert!(out.status.success(), "summary --exclude-chains failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Header names the subset and what was dropped.
+    assert!(
+        stdout.contains("chains:       3 of 4  (excluded 4)"),
+        "summary header must show the chain subset, got:\n{stdout}"
+    );
+    // The recomputed R̂ over the three tight chains is finite and below the gate
+    // (dropping the outlier is exactly the convergence-fixing move the feature
+    // exists for; the stored full-cloud R̂ is replaced by the subset R̂).
+    let rhat_line = stdout
+        .lines()
+        .find(|l| l.contains("max R̂ ="))
+        .expect("a max R̂ line in the posterior block");
+    let rhat: f64 = rhat_line
+        .split("max R̂ =")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .expect("parse max R̂");
+    assert!(rhat.is_finite() && rhat < 1.1, "subset R̂ recomputed and healthy: {rhat}");
+
+    // The loud, non-quietable warning fired to stderr.
+    assert!(
+        stderr.contains("--exclude-chains dropped chain(s) 4") && stderr.to_lowercase().contains("bias"),
+        "summary must warn about the biased selection, got:\n{stderr}"
+    );
+
+    // JSON summary stamps the provenance and carries the recomputed R̂.
+    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--format", "json", "--exclude-chains", "4"]);
+    assert!(out.status.success(), "json summary failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let j: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let cs = j.get("chain_selection").expect("json summary stamps chain_selection");
+    assert_eq!(cs["excluded"], serde_json::json!([4]));
+    assert_eq!(cs["kept"], serde_json::json!([1, 2, 3]));
+    assert_eq!(cs["n_total"], serde_json::json!(4));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn summary_full_cloud_is_unchanged_regression() {
+    // No selection: the summary is byte-identical to before this feature — no
+    // header change, no chain_selection field, no warning.
+    let bin = skip_if_missing_binary();
+    let (tmp, seg) = setup(&bin, "summaryfull");
+    let seg_str = seg.to_string_lossy().into_owned();
+
+    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--no-color"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("(excluded"), "no exclusion header without the flag:\n{stdout}");
+
+    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--format", "json"]);
+    assert!(out.status.success());
+    let j: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert!(j.get("chain_selection").is_none(), "no chain_selection field without the flag");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn summary_nonexistent_chain_hard_errors() {
+    let bin = skip_if_missing_binary();
+    let (tmp, seg) = setup(&bin, "summarybadid");
+    let seg_str = seg.to_string_lossy().into_owned();
+
+    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "9"]);
+    assert!(!out.status.success(), "a chain id not in the fit must be a hard error");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("chain 9 not in this fit") && stderr.contains("chains 1..4"),
+        "error names the bad id and range, got:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn summary_excluding_every_chain_hard_errors() {
+    let bin = skip_if_missing_binary();
+    let (tmp, seg) = setup(&bin, "summaryall");
+    let seg_str = seg.to_string_lossy().into_owned();
+
+    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "1,2,3,4"]);
+    assert!(!out.status.success(), "excluding every chain must be a hard error");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("empty posterior"), "empty-posterior refusal, got:\n{stderr}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── fit table --exclude-chains (forwarded to the --quantity derivation) ──────
+
+/// Read the `peak` cell (JSON) for the single fit in a `fit table` run.
+fn table_peak(bin: &Path, tmp: &Path, fits_root: &str, extra: &[&str]) -> (f64, String) {
+    let mut args = vec!["fit", "table", fits_root, "--quantity", "peak", "--format", "json"];
+    args.extend_from_slice(extra);
+    let out = run(bin, tmp, &args);
+    assert!(out.status.success(), "fit table failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let j: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    // The document is an array of rows (or {rows:[...]}); find the one peak cell.
+    let rows = j.get("rows").and_then(|r| r.as_array()).or_else(|| j.as_array()).expect("rows array");
+    let peak = rows
+        .iter()
+        .find_map(|r| r.get("quantities").and_then(|q| q.get("peak")).and_then(|v| v.as_f64()))
+        .expect("a peak cell");
+    (peak, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn table_forwards_selection_to_quantity_derivation() {
+    let bin = skip_if_missing_binary();
+    let (tmp, _seg) = setup(&bin, "table");
+    let fits_root = tmp.join("results").join("fits");
+    let fits_root_str = fits_root.to_string_lossy().into_owned();
+
+    // Full cloud: peak median is tight (the outlier is a minority of draws).
+    let (peak_full, _) = table_peak(&bin, &tmp, &fits_root_str, &[]);
+
+    // Keep ONLY the outlier chain (drop the three tight chains): the peak median
+    // jumps to the outlier's fast-epidemic peak — proof the flag reached the
+    // derivation and reshaped the cloud.
+    let (peak_outlier, stderr) = table_peak(&bin, &tmp, &fits_root_str, &["--exclude-chains", "1,2,3"]);
+    assert!(
+        peak_outlier > peak_full * 1.3,
+        "keeping only the outlier chain must raise the derived peak median \
+         (full {peak_full:.4} vs outlier-only {peak_outlier:.4})"
+    );
+    // The cohort warning fired.
+    assert!(
+        stderr.contains("will drop chain(s) 1,2,3") && stderr.to_lowercase().contains("bias"),
+        "fit table must warn about the cohort-wide exclusion, got:\n{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn table_exclude_chains_requires_quantity() {
+    let bin = skip_if_missing_binary();
+    let (tmp, _seg) = setup(&bin, "tablenoq");
+    let fits_root = tmp.join("results").join("fits");
+    let fits_root_str = fits_root.to_string_lossy().into_owned();
+
+    // --exclude-chains without --quantity is inert (fit table otherwise reads
+    // stored metadata), so clap refuses it rather than silently doing nothing.
+    let out = run(&bin, &tmp, &["fit", "table", &fits_root_str, "--exclude-chains", "4"]);
+    assert!(!out.status.success(), "--exclude-chains without --quantity must be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("quantity") || stderr.contains("required"),
+        "clap error points at the missing --quantity, got:\n{stderr}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }

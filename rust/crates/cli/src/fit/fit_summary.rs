@@ -19,6 +19,7 @@
 //! is preserved in git history at commit `d45c932` for context.
 
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
+use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::evidence::NATS_TO_DB;
 use crate::fit::config_diff::ConfigDiff;
 use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
@@ -37,6 +38,114 @@ use std::path::{Path, PathBuf};
 /// Versioned JSON schema. Bumped when fields are renamed / removed /
 /// retyped; field additions are non-breaking and keep version stable.
 const SCHEMA_VERSION: u32 = 1;
+
+/// Recompute a Bayesian stage's diagnostics + posterior means over a
+/// chain-filtered draws cloud, mutating `diag`/`posterior_mean` in place, and
+/// return the [`SubsetInfo`] provenance.
+///
+/// The subset R̂ / ESS / mean are computed from the SAME per-chain sequences and
+/// the SAME [`compute_rhat_ess`](crate::fit::runner::compute_rhat_ess) the fit
+/// used at completion (the shared seam), applied to the retained chains only —
+/// so `fit summary --exclude-chains` answers "what would the diagnostics be
+/// without these chains?" with the fit's own estimator, not a parallel one.
+fn recompute_over_subset(
+    diag: &mut crate::fit::method_result::PosteriorDiagnostics,
+    posterior_mean: &mut BTreeMap<String, f64>,
+    stage_dir: &Path,
+    selection: &ChainSelection,
+) -> Result<SubsetInfo, String> {
+    let draws_path = stage_dir.join("draws.tsv");
+    let keyed = crate::load_draws_tsv_keyed(&draws_path.to_string_lossy())?;
+    let (kept, info) = selection.apply_keyed(keyed)?;
+
+    // Group the retained rows by 0-based chain (BTreeMap → ascending order).
+    let mut grouped: BTreeMap<usize, Vec<&crate::KeyedDraw>> = BTreeMap::new();
+    for d in &kept {
+        if let Some(c) = d.chain {
+            grouped.entry(c).or_default().push(d);
+        }
+    }
+
+    // Recompute for the estimated params — the keys of `posterior_mean`, the
+    // exact set the renderer iterates, so the table shape is unchanged.
+    let param_names: Vec<String> = posterior_mean.keys().cloned().collect();
+    let mut new_rhat = BTreeMap::new();
+    let mut new_ess = BTreeMap::new();
+    let mut new_mean = BTreeMap::new();
+    for p in &param_names {
+        let chains: Vec<Vec<f64>> = grouped
+            .values()
+            .map(|rows| rows.iter().filter_map(|r| r.params.get(p).copied()).collect())
+            .collect();
+        let d = crate::fit::runner::compute_rhat_ess(&chains);
+        if d.rhat.is_finite() {
+            new_rhat.insert(p.clone(), d.rhat);
+        }
+        new_ess.insert(p.clone(), d.ess_total);
+        let vals: Vec<f64> = kept.iter().filter_map(|r| r.params.get(p).copied()).collect();
+        let mean = if vals.is_empty() {
+            f64::NAN
+        } else {
+            vals.iter().sum::<f64>() / vals.len() as f64
+        };
+        new_mean.insert(p.clone(), mean);
+    }
+
+    diag.rhat_per_param = new_rhat;
+    diag.ess_per_param = new_ess;
+    diag.n_samples = kept.len();
+    diag.n_chains = grouped.len();
+    // `thin` and `wall_time_secs` are properties of the whole run, unchanged by
+    // a read-side subset (ESS/iter and ESS/sec are then reported over the
+    // subset's ESS against the same iteration / wall-clock denominators).
+    *posterior_mean = new_mean;
+    Ok(info)
+}
+
+/// Mutate a Bayesian stage's typed result to the chain-subset diagnostics.
+/// Errors (never silently no-ops) for a non-Bayesian stage — the caller only
+/// invokes it on Bayesian stages.
+fn apply_selection_to_typed(
+    typed: &mut MethodResult,
+    stage_dir: &Path,
+    selection: &ChainSelection,
+) -> Result<SubsetInfo, String> {
+    match typed {
+        MethodResult::Pgas(r) => {
+            recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, stage_dir, selection)
+        }
+        MethodResult::Pmmh(r) => {
+            recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, stage_dir, selection)
+        }
+        MethodResult::Nuts(r) => {
+            recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, stage_dir, selection)
+        }
+        _ => Err(
+            "--exclude-chains applies only to Bayesian stages (PGAS / PMMH / NUTS)".to_string(),
+        ),
+    }
+}
+
+/// Print the read-side chain-selection advisory to STDERR (so it never pollutes
+/// the stdout summary): the identifiability nudge FIRST (when the per-chain
+/// outlier signal is strong — gh#406), then the loud, non-quietable exclusion
+/// warning. The flag is the second thing the user reads, not the first.
+fn chain_selection_advisory(stage_dir: &Path, info: &SubsetInfo) {
+    use super::chain_diagnostics as cd;
+    if let Some(means) = cd::read_chain_mean_logliks(stage_dir) {
+        let scores = cd::chain_loglik_mod_zscores(&means);
+        let outliers = cd::outlier_labels(&scores);
+        if !outliers.is_empty() {
+            eprintln!(
+                "\x1b[33mnote:\x1b[0m {} disagree strongly with the others — before excluding, \
+                 ask whether a parameter is unidentified (a flat likelihood ridge). The \
+                 per-chain table below names them; the primary fix is the model, not the flag.",
+                outliers.join(", ")
+            );
+        }
+    }
+    warn_active_selection(info);
+}
 
 /// Top-level entry point. Resolves `args.fit` (the fit handle) to its segment
 /// directory, walks every completed fit-stage run, and dispatches to the right
@@ -99,11 +208,37 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
         None => discovered.clone(),
     };
 
+    // Parse `--exclude-chains` at the boundary into a typed selection. A
+    // selection is meaningless without a Bayesian stage to subset — refuse it
+    // rather than silently no-op (an optimizer-only fit has no chains-as-draws).
+    let selection: Option<ChainSelection> = match args.exclude_chains.as_deref() {
+        Some(raw) => match ChainSelection::parse_exclude(raw) {
+            Ok(sel) => {
+                let has_bayesian = selected.iter().any(|s| {
+                    matches!(s.method.as_str(), "pgas" | "pmmh" | "nuts" | "mh")
+                });
+                if !has_bayesian {
+                    eprintln!(
+                        "error: --exclude-chains needs a Bayesian stage (PGAS / PMMH / NUTS) to \
+                         subset; this fit's selected stage(s) have no posterior chains"
+                    );
+                    std::process::exit(1);
+                }
+                Some(sel)
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
     match args.format {
-        FitSummaryFormat::Text => format_text(&dir, args, &selected, strict),
-        FitSummaryFormat::Json => format_json(&dir, args, &selected, strict),
-        FitSummaryFormat::Md => format_md(&dir, args, &selected, strict),
-        FitSummaryFormat::Latex => format_latex(&dir, args, &selected, strict),
+        FitSummaryFormat::Text => format_text(&dir, args, &selected, strict, selection.as_ref()),
+        FitSummaryFormat::Json => format_json(&dir, &selected, strict, selection.as_ref()),
+        FitSummaryFormat::Md => format_md(&dir, &selected, strict, selection.as_ref()),
+        FitSummaryFormat::Latex => format_latex(&dir, &selected, strict, selection.as_ref()),
     }
 }
 
@@ -309,11 +444,20 @@ fn discover_stages(fit_dir: &Path) -> Vec<ResolvedStage> {
     out
 }
 
-fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], strict: bool) {
+fn format_text(
+    dir: &str,
+    args: &FitSummaryArgs,
+    stages: &[ResolvedStage],
+    strict: bool,
+    selection: Option<&ChainSelection>,
+) {
     let use_color = should_use_color(args.no_color);
     let cal = load_calendar_context(Path::new(dir));
     let fmt = Formatter { use_color, cal };
     let mut had_provenance_failure = false;
+    // Emit the loud selection advisory (nudge + warning) once, from the first
+    // Bayesian stage that recomputes.
+    let mut warned = false;
 
     print!("{}", fmt.fit_header(dir));
 
@@ -347,7 +491,7 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
     let mut prev_stage_name: Option<String> = None;
     for resolved in stages {
         let stage_dir_str = resolved.stage_dir.to_string_lossy().into_owned();
-        let typed = match MethodResult::load_from(&resolved.stage_dir, &resolved.method) {
+        let mut typed = match MethodResult::load_from(&resolved.stage_dir, &resolved.method) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
@@ -357,6 +501,31 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
                 continue;
             }
         };
+
+        // Chain selection: recompute this Bayesian stage's diagnostics over the
+        // retained chains before rendering (an IF2 / NLopt stage has no chains
+        // and is left untouched). The advisory prints once.
+        let mut subset_info: Option<SubsetInfo> = None;
+        if let Some(sel) = selection {
+            if matches!(
+                typed,
+                MethodResult::Pgas(_) | MethodResult::Pmmh(_) | MethodResult::Nuts(_)
+            ) {
+                match apply_selection_to_typed(&mut typed, &resolved.stage_dir, sel) {
+                    Ok(info) => {
+                        if !warned {
+                            chain_selection_advisory(&resolved.stage_dir, &info);
+                            warned = true;
+                        }
+                        subset_info = Some(info);
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
 
         match &typed {
             MethodResult::If2(if2) => {
@@ -395,7 +564,7 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
             MethodResult::Pgas(pgas) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&resolved.stage, "pgas", &resolved.stage_dir, BayesianView::Pgas(pgas))
+                    fmt.bayesian_block(&resolved.stage, "pgas", &resolved.stage_dir, BayesianView::Pgas(pgas), subset_info.as_ref())
                 );
                 prev_stage_name = Some(resolved.stage.clone());
                 // Bayesian rows have no scalar best_loglik to chain
@@ -404,7 +573,7 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
             MethodResult::Pmmh(pmmh) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&resolved.stage, "pmmh", &resolved.stage_dir, BayesianView::Pmmh(pmmh))
+                    fmt.bayesian_block(&resolved.stage, "pmmh", &resolved.stage_dir, BayesianView::Pmmh(pmmh), subset_info.as_ref())
                 );
                 prev_loglik = Some(pmmh.map_loglik);
                 prev_stage_name = Some(resolved.stage.clone());
@@ -412,7 +581,7 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
             MethodResult::Nuts(nuts) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&resolved.stage, "nuts", &resolved.stage_dir, BayesianView::Nuts(nuts))
+                    fmt.bayesian_block(&resolved.stage, "nuts", &resolved.stage_dir, BayesianView::Nuts(nuts), subset_info.as_ref())
                 );
                 prev_loglik = Some(nuts.map_loglik);
                 prev_stage_name = Some(resolved.stage.clone());
@@ -474,8 +643,8 @@ fn format_text(dir: &str, args: &FitSummaryArgs, stages: &[ResolvedStage], stric
     }
 }
 
-fn format_json(dir: &str, _args: &FitSummaryArgs, stages: &[ResolvedStage], strict: bool) {
-    let doc = build_summary_doc(dir, stages);
+fn format_json(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) {
+    let doc = build_summary_doc(dir, stages, selection);
     let any_failed = doc.stages.iter().any(|s| s.provenance_failed());
     let s = serde_json::to_string_pretty(&doc).expect("FitSummaryDoc must serialize");
     println!("{}", s);
@@ -485,8 +654,8 @@ fn format_json(dir: &str, _args: &FitSummaryArgs, stages: &[ResolvedStage], stri
     }
 }
 
-fn format_md(dir: &str, _args: &FitSummaryArgs, stages: &[ResolvedStage], strict: bool) {
-    let doc = build_summary_doc(dir, stages);
+fn format_md(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) {
+    let doc = build_summary_doc(dir, stages, selection);
     let any_failed = doc.stages.iter().any(|s| s.provenance_failed());
     print!("{}", render_markdown(&doc));
     if strict && any_failed {
@@ -495,8 +664,8 @@ fn format_md(dir: &str, _args: &FitSummaryArgs, stages: &[ResolvedStage], strict
     }
 }
 
-fn format_latex(dir: &str, _args: &FitSummaryArgs, stages: &[ResolvedStage], strict: bool) {
-    let doc = build_summary_doc(dir, stages);
+fn format_latex(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) {
+    let doc = build_summary_doc(dir, stages, selection);
     let any_failed = doc.stages.iter().any(|s| s.provenance_failed());
     print!("{}", render_latex(&doc));
     if strict && any_failed {
@@ -824,7 +993,7 @@ impl Formatter {
     /// Gelman-Rubin R̂, ESS, and (for PMMH only) a scalar acceptance
     /// rate. The IF2 compound gate doesn't apply; convergence keys on
     /// `max R̂ < 1.05`.
-    fn bayesian_block(&self, stage: &str, method: &str, stage_dir: &Path, view: BayesianView<'_>) -> String {
+    fn bayesian_block(&self, stage: &str, method: &str, stage_dir: &Path, view: BayesianView<'_>, subset: Option<&SubsetInfo>) -> String {
         let mut s = String::new();
         s.push_str(&format!(
             "══ {} {} {}\n",
@@ -851,7 +1020,17 @@ impl Formatter {
         let ess = &diag.ess_per_param;
         let max_rhat = diag.max_rhat();
 
-        s.push_str(&format!("  chains:       {}\n", diag.n_chains));
+        // Header: with an active chain selection, `diag.n_chains` is already the
+        // RETAINED count (recomputed), so name the subset and what was dropped.
+        match subset {
+            Some(info) => s.push_str(&format!(
+                "  chains:       {} of {}  (excluded {})\n",
+                info.kept.len(),
+                info.n_total,
+                info.excluded_csv()
+            )),
+            None => s.push_str(&format!("  chains:       {}\n", diag.n_chains)),
+        }
         s.push_str(&format!("  samples:      {}\n", diag.n_samples));
         if let Some(ll) = map_loglik {
             s.push_str(&format!("  MAP loglik:   {:.1}\n", ll));
@@ -1159,6 +1338,12 @@ pub struct FitSummaryDoc {
     /// `fit table`'s row output, enforced by Deliverable C.
     pub table_row: TableRow,
     pub stages: Vec<StageReport>,
+    /// Read-side chain selection (`--exclude-chains`), when active: the
+    /// `{excluded, kept, n_total}` provenance for the subset the stages'
+    /// diagnostics were recomputed over. Absent (omitted) for a full-cloud
+    /// summary, so existing machine consumers are unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_selection: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1302,14 +1487,46 @@ pub struct HeuristicReport {
 /// Walk the stage dirs and build a `FitSummaryDoc`. Used by JSON, MD,
 /// and LaTeX formatters. Pure on its inputs (file system + the args
 /// it was called with).
-fn build_summary_doc(dir: &str, stages: &[ResolvedStage]) -> FitSummaryDoc {
+fn build_summary_doc(
+    dir: &str,
+    stages: &[ResolvedStage],
+    selection: Option<&ChainSelection>,
+) -> FitSummaryDoc {
     let cal = load_calendar_context(Path::new(dir));
     let mut stage_reports: Vec<StageReport> = Vec::new();
     let mut prev_loglik: Option<f64> = None;
     let mut prev_stage_name_owned: Option<String> = None;
+    // The chain-selection provenance (stamped on the doc) + one-shot advisory.
+    let mut chain_selection_json: Option<serde_json::Value> = None;
+    let mut advised = false;
     for resolved in stages {
         let stage_dir_str = resolved.stage_dir.to_string_lossy().into_owned();
-        let typed = MethodResult::load_from(&resolved.stage_dir, &resolved.method).ok();
+        let mut typed = MethodResult::load_from(&resolved.stage_dir, &resolved.method).ok();
+        // Chain selection: recompute this Bayesian stage's diagnostics over the
+        // retained chains before the report is built from the (now mutated)
+        // typed payload — so JSON / MD / LaTeX all carry the subset diagnostics.
+        if let Some(sel) = selection {
+            if matches!(
+                typed,
+                Some(MethodResult::Pgas(_)) | Some(MethodResult::Pmmh(_)) | Some(MethodResult::Nuts(_))
+            ) {
+                if let Some(t) = typed.as_mut() {
+                    match apply_selection_to_typed(t, &resolved.stage_dir, sel) {
+                        Ok(info) => {
+                            if !advised {
+                                chain_selection_advisory(&resolved.stage_dir, &info);
+                                advised = true;
+                            }
+                            chain_selection_json = Some(info.to_json());
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
         let prev_name = prev_stage_name_owned.as_deref();
         let report = match (&typed, resolved.method.as_str()) {
             (Some(MethodResult::If2(_)), _) => {
@@ -1368,6 +1585,7 @@ fn build_summary_doc(dir: &str, stages: &[ResolvedStage]) -> FitSummaryDoc {
         fit_dir: dir.to_string(),
         table_row,
         stages: stage_reports,
+        chain_selection: chain_selection_json,
     }
 }
 
@@ -1647,6 +1865,15 @@ pub fn render_markdown(doc: &FitSummaryDoc) -> String {
     s.push_str(&format!("# Fit summary: `{}`\n\n", doc.fit_dir));
     s.push_str(&format!("camdl `{}` (schema v{})\n\n",
         doc.schema.camdl_version, doc.schema.version));
+    if let Some(cs) = &doc.chain_selection {
+        s.push_str(&format!(
+            "> **Chain subset** — diagnostics recomputed over {} of {} chains (excluded {}). \
+             Post-hoc chain exclusion biases the posterior toward the retained mode.\n\n",
+            cs["kept"].as_array().map(|a| a.len()).unwrap_or(0),
+            cs["n_total"].as_u64().unwrap_or(0),
+            render_id_csv(&cs["excluded"]),
+        ));
+    }
     if doc.stages.is_empty() {
         s.push_str("_(no MLE stages found)_\n");
         return s;
@@ -1818,10 +2045,33 @@ pub fn render_latex(doc: &FitSummaryDoc) -> String {
     s.push_str(&format!("% camdl fit summary: {}\n", escape_latex(&doc.fit_dir)));
     s.push_str(&format!("% camdl {} schema v{}\n\n",
         doc.schema.camdl_version, doc.schema.version));
+    if let Some(cs) = &doc.chain_selection {
+        s.push_str(&format!(
+            "% chain subset: diagnostics over {} of {} chains (excluded {}); \
+             post-hoc exclusion biases toward the retained mode\n\n",
+            cs["kept"].as_array().map(|a| a.len()).unwrap_or(0),
+            cs["n_total"].as_u64().unwrap_or(0),
+            render_id_csv(&cs["excluded"]),
+        ));
+    }
     for stage in &doc.stages {
         s.push_str(&render_latex_stage(stage));
     }
     s
+}
+
+/// Render a JSON array of chain ids as a `"3,5"` CSV for the header/provenance
+/// lines. Empty array → empty string.
+fn render_id_csv(v: &serde_json::Value) -> String {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64())
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default()
 }
 
 fn render_latex_stage(stage: &StageReport) -> String {
@@ -2206,7 +2456,7 @@ mod tests {
         // table degrades to "unavailable"; the ESS lines under test are unaffected.
         let no_traces = std::path::Path::new("/nonexistent/stage_dir");
         // min-param ESS (145) / wall (11.8 s) = 12.29 ESS/sec — thinning-invariant.
-        let with = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(11.8), 500, 1)));
+        let with = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(11.8), 500, 1)), None);
         assert!(
             with.contains("ESS/sec  = 12.29"),
             "must report ESS/sec off the slowest param (145/11.8): {with}"
@@ -2218,14 +2468,14 @@ mod tests {
         );
         // Thinning-invariance: (n_samples 50 × thin 10) is the SAME 500 raw steps,
         // so ESS/iter is identical — the whole point.
-        let thinned = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(5.0), 50, 10)));
+        let thinned = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(5.0), 50, 10)), None);
         assert!(
             thinned.contains("ESS/iter = 0.290"),
             "ESS/iter must be invariant to thinning (50×10 == 500 raw): {thinned}"
         );
         // No wall-time (older run) → no ESS/sec line, but ESS/iter still shows
         // (it needs only n_samples×thin, not wall-time).
-        let without = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(None, 500, 1)));
+        let without = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(None, 500, 1)), None);
         assert!(
             !without.contains("ESS/sec"),
             "no wall-time must omit the ESS/sec line: {without}"
@@ -2467,7 +2717,7 @@ mod tests {
         let dir = make_fit_dir("scout", &state, &params);
 
         let stages = discover_stages(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &stages);
+        let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
         let json = serde_json::to_string_pretty(&doc).unwrap();
         assert!(json.contains("\"version\": 1"),
             "schema.version must be present and = 1: {}", json);
@@ -2495,7 +2745,7 @@ mod tests {
         let dir = make_fit_dir("scout", &state, &params);
 
         let stages = discover_stages(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &stages);
+        let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
         let md = render_markdown(&doc);
         assert!(md.contains("# Fit summary:"));
         assert!(md.contains("## `scout`"));
@@ -2516,7 +2766,7 @@ mod tests {
         let dir = make_fit_dir("scout", &state, &params);
 
         let stages = discover_stages(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &stages);
+        let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
         let tex = render_latex(&doc);
         // No preamble, but tabular blocks per stage.
         assert!(tex.contains("\\subsection*{Stage:"));
@@ -2782,6 +3032,77 @@ mod tests {
         // skip_serializing_if = Option::is_none → field absent, not null.
         assert!(json.get("estimate_date").is_none(),
             "numeric param must omit estimate_date entirely: {}", json);
+    }
+
+    /// A `draws.tsv` with a `beta` param on `n_chains` chains, `per_chain` draws
+    /// each. Chain `outlier` (0-based) sits far from the rest, so it dominates
+    /// the between-chain spread → a large R̂ over all chains.
+    fn write_outlier_draws(dir: &Path, n_chains: usize, per_chain: usize, outlier: usize) {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut s = String::from("chain\tdraw\tbeta\n");
+        for c in 0..n_chains {
+            for d in 0..per_chain {
+                let jitter = ((d % 7) as f64 - 3.0) * 0.003;
+                let beta = if c == outlier { 0.85 + jitter } else { 0.35 + jitter };
+                s.push_str(&format!("{c}\t{d}\t{beta:.4}\n"));
+            }
+        }
+        std::fs::write(dir.join("draws.tsv"), s).unwrap();
+    }
+
+    /// The load-bearing numeric: `fit summary --exclude-chains` recomputes R̂/ESS
+    /// over the retained chains with the fit's OWN estimator. Over all 4 chains
+    /// the outlier inflates R̂ far past the 1.1 gate; dropping it collapses R̂ to
+    /// ~1 and yields a finite (gated) ESS. The posterior mean also moves toward
+    /// the retained (tight) chains.
+    #[test]
+    fn recompute_over_subset_drops_outlier_and_fixes_rhat() {
+        let dir = crate::test_support::unique_temp_dir("summary_subset_recompute");
+        write_outlier_draws(&dir, 4, 40, 3); // chains 1..4; chain 4 (0-based 3) stuck
+
+        // Ground truth: over ALL four chains R̂ is large (the outlier disagrees).
+        let all: Vec<Vec<f64>> = {
+            let rows = crate::load_draws_tsv_keyed(&dir.join("draws.tsv").to_string_lossy()).unwrap();
+            let mut by_chain: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+            for r in &rows {
+                by_chain.entry(r.chain.unwrap()).or_default().push(r.params["beta"]);
+            }
+            by_chain.into_values().collect()
+        };
+        let rhat_all = crate::fit::runner::compute_rhat_ess(&all).rhat;
+        assert!(rhat_all > 1.5, "over all chains the outlier inflates R̂: {rhat_all}");
+
+        // Recompute over the subset (drop chain 4).
+        let mut diag = PosteriorDiagnostics {
+            rhat_per_param: BTreeMap::from([("beta".to_string(), rhat_all)]),
+            ess_per_param: BTreeMap::from([("beta".to_string(), f64::NAN)]),
+            n_samples: 160,
+            thin: 1,
+            wall_time_secs: Some(10.0),
+            n_chains: 4,
+        };
+        let mut mean = BTreeMap::from([("beta".to_string(), 0.475)]); // mixed (incl. outlier)
+        let sel = ChainSelection::parse_exclude("4").unwrap();
+        let info = recompute_over_subset(&mut diag, &mut mean, &dir, &sel).unwrap();
+
+        assert_eq!(info.kept, vec![1, 2, 3]);
+        assert_eq!(info.excluded, vec![4]);
+        assert_eq!(info.n_total, 4);
+        assert_eq!(diag.n_chains, 3, "n_chains is now the retained count");
+        assert_eq!(diag.n_samples, 120, "3 retained chains × 40 draws");
+        assert!(
+            diag.max_rhat() < 1.1,
+            "excluding the outlier collapses R̂ below the gate: {}",
+            diag.max_rhat()
+        );
+        let ess = diag.min_ess().expect("ess present");
+        assert!(ess.is_finite() && ess > 0.0, "subset ESS is finite + positive: {ess}");
+        assert!(
+            (mean["beta"] - 0.35).abs() < 0.02,
+            "posterior mean moves onto the retained tight chains: {}",
+            mean["beta"]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn synthetic_pgas_result() -> MethodResult {

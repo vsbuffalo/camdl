@@ -110,6 +110,28 @@ impl ChainSelection {
         Ok(ChainSelection { excluded })
     }
 
+    /// `"3,5"` — the excluded ids as the warning renders them.
+    pub fn excluded_csv(&self) -> String {
+        self.excluded
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// The cohort-level warning (`fit table`): the same drop set is applied to
+    /// every fit, so there is no single kept/total to report — name the
+    /// requested ids. Printed once, to stderr, before the derivations run.
+    pub fn warn_requested(&self) {
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m --exclude-chains will drop chain(s) {} from each fit's \
+             posterior when deriving a quantity.",
+            self.excluded_csv()
+        );
+        eprintln!("         {BIAS_CAVEAT_A}");
+        eprintln!("         {BIAS_CAVEAT_B}");
+    }
+
     /// Drop the selected chains from a keyed draws cloud.
     ///
     /// This is THE chain filter — the single definition every read-side consumer
@@ -207,6 +229,16 @@ impl SubsetInfo {
     }
 }
 
+/// The two load-bearing caveat lines, single-sourced so the per-fit
+/// ([`warn_active_selection`]) and cohort ([`ChainSelection::warn_requested`])
+/// warnings state the bias risk identically.
+const BIAS_CAVEAT_A: &str =
+    "Post-hoc chain exclusion BIASES the posterior toward the retained mode — it is not a \
+     convergence fix.";
+const BIAS_CAVEAT_B: &str =
+    "Excluded chains that disagree are often the sign of an unidentified parameter; see \
+     `camdl fit summary` for the per-chain diagnostics.";
+
 /// The loud, non-quietable warning printed to stderr on EVERY active selection.
 ///
 /// The failure mode this guards is silent: a cherry-picked posterior read as if
@@ -215,21 +247,15 @@ impl SubsetInfo {
 /// the dropped chains and states the bias direction (toward the retained mode),
 /// and points at `fit summary` for the per-chain diagnostics (gh#406).
 pub fn warn_active_selection(info: &SubsetInfo) {
-    let ex = info.excluded_csv();
     eprintln!(
-        "\x1b[33mwarning:\x1b[0m --exclude-chains dropped chain(s) {ex} \
+        "\x1b[33mwarning:\x1b[0m --exclude-chains dropped chain(s) {} \
          ({} of {} chains kept).",
+        info.excluded_csv(),
         info.kept.len(),
         info.n_total
     );
-    eprintln!(
-        "         Post-hoc chain exclusion BIASES the posterior toward the retained \
-         mode — it is not a convergence fix."
-    );
-    eprintln!(
-        "         Excluded chains that disagree are often the sign of an unidentified \
-         parameter; see `camdl fit summary` for the per-chain diagnostics."
-    );
+    eprintln!("         {BIAS_CAVEAT_A}");
+    eprintln!("         {BIAS_CAVEAT_B}");
 }
 
 #[cfg(test)]
