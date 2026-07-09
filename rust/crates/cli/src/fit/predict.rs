@@ -1777,17 +1777,19 @@ fn one_step_bands(
     schema: Option<&ObsSchema>,
 ) -> Result<(Vec<StreamBands>, usize), String> {
     use sim::inference::{
-        bootstrap_filter, multi_stream_obs::StreamProjection, multi_stream_obs::StreamSpec,
+        bootstrap_filter, multi_stream_obs::StreamProjection,
         traits::SMCConfig, BoundObs, ChainBinomialProcess, MultiStreamObsModel,
     };
+    use crate::fit::runner::ObsStream;
 
-    // ── Build the filter obs model ONCE. This mirrors `pfilter.rs:386-421` and
-    // `fit::runner::build_obs_model`: it is the THIRD copy of this obs-model
-    // assembly (pfilter.rs, runner, here). Consolidating the three onto a shared
-    // builder is a follow-up — NOT done here (the two existing copies are left
-    // untouched). Each bound leaf reuses `runner::load_observations` for its
-    // cells + cadence, then `StreamProjection::from_ir` + `bind` + the
-    // multi-stream model, the same way the fit's pfilter stage does.
+    // ── Build the filter obs model ONCE. Resolution here is predict-specific
+    // (skips a fit-only diagnostic stream whose source is unbound; honours the
+    // `--stream` filter; iterates in `model.observations` order so `stream_idx`
+    // maps back to its IR leaf via `bound_leaves`), so it does NOT route through
+    // `resolve_and_load_obs_streams`. But the `ObsStream -> StreamSpec` assembly
+    // (the bug-prone shared part) IS routed through the single shared builder
+    // `stream_specs_from_obs_streams`, the same one `fit run` and `pfilter` use.
+    // Each bound leaf reuses `runner::load_observations` for its cells + cadence.
     let data = config.data_spec().map_err(|e| {
         format!("this fit has no [data] block to read the observed series from: {e}")
     })?;
@@ -1806,7 +1808,7 @@ fn one_step_bands(
     // Bound leaves, in `model.observations` order, so `stream_idx` (the index
     // into the obs model's `stream_names()`) maps back to its IR leaf here.
     let mut bound_leaves: Vec<&ir::observation::ObservationModel> = Vec::new();
-    let mut specs: Vec<StreamSpec> = Vec::new();
+    let mut obs_streams: Vec<ObsStream> = Vec::new();
     for obs_model in &model.observations {
         if !stream_selected(obs_model, stream_filter) {
             continue;
@@ -1819,23 +1821,24 @@ fn one_step_bands(
         let (obs, cells, aux) =
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
         let projection = StreamProjection::from_ir(&obs_model.projection, &compiled, &obs_model.name)?;
-        let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
-        specs.push(StreamSpec {
+        obs_streams.push(ObsStream {
+            name: obs_model.name.clone(),
             projection,
-            ir_model: obs_model.clone(),
-            observations: cells,
-            obs_times: times,
+            obs_model_ir: obs_model.clone(),
+            data: obs,
+            cells,
             aux,
         });
         bound_leaves.push(obs_model);
     }
-    if specs.is_empty() {
+    if obs_streams.is_empty() {
         return Err("no observation streams to predict — check that the model's \
                     observation sources are bound to data in the fit config, and that \
                     --stream (if given) names a real stream"
             .into());
     }
 
+    let specs = crate::fit::runner::stream_specs_from_obs_streams(&obs_streams);
     let (bound, _report) = BoundObs::bind(specs)
         .map_err(|report| format!("observation data invalid:\n{}", report.render()))?;
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
