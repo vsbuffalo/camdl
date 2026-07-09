@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 
+use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::posterior_draws;
 use crate::run_meta::{FitAlgorithm, ObsSchema};
 
@@ -160,6 +161,12 @@ pub struct PosteriorDraws {
     pub backend: crate::args::types::ForwardBackend,
     /// The stage's convergence summary.
     pub convergence: ConvergenceStatus,
+    /// The read-side chain selection that produced this cloud, when one was
+    /// active (`--exclude-chains`). `None` for a full-cloud posterior. Carried
+    /// so the predictive artifact can stamp its provenance (`predictive.json`
+    /// `chain_selection`) — a chain-subset band is never mistakable for a
+    /// full-cloud one.
+    pub selection: Option<SubsetInfo>,
 }
 
 impl PosteriorDraws {
@@ -179,7 +186,18 @@ impl PosteriorDraws {
                  that burn-in did not discard every sweep)"
             ));
         }
-        Ok(PosteriorDraws { draws, stage, method, backend, convergence })
+        Ok(PosteriorDraws { draws, stage, method, backend, convergence, selection: None })
+    }
+
+    /// Attach the chain-selection provenance (`--exclude-chains`) to the cloud.
+    pub fn with_selection_info(mut self, info: Option<SubsetInfo>) -> Self {
+        self.selection = info;
+        self
+    }
+
+    /// The chain-selection provenance, when a selection was active.
+    pub fn selection(&self) -> Option<&SubsetInfo> {
+        self.selection.as_ref()
     }
 
     /// The draw cloud (read-only).
@@ -551,11 +569,21 @@ impl FitResult {
     /// A stage that wrote a `draws.tsv` → [`FitResult::Posterior`]; an
     /// optimizer-only fit (no cloud) → [`FitResult::PointEstimate`]; nothing
     /// resolvable → the resolver's actionable error.
-    pub fn resolve(segment: &Path, stage: Option<&str>) -> Result<FitResult, String> {
+    ///
+    /// `selection` (`--exclude-chains`) is applied to the cloud through the
+    /// draws authority ([`PosteriorDrawsRef::load_params_with_info`]) — the one
+    /// place a chain filter meets a cloud — and its provenance is carried onto
+    /// the returned [`PosteriorDraws`].
+    pub fn resolve(
+        segment: &Path,
+        stage: Option<&str>,
+        selection: Option<ChainSelection>,
+    ) -> Result<FitResult, String> {
         let seg_str = segment.to_str().ok_or("fit path is not valid UTF-8")?;
         match posterior_draws::resolve_posterior_draws(seg_str, stage) {
             Ok(pref) => {
-                let rows = crate::load_draws_tsv(&pref.draws_path.to_string_lossy())?;
+                let pref = pref.with_selection(selection);
+                let (rows, sel_info) = pref.load_params_with_info()?;
                 let draws: Vec<IndexMap<String, f64>> = rows
                     .into_iter()
                     .map(|m| m.into_iter().collect())
@@ -572,13 +600,16 @@ impl FitResult {
                     .backend
                     .map(crate::args::types::ForwardBackend::from)
                     .unwrap_or(crate::args::types::ForwardBackend::ChainBinomial);
-                Ok(FitResult::Posterior(PosteriorDraws::new(
-                    draws,
-                    pref.stage,
-                    pref.method,
-                    backend,
-                    convergence,
-                )?))
+                Ok(FitResult::Posterior(
+                    PosteriorDraws::new(
+                        draws,
+                        pref.stage,
+                        pref.method,
+                        backend,
+                        convergence,
+                    )?
+                    .with_selection_info(sel_info),
+                ))
             }
             // No cloud: classify as a point-estimate fit. Report the stage the
             // user asked for (`--stage`), not the terminal one, so the refusal
@@ -852,7 +883,14 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         crate::fit::handle::resolve_fit(args.fit()?).map_err(|e| e.to_string())?;
 
     // 2. Resolve the posterior — by artifact. A point-estimate fit is refused.
-    let fit_result = FitResult::resolve(&segment, args.stage.as_deref())?;
+    //    `--exclude-chains` is parsed at the boundary into a typed selection and
+    //    applied to the cloud through the draws authority (one filter, once).
+    let selection = args
+        .exclude_chains
+        .as_deref()
+        .map(ChainSelection::parse_exclude)
+        .transpose()?;
+    let fit_result = FitResult::resolve(&segment, args.stage.as_deref(), selection)?;
     let treatment = fit_result.into_treatment();
     // The label the artifact carries, derived from the treatment before we
     // unwrap the cloud (v1 only ever reaches `posterior` here, but the label is
@@ -862,6 +900,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         ParamTreatment::Posterior(pd) => pd,
         ParamTreatment::PlugIn { method, stage } => return Err(plugin_refusal(method, &stage)),
     };
+
+    // A chain selection actually dropped chains — warn loudly (non-quietable),
+    // naming the dropped chains and the bias direction, before any output.
+    if let Some(info) = posterior.selection() {
+        warn_active_selection(info);
+    }
 
     // 2b. Resolve which horizon(s) to emit. The one-step horizon is gated by a
     // backend witness ([`FilterableFit`]); an explicit `--horizon one_step` on a
@@ -1444,10 +1488,16 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // (regenerated, overwritten in place). Written whenever any predictive
     // stream was emitted.
     if !predictive_manifest_entries.is_empty() {
-        let manifest = serde_json::json!({
+        let mut manifest = serde_json::json!({
             "schema": "camdl.predictive/v1",
             "streams": predictive_manifest_entries,
         });
+        // Provenance: a chain-subset predictive records the selection alongside
+        // the streams, so a chain-subset artifact is never mistakable for a
+        // full-cloud one. Absent (no key) when the full cloud was used.
+        if let Some(info) = posterior.selection() {
+            manifest["chain_selection"] = info.to_json();
+        }
         let path = segment.join("predictive.json");
         let text = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing predictive manifest: {e}"))?;

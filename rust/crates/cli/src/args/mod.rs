@@ -1198,6 +1198,15 @@ pub struct FitPredictArgs {
     /// RNG seed for the y_rep observation sampling (default 1).
     #[arg(long)]
     pub seed: Option<u64>,
+
+    /// Drop the named MCMC chains from the posterior cloud before banding —
+    /// a comma-separated list of 1-based chain ids (matching the `chain_N/`
+    /// dirs and the `fit summary` per-chain table), e.g. `--exclude-chains 3,5`.
+    /// The escape hatch for a known-stuck minority of chains; post-hoc exclusion
+    /// BIASES the posterior toward the retained mode and always prints a warning.
+    /// A chain id not in the fit, or excluding every chain, is a hard error.
+    #[arg(long, value_name = "IDS")]
+    pub exclude_chains: Option<String>,
 }
 
 /// The reserved scenario name for the no-overlay row — the fitted model as

@@ -16,8 +16,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
+use crate::chain_selection::{ChainSelection, SubsetInfo};
 use crate::fit::fit_view::FitView;
 use crate::run_meta::{FitAlgorithm, InferenceBackend};
+use crate::KeyedDraw;
 
 /// The terminal (or `--stage`-selected) Bayesian stage that produced a
 /// posterior draws cloud, located within a resolved fit directory.
@@ -35,6 +37,13 @@ pub struct PosteriorDrawsRef {
     /// downstream predictive replays on the SAME forward simulator the fit used
     /// — not a hardcoded default. `None` when a stage dir was passed directly.
     pub backend: Option<InferenceBackend>,
+    /// Read-side chain selection (`--exclude-chains`) to apply when the cloud is
+    /// loaded — `None` for every consumer that does not surface the flag, so the
+    /// filter is a no-op there (byte-identical to the pre-selection behaviour).
+    /// Attached via [`PosteriorDrawsRef::with_selection`]; applied ONCE, in the
+    /// load methods, so the filter lives at the draws authority rather than in
+    /// each consumer.
+    pub chain_selection: Option<ChainSelection>,
 }
 
 const DRAWS_FILE: &str = "draws.tsv";
@@ -86,6 +95,7 @@ pub fn resolve_posterior_draws(
                 draws_path,
                 method: Some(chosen.method),
                 backend: Some(chosen.backend),
+                chain_selection: None,
             });
         }
 
@@ -97,6 +107,7 @@ pub fn resolve_posterior_draws(
             draws_path,
             method: Some(chosen.method),
             backend: Some(chosen.backend),
+            chain_selection: None,
         });
     }
 
@@ -114,6 +125,7 @@ pub fn resolve_posterior_draws(
             draws_path,
             method: None,
             backend: None,
+            chain_selection: None,
         });
     }
 
@@ -122,6 +134,44 @@ pub fn resolve_posterior_draws(
          expected a Bayesian fit (PGAS / PMMH / MH) that wrote {DRAWS_FILE}; \
          found no fit stages there"
     ))
+}
+
+impl PosteriorDrawsRef {
+    /// Attach a read-side chain selection to apply when the cloud is loaded.
+    /// `None` leaves the cloud unfiltered (the default for every consumer that
+    /// does not surface `--exclude-chains`).
+    pub fn with_selection(mut self, selection: Option<ChainSelection>) -> Self {
+        self.chain_selection = selection;
+        self
+    }
+
+    /// Read the keyed posterior cloud from `draws_path`, applying the attached
+    /// chain selection (if any). Returns the retained rows and — when a
+    /// selection was active — the [`SubsetInfo`] provenance record.
+    ///
+    /// This is the single point where the chain filter meets the cloud: the raw
+    /// parse ([`crate::load_draws_tsv_keyed`]) then, once, the shared filter
+    /// ([`ChainSelection::apply_keyed`]). Every consumer that reads a cloud
+    /// through the ref inherits the filter here rather than re-deriving it.
+    pub fn load_keyed_with_info(&self) -> Result<(Vec<KeyedDraw>, Option<SubsetInfo>), String> {
+        let rows = crate::load_draws_tsv_keyed(&self.draws_path.to_string_lossy())?;
+        match &self.chain_selection {
+            Some(sel) => {
+                let (kept, info) = sel.apply_keyed(rows)?;
+                Ok((kept, Some(info)))
+            }
+            None => Ok((rows, None)),
+        }
+    }
+
+    /// Param-only rows (the `(chain, draw)` key dropped), selection applied.
+    /// Second return is the [`SubsetInfo`] when a selection was active.
+    pub fn load_params_with_info(
+        &self,
+    ) -> Result<(Vec<HashMap<String, f64>>, Option<SubsetInfo>), String> {
+        let (keyed, info) = self.load_keyed_with_info()?;
+        Ok((keyed.into_iter().map(|d| d.params).collect(), info))
+    }
 }
 
 /// The "this stage has no `draws.tsv`" error, framed by the stage's method

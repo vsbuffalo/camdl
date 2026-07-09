@@ -9,6 +9,7 @@ mod hashing;
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
+mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
 mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by fit predict + simulate)
 mod run_paths;      // canonical output-path helpers
 mod cas;
@@ -2838,6 +2839,7 @@ fn write_draws_tsv(path: &str, draws: &[HashMap<String, f64>]) -> Result<(), Str
 /// One parsed `draws.tsv` row: the optional `(chain, draw)` posterior key
 /// (gh#322 — the join key to the smoothed `trajectories.tsv`; `None` for a
 /// pre-key, param-only file) plus the model parameters.
+#[derive(Debug, Clone)]
 pub(crate) struct KeyedDraw {
     pub chain: Option<usize>,
     pub draw: Option<usize>,
