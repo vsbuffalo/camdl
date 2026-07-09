@@ -390,25 +390,28 @@ pub fn compile_obs_sample_pf(
     obs_model: &ObservationModel,
     compiled: Arc<CompiledModel>,
     params: &[f64],
-) -> Box<dyn Fn(f64, f64, &[i64], &mut crate::rng::StatefulRng) -> f64> {
+) -> Box<dyn Fn(f64, f64, &[i64], &[(String, f64)], &mut crate::rng::StatefulRng) -> f64> {
     let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled)
         .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {:?}", e));
     let params = params.to_vec();
     let real_s = RealState::new(compiled.real_local_to_global.len());
     let n_int  = compiled.int_local_to_global.len();
 
-    Box::new(move |projected: f64, t: f64, counts: &[i64], rng: &mut StatefulRng| {
+    Box::new(move |projected: f64, t: f64, counts: &[i64], aux: &[(String, f64)], rng: &mut StatefulRng| {
         // GH #6 fix: evaluate likelihood args against the real state,
         // not a zero-filled scratch. Caller is responsible for passing
         // the compartment snapshot at the obs time.
         assert_eq!(counts.len(), n_int,
             "compile_obs_sample_pf: counts length {} != expected {}", counts.len(), n_int);
         let int_s = IntState::from_vec(counts.to_vec());
-        // No per-observation aux at emission time (simulate --obs has no data
-        // file). A likelihood referencing an aux column (binomial `n = tested`)
-        // can't be sampled without a denominator — its `ObsColumnRef` would
-        // error at eval, the honest behaviour.
-        sample_obs_resolved(&resolved, t, projected, &[], &params, &compiled, &int_s, &real_s, rng)
+        // Per-observation aux (e.g. a binomial denominator `n = tested`) is the
+        // CALLER's to supply. `fit predict` forwards the OBSERVED aux at each obs
+        // time, so the posterior-predictive draws `y_rep ~ binomial(n_observed,
+        // p̂)` — the exogenous survey sample size carried forward. Data-free
+        // emitters (`simulate --obs`, synthetic generation) pass `&[]`; a
+        // likelihood that references an unavailable aux column then evaluates its
+        // denominator to 0 and draws 0, the honest data-free behaviour.
+        sample_obs_resolved(&resolved, t, projected, aux, &params, &compiled, &int_s, &real_s, rng)
     })
 }
 

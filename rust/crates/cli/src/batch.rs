@@ -1655,7 +1655,7 @@ fn write_obs_into_cas(
         writeln!(out, "time\t{}", obs_ir.name).map_err(|e| e.to_string())?;
         for (ti, &obs_t) in obs_times.iter().enumerate() {
             let snap = crate::snap_at(traj, obs_t);
-            let draw = sampler(projected[ti], obs_t, &snap.int_state.counts, &mut obs_rng);
+            let draw = sampler(projected[ti], obs_t, &snap.int_state.counts, &[], &mut obs_rng);
             if draw == draw.round() && draw.abs() < 1e15 {
                 writeln!(out, "{}\t{}", obs_t, draw as i64).map_err(|e| e.to_string())?;
             } else {
