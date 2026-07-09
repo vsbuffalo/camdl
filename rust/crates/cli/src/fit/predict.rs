@@ -658,6 +658,11 @@ struct PredictiveSink {
     compiled: std::sync::Arc<sim::CompiledModel>,
     /// Per leaf (in `model.observations` order): the observation times to score.
     leaf_times: Vec<Vec<f64>>,
+    /// Per leaf, per time (aligned with `leaf_times`): the observed auxiliary
+    /// columns carried forward into the predictive draw (a data-supplied
+    /// binomial denominator `n = n_examined`). Empty inner vec = no aux at that
+    /// obs time (the likelihood's denominator then resolves data-free).
+    leaf_aux: Vec<Vec<Vec<(String, f64)>>>,
     /// The generated-quantities evaluator, `Some` iff the model declares a
     /// `quantities {}` block. Composed alongside the obs-sample accumulator (same
     /// draw, same params) — not a second [`RunSink`]. Held behind an `Arc` so a
@@ -731,10 +736,15 @@ impl crate::engine::RunSink for PredictiveSink {
                 &params,
             );
             let projected = crate::project_all_obs_times(&cell.traj, obs_ir, model, times);
+            let leaf_aux = &self.leaf_aux[si];
             let mut stream_vals: Vec<f64> = Vec::with_capacity(times.len());
             for (ti, &t) in times.iter().enumerate() {
                 let snap = crate::snap_at(&cell.traj, t);
-                let y = sampler(projected[ti], t, &snap.int_state.counts, &mut obs_rng);
+                // Carry the OBSERVED aux (survey denominator) at this obs time
+                // into the draw; `&[]` when the leaf has no aux (aligned 1:1 with
+                // `times`, so a wrong index is impossible).
+                let aux: &[(String, f64)] = leaf_aux.get(ti).map(|v| v.as_slice()).unwrap_or(&[]);
+                let y = sampler(projected[ti], t, &snap.int_state.counts, aux, &mut obs_rng);
                 stream_vals.push(y);
             }
             if want_obs {
@@ -793,12 +803,18 @@ pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
 }
 
 /// One fit leaf's loaded observed series: its logical stream, stratum, times,
-/// and observed cells (`None` = a hole).
+/// observed cells (`None` = a hole), and per-observation auxiliary columns
+/// (e.g. a survey denominator `n = n_examined`) aligned 1:1 with `times`.
 struct LeafObs {
     source: String,
     stratum: Vec<(String, String)>,
     times: Vec<f64>,
     observed: Vec<Option<f64>>,
+    /// `aux[i]` = the auxiliary `(column, value)` pairs observed at `times[i]`.
+    /// Carried into the free-forward predictive so a data-supplied denominator
+    /// (`binomial(n = n_examined, …)`) draws `y_rep ~ binomial(n_examined, p̂)`
+    /// rather than `binomial(0, …) = 0`.
+    aux: Vec<Vec<(String, f64)>>,
 }
 
 /// Expand the `--sweep` specs into Cartesian grid cells, each a sorted-by-name
@@ -1099,6 +1115,21 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     .unwrap_or_default()
             })
             .collect();
+        // Observed aux per leaf, in the SAME model.observations order + the same
+        // per-leaf time alignment as `leaf_times` (both cloned from the matched
+        // `LeafObs`), so `leaf_aux[si][ti]` is the survey denominator at
+        // `leaf_times[si][ti]`.
+        let leaf_aux: Vec<Vec<Vec<(String, f64)>>> = model
+            .observations
+            .iter()
+            .map(|o| {
+                leaves
+                    .iter()
+                    .find(|l| leaf_matches(o, l))
+                    .map(|l| l.aux.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
 
         // The free-forward cells (one per sweep-point × scenario, engine canonical
         // order), plus the stacked quantity bodies + merged manifest entries — all
@@ -1141,6 +1172,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             let mut sink = PredictiveSink {
                 compiled: compiled.clone(),
                 leaf_times: leaf_times.clone(),
+                leaf_aux: leaf_aux.clone(),
                 quant_eval: quant_eval.clone(),
                 by_scenario: IndexMap::new(),
             };
@@ -1520,7 +1552,7 @@ fn load_leaf_obs(
         };
         let siblings: Vec<&ir::observation::ObservationModel> =
             model.observations.iter().filter(|o| o.source == obs_model.source).collect();
-        let (obs, cells, _aux) =
+        let (obs, cells, aux) =
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
         let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
         let observed: Vec<Option<f64>> = cells
@@ -1531,7 +1563,7 @@ fn load_leaf_obs(
             .collect();
         let stratum: Vec<(String, String)> =
             obs_model.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
-        out.push(LeafObs { source: obs_model.source.clone(), stratum, times, observed });
+        out.push(LeafObs { source: obs_model.source.clone(), stratum, times, observed, aux });
     }
     Ok(out)
 }

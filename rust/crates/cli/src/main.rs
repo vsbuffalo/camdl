@@ -1521,7 +1521,7 @@ fn materialize_obs_for_quantities(
         let mut vals = Vec::with_capacity(times.len());
         for (ti, &t) in times.iter().enumerate() {
             let snap = snap_at(traj, t);
-            vals.push(sampler(projected[ti], t, &snap.int_state.counts, &mut obs_rng));
+            vals.push(sampler(projected[ti], t, &snap.int_state.counts, &[], &mut obs_rng));
         }
         out.insert(obs_ir.name.clone(), (times, vals));
     }
@@ -2034,7 +2034,7 @@ impl engine::RunSink for StreamSink {
                     // references like `N = S + I + R`.
                     let snap = snap_at(traj, obs_t);
                     let draw = sampler(
-                        projected_values[ti], obs_t, &snap.int_state.counts, &mut obs_rng,
+                        projected_values[ti], obs_t, &snap.int_state.counts, &[], &mut obs_rng,
                     );
                     self.obs_data[si].push(ObsRow {
                         time: obs_t,
