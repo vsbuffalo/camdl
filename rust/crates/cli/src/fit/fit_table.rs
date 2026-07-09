@@ -109,6 +109,25 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     // the surviving rows back to their segment dirs by `fit_hash` —
     // filtering/sorting decouples row index from `pre_filtered`.
     if !args.quantities.is_empty() {
+        // `--exclude-chains` (clap-gated to require `--quantity`): parse ONCE at
+        // the boundary to validate the format, then forward it to every derived
+        // `fit predict`. The same drop set is applied to each fit — a cohort
+        // caveat we warned about above. A chain id absent from a given fit makes
+        // that fit's predict refuse, so its cell renders `—` (like any other
+        // derivation failure), rather than aborting the whole table.
+        let selection = match args.exclude_chains.as_deref() {
+            Some(raw) => match crate::chain_selection::ChainSelection::parse_exclude(raw) {
+                Ok(sel) => {
+                    sel.warn_requested();
+                    Some(raw)
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            },
+            None => None,
+        };
         let dir_by_hash: std::collections::HashMap<&str, &std::path::Path> = pre_filtered
             .iter()
             .map(|e| (e.view.fit_hash.as_str(), e.fit_dir.as_path()))
@@ -118,7 +137,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
                 continue;
             };
             for name in &args.quantities {
-                if let Some(median) = resolve_quantity_median(fit_dir, name) {
+                if let Some(median) = resolve_quantity_median(fit_dir, name, selection) {
                     r.quantities.insert(name.clone(), median);
                 }
             }
@@ -322,12 +341,21 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 /// Any failure (predict refused, the model doesn't declare `name`, a
 /// malformed or scalar-less TSV) yields `None` — a single uncomputable
 /// cell renders `—` and never fails the whole table.
-fn resolve_quantity_median(fit_dir: &std::path::Path, name: &str) -> Option<f64> {
+fn resolve_quantity_median(
+    fit_dir: &std::path::Path,
+    name: &str,
+    exclude_chains: Option<&str>,
+) -> Option<f64> {
     let tsv = fit_dir.join("quantities").join(format!("{name}.tsv"));
 
-    // (1) Fast path: an already-computed quantities TSV.
-    if let Some(median) = read_scalar_quantity_q50(&tsv) {
-        return Some(median);
+    // (1) Fast path: an already-computed quantities TSV — BUT only when no chain
+    // selection is active. A pre-computed sidecar was banded over the FULL
+    // cloud, so honouring `--exclude-chains` means re-deriving it (the derive
+    // path below re-runs predict with the flag, overwriting the sidecar).
+    if exclude_chains.is_none() {
+        if let Some(median) = read_scalar_quantity_q50(&tsv) {
+            return Some(median);
+        }
     }
 
     // (2/3) Derive only for fits that carry a posterior cloud — gated through
@@ -342,15 +370,20 @@ fn resolve_quantity_median(fit_dir: &std::path::Path, name: &str) -> Option<f64>
     }
 
     let exe = std::env::current_exe().ok()?;
-    let output = std::process::Command::new(&exe)
-        .arg("fit")
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("fit")
         .arg("predict")
         .arg(fit_dir)
         .arg("--horizon")
         .arg("free_forward")
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .output()
-        .ok()?;
+        .env("CAMDL_SKIP_VERSION_CHECK", "1");
+    // Forward the chain selection so the derived quantity is banded over the
+    // same subset. `fit predict` re-parses + validates it against THIS fit's
+    // chains; an id absent here makes predict refuse → this cell renders `—`.
+    if let Some(ids) = exclude_chains {
+        cmd.arg("--exclude-chains").arg(ids);
+    }
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         // predict refused (e.g. the model doesn't declare `name`, or
         // some other failure) — leave the cell absent, don't abort.
