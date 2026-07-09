@@ -229,6 +229,48 @@ fn max_rel_q95_shift(a: &[FfRow], b: &[FfRow]) -> f64 {
     m
 }
 
+/// Read the `rhat_max` / `ess_min` cells of the first free-forward row of a
+/// `predictive/<stream>.tsv`. Both are section-level (identical across a
+/// section's rows), so the first free-forward row is representative. Returns the
+/// raw cell strings so an empty cell (NotAssessed) stays distinguishable from
+/// `"0"`.
+fn free_forward_convergence_cells(pred_tsv: &str) -> (String, String) {
+    let mut lines = pred_tsv.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let col = |name: &str| header.iter().position(|c| *c == name).unwrap();
+    let (hi, ri, ei) = (col("horizon"), col("rhat_max"), col("ess_min"));
+    for l in lines {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.get(hi).copied() == Some("free_forward") {
+            return (f[ri].to_string(), f[ei].to_string());
+        }
+    }
+    panic!("no free_forward row in predictive tsv:\n{pred_tsv}");
+}
+
+/// Parse the `max R̂ = <x>` value from a `fit summary` (text) stdout.
+fn summary_max_rhat(stdout: &str) -> f64 {
+    stdout
+        .lines()
+        .find(|l| l.contains("max R̂ ="))
+        .and_then(|l| l.split("max R̂ =").nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .expect("a max R̂ line in the posterior block")
+}
+
+/// Parse the `min-param ESS <n>` token from a `fit summary` (text) stdout (the
+/// ESS/iter line; ESS/sec repeats the same value).
+fn summary_min_ess(stdout: &str) -> f64 {
+    stdout
+        .lines()
+        .find(|l| l.contains("min-param ESS"))
+        .and_then(|l| l.split("min-param ESS").nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .expect("a min-param ESS token in the ESS/iter line")
+}
+
 /// Set up a fit segment whose `draws.tsv` is the controlled 4-chain cloud.
 /// `label` keeps each test's tmp dir distinct (the tests run in parallel).
 /// Returns `(tmp_dir, segment_dir)`.
@@ -497,6 +539,100 @@ fn summary_full_cloud_is_unchanged_regression() {
     assert!(out.status.success());
     let j: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
     assert!(j.get("chain_selection").is_none(), "no chain_selection field without the flag");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn predict_subset_recomputes_convergence_agreeing_with_summary() {
+    // gh#409: a chain-subset predictive band must carry the R̂ / ESS of the
+    // RETAINED chains, not the stored full-cloud summary (which includes the
+    // dropped chains). The buggy path copied the stored value into every row of
+    // `predictive/*.tsv` — labelling a band drawn from the clean chains with the
+    // polluted full-cloud R̂ (a "did not converge" verdict about a subset that
+    // did). `fit summary` already recomputes over the subset; `fit predict` must
+    // AGREE — that divergence IS the bug.
+    let bin = skip_if_missing_binary();
+    let (tmp, seg) = setup(&bin, "predict_subset_rhat");
+    let seg_str = seg.to_string_lossy().into_owned();
+
+    // Pin the stored full-cloud summary to a KNOWN, large R̂ / ESS, so the value
+    // the buggy path copies is deterministic (the reported 1.570) and the
+    // recomputed subset value is unambiguously different.
+    let draws = find_draws_tsv(&seg).expect("draws.tsv written by the fit");
+    let stage_dir = draws.parent().unwrap();
+    std::fs::write(
+        stage_dir.join("pgas_summary.json"),
+        r#"{"stage":"pgas","n_chains":4,"thin":1,"rhat":{"beta":1.5700,"gamma":1.3000},"ess":{"beta":55,"gamma":47}}"#,
+    )
+    .unwrap();
+    const STORED_RHAT: f64 = 1.5700;
+    const STORED_ESS_MIN: f64 = 47.0;
+
+    // Full cloud (no selection): the band carries the stored full-cloud summary.
+    // That is CORRECT for the full cloud and must stay put — the regression guard.
+    let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--horizon", "free_forward"]);
+    assert!(out.status.success(), "full predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let (full_rhat_s, full_ess_s) = free_forward_convergence_cells(
+        &std::fs::read_to_string(seg.join("predictive").join("weekly_cases.tsv")).unwrap(),
+    );
+    let full_rhat: f64 = full_rhat_s.parse().unwrap();
+    let full_ess: f64 = full_ess_s.parse().unwrap();
+    assert!(
+        (full_rhat - STORED_RHAT).abs() < 1e-9,
+        "full-cloud band keeps the stored R̂ {STORED_RHAT}, got {full_rhat}"
+    );
+    assert!(
+        (full_ess - STORED_ESS_MIN).abs() < 1e-9,
+        "full-cloud band keeps the stored min ESS {STORED_ESS_MIN}, got {full_ess}"
+    );
+
+    // Exclude the stuck outlier chain 4: the band must be RELABELLED with the
+    // recomputed subset R̂ / ESS.
+    let out = run(
+        &bin,
+        &tmp,
+        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "4"],
+    );
+    assert!(out.status.success(), "excluded predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let (excl_rhat_s, excl_ess_s) = free_forward_convergence_cells(
+        &std::fs::read_to_string(seg.join("predictive").join("weekly_cases.tsv")).unwrap(),
+    );
+    let excl_rhat: f64 = excl_rhat_s.parse().expect("recomputed rhat_max cell parses");
+    let excl_ess: f64 = excl_ess_s.parse().expect("recomputed ess_min cell parses");
+
+    // (1) Recomputed, not copied: strictly below the stored full-cloud R̂ (the
+    //     outlier that inflated it is gone) and healthy (3 tight chains). On the
+    //     buggy code excl_rhat == STORED_RHAT, so this assertion fails (RED).
+    assert!(
+        excl_rhat < STORED_RHAT - 1e-6,
+        "subset R̂ must be recomputed below the stored full-cloud R̂ {STORED_RHAT} \
+         — the bug copies {STORED_RHAT} into the subset band; got {excl_rhat}"
+    );
+    assert!(
+        excl_rhat.is_finite() && excl_rhat < 1.1,
+        "3 retained tight chains → healthy subset R̂: {excl_rhat}"
+    );
+    assert!(
+        (excl_ess - STORED_ESS_MIN).abs() > 1e-6,
+        "subset min ESS must be recomputed, not the stored {STORED_ESS_MIN}: got {excl_ess}"
+    );
+
+    // (2) predict and summary AGREE on the same fit + selection — the divergence
+    //     that IS the bug is closed. summary recomputes over the same subset.
+    let sout = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "4", "--no-color"]);
+    assert!(sout.status.success(), "summary --exclude-chains failed:\n{}", String::from_utf8_lossy(&sout.stderr));
+    let sstdout = String::from_utf8_lossy(&sout.stdout);
+    let summary_rhat = summary_max_rhat(&sstdout);
+    let summary_ess = summary_min_ess(&sstdout);
+    assert!(
+        (excl_rhat - summary_rhat).abs() < 1e-3,
+        "predict and summary must report the SAME subset R̂: predict {excl_rhat} vs summary {summary_rhat}"
+    );
+    assert!(
+        (excl_ess - summary_ess).abs() < 1.5,
+        "predict and summary must report the SAME subset min ESS: predict {excl_ess} vs summary {summary_ess}"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

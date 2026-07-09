@@ -54,35 +54,23 @@ fn recompute_over_subset(
     stage_dir: &Path,
     selection: &ChainSelection,
 ) -> Result<SubsetInfo, String> {
-    let draws_path = stage_dir.join("draws.tsv");
-    let keyed = crate::load_draws_tsv_keyed(&draws_path.to_string_lossy())?;
-    let (kept, info) = selection.apply_keyed(keyed)?;
-
-    // Group the retained rows by 0-based chain (BTreeMap → ascending order).
-    let mut grouped: BTreeMap<usize, Vec<&crate::KeyedDraw>> = BTreeMap::new();
-    for d in &kept {
-        if let Some(c) = d.chain {
-            grouped.entry(c).or_default().push(d);
-        }
-    }
-
-    // Recompute for the estimated params — the keys of `posterior_mean`, the
-    // exact set the renderer iterates, so the table shape is unchanged.
+    // Recompute R̂ / ESS over the retained chains for the estimated params — the
+    // keys of `posterior_mean`, the exact set the renderer iterates, so the table
+    // shape is unchanged. Routed through the one shared recompute
+    // (`chain_selection::recompute_subset_diagnostics`) that `fit predict` also
+    // calls, so summary and predict cannot disagree on the same fit + selection.
     let param_names: Vec<String> = posterior_mean.keys().cloned().collect();
-    let mut new_rhat = BTreeMap::new();
-    let mut new_ess = BTreeMap::new();
+    let sub = crate::chain_selection::recompute_subset_diagnostics(
+        &stage_dir.join("draws.tsv"),
+        selection,
+        Some(&param_names),
+    )?;
+
+    // Posterior means over the retained rows — summary-specific, so computed
+    // here from the shared recompute's `kept` rows rather than in the shared fn.
     let mut new_mean = BTreeMap::new();
     for p in &param_names {
-        let chains: Vec<Vec<f64>> = grouped
-            .values()
-            .map(|rows| rows.iter().filter_map(|r| r.params.get(p).copied()).collect())
-            .collect();
-        let d = crate::fit::runner::compute_rhat_ess(&chains);
-        if d.rhat.is_finite() {
-            new_rhat.insert(p.clone(), d.rhat);
-        }
-        new_ess.insert(p.clone(), d.ess_total);
-        let vals: Vec<f64> = kept.iter().filter_map(|r| r.params.get(p).copied()).collect();
+        let vals: Vec<f64> = sub.kept.iter().filter_map(|r| r.params.get(p).copied()).collect();
         let mean = if vals.is_empty() {
             f64::NAN
         } else {
@@ -91,15 +79,15 @@ fn recompute_over_subset(
         new_mean.insert(p.clone(), mean);
     }
 
-    diag.rhat_per_param = new_rhat;
-    diag.ess_per_param = new_ess;
-    diag.n_samples = kept.len();
-    diag.n_chains = grouped.len();
+    diag.rhat_per_param = sub.rhat_per_param;
+    diag.ess_per_param = sub.ess_per_param;
+    diag.n_samples = sub.n_samples;
+    diag.n_chains = sub.n_chains;
     // `thin` and `wall_time_secs` are properties of the whole run, unchanged by
     // a read-side subset (ESS/iter and ESS/sec are then reported over the
     // subset's ESS against the same iteration / wall-clock denominators).
     *posterior_mean = new_mean;
-    Ok(info)
+    Ok(sub.info)
 }
 
 /// Mutate a Bayesian stage's typed result to the chain-subset diagnostics.
