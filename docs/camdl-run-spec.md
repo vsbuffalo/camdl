@@ -299,6 +299,28 @@ A consumer reads both, joins on `(time, <dims>)`, and plots `observed` over the
 `predictive` ribbon, one facet per stratum — using the `index_dims` from the
 `fit.meta.json` schema, with no run-store, DSL, or likelihood knowledge.
 
+**Calendar semantics travel with the artifact.** Each `.json` sidecar
+manifest — `predictive.json`, `observed.json`, `quantities.json`, and the
+inference `trajectories.json` — carries a top-level `calendar` block so a
+consumer maps the numeric `time` column to a date without re-deriving it:
+
+```jsonc
+"calendar": { "time_unit": "days", "origin": "1910-01-01", "days_per_unit": 1.0 }
+```
+
+`time_unit` is the model's `time_unit` (`days` / `weeks` / `months` / `years`);
+`origin` is the model's `origin` as an ISO `YYYY-MM-DD` string, or `null` for a
+bare-numeric-time model (no `origin` declared) — the signal to plot `time`
+numerically. `days_per_unit` is the exact length of one `time_unit` in days
+(`days`=1, `weeks`=7, `months`=365.2425/12, `years`=365.2425). A consumer maps
+`time → date` as `origin + time · days_per_unit` **days** (e.g. `d3.utcFormat`
+on a JS axis). A calendar-anchored model is constrained to `days`/`weeks`
+(camdl rejects `origin` with `months`/`years` — E320), so wherever there is an
+`origin` to map, `days_per_unit` is 1 or 7 and the mapping is exact and
+identical to camdl's own rendered `date` column. Numeric `time` stays the
+canonical, diff-stable axis; the `calendar` block is additive metadata, not a
+re-encoding of it.
+
 ### 2.3 Sweep Subdirectories
 
 When a fit is swept over a fixed parameter, each sweep point gets a subdirectory
