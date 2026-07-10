@@ -437,7 +437,10 @@ fn parse_cohort_exclude(
         return Ok(CohortChainSelection { per_fit, cohort_wide: true });
     }
 
-    // Per-fit: `@fit:ids`. Split on the LAST ':' so a fit name may contain one.
+    // Per-fit: `fit:ids`. Split on the LAST ':' so a fit name may contain one.
+    // The name is matched VERBATIM against the compared fits' names — a
+    // handle-referenced fit is named `@a`, a path-referenced one `ctl_rm.toml`.
+    // The `@` is part of a handle name, NOT a per-fit sigil to prepend.
     for tok in tokens {
         let (fit, ids) = tok
             .rsplit_once(':')
@@ -447,8 +450,21 @@ fn parse_cohort_exclude(
         }
         let n_match = names.iter().filter(|n| n.as_str() == fit).count();
         if n_match == 0 {
+            // Common slip: the `--help` example uses a handle name `@a`, so a
+            // user prepends a spurious `@` to a path-named fit. If dropping it
+            // would match, say so rather than a bare "no such fit".
+            let hint = fit
+                .strip_prefix('@')
+                .filter(|stripped| names.iter().any(|n| n == stripped))
+                .map(|stripped| {
+                    format!(
+                        " — did you mean '{stripped}'? the leading `@` names a run-store \
+                         handle; a fit given by path is named without it"
+                    )
+                })
+                .unwrap_or_default();
             return Err(format!(
-                "--exclude-chains: no compared fit named '{fit}' (fits: {})",
+                "--exclude-chains: no compared fit named '{fit}' (fits: {}){hint}",
                 names.join(", ")
             ));
         }
@@ -938,6 +954,8 @@ mod tests {
     /// gh#418: per-fit `@fit:ids` binds to one fit; bare ids are cohort-wide.
     #[test]
     fn parse_cohort_exclude_forms() {
+        // Fit names are matched VERBATIM. A handle-referenced fit carries the
+        // `@` in its name (`@a`); a path-referenced one does not (`ctl_rm.toml`).
         let names = vec!["@a".to_string(), "@b".to_string()];
 
         // Empty → no filtering.
@@ -955,11 +973,26 @@ mod tests {
         assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "2");
         assert!(c.for_fit("@b").is_none(), "@b keeps all chains");
 
+        // A path-named fit (no `@`) is matched by its bare name.
+        let paths = vec!["ctl_rm.toml".to_string(), "ctl_bb.toml".to_string()];
+        let c = parse_cohort_exclude(&["ctl_rm.toml:4".to_string()], &paths).unwrap();
+        assert_eq!(c.for_fit("ctl_rm.toml").unwrap().excluded_csv(), "4");
+        assert!(c.for_fit("ctl_bb.toml").is_none());
+
         // Multiple per-fit tokens, each its own drop set.
         let c =
             parse_cohort_exclude(&["@a:2".to_string(), "@b:5,6".to_string()], &names).unwrap();
         assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "2");
         assert_eq!(c.for_fit("@b").unwrap().excluded_csv(), "5,6");
+    }
+
+    #[test]
+    fn parse_cohort_exclude_hints_spurious_at_sigil() {
+        // A path-named fit targeted with a spurious `@` (the common slip garki
+        // hit): the error names the fix rather than a bare "no such fit".
+        let names = vec!["ctl_rm.toml".to_string(), "ctl_bb.toml".to_string()];
+        let e = parse_cohort_exclude(&["@ctl_rm.toml:4".to_string()], &names).unwrap_err();
+        assert!(e.contains("did you mean 'ctl_rm.toml'"), "{e}");
     }
 
     /// A per-fit token that cannot bind to exactly one model is a hard error —
@@ -968,9 +1001,11 @@ mod tests {
     fn parse_cohort_exclude_rejects_bad_forms() {
         let names = vec!["@a".to_string(), "@b".to_string()];
 
-        // Unknown fit name → error naming the available fits.
+        // Unknown fit name → error naming the available fits (verbatim, so the
+        // message names `@z` — and there is no `z` to hint, so no "did you mean").
         let e = parse_cohort_exclude(&["@z:3".to_string()], &names).unwrap_err();
         assert!(e.contains("no compared fit named '@z'") && e.contains("@a"), "{e}");
+        assert!(!e.contains("did you mean"), "no hint when the stripped name also misses: {e}");
 
         // Mixing bare (cohort) and per-fit tokens → rejected as ambiguous.
         assert!(parse_cohort_exclude(&["3".to_string(), "@a:4".to_string()], &names).is_err());
