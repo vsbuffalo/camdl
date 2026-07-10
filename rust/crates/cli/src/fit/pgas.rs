@@ -1166,7 +1166,7 @@ fn write_summary(
         "thin": thin,
     });
 
-    let path = dir.join("pgas_summary.json");
+    let path = dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
     let contents = serde_json::to_string_pretty(&summary)
         .map_err(|e| format!("json error: {}", e))?;
     std::fs::write(&path, contents)

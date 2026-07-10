@@ -944,8 +944,14 @@ pub fn run_stage(
         .max_by(|a, b| a.1.map_log_posterior.total_cmp(&b.1.map_log_posterior))
         .unwrap();
 
-    // Write summary JSON
-    write_summary(stage_dir, &results, &config, thin, &diagnostics)?;
+    // Write summary JSON. Deterministic mh-ODE shares this runner but writes its
+    // OWN `mh_summary.json`, not `pmmh_summary.json`.
+    let algo = if is_ode_mh {
+        crate::run_meta::FitAlgorithm::Mh
+    } else {
+        crate::run_meta::FitAlgorithm::Pmmh
+    };
+    write_summary(stage_dir, &results, &config, thin, &diagnostics, algo)?;
 
     // Write fit_state.toml
     let mut start_values = HashMap::new();
@@ -1249,6 +1255,7 @@ fn write_summary(
     config: &FitRunConfig,
     thin: usize,
     diagnostics: &Diagnostics,
+    algo: crate::run_meta::FitAlgorithm,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<f64> = results.iter().map(|(_, r)| r.acceptance_rate).collect();
 
@@ -1275,7 +1282,7 @@ fn write_summary(
         "thin": thin,
     });
 
-    let path = dir.join("pmmh_summary.json");
+    let path = dir.join(algo.summary_filename());
     let contents = serde_json::to_string_pretty(&summary)
         .map_err(|e| format!("json error: {}", e))?;
     std::fs::write(&path, contents)
