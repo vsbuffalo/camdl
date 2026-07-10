@@ -2562,8 +2562,10 @@ pub struct CompareArgs {
     /// Drop MCMC chains from a fit's posterior cloud before deriving its plug-in
     /// θ̂, so a comparison scores the SAME subset `fit predict`/`fit summary`
     /// would band. PER-FIT (repeat the flag): `--exclude-chains @a:4` drops
-    /// chain 4 from the fit named `@a` only, leaving the others whole — the fit
-    /// name is the one shown in the table (and matched by `--baseline`). Bare
+    /// chain 4 from the fit named `@a` only, leaving the others whole. The fit
+    /// name is matched VERBATIM against the name shown in the table (and matched
+    /// by `--baseline`): a fit given by run-store handle is `@a`, one given by
+    /// path is e.g. `ctl_rm.toml` with no `@` — do not add a spurious `@`. Bare
     /// ids `--exclude-chains 3,4` apply COHORT-WIDE to every fit (convenient
     /// only when the fits share a stuck-chain index — otherwise use the per-fit
     /// form). Chain ids are 1-based (matching the `chain_N/` dirs and the `fit
