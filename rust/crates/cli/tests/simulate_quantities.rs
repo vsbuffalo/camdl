@@ -164,6 +164,10 @@ fn simulate_point_run_writes_quantities_sidecar() {
         .unwrap_or_else(|_| panic!("missing {}", manifest.display()));
     let mjson: serde_json::Value = serde_json::from_str(&mtxt).unwrap();
     assert_eq!(mjson["schema"], "camdl.quantities/v1", "manifest schema tag");
+    // Calendar semantics travel with the artifact. This fixture is unanchored
+    // (no `origin`), so origin is null — the consumer's numeric-fallback path.
+    assert_eq!(mjson["calendar"]["time_unit"], "days", "calendar time_unit travels");
+    assert!(mjson["calendar"]["origin"].is_null(), "unanchored model → null origin");
     let qs = mjson["quantities"].as_array().expect("quantities array");
     let lookup = |n: &str| qs.iter().find(|q| q["name"] == n).unwrap_or_else(|| panic!("manifest missing {n}"));
     assert_eq!(lookup("prevalence")["shape"], "series");

@@ -251,6 +251,11 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
         .expect("predictive.json must be written");
     let pjson: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&pmf).unwrap()).unwrap();
+    // Calendar semantics travel with the predictive artifact.
+    assert!(
+        pjson["calendar"]["time_unit"].is_string(),
+        "predictive.json carries calendar semantics"
+    );
     let wc = pjson["streams"].as_array().unwrap()
         .iter().find(|s| s["name"] == "weekly_cases").expect("weekly_cases stream entry");
     let coords: Vec<&str> = wc["coordinates"].as_array().unwrap()
@@ -258,6 +263,18 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     assert_eq!(
         coords, ["scenario", "sweep:k", "time", "horizon", "treatment"],
         "the manifest names sweep:k as a coordinate, after scenario; saw {coords:?}"
+    );
+
+    // ── observed.json: the net-new sibling manifest carries calendar semantics ──
+    let omf = pmf.parent().unwrap().join("observed.json");
+    let ojson: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&omf).expect("observed.json must be written"),
+    )
+    .unwrap();
+    assert_eq!(ojson["schema"], "camdl.observed/v1", "observed.json schema tag");
+    assert!(
+        ojson["calendar"]["time_unit"].is_string(),
+        "observed.json carries calendar semantics"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

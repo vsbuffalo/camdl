@@ -1242,6 +1242,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 eval: None,
                 draws: Vec::new(),
                 times: Vec::new(),
+                calendar: io::CalendarMeta::from_model(&q_model),
             })
         } else {
             let n = q_model.quantities.len();
@@ -1379,6 +1380,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 crate::quantity_output::render_quantities(
                     &q.quantities, &q.draws, &q.times, mode,
                     crate::quantity_output::DesignCoords::none(),
+                    &q.calendar,
                 )
                     .unwrap_or_else(|e| {
                         eprintln!("error rendering quantities: {}", e);
@@ -1493,6 +1495,9 @@ struct SimQuantities {
     /// The trajectory snapshot times, captured once (every cell shares the output
     /// cadence) — the time axis a series quantity is rendered against.
     times: Vec<f64>,
+    /// Calendar semantics for the `time` axis, stamped into `quantities.json` so
+    /// a consumer maps `time → Date` without re-deriving `origin`/`time_unit`.
+    calendar: io::CalendarMeta,
 }
 
 /// Materialize the per-draw `y_sim` for the streams an `observations.<stream>`

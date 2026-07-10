@@ -8,9 +8,11 @@
 //! output and `simulate` output share one format, one writer, and one
 //! downstream toolchain.
 
+pub mod calendar;
 pub mod progress;
 pub mod trajectories;
 
+pub use calendar::CalendarMeta;
 pub use progress::{
     Heartbeat, Phase, Progress, RunLiveness, RunState, liveness, read_progress, write_progress,
 };

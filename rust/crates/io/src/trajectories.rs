@@ -11,6 +11,8 @@ use std::path::Path;
 
 use sim::{Flows, IntState, RealState, Trajectory};
 
+use crate::calendar::CalendarMeta;
+
 /// Tolerance for matching a requested fork time T* to a saved snapshot time.
 /// A trajectory is recorded at discrete snapshot times; the conditioned
 /// counterfactual fork requires T* to coincide with one of them — the "saved
@@ -147,6 +149,9 @@ pub struct TrajManifest {
     /// the conditioned smoother incidence here against the forward predictive.
     /// `None` when no such file is discoverable for this run.
     pub predictive_obs_file: Option<String>,
+    /// Calendar semantics for the `time` axis — so a consumer maps `time →
+    /// Date` without re-deriving `origin`/`time_unit` from the header.
+    pub calendar: CalendarMeta,
 }
 
 impl TrajManifest {
@@ -168,6 +173,7 @@ impl TrajManifest {
             "degeneracy_caveat": self.degeneracy_caveat,
             "n_trajectories": self.n_trajectories,
             "predictive_obs_file": self.predictive_obs_file,
+            "calendar": self.calendar.to_json(),
         })
     }
 
@@ -702,6 +708,11 @@ mod tests {
             degeneracy_caveat: false,
             n_trajectories: 4,
             predictive_obs_file: None,
+            calendar: CalendarMeta {
+                time_unit: "days".into(),
+                origin: Some("1910-01-01".into()),
+                days_per_unit: 1.0,
+            },
         };
         let json = m.to_json();
         assert_eq!(json["conditioned"], serde_json::json!(true));
@@ -709,5 +720,18 @@ mod tests {
         assert_eq!(json["n_trajectories"], serde_json::json!(4));
         assert_eq!(json["columns"][4], serde_json::json!("inc_cases"));
         assert_eq!(json["predictive_obs_file"], serde_json::Value::Null);
+        // Calendar semantics travel with the manifest.
+        assert_eq!(json["calendar"]["time_unit"], serde_json::json!("days"));
+        assert_eq!(json["calendar"]["origin"], serde_json::json!("1910-01-01"));
+        assert_eq!(json["calendar"]["days_per_unit"], serde_json::json!(1.0));
+    }
+
+    #[test]
+    fn manifest_calendar_null_when_unanchored() {
+        let cal = CalendarMeta { time_unit: "days".into(), origin: None, days_per_unit: 1.0 };
+        let json = cal.to_json();
+        assert_eq!(json["time_unit"], serde_json::json!("days"));
+        assert_eq!(json["origin"], serde_json::Value::Null);
+        assert_eq!(json["days_per_unit"], serde_json::json!(1.0));
     }
 }

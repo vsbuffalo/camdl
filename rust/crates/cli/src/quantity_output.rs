@@ -248,6 +248,7 @@ pub(crate) fn render_quantities(
     snapshot_times: &[f64],
     mode: Mode,
     coords: DesignCoords,
+    calendar: &io::CalendarMeta,
 ) -> Result<(Vec<(String, String)>, String), String> {
     use ir::quantity::{QuantityBody, TemporalReduce};
 
@@ -378,6 +379,7 @@ pub(crate) fn render_quantities(
 
     let manifest = serde_json::json!({
         "schema": "camdl.quantities/v1",
+        "calendar": calendar.to_json(),
         "quantities": manifest_entries,
     });
     let manifest_str = serde_json::to_string_pretty(&manifest)
@@ -543,6 +545,16 @@ fn render_point_leaf(
 mod tests {
     use super::*;
 
+    /// An anchored calendar for the render tests. The manifest carries these
+    /// verbatim; the render output itself is calendar-independent.
+    fn test_cal() -> io::CalendarMeta {
+        io::CalendarMeta {
+            time_unit: "days".into(),
+            origin: Some("2020-01-01".into()),
+            days_per_unit: 1.0,
+        }
+    }
+
     #[test]
     fn band_with_censoring_partitions_finite_and_censored() {
         use sim::quantity::QuantityDrawValue::{Censored, Value};
@@ -645,7 +657,7 @@ mod tests {
         ]];
         let times = vec![0.0, 7.0];
         let (outs, _manifest) =
-            render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords::none()).unwrap();
+            render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords::none(), &test_cal()).unwrap();
 
         let prev = &outs.iter().find(|(n, _)| n == "prevalence").unwrap().1;
         let plines: Vec<&str> = prev.trim_end().lines().collect();
@@ -686,7 +698,7 @@ mod tests {
     #[test]
     fn point_mode_rejects_multiple_realizations() {
         let draws: Vec<Vec<sim::quantity::QuantityResult>> = vec![vec![], vec![]];
-        let err = render_quantities(&[], &draws, &[], Mode::Point, DesignCoords::none()).unwrap_err();
+        let err = render_quantities(&[], &draws, &[], Mode::Point, DesignCoords::none(), &test_cal()).unwrap_err();
         assert!(err.contains("exactly one realization"), "got: {err}");
     }
 
@@ -716,7 +728,7 @@ mod tests {
 
         let (outs, manifest) =
             render_quantities(&quantities, &draws, &[], Mode::Banded,
-                DesignCoords { scenario: Some("with_sia"), sweep: &[] }).unwrap();
+                DesignCoords { scenario: Some("with_sia"), sweep: &[] }, &test_cal()).unwrap();
         let peak = &outs.iter().find(|(n, _)| n == "peak").unwrap().1;
         let lines: Vec<&str> = peak.trim_end().lines().collect();
         assert_eq!(
@@ -731,6 +743,9 @@ mod tests {
         let mjson: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         let entry = mjson["quantities"].as_array().unwrap()[0].clone();
         assert_eq!(entry["scenario"], "with_sia", "manifest entry carries the scenario");
+        // Calendar semantics travel at the manifest top level.
+        assert_eq!(mjson["calendar"]["time_unit"], "days", "manifest carries the time_unit");
+        assert_eq!(mjson["calendar"]["origin"], "2020-01-01", "manifest carries the origin");
 
         // Scenario + sweep: the sweep:<param> column follows the scenario column,
         // every row carries this cell's swept value, and the manifest entry gains
@@ -739,6 +754,7 @@ mod tests {
         let (outs_sw, manifest_sw) = render_quantities(
             &quantities, &draws, &[], Mode::Banded,
             DesignCoords { scenario: Some("with_sia"), sweep: &sweep },
+            &test_cal(),
         )
         .unwrap();
         let peak_sw = &outs_sw.iter().find(|(n, _)| n == "peak").unwrap().1;
@@ -759,7 +775,7 @@ mod tests {
 
         // None → no scenario column or field (simulate's byte-identical path).
         let (outs2, manifest2) =
-            render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords::none()).unwrap();
+            render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords::none(), &test_cal()).unwrap();
         let peak2 = &outs2.iter().find(|(n, _)| n == "peak").unwrap().1;
         assert_eq!(
             peak2.lines().next().unwrap(),

@@ -985,6 +985,9 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         crate::util::resolve_ir_path(&config.model.camdl)?
     };
     let (model, _) = crate::util::load_model(&compiled_ir)?;
+    // One calendar block for every sidecar manifest this run writes
+    // (predictive / observed / quantities), read once off the model.
+    let calendar = io::CalendarMeta::from_model(&model);
     let dt = model.simulation.dt.unwrap_or(1.0);
 
     // 3b. Parse the prospective scenario overlay (reusing simulate's ScenarioRef
@@ -1330,6 +1333,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                         &accum.quant_times,
                         crate::quantity_output::Mode::Banded,
                         coords,
+                        &calendar,
                     )?;
                     for (name, content) in outs {
                         // First design cell for this quantity: keep its header +
@@ -1532,6 +1536,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     if !predictive_manifest_entries.is_empty() {
         let mut manifest = serde_json::json!({
             "schema": "camdl.predictive/v1",
+            "calendar": calendar.to_json(),
             "streams": predictive_manifest_entries,
         });
         // Provenance: a chain-subset predictive records the selection alongside
@@ -1547,10 +1552,36 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         written.push(path);
     }
 
-    // The observed half, grouped by logical stream.
+    // The observed half, grouped by logical stream, plus an `observed.json`
+    // manifest carrying the calendar semantics for the `time` column — a sibling
+    // of `predictive.json`, NOT in the run_id-keyed CAS leaf (regenerated,
+    // overwritten in place).
+    let mut observed_manifest_entries: Vec<serde_json::Value> = Vec::new();
     for (source, index_dims, rows) in observed_by_stream(&leaves, schema.as_ref()) {
         let obs_tsv = render_observed_tsv(&index_dims, &rows);
         written.push(write_tsv(&segment, "observed", &source, &obs_tsv)?);
+        let file = format!("observed/{source}.tsv");
+        let mut coordinates: Vec<String> = vec!["time".to_string()];
+        coordinates.extend(index_dims.iter().cloned());
+        observed_manifest_entries.push(serde_json::json!({
+            "name": source,
+            "file": file,
+            "coordinates": coordinates,
+            "value_column": "value",
+        }));
+    }
+    if !observed_manifest_entries.is_empty() {
+        let manifest = serde_json::json!({
+            "schema": "camdl.observed/v1",
+            "calendar": calendar.to_json(),
+            "streams": observed_manifest_entries,
+        });
+        let path = segment.join("observed.json");
+        let text = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("serializing observed manifest: {e}"))?;
+        std::fs::write(&path, text)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        written.push(path);
     }
     // Generated quantities: one sidecar TSV per logical quantity + a manifest.
     // These are NOT in the run_id-keyed CAS leaf — a regenerated sidecar beside
