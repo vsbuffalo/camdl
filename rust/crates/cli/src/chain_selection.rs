@@ -120,17 +120,28 @@ impl ChainSelection {
             .join(",")
     }
 
-    /// The cohort-level warning (`fit table`): the same drop set is applied to
-    /// every fit, so there is no single kept/total to report — name the
-    /// requested ids. Printed once, to stderr, before the derivations run.
+    /// The cohort-level warning (`fit table`, `compare`): the same drop set is
+    /// applied to every fit, so there is no single kept/total to report — name
+    /// the requested ids. Printed once, to stderr, before the derivations run.
     pub fn warn_requested(&self) {
         eprintln!(
             "\x1b[33mwarning:\x1b[0m --exclude-chains will drop chain(s) {} from each fit's \
-             posterior when deriving a quantity.",
+             posterior cloud.",
             self.excluded_csv()
         );
         eprintln!("         {BIAS_CAVEAT_A}");
         eprintln!("         {BIAS_CAVEAT_B}");
+    }
+
+    /// The per-fit warning (`compare --exclude-chains @fit:ids`): this drop set
+    /// targets one named fit, so name it. Printed once per fit, to stderr,
+    /// before the derivations run. The bias caveat is left to the caller so it
+    /// prints once for a multi-fit selection.
+    pub fn warn_requested_for_fit(&self, fit: &str) {
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m --exclude-chains will drop chain(s) {} from fit '{fit}'.",
+            self.excluded_csv()
+        );
     }
 
     /// Drop the selected chains from a keyed draws cloud.
@@ -344,6 +355,14 @@ const BIAS_CAVEAT_A: &str =
 const BIAS_CAVEAT_B: &str =
     "Excluded chains that disagree are often the sign of an unidentified parameter; see \
      `camdl fit summary` for the per-chain diagnostics.";
+
+/// Print the two-line bias caveat once. For the per-fit `compare` form, which
+/// names each fit's drop set separately ([`ChainSelection::warn_requested_for_fit`])
+/// and then states the shared bias risk a single time.
+pub fn eprint_bias_caveat() {
+    eprintln!("         {BIAS_CAVEAT_A}");
+    eprintln!("         {BIAS_CAVEAT_B}");
+}
 
 /// The loud, non-quietable warning printed to stderr on EVERY active selection.
 ///

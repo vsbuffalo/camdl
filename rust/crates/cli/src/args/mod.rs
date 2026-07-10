@@ -2558,6 +2558,23 @@ pub struct CompareArgs {
     /// prequential.json path (read as-is).
     #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_SEED)]
     pub seed: u64,
+
+    /// Drop MCMC chains from a fit's posterior cloud before deriving its plug-in
+    /// θ̂, so a comparison scores the SAME subset `fit predict`/`fit summary`
+    /// would band. PER-FIT (repeat the flag): `--exclude-chains @a:4` drops
+    /// chain 4 from the fit named `@a` only, leaving the others whole — the fit
+    /// name is the one shown in the table (and matched by `--baseline`). Bare
+    /// ids `--exclude-chains 3,4` apply COHORT-WIDE to every fit (convenient
+    /// only when the fits share a stuck-chain index — otherwise use the per-fit
+    /// form). Chain ids are 1-based (matching the `chain_N/` dirs and the `fit
+    /// summary` per-chain table). Mixing bare and `@fit:ids` tokens is rejected;
+    /// a fit with no posterior cloud (an optimizer fit, or an explicit
+    /// prequential.json) ignores the flag. Post-hoc exclusion BIASES the
+    /// posterior toward the retained mode and always prints a warning. A chain
+    /// id not in a fit, an unknown/ambiguous fit name, or excluding every chain
+    /// is a hard error.
+    #[arg(long, value_name = "[@FIT:]IDS")]
+    pub exclude_chains: Vec<String>,
 }
 
 // ─── mre (minimal-reproducible-example bundles) ──────────────────────────────
