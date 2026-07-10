@@ -52,6 +52,16 @@ impl FitAlgorithm {
         }
     }
 
+    /// The per-stage convergence-summary filename a Bayesian sampler writes into
+    /// its stage dir: `<algorithm>_summary.json`. The single source of this
+    /// naming convention — written by the pgas / pmmh / mh / nuts runners, read
+    /// back by `read_convergence` and the `MethodResult` loaders. Deterministic
+    /// mh-ODE shares the PMMH runner but gets its OWN file (`mh_summary.json`),
+    /// not the misleading `pmmh_summary.json`.
+    pub fn summary_filename(self) -> String {
+        format!("{}_summary.json", self.as_str())
+    }
+
     /// A Bayesian posterior sampler: it explores the full posterior and writes a
     /// `draws.tsv` cloud, so a completed run has a posterior band to draw. PGAS
     /// (the default Bayesian path), PMMH, and MH are samplers. This is the
@@ -620,6 +630,21 @@ pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Option<FitSidecar> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_filename_matches_algorithm_name() {
+        // The naming seam: each sampler's summary is `<algorithm>_summary.json`.
+        // In particular mh gets its OWN file, never the pmmh one.
+        assert_eq!(FitAlgorithm::Pgas.summary_filename(), "pgas_summary.json");
+        assert_eq!(FitAlgorithm::Pmmh.summary_filename(), "pmmh_summary.json");
+        assert_eq!(FitAlgorithm::Mh.summary_filename(), "mh_summary.json");
+        assert_eq!(FitAlgorithm::Nuts.summary_filename(), "nuts_summary.json");
+        // mh and pmmh must not collide on disk.
+        assert_ne!(
+            FitAlgorithm::Mh.summary_filename(),
+            FitAlgorithm::Pmmh.summary_filename()
+        );
+    }
 
     #[test]
     fn survey_eval_method_serializes_lowercase() {

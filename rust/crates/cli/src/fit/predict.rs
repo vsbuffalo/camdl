@@ -644,15 +644,11 @@ impl FitResult {
     }
 }
 
-/// Read a Bayesian stage's convergence summary (`pgas_summary.json` /
-/// `pmmh_summary.json`): `max` over its R̂ map, `min` over its ESS map. Returns
+/// Read a Bayesian stage's convergence summary (`<algorithm>_summary.json`):
+/// `max` over its R̂ map, `min` over its ESS map. Returns
 /// [`ConvergenceStatus::NotAssessed`] when no summary or no R̂ is present (a
 /// single-chain stage), so a band is never silently "converged".
 fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> ConvergenceStatus {
-    let file = match method {
-        Some(FitAlgorithm::Pmmh) | Some(FitAlgorithm::Mh) => "pmmh_summary.json",
-        _ => "pgas_summary.json",
-    };
     let try_read = |name: &str| -> Option<ConvergenceStatus> {
         let bytes = std::fs::read(stage_dir.join(name)).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -668,10 +664,16 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
             None
         }
     };
-    // Try the method's summary, then the other (a stage dir we couldn't name).
-    try_read(file)
+    // The method's own summary first (via the one naming seam), then each
+    // sampler's as a fallback for a stage dir we couldn't name.
+    method
+        .map(|m| m.summary_filename())
+        .as_deref()
+        .and_then(try_read)
         .or_else(|| try_read("pgas_summary.json"))
         .or_else(|| try_read("pmmh_summary.json"))
+        .or_else(|| try_read("mh_summary.json"))
+        .or_else(|| try_read("nuts_summary.json"))
         .unwrap_or(ConvergenceStatus::NotAssessed)
 }
 
@@ -2104,6 +2106,31 @@ fn plugin_refusal(method: Option<FitAlgorithm>, stage: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_convergence_finds_mh_summary_for_mh_method() {
+        // An mh(-ODE) stage writes `mh_summary.json` (NOT `pmmh_summary.json`),
+        // so read_convergence must resolve it via the algorithm's own name. On
+        // the pre-fix code — which searched only pgas/pmmh — this returned
+        // NotAssessed, silently dropping the mh stage's convergence.
+        let dir = std::env::temp_dir().join("camdl_read_convergence_mh_summary_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mh_summary.json"),
+            r#"{"rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
+        )
+        .unwrap();
+
+        match read_convergence(&dir, Some(FitAlgorithm::Mh)) {
+            ConvergenceStatus::Reported { rhat_max, ess_min } => {
+                assert!((rhat_max - 1.03).abs() < 1e-9, "rhat_max from mh_summary.json");
+                assert!((ess_min - 250.0).abs() < 1e-9, "ess_min from mh_summary.json");
+            }
+            _ => panic!("mh stage must resolve its own mh_summary.json, not NotAssessed"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn quantile_linear_interpolation_matches_numpy() {
