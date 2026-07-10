@@ -17,7 +17,9 @@
 //!   obs-model / backend preflights, anti-pattern detection beyond T_score,
 //!   stacking, plotting.
 
+use crate::chain_selection::ChainSelection;
 use crate::fit::handle::ResolvedFit;
+use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
 use sim::inference::prequential::PrequentialTrace;
 use std::path::{Path, PathBuf};
@@ -119,9 +121,22 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         std::process::exit(1);
     }
 
-    // Load traces.
+    // gh#417/gh#418: chain exclusion resolved PER FIT, bound to each model's
+    // name. `@a:4` targets one fit; bare `3,4` is cohort-wide (every fit). Parsed
+    // and name-validated at the boundary, before any derivation runs. A fit with
+    // no posterior cloud (an optimizer fit, or an explicit prequential.json) has
+    // nothing to filter, so the selection is inert there.
+    let model_names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
+    let cohort = parse_cohort_exclude(&a.exclude_chains, &model_names).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
+    cohort.warn();
+
+    // Load traces, each filtered by its own fit's selection (if any).
     let rows: Vec<Row> = models.into_iter().map(|m| {
-        let trace = load_trace(&m.path, derive).unwrap_or_else(|e| {
+        let selection = cohort.for_fit(&m.name);
+        let trace = load_trace(&m.path, derive, selection).unwrap_or_else(|e| {
             eprintln!("error loading trace for '{}' at '{}': {}", m.name, m.path, e);
             std::process::exit(1);
         });
@@ -184,13 +199,17 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
 ///    The prequential is DERIVED by invoking the canonical `camdl pfilter` at
 ///    the fit's sealed θ̂ — never by reimplementing the filter (the obs-model
 ///    assembly is already triplicated; a fourth copy is forbidden).
-fn load_trace(path: &str, derive: DeriveSettings) -> Result<PrequentialTrace, String> {
+fn load_trace(
+    path: &str,
+    derive: DeriveSettings,
+    selection: Option<&ChainSelection>,
+) -> Result<PrequentialTrace, String> {
     if let Some(trace) = try_load_explicit_prequential(path)? {
         return Ok(trace);
     }
     // Not an explicit prequential → treat as a fit handle and derive.
     match crate::fit::handle::resolve_fit(path) {
-        Ok(resolved) => derive_prequential(&resolved, derive),
+        Ok(resolved) => derive_prequential(&resolved, derive, selection),
         Err(resolve_err) => Err(format!(
             "'{path}' is neither a prequential trace nor a resolvable fit handle.\n  \
              - as a fit handle: {resolve_err}\n  \
@@ -239,7 +258,11 @@ fn try_load_explicit_prequential(path: &str) -> Result<Option<PrequentialTrace>,
 /// fit's data streams as `--data NAME=PATH`; (d) run `pfilter
 /// --save-prequential` to a temp stem; (e) read back the `{stem}.json` trace.
 /// All temp files live in the system temp dir and are best-effort cleaned up.
-fn derive_prequential(resolved: &ResolvedFit, derive: DeriveSettings) -> Result<PrequentialTrace, String> {
+fn derive_prequential(
+    resolved: &ResolvedFit,
+    derive: DeriveSettings,
+    selection: Option<&ChainSelection>,
+) -> Result<PrequentialTrace, String> {
     let segment = &resolved.segment;
     let config = &resolved.config;
 
@@ -249,7 +272,7 @@ fn derive_prequential(resolved: &ResolvedFit, derive: DeriveSettings) -> Result<
     // `final_params.toml` — its θ̂ is the posterior MEAN over `draws.tsv`; only
     // an optimizer fit (IF2/NLopt) has a single winner file. The headline
     // `compare @pgas_a @pgas_b` workflow used to dead-end on the missing file.
-    let params_toml = point_estimate_params_toml(segment)?;
+    let params_toml = point_estimate_params_toml(segment, selection)?;
 
     // (b) model — prefer the self-contained archived IR (Phase 1a), else the
     // loose source the config names (recompiled by pfilter). config.model.camdl
@@ -342,6 +365,108 @@ fn derive_prequential(resolved: &ResolvedFit, derive: DeriveSettings) -> Result<
     trace
 }
 
+/// Chain exclusion for the compared cohort, resolved per fit by name. A fit
+/// absent from the map keeps all its chains. Built from repeatable
+/// `--exclude-chains` tokens: `@fit:ids` targets one fit; bare `ids` apply
+/// cohort-wide (every fit). `cohort_wide` only tunes the warning wording.
+#[derive(Debug, Default)]
+struct CohortChainSelection {
+    per_fit: std::collections::BTreeMap<String, ChainSelection>,
+    cohort_wide: bool,
+}
+
+impl CohortChainSelection {
+    /// This fit's drop set, or `None` (keep all its chains).
+    fn for_fit(&self, name: &str) -> Option<&ChainSelection> {
+        self.per_fit.get(name)
+    }
+
+    /// The loud, non-quietable bias warning, once, before derivations run.
+    /// Cohort-wide reuses the shared `each fit` phrasing; the per-fit form names
+    /// each targeted fit and states the bias caveat a single time.
+    fn warn(&self) {
+        if self.per_fit.is_empty() {
+            return;
+        }
+        if self.cohort_wide {
+            // Every entry carries the same drop set — warn once.
+            if let Some(sel) = self.per_fit.values().next() {
+                sel.warn_requested();
+            }
+        } else {
+            for (fit, sel) in &self.per_fit {
+                sel.warn_requested_for_fit(fit);
+            }
+            crate::chain_selection::eprint_bias_caveat();
+        }
+    }
+}
+
+/// Parse repeatable `--exclude-chains` tokens, bound to the resolved model
+/// `names`. Each token is `@fit:ids` / `fit:ids` (one fit) or bare `ids`
+/// (cohort-wide, applied to every fit). Mixing the two forms is rejected as
+/// ambiguous. A named fit must match EXACTLY ONE model — an unknown or ambiguous
+/// name is a hard error, so a per-fit token can never silently bind nowhere or
+/// to the wrong fit.
+fn parse_cohort_exclude(
+    tokens: &[String],
+    names: &[String],
+) -> Result<CohortChainSelection, String> {
+    if tokens.is_empty() {
+        return Ok(CohortChainSelection::default());
+    }
+    let has_keyed = tokens.iter().any(|t| t.contains(':'));
+    let has_bare = tokens.iter().any(|t| !t.contains(':'));
+    if has_keyed && has_bare {
+        return Err(
+            "--exclude-chains: mixing cohort-wide ids and per-fit `@fit:ids` is ambiguous; \
+             give either bare ids (dropped from every fit) or @fit:ids (per fit), not both"
+                .to_string(),
+        );
+    }
+
+    let mut per_fit = std::collections::BTreeMap::new();
+
+    if has_bare {
+        // Cohort-wide: union the bare tokens into one selection, applied to all.
+        let sel = ChainSelection::parse_exclude(&tokens.join(","))
+            .map_err(|e| format!("--exclude-chains: {e}"))?;
+        for name in names {
+            per_fit.insert(name.clone(), sel.clone());
+        }
+        return Ok(CohortChainSelection { per_fit, cohort_wide: true });
+    }
+
+    // Per-fit: `@fit:ids`. Split on the LAST ':' so a fit name may contain one.
+    for tok in tokens {
+        let (fit, ids) = tok
+            .rsplit_once(':')
+            .expect("every token has ':' in the per-fit branch");
+        if fit.is_empty() {
+            return Err(format!("--exclude-chains '{tok}': missing fit name before ':'"));
+        }
+        let n_match = names.iter().filter(|n| n.as_str() == fit).count();
+        if n_match == 0 {
+            return Err(format!(
+                "--exclude-chains: no compared fit named '{fit}' (fits: {})",
+                names.join(", ")
+            ));
+        }
+        if n_match > 1 {
+            return Err(format!(
+                "--exclude-chains: fit name '{fit}' is ambiguous ({n_match} compared fits \
+                 share it) — give each `[[model]]` a unique name via --config"
+            ));
+        }
+        let sel = ChainSelection::parse_exclude(ids)
+            .map_err(|e| format!("--exclude-chains @{fit}: {e}"))?;
+        if per_fit.insert(fit.to_string(), sel).is_some() {
+            return Err(format!("--exclude-chains: fit '{fit}' listed more than once"));
+        }
+    }
+    Ok(CohortChainSelection { per_fit, cohort_wide: false })
+}
+
 /// θ̂ for the prequential as a flat params TOML, routed through the draws-cloud
 /// authority. A Bayesian fit (its terminal stage wrote a `draws.tsv`) plugs in
 /// the posterior MEAN over the cloud; an optimizer fit (no cloud) plugs in its
@@ -349,66 +474,56 @@ fn derive_prequential(resolved: &ResolvedFit, derive: DeriveSettings) -> Result<
 /// "resolve by artifact, not by method name" rule — the headline `compare
 /// @pgas_a @pgas_b` Bayesian comparison was previously dead-ending on the
 /// IF2-only `final_params.toml`.
-fn point_estimate_params_toml(segment: &Path) -> Result<String, String> {
+///
+/// A `--exclude-chains` selection (gh#417) is attached to the resolved draws
+/// ref, so the posterior mean is taken over the RETAINED cloud — the same
+/// filter `fit predict`/`fit summary` apply. An optimizer fit has no cloud, so
+/// the selection has nothing to filter there.
+fn point_estimate_params_toml(
+    segment: &Path,
+    selection: Option<&ChainSelection>,
+) -> Result<String, String> {
     match crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), None) {
-        Ok(pdraws) => posterior_mean_params_toml(&pdraws.draws_path),
+        Ok(pdraws) => posterior_mean_params_toml(&pdraws.with_selection(selection.cloned())),
         // No posterior cloud → an optimizer fit; its θ̂ is the single winner.
         Err(_) => crate::fit::fit_summary::winner_params_toml(segment, None),
     }
 }
 
-/// The posterior MEAN of every column in a `draws.tsv` as a flat params TOML —
-/// the plug-in point a prequential is scored at for a Bayesian fit. Every model
-/// parameter is a column (estimated + fixed); a fixed column is constant, so its
-/// mean is the fixed value. Columns are emitted in sorted order for determinism.
-fn posterior_mean_params_toml(draws_path: &Path) -> Result<String, String> {
-    let text = std::fs::read_to_string(draws_path)
-        .map_err(|e| format!("reading {}: {e}", draws_path.display()))?;
-    let mut lines = text.lines();
-    let header: Vec<String> = lines
-        .next()
-        .ok_or_else(|| format!("empty draws.tsv at {}", draws_path.display()))?
-        .split('\t')
-        .map(|s| s.to_string())
-        .collect();
-    let mut sums = vec![0.0f64; header.len()];
-    let mut n = 0usize;
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() != header.len() {
-            return Err(format!("ragged row in {} ({} cols, header has {})",
-                draws_path.display(), fields.len(), header.len()));
-        }
-        for (i, f) in fields.iter().enumerate() {
-            sums[i] += f.parse::<f64>().map_err(|_| {
-                format!("non-numeric draw '{f}' in {}", draws_path.display())
-            })?;
-        }
-        n += 1;
-    }
+/// The posterior MEAN of every parameter column in a fit's draws cloud as a flat
+/// params TOML — the plug-in point a prequential is scored at for a Bayesian
+/// fit. Every model parameter is a column (estimated + fixed); a fixed column is
+/// constant, so its mean is the fixed value. Columns are emitted in sorted order
+/// for determinism.
+///
+/// Reads through the shared draws authority ([`PosteriorDrawsRef`]) so an
+/// attached `--exclude-chains` selection is applied ONCE, here, before the mean
+/// — the same seam `fit predict`/`fit summary` use, rather than a second raw
+/// draws reader. The `(chain, draw)` key columns are dropped by the keyed
+/// loader, never emitted as parameters (gh#322).
+fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<String, String> {
+    let (rows, _info) = pref.load_params_with_info()?;
+    let n = rows.len();
     if n == 0 {
-        return Err(format!("no posterior draws in {}", draws_path.display()));
+        return Err(format!("no posterior draws in {}", pref.draws_path.display()));
     }
-    let mut idx: Vec<usize> = (0..header.len()).collect();
-    idx.sort_by(|&a, &b| header[a].cmp(&header[b]));
+    // Sum each parameter over the retained rows in file order — one accumulator
+    // per name, so the intra-row (HashMap) order is irrelevant; the BTreeMap
+    // keeps the emit order sorted and deterministic.
+    let mut sums: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    for row in &rows {
+        for (name, v) in row {
+            *sums.entry(name.clone()).or_insert(0.0) += *v;
+        }
+    }
     let mut out = String::new();
     out.push_str("# camdl compare: posterior-mean point estimate (θ̂) for the prequential\n");
-    out.push_str(&format!("# source: {} ({n} draws)\n\n", draws_path.display()));
-    for i in idx {
-        // gh#322: `chain` / `draw` are posterior key columns, not parameters —
-        // never emit them into θ̂ (a `chain = …` line would make `pfilter` reject
-        // an unknown parameter). This parser reads the file directly rather than
-        // via the shared loader, so it strips them itself.
-        if header[i] == "chain" || header[i] == "draw" {
-            continue;
-        }
+    out.push_str(&format!("# source: {} ({n} draws)\n\n", pref.draws_path.display()));
+    for (name, sum) in &sums {
         out.push_str(&format!(
             "{} = {}\n",
-            header[i],
-            crate::fit::runner::format_param_value(sums[i] / n as f64)
+            name,
+            crate::fit::runner::format_param_value(sum / n as f64)
         ));
     }
     Ok(out)
@@ -761,6 +876,117 @@ mod tests {
             toml::from_str::<CompareToml>(bad_model).is_err(),
             "an unknown [[model]] key must be rejected"
         );
+    }
+
+    /// gh#417: `compare --exclude-chains` must drop the named chains from the
+    /// posterior cloud BEFORE deriving θ̂ — the plug-in point the prequential is
+    /// scored at. A stuck chain shifts the posterior mean, so the subset θ̂ must
+    /// differ from the all-chain θ̂ and equal the mean over the retained chains
+    /// (θ̂ changes ⇒ elpd/CRPS change: a correctness knob, not cosmetic).
+    #[test]
+    fn posterior_mean_excludes_selected_chains() {
+        use crate::chain_selection::ChainSelection;
+        use crate::posterior_draws::PosteriorDrawsRef;
+
+        // Two chains in draws.tsv (`chain` is 0-based on disk). Chain id 1 is
+        // mixed at beta = 1.0; chain id 2 is stuck at beta = 9.0 (never moved,
+        // 0% acceptance).
+        let dir = tempfile::tempdir().unwrap();
+        let draws_path = dir.path().join("draws.tsv");
+        let mut s = String::from("chain\tdraw\tbeta\n");
+        for d in 0..4 {
+            s.push_str(&format!("0\t{d}\t1.0\n"));
+        }
+        for d in 0..4 {
+            s.push_str(&format!("1\t{d}\t9.0\n"));
+        }
+        std::fs::write(&draws_path, s).unwrap();
+
+        let pref = PosteriorDrawsRef {
+            stage: "pgas".into(),
+            draws_path,
+            method: None,
+            backend: None,
+            chain_selection: None,
+        };
+
+        let beta_of = |toml_text: &str| -> f64 {
+            toml_text
+                .lines()
+                .find_map(|l| l.strip_prefix("beta = "))
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or_else(|| panic!("no beta in θ̂:\n{toml_text}"))
+        };
+
+        // All chains: mean beta = (1.0·4 + 9.0·4)/8 = 5.0 — the stuck chain
+        // drags θ̂ up.
+        let all = posterior_mean_params_toml(&pref).unwrap();
+        assert_eq!(beta_of(&all), 5.0, "all-chain θ̂ pools both chains");
+
+        // Drop the stuck chain 2 → mean beta = 1.0 over the retained chain.
+        let sel = ChainSelection::parse_exclude("2").unwrap();
+        let sub =
+            posterior_mean_params_toml(&pref.clone().with_selection(Some(sel))).unwrap();
+        assert_eq!(beta_of(&sub), 1.0, "subset θ̂ is the mean over the retained chain");
+        assert_ne!(
+            beta_of(&all),
+            beta_of(&sub),
+            "excluding a stuck chain must change θ̂ (hence the prequential score)"
+        );
+    }
+
+    /// gh#418: per-fit `@fit:ids` binds to one fit; bare ids are cohort-wide.
+    #[test]
+    fn parse_cohort_exclude_forms() {
+        let names = vec!["@a".to_string(), "@b".to_string()];
+
+        // Empty → no filtering.
+        assert!(parse_cohort_exclude(&[], &names).unwrap().per_fit.is_empty());
+
+        // Bare ids → cohort-wide: every fit gets the same drop set.
+        let c = parse_cohort_exclude(&["3,4".to_string()], &names).unwrap();
+        assert!(c.cohort_wide);
+        assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "3,4");
+        assert_eq!(c.for_fit("@b").unwrap().excluded_csv(), "3,4");
+
+        // Per-fit → ONLY the named fit is filtered; the other keeps all chains.
+        let c = parse_cohort_exclude(&["@a:2".to_string()], &names).unwrap();
+        assert!(!c.cohort_wide);
+        assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "2");
+        assert!(c.for_fit("@b").is_none(), "@b keeps all chains");
+
+        // Multiple per-fit tokens, each its own drop set.
+        let c =
+            parse_cohort_exclude(&["@a:2".to_string(), "@b:5,6".to_string()], &names).unwrap();
+        assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "2");
+        assert_eq!(c.for_fit("@b").unwrap().excluded_csv(), "5,6");
+    }
+
+    /// A per-fit token that cannot bind to exactly one model is a hard error —
+    /// never a silent no-op or a wrong-fit bind.
+    #[test]
+    fn parse_cohort_exclude_rejects_bad_forms() {
+        let names = vec!["@a".to_string(), "@b".to_string()];
+
+        // Unknown fit name → error naming the available fits.
+        let e = parse_cohort_exclude(&["@z:3".to_string()], &names).unwrap_err();
+        assert!(e.contains("no compared fit named '@z'") && e.contains("@a"), "{e}");
+
+        // Mixing bare (cohort) and per-fit tokens → rejected as ambiguous.
+        assert!(parse_cohort_exclude(&["3".to_string(), "@a:4".to_string()], &names).is_err());
+
+        // Ambiguous name (two compared models share it) → rejected.
+        let dup = vec!["scout".to_string(), "scout".to_string()];
+        let e = parse_cohort_exclude(&["scout:3".to_string()], &dup).unwrap_err();
+        assert!(e.contains("ambiguous"), "{e}");
+
+        // Same fit listed twice → rejected.
+        assert!(
+            parse_cohort_exclude(&["@a:2".to_string(), "@a:3".to_string()], &names).is_err()
+        );
+
+        // Missing fit name before ':' → rejected.
+        assert!(parse_cohort_exclude(&[":3".to_string()], &names).is_err());
     }
 }
 
