@@ -165,17 +165,15 @@ rule token = parse
   | '#'                       { token lexbuf }   (* lone `#` (e.g. end of line) *)
   | '#' [^'\n' '['] [^'\n']*  { token lexbuf }   (* line comment, first char not `[` *)
 
-  (* Unit literals: 'days, 'per_day, etc. *)
-  | "'days"      { UNIT_IDENT "days" }
-  | "'weeks"     { UNIT_IDENT "weeks" }
-  | "'months"    { UNIT_IDENT "months" }
-  | "'years"     { UNIT_IDENT "years" }
-  | "'per_day"   { UNIT_IDENT "per_day" }
-  | "'per_week"  { UNIT_IDENT "per_week" }
-  | "'per_month" { UNIT_IDENT "per_month" }
-  | "'per_year"  { UNIT_IDENT "per_year" }
-  | "'count"     { UNIT_IDENT "count" }
-  | "'ratio"     { UNIT_IDENT "ratio" }
+  (* Unit literals: 'days, 'per_day, etc. A GENERAL `'<name>` is lexed to
+     UNIT_IDENT — the parser's `unit_lit` rule accepts the known ten and
+     rejects anything else with the friendly E102 "unknown unit" diagnostic
+     (parser.mly). Lexing the general form here (rather than ten fixed
+     literals) is what lets a typo like `'per_capita` reach that diagnostic
+     instead of dying on the catch-all as a raw apostrophe lex error. The
+     name uses the identifier charset (`alpha alnum*`), so a bare `'` or
+     `'123` still falls through to the catch-all, unchanged. *)
+  | '\'' (alpha alnum* as u) { UNIT_IDENT u }
 
   (* Numbers — underscore separators allowed between digit groups (1_000_000) *)
   | int_lit '.' digit* (['e' 'E'] ['+' '-']? int_lit)?
