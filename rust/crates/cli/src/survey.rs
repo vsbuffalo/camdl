@@ -457,50 +457,113 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
             }))
     };
 
-    // Progress: one overall bar over the LHS points, ticked from the parallel
-    // sweep (`Task` is `Send + Sync`), with the best loglik found so far as the
-    // researcher metric. Honors `--progress none/plain`.
+    // Progress: one overall bar over the LHS points, with the best loglik found
+    // so far as the researcher metric. Honors `--progress none/plain`.
     let bar = crate::progress::Reporter::new().task(n_points as u64, "survey", "pts");
-    let best = std::sync::Mutex::new(f64::NEG_INFINITY);
-    let sweep = || lhs_starts.par_iter().enumerate()
-        .map(|(point_id, draw)| {
-            // Build the full parameter vector: base_params overwritten
-            // at each estimated index. Fixed params are already baked
-            // into base_params (resolve_survey_inputs).
-            let mut params = resolved.base_params.clone();
-            for spec in draw {
-                params[spec.index] = spec.initial;
-            }
-            let row = match eval_method {
-                SurveyEvalMethod::Pfilter => eval_point_pfilter(
-                    &process, obs_model.as_ref(),
-                    &params, &resolved.estimated, draw,
-                    a.eval_particles, a.eval_replicates,
-                    smc_dt, t_start, a.seed, point_id,
-                ),
-                SurveyEvalMethod::Auto => unreachable!(
-                    "Auto resolved before parallel eval loop"),
-                SurveyEvalMethod::Simulate => eval_point_simulate(
-                    &resolved.compiled, &obs_model, &obs_times,
-                    &params, &resolved.estimated, draw,
-                    smc_dt, point_id,
-                ),
-            };
-            bar.inc(1);
-            if row.loglik.is_finite() {
-                if let Ok(mut b) = best.lock() {
-                    if row.loglik > *b {
-                        *b = row.loglik;
-                        bar.set(crate::progress::best_ll(*b));
-                    }
-                }
-            }
-            row
-        })
+
+    // Evaluate a single LHS point. A point's result is a pure function of
+    // (seed, point_id) — `derive_point_seed` / `mix_cell_seed` key the RNG on
+    // the point index, not on evaluation order — so the greedy schedule below
+    // reorders WHEN points run without changing any row. `bar.inc` is the only
+    // shared-state touch; the running best is folded in single-threaded after
+    // each batch.
+    let eval_one = |point_id: usize| -> LandscapeRow {
+        let draw = &lhs_starts[point_id];
+        // Build the full parameter vector: base_params overwritten at each
+        // estimated index. Fixed params are already baked into base_params.
+        let mut params = resolved.base_params.clone();
+        for spec in draw {
+            params[spec.index] = spec.initial;
+        }
+        let row = match eval_method {
+            SurveyEvalMethod::Pfilter => eval_point_pfilter(
+                &process, obs_model.as_ref(),
+                &params, &resolved.estimated, draw,
+                a.eval_particles, a.eval_replicates,
+                smc_dt, t_start, a.seed, point_id,
+            ),
+            SurveyEvalMethod::Auto => unreachable!(
+                "Auto resolved before parallel eval loop"),
+            SurveyEvalMethod::Simulate => eval_point_simulate(
+                &resolved.compiled, &obs_model, &obs_times,
+                &params, &resolved.estimated, draw,
+                smc_dt, point_id,
+            ),
+        };
+        bar.inc(1);
+        row
+    };
+
+    // Greedy-nearest evaluation order (progressive, never early-stopping).
+    // Seed a coarse spread of points, then each round evaluate the unevaluated
+    // points nearest — in transform-normalized parameter space — to the current
+    // best-loglik point, a batch at a time so every core stays busy. Every
+    // point is still evaluated: this reorders WHEN, never WHICH, so
+    // `landscape.tsv` is byte-identical to an index-order sweep (the final sort
+    // by (loglik desc, point_id asc) is order-independent, and each point's RNG
+    // is keyed on point_id). The payoff is a live signal: the best-loglik metric
+    // climbs fast and plateaus early when the box holds a basin — an
+    // at-a-glance read on whether the survey bounds are placed well — and the
+    // good region is the part that fills in first.
+    let normed: Vec<Vec<f64>> = lhs_starts.iter()
+        .map(|draw| draw.iter().map(|ep| survey_norm_coord(ep, ep.initial)).collect())
         .collect();
+    let greedy = || {
+        let n = lhs_starts.len();
+        let n_threads = rayon::current_num_threads().max(1);
+        let batch_size = n_threads;
+        // Coarse global spread before drilling: √n, at least one full core-width.
+        let seed_size = n_threads.max((n as f64).sqrt().ceil() as usize).min(n);
+
+        let mut result: Vec<Option<LandscapeRow>> = (0..n).map(|_| None).collect();
+        let mut done = vec![false; n];
+        let mut best_point: Option<usize> = None;
+        let mut running_best = f64::NEG_INFINITY;
+        let mut n_done = 0usize;
+
+        while n_done < n {
+            // This round's batch: the seed spread first, then the unevaluated
+            // points closest to the running-best point. Ties (and the
+            // no-finite-best-yet case) fall back to ascending point_id, so the
+            // schedule is deterministic given the point set.
+            let batch: Vec<usize> = if n_done == 0 {
+                (0..seed_size).collect()
+            } else {
+                let mut remaining: Vec<usize> =
+                    (0..n).filter(|&i| !done[i]).collect();
+                if let Some(bp) = best_point {
+                    remaining.sort_by(|&x, &y| {
+                        let dx = survey_dist2(&normed[bp], &normed[x]);
+                        let dy = survey_dist2(&normed[bp], &normed[y]);
+                        dx.partial_cmp(&dy)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(x.cmp(&y))
+                    });
+                }
+                remaining.truncate(batch_size);
+                remaining
+            };
+            let batch_rows: Vec<(usize, LandscapeRow)> = batch.par_iter()
+                .map(|&pid| (pid, eval_one(pid)))
+                .collect();
+            for (pid, row) in batch_rows {
+                if row.loglik.is_finite() && row.loglik > running_best {
+                    running_best = row.loglik;
+                    best_point = Some(pid);
+                    bar.set(crate::progress::best_ll(running_best));
+                }
+                result[pid] = Some(row);
+                done[pid] = true;
+                n_done += 1;
+            }
+        }
+        result.into_iter()
+            .map(|o| o.expect("every survey point evaluated"))
+            .collect::<Vec<LandscapeRow>>()
+    };
     let rows: Vec<LandscapeRow> = match &survey_pool {
-        Some(pool) => pool.install(sweep),
-        None => sweep(),
+        Some(pool) => pool.install(greedy),
+        None => greedy(),
     };
     bar.finish();
 
@@ -996,6 +1059,28 @@ struct LandscapeRow {
     /// Mean ESS across observation times. NaN when --eval simulate.
     mean_ess: f64,
     n_replicates: usize,
+}
+
+/// Normalize a natural-scale parameter value to `[0, 1]` on the parameter's
+/// *transform* scale — the same scale the sampler and the landscape geometry
+/// live on (log for rates, logit for probabilities, linear otherwise). Used
+/// only to order survey evaluation (nearest-to-best first); it never touches a
+/// `loglik`, so the exact metric is a heuristic, not a result.
+fn survey_norm_coord(ep: &EstimatedParam, x: f64) -> f64 {
+    let zlo = ep.to_transformed(ep.lower);
+    let zhi = ep.to_transformed(ep.upper);
+    let denom = zhi - zlo;
+    if !denom.is_finite() || denom.abs() < 1e-12 {
+        return 0.0; // degenerate / near-fixed dimension contributes no distance
+    }
+    ((ep.to_transformed(x) - zlo) / denom).clamp(0.0, 1.0)
+}
+
+/// Squared Euclidean distance between two transform-normalized coordinate
+/// vectors (see [`survey_norm_coord`]). Squared because ordering only needs the
+/// monotone comparison — the sqrt would be wasted.
+fn survey_dist2(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
 #[allow(clippy::too_many_arguments)]
