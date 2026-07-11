@@ -1121,8 +1121,9 @@ built-in types cover real-world needs:
 - `piecewise` — non-repeating step function (policy changes, campaign windows)
 - `interpolated` — data-driven time series (empirical covariates)
 - `fourier` — finite Fourier series with estimable cos/sin harmonic pairs
-  (`period`, `harmonics = [(a1, b1), (a2, b2), ...]`), for smooth periodic
-  forcing richer than a single sinusoid (gh#59)
+  (`period`, `harmonics = [[a1, b1], [a2, b2], ...]` — each harmonic is a
+  2-element list), for smooth periodic forcing richer than a single sinusoid
+  (gh#59)
 - `periodic_spline` — periodic B-spline with uniform knots (`period`, `n_basis`,
   optional `degree` = 3), for flexible smooth seasonality (gh#59)
 
@@ -1165,9 +1166,9 @@ forcing {
 
   pop_trend : interpolated 'count {
     data      = "data/nga_pop.csv"
-    time_col  = year             # column holding the time axis
-    value_col = total_pop        # column holding the value axis
-    method    = "cubic_spline"   # "linear" | "cubic_spline" | "pchip"
+    time_col  = "year"           # quoted file column (outside the model)
+    value_col = "total_pop"      # quoted file column (outside the model)
+    method    = linear           # bare enum: linear | constant | spline
   }
 
   reporting_dow : periodic 'ratio {
@@ -1250,8 +1251,8 @@ once, on the forcing definition, with an optional `lag`:
 forcing {
   C : interpolated 'per_day {
     data      = "vectorial_capacity.tsv"
-    time_col  = t
-    value_col = C
+    time_col  = "t"
+    value_col = "C"
     lag       = 10 'days        # evaluate C at t − 10 days
   }
 }
@@ -1322,8 +1323,8 @@ forcing {
   seasonal  : sinusoidal   'ratio    { baseline = 1.0  amplitude = 0.3  … }
   beta_seas : sinusoidal   'per_day  { baseline = beta  amplitude = amp  … }
   school    : periodic     'ratio    { values = [0.7, 1.3, 0.7, …]  … }
-  pop       : interpolated 'count    { data = "…"  time_col = t  value_col = pop  method = "linear" }
-  birthrate : interpolated 'per_year { data = "…"  time_col = t  value_col = rate  method = "linear" }
+  pop       : interpolated 'count    { data = "…"  time_col = "t"  value_col = "pop"  method = linear }
+  birthrate : interpolated 'per_year { data = "…"  time_col = "t"  value_col = "rate"  method = linear }
 }
 ```
 
@@ -2662,7 +2663,9 @@ The `observations {}` block is evaluated at runtime in both directions.
   synthetic-data generation under `simulate`.
 
 The emission cadence is written `emit_schedule = every N 'unit` or
-`emit_schedule = at [t1, t2, ...] 'unit` (§12 examples). A bare `every`/`at`
+`emit_schedule = at [t1 'unit, t2 'unit, ...]` — the unit rides on each list
+element (e.g. `at [7 'days, 14 'days]`), not after the bracket (§12 examples).
+A bare `every`/`at`
 field at the top of an observation block is the removed pre-gh#171 form and is
 rejected with **E272** pointing at the `emit_schedule = ...` rewrite. Monthly
 incidence can be obtained natively by setting `emit_schedule = every 30 'days`
@@ -2682,7 +2685,7 @@ interventions {
   routine_vacc : transfer(fraction = vacc_rate, from = S, to = V) {
     every = 30 'days
     from  = 0 'days
-    until = 2 'years
+    to    = 2 'years
   }
 
   importation_pulse : { I_child_p1 = I_child_p1 + 10  at = [90] }
@@ -2731,11 +2734,11 @@ NAME : ACTION at [TIME, ...]     # times in model time_unit
 NAME : ACTION {
   every = DURATION             recurring interval
   from  = DURATION             start of recurring (default: t_start)
-  until = DURATION             end of recurring (default: t_end)
+  to    = DURATION             end of recurring (default: t_end)
 }
 ```
 
-**In anchored mode**, `every`, `from`, and `until` must be classified `Exact`
+**In anchored mode**, `every`, `from`, and `to` must be classified `Exact`
 (§2.1) — a `Calendar`-classified duration (e.g. `every = 1
 'months`) is
 **E322**, with a hint pointing at `every = 30 'days` for an affine ~monthly
@@ -2878,7 +2881,7 @@ trajectory and is resampled away.
 
 For `add` events and interventions that recur on a specific day within each
 period. The `every … at_day …` schedule is available only on the `add` action
-(`transfer`/`set` use the `at [...]` or `{ every = …; from = …; until = … }`
+(`transfer`/`set` use the `at [...]` or `{ every = …; from = …; to = … }`
 schedule forms instead):
 
 ```camdl
@@ -3062,7 +3065,7 @@ timepoints {
 `t_start` and `t_end` are **reserved identifiers** automatically defined from
 the `simulate` block, holding the simulation's start and end times. They are
 available in any expression — most usefully to anchor intervention or event
-schedule windows relative to the run (e.g. `from` / `until`).
+schedule windows relative to the run (e.g. `from` / `to`).
 
 If `simulate` is absent (e.g., during `camdl check`), the expander silently
 defaults `t_start = 0` and `t_end = 100`; expressions referencing them use those

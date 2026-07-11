@@ -48,9 +48,8 @@ estimable.
 ### Fixed, aperiodic
 
 `interpolated`: load `times[]` and `values[]` from a TSV (or inline);
-interpolate with `method = "linear" | "spline" |
-"constant"`. Common use:
-demographic covariates (pop(t), birthrate(t)) from census data.
+interpolate with `method = linear | spline | constant` (a bare enum). Common
+use: demographic covariates (pop(t), birthrate(t)) from census data.
 
 `piecewise`: inline step-function with explicit `breakpoints[]` and `values[]`.
 Use when the schedule is short enough to fit in the model file and a covariate

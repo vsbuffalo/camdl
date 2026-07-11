@@ -369,8 +369,8 @@ type action_decl =
 
 type schedule_decl =
   | SAtTimes of expr list
-  (** Recurring schedule: (every, from?, until?).
-      from defaults to simulate.from if None; until defaults to simulate.to. *)
+  (** Recurring schedule: (every, from?, to?).
+      from defaults to simulate.from if None; to defaults to simulate.to. *)
   | SRecurring of expr * expr option * expr option
   | SEveryAtDay of expr * expr          (* period, at_day *)
 
@@ -435,6 +435,25 @@ type contrast_decl = {
   cd_loc    : loc;
 }
 
+(* A forcing-block keyword-argument value (gh#423). The string-vs-expr
+   distinction is carried in the TYPE, confined to the forcing surface — the
+   global [expr] AST is unchanged. A quoted STRING names the outside world (a
+   data-file path or a file column) and parses to [FStr]; a bare expression
+   names something inside the model (a param, a dimension, a table, or a closed
+   enum like `method = linear`) and parses to [FExpr]. Consumers require the
+   arm that matches the kwarg's role, so `value_col = C` (bare) and
+   `table = "T"` (quoted) fail with a signposted diagnostic instead of being
+   silently indistinguishable via a `dummy_loc`. Reader's rule: quoted =
+   outside the model (file), bare = inside the model or a closed enum. *)
+type farg_value =
+  | FStr  of string   (* a quoted string: a file path or a file column name *)
+  | FExpr of expr     (* a bare expression: model value, model name, or enum *)
+
+(* The bare-expression view of a forcing arg, or [None] for a [FStr]. Readers
+   that walk "the exprs of a forcing" (unit / date analysis) use this so a
+   string literal — which carries no unit or date content — is skipped. *)
+let farg_expr_opt = function FExpr e -> Some e | FStr _ -> None
+
 type func_decl = {
   fname    : string;
   findices : index_binding list;
@@ -445,7 +464,7 @@ type func_decl = {
      'per_year`, `seasonal : sinusoidal 'ratio`. The dim-checker
      uses this authoritatively — no value-based inference fallback. *)
   funit    : unit_lit;
-  fargs    : (string * expr) list;
+  fargs    : (string * farg_value) list;
 }
 
 type output_traj_decl = {

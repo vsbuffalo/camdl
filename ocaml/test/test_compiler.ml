@@ -1924,7 +1924,7 @@ let test_intervention_transfer_count_and_fraction_rejected () =
   compile_expect_error_code ~code:"E261" ~contains:"mutually exclusive" src
 
 (* ── Recurring intervention block syntax ─────────────────────────────────
-   transfer(...) { every = T, from = T0, until = T1 } — exists alongside
+   transfer(...) { every = T, from = T0, to    = T1 } — exists alongside
    the existing at [t1, t2, ...] form. *)
 
 let test_recurring_block_transfer () =
@@ -1939,7 +1939,7 @@ let test_recurring_block_transfer () =
       routine : transfer(fraction = vacc_rate, from = S, to = V) {
         every = 30 'days
         from  = 0 'days
-        until = 365 'days
+        to    = 365 'days
       }
     }
   |} in
@@ -1955,7 +1955,7 @@ let test_recurring_block_transfer () =
      | _ -> Alcotest.fail "expected Recurring schedule")
 
 let test_recurring_kwargs_any_order () =
-  (* until / from / every in arbitrary order — all should work. *)
+  (* to / from / every in arbitrary order — all should work. *)
   let src = {|
     time_unit = 'days
     compartments { S, V }
@@ -1964,7 +1964,7 @@ let test_recurring_kwargs_any_order () =
     simulate { from = 0 'days  to = 100 'days }
     interventions {
       r : transfer(fraction = 0.1, from = S, to = V) {
-        until = 100 'days
+        to    = 100 'days
         every = 7 'days
         from  = 14 'days
       }
@@ -1993,7 +1993,7 @@ let test_recurring_unit_conversion () =
       r : transfer(fraction = 0.1, from = S, to = V) {
         every = 30 'days
         from  = 0 'days
-        until = 1 'years
+        to    = 1 'years
       }
     }
   |} in
@@ -2021,7 +2021,7 @@ let test_recurring_add_action () =
       influx : add(S, 50) {
         every = 10 'days
         from  = 0 'days
-        until = 100 'days
+        to    = 100 'days
       }
     }
   |} in
@@ -2038,7 +2038,7 @@ let test_recurring_add_action () =
      | _ -> Alcotest.fail "expected Add action")
 
 let test_recurring_default_from_until () =
-  (* 'from' and 'until' default to simulate.from / simulate.to when omitted.
+  (* 'from' and 'to' default to simulate.from / simulate.to when omitted.
      Only 'every' is required. *)
   let src = {|
     time_unit = 'days
@@ -2109,13 +2109,13 @@ let test_recurring_e240_zero_every () =
       r : transfer(fraction = 0.1, from = S, to = V) {
         every = 0 'days
         from  = 0 'days
-        until = 10 'days
+        to    = 10 'days
       }
     }
   |}
 
 let test_recurring_e241_inverted_range () =
-  compile_expect_error_code ~code:"E241" ~contains:"must be <= 'until'" {|
+  compile_expect_error_code ~code:"E241" ~contains:"must be <= 'to'" {|
     time_unit = 'days
     compartments { S, V }
     transitions {}
@@ -2125,7 +2125,7 @@ let test_recurring_e241_inverted_range () =
       r : transfer(fraction = 0.1, from = S, to = V) {
         every = 1 'days
         from  = 20 'days
-        until = 10 'days
+        to    = 10 'days
       }
     }
   |}
@@ -2142,7 +2142,7 @@ let test_recurring_e242_schedule_too_long () =
       r : transfer(fraction = 0.1, from = S, to = V) {
         every = 0.000001 'days
         from  = 0 'days
-        until = 10 'days
+        to    = 10 'days
       }
     }
   |}
@@ -2565,8 +2565,8 @@ let test_l403_fires_on_div_conversion () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
-      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
+      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = linear }
     }
     transitions {
       births : S --> I @ birthrate(t) * popsize(t) / 365.25
@@ -2595,7 +2595,7 @@ let test_l403_fires_on_reciprocal_mul () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       births : S --> I @ birthrate(t) * (1 / 365.25) * S
@@ -2621,7 +2621,7 @@ let test_l403_no_fire_on_plain_use () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       births : S --> I @ birthrate(t) * S
@@ -2646,8 +2646,8 @@ let test_l403_no_fire_on_non_rate_forcing () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      seasonal : interpolated 'ratio { times = [0, 100]  values = [1.0, 1.2]  method = "linear" }
-      popsize  : interpolated 'count { times = [0, 100]  values = [1000, 1100]  method = "linear" }
+      seasonal : interpolated 'ratio { times = [0, 100]  values = [1.0, 1.2]  method = linear }
+      popsize  : interpolated 'count { times = [0, 100]  values = [1000, 1100]  method = linear }
     }
     transitions {
       a : S --> I @ seasonal(t) / 365.25 * R0 * S
@@ -2693,7 +2693,7 @@ let test_gh345_indexed_file_backed_forcing () =
     forcing {
       cforce[p in patch] : interpolated 'ratio {
         data = "camdl_gh345_temps.tsv"
-        key_col = patch  time_col = week  value_col = cval  method = "linear"
+        key_col = "patch"  time_col = "week"  value_col = "cval"  method = linear
       }
     }
     transitions {
@@ -2757,7 +2757,7 @@ let test_gh345_table_backed_forcing () =
       cforce[p in patch] : interpolated 'ratio {
         table    = temp_data
         time_dim = climate_week
-        method   = "linear"
+        method   = linear
       }
     }
     transitions {
@@ -2822,7 +2822,7 @@ let test_gh345_table_unaccounted_dim_rejected () =
       cforce[p in patch] : interpolated 'ratio {
         table    = clim
         time_dim = week
-        method   = "linear"
+        method   = linear
       }
     }
     transitions {
@@ -2854,7 +2854,7 @@ let test_l403_no_fire_on_unrelated_div () =
       mu : rate in [0.001, 1.0]
     }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       decay : I --> S @ mu * S / 365.25
@@ -2880,8 +2880,8 @@ let test_l403_fires_via_hoisted_binding () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
-      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
+      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = linear }
     }
     let birth_flow = birthrate(t) * popsize(t) / 365.25
     transitions {
@@ -2913,7 +2913,7 @@ let test_l403_no_fire_on_same_unit_forcing () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      rate_pd : interpolated 'per_day { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      rate_pd : interpolated 'per_day { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       x : S --> I @ rate_pd(t) * S / 60
@@ -2941,7 +2941,7 @@ let test_l403_no_fire_on_structural_divisor () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      import_rate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      import_rate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       imp : S --> I @ import_rate(t) * S / 12
@@ -3456,7 +3456,7 @@ let test_forcing_with_literal_lag () =
       vc : interpolated 'ratio {
         times  = [0.0, 10.0, 20.0]
         values = [1.0, 2.0, 3.0]
-        method = "linear"
+        method = linear
         lag    = 10 'days
       }
     }
@@ -3495,7 +3495,7 @@ let test_forcing_with_param_lag () =
       vc : interpolated 'ratio {
         times  = [0.0, 10.0, 20.0]
         values = [1.0, 2.0, 3.0]
-        method = "linear"
+        method = linear
         lag    = tau
       }
     }
@@ -5592,7 +5592,7 @@ let test_interpolated_iso_date_time_col () =
     compartments { S }
     parameters { dummy : rate }
     forcing {
-      eff : interpolated 'count { data = "%s"  time_col = time  value_col = value  method = "linear" }
+      eff : interpolated 'count { data = "%s"  time_col = "time"  value_col = "value"  method = linear }
     }
     transitions { drain : S --> @ dummy * eff * S }
     init { S = 100 }
@@ -5619,7 +5619,7 @@ let test_interpolated_numeric_time_col () =
     compartments { S }
     parameters { dummy : rate }
     forcing {
-      eff : interpolated 'count { data = "%s"  time_col = day  value_col = value  method = "linear" }
+      eff : interpolated 'count { data = "%s"  time_col = "day"  value_col = "value"  method = linear }
     }
     transitions { drain : S --> @ dummy * eff * S }
     init { S = 100 }
@@ -5644,7 +5644,7 @@ let test_interpolated_iso_date_no_origin_errors () =
     compartments { S }
     parameters { dummy : rate }
     forcing {
-      eff : interpolated 'count { data = "%s"  time_col = time  value_col = value  method = "linear" }
+      eff : interpolated 'count { data = "%s"  time_col = "time"  value_col = "value"  method = linear }
     }
     transitions { drain : S --> @ dummy * eff * S }
     init { S = 100 }
@@ -6535,7 +6535,7 @@ let test_origin_absent_no_rata_die () =
    Rules tested below:
      E320 — time_unit = 'months/'years under `origin = date(...)`.
      E321 — Instant + CalendarDuration (literal or `let`-laundered).
-     E322 — Calendar duration in recurring schedule `every`/`from`/`until`.
+     E322 — Calendar duration in recurring schedule `every`/`from`/`to`.
      E323 — Bare-numeric entries inside `on=[...]` of a periodic forcing
             in anchored mode.
      W324 — Bare-numeric `simulate.from` / `simulate.to` in anchored mode.
@@ -7589,6 +7589,121 @@ let test_forcing_known_kwargs_ok () =
   | Ok _ -> ()
   | Error e -> Alcotest.failf "forcing with only known kwargs should compile, got: %s" e
 
+(* ── gh#423: typed forcing arg values (FStr | FExpr) ──────────────────────────
+   A quoted STRING in a forcing kwarg names the outside world (a data file or a
+   file column); a bare word names something inside the model (a param, a table,
+   a dimension) or a closed enum. Consumers require the arm matching each
+   kwarg's role, so `value_col = C` (bare) → E410, `method = "linear"` (quoted)
+   → E411, `method = banana` → E411; the happy paths (`method = linear`, quoted
+   selectors) compile. Proposal: docs/dev/proposals/2026-07-10-dsl-surface-consistency.md §1.2. *)
+let gh423_inline_forcing extra = {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    forcing {
+      cov : interpolated 'ratio {
+        times = [0, 100, 200]
+        values = [1.0, 1.5, 1.2]
+|} ^ extra ^ {|
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * cov(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |}
+
+let test_forcing_method_bare_linear_ok () =
+  match Compiler.compile ~name:"m_ok" (gh423_inline_forcing "        method = linear\n") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "bare `method = linear` should compile, got: %s" e
+
+let test_forcing_method_quoted_e411 () =
+  compile_expect_error_code ~code:"E411" ~contains:"bare enum"
+    (gh423_inline_forcing "        method = \"linear\"\n")
+
+let test_forcing_method_unknown_e411 () =
+  compile_expect_error_code ~code:"E411" ~contains:"banana"
+    (gh423_inline_forcing "        method = banana\n")
+
+(* A file-backed forcing whose time_col/value_col literals are spliced in, so a
+   bare (unquoted) selector can be contrasted with the quoted form. Writes its
+   data file to a temp dir the model's `data =` path resolves against. *)
+let gh423_file_forcing ~time_col ~value_col =
+  let dir = Filename.get_temp_dir_name () in
+  let tsv = Filename.concat dir "camdl_gh423_cov.tsv" in
+  let oc  = open_out tsv in
+  output_string oc "t\tforce\n0\t1.0\n100\t1.5\n200\t1.2\n";
+  close_out oc;
+  let src = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    forcing {
+      cov : interpolated 'ratio {
+        data      = "camdl_gh423_cov.tsv"
+        time_col  = %s
+        value_col = %s
+        method    = linear
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * cov(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |} time_col value_col in
+  Compiler.compile ~name:"gh423f" ~filename:(Filename.concat dir "m.camdl") src
+
+let test_forcing_selector_quoted_ok () =
+  match gh423_file_forcing ~time_col:"\"t\"" ~value_col:"\"force\"" with
+  | Ok _    -> ()
+  | Error e -> Alcotest.failf "quoted file-column selectors should compile, got: %s" e
+
+let test_forcing_selector_bare_e410 () =
+  Diagnostics.json_errors_mode := true;
+  let r = gh423_file_forcing ~time_col:"\"t\"" ~value_col:"force" in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _    -> Alcotest.failf "a bare `value_col = force` selector should be rejected (E410)"
+  | Error e ->
+    if not (contains_substring ~needle:"E410" e) then
+      Alcotest.failf "expected E410, got: %s" e;
+    if not (contains_substring ~needle:"quoted column name" e) then
+      Alcotest.failf "E410 must name the quote fix, got: %s" e
+
+(* ── gh#423 schedule cleanup: retire `until` → `to` ───────────────────────────
+   The recurring window end is now spelled `to` everywhere (matching `set`
+   blocks and `simulate { from … to … }`). `until` is rejected with a migration
+   diagnostic (E113) that names the rewrite, not a bare E001. *)
+let gh423_sched_model end_kw = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, V, I, R }
+    parameters { beta : rate  gamma : rate }
+    interventions {
+      vacc : transfer(fraction = 0.1, from = S, to = V) { every = 30 'days  from = 0 'days  %s = 90 'days }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 365 'days }
+  |} end_kw
+
+let test_schedule_to_recurring_ok () =
+  match Compiler.compile ~name:"sched_to" (gh423_sched_model "to") with
+  | Ok _    -> ()
+  | Error e -> Alcotest.failf "`to = ` recurring window end should compile, got: %s" e
+
+let test_schedule_until_migration_e113 () =
+  compile_expect_error_code ~code:"E113" ~contains:"until"
+    (gh423_sched_model "until")
+
 (* ── Phase 0: unknown-unit E102 is reachable (was dead code) ──────────────────
    Before: the lexer emitted UNIT_IDENT only for ten hardcoded literals, so a
    typo'd unit like `'per_capita` never reached the parser — it died on the
@@ -8400,9 +8515,9 @@ let forcing_data_model ~path =
     forcing {
       clim : interpolated 'ratio {
         data      = "%s"
-        time_col  = t
-        value_col = force
-        method    = "linear"
+        time_col  = "t"
+        value_col = "force"
+        method    = linear
       }
     }
     transitions {
@@ -9050,15 +9165,15 @@ let () =
         `Quick test_reactive_unknown_action_target_rejected;
     ];
     "recurring_interventions", [
-      Alcotest.test_case "transfer(...) { every, from, until }"     `Quick test_recurring_block_transfer;
+      Alcotest.test_case "transfer(...) { every, from, to }"     `Quick test_recurring_block_transfer;
       Alcotest.test_case "kwargs accepted in any order"             `Quick test_recurring_kwargs_any_order;
       Alcotest.test_case "unit conversion applies to interval args" `Quick test_recurring_unit_conversion;
-      Alcotest.test_case "add(...) { every, from, until } in events" `Quick test_recurring_add_action;
-      Alcotest.test_case "from / until default to simulation bounds" `Quick test_recurring_default_from_until;
+      Alcotest.test_case "add(...) { every, from, to } in events" `Quick test_recurring_add_action;
+      Alcotest.test_case "from / to default to simulation bounds" `Quick test_recurring_default_from_until;
       Alcotest.test_case "at [...] form still compiles (regression)" `Quick test_recurring_at_times_still_works;
       Alcotest.test_case "E213 block transition missing rate is rejected" `Quick test_block_transition_missing_rate_e213;
       Alcotest.test_case "E240 every = 0 is rejected"               `Quick test_recurring_e240_zero_every;
-      Alcotest.test_case "E241 from > until is rejected"            `Quick test_recurring_e241_inverted_range;
+      Alcotest.test_case "E241 from > to is rejected"            `Quick test_recurring_e241_inverted_range;
       Alcotest.test_case "E242 expanded schedule too long"          `Quick test_recurring_e242_schedule_too_long;
     ];
     "scenario_extends", [
@@ -9427,6 +9542,24 @@ let () =
         `Quick test_forcing_unknown_kwarg_e409;
       Alcotest.test_case "known forcing kwargs still compile"
         `Quick test_forcing_known_kwargs_ok;
+    ];
+    "forcing_typed_args_gh423", [
+      Alcotest.test_case "method = linear (bare, valid) compiles"
+        `Quick test_forcing_method_bare_linear_ok;
+      Alcotest.test_case "method = \"linear\" (quoted) → E411 bare-enum migration"
+        `Quick test_forcing_method_quoted_e411;
+      Alcotest.test_case "method = banana (unknown value) → E411"
+        `Quick test_forcing_method_unknown_e411;
+      Alcotest.test_case "quoted file-column selectors compile"
+        `Quick test_forcing_selector_quoted_ok;
+      Alcotest.test_case "bare value_col = force → E410 quote-the-column"
+        `Quick test_forcing_selector_bare_e410;
+    ];
+    "schedule_until_to_gh423", [
+      Alcotest.test_case "recurring `to = ` window end compiles"
+        `Quick test_schedule_to_recurring_ok;
+      Alcotest.test_case "recurring `until = ` → E113 until→to migration"
+        `Quick test_schedule_until_migration_e113;
     ];
     "block_separators", [
       Alcotest.test_case "comma between `parameters` members → directional E001"

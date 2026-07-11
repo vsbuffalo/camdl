@@ -518,8 +518,24 @@ func_decl:
 func_args:
   | kvs = list(func_arg) { kvs }
 
+(* A forcing kwarg's value carries the string-vs-expr distinction in the TYPE
+   (gh#423): a quoted STRING RHS is an [FStr] (a data-file path or file column),
+   any other expression is an [FExpr] (a model value, a model name, or a closed
+   enum like `method = linear`). The consumers in `expand_time_function_one`
+   require the arm matching each kwarg's role. A lone STRING resolves to [FStr]
+   here rather than to `expr`'s `STRING -> EIdent(_, dummy_loc)` atom — this is
+   the whole point of gh#423 (kill the dummy_loc discriminator).
+
+   Grammar note: the two rules overlap on a lone STRING (which `expr` can also
+   derive via the `STRING` atom needed for `date("…")`/`read("…")` args), so
+   menhir reports one reduce/reduce conflict in this state, resolved in favour
+   of the FIRST rule — i.e. [FStr]. That is exactly the wanted semantics (a
+   quoted forcing value is always a string), and the resolution is deterministic
+   as long as the FStr rule precedes the FExpr rule here. A bare STRING never
+   starts a compound expression in a forcing value, so nothing else is lost. *)
 func_arg:
-  | k = IDENT EQ v = expr { (k, v) }
+  | k = IDENT EQ s = STRING { (k, FStr s) }
+  | k = IDENT EQ v = expr   { (k, FExpr v) }
 
 (* ── Transitions block ──────────────────────────────────────────────────── *)
 
@@ -870,7 +886,7 @@ intervention_decl:
   | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
-  (* transfer(...) { every = T, from = T0, until = T1 } — recurring schedule *)
+  (* transfer(...) { every = T, from = T0, to = T1 } — recurring schedule *)
   | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
@@ -878,7 +894,7 @@ intervention_decl:
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
-  (* add(COMP, EXPR) { every = T, from = T0, until = T1 } — recurring schedule *)
+  (* add(COMP, EXPR) { every = T, from = T0, to = T1 } — recurring schedule *)
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
@@ -969,11 +985,11 @@ recurring_body:
   | kvs = list(recurring_kv)
       { let every = ref None in
         let from_ = ref None in
-        let until = ref None in
+        let end_  = ref None in
         List.iter (function
           | `Every e  -> every := Some e
-          | `From  e  -> from_  := Some e
-          | `Until e  -> until := Some e
+          | `From  e  -> from_ := Some e
+          | `End   e  -> end_  := Some e
         ) kvs;
         let every_e = match !every with
           | Some e -> e
@@ -983,13 +999,23 @@ recurring_body:
               ~msg:"recurring schedule missing required 'every = ...'";
             EConst 1.0
         in
-        (* from and until default to simulate.from / simulate.to respectively. *)
-        SRecurring (every_e, !from_, !until) }
+        (* from and to default to simulate.from / simulate.to respectively. *)
+        SRecurring (every_e, !from_, !end_) }
 
 recurring_kv:
   | EVERY EQ e = expr  { `Every e }
   | FROM  EQ e = expr  { `From  e }
-  | UNTIL EQ e = expr  { `Until e }
+  | TO    EQ e = expr  { `End   e }
+  (* Migration (gh#423 schedule cleanup): the recurring window end was spelled
+     `until` in a `transfer`/`add` body but `to` in a `set` block and in
+     `simulate { from … to … }`. `to` is now the only spelling; reject `until`
+     with the rewrite, not a bare E001. *)
+  | UNTIL EQ e = expr
+      { Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+          ~code:"E113"
+          ~msg:"`until` is now `to`"
+          ~hint:"write `to = <time>` for the recurring window end — see `camdl docs language-changes`";
+        `End e }
 
 transfer_kwarg:
   | k = IDENT EQ e = expr { (k, e) }
