@@ -5518,6 +5518,31 @@ let expand_time_function_one ctx fname (env : (string * string) list)
       end
     end
   in
+  (* gh#423 companion: reject unknown forcing kwargs (no loose semantics). The
+     forcing arg handler was the one kwarg surface in the compiler that silently
+     ignored typos — `value_column = C` was dropped and the selector fell back
+     to its default. Each kind's accepted keys are listed below; `lag` applies
+     to every kind. An unknown kind is left to the E408 default arm. *)
+  (match (match fkind with
+          | "sinusoidal"      -> Some ["amplitude"; "period"; "phase"; "baseline"]
+          | "piecewise"       -> Some ["breakpoints"; "values"]
+          | "interpolated"    -> Some ["method"; "data"; "time_col"; "value_col";
+                                       "key_col"; "table"; "time_dim"; "times"; "values"]
+          | "periodic"        -> Some ["period"; "on"; "step"; "values"]
+          | "fourier"         -> Some ["period"; "harmonics"]
+          | "periodic_spline" -> Some ["period"; "n_basis"; "degree"; "coefs"]
+          | _                 -> None) with
+   | None -> ()
+   | Some keys ->
+     let known = "lag" :: keys in
+     List.iter (fun (k, _) ->
+       if not (List.mem k known) then
+         Diagnostics.error ctx.diags ~code:"E409" ~loc:Diagnostics.no_loc
+           ~message:(Printf.sprintf
+             "forcing '%s': `%s` forcing has no argument '%s'" fname fkind k)
+           ~hint:(Printf.sprintf "accepted arguments: %s, lag"
+                    (String.concat ", " keys))
+           ()) fargs);
   let kind = match fkind with
     | "sinusoidal" ->
       Ir.Sinusoidal {
