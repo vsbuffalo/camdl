@@ -1074,12 +1074,17 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }).collect();
 
     // The profile-base segment is shared across all jobs — a path segment
-    // with no base-level record (guardrail 2). Write the provenance sidecar
-    // there once (guardrail 4: resolved_priors/estimated/data_hashes carried
-    // with no silent default; not identity-bearing).
-    if let Some((_, _, _, resolved0, _)) = resolved_jobs.first() {
-        let base_seg = runid::store_path(
-            &root, runid::ArtifactKind::ProfilePoint, &resolved0.levels[..1]);
+    // with no base-level record (guardrail 2). It roots the provenance sidecar
+    // and the run-level liveness heartbeat below. `None` only when there are no
+    // jobs at all (empty grid), in which case there is nothing to monitor.
+    let base_seg: Option<std::path::PathBuf> = resolved_jobs.first().map(|(_, _, _, resolved0, _)| {
+        runid::store_path(&root, runid::ArtifactKind::ProfilePoint, &resolved0.levels[..1])
+    });
+
+    // Write the provenance sidecar there once (guardrail 4:
+    // resolved_priors/estimated/data_hashes carried with no silent default; not
+    // identity-bearing).
+    if let Some(base_seg) = &base_seg {
         let sidecar = crate::run_meta::FitSidecar {
             label: label_arg.clone(),
             model_path: ir_path.clone(),
@@ -1101,7 +1106,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // skips when the path isn't a file, i.e. a CLI-only profile).
         let archive_src = a.fit.clone().unwrap_or_else(|| std::path::PathBuf::from(""));
         if let Err(e) = crate::run_meta::write_fit_sidecar(
-            &base_seg, &archive_src, &sidecar)
+            base_seg, &archive_src, &sidecar)
         {
             eprintln!("warning: cannot write profile sidecar {}: {}",
                 base_seg.display(), e);
@@ -1126,6 +1131,23 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         eprintln!("profile: {} of {} starts already cached — resuming",
             cached.len(), total_jobs);
         bar.inc(cached.len() as u64);
+    }
+
+    // gh#278: run-level liveness heartbeat, so `camdl-watcher` can monitor a
+    // profile the way it monitors a fit stage. One `progress.json` at the
+    // profile base dir (`Phase::Profiling`, `total` = all jobs), stepped as
+    // cells finalize; its `updated_at` freshness is the liveness signal and a
+    // crashed run's last beat goes stale rather than lying "done". The step
+    // counter is shared across the parallel sweep; cached jobs count as already
+    // done. `None` for an empty grid (nothing to monitor).
+    let completed = std::sync::atomic::AtomicU64::new(cached.len() as u64);
+    let heartbeat: Option<io::progress::Heartbeat> = base_seg.as_ref().map(|dir| {
+        let _ = std::fs::create_dir_all(dir);
+        io::progress::Heartbeat::profiling(
+            dir.clone(), total_jobs as u64, std::time::Duration::from_secs(5))
+    });
+    if let Some(h) = &heartbeat {
+        h.bump(completed.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     // gh#audit-H13: --parallel / CAMDL_PARALLEL throttles the rayon thread
@@ -1627,6 +1649,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // Passive progress tick. `Task` handles Pretty (redraw) / Plain
         // (throttled `profile pos/len` log line) / None (no-op) internally.
         bar.inc(1);
+        // gh#278: advance the run-level heartbeat as this cell finalizes.
+        if let Some(h) = &heartbeat {
+            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            h.bump(done);
+        }
 
     });
     };
@@ -1636,6 +1663,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     }
 
     bar.finish();
+    // gh#278: terminal beat — the run completed. A crash before here leaves the
+    // last `Running` beat to go stale, which the watcher reads as dead.
+    if let Some(h) = heartbeat {
+        h.finish(io::progress::RunState::Done);
+    }
 
     // gh#147 (M3.3): the per-seed profile.tsv curve + the cross-seed
     // summary.tsv are cross-point / cross-seed aggregates with no home in the
