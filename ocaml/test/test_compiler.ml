@@ -7554,6 +7554,41 @@ let test_sep_canonical_separators_compile () =
   | Ok _ -> ()
   | Error e -> Alcotest.failf "canonical separators should compile, got: %s" e
 
+(* ── Phase 0 (gh#423 companion): forcing unknown-kwarg rejection ──────────────
+   The forcing arg handler was the one kwarg surface that silently ignored a
+   typo — `value_column = ...` (for `value_col`) was dropped and the selector
+   fell back to its default. It is now an E409 naming the unknown key. *)
+let forcing_kwarg_model extra_kw = {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    forcing {
+      cov : interpolated 'ratio {
+        times = [0, 100, 200]
+        values = [1.0, 1.5, 1.2]
+|} ^ extra_kw ^ {|
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * cov(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |}
+
+let test_forcing_unknown_kwarg_e409 () =
+  compile_expect_error_all ~code:"E409"
+    ~contains:["value_column"; "cov"]
+    (forcing_kwarg_model "        value_column = 3\n")
+
+let test_forcing_known_kwargs_ok () =
+  (* The same model with only recognized kwargs (times/values) compiles — the
+     unknown-kwarg check does not reject valid arguments. *)
+  match Compiler.compile ~name:"forcing_ok" (forcing_kwarg_model "") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "forcing with only known kwargs should compile, got: %s" e
+
 (* ── Phase 0: unknown-unit E102 is reachable (was dead code) ──────────────────
    Before: the lexer emitted UNIT_IDENT only for ten hardcoded literals, so a
    typo'd unit like `'per_capita` never reached the parser — it died on the
@@ -9386,6 +9421,12 @@ let () =
         `Quick test_unknown_unit_literal_e102;
       Alcotest.test_case "known unit 'per_day still lexes and compiles"
         `Quick test_known_unit_literal_still_ok;
+    ];
+    "forcing_kwargs", [
+      Alcotest.test_case "E409 unknown forcing kwarg (value_column typo) errors"
+        `Quick test_forcing_unknown_kwarg_e409;
+      Alcotest.test_case "known forcing kwargs still compile"
+        `Quick test_forcing_known_kwargs_ok;
     ];
     "block_separators", [
       Alcotest.test_case "comma between `parameters` members → directional E001"
