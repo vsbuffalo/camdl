@@ -7474,6 +7474,44 @@ let test_simulate_unknown_key_errors () =
     simulate { from = 0 'days  to = 100 'days  step = 0.5 }
   |})
 
+(* ── Phase 0: unknown-unit E102 is reachable (was dead code) ──────────────────
+   Before: the lexer emitted UNIT_IDENT only for ten hardcoded literals, so a
+   typo'd unit like `'per_capita` never reached the parser — it died on the
+   catch-all as a raw `unexpected character '''` lex error, and the friendly
+   E102 "unknown unit" production in `unit_lit` was unreachable dead code.
+   After: the lexer lexes a general `'<name>` into UNIT_IDENT, so the typo
+   reaches `unit_lit` and fires E102 with its "expected one of …" list. *)
+let test_unknown_unit_literal_e102 () =
+  compile_expect_error_code ~code:"E102" ~contains:"per_capita"
+    {|
+    compartments { S, I, R }
+    parameters { beta : positive 'per_capita  gamma : rate }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |}
+
+(* The ten known unit literals still lex identically through the general rule —
+   a model using `'per_day` compiles without an E102. *)
+let test_known_unit_literal_still_ok () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : positive 'per_day  gamma : rate }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |} in
+  match Compiler.compile ~name:"known_unit" src with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "model with 'per_day should compile, got: %s" e
+
 (* ── gh#181 step 1: structured, non-raising compile_outcome ──────────────────
    compile_outcome returns every diagnostic as a value and never raises;
    on a POST-EXPANSION error (Validate E507) both surfaces return it as a
@@ -9262,5 +9300,11 @@ let () =
         `Quick test_simulate_dt_unit_aware;
       Alcotest.test_case "E106 unknown simulate key (typo) errors"
         `Quick test_simulate_unknown_key_errors;
+    ];
+    "unit_literals", [
+      Alcotest.test_case "E102 typo'd unit 'per_capita is a diagnostic, not a lex error"
+        `Quick test_unknown_unit_literal_e102;
+      Alcotest.test_case "known unit 'per_day still lexes and compiles"
+        `Quick test_known_unit_literal_still_ok;
     ];
   ]
