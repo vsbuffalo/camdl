@@ -7474,6 +7474,86 @@ let test_simulate_unknown_key_errors () =
     simulate { from = 0 'days  to = 100 'days  step = 0.5 }
   |})
 
+(* Like [compile_expect_error_code] but asserts several substrings are all
+   present in the diagnostic payload (code + directional message + block name). *)
+let compile_expect_error_all ~code ~contains src =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"sep_err" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.failf "expected error %s but compile succeeded" code
+  | Error e ->
+    if not (contains_substring ~needle:code e) then
+      Alcotest.failf "expected error code %s, got: %s" code e;
+    List.iter (fun n ->
+      if not (contains_substring ~needle:n e) then
+        Alcotest.failf "expected error to contain %S, got: %s" n e) contains
+
+(* ── Phase 0 (gh#414): directional block-separator diagnostics ────────────────
+   A stray comma between members of a WHITESPACE block, or a missing comma
+   between `compartments` members, was a bare `E001 syntax error`. It is now a
+   directional E001 naming the block and the fix. These assert the new message
+   fires; a bare E001 contains neither "separates members with whitespace" nor
+   "comma-separated". *)
+let sep_model_compartments = "compartments { S, I, R }\n"
+let sep_model_rest = {|
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |}
+
+let test_sep_comma_in_parameters () =
+  compile_expect_error_all ~code:"E001"
+    ~contains:["separates members with whitespace"; "parameters"]
+    (sep_model_compartments
+     ^ "parameters { beta : rate, gamma : rate }\n"
+     ^ sep_model_rest)
+
+let test_sep_comma_in_transitions () =
+  compile_expect_error_all ~code:"E001"
+    ~contains:["separates members with whitespace"; "transitions"]
+    (sep_model_compartments
+     ^ "parameters { beta : rate  gamma : rate }\n"
+     ^ {|
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N,
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |})
+
+let test_sep_comma_in_dimensions () =
+  compile_expect_error_all ~code:"E001"
+    ~contains:["separates members with whitespace"; "dimensions"]
+    ({|
+    dimensions { age = [young, old], region = [north, south] }
+    |}
+     ^ sep_model_compartments
+     ^ "parameters { beta : rate  gamma : rate }\n"
+     ^ sep_model_rest)
+
+let test_sep_missing_comma_in_compartments () =
+  compile_expect_error_all ~code:"E001"
+    ~contains:["comma-separated"; "compartments"]
+    ("compartments { S I R }\n"
+     ^ "parameters { beta : rate  gamma : rate }\n"
+     ^ sep_model_rest)
+
+(* Golden-neutral guard: the canonical separators (comma-separated compartments,
+   whitespace-separated parameters/transitions) still compile with no error. *)
+let test_sep_canonical_separators_compile () =
+  let src =
+    sep_model_compartments
+    ^ "parameters { beta : rate  gamma : rate }\n"
+    ^ sep_model_rest in
+  match Compiler.compile ~name:"sep_ok" src with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "canonical separators should compile, got: %s" e
+
 (* ── Phase 0: unknown-unit E102 is reachable (was dead code) ──────────────────
    Before: the lexer emitted UNIT_IDENT only for ten hardcoded literals, so a
    typo'd unit like `'per_capita` never reached the parser — it died on the
@@ -9306,5 +9386,17 @@ let () =
         `Quick test_unknown_unit_literal_e102;
       Alcotest.test_case "known unit 'per_day still lexes and compiles"
         `Quick test_known_unit_literal_still_ok;
+    ];
+    "block_separators", [
+      Alcotest.test_case "comma between `parameters` members → directional E001"
+        `Quick test_sep_comma_in_parameters;
+      Alcotest.test_case "comma between `transitions` members → directional E001"
+        `Quick test_sep_comma_in_transitions;
+      Alcotest.test_case "comma between `dimensions` members → directional E001"
+        `Quick test_sep_comma_in_dimensions;
+      Alcotest.test_case "missing comma between `compartments` members → directional E001"
+        `Quick test_sep_missing_comma_in_compartments;
+      Alcotest.test_case "canonical separators still compile (golden-neutral)"
+        `Quick test_sep_canonical_separators_compile;
     ];
   ]

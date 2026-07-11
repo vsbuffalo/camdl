@@ -1,6 +1,28 @@
 %{
   open Ast
 
+  (* gh#414 — directional block-separator diagnostics. A `{}` block is either a
+     comma-separated SET (`compartments`) or a whitespace/newline-separated
+     STATEMENT LIST (everything else). Getting the separator wrong is otherwise
+     a bare `E001 syntax error`; these two helpers turn it into a diagnostic
+     that names the block and the fix. The offending token sits at the tail of
+     the reported span, so the caret localizes to it.
+
+     [comma_sep_error]: a stray comma between members of a whitespace block. *)
+  let comma_sep_error ~sp ~ep block =
+    Parser_errors.push_error ~sp ~ep ~code:"E001"
+      ~msg:(Printf.sprintf
+        "`%s` separates members with whitespace or newlines, not commas — \
+         put each member on its own line. See `camdl docs language-changes`."
+        block)
+
+  (* [compartment_missing_comma_error]: two adjacent compartment names with no
+     comma between them. `compartments` is the sole comma-separated block. *)
+  let compartment_missing_comma_error ~sp ~ep =
+    Parser_errors.push_error ~sp ~ep ~code:"E001"
+      ~msg:"`compartments` members are comma-separated — write \
+            `compartments { S, I, R }`. See `camdl docs language-changes`."
+
   let extract_ident_list = function
     | EList items -> List.filter_map (function EIdent (n, _) -> Some n | _ -> None) items
     | _ -> []
@@ -186,7 +208,7 @@ declaration:
             ~code:"E101"
             ~msg:"invalid origin declaration: expected origin = date(\"YYYY-MM-DD\")";
           DOrigin "" }
-  | DIMENSIONS LBRACE es = list(dim_entry) RBRACE
+  | DIMENSIONS LBRACE es = list(dim_entry_sep) RBRACE
       { DDimensions es }
   | COMPARTMENTS LBRACE cs = compartment_list RBRACE
       { DCompartments cs }
@@ -208,7 +230,7 @@ declaration:
       { DInterventions ivs }
   | EVENTS LBRACE evs = intervention_list RBRACE
       { DEvents evs }
-  | REACTIVE_INTERVENTIONS LBRACE rxs = list(reactive_decl) RBRACE
+  | REACTIVE_INTERVENTIONS LBRACE rxs = list(reactive_decl_sep) RBRACE
       { DReactiveInterventions rxs }
   | ODE LBRACE odes = ode_list RBRACE
       { DODE odes }
@@ -262,8 +284,21 @@ doc_opt:
 
 (* ── Compartment block ──────────────────────────────────────────────────── *)
 
+(* `compartments` is the sole comma-separated block. Two adjacent names with
+   no comma (`compartments { S I R }`) would otherwise be a bare E001; the
+   [compartment_tail] missing-comma alternative recovers and fires a directional
+   diagnostic pointing at the second name. A trailing comma stays an E001 (the
+   set/statement split; forgiving it is a separate, deliberate change). *)
 compartment_list:
-  | cs = separated_list(COMMA, compartment_decl) { cs }
+  |                                            { [] }
+  | c = compartment_decl cs = compartment_tail { c :: cs }
+
+compartment_tail:
+  | (* empty *)                                       { [] }
+  | COMMA c = compartment_decl cs = compartment_tail  { c :: cs }
+  | c = compartment_decl cs = compartment_tail
+      { compartment_missing_comma_error ~sp:$startpos(c) ~ep:$endpos(c);
+        c :: cs }
 
 compartment_decl:
   | d = doc_opt name = IDENT kind = compartment_kind_opt
@@ -278,7 +313,15 @@ compartment_kind_opt:
 (* ── Parameter block ────────────────────────────────────────────────────── *)
 
 param_list:
-  | ps = list(param_decl) { ps }
+  | ps = list(param_decl_sep) { ps }
+
+(* Whitespace-block member wrapper (gh#414): a stray comma between members is
+   caught here and reported directionally instead of as a bare E001. Same shape
+   as the scenario `set`/`scale` recovery below; the comma sits at the tail of
+   the member's span so the caret localizes to it. *)
+param_decl_sep:
+  | p = param_decl       { p }
+  | p = param_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "parameters"; p }
 
 param_decl:
   (* scalar, no bounds, no prior *)
@@ -424,7 +467,11 @@ param_kind:
 (* ── Table block ────────────────────────────────────────────────────────── *)
 
 table_list:
-  | ts = list(table_decl) { ts }
+  | ts = list(table_decl_sep) { ts }
+
+table_decl_sep:
+  | t = table_decl       { t }
+  | t = table_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "tables"; t }
 
 table_decl:
   | names = separated_nonempty_list(COMMA, IDENT) COLON dims = table_dims_nonempty COLON kind = param_kind EQ v = expr
@@ -453,7 +500,11 @@ table_dim_entry:
 (* ── Function block ─────────────────────────────────────────────────────── *)
 
 func_list:
-  | fs = list(func_decl) { fs }
+  | fs = list(func_decl_sep) { fs }
+
+func_decl_sep:
+  | f = func_decl       { f }
+  | f = func_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "forcing"; f }
 
 func_decl:
   (* Required tier-3 unit literal between kind and block — e.g.
@@ -473,7 +524,11 @@ func_arg:
 (* ── Transitions block ──────────────────────────────────────────────────── *)
 
 transition_list:
-  | trs = list(transition_decl) { trs }
+  | trs = list(transition_decl_sep) { trs }
+
+transition_decl_sep:
+  | t = transition_decl       { t }
+  | t = transition_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "transitions"; t }
 
 transition_decl:
   (* inline: [#[lineage]] name[...] : srcs --> dsts @ rate where guard.
@@ -662,7 +717,11 @@ index_binding:
 (* ── Observations block ─────────────────────────────────────────────────── *)
 
 obs_list:
-  | obs = list(obs_decl) { obs }
+  | obs = list(obs_decl_sep) { obs }
+
+obs_decl_sep:
+  | o = obs_decl       { o }
+  | o = obs_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "observations"; o }
 
 (* Header: `name [p in dim] (from <source>)? { ... }` — NO colon (§2.2/§2.4).
    The old `name : { ... }` form is rejected by [obs_decl_colon] below with a
@@ -789,7 +848,14 @@ obs_projection:
 (* ── Interventions block ─────────────────────────────────────────────────── *)
 
 intervention_list:
-  | ivs = list(intervention_decl) { ivs }
+  | ivs = list(intervention_decl_sep) { ivs }
+
+(* Shared by both `interventions {}` and `events {}` (same member grammar), so
+   the diagnostic names both. *)
+intervention_decl_sep:
+  | i = intervention_decl       { i }
+  | i = intervention_decl COMMA
+      { comma_sep_error ~sp:$startpos ~ep:$endpos "interventions/events"; i }
 
 intervention_decl:
   | name = IDENT ibs = index_bindings_opt COLON LBRACE iv_kvs = list(iv_kv) RBRACE guard = where_clause_opt
@@ -826,6 +892,10 @@ intervention_decl:
    The predicate is a dedicated boolean grammar over comparison atoms; observed()
    / sum_observed() are ordinary IDENT funcalls recognised only here (the expander
    rejects them in rate expressions). *)
+reactive_decl_sep:
+  | r = reactive_decl       { r }
+  | r = reactive_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "reactive_interventions"; r }
+
 reactive_decl:
   | name = IDENT ibs = index_bindings_opt COLON WHEN pred = trig_pred LBRACE kvs = list(reactive_kv) RBRACE guard = where_clause_opt
       { let action   = ref None in
@@ -947,7 +1017,11 @@ iv_kv:
 (* ── ODE block ───────────────────────────────────────────────────────────── *)
 
 ode_list:
-  | odes = list(ode_decl) { odes }
+  | odes = list(ode_decl_sep) { odes }
+
+ode_decl_sep:
+  | o = ode_decl       { o }
+  | o = ode_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "ode"; o }
 
 ode_decl:
   | comp = IDENT EQ e = expr
@@ -960,7 +1034,11 @@ ode_decl:
    it means. Reduction function names (`final`, `max`, `time_of_max`, …) are NOT
    keywords; they lex as IDENT and dispatch by name in the classifier. *)
 quantity_list:
-  | qs = list(quantity_decl) { qs }
+  | qs = list(quantity_decl_sep) { qs }
+
+quantity_decl_sep:
+  | q = quantity_decl       { q }
+  | q = quantity_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "quantities"; q }
 
 quantity_decl:
   | d = doc_opt name = IDENT ibs = index_bindings_opt EQ body = expr
@@ -974,7 +1052,11 @@ quantity_decl:
    before the toggled intervention's fire time), and the result is naturally
    shaped over `[fork, run-end]`. *)
 contrast_list:
-  | cs = list(contrast_decl) { cs }
+  | cs = list(contrast_decl_sep) { cs }
+
+contrast_decl_sep:
+  | c = contrast_decl       { c }
+  | c = contrast_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "contrasts"; c }
 
 contrast_decl:
   | d = doc_opt name = IDENT EQ body = expr
@@ -1110,7 +1192,11 @@ integ_opt:
 (* ── Init block ──────────────────────────────────────────────────────────── *)
 
 init_list:
-  | ies = list(init_entry) { ies }
+  | ies = list(init_entry_sep) { ies }
+
+init_entry_sep:
+  | i = init_entry       { i }
+  | i = init_entry COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "init"; i }
 
 init_entry:
   | comp = IDENT LBRACKET ibs = separated_nonempty_list(COMMA, index_binding) RBRACKET EQ v = expr
@@ -1123,12 +1209,20 @@ init_entry:
 (* ── Timepoints block ────────────────────────────────────────────────────── *)
 
 timepoint_list:
-  | tps = list(timepoint_decl) { tps }
+  | tps = list(timepoint_decl_sep) { tps }
+
+timepoint_decl_sep:
+  | t = timepoint_decl       { t }
+  | t = timepoint_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "timepoints"; t }
 
 timepoint_decl:
   | name = IDENT EQ t = expr { { tpname = name; tptime = t } }
 
 (* ── Dimensions ─────────────────────────────────────────────────────────── *)
+
+dim_entry_sep:
+  | e = dim_entry       { e }
+  | e = dim_entry COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "dimensions"; e }
 
 dim_entry:
   | d = doc_opt name = IDENT EQ src = dim_source_expr { { dename = name; desrc = src; dedoc = d } }
