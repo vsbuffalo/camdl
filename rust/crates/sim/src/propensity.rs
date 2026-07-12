@@ -363,13 +363,19 @@ pub fn interpolated_value(times: &[f64], values: &[f64], t: f64) -> f64 {
     if times.is_empty() || values.is_empty() { return 0.0; }
     if t <= times[0] { return values[0]; }
     if t >= *times.last().unwrap() { return *values.last().unwrap(); }
-    for i in 0..times.len() - 1 {
-        if t >= times[i] && t <= times[i + 1] {
-            let frac = (t - times[i]) / (times[i + 1] - times[i]);
-            return values[i] + frac * (values[i + 1] - values[i]);
-        }
-    }
-    *values.last().unwrap()
+    // Binary search for the bracketing interval `[hi-1, hi]` (knots are strictly
+    // increasing), mirroring `constant_value`. Both the exact-knot (`Ok`) and
+    // strictly-interior (`Err`) cases resolve to the SAME bracket the former
+    // linear scan found first, so the lerp arithmetic is bit-for-bit unchanged —
+    // just O(log n) instead of O(n). The endpoint guards above ensure
+    // `times[0] < t < times.last()`, so `hi ∈ [1, len-1]` and both indices are
+    // in range. This turns the per-step forcing lookup from a scan over every
+    // knot into a search, the dominant cost on many-knot interpolated forcings.
+    let hi = match times.binary_search_by(|x| x.partial_cmp(&t).unwrap()) {
+        Ok(i) | Err(i) => i,
+    };
+    let frac = (t - times[hi - 1]) / (times[hi] - times[hi - 1]);
+    values[hi - 1] + frac * (values[hi] - values[hi - 1])
 }
 
 /// Piecewise-constant lookup: value at the largest grid point ≤ t. Matches
@@ -641,4 +647,76 @@ pub fn eval_propensities(
         out.push(p);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod interp_tests {
+    use super::interpolated_value;
+
+    /// The former O(n) linear scan, kept here as the reference oracle: the
+    /// binary-search rewrite must reproduce it *bit-for-bit* (same bracketing
+    /// interval, same lerp operands and order), not merely approximately.
+    fn ref_linear_scan(times: &[f64], values: &[f64], t: f64) -> f64 {
+        if times.is_empty() || values.is_empty() { return 0.0; }
+        if t <= times[0] { return values[0]; }
+        if t >= *times.last().unwrap() { return *values.last().unwrap(); }
+        for i in 0..times.len() - 1 {
+            if t >= times[i] && t <= times[i + 1] {
+                let frac = (t - times[i]) / (times[i + 1] - times[i]);
+                return values[i] + frac * (values[i + 1] - values[i]);
+            }
+        }
+        *values.last().unwrap()
+    }
+
+    #[test]
+    fn interpolated_matches_linear_scan_bit_for_bit() {
+        // Irregular, strictly-increasing knots with irrational-ish spacing so
+        // exact-knot and strictly-interior branches both fire, and so the lerp
+        // has real rounding to expose any operand/order divergence.
+        let times: Vec<f64> = (0..64).map(|i| (i as f64) * 1.3 + (i as f64).sqrt()).collect();
+        let values: Vec<f64> = (0..64).map(|i| (i as f64 * 0.37).sin() * 3.0 + 1.0).collect();
+
+        let mut ts = vec![f64::MIN, -5.0, times[0], *times.last().unwrap(), 1e9];
+        for i in 0..times.len() {
+            ts.push(times[i]); // exact knot
+            if i + 1 < times.len() {
+                let lo = times[i];
+                let hi = times[i + 1];
+                ts.push((lo + hi) * 0.5); // interior
+                ts.push(lo + (hi - lo) * 1e-6); // just above a knot
+                ts.push(hi - (hi - lo) * 1e-6); // just below the next knot
+            }
+        }
+        for &t in &ts {
+            let got = interpolated_value(&times, &values, t);
+            let want = ref_linear_scan(&times, &values, t);
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "binary-search interpolation diverged from linear scan at t={t}: {got} vs {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn interpolated_known_values_and_clamps() {
+        let times = [0.0, 1.0, 2.0];
+        let values = [10.0, 20.0, 40.0];
+        assert_eq!(interpolated_value(&times, &values, 0.5), 15.0); // lerp 10..20
+        assert_eq!(interpolated_value(&times, &values, 1.5), 30.0); // lerp 20..40
+        assert_eq!(interpolated_value(&times, &values, 1.0), 20.0); // exact interior knot
+        assert_eq!(interpolated_value(&times, &values, 0.0), 10.0); // exact first knot
+        assert_eq!(interpolated_value(&times, &values, 2.0), 40.0); // exact last knot
+        assert_eq!(interpolated_value(&times, &values, -1.0), 10.0); // clamp low
+        assert_eq!(interpolated_value(&times, &values, 5.0), 40.0); // clamp high
+    }
+
+    #[test]
+    fn interpolated_single_and_empty() {
+        assert_eq!(interpolated_value(&[], &[], 3.0), 0.0);
+        assert_eq!(interpolated_value(&[5.0], &[7.0], 3.0), 7.0); // t below the lone knot
+        assert_eq!(interpolated_value(&[5.0], &[7.0], 9.0), 7.0); // t above the lone knot
+        assert_eq!(interpolated_value(&[5.0], &[7.0], 5.0), 7.0); // t on the lone knot
+    }
 }
