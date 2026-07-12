@@ -6726,10 +6726,20 @@ let expand_observations ctx =
           prevalence_projection name []
         else
           Ir.CumulativeFlow name
-      | ProjDerived (EIndex (name, idxs, _)) ->
+      | ProjDerived (EIndex (name, idxs, _) as e) ->
         let idx_vals = List.map (index_item_to_str env) idxs in
         let concrete = String.concat "_" (name :: idx_vals) in
-        if Hashtbl.mem ctx.expanded_comp_tbl concrete then
+        (* An indexed let-family reference (e.g. `projected = m[v]` with
+           `let m[v in village] = …`) must inline the let body via the
+           canonical resolver — symmetric to the bare-`EIdent` arm above.
+           let_tbl is keyed by base name; without this check an indexed let
+           ref falls through to `CumulativeFlow` and E507s as if it named a
+           transition (a covariate-driven mean projection is inexpressible
+           only because of this omission — the likelihood family is
+           irrelevant here). *)
+        if Hashtbl.mem ctx.let_tbl name then
+          Ir.DerivedExpr (resolve_expr ctx env e)
+        else if Hashtbl.mem ctx.expanded_comp_tbl concrete then
           Ir.CurrentPop concrete
         else if Hashtbl.mem ctx.comp_tbl name then
           prevalence_projection name idx_vals

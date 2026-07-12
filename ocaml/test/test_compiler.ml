@@ -7628,6 +7628,44 @@ let test_forcing_method_unknown_e411 () =
   compile_expect_error_code ~code:"E411" ~contains:"banana"
     (gh423_inline_forcing "        method = banana\n")
 
+(* F36 regression: an indexed let-family reference in `projected`
+   (`projected = m[v]` with `let m[v in village] = …`) must resolve as a
+   derived expression, not fall through to transition-incidence and E507. This
+   is symmetric to a bare let ref and — the point garki mis-diagnosed —
+   independent of the likelihood family. Both a count and a proportion family
+   must compile the identical projection. *)
+let projection_indexed_let ~lik =
+  Printf.sprintf {|
+time_unit = 'days
+compartments { S, I }
+dimensions { village = [va, vb] }
+stratify(by = village)
+parameters { beta : rate in [0,1]  mm : count in [0,1000] }
+transitions { inf[v in village] : S[v] --> I[v] @ beta * S[v] }
+let m[v in village] = mm
+observations {
+  catch[v in village] {
+    columns { time : time, village : dim, y : count }
+    projected = m[v]
+    %s
+  }
+}
+init { S[va] = 100  S[vb] = 100  I[va] = 1  I[vb] = 1 }
+simulate { from = 0 'days  to = 5 'days }
+|} lik
+
+let test_projection_indexed_let_count_ok () =
+  match Compiler.compile ~name:"f36_count"
+    (projection_indexed_let ~lik:"y ~ neg_binomial(mean = projected, r = 1.0)") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "indexed-let projection (count) should compile, got: %s" e
+
+let test_projection_indexed_let_prop_ok () =
+  match Compiler.compile ~name:"f36_prop"
+    (projection_indexed_let ~lik:"y ~ binomial(n = 100, p = projected)") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "indexed-let projection (proportion) should compile, got: %s" e
+
 (* A file-backed forcing whose time_col/value_col literals are spliced in, so a
    bare (unquoted) selector can be contrasted with the quoted form. Writes its
    data file to a temp dir the model's `data =` path resolves against. *)
@@ -9572,5 +9610,11 @@ let () =
         `Quick test_sep_missing_comma_in_compartments;
       Alcotest.test_case "canonical separators still compile (golden-neutral)"
         `Quick test_sep_canonical_separators_compile;
+    ];
+    "projection_indexed_let_f36", [
+      Alcotest.test_case "indexed let-family projection compiles (count family)"
+        `Quick test_projection_indexed_let_count_ok;
+      Alcotest.test_case "indexed let-family projection compiles (proportion family)"
+        `Quick test_projection_indexed_let_prop_ok;
     ];
   ]
