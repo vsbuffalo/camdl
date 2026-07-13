@@ -341,20 +341,20 @@ param_decl:
       { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, no prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, with prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, no prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, with prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 prior_clause:

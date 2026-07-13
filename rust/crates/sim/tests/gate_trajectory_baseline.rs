@@ -155,6 +155,9 @@ const BASELINES: &[(&str, &str, u64)] = &[
     // draining `I` to the shared `--> R`, the entry split `p` / `1−p`, and the
     // FOI's bare `I` summing all three stages. Hashes stand alone (the
     // same-endpoint IR shape is pinned by test_hyper_erlang).
+    ("multi_index_beta", "gillespie", 0xb5b316ed9463ebf2),
+    ("multi_index_beta", "chain_binomial", 0xb63048d396fb309a),
+    ("multi_index_beta", "ode", 0x85f898d465a420b5),
     ("polio_shedding_bimodal", "gillespie", 0xef5d276a6774bc31),
     ("polio_shedding_bimodal", "chain_binomial", 0xdd348d9d5a752f05),
     ("polio_shedding_bimodal", "ode", 0x4b0e6b49f73269b4),
@@ -340,6 +343,7 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("ebola_outcome_hyper", 0xfda4ae754f35311c),
     ("flu_data_forcing", 0xd55c543de04d2062),
     ("malaria_two_species", 0xfd4699acf8596e87),
+    ("multi_index_beta", 0x31fc0e11eb647500),
     ("phenom_mixing_unchecked", 0x46f766b4f10b0138),
     ("polio_age", 0x3feecf44d4f3c67a),
     ("polio_shedding_bimodal", 0x794dd970f8dd41e2),

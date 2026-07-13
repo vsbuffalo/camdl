@@ -2153,11 +2153,9 @@ let build_lookup_tables ctx =
   (* expanded indexed param names: "R0_urban" etc. -> unit *)
   let ept = Hashtbl.create 16 in
   List.iter (fun pd -> match pd with
-    | PIndexed { pname; pdims = [dim]; _ } ->
-      let vals = match List.assoc_opt dim ctx.dim_registry with
-        | Some vs -> vs | None -> []
-      in
-      List.iter (fun v -> Hashtbl.replace ept (pname ^ "_" ^ v) ()) vals
+    | PIndexed { pname; pdims; _ } ->
+      List.iter (fun nm -> Hashtbl.replace ept nm ())
+        (expand_indexed_decl_names ctx pname pdims)
     | _ -> ()
   ) ctx.param_decls;
   ctx.expanded_param_tbl <- ept;
@@ -4792,46 +4790,63 @@ let expand_parameters ctx =
          Ir.param_kind = pk;
          Ir.param_dim  = dim;
        }]
-    | PIndexed { pname; pdims = [dim]; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
-      let vals = dim_values ctx dim in
-      let bounds = resolve_bounds ctx pbounds in
-      let pk = Some (ir_param_kind_of_ast pkind) in
+    | PIndexed { pname; pdims; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
+      (* N-dim indexed parameter: one scalar param per cell of the cartesian
+         product of the index dimensions' levels. Names mangle
+         `<base>_<l1>_<l2>_…` via `expand_indexed_decl_names` (the same producer
+         the lookup table and collision guard use). Two guards run first because
+         the cartesian product is silent on both: it does no dedup (a repeated
+         axis would emit nonsense diagonal cells) and returns [] on an
+         unknown/empty dim (zero cells, no error). *)
       let loc = diag_loc_of_ast_ctx ctx ploc in
-      let resolved_dim = resolve_param_dim ctx ~loc ~pname pkind pdim_ann punit in
-      let (prior, hierarchical) = match pprior with
-        | None -> (None, None)
-        | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with
-                      | `Plain p        -> (Some p, None)
-                      | `Hierarchical h -> (None, Some h))
-      in
-      List.map (fun v ->
-        { Ir.name       = pname ^ "_" ^ v;
-          Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
-          Ir.param_kind = pk;
-          Ir.param_dim  = resolved_dim;
-        }
-      ) vals
-    | PIndexed { pname; pdims; _ } ->
-      (* The parser only produces single-dim indexed params
-         (pdims = [dim]). The single-dim arm above matches that; this
-         fallback is defensive. M10 in the 2026-04-19 review —
-         previously this raised `failwith` which produced a bare
-         stack trace in production via compile_detail_result's
-         generic exn → Error catch. Even though the review's author
-         identified this as "parser only produces single-dim", a
-         future parser extension to multi-dim indexed params would
-         regress this into a crash. Emit a real diagnostic instead. *)
-      Diagnostics.error ctx.diags
-        ~code:"E274"
-        ~loc:Diagnostics.no_loc
-        ~message:(Printf.sprintf
-          "indexed parameter '%s' has %d dimensions; only single-dim \
-           indexed parameters are supported"
-          pname (List.length pdims))
-        ~hint:"declare one parameter per stratified axis, e.g. \
-               `R0[patch] : positive` rather than `R0[patch, age]`"
-        ();
-      []
+      let has_dup =
+        List.length pdims <> List.length (List.sort_uniq compare pdims) in
+      if has_dup then
+        Diagnostics.error ctx.diags
+          ~code:"E331" ~loc
+          ~message:(Printf.sprintf
+            "indexed parameter '%s' repeats a dimension in [%s]"
+            pname (String.concat ", " pdims))
+          ~hint:"each index axis must be a distinct dimension"
+          ();
+      let bad_dim = ref false in
+      List.iter (fun d ->
+        match List.assoc_opt d ctx.dim_registry with
+        | None ->
+          bad_dim := true;
+          Diagnostics.error ctx.diags
+            ~code:"E330" ~loc
+            ~message:(Printf.sprintf
+              "indexed parameter '%s': unknown dimension '%s'" pname d)
+            ~hint:"the index must name a declared `stratify` dimension"
+            ()
+        | Some [] ->
+          bad_dim := true;
+          Diagnostics.error ctx.diags
+            ~code:"E330" ~loc
+            ~message:(Printf.sprintf
+              "indexed parameter '%s': dimension '%s' has no levels" pname d)
+            ()
+        | Some _ -> ()) pdims;
+      if has_dup || !bad_dim then []
+      else begin
+        let bounds = resolve_bounds ctx pbounds in
+        let pk = Some (ir_param_kind_of_ast pkind) in
+        let resolved_dim = resolve_param_dim ctx ~loc ~pname pkind pdim_ann punit in
+        let (prior, hierarchical) = match pprior with
+          | None -> (None, None)
+          | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with
+                        | `Plain p        -> (Some p, None)
+                        | `Hierarchical h -> (None, Some h))
+        in
+        List.map (fun nm ->
+          { Ir.name       = nm;
+            Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
+            Ir.param_kind = pk;
+            Ir.param_dim  = resolved_dim;
+          }
+        ) (expand_indexed_decl_names ctx pname pdims)
+      end
   ) ctx.param_decls in
   (* Typed const let bindings → fixed-value parameters *)
   let from_lets = List.filter_map (fun (lb : let_binding) ->
@@ -8314,12 +8329,10 @@ let expand_scenarios ctx : Ir.preset list =
     (* Accept both the family name ("N") and the fully-expanded
        per-stratum name ("N_rural", "N_urban"). The expansion table
        is populated by `build_lookup_tables` upstream of this call
-       site (verified at line ~741: `ctx.expanded_param_tbl <- ept`).
-       Multi-dim indexed params: `build_lookup_tables` populates the
-       expanded set only for single-dim indexed params today; a
-       multi-dim parameter's family name is still accepted via the
-       PIndexed branch below. That mirrors today's user-facing
-       behaviour and avoids false-positives on existing models. *)
+       site (`ctx.expanded_param_tbl <- ept`). It covers indexed params
+       of any arity — a multi-dim `mu[village, season]` contributes its
+       cartesian-product cell names ("mu_kwaru_wet", …), so a scenario
+       key naming a specific cell validates like any single-dim stratum. *)
     let t = Hashtbl.create (List.length ctx.param_decls) in
     List.iter (fun (pd : param_decl) ->
       let n = match pd with

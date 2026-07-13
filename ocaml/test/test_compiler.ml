@@ -3806,6 +3806,118 @@ let test_indexed_param_variable_index () =
     Alcotest.(check bool) "infection_b rate has R0_b" true
       (contains_param "R0_b" (tr_rate infection_b))
 
+(* ── Multi-index parameters (mu[village, season]) ──────────────────────────
+   Indexed param declarations accept N dimensions, expanding to one scalar
+   param per cell of the cartesian product. The use side, arity checking, obs
+   multi-column matching, and dimcheck were already N-dim; these pin the
+   declaration change and its two guards (E330 unknown/empty dim, E331 dup). *)
+
+let test_multi_index_param_expansion () =
+  let src = {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    parameters { mu[village, season] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |} in
+  let m = compile_expect_ok src in
+  let names = List.map (fun (p : Ir.parameter) -> p.Ir.name) m.Ir.parameters in
+  List.iter (fun expected ->
+    if not (List.mem expected names) then
+      Alcotest.failf "expected cell '%s'; got: %s" expected (String.concat ", " names))
+    ["mu_kwaru_wet"; "mu_kwaru_dry"; "mu_ajura_wet"; "mu_ajura_dry"];
+  Alcotest.(check int) "exactly 4 cells" 4 (List.length names)
+
+let test_multi_index_param_3dim () =
+  let src = {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry]  species = [gam, fun_] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    stratify(by = species)
+    parameters { m[village, season, species] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |} in
+  let m = compile_expect_ok src in
+  let names = List.map (fun (p : Ir.parameter) -> p.Ir.name) m.Ir.parameters in
+  Alcotest.(check int) "2x2x2 = 8 cells" 8 (List.length names);
+  List.iter (fun expected ->
+    if not (List.mem expected names) then
+      Alcotest.failf "expected cell '%s'; got: %s" expected (String.concat ", " names))
+    ["m_kwaru_wet_gam"; "m_ajura_dry_fun_"]
+
+let test_multi_index_param_use () =
+  let src = {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    parameters {
+      mu[village, season] : positive 'ratio in [0.1, 5.0]
+      b[village]          : positive 'ratio in [0.1, 5.0]
+    }
+    let C[v in village, s in season] = mu[v,s] * b[v]
+    observations {
+      parity[v in village, s in season] {
+        columns { time : time, village : dim, season : dim, n_parous : count, n_dissected : count }
+        projected = min(max(C[v,s], 1e-4), 1.0 - 1e-4)
+        n_parous ~ binomial(n = n_dissected, p = projected)
+      }
+    }
+    simulate { from = 0  to = 10 }
+  |} in
+  (* compiles: mu[v,s] resolves to the right cell, obs matches village+season *)
+  let _ = compile_expect_ok src in ()
+
+let test_multi_index_dup_dim_e331 () =
+  compile_expect_error_code ~code:"E331" ~contains:"repeats a dimension" {|
+    dimensions { village = [kwaru, ajura] }
+    compartments { }
+    stratify(by = village)
+    parameters { mu[village, village] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |}
+
+let test_multi_index_unknown_dim_e330 () =
+  compile_expect_error_code ~code:"E330" ~contains:"unknown dimension" {|
+    dimensions { village = [kwaru, ajura] }
+    compartments { }
+    stratify(by = village)
+    parameters { mu[village, nonesuch] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |}
+
+let test_multi_index_empty_dim_e330 () =
+  compile_expect_error_code ~code:"E330" ~contains:"no levels" {|
+    dimensions { village = [kwaru, ajura]  empty = [] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = empty)
+    parameters { mu[village, empty] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |}
+
+let test_multi_index_use_arity_e299 () =
+  (* `mu[v]` under-indexes a 2-D param; the arity check fires when the value is
+     resolved, so the projection must actually use it. *)
+  compile_expect_error_code ~code:"E299" ~contains:"expects 2 indices" {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    parameters { mu[village, season] : positive 'ratio in [0.1, 5.0] }
+    let C[v in village] = mu[v]
+    observations {
+      obs[v in village] {
+        columns { time : time, village : dim, y : count, n : count }
+        projected = min(max(C[v], 1e-4), 1.0 - 1e-4)
+        y ~ binomial(n = n, p = projected)
+      }
+    }
+    simulate { from = 0  to = 10 }
+  |}
+
 let test_indexed_param_literal_index () =
   let src = {|
     dimensions { patch = [kano, lagos] }
@@ -9314,6 +9426,13 @@ let () =
       Alcotest.test_case "no default → value = 0.0"         `Quick test_indexed_param_no_default;
       Alcotest.test_case "bad index value → E100"            `Quick test_indexed_param_bad_index;
       Alcotest.test_case "let shadows stratum → W103"        `Quick test_indexed_param_shadow_warning;
+      Alcotest.test_case "multi-index mu[village,season] → 4 cells" `Quick test_multi_index_param_expansion;
+      Alcotest.test_case "multi-index 3-dim → 8 cells"       `Quick test_multi_index_param_3dim;
+      Alcotest.test_case "multi-index use mu[v,s] resolves + obs" `Quick test_multi_index_param_use;
+      Alcotest.test_case "duplicate dim → E331"              `Quick test_multi_index_dup_dim_e331;
+      Alcotest.test_case "unknown dim → E330"                `Quick test_multi_index_unknown_dim_e330;
+      Alcotest.test_case "empty-levels dim → E330"           `Quick test_multi_index_empty_dim_e330;
+      Alcotest.test_case "multi-index under-index use → E299" `Quick test_multi_index_use_arity_e299;
     ];
     "param_bounds", [
       Alcotest.test_case "scalar param in [lo, hi]"          `Quick test_scalar_bounds;
