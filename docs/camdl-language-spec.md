@@ -653,19 +653,35 @@ block) and require at least one dimension (§6).
 
 ### 4.3 Indexed Parameters
 
-Parameters may be declared with a single dimension index, creating one scalar
-parameter per stratum:
+Parameters may be declared with one or more dimension indices, creating one
+scalar parameter per stratum (or, for several indices, per cell of the cartesian
+product):
 
 ```camdl
 parameters {
-  gamma    : rate
-  N[patch] : positive   # expands to N_urban, N_rural, ...
-  R0[patch]: positive   # expands to R0_urban, R0_rural, ...
+  gamma               : rate
+  N[patch]            : positive   # expands to N_urban, N_rural, ...
+  R0[patch]           : positive   # expands to R0_urban, R0_rural, ...
+  mu[village, season] : rate       # expands to mu_kwaru_wet, mu_kwaru_dry, ...
 }
 ```
 
-The index must refer to a declared `stratify` dimension. In expressions, indexed
-parameters are accessed with `[index]`:
+A multi-index parameter is a design matrix: `mu[village, season]` over
+`village = [kwaru, ajura]`, `season = [wet, dry]` expands to the four cells
+`mu_kwaru_wet`, `mu_kwaru_dry`, `mu_ajura_wet`, `mu_ajura_dry`, each an
+independent scalar with the declared kind, bounds, and prior. Names mangle
+`<base>_<level1>_<level2>_…` in declaration-dim order. A repeated axis
+(`mu[village, village]`) is an error (E331); an unknown or empty index dimension
+is E330.
+
+Each index must refer to a declared `stratify` dimension. In expressions,
+indexed parameters are accessed with `[index]` (all axes, in declaration order):
+
+```camdl
+let C[v in village, s in season] = mu[v, s] * gamma   # mu[v,s] → Param("mu_kwaru_wet") etc.
+```
+
+For a single index:
 
 ```camdl
 let beta[p in patch] = R0[p] * gamma   # R0[p] → Param("R0_urban") etc.
