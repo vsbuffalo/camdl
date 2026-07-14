@@ -633,6 +633,11 @@ fn check_likelihood_exprs(
         Likelihood::Bernoulli(l) => {
             check_expr(&l.p.expr, ctx, true, errors);
         }
+        Likelihood::ZeroInflatedNegBinomial(l) => {
+            check_expr(&l.mean, ctx, true, errors);
+            check_expr(&l.dispersion, ctx, true, errors);
+            check_expr(&l.pi, ctx, true, errors);
+        }
     }
 }
 

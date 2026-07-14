@@ -13,7 +13,7 @@ use crate::resolved_expr::{
 };
 use crate::state::{IntState, RealState};
 use crate::inference::obs_loglik::{
-    negbin_logpmf, discretized_normal_logpmf_tol, poisson_logpmf, DEFAULT_TOL,
+    negbin_logpmf, zi_negbin_logpmf, discretized_normal_logpmf_tol, poisson_logpmf, DEFAULT_TOL,
     negbin_logpmf_grad, discretized_normal_logpmf_grad, poisson_logpmf_grad,
     beta_binomial_logpmf_grad,
 };
@@ -138,6 +138,12 @@ pub(crate) fn eval_likelihood_resolved(
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             if observed > 0.5 { p_val.max(LOG_PROB_FLOOR).ln() }
             else              { (1.0 - p_val).max(LOG_PROB_FLOOR).ln() }
+        }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi } => {
+            let m = eval_resolved(mean, &ctx(projected));
+            let k = eval_resolved(dispersion, &ctx(projected));
+            let p = eval_resolved(pi, &ctx(projected));
+            zi_negbin_logpmf(observed, m, k, p)
         }
     }
 }
@@ -267,6 +273,10 @@ pub(crate) fn eval_likelihood_resolved_grad(
                 }
             }
         }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => unreachable!(
+            "zero_inflated_neg_binomial is scoring-only; gradient-based inference \
+             (PGAS/NUTS) must be refused by the gradient-capability gate before this point"
+        ),
     }
 }
 
@@ -369,6 +379,10 @@ pub(crate) fn dlogp_dprojected(
                 0.0
             }
         }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => unreachable!(
+            "zero_inflated_neg_binomial is scoring-only; the ODE-gradient factor-2 path \
+             must be refused by the gradient-capability gate before this point"
+        ),
     }
 }
 
@@ -479,6 +493,17 @@ pub(crate) fn sample_obs_resolved(
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             if rng.uniform() < p_val { 1.0 } else { 0.0 }
         }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi } => {
+            // With prob pi draw a structural zero; otherwise draw from the
+            // NegBinomial base (Gamma-Poisson mixture, mirroring the NB arm).
+            let p = eval_resolved(pi, &ctx(projected)).clamp(0.0, 1.0);
+            if rng.uniform() < p { return 0.0; }
+            let m = eval_resolved(mean, &ctx(projected));
+            let k = eval_resolved(dispersion, &ctx(projected));
+            if m <= 0.0 || k <= 0.0 { return 0.0; }
+            let g = Gamma::new(k, m / k).unwrap().sample(rng.inner_mut());
+            rng.poisson(g) as f64
+        }
     }
 }
 
@@ -524,6 +549,12 @@ pub(crate) fn eval_obs_mean_resolved(
         }
         ResolvedLikelihood::Bernoulli { p, .. } => {
             eval_resolved(p, &ctx(projected))
+        }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { mean, pi, .. } => {
+            // E[Y] = (1 - pi)·E[NB] = (1 - pi)·mean.
+            let m = eval_resolved(mean, &ctx(projected));
+            let p = eval_resolved(pi, &ctx(projected)).clamp(0.0, 1.0);
+            (1.0 - p) * m
         }
     }
 }

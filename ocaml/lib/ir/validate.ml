@@ -174,7 +174,8 @@ let validate (m : model) : (unit, error list) result =
      | Normal       { mean; sd }                -> chk mean.expr; chk sd.expr
      | Binomial     { n; p }                    -> chk n; chk p.expr
      | BetaBinomial { n; alpha; beta }          -> chk n; chk alpha.expr; chk beta.expr
-     | Bernoulli    { p }                       -> chk p.expr)
+     | Bernoulli    { p }                       -> chk p.expr
+     | ZeroInflatedNegBinomial { mean; dispersion; pi } -> chk mean; chk dispersion; chk pi)
   ) m.observations;
 
   (* Hoist/autodiff contract (defensive invariant). Every entry in

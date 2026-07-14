@@ -136,6 +136,8 @@ let fold_likelihood fe (lik : likelihood) : likelihood =
   | Binomial b -> Binomial { n = fe b.n; p = fd b.p }
   | BetaBinomial bb -> BetaBinomial { n = fe bb.n; alpha = fd bb.alpha; beta = fd bb.beta }
   | Bernoulli b -> Bernoulli { p = fd b.p }
+  | ZeroInflatedNegBinomial zi ->
+    ZeroInflatedNegBinomial { mean = fe zi.mean; dispersion = fe zi.dispersion; pi = fe zi.pi }
 
 (* Fold the expr-bearing fields where a sparse coupling matrix actually
    appears: transition rates + their gradients + σ² draw method, model-level
