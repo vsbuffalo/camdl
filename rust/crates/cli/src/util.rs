@@ -2443,6 +2443,7 @@ pub fn print_observations_summary(model: &ir::Model) {
             ir::observation::Likelihood::Binomial(_)     => "Binomial",
             ir::observation::Likelihood::BetaBinomial(_) => "BetaBinomial",
             ir::observation::Likelihood::Bernoulli(_)    => "Bernoulli",
+            ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "ZeroInflatedNegBinomial",
         };
         eprintln!("    \x1b[32m✓\x1b[0m {:<16} {:<28} {}", obs.name, kind_label, lik_label);
         if is_snapshot && matches!(obs.likelihood, ir::observation::Likelihood::NegBinomial(_)) {

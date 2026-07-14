@@ -296,6 +296,9 @@ fn obs_sd_for_likelihood(
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             (p_val * (1.0 - p_val)).max(0.0).sqrt()
         }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => {
+            unreachable!("zero-inflated NB is non-differentiable; the obs gradient check does not cover it")
+        }
     }
 }
 
@@ -331,6 +334,9 @@ fn obs_mean_for_likelihood(
             n_val * (a / denom)
         }
         ResolvedLikelihood::Bernoulli { p, .. } => eval_resolved(p, &ctx(projected)),
+        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => {
+            unreachable!("zero-inflated NB is non-differentiable; the obs gradient check does not cover it")
+        }
     }
 }
 

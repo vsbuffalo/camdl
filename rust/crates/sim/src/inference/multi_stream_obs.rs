@@ -82,6 +82,7 @@ fn aux_refs_in_likelihood(lik: &ir::observation::Likelihood) -> Vec<String> {
         L::Binomial(b) => vec![&b.n, &b.p.expr],
         L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha.expr, &bb.beta.expr],
         L::Bernoulli(b) => vec![&b.p.expr],
+        L::ZeroInflatedNegBinomial(zi) => vec![&zi.mean, &zi.dispersion, &zi.pi],
     };
     for e in args {
         collect_obs_column_refs(e, &mut out);

@@ -92,6 +92,7 @@ impl ContentAddressed for UnsupportedReason {
             UnsupportedReason::Mod => 4,
             UnsupportedReason::ParametricN => 5,
             UnsupportedReason::NonsmoothState => 6,
+            UnsupportedReason::ZeroInflated => 7,
         };
         h.write_u32(idx);
     }
@@ -552,13 +553,22 @@ impl ContentAddressed for Likelihood {
             Likelihood::Binomial(_) => 3,
             Likelihood::BetaBinomial(_) => 4,
             Likelihood::Bernoulli(_) => 5,
+            Likelihood::ZeroInflatedNegBinomial(_) => 6,
         });
         // The θ-independent `n` (Binomial/BetaBinomial) carries no gradient, so
         // it is not a `Diffable` and must be hashed explicitly, before the
-        // differentiable positions.
+        // differentiable positions. The zero-inflated NB is entirely bare exprs
+        // (scoring-only, no `Diffable`), so all three of its arguments must be
+        // hashed explicitly too — otherwise `diffables()` sees nothing and two
+        // ZI models differing only in mean/dispersion/pi would collide.
         match self {
             Likelihood::Binomial(l) => l.n.hash_into(h),
             Likelihood::BetaBinomial(l) => l.n.hash_into(h),
+            Likelihood::ZeroInflatedNegBinomial(l) => {
+                l.mean.hash_into(h);
+                l.dispersion.hash_into(h);
+                l.pi.hash_into(h);
+            }
             _ => {}
         }
         // Every differentiable position (each `Diffable` = expr + classified grad

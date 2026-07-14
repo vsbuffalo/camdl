@@ -179,6 +179,39 @@ pub fn negbin_logpmf(y: f64, mu: f64, k: f64) -> f64 {
         + y * (1.0 - p).ln()
 }
 
+/// Stable two-term log-sum-exp of already-logged terms:
+/// `log(exp(la) + exp(lb))`, with `-inf` inputs handled.
+fn log_add_exp(la: f64, lb: f64) -> f64 {
+    if la == f64::NEG_INFINITY { return lb; }
+    if lb == f64::NEG_INFINITY { return la; }
+    let m = la.max(lb);
+    m + ((la - m).exp() + (lb - m).exp()).ln()
+}
+
+/// Zero-inflated Negative-Binomial log-PMF.
+///
+/// A structural-zero mass `pi ∈ [0, 1]` mixed with `NegBinomial(mu, k)`:
+///   `P(Y = 0)   = pi + (1 - pi)·f_NB(0)`
+///   `P(Y = j>0) = (1 - pi)·f_NB(j)`
+/// where `f_NB(·; mu, k)` is [`negbin_logpmf`]'s distribution. `pi = 0` recovers
+/// the plain NegBinomial exactly. `pi` is clamped to `[0, 1]` so a numerical
+/// excursion (e.g. an MH proposal stepping slightly out of range before the
+/// chain concentrates) cannot produce a NaN log-probability.
+pub fn zi_negbin_logpmf(y: f64, mu: f64, k: f64, pi: f64) -> f64 {
+    let pi = pi.clamp(0.0, 1.0);
+    let base = negbin_logpmf(y, mu, k); // log f_NB(y)
+    if y.round() == 0.0 {
+        let log_pi = if pi > 0.0 { pi.ln() } else { f64::NEG_INFINITY };
+        let log_rest = if pi < 1.0 { (1.0 - pi).ln() + base } else { f64::NEG_INFINITY };
+        log_add_exp(log_pi, log_rest)
+    } else if pi < 1.0 {
+        (1.0 - pi).ln() + base
+    } else {
+        // pi == 1: all mass at zero, so any positive count is impossible.
+        f64::NEG_INFINITY
+    }
+}
+
 /// Normal log-PDF.
 ///
 /// log p(y | mu, sigma) = -0.5·((y-mu)/sigma)² - log(sigma) - 0.5·log(2π)
@@ -397,6 +430,41 @@ mod tests {
         assert_eq!(negbin_logpmf(0.0, 0.0, 0.0), 0.0);
         // y > 0 with μ=0 is still impossible, k irrelevant.
         assert_eq!(negbin_logpmf(1.0, 0.0, 0.0), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_zi_negbin_reduces_to_negbin_at_pi_zero() {
+        // pi = 0 must recover the plain NegBinomial exactly.
+        for &(y, mu, k) in &[(0.0, 5.0, 2.0), (3.0, 5.0, 2.0), (10.0, 5.0, 2.0)] {
+            let zi = zi_negbin_logpmf(y, mu, k, 0.0);
+            let nb = negbin_logpmf(y, mu, k);
+            assert!((zi - nb).abs() < 1e-12, "y={y}: zi={zi} nb={nb}");
+        }
+    }
+
+    #[test]
+    fn test_zi_negbin_mixture_math_and_normalization() {
+        let (mu, k, pi) = (5.0, 2.0, 0.3);
+        // P(Y=0) = pi + (1-pi)·f_NB(0).
+        let f0 = negbin_logpmf(0.0, mu, k).exp();
+        let expected0 = (pi + (1.0 - pi) * f0).ln();
+        let got0 = zi_negbin_logpmf(0.0, mu, k, pi);
+        assert!((got0 - expected0).abs() < 1e-12, "P(0): got {got0} expected {expected0}");
+        // Negative control: zero-inflation must RAISE P(0) above the base NB —
+        // catches a `pi` silently dropped from the zero branch.
+        assert!(got0 > negbin_logpmf(0.0, mu, k), "zero-inflation must raise P(0)");
+        // P(Y=2) = (1-pi)·f_NB(2): base shifted down by log(1-pi), and finite.
+        let got2 = zi_negbin_logpmf(2.0, mu, k, pi);
+        let expected2 = (1.0 - pi).ln() + negbin_logpmf(2.0, mu, k);
+        assert!((got2 - expected2).abs() < 1e-12, "P(2): got {got2} expected {expected2}");
+        assert!(got2.is_finite());
+        // Boundary: pi = 1 puts all mass at 0.
+        assert_eq!(zi_negbin_logpmf(0.0, mu, k, 1.0), 0.0);
+        assert_eq!(zi_negbin_logpmf(1.0, mu, k, 1.0), f64::NEG_INFINITY);
+        // The whole PMF must sum to 1 over a wide support — the strongest check
+        // that the mixture is a proper distribution.
+        let total: f64 = (0..200).map(|j| zi_negbin_logpmf(j as f64, mu, k, pi).exp()).sum();
+        assert!((total - 1.0).abs() < 1e-6, "ZI-NB pmf must sum to 1; got {total}");
     }
 
     #[test]

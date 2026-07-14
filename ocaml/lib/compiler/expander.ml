@@ -1507,6 +1507,7 @@ let lower_via_transitions ctx =
               | LikBinomial a     -> LikBinomial     (rw_kwargs a)
               | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
               | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
+              | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
             in
             { om with om_lik }) od.omeasurement
           in
@@ -1784,6 +1785,7 @@ let lower_via_transitions ctx =
                 | LikBinomial a     -> LikBinomial     (rw_kwargs a)
                 | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
                 | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
+                | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
               in
               { om with om_lik }) od.omeasurement in
             { od with oprojection; omeasurement }
@@ -6588,7 +6590,8 @@ let expand_observations ctx =
         in
         match meas_v.om_lik with
         | LikNegBinomial k | LikPoisson k | LikNormal k
-        | LikBinomial k | LikBetaBinomial k | LikBernoulli k ->
+        | LikBinomial k | LikBetaBinomial k | LikBernoulli k
+        | LikZeroInflatedNegBinomial k ->
           List.concat_map (fun (_, e) -> names_of e) k
       in
       if has_real_measurement && od.ocolumns <> None then
@@ -6804,6 +6807,7 @@ let expand_observations ctx =
       | LikBinomial _     -> "binomial"
       | LikBetaBinomial _ -> "beta_binomial"
       | LikBernoulli _    -> "bernoulli"
+      | LikZeroInflatedNegBinomial _ -> "zero_inflated_neg_binomial"
     in
     let required_kwargs = match lik_v with
       | LikNegBinomial _  -> ["mean"; "r"]
@@ -6815,10 +6819,12 @@ let expand_observations ctx =
          below enforces exclusivity (E252) and the per-form required args (E250). *)
       | LikBetaBinomial _ -> ["n"; "alpha"; "beta"; "mean"; "concentration"]
       | LikBernoulli _    -> ["p"]
+      | LikZeroInflatedNegBinomial _ -> ["mean"; "r"; "pi"]
     in
     let current_kwargs = match lik_v with
       | LikNegBinomial k | LikPoisson k | LikNormal k
-      | LikBinomial k | LikBetaBinomial k | LikBernoulli k -> k
+      | LikBinomial k | LikBetaBinomial k | LikBernoulli k
+      | LikZeroInflatedNegBinomial k -> k
     in
     (* Report unknown kwargs and positional args up front. *)
     List.iter (fun (k, _) ->
@@ -6934,6 +6940,14 @@ let expand_observations ctx =
           }
       | LikBernoulli kwargs ->
         Ir.Bernoulli { Ir.p = diff (resolve_kw kwargs "p") }
+      | LikZeroInflatedNegBinomial kwargs ->
+        (* Scoring-only: bare exprs, no `diff` wrapper. `r` -> dispersion,
+           matching the NegBinomial base; `pi` is the structural-zero prob. *)
+        Ir.ZeroInflatedNegBinomial {
+          Ir.mean       = resolve_kw kwargs "mean";
+          Ir.dispersion = resolve_kw kwargs "r";
+          Ir.pi         = resolve_kw kwargs "pi";
+        }
     in
     ctx.obs_aux_cols <- [];
     let parts = name_parts_from_bindings od.oindices env in
@@ -7723,7 +7737,8 @@ let check_no_shadowing ctx =
      | Some om ->
        let kwargs = match om.om_lik with
          | LikNegBinomial a | LikPoisson a | LikNormal a
-         | LikBinomial a | LikBetaBinomial a | LikBernoulli a -> a
+         | LikBinomial a | LikBetaBinomial a | LikBernoulli a
+         | LikZeroInflatedNegBinomial a -> a
        in
        List.iter (fun (_, e) -> walk decl seed e) kwargs
      | None -> ())

@@ -1,0 +1,64 @@
+# Zero-inflated NegBinomial observation of focal-vector catch counts.
+#
+# Golden-coverage purpose: the only model golden exercising the
+# `zero_inflated(...)` observation likelihood (spec §12.2) — a structural-zero
+# mass mixed over a NegBinomial base. Focal (patchy) vector surveillance
+# produces excess zeros: many site×time cells with no vectors caught, plus
+# over-dispersed positive counts where vectors are present. A single-component
+# NegBinomial cannot represent both. The family is scoring-only (no emitted
+# gradient), so it pairs with a gradient-free method (mh/pmmh/if2/pfilter).
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta    : rate
+  gamma   : rate
+  rho     : probability   # catch / reporting fraction
+  k       : positive      # neg-binomial dispersion
+  pi_zero : probability   # structural-zero (vector-absence) probability
+  N0      : count
+  I0      : count
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+observations {
+  vector_catch {
+    columns       { time : time, vector_catch : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    vector_catch  ~ zero_inflated(base = neg_binomial(mean = rho * projected, r = k), pi = pi_zero)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 180 'days
+}
+
+scenarios {
+  baseline {
+    label = "focal vector catch with excess zeros"
+    set = {
+      beta    = 0.4
+      gamma   = 0.15
+      rho     = 0.3
+      k       = 2.0
+      pi_zero = 0.4
+      N0      = 10000
+      I0      = 10
+    }
+  }
+}

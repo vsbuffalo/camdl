@@ -330,6 +330,11 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("sir_spatial_where", "gillespie", 0x093f980c2089c00c),
     ("sir_spatial_where", "chain_binomial", 0x3a8c0b0bb6dd86ac),
     ("sir_spatial_where", "ode", 0x414139babb1ed18a),
+    // Zero-inflated NB observation golden (gh#433). ZI is an observation model,
+    // orthogonal to the forward dynamics, so these pin the plain SIR trajectory.
+    ("zinb_vector_catch", "gillespie", 0x5ea758b8d07767bb),
+    ("zinb_vector_catch", "chain_binomial", 0x7e8434620b14cd5f),
+    ("zinb_vector_catch", "ode", 0xa3f1e32cfccb4698),
 ];
 
 /// State-only ODE baselines (gh#166 Phase A): model -> `ode_state_hash`, captured
@@ -385,6 +390,7 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("sir_two_patch_long_obs", 0x84dd19dfc276b148),
     ("sirv_anchored_calendar", 0x59095d189f6f3b42),
     ("surveillance_likelihoods", 0x1797802b02ef6f71),
+    ("zinb_vector_catch", 0x90be0bab1ecfa3ba),
 ];
 
 #[test]

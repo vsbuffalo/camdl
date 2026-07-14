@@ -309,6 +309,10 @@ type likelihood_kind =
   | LikBinomial     of (string * expr) list
   | LikBetaBinomial of (string * expr) list
   | LikBernoulli    of (string * expr) list
+  (* Zero-inflated NB. Surface: `zero_inflated(base = neg_binomial(mean=, r=),
+     pi = )`, desugared here at parse time to the base's kwargs (`mean`, `r`)
+     plus `pi`. *)
+  | LikZeroInflatedNegBinomial of (string * expr) list
 
 (* A measurement-model statement: `<scored_col> ~ Dist(kw = ..., ...)`.
    The left side is a declared value column (the scored outcome); the right

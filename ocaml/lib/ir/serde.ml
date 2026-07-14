@@ -857,6 +857,11 @@ let likelihood_to_json (l : likelihood) : Yojson.Safe.t =
       ("beta",  diffable_to_json bb.beta)])]
   | Bernoulli b ->
     obj [("bernoulli", obj [("p", diffable_to_json b.p)])]
+  | ZeroInflatedNegBinomial zi ->
+    obj [("zero_inflated_neg_binomial", obj [
+      ("mean", expr_to_json zi.mean);
+      ("dispersion", expr_to_json zi.dispersion);
+      ("pi", expr_to_json zi.pi)])]
 
 let likelihood_of_json j =
   let d key v = diffable_of_json (member key v) in
@@ -879,6 +884,12 @@ let likelihood_of_json j =
       }
     | "bernoulli" ->
       Bernoulli { p = d "p" v }
+    | "zero_inflated_neg_binomial" ->
+      ZeroInflatedNegBinomial {
+        mean = expr_of_json (member "mean" v);
+        dispersion = expr_of_json (member "dispersion" v);
+        pi = expr_of_json (member "pi" v);
+      }
     | k -> fail "unknown likelihood '%s'" k
   )
   | _ -> fail "likelihood must be a single-key object"

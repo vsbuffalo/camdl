@@ -75,10 +75,42 @@
            ~code:"E254"
            ~msg:"diagnostic_test requires keyword args base = <binomial|bernoulli>(...), sens = <expr>, spec = <expr>";
          LikBinomial [])
+    | "zero_inflated" ->
+      (* Zero-inflation wrapper: `zero_inflated(base = neg_binomial(mean=, r=),
+         pi = )`. Desugar to the flat [LikZeroInflatedNegBinomial] by flattening
+         the base's kwargs with `pi`. Base is restricted to neg_binomial for
+         now; scoring-only (no gradient). *)
+      (* Reject any kwarg other than base/pi so a stray or typo'd argument is not
+         silently dropped (No loose semantics). *)
+      List.iter (fun (k, _) ->
+        if k <> "" && k <> "base" && k <> "pi" then
+          Parser_errors.push_error ~sp ~ep
+            ~code:"E251"
+            ~msg:(Printf.sprintf
+              "zero_inflated has no argument '%s'; expected base = neg_binomial(...), \
+               pi = <expr>" k))
+        args;
+      let find k = List.assoc_opt k args in
+      (match find "base", find "pi" with
+       | Some (EFuncCall (base_kind, base_args)), Some pi_e ->
+         (match base_kind with
+          | "neg_binomial" ->
+            LikZeroInflatedNegBinomial (base_args @ [("pi", pi_e)])
+          | other ->
+            Parser_errors.push_error ~sp ~ep
+              ~code:"E324"
+              ~msg:(Printf.sprintf
+                "zero_inflated base must be neg_binomial(...); got %s(...)" other);
+            LikZeroInflatedNegBinomial [])
+       | _ ->
+         Parser_errors.push_error ~sp ~ep
+           ~code:"E325"
+           ~msg:"zero_inflated requires keyword args base = neg_binomial(...), pi = <expr>";
+         LikZeroInflatedNegBinomial [])
     | s ->
       Parser_errors.push_error ~sp ~ep
         ~code:"E104"
-        ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test" s);
+        ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test, zero_inflated" s);
       LikPoisson args
 
   let build_obs_decl name ibs src kvs ~doc ~sp ~ep =
