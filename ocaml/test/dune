@@ -50,7 +50,7 @@
 (test
  (name test_latex)
  (modules test_latex)
- (libraries compiler ir alcotest))
+ (libraries compiler ir alcotest yojson))
 
 ; Phase-2 staged-residence `via erlang(...)` lowering. The T1 anchor pins the
 ; desugar against the trusted hand-written `seir_erlang.camdl` golden (IR-level,

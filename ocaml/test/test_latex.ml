@@ -31,6 +31,9 @@ let parse_to_ast (src : string) : Ast.declaration list =
 let render ?(expand = []) (src : string) : string =
   Latex.of_model ~name:"test" ~expand (parse_to_ast src)
 
+let render_json ?(expand = []) (src : string) : string =
+  Latex.to_json (Latex.render_model ~name:"test" ~expand (parse_to_ast src))
+
 let has ~doc needle out =
   Alcotest.(check bool) (Printf.sprintf "contains %s" doc) true
     (contains_substring ~needle out)
@@ -157,6 +160,22 @@ let test_expand_selected_dimension () =
   has_not ~doc:"age level not in index" "\\mathrm{child}" out;
   has_not ~doc:"age level not in index" "\\mathrm{adult}" out
 
+(* The JSON projection is well-formed, splits transitions into parts (for a
+   reaction table, not a pre-assembled arrow), keys dynamics by state, carries
+   the @symbol glossary, and JSON-escapes the LaTeX backslashes. *)
+let test_json_shape () =
+  let out = render_json sir_symbol in
+  (match Yojson.Safe.from_string out with
+   | _ -> ()
+   | exception _ -> Alcotest.failf "to_json did not produce well-formed JSON:\n%s" out);
+  has     ~doc:"reactants part"      "\"reactants\"" out;
+  has     ~doc:"rate part"           "\"rate\"" out;
+  has_not ~doc:"no assembled arrow"  "xrightarrow" out;
+  has     ~doc:"dynamics state key"  "\"state\"" out;
+  has     ~doc:"param glossary"      "\"symbol\"" out;
+  has     ~doc:"@symbol β in glossary" "β" out;
+  has     ~doc:"latex backslash JSON-escaped" "\\\\dot" out
+
 let () =
   Alcotest.run "latex"
     [ ( "scaffold",
@@ -176,4 +195,7 @@ let () =
         [ Alcotest.test_case "merged subscripts on indexed refs" `Quick
             test_indexed_subscripts;
           Alcotest.test_case "--expand unfolds one dimension" `Quick
-            test_expand_selected_dimension ] ) ]
+            test_expand_selected_dimension ] );
+      ( "json",
+        [ Alcotest.test_case "to_json: split transitions + glossary + escaping"
+            `Quick test_json_shape ] ) ]

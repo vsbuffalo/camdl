@@ -204,7 +204,10 @@ let rate_tex (d : trans_dynamics) : string =
   | Rate e -> tex e
   | Via (law, _) -> Printf.sprintf "\\text{via } \\mathrm{%s}" (escape law)
 
-let reaction (t : transition_decl) : string =
+(* The three renderable parts of a transition — reactants, products, rate —
+   kept separate so a web consumer can lay them out as a reaction table, while
+   the document assembles them into the \xrightarrow arrow. *)
+let reaction_parts (t : transition_decl) : string * string * string =
   let lhs = String.concat " + " (List.map comp_ref t.trsrc) in
   let rhs =
     match t.trdst with
@@ -213,10 +216,13 @@ let reaction (t : transition_decl) : string =
       String.concat ",\\ "
         (List.map (fun (r, w) -> Printf.sprintf "%s\\,(%s)" (comp_ref r) (tex w)) bs)
   in
-  Printf.sprintf "%s &\\xrightarrow{\\; %s \\;} %s"
-    (if lhs = "" then "\\varnothing" else lhs)
-    (rate_tex t.trdyn)
-    (if rhs = "" then "\\varnothing" else rhs)
+  ( (if lhs = "" then "\\varnothing" else lhs),
+    (if rhs = "" then "\\varnothing" else rhs),
+    rate_tex t.trdyn )
+
+let reaction (t : transition_decl) : string =
+  let reactants, products, rate = reaction_parts t in
+  Printf.sprintf "%s &\\xrightarrow{\\; %s \\;} %s" reactants rate products
 
 (* ── Derived dynamics (assembled from stoichiometry, kept indexed) ──────────── *)
 
@@ -249,7 +255,11 @@ let comp_instances (transitions : transition_decl list) (comps : compartment_dec
 (* One line \dot{X}_i = <signed rates> for a compartment instance, over every
    transition that produces (+) or consumes (-) exactly that instance; a catalyst
    (same instance both sides) nets to zero and is dropped. *)
-let derived_ode (transitions : transition_decl list) ((base, items) : stoich_ref) : string =
+(* The compartment's derivative split into its LHS (`\dot{X}_i`) and signed-rate
+   RHS, plus the compartment base name — so the document assembles the aligned
+   `\dot{X}_i &= …` while the web shape keys each equation by its state. *)
+let derived_ode_parts (transitions : transition_decl list) ((base, items) : stoich_ref) :
+    string * string * string =
   let idx_str = index_tex items in
   let matches (n, its) = n = base && index_tex its = idx_str in
   let terms =
@@ -279,6 +289,10 @@ let derived_ode (transitions : transition_decl list) ((base, items) : stoich_ref
              else "- " ^ r)
            terms)
   in
+  (base, dot, rhs)
+
+let derived_ode (transitions : transition_decl list) (inst : stoich_ref) : string =
+  let _, dot, rhs = derived_ode_parts transitions inst in
   Printf.sprintf "%s &= %s" dot rhs
 
 (* ── Document ───────────────────────────────────────────────────────────────── *)
@@ -299,12 +313,38 @@ let populate_overrides (decls : declaration list) : unit =
       | _ -> ())
     decls
 
-let of_model ?(name = "model") ?(expand = []) (decls : declaration list) : string =
+(* ── Structured render: one record, two projections ────────────────────────── *)
+
+type r_param = { rp_name : string; rp_symbol : string; rp_desc : string option }
+type r_transition = { rt_name : string; rt_reactants : string; rt_products : string; rt_rate : string }
+type r_definition = { rd_name : string; rd_lhs : string; rd_body : string }
+type r_dynamics = { ry_state : string; ry_lhs : string; ry_rhs : string }
+
+(* The model rendered to LaTeX, split by section with every equation its own
+   KaTeX-renderable string. `to_document` assembles the standalone `.tex`;
+   `to_json` emits the web/display shape (`model.render.json`). *)
+type rendered_model = {
+  rm_name : string;
+  rm_mode : string;                       (* "indexed" | "expanded over …" *)
+  rm_states : string list;                (* compartment names *)
+  rm_dims : (string * string list) list;  (* dimension name, ordered levels *)
+  rm_params : r_param list;
+  rm_definitions : r_definition list;
+  rm_transitions : r_transition list;
+  rm_dynamics : r_dynamics list;
+}
+
+let param_entry = function
+  | PScalar { pname; pdoc; _ } | PIndexed { pname; pdoc; _ } ->
+    { rp_name = pname;
+      rp_symbol = sym pname;
+      rp_desc = (match pdoc with Some { d_text; _ } -> d_text | None -> None) }
+
+let render_model ?(name = "model") ?(expand = []) (decls : declaration list) : rendered_model =
   populate_overrides decls;
   let dims = dims_of decls in
   let lets = lets_of decls in
   let comps = compartments_of decls in
-  (* the requested --expand dimensions paired with their inline levels *)
   let expand_levels =
     List.filter_map
       (fun (de : dimensions_entry) ->
@@ -317,53 +357,123 @@ let of_model ?(name = "model") ?(expand = []) (decls : declaration list) : strin
     let raw = transitions_of decls in
     if expand_levels = [] then raw else List.concat_map (expand_transition expand_levels) raw
   in
+  let mode =
+    if expand_levels = [] then "indexed"
+    else "expanded over " ^ String.concat ", " (List.map fst expand_levels)
+  in
+  let binder_var = function IBind (v, _) | IConsec (v, _, _) -> v | IComp v -> v in
+  {
+    rm_name = name;
+    rm_mode = mode;
+    rm_states = List.map (fun (c : compartment_decl) -> c.cname) comps;
+    rm_dims =
+      List.filter_map
+        (fun (de : dimensions_entry) ->
+          match de.desrc with DInline levels -> Some (de.dename, levels) | DRead _ -> None)
+        dims;
+    rm_params = List.concat_map (function DParameters ps -> List.map param_entry ps | _ -> []) decls;
+    rm_definitions =
+      List.map
+        (fun (l : let_binding) ->
+          let idx = String.concat "," (List.map binder_var l.lindices) in
+          { rd_name = l.lname; rd_lhs = comp_sym l.lname idx; rd_body = tex l.lbody })
+        lets;
+    rm_transitions =
+      List.map
+        (fun (t : transition_decl) ->
+          let reactants, products, rate = reaction_parts t in
+          { rt_name = t.trname; rt_reactants = reactants; rt_products = products; rt_rate = rate })
+        transitions;
+    rm_dynamics =
+      List.map
+        (fun inst ->
+          let state, lhs, rhs = derived_ode_parts transitions inst in
+          { ry_state = state; ry_lhs = lhs; ry_rhs = rhs })
+        (comp_instances transitions comps);
+  }
+
+let to_document (rm : rendered_model) : string =
   let buf = Buffer.create 4096 in
   let p fmt = Printf.ksprintf (Buffer.add_string buf) fmt in
   p "\\documentclass[12pt]{article}\n";
   p "\\usepackage[utf8]{inputenc}\n\\usepackage{amsmath,amssymb}\n";
   p "\\usepackage[margin=1in]{geometry}\n\\pagestyle{empty}\n";
   p "\\begin{document}\n";
-  p "\\begin{center}\\Large\\textbf{Model: \\texttt{%s}}\\end{center}\n\\vspace{0.5em}\n\n" (escape name);
+  p "\\begin{center}\\Large\\textbf{Model: \\texttt{%s}}\\end{center}\n\\vspace{0.5em}\n\n" (escape rm.rm_name);
   List.iter
-    (fun (de : dimensions_entry) ->
-      match de.desrc with
-      | DInline levels ->
-        p "\\noindent\\textbf{Dimension} $\\mathrm{%s} = \\{%s\\}$.\\par\\medskip\n" (escape de.dename)
-          (String.concat ",\\ " (List.map (fun l -> "\\text{" ^ l ^ "}") levels))
-      | DRead _ -> ())
-    dims;
-  if lets <> [] then begin
+    (fun (name, levels) ->
+      p "\\noindent\\textbf{Dimension} $\\mathrm{%s} = \\{%s\\}$.\\par\\medskip\n" (escape name)
+        (String.concat ",\\ " (List.map (fun l -> "\\text{" ^ l ^ "}") levels)))
+    rm.rm_dims;
+  if rm.rm_definitions <> [] then begin
     p "\\noindent\\textbf{Definitions}\n\\begin{align*}\n";
     p "%s\n"
       (String.concat " \\\\\n"
-         (List.map
-            (fun (l : let_binding) ->
-              (* All binder vars on the LHS, comma-joined into one subscript —
-                 N[r in region, a in age] -> N_{r,a}, matching how N is
-                 subscripted at every use site (not just the first binder). *)
-              let binder_var = function
-                | IBind (v, _) | IConsec (v, _, _) -> v
-                | IComp v -> v
-              in
-              let idx = String.concat "," (List.map binder_var l.lindices) in
-              Printf.sprintf "%s &= %s" (comp_sym l.lname idx) (tex l.lbody))
-            lets));
+         (List.map (fun d -> Printf.sprintf "%s &= %s" d.rd_lhs d.rd_body) rm.rm_definitions));
     p "\\end{align*}\n\n"
   end;
   p "\\noindent\\textbf{Transitions}\n\\begin{align*}\n";
-  p "%s\n" (String.concat " \\\\\n" (List.map reaction transitions));
+  p "%s\n"
+    (String.concat " \\\\\n"
+       (List.map
+          (fun t -> Printf.sprintf "%s &\\xrightarrow{\\; %s \\;} %s" t.rt_reactants t.rt_rate t.rt_products)
+          rm.rm_transitions));
   p "\\end{align*}\n\n";
-  let mode =
-    if expand_levels = [] then "indexed"
-    else "expanded over " ^ String.concat ", " (List.map fst expand_levels)
-  in
-  p "\\noindent\\textbf{Derived dynamics} \\; \\small(%s; assembled from stoichiometry)\\normalsize\n" mode;
+  p "\\noindent\\textbf{Derived dynamics} \\; \\small(%s; assembled from stoichiometry)\\normalsize\n" rm.rm_mode;
   p "\\begin{align*}\n";
   p "%s\n"
-    (String.concat " \\\\\n" (List.map (derived_ode transitions) (comp_instances transitions comps)));
+    (String.concat " \\\\\n"
+       (List.map (fun d -> Printf.sprintf "%s &= %s" d.ry_lhs d.ry_rhs) rm.rm_dynamics));
   p "\\end{align*}\n";
   p "\\end{document}\n";
   Buffer.contents buf
+
+(* The web/display shape a KaTeX consumer renders — every math string is a
+   standalone expression; transitions are split into parts for a reaction table. *)
+let to_json (rm : rendered_model) : string =
+  let str s : Yojson.Safe.t = `String s in
+  let opt_desc = function Some d -> [ ("description", str d) ] | None -> [] in
+  let j : Yojson.Safe.t =
+    `Assoc
+      [ ("model", str rm.rm_name);
+        ("mode", str rm.rm_mode);
+        ("states", `List (List.map str rm.rm_states));
+        ( "dimensions",
+          `List
+            (List.map
+               (fun (n, ls) -> `Assoc [ ("name", str n); ("levels", `List (List.map str ls)) ])
+               rm.rm_dims) );
+        ( "parameters",
+          `List
+            (List.map
+               (fun p -> `Assoc ([ ("name", str p.rp_name); ("symbol", str p.rp_symbol) ] @ opt_desc p.rp_desc))
+               rm.rm_params) );
+        ( "definitions",
+          `List
+            (List.map
+               (fun d -> `Assoc [ ("name", str d.rd_name); ("tex", str (d.rd_lhs ^ " = " ^ d.rd_body)) ])
+               rm.rm_definitions) );
+        ( "transitions",
+          `List
+            (List.map
+               (fun t ->
+                 `Assoc
+                   [ ("name", str t.rt_name);
+                     ("reactants", str t.rt_reactants);
+                     ("products", str t.rt_products);
+                     ("rate", str t.rt_rate) ])
+               rm.rm_transitions) );
+        ( "dynamics",
+          `List
+            (List.map
+               (fun d -> `Assoc [ ("state", str d.ry_state); ("tex", str (d.ry_lhs ^ " = " ^ d.ry_rhs)) ])
+               rm.rm_dynamics) );
+      ]
+  in
+  Yojson.Safe.pretty_to_string j
+
+let of_model ?(name = "model") ?(expand = []) (decls : declaration list) : string =
+  to_document (render_model ~name ~expand decls)
 
 (* ── Subcommand driver: `camdlc render FILE.camdl` ─────────────────────────── *)
 
@@ -375,13 +485,23 @@ let read_file path =
   s
 
 let run (args : string list) : unit =
-  let expand = ref [] and files = ref [] in
+  let expand = ref [] and files = ref [] and format = ref `Document in
   let add_dims s = expand := !expand @ List.filter (( <> ) "") (String.split_on_char ',' s) in
+  let set_format = function
+    | "json" -> format := `Json
+    | "document" | "latex" | "tex" -> format := `Document
+    | other ->
+      Printf.eprintf "camdlc render: unknown --format '%s' (want json|document)\n" other;
+      exit 2
+  in
   let rec parse = function
     | [] -> ()
     | "--expand" :: dims :: tl -> add_dims dims; parse tl
     | a :: tl when String.length a >= 9 && String.sub a 0 9 = "--expand=" ->
       add_dims (String.sub a 9 (String.length a - 9)); parse tl
+    | "--format" :: fmt :: tl -> set_format fmt; parse tl
+    | a :: tl when String.length a >= 9 && String.sub a 0 9 = "--format=" ->
+      set_format (String.sub a 9 (String.length a - 9)); parse tl
     | a :: _ when String.length a > 0 && a.[0] = '-' ->
       Printf.eprintf "camdlc render: unknown flag '%s'\n" a; exit 2
     | f :: tl -> files := f :: !files; parse tl
@@ -389,7 +509,7 @@ let run (args : string list) : unit =
   parse args;
   match List.rev !files with
   | [] ->
-    prerr_endline "usage: camdlc render [--expand DIM[,DIM]] FILE.camdl  (LaTeX to stdout)";
+    prerr_endline "usage: camdlc render [--format json|document] [--expand DIM[,DIM]] FILE.camdl";
     exit 2
   | file :: _ ->
     let src = read_file file in
@@ -400,5 +520,6 @@ let run (args : string list) : unit =
        Printf.eprintf "camdlc render: %s in %s\n" msg file;
        exit 1
      | Ok decls ->
-       print_string
-         (of_model ~name:(Filename.remove_extension (Filename.basename file)) ~expand:!expand decls))
+       let name = Filename.remove_extension (Filename.basename file) in
+       let rm = render_model ~name ~expand:!expand decls in
+       print_string (match !format with `Json -> to_json rm | `Document -> to_document rm))
