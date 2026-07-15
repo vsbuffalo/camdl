@@ -7,6 +7,7 @@ mod cas_read;       // generic RunRecord reader (new-format sims); transitional 
 mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)
 mod hashing;
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
+mod output_schema;  // run.json output_schema: column roles for tabular outputs (proposal 2026-07-15)
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
 mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
