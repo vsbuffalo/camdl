@@ -43,6 +43,15 @@
  (modules test_via)
  (libraries compiler ir alcotest))
 
+; `camdlc render` LaTeX projection (Ast -> string, pre-expansion). Drives
+; Latex.of_model over inline SIR / stratified models and asserts the @symbol
+; override vs greek fallback, \frac flattening, derived-ODE sign assembly,
+; merged indexed subscripts, and selective --expand.
+(test
+ (name test_latex)
+ (modules test_latex)
+ (libraries compiler ir alcotest))
+
 ; Phase-2 staged-residence `via erlang(...)` lowering. The T1 anchor pins the
 ; desugar against the trusted hand-written `seir_erlang.camdl` golden (IR-level,
 ; modulo stage names); plus stage-rate, inflow/init redirect, bare-name summing,
