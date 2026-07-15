@@ -1084,6 +1084,26 @@ pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
+/// Render a `.camdl` model to its display JSON (`camdlc render --format json`),
+/// capturing the bytes. Used to archive `model.render.json` beside a run so a
+/// viewer can show the model's math without recompiling. Best-effort — the
+/// caller treats an `Err` as "skip the archive", never a hard failure.
+pub fn render_model_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, String> {
+    let camdlc = find_camdlc()?;
+    let out = std::process::Command::new(&camdlc)
+        .args(["render", "--format", "json"])
+        .arg(model_camdl)
+        .output()
+        .map_err(|e| format!("cannot run camdlc render: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "camdlc render failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
+}
+
 
 // ─── Multi-stream binding diagnostics (gh#90) ───────────────────────────────
 

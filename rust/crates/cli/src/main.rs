@@ -233,6 +233,20 @@ Examples:
 "))]
     Inspect(Passthrough),
 
+    /// Render a .camdl model as LaTeX or display JSON (delegates to camdlc)
+    #[command(long_about = "\
+Render a model for reading or display (delegates to camdlc).
+
+  # LaTeX document (indexed form) to stdout
+  camdl render sir.camdl
+
+  # Structured JSON for a web viewer (KaTeX-ready blocks)
+  camdl render sir.camdl --format json
+
+  # Expand chosen dimensions to their literal strata
+  camdl render seir_age.camdl --expand age")]
+    Render(Passthrough),
+
     /// Show embedded usage guides (offline, version-matched to this binary)
     Docs(args::DocsArgs),
 
@@ -573,6 +587,13 @@ fn main() {
         }
         Command::Inspect(a) => {
             let mut refs = vec!["inspect"];
+            refs.extend(a.args.iter().map(String::as_str));
+            util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
+                eprintln!("error: {}", e); std::process::exit(1);
+            });
+        }
+        Command::Render(a) => {
+            let mut refs = vec!["render"];
             refs.extend(a.args.iter().map(String::as_str));
             util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
                 eprintln!("error: {}", e); std::process::exit(1);

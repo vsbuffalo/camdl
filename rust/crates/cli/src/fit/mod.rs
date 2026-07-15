@@ -829,6 +829,20 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             "warning: cannot read compiled IR {} to archive: {}", ir_src, e),
                     }
                 }
+                // Archive the model's display render (`model.render.json`) beside
+                // the IR so a viewer (camdl-watch) can show the model's math
+                // without recompiling. Best-effort + identity-neutral, like the
+                // IR archive above; a render failure never aborts the fit.
+                match crate::util::render_model_json(std::path::Path::new(&config.model.camdl)) {
+                    Ok(json) => {
+                        let dest = seg.join("model.render.json");
+                        if let Err(e) = std::fs::write(&dest, &json) {
+                            eprintln!("warning: cannot archive model render {}: {}",
+                                dest.display(), e);
+                        }
+                    }
+                    Err(e) => eprintln!("warning: cannot render model for archive: {}", e),
+                }
             }
         }
         let store = runid::FsCasStore::new(&cas_root);
