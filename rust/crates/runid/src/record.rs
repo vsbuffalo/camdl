@@ -107,7 +107,8 @@ pub enum TableRole {
     Observation,
     /// The thinned posterior-draws cloud: `draws.tsv`.
     PosteriorCloud,
-    /// The full per-chain sampler trace: `chain_N/trace.tsv`.
+    /// The full per-chain trace of a sampler or optimizer: `chain_N/trace.tsv`
+    /// (MCMC) or `chain_N/parameter_traces.tsv` (if2 / nlopt).
     Trace,
     /// Predicted-vs-observed bands: `predictive/<stream>.tsv`.
     Predictive,
