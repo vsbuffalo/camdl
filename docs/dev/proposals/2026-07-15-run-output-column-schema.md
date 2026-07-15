@@ -185,10 +185,11 @@ A consumer reads `run.json` once — already fetched for the run list — and fi
 `param_estimated` for the mixing series, with no per-method knowledge and no
 hardcoded column names. `{n}` is the per-chain wildcard.
 
-**Invariants** (enforced at construction, unit-tested): a
-`Trace`/`PosteriorCloud` table has exactly one `Iteration` column; a
-`Trajectory`/`Observation`/`Predictive` table has exactly one `Time` column; at
-most one `Chain`.
+**Properties** (produced by the classifier on well-formed writer output, pinned
+by the classifier's unit tests): a `Trace`/`PosteriorCloud` table has exactly
+one `Iteration` column; a `Trajectory`/`Observation`/`Predictive` table has
+exactly one `Time` column; at most one `Chain`. These follow from the writers'
+headers rather than a construction-time check.
 
 **Why `run.json`, not `fit.meta.json`.** `fit.meta.json` is fit-only; a
 `simulate`, `survey`, or `profile` leaf has none, so a fit-only home forks the
@@ -197,25 +198,19 @@ manifest every command writes and every consumer already reads. It lives in the
 identity-critical `runid` crate, but the field is identity-inert (§5), and this
 keeps the whole facility to one seam.
 
-### 3.3 One source of truth (no drift)
+### 3.3 One source of truth (no drift, by construction)
 
-The failure mode to avoid is a declaration that silently diverges from what the
-writers emit. Defense, in order of strength:
-
-1. A tabular writer's header and its `TableSchema` come from **one** value. The
-   trace writer already receives
-   `(index_col, loglik_col, extra_columns,
-   param_names)` and assembles the
-   header inline; it is refactored to first build `Vec<ColumnSpec>` (assigning
-   roles once) and derive the header from it, then hand the same value to the
-   store. The two existing per-file manifests (`trajectories.json`,
-   `quantities.json`) source their column list from the same `TableSchema`
-   rather than a second literal.
-2. Where a writer is not yet refactored, a **drift test** pins the agreement:
-   run the real writer on a small fixture, read the actual TSV header, and
-   assert it equals the header implied by the declared `TableSchema`. A column
-   change on either side fails the test — the "fix the code and add a test
-   pinning the agreement" rule for a code-vs-code contract.
+The declaration is built by reading each output file's **actual header** after
+the run wrote it, and classifying each column name by role: a chain key, an
+iteration axis (`sweep`/`step`/`draw`/`iteration`), a model parameter (estimated
+vs fixed by membership in the estimated set), else a diagnostic. Because the
+schema is derived _from_ the file it describes, it cannot disagree with it — the
+column names and their order are the file's own, and classification needs only
+set membership, never a hardcoded per-method column recipe. The only failure
+mode is a misclassified role, pinned by unit tests over the classifier. A useful
+consequence: a new method or a new column is covered automatically — an
+unfamiliar column falls through to `diagnostic` rather than being silently
+dropped.
 
 ### 3.4 Declare, don't rename
 
@@ -260,25 +255,34 @@ so `output_schema` is additive and cannot re-key any run. Verified:
 
 Staged so the bug-relevant coverage lands first, wired into its consumer:
 
-**v1**
+**v1 — fit** (the surface behind the watcher x-axis bug)
 
 1. Types in `rust/crates/runid/src/record.rs`: `ColumnRole`, `ColumnSpec`,
-   `TableRole`, `TableSchema`; `output_schema` on `RunRecord` (default empty, so
-   existing readers are unaffected).
-2. Store: `finalize`/`commit` accept a `BTreeMap<String, TableSchema>` the
-   command supplies; merged into the record. Empty for kinds not yet wired.
-3. Wire `fit` (draws.tsv, chain_N/trace.tsv, parameter_traces.tsv) and `sim`
-   (traj.tsv, obs.tsv), building each table's `TableSchema` from the writer.
-4. The §3.3 drift test for the wired writers; the §3.2 invariants; a serde
-   round-trip.
-5. `docs/camdl-run-spec.md`: a new §2.5 "Output column schema" declaring the
-   vocabulary and the `run.json.output_schema` shape.
+   `TableRole`, `TableSchema`; `output_schema` on `RunRecord` (default empty,
+   skip-serialized when empty, so existing readers and manifests round-trip
+   unchanged).
+2. A `ResolvedClaim::set_output_schema` setter on the streaming write handle:
+   the schema is attached just before `finalize` — the point at which the
+   tabular files exist and the estimated/fixed parameter sets are known. No
+   store-signature change; the schema rides the record through the one
+   `build_record`.
+3. `output_schema::fit_output_schema` reads each written file's real header
+   (`draws.tsv`, `chain_{n}/trace.tsv`, `chain_{n}/parameter_traces.tsv`) and
+   classifies each column (§3.3), wired at the fit stage's finalize.
+4. Tests: `classify` role units; a tempdir test that builds the schema from real
+   headers and asserts the index/chain/param roles; the record serde round-trip
+   and empty-omitted invariant.
+5. `docs/camdl-run-spec.md` §2.5 declaring the vocabulary and the
+   `run.json.output_schema` shape.
 
-**v2**
+**v1.5 — sim, then the rest**
 
-6. Wire `projection` (predictive/observed), `survey` (landscape), `profile`, and
-   `quantities`; reconcile `trajectories.json`/`quantities.json` to source their
-   column lists from `TableSchema`.
+6. Extend the classifier with the trajectory/observation axes (`t`/`time` →
+   time, compartments → state, `flow_*` → flow, `inc_*` → incidence) and wire
+   `sim` (`traj.tsv`, `obs.tsv`) at its finalize — the same seam.
+7. `projection` (predictive/observed), `survey` (landscape), `profile`,
+   `quantities`; reconcile `trajectories.json`/`quantities.json` to reference
+   `TableSchema`.
 
 No IR, `ir/schema.json`, `ir/VERSION`, or golden change — this is run-store
 output metadata, not the OCaml↔Rust IR contract.
