@@ -7,7 +7,7 @@ Usage:
   camdlc check   FILE.camdl                  parse + type-check; report diagnostics
   camdlc inspect FILE.camdl [OPTIONS]        print model structure (summary, dims, ...)
   camdlc doctest [--gate] FILE.md ...        compile the camdl blocks in Markdown docs
-  camdlc render  FILE.camdl                  render the model as LaTeX (indexed form)
+  camdlc render  FILE.camdl [--format json]  render the model as LaTeX (or JSON, for display)
 
 Flags (compile):
   --set NAME=VALUE   override a parameter value
