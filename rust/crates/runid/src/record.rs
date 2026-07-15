@@ -56,6 +56,81 @@ pub struct FileChecksum {
     pub digest: ContentHash,
 }
 
+/// The semantic role a column plays in a camdl output table — a small closed
+/// vocabulary so a consumer can render any tabular output without
+/// reverse-engineering its header. `Time` (a physical/calendar axis) and
+/// `Iteration` (a sampler/optimizer axis) are deliberately distinct: a
+/// trajectory's x-axis is physical time, a trace's is a sampler index, and
+/// conflating them is a real rendering bug. Wire form is the snake-case tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnRole {
+    /// Physical/calendar axis: `t`, `time`, `date`.
+    Time,
+    /// Sampler/optimizer axis: `sweep`, `step`, `draw`, `iteration`, `point_id`.
+    Iteration,
+    /// MCMC chain key.
+    Chain,
+    /// Ensemble/batch replicate key.
+    Replicate,
+    /// Scenario key.
+    Scenario,
+    /// A stratification key: `patch`, `age`.
+    Dimension,
+    /// A compartment count/value: `S`, `I`, `R`.
+    State,
+    /// A transition flow: `flow_infection`.
+    Flow,
+    /// A per-stream incidence: `inc_<stream>`.
+    Incidence,
+    /// A sampled (estimated) model parameter.
+    ParamEstimated,
+    /// A held-constant (fixed) model parameter.
+    ParamFixed,
+    /// An observation stream's value.
+    Observable,
+    /// A predictive quantile band: `q05` … `q95`.
+    Quantile,
+    /// A sampler/fit diagnostic: `loglik`, `log_posterior`, `ESS`, `rhat`,
+    /// `accepted`, `n_divergent`, ….
+    Diagnostic,
+}
+
+/// What kind of table an output file is — the consumer's default view. Wire
+/// form is the snake-case tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TableRole {
+    /// Time × state (compartments, flows): `traj.tsv`, `trajectories.tsv`.
+    Trajectory,
+    /// Time × observable: `obs.tsv`.
+    Observation,
+    /// The thinned posterior-draws cloud: `draws.tsv`.
+    PosteriorCloud,
+    /// The full per-chain sampler trace: `chain_N/trace.tsv`.
+    Trace,
+    /// Predicted-vs-observed bands: `predictive/<stream>.tsv`.
+    Predictive,
+    /// A parameter-grid evaluation: `landscape.tsv`, `profile.tsv`.
+    Landscape,
+}
+
+/// One column of a camdl output table: its on-disk name and its semantic role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnSpec {
+    pub name: String,
+    pub role: ColumnRole,
+}
+
+/// The column schema of one tabular output file: what kind of table it is and,
+/// in file order, what each column means. Recorded in `run.json.output_schema`
+/// keyed by the file's leaf-relative path (`{n}` = per-chain wildcard).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableSchema {
+    pub role: TableRole,
+    pub columns: Vec<ColumnSpec>,
+}
+
 /// Recorded-not-hashed provenance: the readable mirror `show` renders.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Provenance {
@@ -98,6 +173,13 @@ pub struct RunRecord {
     pub status: RunStatus,
     /// EXACT-SET over the leaf's OWN files only (not the declared children).
     pub artifacts: BTreeMap<String, FileChecksum>,
+    /// Column schema for the leaf's tabular outputs, keyed by leaf-relative
+    /// path (`{n}` = per-chain wildcard). Recorded, NOT hashed — lets a
+    /// consumer render any output (find the x-axis, group by chain, facet by
+    /// dimension) without reverse-engineering a TSV header. Empty when the
+    /// command declares no schema.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub output_schema: BTreeMap<String, TableSchema>,
     /// Declared child sub-artifacts: namespace (`obs`, `paths`, …) → child
     /// `run_id`s. Recorded, NOT hashed; recognized as children (not orphans)
     /// by the exact-set check; validated recursively on their *own* lookup.
@@ -117,5 +199,54 @@ impl RunRecord {
     /// `PathPrefixCollision`, not a hit.
     pub fn identity_matches(&self, run_id: &ContentHash) -> bool {
         &self.run_id == run_id
+    }
+}
+
+#[cfg(test)]
+mod output_schema_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn table_schema_roundtrips_with_snake_case_wire_tags() {
+        let schema = TableSchema {
+            role: TableRole::Trace,
+            columns: vec![
+                ColumnSpec { name: "sweep".to_string(), role: ColumnRole::Iteration },
+                ColumnSpec { name: "log_posterior".to_string(), role: ColumnRole::Diagnostic },
+                ColumnSpec { name: "beta".to_string(), role: ColumnRole::ParamEstimated },
+            ],
+        };
+        let json = serde_json::to_string(&schema).unwrap();
+        // Wire tags are snake_case — the contract a consumer reads.
+        for tag in ["\"trace\"", "\"iteration\"", "\"diagnostic\"", "\"param_estimated\""] {
+            assert!(json.contains(tag), "missing {tag} in {json}");
+        }
+        let back: TableSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(schema, back);
+    }
+
+    #[test]
+    fn empty_output_schema_is_omitted() {
+        // The additive field skips serialization when empty, so existing
+        // manifests and readers are unaffected.
+        let record = RunRecord {
+            format_version: FORMAT_VERSION,
+            kind: ArtifactKind::Sim,
+            run_id: ContentHash::digest_bytes(b"x"),
+            hash_version: 1,
+            ir_version: "0.0".to_string(),
+            engine_version: "test".to_string(),
+            levels: vec![],
+            deps: vec![],
+            status: RunStatus::Completed,
+            artifacts: BTreeMap::new(),
+            output_schema: BTreeMap::new(),
+            children: BTreeMap::new(),
+            inputs: serde_json::Value::Null,
+            provenance: Provenance::default(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(!json.contains("output_schema"), "empty schema must be omitted: {json}");
     }
 }

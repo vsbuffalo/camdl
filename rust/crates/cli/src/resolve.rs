@@ -356,6 +356,7 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
         deps: meta.deps.clone(),
         status,
         artifacts: Default::default(),
+        output_schema: Default::default(),
         children: meta.children.clone(),
         inputs: resolved.display_inputs.clone(),
         provenance: Provenance {
