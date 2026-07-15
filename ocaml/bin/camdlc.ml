@@ -7,6 +7,7 @@ Usage:
   camdlc check   FILE.camdl                  parse + type-check; report diagnostics
   camdlc inspect FILE.camdl [OPTIONS]        print model structure (summary, dims, ...)
   camdlc doctest [--gate] FILE.md ...        compile the camdl blocks in Markdown docs
+  camdlc render  FILE.camdl                  render the model as LaTeX (indexed form)
 
 Flags (compile):
   --set NAME=VALUE   override a parameter value
@@ -35,6 +36,10 @@ let () =
   (* ── camdlc doctest [--gate] [--verbose] FILE.md ... ──────────────── *)
   | "doctest" :: rest ->
     Doctest.main rest
+
+  (* ── camdlc render FILE.camdl  (LaTeX of the indexed, pre-expansion model) ── *)
+  | "render" :: rest ->
+    Latex.run rest
 
   (* ── camdlc --camdl-version ──────────────────────────────────────── *)
   | ["--camdl-version"] | "--camdl-version" :: _ ->
