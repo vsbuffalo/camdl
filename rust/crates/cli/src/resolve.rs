@@ -274,6 +274,11 @@ pub struct RecordMeta {
     pub children: BTreeMap<String, Vec<ContentHash>>,
     pub source_paths: Vec<String>,
     pub label: Option<String>,
+    /// Column schema for the leaf's tabular outputs, attached to the record at
+    /// build time — used by atomic-commit paths (e.g. `sim`, whose files are
+    /// known in memory before commit); the streaming fit path sets it at
+    /// finalize instead.
+    pub output_schema: BTreeMap<String, runid::record::TableSchema>,
 }
 
 impl RecordMeta {
@@ -290,6 +295,7 @@ impl RecordMeta {
             children: BTreeMap::new(),
             source_paths: vec![model_path.into()],
             label,
+            output_schema: BTreeMap::new(),
         }
     }
 
@@ -366,7 +372,7 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
         deps: meta.deps.clone(),
         status,
         artifacts: Default::default(),
-        output_schema: Default::default(),
+        output_schema: meta.output_schema.clone(),
         children: meta.children.clone(),
         inputs: resolved.display_inputs.clone(),
         provenance: Provenance {

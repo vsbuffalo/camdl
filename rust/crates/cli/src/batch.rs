@@ -593,6 +593,19 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         eprintln!("warning: could not write model.ir.json: {}", e);
     });
 
+    // Archive the model's display render beside the IR so a viewer (camdl-watch)
+    // can show the model's math without recompiling. Best-effort — a render
+    // failure (e.g. the model was given as compiled IR, not source) warns and
+    // skips, never aborts the run.
+    match crate::util::render_model_json(std::path::Path::new(&model_path)) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(format!("{}/model.render.json", output_dir), &json) {
+                eprintln!("warning: could not write model.render.json: {}", e);
+            }
+        }
+        Err(e) => eprintln!("warning: could not render model for archive: {}", e),
+    }
+
     // Copy any boundary GeoJSON into the output tree as a sibling artifact
     // (a map viewer reads `<output>/geo/boundaries.geojson`).
     if let Some(ref geo_src) = exp.config.geo {
@@ -1178,7 +1191,7 @@ impl crate::engine::RunSink for CasSink {
             run_id: rt.run_id,
             display_inputs: serde_json::Value::Null,
         };
-        let meta = crate::resolve::RecordMeta::new(
+        let mut meta = crate::resolve::RecordMeta::new(
             ir::IR_VERSION.trim(), self.model_path.clone(), self.label.clone())
             .with_deps(self.fit_dep.clone())
             .with_children(children);
@@ -1216,6 +1229,10 @@ impl crate::engine::RunSink for CasSink {
             let bytes = sim::reactive::format_reactive_log(firings).into_bytes();
             artifacts.insert("reactive_log.tsv", bytes);
         }
+        // Declare the tabular outputs' column schema in run.json — classify the
+        // in-memory artifact headers (they're committed atomically, not yet on
+        // disk). Recorded, not hashed.
+        meta.output_schema = crate::output_schema::sim_output_schema(&artifacts.files);
         let root = self.root();
         let store = runid::FsCasStore::new(&root);
         let dest = match crate::resolve::begin_resolved_write(
