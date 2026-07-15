@@ -855,7 +855,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let meta = crate::resolve::RecordMeta::new(
             &ir_version_str, &sweep_config.model.camdl, None)
             .with_deps(deps.clone());
-        let write = match crate::resolve::begin_resolved_write(
+        let mut write = match crate::resolve::begin_resolved_write(
             &store, &cas_root, &resolved_artifact, &meta,
             crate::resolve::WriteMode::Streaming,
         ) {
@@ -1711,6 +1711,23 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
             "wall_time_seconds": stage_elapsed.as_secs_f64(),
         });
+        // Declare the tabular outputs' column schema in run.json (proposal
+        // 2026-07-15): classify each written file's real header so a consumer
+        // reads roles instead of reverse-engineering columns. Recorded, not
+        // hashed — the run's identity was fixed at claim time.
+        {
+            let estimated: std::collections::HashSet<&str> =
+                fit_sidecar.estimated.iter().map(String::as_str).collect();
+            let all_params: std::collections::HashSet<&str> = fit_sidecar
+                .estimated
+                .iter()
+                .map(String::as_str)
+                .chain(fit_sidecar.fixed.keys().map(String::as_str))
+                .collect();
+            let schema =
+                crate::output_schema::fit_output_schema(write.dir(), &all_params, &estimated);
+            write.set_output_schema(schema);
+        }
         let dest = match write.finalize(inputs_json) {
             Ok(d) => d,
             Err(e) => {

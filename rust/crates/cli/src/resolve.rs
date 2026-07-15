@@ -333,6 +333,16 @@ impl ResolvedClaim {
         self.claim.dir()
     }
 
+    /// Attach the tabular outputs' column schema, keyed by leaf-relative path,
+    /// before `finalize`. Recorded in `run.json`, never hashed — identity was
+    /// fixed at claim time, so this cannot re-key the run.
+    pub fn set_output_schema(
+        &mut self,
+        schema: std::collections::BTreeMap<String, runid::record::TableSchema>,
+    ) {
+        self.record.output_schema = schema;
+    }
+
     /// Commit Running → Completed, writing the post-run `display_inputs` into
     /// `run.json.inputs`. (`StreamClaim::finalize` flips status and builds the
     /// exact-set manifest from the streamed files.)
