@@ -272,6 +272,27 @@ pub fn preflight_gradient_ode(
         )));
     }
 
+    // ── State-Jacobian present at all (gh#439) ──────────────────────────────────
+    // The forward sensitivity chains ∂rate/∂state (`rate_state_grad`, J_x) into
+    // dS/dt. A model compiled with `camdlc --no-state-grad` carries it EMPTY on
+    // every transition, which would make the sensitivity silently drop the J_x·S
+    // coupling term and sample against a biased gradient. A genuine ODE fit has
+    // state-dependent dynamics, so at least one transition's rate_state_grad is
+    // non-empty; if every one is empty, refuse loudly rather than integrate a
+    // wrong sensitivity.
+    if !m.transitions.is_empty()
+        && m.transitions.iter().all(|t| t.rate_state_grad.is_empty())
+    {
+        return Err(SimError::Validation(
+            "ODE gradient (nuts) requires the state-Jacobian `rate_state_grad`, but this \
+             model carries none on any transition — it was compiled with `camdlc \
+             --no-state-grad` (or has no state-dependent rates). Recompile WITHOUT \
+             --no-state-grad to fit with `nuts` on the ODE backend, or use a gradient-free \
+             method (IF2, PMMH, or `mh` on ode)."
+                .to_string(),
+        ));
+    }
+
     // ── ODE-sensitivity coverage: a nonsmooth ∂rate/∂state (§1a) ────────────────
     // A `floor`/`ceil`/`abs`/`min`/`max`/`mod` of a compartment (or a state-indexed
     // table) has no smooth state derivative, so the WrtPop pass serializes a
@@ -592,6 +613,23 @@ mod tests {
             .collect();
         preflight_gradient_ode(&cm, &params, &est(&["beta", "gamma", "k"]))
             .expect("the base model must pass the ODE gradient gate");
+    }
+
+    #[test]
+    fn refuses_absent_state_jacobian_no_state_grad() {
+        // A model compiled with `camdlc --no-state-grad` carries an EMPTY
+        // rate_state_grad on every transition (gh#439). The ODE-NUTS gate must
+        // refuse loudly rather than integrate a forward sensitivity that silently
+        // drops the J_x·S state-coupling term.
+        let mut m = base_model();
+        for t in &mut m.transitions {
+            t.rate_state_grad = Default::default();
+        }
+        let err = gate_err(m, &["beta", "gamma", "k"]);
+        assert!(
+            err.contains("--no-state-grad") && err.contains("rate_state_grad"),
+            "expected a --no-state-grad refusal naming rate_state_grad, got: {err}"
+        );
     }
 
     #[test]

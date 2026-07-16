@@ -252,6 +252,48 @@ let test_constant_fold_collapses_sparse_foi_reduce () =
   Alcotest.(check int) "fold collapses FOI Reduce to k=2 terms" 2 after;
   Alcotest.(check bool) "fold strictly shrank the FOI Reduce" true (after < before)
 
+(* ── gh#439: --no-state-grad gates the WrtPop state-Jacobian emission ──────────
+   The state-Jacobian (rate_state_grad / projection_state_grad) is consumed only
+   by the ODE forward-sensitivity gradient; forward sim, IF2, PMMH, PF, and MH
+   never read it, and on a mean-field-coupled model it is a dense one-entry-per-
+   stratum map that dominates the IR (gh#439). The `Compiler.no_state_grad` gate
+   (set by `camdlc --no-state-grad`) drops it while leaving the dynamics [rate]
+   and the parameter gradient [rate_grad] intact. Default (gate off) still emits
+   it, so goldens are unchanged. sparse_ring's `infection` couples across patches,
+   so its state-Jacobian is non-empty in the baseline. *)
+let test_no_state_grad_gates_state_jacobian () =
+  let find_infection (m : Ir.model) =
+    List.find (fun (t : Ir.transition) ->
+      String.length t.name >= 9 && String.sub t.name 0 9 = "infection")
+      m.Ir.transitions
+  in
+  let compile_ring () =
+    match Compiler.compile ~name:"sparse_ring" sparse_ring_src with
+    | Ok m -> m
+    | Error e -> Alcotest.failf "compile failed: %s" e
+  in
+  Compiler.no_state_grad := false;
+  let m_full = compile_ring () in
+  let inf_full = find_infection m_full in
+  Alcotest.(check bool) "baseline: infection rate_state_grad populated"
+    true (inf_full.Ir.rate_state_grad <> []);
+  Alcotest.(check bool) "baseline: infection rate_grad populated"
+    true (inf_full.Ir.rate_grad <> []);
+  Compiler.no_state_grad := true;
+  let m_gated =
+    Fun.protect ~finally:(fun () -> Compiler.no_state_grad := false) compile_ring
+  in
+  List.iter (fun (t : Ir.transition) ->
+    Alcotest.(check bool)
+      (Printf.sprintf "gated: %s rate_state_grad empty" t.name)
+      true (t.Ir.rate_state_grad = []))
+    m_gated.Ir.transitions;
+  let inf_gated = find_infection m_gated in
+  Alcotest.(check bool) "gated: infection rate_grad preserved"
+    true (inf_gated.Ir.rate_grad <> []);
+  Alcotest.(check bool) "gated: dynamics rate unchanged (WrtPop-only gate)"
+    true (inf_gated.Ir.rate = inf_full.Ir.rate)
+
 (* ── gh#272 LICM pass ─────────────────────────────────────────────────────────
    Loop-invariant code motion hoists param/table-only subexpressions out of the
    dynamics rates into `per_eval_bindings`. These pin the variant/invariant
@@ -9162,6 +9204,10 @@ let () =
     "constant_fold", [
       Alcotest.test_case "sparse ring FOI Reduce P=4 collapses to k=2"
         `Quick test_constant_fold_collapses_sparse_foi_reduce;
+    ];
+    "no_state_grad", [
+      Alcotest.test_case "--no-state-grad drops rate_state_grad, keeps rate_grad + rate (gh#439)"
+        `Quick test_no_state_grad_gates_state_jacobian;
     ];
     "licm", [
       Alcotest.test_case "invariant/variant classification (Dt/Time/forcing/state are variant)"
