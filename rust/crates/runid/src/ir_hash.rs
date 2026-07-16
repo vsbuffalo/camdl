@@ -3,10 +3,17 @@
 //!
 //! Why hand-written, not derived: `ir::Model` is a *foreign* type tree with
 //! ~60 nested foreign types pervaded by `HashMap<String, f64>`,
-//! `HashMap<String, Expr>` (`rate_grad`), and raw `f64`. You cannot
-//! `#[derive]` on types you don't own, and hashing the IR via serde bytes
-//! would be unsound (NaN → `null`, `HashMap` order not guaranteed sorted).
-//! The orphan rule allows these impls (local trait, foreign types).
+//! `HashMap<String, Vec<String>>` (`compartment_dims`), and raw `f64`. You
+//! cannot `#[derive]` on types you don't own, and hashing the IR via serde
+//! bytes would be unsound (NaN → `null`, `HashMap` order not guaranteed
+//! sorted). The orphan rule allows these impls (local trait, foreign types).
+//!
+//! The compiler-derived gradient maps (`rate_grad`, `rate_state_grad`,
+//! `sigma_sq_grad`, `projection_state_grad`, `ic_grad`, and each obs
+//! `Diffable`'s `grad` / `proj_grad`) are deliberately **NOT** folded into these
+//! impls: they are redundant autodiff of the rates/args over the already-hashed
+//! params/tables/forcings, so model identity is gradient-independent (`SV = 2`
+//! note below; proposal `2026-07-16-gradient-maps-out-of-run-identity.md`).
 //!
 //! Two policies applied throughout:
 //!
@@ -18,13 +25,13 @@
 //!   floats through `FiniteF64` would erase that distinction *and* reject
 //!   NaN-bearing consts at hash time (a totality break).
 //! - **Sorted maps.** Every `HashMap`/`BTreeMap` is hashed in sorted key
-//!   order (`rate_grad` is a `HashMap` inside the IR).
+//!   order (`compartment_dims` is a `HashMap` inside the IR).
 //!
 //! `Expr` is a `Box`-recursive tree; `eval_expr` already recurses it plainly
 //! and production handles multi-GB IRs without overflow, so a recursive
 //! `hash_into` is exactly as safe as the engine itself.
 
-use ir::deriv::{DerivEntry, Diffable, UnsupportedReason};
+use ir::deriv::Diffable;
 use ir::Differentiable;
 use ir::expr::{BinOp, Expr, UnOp};
 use ir::intervention::{
@@ -57,7 +64,20 @@ use crate::hash::{CanonicalHasher, ContentAddressed};
 /// hashed (a field's policy) bumps this; bumping it re-keys IR-derived
 /// identities. (The IR's own *content* version is `ir_version`; this is the
 /// hashing policy version, which is independent.)
-const SV: u16 = 1;
+///
+/// `SV = 2` (2026-07-16): model identity is now gradient-independent. The
+/// compiler-derived gradient maps — transition `rate_grad` / `rate_state_grad`,
+/// overdispersion `sigma_sq_grad`, observation-model `projection_state_grad` and
+/// each likelihood `Diffable`'s `grad` / `proj_grad`, and model `ic_grad` — are
+/// no longer folded into `hash_into`. They are deterministic autodiff of the
+/// rates / observation arguments over the (already-hashed) params, tables, and
+/// forcings, so they are redundant in an identity hash; dropping them makes
+/// run_id invariant to which gradients a compile emitted (e.g. `camdlc
+/// --no-state-grad`, gh#439). Removing the (even-empty) length prefixes shifts
+/// every model hash — a deliberate, version-bumped re-key, pinned by the golden
+/// hash + the gradient-inert tests. See
+/// `docs/dev/proposals/2026-07-16-gradient-maps-out-of-run-identity.md`.
+const SV: u16 = 2;
 
 /// Write the per-type domain-separation header: tag + schema version.
 fn header(h: &mut CanonicalHasher, tag: &str) {
@@ -79,60 +99,23 @@ fn hash_opt_f64(h: &mut CanonicalHasher, x: &Option<f64>) {
 }
 
 // ── deriv.rs ─────────────────────────────────────────────────────────────────
-
-impl ContentAddressed for UnsupportedReason {
-    fn hash_into(&self, h: &mut CanonicalHasher) {
-        header(h, "ir::deriv::UnsupportedReason");
-        // Positional discriminant; variants append at the end (see the type).
-        let idx: u32 = match self {
-            UnsupportedReason::Lag => 0,
-            UnsupportedReason::PeriodicCoeff => 1,
-            UnsupportedReason::StructuralForcing => 2,
-            UnsupportedReason::NonConstTableIndex => 3,
-            UnsupportedReason::Mod => 4,
-            UnsupportedReason::ParametricN => 5,
-            UnsupportedReason::NonsmoothState => 6,
-            UnsupportedReason::ZeroInflated => 7,
-        };
-        h.write_u32(idx);
-    }
-}
-
-impl ContentAddressed for DerivEntry {
-    fn hash_into(&self, h: &mut CanonicalHasher) {
-        header(h, "ir::deriv::DerivEntry");
-        match self {
-            DerivEntry::Grad(e) => {
-                h.write_u32(0);
-                e.hash_into(h);
-            }
-            // Hash the stable `code`, NEVER the free-text `node` label — a
-            // message/label copy-edit must not re-key run_id (§4.1).
-            DerivEntry::Unsupported { node: _, code } => {
-                h.write_u32(1);
-                code.hash_into(h);
-            }
-        }
-    }
-}
+//
+// `DerivEntry` / `UnsupportedReason` have no `ContentAddressed` impls: the
+// classified gradient maps that carried them (`rate_grad`, `sigma_sq_grad`,
+// `ic_grad`, obs `grad` / `proj_grad`) are no longer hashed (SV = 2; proposal
+// 2026-07-16-gradient-maps-out-of-run-identity.md), so nothing hashes a
+// `DerivEntry`. Only `Diffable` remains here — for its semantic `expr`.
 
 impl ContentAddressed for Diffable {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::deriv::Diffable");
+        // Only the semantic argument `expr` is identity. The classified gradient
+        // maps `grad` (∂arg/∂θ) and `proj_grad` (∂arg/∂projected) are
+        // compiler-derived — pure autodiff of `expr` over the already-hashed
+        // params/forcings — so they are NOT hashed (SV = 2; proposal
+        // 2026-07-16-gradient-maps-out-of-run-identity.md). This is the obs half
+        // of gradient-independent model identity, mirroring the rate side below.
         self.expr.hash_into(h);
-        // The classified `∂arg/∂θ` gradient map, sorted by key (mirrors the
-        // transition `rate_grad`); empty ⇒ length-0 prefix.
-        h.write_str_map(self.grad.iter());
-        // `∂arg/∂projected` (`proj_grad`, gh#275): `0` = absent (a genuine zero),
-        // else the classified entry. Hashed like `grad` so a `WrtProjected` autodiff
-        // change re-keys run_id, exactly as an `∂arg/∂θ` change does.
-        match &self.proj_grad {
-            None => h.write_u32(0),
-            Some(de) => {
-                h.write_u32(1);
-                de.hash_into(h);
-            }
-        }
     }
 }
 
@@ -292,12 +275,12 @@ impl ContentAddressed for DrawMethod {
         header(h, "ir::transition::DrawMethod");
         match self {
             DrawMethod::Poisson => h.write_u32(0),
-            DrawMethod::Overdispersed { sigma_sq, sigma_sq_grad } => {
+            DrawMethod::Overdispersed { sigma_sq, sigma_sq_grad: _ } => {
                 h.write_u32(1);
+                // Only the semantic σ² expr is identity; `sigma_sq_grad`
+                // (∂σ²/∂θ) is compiler-derived and NOT hashed (SV = 2; proposal
+                // 2026-07-16-gradient-maps-out-of-run-identity.md).
                 sigma_sq.hash_into(h);
-                // sigma_sq_grad: HashMap<String, DerivEntry> — sorted by key
-                // (mirrors the transition rate_grad). Empty ⇒ length-0 prefix.
-                h.write_str_map(sigma_sq_grad.iter());
             }
             DrawMethod::Deterministic => h.write_u32(2),
         }
@@ -320,14 +303,11 @@ impl ContentAddressed for Transition {
         self.rate.hash_into(h);
         self.metadata.hash_into(h);
         self.draw_method.hash_into(h);
-        // rate_grad: ParamGradMap (HashMap<String, DerivEntry>) — sorted by key;
-        // each entry hashes the stable Unsupported `code`, not the display node.
-        h.write_str_map(self.rate_grad.iter());
-        // rate_state_grad: ∂rate/∂compartment (gh#275), the compartment-keyed
-        // sibling — hashed identically (sorted by key). Empty by default until
-        // the WrtPop emission, so its length-0 prefix re-keys at the 0.27 bump
-        // (a deliberate, version-bumped re-key, pinned by the distinctness test).
-        h.write_str_map(self.rate_state_grad.iter());
+        // rate_grad (∂rate/∂θ) and rate_state_grad (∂rate/∂compartment, `J_x`,
+        // gh#275) are compiler-derived autodiff of `rate` over the already-hashed
+        // params/compartments/forcings, so they are NOT hashed — model identity is
+        // gradient-independent (SV = 2; proposal
+        // 2026-07-16-gradient-maps-out-of-run-identity.md).
         self.lineage.hash_into(h);
     }
 }
@@ -664,11 +644,10 @@ impl ContentAddressed for ObservationModel {
             self.stratum.hash_into(h);
         }
         self.projection.hash_into(h);
-        // ∂projection/∂compartment (gh#275 §1h): the DerivedExpr projection's
-        // WrtPop gradient, hashed like rate_state_grad (sorted by key). A
-        // projection-gradient change alters a gradient fit's posterior, so it is
-        // run identity. Empty ⇒ length-0 prefix (linear projections unchanged).
-        h.write_str_map(self.projection_state_grad.iter());
+        // projection_state_grad (∂projection/∂compartment, gh#275 §1h) is the
+        // compiler-derived WrtPop gradient of a DerivedExpr projection — pure
+        // autodiff of `projection` — so it is NOT hashed (SV = 2; proposal
+        // 2026-07-16-gradient-maps-out-of-run-identity.md).
         self.likelihood.hash_into(h);
     }
 }
@@ -1159,19 +1138,11 @@ impl ContentAddressed for Model {
         // distinctness test in this module.
         self.per_eval_bindings.hash_into(h);
         self.initial_conditions.hash_into(h);
-        // ic_grad: compartment → (param → DerivEntry) — ∂(initial_state)/∂θ, the
-        // forward-sensitivity seed (gh#275). A nested map: sort the outer map by
-        // compartment for canonicity, then hash each inner param-map via
-        // `write_str_map` (which sorts by param). Empty by default — golden- and
-        // hash-neutral until the WrtParam-over-init emission — but the outer
-        // length-0 prefix re-keys at the 0.27 bump; pinned by the distinctness test.
-        let mut ic_grads: Vec<_> = self.ic_grad.iter().collect();
-        ic_grads.sort_by(|a, b| a.0.cmp(b.0));
-        h.write_len(ic_grads.len() as u64);
-        for (compartment, grad) in ic_grads {
-            h.write_str(compartment);
-            h.write_str_map(grad.iter());
-        }
+        // ic_grad (∂(initial_state)/∂θ, the forward-sensitivity seed, gh#275) is
+        // compiler-derived autodiff of the parameterized initial conditions over
+        // the already-hashed params, so it is NOT hashed — model identity is
+        // gradient-independent (SV = 2; proposal
+        // 2026-07-16-gradient-maps-out-of-run-identity.md).
         self.output.hash_into(h);
         self.simulation.hash_into(h);
         self.presets.hash_into(h);
