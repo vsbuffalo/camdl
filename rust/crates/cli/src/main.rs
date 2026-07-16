@@ -658,7 +658,9 @@ fn run_simulate(a: &args::SimulateArgs) {
     // `ir_path` (the original `.camdl`) is preserved for display + provenance
     // (dry-run model line, CAS `model_path`/`model_stem`); `ir_path_compiled`
     // is the resolved IR used for all compilation.
-    let (ir_path_compiled, _ir_tmp) = util::resolve_ir_path(&ir_path).unwrap_or_else(|e| {
+    // `simulate` never reads the state-Jacobian, so compile lean
+    // (`needs_state_grad = false`, gh#439 A2 — `--no-state-grad`).
+    let (ir_path_compiled, _ir_tmp) = util::resolve_ir_path(&ir_path, false).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
@@ -1677,8 +1679,10 @@ fn build_simulate_cas_sink(
     total_runs: usize,
 ) -> Result<crate::batch::CasSink, String> {
     // Parse the raw IR (envelope-aware) — params NOT applied (batch parity).
-    // `run.ir_path` is already the compiled IR, so this short-circuits.
-    let (ir_path_resolved, _tmp) = util::resolve_ir_path(&run.ir_path)?;
+    // `run.ir_path` is already the compiled IR, so this short-circuits; the
+    // forward CAS-sink path never reads the state-Jacobian either
+    // (`needs_state_grad = false`, gh#439 A2).
+    let (ir_path_resolved, _tmp) = util::resolve_ir_path(&run.ir_path, false)?;
     let src = std::fs::read_to_string(&ir_path_resolved)
         .map_err(|e| format!("cannot read {}: {}", ir_path_resolved, e))?;
     let base_model: ir::Model = ir::from_str(&src)

@@ -409,7 +409,9 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
     let dt         = exp.config.dt;
     let model_path = exp.config.model.clone();
 
-    let (ir_path_resolved, _tmpfile) = resolve_ir_path(&model_path).unwrap_or_else(|e| {
+    // Batch runs are forward simulations — no state-Jacobian consumer, so compile
+    // lean (`needs_state_grad = false`, gh#439 A2).
+    let (ir_path_resolved, _tmpfile) = resolve_ir_path(&model_path, false).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });

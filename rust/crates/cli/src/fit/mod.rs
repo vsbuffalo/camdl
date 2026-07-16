@@ -193,7 +193,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // untouched so the fit's content hash still hashes the original `.camdl`
     // source bytes (identity is unchanged by the hoist). The temp IR persists
     // for the process — `resolve_ir_path`'s returned path is not a drop guard.
-    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.model.camdl)
+    //
+    // gh#439 A2: only `nuts` on the `ode` backend reads the WrtPop state-Jacobian
+    // (`rate_state_grad` / `projection_state_grad`, via the ODE forward-sensitivity
+    // gradient in `ode_grad::det_grad`). If no stage is nuts+ode, compile lean
+    // (`--no-state-grad`), which omits the dense ~O(G^3) Jacobian that dominates
+    // coupled-model IR. The bit is folded into the IR-cache key, so a lean entry is
+    // never reused for a nuts+ode fit (and run identity is gradient-independent, so
+    // lean vs full share the same model digest).
+    let needs_state_grad = config.needs_state_grad();
+    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.model.camdl, needs_state_grad)
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
             std::process::exit(1);
