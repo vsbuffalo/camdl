@@ -1002,6 +1002,10 @@ pub enum ResolvedLikelihood {
         alpha: ResolvedExpr, alpha_grad: ResolvedGradMap, alpha_proj: ResolvedProjGrad,
         beta: ResolvedExpr, beta_grad: ResolvedGradMap, beta_proj: ResolvedProjGrad,
     },
+    Beta {
+        mean: ResolvedExpr, mean_grad: ResolvedGradMap, mean_proj: ResolvedProjGrad,
+        concentration: ResolvedExpr, concentration_grad: ResolvedGradMap, concentration_proj: ResolvedProjGrad,
+    },
     Bernoulli { p: ResolvedExpr, p_grad: ResolvedGradMap, p_proj: ResolvedProjGrad },
     /// Zero-inflated NegBinomial. Scoring-only — no `_grad`/`_proj` carriers,
     /// because the family is non-differentiable and the gradient-capability gate
@@ -1070,6 +1074,14 @@ pub fn resolve_likelihood(
             beta: resolve_expr(&bb.beta.expr, ctx)?,
             beta_grad: resolve_grad_map(&bb.beta.grad, ctx)?,
             beta_proj: resolve_proj_grad(&bb.beta.proj_grad, ctx)?,
+        }),
+        Likelihood::Beta(b) => Ok(ResolvedLikelihood::Beta {
+            mean: resolve_expr(&b.mean.expr, ctx)?,
+            mean_grad: resolve_grad_map(&b.mean.grad, ctx)?,
+            mean_proj: resolve_proj_grad(&b.mean.proj_grad, ctx)?,
+            concentration: resolve_expr(&b.concentration.expr, ctx)?,
+            concentration_grad: resolve_grad_map(&b.concentration.grad, ctx)?,
+            concentration_proj: resolve_proj_grad(&b.concentration.proj_grad, ctx)?,
         }),
         Likelihood::Bernoulli(b) => Ok(ResolvedLikelihood::Bernoulli {
             p: resolve_expr(&b.p.expr, ctx)?,

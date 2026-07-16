@@ -294,6 +294,44 @@ let test_no_state_grad_gates_state_jacobian () =
   Alcotest.(check bool) "gated: dynamics rate unchanged (WrtPop-only gate)"
     true (inf_gated.Ir.rate = inf_full.Ir.rate)
 
+(* ── gh#440: beta likelihood for a continuous proportion ──────────────────────
+   Parse → expand → IR: `beta(mean, concentration)` must lower to `Ir.Beta` with
+   both differentiable args populated. The scorer/sampler/gradient live Rust-side
+   (obs_loglik/obs_model, FD-verified there); this pins the OCaml frontend. *)
+let test_beta_likelihood_compiles () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    let N = S + I
+    parameters { beta : rate  phi : real in [1.0, 1000.0] }
+    transitions { infection : S --> I @ beta * S * I / N }
+    observations {
+      positivity {
+        columns       { time : time, positivity : real }
+        projected     = prevalence(I)
+        emit_schedule = every 7 'days
+        positivity  ~ beta(mean = projected / N, concentration = phi)
+      }
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} in
+  match Compiler.compile ~name:"beta_test" src with
+  | Error e -> Alcotest.failf "beta model must compile: %s" e
+  | Ok m ->
+    let beta_om =
+      List.find_opt (fun (o : Ir.observation_model) ->
+        match o.Ir.likelihood with Ir.Beta _ -> true | _ -> false)
+        m.Ir.observations
+    in
+    (match beta_om with
+     | Some { Ir.likelihood = Ir.Beta b; _ } ->
+       Alcotest.(check bool) "beta mean arg populated"
+         true (b.Ir.mean.Ir.expr <> Ir.Const 0.0);
+       Alcotest.(check bool) "beta concentration arg populated"
+         true (b.Ir.concentration.Ir.expr <> Ir.Const 0.0)
+     | _ -> Alcotest.fail "positivity stream did not compile to Ir.Beta")
+
 (* ── gh#272 LICM pass ─────────────────────────────────────────────────────────
    Loop-invariant code motion hoists param/table-only subexpressions out of the
    dynamics rates into `per_eval_bindings`. These pin the variant/invariant
@@ -9208,6 +9246,10 @@ let () =
     "no_state_grad", [
       Alcotest.test_case "--no-state-grad drops rate_state_grad, keeps rate_grad + rate (gh#439)"
         `Quick test_no_state_grad_gates_state_jacobian;
+    ];
+    "beta_likelihood", [
+      Alcotest.test_case "beta(mean, concentration) compiles to Ir.Beta (gh#440)"
+        `Quick test_beta_likelihood_compiles;
     ];
     "licm", [
       Alcotest.test_case "invariant/variant classification (Dt/Time/forcing/state are variant)"

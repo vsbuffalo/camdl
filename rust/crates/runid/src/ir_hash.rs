@@ -554,6 +554,12 @@ impl ContentAddressed for Likelihood {
             Likelihood::BetaBinomial(_) => 4,
             Likelihood::Bernoulli(_) => 5,
             Likelihood::ZeroInflatedNegBinomial(_) => 6,
+            // Appended (gh#440), NOT declaration-ordered — a new index must never
+            // renumber an existing variant, which would re-key every model using
+            // it. Beta's mean/concentration are both `Diffable`, so the derived
+            // `diffables()` traversal below hashes them; nothing to add to the
+            // explicit-`n` match.
+            Likelihood::Beta(_) => 7,
         });
         // The θ-independent `n` (Binomial/BetaBinomial) carries no gradient, so
         // it is not a `Diffable` and must be hashed explicitly, before the

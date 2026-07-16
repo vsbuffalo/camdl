@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.29",
-  "validated_by": "ocaml-compiler-v0.29",
+  "ir_version": "0.30",
+  "validated_by": "ocaml-compiler-v0.30",
   "model": {
     "name": "pathogen_migration",
     "version": "0.3",

@@ -81,6 +81,7 @@ fn aux_refs_in_likelihood(lik: &ir::observation::Likelihood) -> Vec<String> {
         L::Normal(n) => vec![&n.mean.expr, &n.sd.expr],
         L::Binomial(b) => vec![&b.n, &b.p.expr],
         L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha.expr, &bb.beta.expr],
+        L::Beta(b) => vec![&b.mean.expr, &b.concentration.expr],
         L::Bernoulli(b) => vec![&b.p.expr],
         L::ZeroInflatedNegBinomial(zi) => vec![&zi.mean, &zi.dispersion, &zi.pi],
     };

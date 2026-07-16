@@ -777,6 +777,21 @@
           "additionalProperties": false
         },
         {
+          "required": ["beta"],
+          "properties": {
+            "beta": {
+              "type": "object",
+              "comment": "Beta likelihood for a continuous proportion x ∈ (0,1). Mean-linked: shape parameters alpha = mean·concentration, beta = (1−mean)·concentration are formed in the runtime scorer/sampler.",
+              "required": ["mean", "concentration"],
+              "properties": {
+                "mean": { "$ref": "#/definitions/expr" },
+                "concentration": { "$ref": "#/definitions/expr" }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "required": ["zero_inflated_neg_binomial"],
           "properties": {
             "zero_inflated_neg_binomial": {

@@ -44,6 +44,7 @@
     | "normal"        -> LikNormal       args
     | "binomial"      -> LikBinomial     args
     | "beta_binomial" -> LikBetaBinomial args
+    | "beta"          -> LikBeta         args
     | "bernoulli"     -> LikBernoulli    args
     | "diagnostic_test" ->
       let find k = List.assoc_opt k args in

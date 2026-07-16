@@ -946,6 +946,7 @@ let differentiate_likelihood (proj : projection) (lik : likelihood)
   | Normal n -> Normal { mean = d n.mean; sd = d n.sd }
   | Binomial b -> Binomial { n = b.n; p = d b.p }
   | BetaBinomial bb -> BetaBinomial { n = bb.n; alpha = d bb.alpha; beta = d bb.beta }
+  | Beta b -> Beta { mean = d b.mean; concentration = d b.concentration }
   | Bernoulli b -> Bernoulli { p = d b.p }
   (* Zero-inflated NB is scoring-only: [mean]/[dispersion]/[pi] are bare exprs,
      not [diffable], so there is no gradient position to fill. The fit-time

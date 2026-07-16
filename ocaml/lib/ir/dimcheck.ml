@@ -1136,6 +1136,19 @@ let check_model (m : model) : result =
            ~msg:(Printf.sprintf
              "%s: BetaBinomial `beta` must be dimensionless" ctx)
            bb.beta.expr
+       | Beta b ->
+         (* `mean` is a proportion (dimensionless on [0, 1]); `concentration` is
+            the Beta shape scale — dimensionless by definition. A count in `mean`
+            is the same missing-`/N` bug the Bernoulli/Binomial-p check catches. *)
+         require_dimensionless st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: Beta `mean` must be dimensionless (a proportion on [0, 1]); \
+              a count here is almost certainly a missing `/N`." ctx)
+           b.mean.expr;
+         require_dimensionless st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: Beta `concentration` must be dimensionless" ctx)
+           b.concentration.expr
        | Bernoulli b ->
          (* gh#116: same as Binomial.p — must be a probability. *)
          require_dimensionless st ~ctx

@@ -855,6 +855,10 @@ let likelihood_to_json (l : likelihood) : Yojson.Safe.t =
       ("n", expr_to_json bb.n);
       ("alpha", diffable_to_json bb.alpha);
       ("beta",  diffable_to_json bb.beta)])]
+  | Beta b ->
+    obj [("beta", obj [
+      ("mean", diffable_to_json b.mean);
+      ("concentration", diffable_to_json b.concentration)])]
   | Bernoulli b ->
     obj [("bernoulli", obj [("p", diffable_to_json b.p)])]
   | ZeroInflatedNegBinomial zi ->
@@ -882,6 +886,8 @@ let likelihood_of_json j =
         alpha = d "alpha" v;
         beta  = d "beta"  v;
       }
+    | "beta" ->
+      Beta { mean = d "mean" v; concentration = d "concentration" v }
     | "bernoulli" ->
       Bernoulli { p = d "p" v }
     | "zero_inflated_neg_binomial" ->

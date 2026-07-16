@@ -1506,6 +1506,7 @@ let lower_via_transitions ctx =
               | LikNormal a       -> LikNormal       (rw_kwargs a)
               | LikBinomial a     -> LikBinomial     (rw_kwargs a)
               | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
+              | LikBeta a         -> LikBeta         (rw_kwargs a)
               | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
               | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
             in
@@ -1784,6 +1785,7 @@ let lower_via_transitions ctx =
                 | LikNormal a       -> LikNormal       (rw_kwargs a)
                 | LikBinomial a     -> LikBinomial     (rw_kwargs a)
                 | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
+                | LikBeta a         -> LikBeta         (rw_kwargs a)
                 | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
                 | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
               in
@@ -6590,7 +6592,7 @@ let expand_observations ctx =
         in
         match meas_v.om_lik with
         | LikNegBinomial k | LikPoisson k | LikNormal k
-        | LikBinomial k | LikBetaBinomial k | LikBernoulli k
+        | LikBinomial k | LikBetaBinomial k | LikBeta k | LikBernoulli k
         | LikZeroInflatedNegBinomial k ->
           List.concat_map (fun (_, e) -> names_of e) k
       in
@@ -6806,6 +6808,7 @@ let expand_observations ctx =
       | LikNormal _       -> "normal"
       | LikBinomial _     -> "binomial"
       | LikBetaBinomial _ -> "beta_binomial"
+      | LikBeta _         -> "beta"
       | LikBernoulli _    -> "bernoulli"
       | LikZeroInflatedNegBinomial _ -> "zero_inflated_neg_binomial"
     in
@@ -6818,12 +6821,13 @@ let expand_observations ctx =
          (mean, concentration) sugar that lowers to them. The construction site
          below enforces exclusivity (E252) and the per-form required args (E250). *)
       | LikBetaBinomial _ -> ["n"; "alpha"; "beta"; "mean"; "concentration"]
+      | LikBeta _         -> ["mean"; "concentration"]
       | LikBernoulli _    -> ["p"]
       | LikZeroInflatedNegBinomial _ -> ["mean"; "r"; "pi"]
     in
     let current_kwargs = match lik_v with
       | LikNegBinomial k | LikPoisson k | LikNormal k
-      | LikBinomial k | LikBetaBinomial k | LikBernoulli k
+      | LikBinomial k | LikBetaBinomial k | LikBeta k | LikBernoulli k
       | LikZeroInflatedNegBinomial k -> k
     in
     (* Report unknown kwargs and positional args up front. *)
@@ -6938,6 +6942,14 @@ let expand_observations ctx =
             Ir.alpha = diff (resolve_kw kwargs "alpha");
             Ir.beta  = diff (resolve_kw kwargs "beta");
           }
+      | LikBeta kwargs ->
+        (* Continuous proportion x ∈ (0,1), mean-linked: alpha = mean·conc,
+           beta = (1 − mean)·conc formed in the Rust scorer/sampler. The obs
+           autodiff threads d/dθ through both diffable args. *)
+        Ir.Beta {
+          Ir.mean          = diff (resolve_kw kwargs "mean");
+          Ir.concentration = diff (resolve_kw kwargs "concentration");
+        }
       | LikBernoulli kwargs ->
         Ir.Bernoulli { Ir.p = diff (resolve_kw kwargs "p") }
       | LikZeroInflatedNegBinomial kwargs ->
@@ -7737,7 +7749,7 @@ let check_no_shadowing ctx =
      | Some om ->
        let kwargs = match om.om_lik with
          | LikNegBinomial a | LikPoisson a | LikNormal a
-         | LikBinomial a | LikBetaBinomial a | LikBernoulli a
+         | LikBinomial a | LikBetaBinomial a | LikBeta a | LikBernoulli a
          | LikZeroInflatedNegBinomial a -> a
        in
        List.iter (fun (_, e) -> walk decl seed e) kwargs

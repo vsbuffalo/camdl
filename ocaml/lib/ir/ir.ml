@@ -385,6 +385,12 @@ type neg_binomial_likelihood = { mean: diffable; dispersion: diffable }
 type normal_likelihood       = { mean: diffable; sd: diffable }
 type binomial_likelihood     = { n: expr; p: diffable }
 type beta_binomial_likelihood = { n: expr; alpha: diffable; beta: diffable }
+(* Beta likelihood for a continuous proportion [x ∈ (0, 1)] — an observed rate,
+   coverage, or positivity given directly as a fraction (not a k-of-n count, which
+   is [beta_binomial_likelihood]). Mean-linked like [neg_binomial_likelihood]: the
+   model predicts [mean] and [concentration] (φ) is the dispersion knob, with shape
+   parameters [α = mean·φ], [β = (1 − mean)·φ]. *)
+type beta_likelihood         = { mean: diffable; concentration: diffable }
 type bernoulli_likelihood    = { p: diffable }
 (* Zero-inflated negative binomial: a structural-zero mass [pi] mixed with a
    NegBinomial count. `P(Y=0) = pi + (1-pi)·f(0)`, `P(Y=k>0) = (1-pi)·f(k)`,
@@ -402,6 +408,7 @@ type likelihood =
   | Normal               of normal_likelihood
   | Binomial             of binomial_likelihood
   | BetaBinomial         of beta_binomial_likelihood
+  | Beta                 of beta_likelihood
   | Bernoulli            of bernoulli_likelihood
   | ZeroInflatedNegBinomial of zi_neg_binomial_likelihood
 

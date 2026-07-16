@@ -2462,6 +2462,7 @@ pub fn print_observations_summary(model: &ir::Model) {
             ir::observation::Likelihood::Normal(_)       => "Normal",
             ir::observation::Likelihood::Binomial(_)     => "Binomial",
             ir::observation::Likelihood::BetaBinomial(_) => "BetaBinomial",
+            ir::observation::Likelihood::Beta(_)         => "Beta",
             ir::observation::Likelihood::Bernoulli(_)    => "Bernoulli",
             ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "ZeroInflatedNegBinomial",
         };

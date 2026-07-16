@@ -15,7 +15,7 @@ use crate::state::{IntState, RealState};
 use crate::inference::obs_loglik::{
     negbin_logpmf, zi_negbin_logpmf, discretized_normal_logpmf_tol, poisson_logpmf, DEFAULT_TOL,
     negbin_logpmf_grad, discretized_normal_logpmf_grad, poisson_logpmf_grad,
-    beta_binomial_logpmf_grad,
+    beta_binomial_logpmf_grad, beta_logpdf, beta_logpdf_grad,
 };
 use crate::inference::types::LOG_PROB_FLOOR;
 use ir::observation::ObservationModel;
@@ -126,6 +126,11 @@ pub(crate) fn eval_likelihood_resolved(
             let k = observed.round().max(0.0) as u64;
             let n_int = n_val.round().max(0.0) as u64;
             crate::inference::obs_loglik::beta_binomial_logpmf(k, n_int, alpha_val, beta_val)
+        }
+        ResolvedLikelihood::Beta { mean, concentration, .. } => {
+            let m = eval_resolved(mean, &ctx(projected));
+            let c = eval_resolved(concentration, &ctx(projected));
+            beta_logpdf(observed, m, c)
         }
         ResolvedLikelihood::Bernoulli { p, .. } => {
             // Clamp p to [0, 1] before forming the log-probability.
@@ -259,6 +264,20 @@ pub(crate) fn eval_likelihood_resolved_grad(
                 grad[i] += d_alpha * da + d_beta * db;
             }
         }
+        ResolvedLikelihood::Beta { mean, mean_grad, concentration, concentration_grad, .. } => {
+            // log f = (a−1)ln x + (b−1)ln(1−x) + lgamma(φ) − lgamma(a) − lgamma(b),
+            // a = mean·φ, b = (1−mean)·φ. The (mean, φ) partials from
+            // `beta_logpdf_grad` chain-rule to each estimated param via the
+            // emitted mean/concentration gradient maps.
+            let m = eval_resolved(mean, &ctx);
+            let c = eval_resolved(concentration, &ctx);
+            let (d_mean, d_conc) = beta_logpdf_grad(observed, m, c);
+            for (i, &model_idx) in estimated_to_model.iter().enumerate() {
+                let dm = eval_emitted_grad(mean_grad, model_idx, &ctx);
+                let dc = eval_emitted_grad(concentration_grad, model_idx, &ctx);
+                grad[i] += d_mean * dm + d_conc * dc;
+            }
+        }
         ResolvedLikelihood::Bernoulli { p, p_grad, .. } => {
             // log L = log(p)         if observed > 0.5
             //       = log(1 - p)     otherwise
@@ -369,6 +388,13 @@ pub(crate) fn dlogp_dprojected(
             let (d_alpha, d_beta) =
                 beta_binomial_logpmf_grad(observed, n_round, alpha_val, beta_val);
             d_alpha * eval_proj_grad(alpha_proj, &ctx) + d_beta * eval_proj_grad(beta_proj, &ctx)
+        }
+        ResolvedLikelihood::Beta { mean, concentration, mean_proj, concentration_proj, .. } => {
+            let m = eval_resolved(mean, &ctx);
+            let c = eval_resolved(concentration, &ctx);
+            let (d_mean, d_conc) = beta_logpdf_grad(observed, m, c);
+            d_mean * eval_proj_grad(mean_proj, &ctx)
+                + d_conc * eval_proj_grad(concentration_proj, &ctx)
         }
         ResolvedLikelihood::Bernoulli { p, p_proj, .. } => {
             let p_val = eval_resolved(p, &ctx);
@@ -487,6 +513,20 @@ pub(crate) fn sample_obs_resolved(
             let p = a / (a + b);
             rng.binomial(n_int, p.clamp(0.0, 1.0)) as f64
         }
+        ResolvedLikelihood::Beta { mean, concentration, .. } => {
+            // Draw x ~ Beta(a, b), a = mean·φ, b = (1−mean)·φ, via the
+            // Gamma(a,1)/(Gamma(a,1)+Gamma(b,1)) construction (same as the
+            // BetaBinomial p-draw) — the continuous proportion, not a count.
+            let m = eval_resolved(mean, &ctx(projected));
+            let c = eval_resolved(concentration, &ctx(projected));
+            let a = (m * c).max(LOG_PROB_FLOOR);
+            let b = ((1.0 - m) * c).max(LOG_PROB_FLOOR);
+            use rand_distr::{Distribution, Gamma};
+            let inner = rng.inner_mut();
+            let ga = Gamma::new(a, 1.0).map(|d| d.sample(inner)).unwrap_or(1.0);
+            let gb = Gamma::new(b, 1.0).map(|d| d.sample(inner)).unwrap_or(1.0);
+            ga / (ga + gb)
+        }
         ResolvedLikelihood::Bernoulli { p, .. } => {
             // Clamp before sampling — an out-of-range p would
             // otherwise always-1 (p > 1) or always-0 (p < 0).
@@ -546,6 +586,10 @@ pub(crate) fn eval_obs_mean_resolved(
             let beta_val  = eval_resolved(beta,  &ctx(projected));
             let denom = (alpha_val + beta_val).max(LOG_PROB_FLOOR);
             n_val * (alpha_val / denom)
+        }
+        ResolvedLikelihood::Beta { mean, .. } => {
+            // E[Beta(mean·φ, (1−mean)·φ)] = mean.
+            eval_resolved(mean, &ctx(projected))
         }
         ResolvedLikelihood::Bernoulli { p, .. } => {
             eval_resolved(p, &ctx(projected))

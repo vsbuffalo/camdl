@@ -2556,6 +2556,7 @@ normal(mean = EXPR, sd = EXPR)                 continuous
 binomial(n = EXPR, p = EXPR)                   bounded counts
 beta_binomial(n = EXPR, alpha = EXPR, beta = EXPR)          overdispersed prevalence (raw)
 beta_binomial(n = EXPR, mean = EXPR, concentration = EXPR)  overdispersed prevalence (mean/concentration)
+beta(mean = EXPR, concentration = EXPR)        continuous proportion in (0, 1)
 bernoulli(p = EXPR)                            binary outcome
 ```
 
@@ -2564,6 +2565,13 @@ The two `beta_binomial` spellings are equivalent: `mean`/`concentration` lowers 
 reads better; mixing the two forms in one call is an error (E252). For a
 sampler-friendly parameterization of the `concentration` (overdispersion) parameter,
 see the reparameterization guidance in `camdl docs inference`.
+
+Use `beta(...)` when the observed value is itself a **continuous proportion** in the
+open interval (0, 1) — a rate, coverage, or positivity given directly as a fraction —
+rather than a `k`-of-`n` count (which is `beta_binomial`). It is mean-linked with the
+same shape mapping (`alpha = mean · concentration`, `beta = (1 − mean) · concentration`);
+`mean` and `concentration` are both differentiable, so `beta` is usable under
+gradient-based inference (`nuts`) as well as the gradient-free methods.
 
 ### 12.2.1 Diagnostic-test likelihood sugar
 
@@ -3122,8 +3130,8 @@ they compile fine. This includes the calendar builtins (`add_calendar_months`,
 `add_calendar_years`, `date`, `date_range` — note only the `_months`/`_years`
 calendar adders exist; there is no `add_calendar_days`/`add_calendar_weeks`), the
 rate wrappers (`overdispersed`, `deterministic`), the likelihood distributions
-(`poisson`, `neg_binomial`, `normal`, `binomial`, `beta_binomial`, `bernoulli`,
-`diagnostic_test`), the observation projection name (`projected`), and the
+(`poisson`, `neg_binomial`, `normal`, `binomial`, `beta_binomial`, `beta`,
+`bernoulli`, `diagnostic_test`), the observation projection name (`projected`), and the
 scenario names (`baseline`, `scenario`). Reusing one as an ordinary parameter is
 legal but inadvisable for readability.
 

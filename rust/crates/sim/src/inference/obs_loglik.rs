@@ -340,6 +340,57 @@ pub fn beta_binomial_logpmf(k: u64, n: u64, alpha: f64, beta: f64) -> f64 {
         - lbeta(alpha, beta)
 }
 
+/// Beta log-density for a continuous proportion `x ∈ (0, 1)`, mean-linked.
+///
+/// With shape parameters `a = mean·φ`, `b = (1 − mean)·φ` (so `a + b = φ`, the
+/// concentration):
+///
+///   log f(x | mean, φ) = (a−1)·ln x + (b−1)·ln(1−x) + lgamma(φ) − lgamma(a) − lgamma(b)
+///
+/// Models an observed rate / coverage / positivity given directly as a fraction
+/// (not a `k`-of-`n` count — that is [`beta_binomial_logpmf`]). Returns
+/// `NEG_INFINITY` outside the open unit interval or for a non-positive shape.
+pub fn beta_logpdf(x: f64, mean: f64, concentration: f64) -> f64 {
+    if !(x > 0.0 && x < 1.0) {
+        return f64::NEG_INFINITY;
+    }
+    let a = mean * concentration;
+    let b = (1.0 - mean) * concentration;
+    if a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    (a - 1.0) * x.ln() + (b - 1.0) * (1.0 - x).ln() + lgamma(concentration) - lgamma(a)
+        - lgamma(b)
+}
+
+/// Gradient of `beta_logpdf` w.r.t. (mean, concentration).
+///
+/// With ψ = digamma, `a = mean·φ`, `b = (1 − mean)·φ` (so `a + b = φ`):
+///
+///   ∂log f/∂mean = φ·[ln x − ln(1−x) − ψ(a) + ψ(b)]
+///   ∂log f/∂φ    = mean·(ln x − ψ(a)) + (1−mean)·(ln(1−x) − ψ(b)) + ψ(φ)
+///
+/// The `lgamma(a+b) = lgamma(φ)` term contributes `ψ(φ)·∂φ/∂θ` — zero for the
+/// mean partial (a+b is constant in mean), one for the concentration partial.
+/// Returns `(0.0, 0.0)` outside the domain, matching the value function's
+/// `NEG_INFINITY` clamp — the gradient of a constant `-inf` floor is zero, as in
+/// the other helpers.
+pub fn beta_logpdf_grad(x: f64, mean: f64, concentration: f64) -> (f64, f64) {
+    let a = mean * concentration;
+    let b = (1.0 - mean) * concentration;
+    if !(x > 0.0 && x < 1.0) || a <= 0.0 || b <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let lx = x.ln();
+    let l1mx = (1.0 - x).ln();
+    let psi_a = digamma(a);
+    let psi_b = digamma(b);
+    let d_mean = concentration * (lx - l1mx - psi_a + psi_b);
+    let d_concentration =
+        mean * (lx - psi_a) + (1.0 - mean) * (l1mx - psi_b) + digamma(concentration);
+    (d_mean, d_concentration)
+}
+
 /// Poisson log-PMF.
 ///
 /// log p(y | lambda) = y·log(lambda) - lambda - lgamma(y+1)
@@ -354,6 +405,49 @@ pub fn poisson_logpmf(y: f64, lambda: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn beta_logpdf_grad_matches_finite_difference() {
+        // Analytic ∂/∂(mean, concentration) vs central finite differences of the
+        // value function — the FD oracle is ground truth for the digamma-based
+        // analytic gradient (gh#440).
+        let h = 1e-6;
+        for &(x, mean, conc) in &[
+            (0.3_f64, 0.4_f64, 20.0_f64),
+            (0.7, 0.5, 5.0),
+            (0.15, 0.2, 50.0),
+            (0.85, 0.75, 8.0),
+        ] {
+            let (d_mean, d_conc) = beta_logpdf_grad(x, mean, conc);
+            let fd_mean =
+                (beta_logpdf(x, mean + h, conc) - beta_logpdf(x, mean - h, conc)) / (2.0 * h);
+            let fd_conc =
+                (beta_logpdf(x, mean, conc + h) - beta_logpdf(x, mean, conc - h)) / (2.0 * h);
+            assert!(
+                (d_mean - fd_mean).abs() < 1e-4,
+                "∂/∂mean at (x={x}, mean={mean}, conc={conc}): analytic {d_mean}, FD {fd_mean}"
+            );
+            assert!(
+                (d_conc - fd_conc).abs() < 1e-4,
+                "∂/∂conc at (x={x}, mean={mean}, conc={conc}): analytic {d_conc}, FD {fd_conc}"
+            );
+        }
+    }
+
+    #[test]
+    fn beta_logpdf_value_and_domain() {
+        // Beta(a=b=1) ≡ Uniform(0,1): mean=0.5, conc=2 ⇒ logpdf = 0 on the interior.
+        for &x in &[0.1_f64, 0.5, 0.9] {
+            assert!(beta_logpdf(x, 0.5, 2.0).abs() < 1e-9, "Uniform beta logpdf at {x}");
+        }
+        // Outside the open unit interval → −inf; gradient of the floor is 0.
+        assert_eq!(beta_logpdf(0.0, 0.4, 20.0), f64::NEG_INFINITY);
+        assert_eq!(beta_logpdf(1.0, 0.4, 20.0), f64::NEG_INFINITY);
+        assert_eq!(beta_logpdf(-0.1, 0.4, 20.0), f64::NEG_INFINITY);
+        assert_eq!(beta_logpdf_grad(0.0, 0.4, 20.0), (0.0, 0.0));
+        let (gm, gc) = beta_logpdf_grad(0.3, 0.4, 20.0);
+        assert!(gm.is_finite() && gc.is_finite());
+    }
 
     #[test]
     fn normal_quantile_inverts_normal_cdf() {

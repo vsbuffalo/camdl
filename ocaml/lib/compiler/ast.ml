@@ -308,6 +308,7 @@ type likelihood_kind =
   | LikNormal       of (string * expr) list
   | LikBinomial     of (string * expr) list
   | LikBetaBinomial of (string * expr) list
+  | LikBeta         of (string * expr) list
   | LikBernoulli    of (string * expr) list
   (* Zero-inflated NB. Surface: `zero_inflated(base = neg_binomial(mean=, r=),
      pi = )`, desugared here at parse time to the base's kwargs (`mean`, `r`)

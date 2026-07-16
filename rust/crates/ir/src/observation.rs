@@ -107,6 +107,17 @@ pub struct BetaBinomialLikelihood {
     pub beta:  Diffable,
 }
 
+/// Beta likelihood for a continuous proportion `x ∈ (0, 1)` (an observed rate,
+/// coverage, or positivity given directly as a fraction — not a `k`-of-`n` count,
+/// which is [`BetaBinomialLikelihood`]). Mean-linked like [`NegBinomialLikelihood`]:
+/// the model predicts `mean` and `concentration` (φ) is the dispersion knob, with
+/// shape parameters `α = mean·φ`, `β = (1 − mean)·φ`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]
+pub struct BetaLikelihood {
+    pub mean:          Diffable,
+    pub concentration: Diffable,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]
 pub struct BernoulliLikelihood {
     pub p: Diffable,
@@ -138,6 +149,7 @@ pub enum Likelihood {
     Normal(NormalLikelihood),
     Binomial(BinomialLikelihood),
     BetaBinomial(BetaBinomialLikelihood),
+    Beta(BetaLikelihood),
     Bernoulli(BernoulliLikelihood),
     ZeroInflatedNegBinomial(ZeroInflatedNegBinomialLikelihood),
 }
@@ -154,6 +166,7 @@ impl Likelihood {
             Likelihood::Normal(_)       => "normal",
             Likelihood::Binomial(_)     => "binomial",
             Likelihood::BetaBinomial(_) => "beta_binomial",
+            Likelihood::Beta(_)         => "beta",
             Likelihood::Bernoulli(_)    => "bernoulli",
             Likelihood::ZeroInflatedNegBinomial(_) => "zero_inflated_neg_binomial",
         }
