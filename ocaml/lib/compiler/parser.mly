@@ -44,6 +44,7 @@
     | "normal"        -> LikNormal       args
     | "binomial"      -> LikBinomial     args
     | "beta_binomial" -> LikBetaBinomial args
+    | "beta"          -> LikBeta         args
     | "bernoulli"     -> LikBernoulli    args
     | "diagnostic_test" ->
       let find k = List.assoc_opt k args in
@@ -75,10 +76,42 @@
            ~code:"E254"
            ~msg:"diagnostic_test requires keyword args base = <binomial|bernoulli>(...), sens = <expr>, spec = <expr>";
          LikBinomial [])
+    | "zero_inflated" ->
+      (* Zero-inflation wrapper: `zero_inflated(base = neg_binomial(mean=, r=),
+         pi = )`. Desugar to the flat [LikZeroInflatedNegBinomial] by flattening
+         the base's kwargs with `pi`. Base is restricted to neg_binomial for
+         now; scoring-only (no gradient). *)
+      (* Reject any kwarg other than base/pi so a stray or typo'd argument is not
+         silently dropped (No loose semantics). *)
+      List.iter (fun (k, _) ->
+        if k <> "" && k <> "base" && k <> "pi" then
+          Parser_errors.push_error ~sp ~ep
+            ~code:"E251"
+            ~msg:(Printf.sprintf
+              "zero_inflated has no argument '%s'; expected base = neg_binomial(...), \
+               pi = <expr>" k))
+        args;
+      let find k = List.assoc_opt k args in
+      (match find "base", find "pi" with
+       | Some (EFuncCall (base_kind, base_args)), Some pi_e ->
+         (match base_kind with
+          | "neg_binomial" ->
+            LikZeroInflatedNegBinomial (base_args @ [("pi", pi_e)])
+          | other ->
+            Parser_errors.push_error ~sp ~ep
+              ~code:"E324"
+              ~msg:(Printf.sprintf
+                "zero_inflated base must be neg_binomial(...); got %s(...)" other);
+            LikZeroInflatedNegBinomial [])
+       | _ ->
+         Parser_errors.push_error ~sp ~ep
+           ~code:"E325"
+           ~msg:"zero_inflated requires keyword args base = neg_binomial(...), pi = <expr>";
+         LikZeroInflatedNegBinomial [])
     | s ->
       Parser_errors.push_error ~sp ~ep
         ~code:"E104"
-        ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test" s);
+        ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test, zero_inflated" s);
       LikPoisson args
 
   let build_obs_decl name ibs src kvs ~doc ~sp ~ep =
@@ -341,20 +374,20 @@ param_decl:
       { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, no prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, with prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, no prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, with prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 prior_clause:

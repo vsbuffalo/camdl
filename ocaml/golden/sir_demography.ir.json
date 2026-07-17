@@ -1,4 +1,4 @@
-{"ir_version":"0.29","validated_by":"ocaml-compiler-v0.29","model":{"name":"sir_demography","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.30","validated_by":"ocaml-compiler-v0.30","model":{"name":"sir_demography","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}

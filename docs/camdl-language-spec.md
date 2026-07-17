@@ -653,19 +653,35 @@ block) and require at least one dimension (§6).
 
 ### 4.3 Indexed Parameters
 
-Parameters may be declared with a single dimension index, creating one scalar
-parameter per stratum:
+Parameters may be declared with one or more dimension indices, creating one
+scalar parameter per stratum (or, for several indices, per cell of the cartesian
+product):
 
 ```camdl
 parameters {
-  gamma    : rate
-  N[patch] : positive   # expands to N_urban, N_rural, ...
-  R0[patch]: positive   # expands to R0_urban, R0_rural, ...
+  gamma               : rate
+  N[patch]            : positive   # expands to N_urban, N_rural, ...
+  R0[patch]           : positive   # expands to R0_urban, R0_rural, ...
+  mu[village, season] : rate       # expands to mu_kwaru_wet, mu_kwaru_dry, ...
 }
 ```
 
-The index must refer to a declared `stratify` dimension. In expressions, indexed
-parameters are accessed with `[index]`:
+A multi-index parameter is a design matrix: `mu[village, season]` over
+`village = [kwaru, ajura]`, `season = [wet, dry]` expands to the four cells
+`mu_kwaru_wet`, `mu_kwaru_dry`, `mu_ajura_wet`, `mu_ajura_dry`, each an
+independent scalar with the declared kind, bounds, and prior. Names mangle
+`<base>_<level1>_<level2>_…` in declaration-dim order. A repeated axis
+(`mu[village, village]`) is an error (E331); an unknown or empty index dimension
+is E330.
+
+Each index must refer to a declared `stratify` dimension. In expressions,
+indexed parameters are accessed with `[index]` (all axes, in declaration order):
+
+```camdl
+let C[v in village, s in season] = mu[v, s] * gamma   # mu[v,s] → Param("mu_kwaru_wet") etc.
+```
+
+For a single index:
 
 ```camdl
 let beta[p in patch] = R0[p] * gamma   # R0[p] → Param("R0_urban") etc.
@@ -2540,6 +2556,7 @@ normal(mean = EXPR, sd = EXPR)                 continuous
 binomial(n = EXPR, p = EXPR)                   bounded counts
 beta_binomial(n = EXPR, alpha = EXPR, beta = EXPR)          overdispersed prevalence (raw)
 beta_binomial(n = EXPR, mean = EXPR, concentration = EXPR)  overdispersed prevalence (mean/concentration)
+beta(mean = EXPR, concentration = EXPR)        continuous proportion in (0, 1)
 bernoulli(p = EXPR)                            binary outcome
 ```
 
@@ -2548,6 +2565,13 @@ The two `beta_binomial` spellings are equivalent: `mean`/`concentration` lowers 
 reads better; mixing the two forms in one call is an error (E252). For a
 sampler-friendly parameterization of the `concentration` (overdispersion) parameter,
 see the reparameterization guidance in `camdl docs inference`.
+
+Use `beta(...)` when the observed value is itself a **continuous proportion** in the
+open interval (0, 1) — a rate, coverage, or positivity given directly as a fraction —
+rather than a `k`-of-`n` count (which is `beta_binomial`). It is mean-linked with the
+same shape mapping (`alpha = mean · concentration`, `beta = (1 − mean) · concentration`);
+`mean` and `concentration` are both differentiable, so `beta` is usable under
+gradient-based inference (`nuts`) as well as the gradient-free methods.
 
 ### 12.2.1 Diagnostic-test likelihood sugar
 
@@ -3106,8 +3130,8 @@ they compile fine. This includes the calendar builtins (`add_calendar_months`,
 `add_calendar_years`, `date`, `date_range` — note only the `_months`/`_years`
 calendar adders exist; there is no `add_calendar_days`/`add_calendar_weeks`), the
 rate wrappers (`overdispersed`, `deterministic`), the likelihood distributions
-(`poisson`, `neg_binomial`, `normal`, `binomial`, `beta_binomial`, `bernoulli`,
-`diagnostic_test`), the observation projection name (`projected`), and the
+(`poisson`, `neg_binomial`, `normal`, `binomial`, `beta_binomial`, `beta`,
+`bernoulli`, `diagnostic_test`), the observation projection name (`projected`), and the
 scenario names (`baseline`, `scenario`). Reusing one as an ordinary parameter is
 legal but inadvisable for readability.
 

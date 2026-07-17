@@ -147,7 +147,10 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
      | Normal { mean; sd } -> add_expr mean.expr; add_expr sd.expr
      | Binomial { n; p } -> add_expr n; add_expr p.expr
      | BetaBinomial { n; alpha; beta } -> add_expr n; add_expr alpha.expr; add_expr beta.expr
-     | Bernoulli { p } -> add_expr p.expr)
+     | Beta { mean; concentration } -> add_expr mean.expr; add_expr concentration.expr
+     | Bernoulli { p } -> add_expr p.expr
+     | ZeroInflatedNegBinomial { mean; dispersion; pi } ->
+       add_expr mean; add_expr dispersion; add_expr pi)
   ) m.observations;
 
   (* Model-level shared bindings: a compartment used only in `let N = S+I+R`

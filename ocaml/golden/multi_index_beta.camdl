@@ -1,0 +1,52 @@
+# Multi-index parameters: transmission as a region × age design matrix.
+# Exercises `beta[region, age]` — a 2-dimensional indexed parameter — read per
+# cell in the force of infection. Compartments stratify over both axes; each
+# (region, age) cell carries its own transmission rate `beta[r, a]`, expanded to
+# the four scalars beta_north_child, beta_north_adult, beta_south_child,
+# beta_south_adult. The golden pins that a multi-index declaration compiles to
+# flat per-cell params and simulates cleanly across backends.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+dimensions {
+  region = [north, south]
+  age    = [child, adult]
+}
+
+stratify(by = region)
+stratify(by = age)
+
+let N[r in region, a in age] = S[r, a] + I[r, a] + R[r, a]
+
+parameters {
+  beta[region, age] : rate in [0.001, 2.0]   # transmission design matrix
+  gamma             : rate in [0.01,  1.0]
+}
+
+transitions {
+  infection[r in region, a in age] : S[r, a] --> I[r, a]
+    @ beta[r, a] * S[r, a] * I[r, a] / N[r, a]
+  recovery[r in region, a in age]  : I[r, a] --> R[r, a] @ gamma * I[r, a]
+}
+
+init {
+  S[north, child] = 1000   I[north, child] = 5
+  S[north, adult] = 2000   I[north, adult] = 5
+  S[south, child] = 1500   I[south, child] = 5
+  S[south, adult] = 2500   I[south, adult] = 5
+}
+
+simulate { from = 0 'days  to = 120 'days }
+
+scenarios {
+  baseline {
+    label = "region × age transmission design matrix"
+    set = {
+      beta_north_child = 0.5   beta_north_adult = 0.3
+      beta_south_child = 0.6   beta_south_adult = 0.35
+      gamma            = 0.1
+    }
+  }
+}

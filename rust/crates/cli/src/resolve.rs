@@ -274,6 +274,11 @@ pub struct RecordMeta {
     pub children: BTreeMap<String, Vec<ContentHash>>,
     pub source_paths: Vec<String>,
     pub label: Option<String>,
+    /// Column schema for the leaf's tabular outputs, attached to the record at
+    /// build time — used by atomic-commit paths (e.g. `sim`, whose files are
+    /// known in memory before commit); the streaming fit path sets it at
+    /// finalize instead.
+    pub output_schema: BTreeMap<String, runid::record::TableSchema>,
 }
 
 impl RecordMeta {
@@ -290,6 +295,7 @@ impl RecordMeta {
             children: BTreeMap::new(),
             source_paths: vec![model_path.into()],
             label,
+            output_schema: BTreeMap::new(),
         }
     }
 
@@ -333,6 +339,16 @@ impl ResolvedClaim {
         self.claim.dir()
     }
 
+    /// Attach the tabular outputs' column schema, keyed by leaf-relative path,
+    /// before `finalize`. Recorded in `run.json`, never hashed — identity was
+    /// fixed at claim time, so this cannot re-key the run.
+    pub fn set_output_schema(
+        &mut self,
+        schema: std::collections::BTreeMap<String, runid::record::TableSchema>,
+    ) {
+        self.record.output_schema = schema;
+    }
+
     /// Commit Running → Completed, writing the post-run `display_inputs` into
     /// `run.json.inputs`. (`StreamClaim::finalize` flips status and builds the
     /// exact-set manifest from the streamed files.)
@@ -356,6 +372,7 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
         deps: meta.deps.clone(),
         status,
         artifacts: Default::default(),
+        output_schema: meta.output_schema.clone(),
         children: meta.children.clone(),
         inputs: resolved.display_inputs.clone(),
         provenance: Provenance {

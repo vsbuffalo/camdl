@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.29",
+  "ir_version": "0.30",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "two_state",

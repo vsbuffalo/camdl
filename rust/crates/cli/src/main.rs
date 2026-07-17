@@ -7,6 +7,7 @@ mod cas_read;       // generic RunRecord reader (new-format sims); transitional 
 mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)
 mod hashing;
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
+mod output_schema;  // run.json output_schema: column roles for tabular outputs (proposal 2026-07-15)
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
 mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
@@ -231,6 +232,20 @@ Examples:
   camdl inspect sir.camdl --transitions
 "))]
     Inspect(Passthrough),
+
+    /// Render a .camdl model as LaTeX or display JSON (delegates to camdlc)
+    #[command(long_about = "\
+Render a model for reading or display (delegates to camdlc).
+
+  # LaTeX document (indexed form) to stdout
+  camdl render sir.camdl
+
+  # Structured JSON for a web viewer (KaTeX-ready blocks)
+  camdl render sir.camdl --format json
+
+  # Expand chosen dimensions to their literal strata
+  camdl render seir_age.camdl --expand age")]
+    Render(Passthrough),
 
     /// Show embedded usage guides (offline, version-matched to this binary)
     Docs(args::DocsArgs),
@@ -577,6 +592,13 @@ fn main() {
                 eprintln!("error: {}", e); std::process::exit(1);
             });
         }
+        Command::Render(a) => {
+            let mut refs = vec!["render"];
+            refs.extend(a.args.iter().map(String::as_str));
+            util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
+                eprintln!("error: {}", e); std::process::exit(1);
+            });
+        }
         Command::Docs(a)                => docs::cmd_docs(&a),
         Command::Mre(MreCmd::Fit(a))      => mre::cmd_mre_fit(&a),
         Command::Mre(MreCmd::Simulate(a)) => mre::cmd_mre_simulate(&a),
@@ -636,7 +658,9 @@ fn run_simulate(a: &args::SimulateArgs) {
     // `ir_path` (the original `.camdl`) is preserved for display + provenance
     // (dry-run model line, CAS `model_path`/`model_stem`); `ir_path_compiled`
     // is the resolved IR used for all compilation.
-    let (ir_path_compiled, _ir_tmp) = util::resolve_ir_path(&ir_path).unwrap_or_else(|e| {
+    // `simulate` never reads the state-Jacobian, so compile lean
+    // (`needs_state_grad = false`, gh#439 A2 — `--no-state-grad`).
+    let (ir_path_compiled, _ir_tmp) = util::resolve_ir_path(&ir_path, false).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
@@ -1655,8 +1679,10 @@ fn build_simulate_cas_sink(
     total_runs: usize,
 ) -> Result<crate::batch::CasSink, String> {
     // Parse the raw IR (envelope-aware) — params NOT applied (batch parity).
-    // `run.ir_path` is already the compiled IR, so this short-circuits.
-    let (ir_path_resolved, _tmp) = util::resolve_ir_path(&run.ir_path)?;
+    // `run.ir_path` is already the compiled IR, so this short-circuits; the
+    // forward CAS-sink path never reads the state-Jacobian either
+    // (`needs_state_grad = false`, gh#439 A2).
+    let (ir_path_resolved, _tmp) = util::resolve_ir_path(&run.ir_path, false)?;
     let src = std::fs::read_to_string(&ir_path_resolved)
         .map_err(|e| format!("cannot read {}: {}", ir_path_resolved, e))?;
     let base_model: ir::Model = ir::from_str(&src)

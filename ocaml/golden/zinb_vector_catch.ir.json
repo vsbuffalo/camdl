@@ -1,0 +1,22 @@
+{"ir_version":"0.30","validated_by":"ocaml-compiler-v0.30","model":{"name":"zinb_vector_catch","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"name":"S","kind":"integer"},
+{"name":"I","kind":"integer"},
+{"name":"R","kind":"integer"}
+],"transitions":[
+{"name":"infection","stoichiometry":[["S",-1],["I",1]],"rate":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"metadata":{"origin_kind":"transmission","source_compartment":"S","dest_compartment":"I"},"rate_grad":{"beta":{"grad":{"bin_op":{"op":"div","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"pop":"S"},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"right":{"bin_op":{"op":"mul","left":{"binding_ref":"N"},"right":{"binding_ref":"N"}}}}}}},"rate_state_grad":{"S":{"grad":{"bin_op":{"op":"div","left":{"bin_op":{"op":"sub","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"I"}}},"right":{"binding_ref":"N"}}},"right":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"pop":"I"}}}}},"right":{"bin_op":{"op":"mul","left":{"binding_ref":"N"},"right":{"binding_ref":"N"}}}}}},"I":{"grad":{"bin_op":{"op":"div","left":{"bin_op":{"op":"sub","left":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"binding_ref":"N"}}},"right":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"pop":"I"}}}}},"right":{"bin_op":{"op":"mul","left":{"binding_ref":"N"},"right":{"binding_ref":"N"}}}}}},"R":{"grad":{"bin_op":{"op":"div","left":{"un_op":{"op":"neg","arg":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}},"right":{"pop":"I"}}}}},"right":{"bin_op":{"op":"mul","left":{"binding_ref":"N"},"right":{"binding_ref":"N"}}}}}}}},
+{"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"gamma":{"grad":{"pop":"I"}}},"rate_state_grad":{"I":{"grad":{"param":"gamma"}}}}
+],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[
+{"name":"vector_catch","source":"vector_catch","columns":[{"name":"time","role":"time"},{"name":"vector_catch","role":{"value":"count"}}],"scored":"vector_catch","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":180.0}},"projection":{"cumulative_flow":"infection"},"likelihood":{"zero_inflated_neg_binomial":{"mean":{"bin_op":{"op":"mul","left":{"param":"rho"},"right":{"projected":null}}},"dispersion":{"param":"k"},"pi":{"param":"pi_zero"}}}}
+],"parameters":[
+{"name":"beta","value":{"mode":"required"},"param_kind":"rate","param_dim":null},
+{"name":"gamma","value":{"mode":"required"},"param_kind":"rate","param_dim":null},
+{"name":"rho","value":{"mode":"required"},"param_kind":"probability","param_dim":null},
+{"name":"k","value":{"mode":"required"},"param_kind":"positive","param_dim":null},
+{"name":"pi_zero","value":{"mode":"required"},"param_kind":"probability","param_dim":null},
+{"name":"N0","value":{"mode":"required"},"param_kind":"count","param_dim":null},
+{"name":"I0","value":{"mode":"required"},"param_kind":"count","param_dim":null}
+],"initial_conditions":{"parameterized":{"S":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}},"I":{"param":"I0"}}},"ic_grad":{"S":{"N0":{"grad":{"const":1.0}},"I0":{"grad":{"const":-1.0}}},"I":{"I0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":180.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+{"name":"baseline","label":"focal vector catch with excess zeros","params":{"beta":0.4,"gamma":0.15,"rho":0.3,"k":2.0,"pi_zero":0.4,"N0":10000.0,"I0":10.0},"enable":[],"disable":[],"t_end":null}
+],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
+{"name":"N","expr":{"pop_sum":["S","I","R"]}}
+]}}

@@ -54,6 +54,13 @@ pub enum UnsupportedReason {
     /// Its state derivative is not smooth, so a gradient method (ODE-NUTS) is
     /// refused. (Append-only, tier 2b: forward sim / IF2 / PF are unaffected.)
     NonsmoothState,
+    /// The parameter reaches a `zero_inflated_neg_binomial` likelihood argument.
+    /// That family is scoring-only (its mixture log-PMF carries no emitted
+    /// gradient), so a gradient method is refused. Detected at the fit gate by
+    /// scanning the argument exprs directly — the family has no `Diffable` field
+    /// to carry a per-param `Unsupported` marker, so it is never serialized into
+    /// the IR (append-only, tier 2b: forward sim / IF2 / PF / MH / PMMH score it).
+    ZeroInflated,
 }
 
 impl UnsupportedReason {
@@ -85,6 +92,10 @@ impl UnsupportedReason {
                 "reaches a nonsmooth function of state (`floor`, `ceil`, `abs`, `min`, \
                  or `max` of a compartment); its state derivative is not smooth, so a \
                  gradient method cannot use it — reformulate with a smooth expression",
+            UnsupportedReason::ZeroInflated =>
+                "reaches a `zero_inflated_neg_binomial` likelihood, which is scoring-only \
+                 (no gradient); fit it with a gradient-free method — `mh`, `pmmh`, `if2`, \
+                 or `pfilter`",
         }
     }
 }
