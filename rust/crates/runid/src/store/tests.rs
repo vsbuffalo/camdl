@@ -43,6 +43,7 @@ fn record(run_id: ContentHash) -> RunRecord {
         deps: vec![],
         status: RunStatus::Running,
         artifacts: BTreeMap::new(),
+        output_schema: BTreeMap::new(),
         children: BTreeMap::new(),
         inputs: serde_json::Value::Null,
         provenance: Provenance::default(),

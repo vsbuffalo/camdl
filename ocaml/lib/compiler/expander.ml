@@ -1506,7 +1506,9 @@ let lower_via_transitions ctx =
               | LikNormal a       -> LikNormal       (rw_kwargs a)
               | LikBinomial a     -> LikBinomial     (rw_kwargs a)
               | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
+              | LikBeta a         -> LikBeta         (rw_kwargs a)
               | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
+              | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
             in
             { om with om_lik }) od.omeasurement
           in
@@ -1783,7 +1785,9 @@ let lower_via_transitions ctx =
                 | LikNormal a       -> LikNormal       (rw_kwargs a)
                 | LikBinomial a     -> LikBinomial     (rw_kwargs a)
                 | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
+                | LikBeta a         -> LikBeta         (rw_kwargs a)
                 | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
+                | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
               in
               { om with om_lik }) od.omeasurement in
             { od with oprojection; omeasurement }
@@ -2153,11 +2157,9 @@ let build_lookup_tables ctx =
   (* expanded indexed param names: "R0_urban" etc. -> unit *)
   let ept = Hashtbl.create 16 in
   List.iter (fun pd -> match pd with
-    | PIndexed { pname; pdims = [dim]; _ } ->
-      let vals = match List.assoc_opt dim ctx.dim_registry with
-        | Some vs -> vs | None -> []
-      in
-      List.iter (fun v -> Hashtbl.replace ept (pname ^ "_" ^ v) ()) vals
+    | PIndexed { pname; pdims; _ } ->
+      List.iter (fun nm -> Hashtbl.replace ept nm ())
+        (expand_indexed_decl_names ctx pname pdims)
     | _ -> ()
   ) ctx.param_decls;
   ctx.expanded_param_tbl <- ept;
@@ -4792,46 +4794,63 @@ let expand_parameters ctx =
          Ir.param_kind = pk;
          Ir.param_dim  = dim;
        }]
-    | PIndexed { pname; pdims = [dim]; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
-      let vals = dim_values ctx dim in
-      let bounds = resolve_bounds ctx pbounds in
-      let pk = Some (ir_param_kind_of_ast pkind) in
+    | PIndexed { pname; pdims; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
+      (* N-dim indexed parameter: one scalar param per cell of the cartesian
+         product of the index dimensions' levels. Names mangle
+         `<base>_<l1>_<l2>_…` via `expand_indexed_decl_names` (the same producer
+         the lookup table and collision guard use). Two guards run first because
+         the cartesian product is silent on both: it does no dedup (a repeated
+         axis would emit nonsense diagonal cells) and returns [] on an
+         unknown/empty dim (zero cells, no error). *)
       let loc = diag_loc_of_ast_ctx ctx ploc in
-      let resolved_dim = resolve_param_dim ctx ~loc ~pname pkind pdim_ann punit in
-      let (prior, hierarchical) = match pprior with
-        | None -> (None, None)
-        | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with
-                      | `Plain p        -> (Some p, None)
-                      | `Hierarchical h -> (None, Some h))
-      in
-      List.map (fun v ->
-        { Ir.name       = pname ^ "_" ^ v;
-          Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
-          Ir.param_kind = pk;
-          Ir.param_dim  = resolved_dim;
-        }
-      ) vals
-    | PIndexed { pname; pdims; _ } ->
-      (* The parser only produces single-dim indexed params
-         (pdims = [dim]). The single-dim arm above matches that; this
-         fallback is defensive. M10 in the 2026-04-19 review —
-         previously this raised `failwith` which produced a bare
-         stack trace in production via compile_detail_result's
-         generic exn → Error catch. Even though the review's author
-         identified this as "parser only produces single-dim", a
-         future parser extension to multi-dim indexed params would
-         regress this into a crash. Emit a real diagnostic instead. *)
-      Diagnostics.error ctx.diags
-        ~code:"E274"
-        ~loc:Diagnostics.no_loc
-        ~message:(Printf.sprintf
-          "indexed parameter '%s' has %d dimensions; only single-dim \
-           indexed parameters are supported"
-          pname (List.length pdims))
-        ~hint:"declare one parameter per stratified axis, e.g. \
-               `R0[patch] : positive` rather than `R0[patch, age]`"
-        ();
-      []
+      let has_dup =
+        List.length pdims <> List.length (List.sort_uniq compare pdims) in
+      if has_dup then
+        Diagnostics.error ctx.diags
+          ~code:"E331" ~loc
+          ~message:(Printf.sprintf
+            "indexed parameter '%s' repeats a dimension in [%s]"
+            pname (String.concat ", " pdims))
+          ~hint:"each index axis must be a distinct dimension"
+          ();
+      let bad_dim = ref false in
+      List.iter (fun d ->
+        match List.assoc_opt d ctx.dim_registry with
+        | None ->
+          bad_dim := true;
+          Diagnostics.error ctx.diags
+            ~code:"E330" ~loc
+            ~message:(Printf.sprintf
+              "indexed parameter '%s': unknown dimension '%s'" pname d)
+            ~hint:"the index must name a declared `stratify` dimension"
+            ()
+        | Some [] ->
+          bad_dim := true;
+          Diagnostics.error ctx.diags
+            ~code:"E330" ~loc
+            ~message:(Printf.sprintf
+              "indexed parameter '%s': dimension '%s' has no levels" pname d)
+            ()
+        | Some _ -> ()) pdims;
+      if has_dup || !bad_dim then []
+      else begin
+        let bounds = resolve_bounds ctx pbounds in
+        let pk = Some (ir_param_kind_of_ast pkind) in
+        let resolved_dim = resolve_param_dim ctx ~loc ~pname pkind pdim_ann punit in
+        let (prior, hierarchical) = match pprior with
+          | None -> (None, None)
+          | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with
+                        | `Plain p        -> (Some p, None)
+                        | `Hierarchical h -> (None, Some h))
+        in
+        List.map (fun nm ->
+          { Ir.name       = nm;
+            Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
+            Ir.param_kind = pk;
+            Ir.param_dim  = resolved_dim;
+          }
+        ) (expand_indexed_decl_names ctx pname pdims)
+      end
   ) ctx.param_decls in
   (* Typed const let bindings → fixed-value parameters *)
   let from_lets = List.filter_map (fun (lb : let_binding) ->
@@ -6573,7 +6592,8 @@ let expand_observations ctx =
         in
         match meas_v.om_lik with
         | LikNegBinomial k | LikPoisson k | LikNormal k
-        | LikBinomial k | LikBetaBinomial k | LikBernoulli k ->
+        | LikBinomial k | LikBetaBinomial k | LikBeta k | LikBernoulli k
+        | LikZeroInflatedNegBinomial k ->
           List.concat_map (fun (_, e) -> names_of e) k
       in
       if has_real_measurement && od.ocolumns <> None then
@@ -6726,10 +6746,20 @@ let expand_observations ctx =
           prevalence_projection name []
         else
           Ir.CumulativeFlow name
-      | ProjDerived (EIndex (name, idxs, _)) ->
+      | ProjDerived (EIndex (name, idxs, _) as e) ->
         let idx_vals = List.map (index_item_to_str env) idxs in
         let concrete = String.concat "_" (name :: idx_vals) in
-        if Hashtbl.mem ctx.expanded_comp_tbl concrete then
+        (* An indexed let-family reference (e.g. `projected = m[v]` with
+           `let m[v in village] = …`) must inline the let body via the
+           canonical resolver — symmetric to the bare-`EIdent` arm above.
+           let_tbl is keyed by base name; without this check an indexed let
+           ref falls through to `CumulativeFlow` and E507s as if it named a
+           transition (a covariate-driven mean projection is inexpressible
+           only because of this omission — the likelihood family is
+           irrelevant here). *)
+        if Hashtbl.mem ctx.let_tbl name then
+          Ir.DerivedExpr (resolve_expr ctx env e)
+        else if Hashtbl.mem ctx.expanded_comp_tbl concrete then
           Ir.CurrentPop concrete
         else if Hashtbl.mem ctx.comp_tbl name then
           prevalence_projection name idx_vals
@@ -6778,7 +6808,9 @@ let expand_observations ctx =
       | LikNormal _       -> "normal"
       | LikBinomial _     -> "binomial"
       | LikBetaBinomial _ -> "beta_binomial"
+      | LikBeta _         -> "beta"
       | LikBernoulli _    -> "bernoulli"
+      | LikZeroInflatedNegBinomial _ -> "zero_inflated_neg_binomial"
     in
     let required_kwargs = match lik_v with
       | LikNegBinomial _  -> ["mean"; "r"]
@@ -6789,11 +6821,14 @@ let expand_observations ctx =
          (mean, concentration) sugar that lowers to them. The construction site
          below enforces exclusivity (E252) and the per-form required args (E250). *)
       | LikBetaBinomial _ -> ["n"; "alpha"; "beta"; "mean"; "concentration"]
+      | LikBeta _         -> ["mean"; "concentration"]
       | LikBernoulli _    -> ["p"]
+      | LikZeroInflatedNegBinomial _ -> ["mean"; "r"; "pi"]
     in
     let current_kwargs = match lik_v with
       | LikNegBinomial k | LikPoisson k | LikNormal k
-      | LikBinomial k | LikBetaBinomial k | LikBernoulli k -> k
+      | LikBinomial k | LikBetaBinomial k | LikBeta k | LikBernoulli k
+      | LikZeroInflatedNegBinomial k -> k
     in
     (* Report unknown kwargs and positional args up front. *)
     List.iter (fun (k, _) ->
@@ -6907,8 +6942,24 @@ let expand_observations ctx =
             Ir.alpha = diff (resolve_kw kwargs "alpha");
             Ir.beta  = diff (resolve_kw kwargs "beta");
           }
+      | LikBeta kwargs ->
+        (* Continuous proportion x ∈ (0,1), mean-linked: alpha = mean·conc,
+           beta = (1 − mean)·conc formed in the Rust scorer/sampler. The obs
+           autodiff threads d/dθ through both diffable args. *)
+        Ir.Beta {
+          Ir.mean          = diff (resolve_kw kwargs "mean");
+          Ir.concentration = diff (resolve_kw kwargs "concentration");
+        }
       | LikBernoulli kwargs ->
         Ir.Bernoulli { Ir.p = diff (resolve_kw kwargs "p") }
+      | LikZeroInflatedNegBinomial kwargs ->
+        (* Scoring-only: bare exprs, no `diff` wrapper. `r` -> dispersion,
+           matching the NegBinomial base; `pi` is the structural-zero prob. *)
+        Ir.ZeroInflatedNegBinomial {
+          Ir.mean       = resolve_kw kwargs "mean";
+          Ir.dispersion = resolve_kw kwargs "r";
+          Ir.pi         = resolve_kw kwargs "pi";
+        }
     in
     ctx.obs_aux_cols <- [];
     let parts = name_parts_from_bindings od.oindices env in
@@ -7698,7 +7749,8 @@ let check_no_shadowing ctx =
      | Some om ->
        let kwargs = match om.om_lik with
          | LikNegBinomial a | LikPoisson a | LikNormal a
-         | LikBinomial a | LikBetaBinomial a | LikBernoulli a -> a
+         | LikBinomial a | LikBetaBinomial a | LikBeta a | LikBernoulli a
+         | LikZeroInflatedNegBinomial a -> a
        in
        List.iter (fun (_, e) -> walk decl seed e) kwargs
      | None -> ())
@@ -8304,12 +8356,10 @@ let expand_scenarios ctx : Ir.preset list =
     (* Accept both the family name ("N") and the fully-expanded
        per-stratum name ("N_rural", "N_urban"). The expansion table
        is populated by `build_lookup_tables` upstream of this call
-       site (verified at line ~741: `ctx.expanded_param_tbl <- ept`).
-       Multi-dim indexed params: `build_lookup_tables` populates the
-       expanded set only for single-dim indexed params today; a
-       multi-dim parameter's family name is still accepted via the
-       PIndexed branch below. That mirrors today's user-facing
-       behaviour and avoids false-positives on existing models. *)
+       site (`ctx.expanded_param_tbl <- ept`). It covers indexed params
+       of any arity — a multi-dim `mu[village, season]` contributes its
+       cartesian-product cell names ("mu_kwaru_wet", …), so a scenario
+       key naming a specific cell validates like any single-dim stratum. *)
     let t = Hashtbl.create (List.length ctx.param_decls) in
     List.iter (fun (pd : param_decl) ->
       let n = match pd with

@@ -310,16 +310,34 @@ pub(crate) fn camdlc_checked_flag() -> &'static std::sync::OnceLock<()> {
 /// call. The camdlc error path is unchanged: a non-zero exit still surfaces
 /// camdlc's stderr as `Err`.
 pub(crate) fn run_camdlc(camdl_path: &str) -> Result<String, String> {
-    run_camdlc_compile(camdl_path, None)
+    // Full IR (state-Jacobian emitted). The metadata / identity / docs loaders
+    // that route through here (`load_model`, `load_model_docs`) must never
+    // withhold the WrtPop Jacobian: a full IR is a safe superset for every
+    // consumer, and run identity is gradient-independent (runid SV=2), so a full
+    // vs lean compile of the same model share the same digest. The lean opt-out
+    // (`--no-state-grad`) lives on the run-producing path (`resolve_ir_path`),
+    // which knows the method and so can safely drop the Jacobian.
+    run_camdlc_compile(camdl_path, None, true)
 }
 
 /// Compile `camdl_path` to IR JSON. When `emit_deps` is `Some(path)`, camdlc
 /// additionally writes its read-closure depfile there in the SAME compile (one
 /// invocation, IR on stdout + depfile to the path), so the IR cache can key on
 /// the contents of `read()`-loaded files (gh#260).
+///
+/// `needs_state_grad` selects whether camdlc emits the WrtPop state-Jacobian
+/// (`rate_state_grad` / `projection_state_grad`, gh#439). It is consumed only by
+/// the ODE forward-sensitivity gradient (`fit --method nuts` on the `ode`
+/// backend); every other path — `simulate`, IF2, PMMH, PF, PGAS, `mh` — never
+/// reads it. When `false` we pass `--no-state-grad`, which skips the WrtPop
+/// autodiff pass and leaves both maps empty (often 95%+ of the IR on
+/// mean-field-coupled models). The IR-cache key folds this bit (`ir_cache_key`),
+/// so a lean-compiled entry is never served to a nuts+ode fit (which needs the
+/// Jacobian) and vice-versa.
 pub(crate) fn run_camdlc_compile(
     camdl_path: &str,
     emit_deps: Option<&std::path::Path>,
+    needs_state_grad: bool,
 ) -> Result<String, String> {
     let camdlc = find_camdlc()?;
 
@@ -365,6 +383,15 @@ pub(crate) fn run_camdlc_compile(
     // rather than serving the stale variant.
     if !licm_enabled() {
         cmd.env("CAMDL_NO_LICM", "1");
+    }
+    // gh#439 A2: skip the WrtPop state-Jacobian when no downstream consumer reads
+    // it. Only nuts+ode does; the runtime passes `needs_state_grad = false` for
+    // every other path, shrinking the IR (`--no-state-grad` leaves
+    // `rate_state_grad` / `projection_state_grad` empty). This is IR-affecting, so
+    // the resolved bit is folded into the IR-cache key (`ir_cache_key`) — a flip
+    // recompiles rather than serving the wrong variant.
+    if !needs_state_grad {
+        cmd.arg("--no-state-grad");
     }
     let output = cmd.output();
 
@@ -475,20 +502,29 @@ pub(crate) fn licm_enabled() -> bool {
 /// The key must fold in EVERY input that changes the emitted IR bytes: the
 /// model source, the camdlc git-hash, the IR schema version, and the compiler
 /// switches that alter output. That switch set is `CAMDL_NO_CONSTANT_FOLD`
-/// (presence flips the fold pass off → unfolded/dense IR) and `CAMDL_NO_LICM` /
+/// (presence flips the fold pass off → unfolded/dense IR), `CAMDL_NO_LICM` /
 /// `--no-licm` (presence flips loop-invariant code motion OFF → inlined IR
-/// without `per_eval_bindings`; LICM is on by default); both are `compiler.ml`
-/// switches that alter output. Any future IR-affecting compiler env var or flag
-/// MUST be added here, or flipping it on an already-cached model would silently
-/// serve the stale variant. (`licm_enabled` is the resolved on/off state.)
+/// without `per_eval_bindings`; LICM is on by default), and `--no-state-grad`
+/// (gh#439: skips the WrtPop state-Jacobian → `rate_state_grad` /
+/// `projection_state_grad` empty). All are `compiler.ml` switches that alter
+/// output. Any future IR-affecting compiler env var or flag MUST be added here,
+/// or flipping it on an already-cached model would silently serve the stale
+/// variant. (`licm_enabled` and `state_grad_emitted` are resolved on/off states.)
+///
+/// Note the state-Jacobian bit is a COMPILE-cache concern only, not a run-identity
+/// one: a lean IR and a full IR of the same model have different bytes (so must
+/// key distinctly here) but the SAME model digest (runid excludes the gradient
+/// maps, SV=2). Serving a lean entry to a nuts+ode fit would leave it without the
+/// Jacobian it needs, so the two variants must not collide in this cache.
 pub(crate) fn ir_cache_key(
     content: &[u8],
     camdlc_ver: &str,
     ir_ver: &str,
     fold_disabled: bool,
     licm_enabled: bool,
+    state_grad_emitted: bool,
 ) -> String {
-    let mut buf = Vec::with_capacity(content.len() + camdlc_ver.len() + ir_ver.len() + 4);
+    let mut buf = Vec::with_capacity(content.len() + camdlc_ver.len() + ir_ver.len() + 8);
     buf.extend_from_slice(content);
     buf.push(0);
     buf.extend_from_slice(camdlc_ver.as_bytes());
@@ -497,6 +533,7 @@ pub(crate) fn ir_cache_key(
     buf.push(0);
     buf.push(fold_disabled as u8);
     buf.push(licm_enabled as u8);
+    buf.push(state_grad_emitted as u8);
     crate::hashing::sha256_hex(&buf)
 }
 
@@ -891,7 +928,13 @@ mod single_flight {
 /// by a single-flight lock (gh#214): one process compiles while the rest wait
 /// and serve its result, instead of every process spawning its own ~11 GB
 /// camdlc and OOMing the machine. See [`single_flight`].
-pub fn resolve_ir_path(path: &str) -> Result<(String, Option<std::path::PathBuf>), String> {
+///
+/// `needs_state_grad` decides whether the compile emits the WrtPop state-Jacobian
+/// (gh#439 A2). Only `fit --method nuts` on the `ode` backend reads it, so the
+/// simulate / batch / predict paths pass `false` (lean IR, `--no-state-grad`) and
+/// the fit path passes `true` iff any stage is nuts+ode. The bit is folded into
+/// the cache key, so a lean entry is never reused for a nuts+ode fit.
+pub fn resolve_ir_path(path: &str, needs_state_grad: bool) -> Result<(String, Option<std::path::PathBuf>), String> {
     if !path.ends_with(".camdl") {
         return Ok((path.to_string(), None));
     }
@@ -907,7 +950,7 @@ pub fn resolve_ir_path(path: &str) -> Result<(String, Option<std::path::PathBuf>
                 // change the IR camdlc emits, so both belong in the key — else
                 // flipping one serves the stale variant.
                 let fold_disabled = std::env::var_os("CAMDL_NO_CONSTANT_FOLD").is_some();
-                let key = ir_cache_key(&content, crate::version::GIT_HASH, ir::IR_VERSION.trim(), fold_disabled, licm_enabled());
+                let key = ir_cache_key(&content, crate::version::GIT_HASH, ir::IR_VERSION.trim(), fold_disabled, licm_enabled(), needs_state_grad);
                 Some((dir.join(format!("{}.ir.json", key)), key))
             }
             _ => None,
@@ -956,7 +999,7 @@ pub fn resolve_ir_path(path: &str) -> Result<(String, Option<std::path::PathBuf>
     let deps_tmp = cache_target.as_ref().map(|(_, key)| {
         std::env::temp_dir().join(format!("camdl_deps_{}_{}.json", std::process::id(), key))
     });
-    let json = run_camdlc_compile(path, deps_tmp.as_deref())?;
+    let json = run_camdlc_compile(path, deps_tmp.as_deref(), needs_state_grad)?;
     let read_deps = match deps_tmp.as_ref() {
         Some(dp) => {
             let built = build_read_deps(dp);
@@ -1082,6 +1125,26 @@ pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
     }
     let status = cmd.status().map_err(|e| format!("cannot run camdlc: {}", e))?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Render a `.camdl` model to its display JSON (`camdlc render --format json`),
+/// capturing the bytes. Used to archive `model.render.json` beside a run so a
+/// viewer can show the model's math without recompiling. Best-effort — the
+/// caller treats an `Err` as "skip the archive", never a hard failure.
+pub fn render_model_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, String> {
+    let camdlc = find_camdlc()?;
+    let out = std::process::Command::new(&camdlc)
+        .args(["render", "--format", "json"])
+        .arg(model_camdl)
+        .output()
+        .map_err(|e| format!("cannot run camdlc render: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "camdlc render failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
 }
 
 
@@ -1817,26 +1880,37 @@ mod ir_cache_key_tests {
 
     #[test]
     fn key_is_stable_and_distinguishes_content_compiler_and_schema() {
-        let a = ir_cache_key(b"model A", "git1", "0.7", false, false);
+        // Args: (content, camdlc_ver, ir_ver, fold_disabled, licm_enabled,
+        //        state_grad_emitted). `a` = full IR (state-Jacobian emitted).
+        let a = ir_cache_key(b"model A", "git1", "0.7", false, false, true);
         // Same inputs → same key (cache hit).
-        assert_eq!(a, ir_cache_key(b"model A", "git1", "0.7", false, false));
+        assert_eq!(a, ir_cache_key(b"model A", "git1", "0.7", false, false, true));
         // Different model content → different key (an edit recompiles).
-        assert_ne!(a, ir_cache_key(b"model B", "git1", "0.7", false, false));
+        assert_ne!(a, ir_cache_key(b"model B", "git1", "0.7", false, false, true));
         // Different compiler version → different key (a camdlc upgrade recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "git2", "0.7", false, false));
+        assert_ne!(a, ir_cache_key(b"model A", "git2", "0.7", false, false, true));
         // Different IR schema version → different key (a format change recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.8", false, false));
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.8", false, false, true));
         // Flipping CAMDL_NO_CONSTANT_FOLD changes the emitted IR → different key
         // (must not serve the folded IR when the user asked for unfolded).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", true, false));
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", true, false, true));
         // gh#272: LICM on vs off (default-on; `--no-licm` / `CAMDL_NO_LICM` forces
         // off) changes the emitted IR (hoisted vs inlined) → different key, so the
         // toggle recompiles rather than serving the stale variant through fit.
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, true));
-        // The two switches are independent — neither masks the other.
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, true, true));
+        // gh#439 A2: state-Jacobian emitted (full, nuts+ode) vs skipped (lean,
+        // `--no-state-grad`) changes the emitted IR bytes → different key, so a
+        // lean simulate/mh entry is never served to a nuts+ode fit that needs the
+        // Jacobian (and vice-versa).
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, false, false));
+        // The three switches are independent — none masks the others.
         assert_ne!(
-            ir_cache_key(b"model A", "git1", "0.7", true, false),
-            ir_cache_key(b"model A", "git1", "0.7", false, true)
+            ir_cache_key(b"model A", "git1", "0.7", true, false, true),
+            ir_cache_key(b"model A", "git1", "0.7", false, true, true)
+        );
+        assert_ne!(
+            ir_cache_key(b"model A", "git1", "0.7", false, false, false),
+            ir_cache_key(b"model A", "git1", "0.7", false, true, true)
         );
         // 64-hex sha256.
         assert_eq!(a.len(), 64);
@@ -2442,7 +2516,9 @@ pub fn print_observations_summary(model: &ir::Model) {
             ir::observation::Likelihood::Normal(_)       => "Normal",
             ir::observation::Likelihood::Binomial(_)     => "Binomial",
             ir::observation::Likelihood::BetaBinomial(_) => "BetaBinomial",
+            ir::observation::Likelihood::Beta(_)         => "Beta",
             ir::observation::Likelihood::Bernoulli(_)    => "Bernoulli",
+            ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "ZeroInflatedNegBinomial",
         };
         eprintln!("    \x1b[32m✓\x1b[0m {:<16} {:<28} {}", obs.name, kind_label, lik_label);
         if is_snapshot && matches!(obs.likelihood, ir::observation::Likelihood::NegBinomial(_)) {
@@ -2550,8 +2626,10 @@ impl Default for SimRun {
 /// ([`run_simulation_lineage`]) so both see byte-identical parameter
 /// resolution.
 pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), String> {
-    // Load IR source (handles .camdl compilation via camdlc)
-    let (ir_path_resolved, _tmpfile) = resolve_ir_path(&run.ir_path)?;
+    // Load IR source (handles .camdl compilation via camdlc). This is the forward
+    // simulation path — it never reads the state-Jacobian, so compile lean
+    // (`needs_state_grad = false`, gh#439 A2).
+    let (ir_path_resolved, _tmpfile) = resolve_ir_path(&run.ir_path, false)?;
 
     let src = std::fs::read_to_string(&ir_path_resolved)
         .map_err(|e| format!("cannot read {}: {}", ir_path_resolved, e))?;

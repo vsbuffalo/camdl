@@ -214,6 +214,29 @@ pub(crate) fn scan_unsupported_gradients(
             }
         }
     }
+    // (d) Zero-inflated NegBinomial is scoring-only: the ENTIRE family carries no
+    //     emitted gradient (all bare exprs, no `Diffable`, so (a)'s `diffables()`
+    //     scan sees nothing). Unlike Binomial's `n` — where only `n` is
+    //     θ-independent and the rest of the likelihood IS differentiable — a ZI
+    //     stream contributes NO gradient at all: not for a param textually in its
+    //     args, and not for a rate param that reaches it only through the shared
+    //     trajectory (the factor-2 chain). A per-param scan of the arg exprs is
+    //     therefore the wrong shape here — it misses the trajectory-coupled case,
+    //     which then hits the `unreachable!` backstop in obs_model.rs
+    //     mid-integration (a reachable panic, not a clean refusal). So whenever
+    //     the model contains a ZI stream, refuse EVERY estimated param: the honest
+    //     model-level refusal that routes the user to a gradient-free method.
+    let has_zero_inflated = model
+        .observations
+        .iter()
+        .any(|om| matches!(om.likelihood, Likelihood::ZeroInflatedNegBinomial(_)));
+    if has_zero_inflated {
+        for pname in estimated {
+            refused
+                .entry(pname.to_string())
+                .or_insert(UnsupportedReason::ZeroInflated);
+        }
+    }
     refused
 }
 
@@ -247,6 +270,27 @@ pub fn preflight_gradient_ode(
              gradient-free method (IF2 or PMMH), or fix these parameters.",
             details.join("; ")
         )));
+    }
+
+    // ── State-Jacobian present at all (gh#439) ──────────────────────────────────
+    // The forward sensitivity chains ∂rate/∂state (`rate_state_grad`, J_x) into
+    // dS/dt. A model compiled with `camdlc --no-state-grad` carries it EMPTY on
+    // every transition, which would make the sensitivity silently drop the J_x·S
+    // coupling term and sample against a biased gradient. A genuine ODE fit has
+    // state-dependent dynamics, so at least one transition's rate_state_grad is
+    // non-empty; if every one is empty, refuse loudly rather than integrate a
+    // wrong sensitivity.
+    if !m.transitions.is_empty()
+        && m.transitions.iter().all(|t| t.rate_state_grad.is_empty())
+    {
+        return Err(SimError::Validation(
+            "ODE gradient (nuts) requires the state-Jacobian `rate_state_grad`, but this \
+             model carries none on any transition — it was compiled with `camdlc \
+             --no-state-grad` (or has no state-dependent rates). Recompile WITHOUT \
+             --no-state-grad to fit with `nuts` on the ODE backend, or use a gradient-free \
+             method (IF2, PMMH, or `mh` on ode)."
+                .to_string(),
+        ));
     }
 
     // ── ODE-sensitivity coverage: a nonsmooth ∂rate/∂state (§1a) ────────────────
@@ -572,6 +616,23 @@ mod tests {
     }
 
     #[test]
+    fn refuses_absent_state_jacobian_no_state_grad() {
+        // A model compiled with `camdlc --no-state-grad` carries an EMPTY
+        // rate_state_grad on every transition (gh#439). The ODE-NUTS gate must
+        // refuse loudly rather than integrate a forward sensitivity that silently
+        // drops the J_x·S state-coupling term.
+        let mut m = base_model();
+        for t in &mut m.transitions {
+            t.rate_state_grad = Default::default();
+        }
+        let err = gate_err(m, &["beta", "gamma", "k"]);
+        assert!(
+            err.contains("--no-state-grad") && err.contains("rate_state_grad"),
+            "expected a --no-state-grad refusal naming rate_state_grad, got: {err}"
+        );
+    }
+
+    #[test]
     fn refuses_unsupported_rate_grad() {
         // An estimated param with a serialized DerivEntry::Unsupported in rate_grad.
         let mut m = base_model();
@@ -584,6 +645,34 @@ mod tests {
         );
         let msg = gate_err(m, &["beta"]);
         assert!(msg.contains("beta") && msg.contains("could not emit"), "{msg}");
+    }
+
+    #[test]
+    fn refuses_every_param_when_a_zero_inflated_stream_is_present() {
+        // Regression: a zero-inflated stream is scoring-only, so an estimated
+        // RATE param (`beta`) that reaches it only through the trajectory —
+        // never textually in the ZI args (mean = projected here) — must still be
+        // refused. A per-param scan of the arg exprs misses this and lets it
+        // reach the `unreachable!` grad backstop in obs_model.rs (a panic). The
+        // gate is model-level: any ZI stream → refuse every estimated param.
+        let mut m = base_model();
+        for om in &mut m.observations {
+            if om.name == "weekly_cases" {
+                om.likelihood = Likelihood::ZeroInflatedNegBinomial(
+                    ir::observation::ZeroInflatedNegBinomialLikelihood {
+                        mean: projected(),
+                        dispersion: Expr::Param(ParamExpr { param: "k".to_string() }),
+                        pi: Expr::Const(ConstExpr { value: 0.3 }),
+                    },
+                );
+            }
+        }
+        let msg = gate_err(m, &["beta"]);
+        assert!(msg.contains("beta"), "must name the refused param: {msg}");
+        assert!(
+            msg.contains("zero_inflated") || msg.contains("scoring-only"),
+            "must explain the ZI scoring-only refusal: {msg}"
+        );
     }
 
     #[test]

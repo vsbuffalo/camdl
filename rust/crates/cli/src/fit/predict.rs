@@ -983,7 +983,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     let (compiled_ir, _ir_tmp): (String, Option<std::path::PathBuf>) = if archived_ir.is_file() {
         (archived_ir.to_string_lossy().into_owned(), None)
     } else {
-        crate::util::resolve_ir_path(&config.model.camdl)?
+        // `fit predict` replays forward trajectories from stored draws — it never
+        // recomputes an ODE gradient, so compile lean (`needs_state_grad = false`,
+        // gh#439 A2).
+        crate::util::resolve_ir_path(&config.model.camdl, false)?
     };
     let (model, _) = crate::util::load_model(&compiled_ir)?;
     // One calendar block for every sidecar manifest this run writes
