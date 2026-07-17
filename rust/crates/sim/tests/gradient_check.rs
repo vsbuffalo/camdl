@@ -250,6 +250,130 @@ fn test_gradient_vs_finite_differences_spatial_bindings() {
     eprintln!("  max relative error: {:.2e}", max_rel_err);
 }
 
+/// Mean-field coupling: the Σ-fold that drops a `Reduce` of zero derivatives
+/// (2026-07-16) must leave the surviving rate gradients numerically CORRECT, not
+/// merely smaller. `sir_coupling` is a two-patch model whose infection rate
+/// carries the global denominator `.../reduce[N_young, N_old]`. Before the fold,
+/// `d(infection)/dp` for a `p` absent from the rate (`gamma`, `N0`, `I0`) was
+/// emitted as `beta·S·reduce[0/g², 0/g²]` — structurally present, zero-valued.
+/// The fold drops those keys; this test proves the gradient it leaves behind
+/// matches finite differences of the forward likelihood (ground truth), on the
+/// exact model shape the fold fires on.
+#[test]
+fn test_gradient_vs_finite_differences_meanfield_coupling() {
+    let model = load_model("../../../ocaml/golden/sir_coupling.ir.json");
+
+    // Pin the fold: infection_young's rate mentions only beta, so its rate_grad
+    // must carry exactly beta. gamma (recovery), N0/I0 (initial conditions) do
+    // not occur in an infection rate — a Reduce of their zero derivatives must
+    // have folded away, not survived as a spurious key.
+    let inf = model.transitions.iter()
+        .find(|t| t.name == "infection_young")
+        .expect("sir_coupling must have an infection_young transition");
+    let mut inf_grad_params: Vec<&str> = inf.rate_grad.keys().map(|s| s.as_str()).collect();
+    inf_grad_params.sort();
+    assert_eq!(inf_grad_params, vec!["beta"],
+        "infection_young rate_grad must be exactly [beta] after the Σ-fold; a \
+         spurious zero-valued Reduce for gamma/N0/I0 was kept: {:?}", inf_grad_params);
+    // The surviving gradient still couples through the hoisted denominator.
+    assert!(format!("{:?}", inf.rate_grad.get("beta")).contains("BindingRef"),
+        "d(infection)/dβ must reference the shared N binding (gradient-through-binding)");
+
+    let mut model = model;
+    for p in &mut model.parameters {
+        if p.value.resolved_value().is_none() {
+            p.value = p.value.with_value(match p.name.as_str() {
+                "beta" => 0.05,
+                "gamma" => 0.1,
+                "N0" => 1000.0,
+                "I0" => 10.0,
+                _ => 0.5,
+            });
+        }
+    }
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+
+    let n_params = compiled.model.parameters.len();
+    let param_names: Vec<String> = compiled.model.parameters.iter()
+        .map(|p| p.name.clone()).collect();
+    let param_indices: Vec<usize> = param_names.iter()
+        .map(|n| *compiled.param_index.get(n.as_str()).unwrap())
+        .collect();
+
+    let mut params = vec![0.0; compiled.param_index.len()];
+    for p in &compiled.model.parameters {
+        if let Some(v) = p.value.resolved_value() {
+            params[compiled.param_index[p.name.as_str()]] = v;
+        }
+    }
+
+    let model_to_estimated: Vec<Option<usize>> = (0..n_params).map(Some).collect();
+    let rate_grads_for_run = sim::inference::pgas_grad::resolve_rate_grad_for_run(
+        &compiled.resolved.rate_grads_indexed,
+        &model_to_estimated,
+    );
+
+    let mut rng = StatefulRng::new(42);
+    let t_end = compiled.model.simulation.t_end;
+    let dt = compiled.model.simulation.dt.unwrap_or(1.0);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+
+    let observations: Vec<Observation> = vec![];
+    let ivp_mappings: Vec<IVPMapping> = vec![];
+    let obs_model = MultiStreamObsModel::empty(compiled.clone());
+    let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
+    let estimated_to_model: Vec<usize> = (0..n_params).collect();
+
+    let (ll, grad) = complete_data_loglik_grad(
+        &compiled, &trajectory, &params, &observations, dt,
+        &obs_model, &ivp_mappings,
+        n_params, &rate_grads_for_run, &oas,
+        &estimated_to_model,
+    ).unwrap();
+    assert!(ll.is_finite(), "complete-data LL must be finite");
+
+    // FD ground truth for the rate-flowing parameters. gamma flows through the
+    // recovery transition (unaffected by the fold); beta flows through the
+    // folded infection gradient. N0/I0 parameterize the initial conditions — an
+    // orthogonal IVP-gradient path (ic_grad), not exercised here (empty
+    // ivp_mappings), so they are not asserted.
+    let rate_params = ["beta", "gamma"];
+    let eps = 1e-5;
+    let mut checked = 0;
+    for i in 0..param_names.len() {
+        if !rate_params.contains(&param_names[i].as_str()) { continue; }
+        let mut p_plus = params.clone();
+        let mut p_minus = params.clone();
+        p_plus[param_indices[i]] += eps;
+        p_minus[param_indices[i]] -= eps;
+
+        let ll_plus = complete_data_loglik(
+            &compiled, &trajectory, &p_plus, &observations, dt,
+            &obs_model, &ivp_mappings, &oas,
+        ).unwrap().total;
+        let ll_minus = complete_data_loglik(
+            &compiled, &trajectory, &p_minus, &observations, dt,
+            &obs_model, &ivp_mappings, &oas,
+        ).unwrap().total;
+
+        let fd = (ll_plus - ll_minus) / (2.0 * eps);
+        let rel_err = if fd.abs() > 1e-8 {
+            (grad[i] - fd).abs() / fd.abs()
+        } else {
+            (grad[i] - fd).abs()
+        };
+        eprintln!("  d(ll)/d({:8}) = {:12.4} (analytic) vs {:12.4} (fd), rel_err = {:.2e}",
+            param_names[i], grad[i], fd, rel_err);
+        assert!(fd.abs() > 1e-6,
+            "{} gradient should be materially nonzero (fd={:.3e})", param_names[i], fd);
+        assert!(rel_err < 0.01,
+            "folded gradient mismatch for {}: analytic={:.6}, fd={:.6}, rel_err={:.2e}",
+            param_names[i], grad[i], fd, rel_err);
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "both beta and gamma must be checked against FD");
+}
+
 /// T1: Full NUTS target gradient check (LL + prior + Jacobian on z scale).
 /// This tests the gradient composition that NUTS actually uses, including
 /// the chain rule through parameter transforms and the Jacobian correction.

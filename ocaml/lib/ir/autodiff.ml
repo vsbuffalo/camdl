@@ -717,6 +717,23 @@ let rec simplify (e : expr) : expr =
       | _ -> UnOp { op = u.op; arg = a }
       end
 
+    (* [Reduce] is an n-ary sum, so [Const 0.0] is its additive identity and a
+       zero summand drops exactly as under `Add, x, Const 0.0 -> x` above.
+
+       This arm is load-bearing for dense mean-field coupling, not a size nicety.
+       Differentiating `Σ_h N[h]` (a global denominator over hoisted, param-free
+       bindings) yields [Reduce [Const 0.0; ...]] — one zero per term, NOT
+       [Const 0.0]. Left unfolded, the quotient rule's `-f·g'` term never meets
+       `Mul, _, Const 0.0`, so `Div, Const 0.0, _` cannot fire and the entire
+       O(H) sum rides into EVERY parameter's gradient, squared — including
+       parameters absent from the rate. That is an O(H²) [rate_grad]. *)
+    | Reduce terms ->
+      begin match List.filter (fun t -> t <> Const 0.0) (List.map simplify terms) with
+      | []  -> Const 0.0
+      | [t] -> t
+      | ts  -> Reduce ts
+      end
+
     | Cond c ->
       let p = simplify c.pred in
       let t = simplify c.then_ in
