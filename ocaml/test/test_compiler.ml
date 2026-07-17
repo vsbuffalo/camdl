@@ -3134,6 +3134,52 @@ let test_trig_autodiff_matches_finite_diff () =
       "∂(b*sin(c))/∂b = sin(c)" (sin c) v
   | Some _ -> Alcotest.failf "expected DEGrad (Const), got a non-constant or refused derivative"
 
+(* ── Reduce-zero folding: d(Σ tᵢ)/dp with every dtᵢ = 0 is a genuine zero ── *)
+
+let test_reduce_of_zeros_folds_to_genuine_zero () =
+  (* A mean-field denominator: rate = beta * I / Σ(N_h). `k` appears nowhere in
+     the rate, so ∂rate/∂k ≡ 0 and must be DROPPED (absent key = genuine zero).
+
+     The failure this pins: d(Reduce[..])/dk = Reduce[Const 0; Const 0] — a sum
+     of zeros, not `Const 0.0`. If [simplify] cannot fold that Reduce, the
+     quotient rule's `-f·g'` term survives, `Div, Const 0.0, _` never fires, and
+     the whole O(H) denominator `g²` is emitted as ∂rate/∂k. That is the O(H²)
+     IR blowup on a dense mean-field coupling: every parameter carries a copy of
+     the global sum, squared. *)
+  let n_glob = Ir.Reduce [ Ir.BindingRef "N_h0"; Ir.BindingRef "N_h1" ] in
+  let rate = Ir.BinOp { op = Ir.Div;
+    left  = Ir.BinOp { op = Ir.Mul; left = Ir.Param "beta"; right = Ir.Pop "I" };
+    right = n_glob } in
+  let grads = match Autodiff.differentiate_rate rate [ "beta"; "k" ] [] [] with
+    | Ok g -> g
+    | Error msg -> Alcotest.failf "differentiate_rate errored: %s" msg in
+  (match List.assoc_opt "k" grads with
+   | None -> ()
+   | Some _ ->
+     Alcotest.failf
+       "∂(beta*I/Σ N_h)/∂k must fold to a genuine zero and be dropped; a \
+        Reduce of zero derivatives kept it alive (O(H²) rate_grad blowup)");
+  (* Negative control: beta's derivative is real and must survive. *)
+  match List.assoc_opt "beta" grads with
+  | Some (Ir.DEGrad _) -> ()
+  | _ -> Alcotest.failf "∂/∂beta must survive as a real gradient"
+
+let test_reduce_partial_zeros_keeps_live_terms () =
+  (* The other side of the fold: Σ must NOT collapse when some term is live.
+     rate = Σ(a*I, N_h0) — ∂/∂a = Σ(I, 0) = I, a real gradient. Guards against a
+     fold that drops live summands. *)
+  let rate = Ir.Reduce [ Ir.BinOp { op = Ir.Mul; left = Ir.Param "a"; right = Ir.Pop "I" };
+                         Ir.BindingRef "N_h0" ] in
+  let grads = match Autodiff.differentiate_rate rate [ "a" ] [] [] with
+    | Ok g -> g
+    | Error msg -> Alcotest.failf "differentiate_rate errored: %s" msg in
+  match List.assoc_opt "a" grads with
+  | Some (Ir.DEGrad (Ir.Pop "I")) -> ()
+  | Some (Ir.DEGrad e) ->
+    Alcotest.failf "∂(Σ(a*I, N_h0))/∂a must simplify to Pop I, got %s"
+      (Yojson.Safe.to_string (Serde.expr_to_json e))
+  | _ -> Alcotest.failf "∂/∂a must survive as a real gradient"
+
 (* ── gh#275: WrtPop — ∂rate/∂compartment (rate_state_grad, the J_x ingredient) ── *)
 
 let test_rate_state_grad_smooth () =
@@ -9470,6 +9516,8 @@ let () =
       Alcotest.test_case "cos(dimensionless) compiles"              `Quick test_trig_cos_compiles_and_dimchecks;
       Alcotest.test_case "cos(t) rejected with E301"                `Quick test_trig_cos_rejects_dimensional_arg;
       Alcotest.test_case "autodiff emits rate_grad for sin(...)"    `Quick test_trig_autodiff_matches_finite_diff;
+      Alcotest.test_case "autodiff: Σ of zero derivatives folds to a genuine zero" `Quick test_reduce_of_zeros_folds_to_genuine_zero;
+      Alcotest.test_case "autodiff: Σ with a live summand is not over-folded" `Quick test_reduce_partial_zeros_keeps_live_terms;
       Alcotest.test_case "rate_state_grad: ∂/∂compartment emits nonzero comps (gh#275)" `Quick test_rate_state_grad_smooth;
       Alcotest.test_case "rate_state_grad: nonsmooth-of-state (floor) is refused (gh#275)" `Quick test_rate_state_grad_nonsmooth_refused;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
