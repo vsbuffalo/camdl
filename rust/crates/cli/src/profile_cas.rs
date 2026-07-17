@@ -53,6 +53,11 @@ pub struct ProfilePointCtx<'a> {
     pub method_config: &'a serde_json::Value,
     /// The pinned focal `(param, value)` for this grid point.
     pub focal: &'a [(String, f64)],
+    /// The full resolved sweep grid — each focal axis name and its values,
+    /// shared across every point of this run. Folded into the base identity so
+    /// a different grid (wider range, more points, shifted bounds) is a
+    /// distinct run rather than a merge onto the previous grid's cells.
+    pub grid: &'a [(String, Vec<f64>)],
     /// The resolved profile seed (the `seed` level hashes this).
     pub seed: u64,
     pub start_index: u32,
@@ -70,6 +75,22 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
     ensure_finite(ctx.base_config)?;
     ensure_finite(ctx.method_config)?;
 
+    // Canonicalize the sweep grid: axes sorted by name, values ascending, so
+    // the identity depends only on the *set* of cells, not `--sweep` order.
+    let mut axes: Vec<(String, Vec<f64>)> = ctx.grid.to_vec();
+    axes.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut grid: Vec<(ParamId, Vec<FiniteF64>)> = Vec::with_capacity(axes.len());
+    for (name, mut values) in axes {
+        values.sort_by(|a, b| a.partial_cmp(b)
+            .expect("grid values are finite (checked at parse)"));
+        let mut fvs = Vec::with_capacity(values.len());
+        for v in values {
+            fvs.push(FiniteF64::new(v)
+                .map_err(|_| format!("non-finite grid value for axis '{}'", name))?);
+        }
+        grid.push((ParamId(name), fvs));
+    }
+
     let base = ProfileBase {
         model: ModelDigest::from_model(
             ctx.model,
@@ -78,6 +99,7 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
         ),
         data: data_digests(ctx.data)?,
         base_config: digest_value(ctx.base_config),
+        grid,
         engine: EngineVersion(ctx.engine_version.to_string()),
         deps: Deps(ctx.deps.clone()),
     };

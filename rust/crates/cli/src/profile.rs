@@ -1057,6 +1057,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             .flat_map(move |gi| (0..n_starts).map(move |si| (seed_idx, gi, si))))
         .collect();
 
+    // The full sweep grid (each focal axis name and its values), shared by
+    // every point. Folded into each point's base identity so a distinct grid
+    // (wider range, more points, shifted bounds) is a distinct run rather than
+    // a silent merge onto the previous grid's cells.
+    let grid_spec: Vec<(String, Vec<f64>)> = focal_grids.iter()
+        .map(|fg| (fg.name.clone(), fg.values.clone()))
+        .collect();
     let resolve_pt = |gi: usize, si: usize, seed: u64|
         -> Result<crate::profile_cas::ResolvedProfilePoint, String>
     {
@@ -1074,6 +1081,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             base_config: &base_config_blob,
             method_config: &method_config_blob,
             focal: &focal,
+            grid: &grid_spec,
             seed,
             start_index: si as u32,
             deps: profile_deps.clone(),
