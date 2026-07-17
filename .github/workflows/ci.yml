@@ -8,30 +8,55 @@ name: CI
 # this is the same surface `make test` runs locally.
 #
 # Linux-only: macOS/Windows runners bill 10×/2× and the code is platform-
-# invariant. Doc-only and fixture-only changes skip this workflow.
+# invariant.
+#
+# Structure: `changes` decides whether any non-doc path changed; `test` (the
+# real suite) runs only when it did; `ci` is a tiny always-runs gate that is the
+# REQUIRED status check. This keeps doc-only changes cheap (test is skipped)
+# WITHOUT deadlocking branch protection — a required check keyed on `test` would
+# never report on a doc-only PR (the job never runs), so the PR would wait
+# forever for a status that never arrives. `ci` always reports a verdict.
+# Make `ci` the required check in branch protection, NOT `test`.
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "examples/**"
-      - "README.md"
-      - "**/*.md"
-      - ".gitignore"
-      - "LICENSE"
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "examples/**"
-      - "README.md"
-      - "**/*.md"
-      - ".gitignore"
-      - "LICENSE"
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.f.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: f
+        name: Detect whether non-doc code changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+            if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
+            fi
+          fi
+          changed="$(git diff --name-only "$base" HEAD)"
+          echo "base=$base"
+          echo "changed files:"; echo "$changed"
+          # code=true if ANY changed path is not doc/example/meta.
+          if echo "$changed" | grep -qvE '^(docs/|examples/|.*\.md$|\.gitignore$|LICENSE$)'; then
+            echo "code=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,3 +98,23 @@ jobs:
 
       - name: Integration tests
         run: opam exec -- make test-integration
+
+  # Always-runs required gate. Passes when `test` succeeded OR was skipped
+  # (doc-only change); fails only when `test` genuinely failed or was cancelled,
+  # or the change-detector itself failed. This is the check to require in branch
+  # protection.
+  ci:
+    needs: [changes, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict
+        run: |
+          echo "changes=${{ needs.changes.result }} test=${{ needs.test.result }}"
+          if [ "${{ needs.changes.result }}" != "success" ]; then
+            echo "change-detector did not succeed"; exit 1
+          fi
+          case "${{ needs.test.result }}" in
+            success|skipped) echo "ok"; exit 0 ;;
+            *) echo "test job did not pass (result=${{ needs.test.result }})"; exit 1 ;;
+          esac
