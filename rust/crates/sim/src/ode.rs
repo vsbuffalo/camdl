@@ -183,14 +183,36 @@ fn sensitivity_derivs(
     let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
 
     for v in d_state.iter_mut() { *v = 0.0; }
+    // Scratch for a transition's state-Jacobian entries ∂rate_r/∂x_j (gh#400). Each
+    // entry is independent of the parameter column `p` — only the `S[j,p]` multiplier
+    // varies — so we evaluate it during the FIRST column (`p == 0`), stash it, and
+    // reuse it for columns `p > 0` instead of re-walking each derivative expression
+    // `d` times. Reused across transitions (one amortized allocation).
+    //
+    // Byte-identical to the pre-hoist loop: column 0 keeps the exact original
+    // evaluation order (J_θ then J_x), so the shared binding cache is populated in
+    // the same order and to the same values; columns p>0 previously re-called
+    // `eval_deriv_entry` and hit the warm cache, returning exactly the `jx[k]` we
+    // stashed. Evaluating all J_x *before* J_θ would reorder cache population and
+    // perturb a binding by ~1 ULP (verified — hence the column-0 interleave).
+    let mut jx: Vec<f64> = Vec::new();
     for (tr_idx, stoich) in model.transition_stoich.iter().enumerate() {
         let rate_grad = &model.resolved.rate_grads_indexed[tr_idx];            // param-keyed ∂rate/∂θ
         let rate_state_grad = &model.resolved.rate_state_grads_indexed[tr_idx].0; // comp-keyed ∂rate/∂x
+        jx.clear();
         for p in 0..d {
             // total_dr_dθ[p] = ∂rate/∂θ_p + Σ_j ∂rate/∂x_j · S[j, p]  (chain through state)
             let mut total = eval_emitted_grad(rate_grad, param_model_idx[p], &ctx);
-            for (j, entry) in rate_state_grad {
-                total += eval_deriv_entry(entry, &ctx) * s[j * d + p];
+            if p == 0 {
+                for (j, entry) in rate_state_grad.iter() {
+                    let v = eval_deriv_entry(entry, &ctx);
+                    jx.push(v);
+                    total += v * s[j * d + p];
+                }
+            } else {
+                for (k, (j, _entry)) in rate_state_grad.iter().enumerate() {
+                    total += jx[k] * s[j * d + p];
+                }
             }
             // ∂flow_r/∂θ_p = total_dr_dθ[p] — the raw per-transition flow
             // derivative (dc_r/dt = rate_r, so d(∂c_r/∂θ)/dt = ∂rate_r/∂θ), NO
