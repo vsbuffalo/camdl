@@ -31,9 +31,9 @@ forcing {
   # Seasonal transmissibility index, read from a monthly TSV and interpolated.
   clim : interpolated 'ratio {
     data      = "data/flu_forcing.tsv"
-    time_col  = t
-    value_col = force
-    method    = "linear"
+    time_col  = "t"
+    value_col = "force"
+    method    = linear
   }
 }
 

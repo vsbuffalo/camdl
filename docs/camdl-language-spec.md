@@ -653,19 +653,35 @@ block) and require at least one dimension (§6).
 
 ### 4.3 Indexed Parameters
 
-Parameters may be declared with a single dimension index, creating one scalar
-parameter per stratum:
+Parameters may be declared with one or more dimension indices, creating one
+scalar parameter per stratum (or, for several indices, per cell of the cartesian
+product):
 
 ```camdl
 parameters {
-  gamma    : rate
-  N[patch] : positive   # expands to N_urban, N_rural, ...
-  R0[patch]: positive   # expands to R0_urban, R0_rural, ...
+  gamma               : rate
+  N[patch]            : positive   # expands to N_urban, N_rural, ...
+  R0[patch]           : positive   # expands to R0_urban, R0_rural, ...
+  mu[village, season] : rate       # expands to mu_kwaru_wet, mu_kwaru_dry, ...
 }
 ```
 
-The index must refer to a declared `stratify` dimension. In expressions, indexed
-parameters are accessed with `[index]`:
+A multi-index parameter is a design matrix: `mu[village, season]` over
+`village = [kwaru, ajura]`, `season = [wet, dry]` expands to the four cells
+`mu_kwaru_wet`, `mu_kwaru_dry`, `mu_ajura_wet`, `mu_ajura_dry`, each an
+independent scalar with the declared kind, bounds, and prior. Names mangle
+`<base>_<level1>_<level2>_…` in declaration-dim order. A repeated axis
+(`mu[village, village]`) is an error (E331); an unknown or empty index dimension
+is E330.
+
+Each index must refer to a declared `stratify` dimension. In expressions,
+indexed parameters are accessed with `[index]` (all axes, in declaration order):
+
+```camdl
+let C[v in village, s in season] = mu[v, s] * gamma   # mu[v,s] → Param("mu_kwaru_wet") etc.
+```
+
+For a single index:
 
 ```camdl
 let beta[p in patch] = R0[p] * gamma   # R0[p] → Param("R0_urban") etc.
@@ -1121,8 +1137,9 @@ built-in types cover real-world needs:
 - `piecewise` — non-repeating step function (policy changes, campaign windows)
 - `interpolated` — data-driven time series (empirical covariates)
 - `fourier` — finite Fourier series with estimable cos/sin harmonic pairs
-  (`period`, `harmonics = [(a1, b1), (a2, b2), ...]`), for smooth periodic
-  forcing richer than a single sinusoid (gh#59)
+  (`period`, `harmonics = [[a1, b1], [a2, b2], ...]` — each harmonic is a
+  2-element list), for smooth periodic forcing richer than a single sinusoid
+  (gh#59)
 - `periodic_spline` — periodic B-spline with uniform knots (`period`, `n_basis`,
   optional `degree` = 3), for flexible smooth seasonality (gh#59)
 
@@ -1165,9 +1182,9 @@ forcing {
 
   pop_trend : interpolated 'count {
     data      = "data/nga_pop.csv"
-    time_col  = year             # column holding the time axis
-    value_col = total_pop        # column holding the value axis
-    method    = "cubic_spline"   # "linear" | "cubic_spline" | "pchip"
+    time_col  = "year"           # quoted file column (outside the model)
+    value_col = "total_pop"      # quoted file column (outside the model)
+    method    = linear           # bare enum: linear | constant | spline
   }
 
   reporting_dow : periodic 'ratio {
@@ -1250,8 +1267,8 @@ once, on the forcing definition, with an optional `lag`:
 forcing {
   C : interpolated 'per_day {
     data      = "vectorial_capacity.tsv"
-    time_col  = t
-    value_col = C
+    time_col  = "t"
+    value_col = "C"
     lag       = 10 'days        # evaluate C at t − 10 days
   }
 }
@@ -1322,8 +1339,8 @@ forcing {
   seasonal  : sinusoidal   'ratio    { baseline = 1.0  amplitude = 0.3  … }
   beta_seas : sinusoidal   'per_day  { baseline = beta  amplitude = amp  … }
   school    : periodic     'ratio    { values = [0.7, 1.3, 0.7, …]  … }
-  pop       : interpolated 'count    { data = "…"  time_col = t  value_col = pop  method = "linear" }
-  birthrate : interpolated 'per_year { data = "…"  time_col = t  value_col = rate  method = "linear" }
+  pop       : interpolated 'count    { data = "…"  time_col = "t"  value_col = "pop"  method = linear }
+  birthrate : interpolated 'per_year { data = "…"  time_col = "t"  value_col = "rate"  method = linear }
 }
 ```
 
@@ -2539,6 +2556,7 @@ normal(mean = EXPR, sd = EXPR)                 continuous
 binomial(n = EXPR, p = EXPR)                   bounded counts
 beta_binomial(n = EXPR, alpha = EXPR, beta = EXPR)          overdispersed prevalence (raw)
 beta_binomial(n = EXPR, mean = EXPR, concentration = EXPR)  overdispersed prevalence (mean/concentration)
+beta(mean = EXPR, concentration = EXPR)        continuous proportion in (0, 1)
 bernoulli(p = EXPR)                            binary outcome
 ```
 
@@ -2547,6 +2565,13 @@ The two `beta_binomial` spellings are equivalent: `mean`/`concentration` lowers 
 reads better; mixing the two forms in one call is an error (E252). For a
 sampler-friendly parameterization of the `concentration` (overdispersion) parameter,
 see the reparameterization guidance in `camdl docs inference`.
+
+Use `beta(...)` when the observed value is itself a **continuous proportion** in the
+open interval (0, 1) — a rate, coverage, or positivity given directly as a fraction —
+rather than a `k`-of-`n` count (which is `beta_binomial`). It is mean-linked with the
+same shape mapping (`alpha = mean · concentration`, `beta = (1 − mean) · concentration`);
+`mean` and `concentration` are both differentiable, so `beta` is usable under
+gradient-based inference (`nuts`) as well as the gradient-free methods.
 
 ### 12.2.1 Diagnostic-test likelihood sugar
 
@@ -2662,7 +2687,9 @@ The `observations {}` block is evaluated at runtime in both directions.
   synthetic-data generation under `simulate`.
 
 The emission cadence is written `emit_schedule = every N 'unit` or
-`emit_schedule = at [t1, t2, ...] 'unit` (§12 examples). A bare `every`/`at`
+`emit_schedule = at [t1 'unit, t2 'unit, ...]` — the unit rides on each list
+element (e.g. `at [7 'days, 14 'days]`), not after the bracket (§12 examples).
+A bare `every`/`at`
 field at the top of an observation block is the removed pre-gh#171 form and is
 rejected with **E272** pointing at the `emit_schedule = ...` rewrite. Monthly
 incidence can be obtained natively by setting `emit_schedule = every 30 'days`
@@ -2682,7 +2709,7 @@ interventions {
   routine_vacc : transfer(fraction = vacc_rate, from = S, to = V) {
     every = 30 'days
     from  = 0 'days
-    until = 2 'years
+    to    = 2 'years
   }
 
   importation_pulse : { I_child_p1 = I_child_p1 + 10  at = [90] }
@@ -2731,11 +2758,11 @@ NAME : ACTION at [TIME, ...]     # times in model time_unit
 NAME : ACTION {
   every = DURATION             recurring interval
   from  = DURATION             start of recurring (default: t_start)
-  until = DURATION             end of recurring (default: t_end)
+  to    = DURATION             end of recurring (default: t_end)
 }
 ```
 
-**In anchored mode**, `every`, `from`, and `until` must be classified `Exact`
+**In anchored mode**, `every`, `from`, and `to` must be classified `Exact`
 (§2.1) — a `Calendar`-classified duration (e.g. `every = 1
 'months`) is
 **E322**, with a hint pointing at `every = 30 'days` for an affine ~monthly
@@ -2878,7 +2905,7 @@ trajectory and is resampled away.
 
 For `add` events and interventions that recur on a specific day within each
 period. The `every … at_day …` schedule is available only on the `add` action
-(`transfer`/`set` use the `at [...]` or `{ every = …; from = …; until = … }`
+(`transfer`/`set` use the `at [...]` or `{ every = …; from = …; to = … }`
 schedule forms instead):
 
 ```camdl
@@ -3062,7 +3089,7 @@ timepoints {
 `t_start` and `t_end` are **reserved identifiers** automatically defined from
 the `simulate` block, holding the simulation's start and end times. They are
 available in any expression — most usefully to anchor intervention or event
-schedule windows relative to the run (e.g. `from` / `until`).
+schedule windows relative to the run (e.g. `from` / `to`).
 
 If `simulate` is absent (e.g., during `camdl check`), the expander silently
 defaults `t_start = 0` and `t_end = 100`; expressions referencing them use those
@@ -3103,8 +3130,8 @@ they compile fine. This includes the calendar builtins (`add_calendar_months`,
 `add_calendar_years`, `date`, `date_range` — note only the `_months`/`_years`
 calendar adders exist; there is no `add_calendar_days`/`add_calendar_weeks`), the
 rate wrappers (`overdispersed`, `deterministic`), the likelihood distributions
-(`poisson`, `neg_binomial`, `normal`, `binomial`, `beta_binomial`, `bernoulli`,
-`diagnostic_test`), the observation projection name (`projected`), and the
+(`poisson`, `neg_binomial`, `normal`, `binomial`, `beta_binomial`, `beta`,
+`bernoulli`, `diagnostic_test`), the observation projection name (`projected`), and the
 scenario names (`baseline`, `scenario`). Reusing one as an ordinary parameter is
 legal but inadvisable for readability.
 

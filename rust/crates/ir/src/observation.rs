@@ -107,9 +107,38 @@ pub struct BetaBinomialLikelihood {
     pub beta:  Diffable,
 }
 
+/// Beta likelihood for a continuous proportion `x ∈ (0, 1)` (an observed rate,
+/// coverage, or positivity given directly as a fraction — not a `k`-of-`n` count,
+/// which is [`BetaBinomialLikelihood`]). Mean-linked like [`NegBinomialLikelihood`]:
+/// the model predicts `mean` and `concentration` (φ) is the dispersion knob, with
+/// shape parameters `α = mean·φ`, `β = (1 − mean)·φ`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]
+pub struct BetaLikelihood {
+    pub mean:          Diffable,
+    pub concentration: Diffable,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]
 pub struct BernoulliLikelihood {
     pub p: Diffable,
+}
+
+/// Zero-inflated negative binomial: a structural-zero mass `pi` mixed with a
+/// `NegBinomial(mean, dispersion)`. `P(Y=0) = pi + (1-pi)·f(0)`,
+/// `P(Y=k>0) = (1-pi)·f(k)`. **Scoring-only** — every field is a bare `Expr`
+/// (no `Diffable`), so the family carries no gradient at all; the fit-time
+/// gradient-capability gate refuses PGAS/NUTS on a model that uses it, while
+/// MH/PMMH/PF/IF2 score it. The surface is the `zero_inflated(base =
+/// neg_binomial(...), pi = ...)` wrapper, desugared to this flat variant by the
+/// OCaml parser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]
+pub struct ZeroInflatedNegBinomialLikelihood {
+    #[differentiate(skip)]
+    pub mean: Expr,
+    #[differentiate(skip)]
+    pub dispersion: Expr,
+    #[differentiate(skip)]
+    pub pi: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]
@@ -120,7 +149,9 @@ pub enum Likelihood {
     Normal(NormalLikelihood),
     Binomial(BinomialLikelihood),
     BetaBinomial(BetaBinomialLikelihood),
+    Beta(BetaLikelihood),
     Bernoulli(BernoulliLikelihood),
+    ZeroInflatedNegBinomial(ZeroInflatedNegBinomialLikelihood),
 }
 
 impl Likelihood {
@@ -135,7 +166,9 @@ impl Likelihood {
             Likelihood::Normal(_)       => "normal",
             Likelihood::Binomial(_)     => "binomial",
             Likelihood::BetaBinomial(_) => "beta_binomial",
+            Likelihood::Beta(_)         => "beta",
             Likelihood::Bernoulli(_)    => "bernoulli",
+            Likelihood::ZeroInflatedNegBinomial(_) => "zero_inflated_neg_binomial",
         }
     }
 }

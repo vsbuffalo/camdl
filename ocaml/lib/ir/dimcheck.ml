@@ -1136,13 +1136,42 @@ let check_model (m : model) : result =
            ~msg:(Printf.sprintf
              "%s: BetaBinomial `beta` must be dimensionless" ctx)
            bb.beta.expr
+       | Beta b ->
+         (* `mean` is a proportion (dimensionless on [0, 1]); `concentration` is
+            the Beta shape scale — dimensionless by definition. A count in `mean`
+            is the same missing-`/N` bug the Bernoulli/Binomial-p check catches. *)
+         require_dimensionless st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: Beta `mean` must be dimensionless (a proportion on [0, 1]); \
+              a count here is almost certainly a missing `/N`." ctx)
+           b.mean.expr;
+         require_dimensionless st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: Beta `concentration` must be dimensionless" ctx)
+           b.concentration.expr
        | Bernoulli b ->
          (* gh#116: same as Binomial.p — must be a probability. *)
          require_dimensionless st ~ctx
            ~msg:(Printf.sprintf
              "%s: Bernoulli `p` must be dimensionless (probability); \
               a count here is almost certainly a missing `/N`." ctx)
-           b.p.expr);
+           b.p.expr
+       | ZeroInflatedNegBinomial zi ->
+         (* Same contract as the NegBinomial base: `mean` is the expected count,
+            `dispersion` is dimensionless. Plus `pi` is the structural-zero
+            probability — dimensionless on [0, 1]. *)
+         ignore (infer st ~ctx zi.mean);
+         let disp_dim = infer st ~ctx zi.dispersion in
+         propagate st ~ctx zi.dispersion dimensionless;
+         constrain_known st ~code:"E304"
+           ~message:(Printf.sprintf
+             "%s: zero-inflated NegBinomial `dispersion` must be dimensionless" ctx)
+           disp_dim dimensionless;
+         require_dimensionless st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: zero-inflation `pi` must be dimensionless (a structural-zero \
+              probability on [0, 1])" ctx)
+           zi.pi);
       st.projected_dim <- None;
       Hashtbl.reset st.obs_col_dims
     ) m.observations;

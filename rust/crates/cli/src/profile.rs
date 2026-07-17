@@ -29,7 +29,6 @@
 //! cross-seed summary are cross-leaf aggregates with no single home in
 //! the factored tree — they are rebuilt from the derived index.
 
-use rayon::prelude::*;
 use sim::{
     compiled_model::CompiledModel,
     inference::{
@@ -101,6 +100,27 @@ impl ProfileAlgo {
 // name starts with `<root>_`, and `--data NAME=PATH` (gh#90 named form)
 // also expands NAME as a family root. Same semantics, single dispatch.
 
+/// Normalized coordinates of grid cell `gi` — each focal value mapped to
+/// `[0, 1]` over its axis's grid range, so the nearest-to-best ordering is
+/// scale-fair across axes with very different magnitudes. Ordering only; it
+/// never touches a loglik or a leaf.
+fn profile_cell_norm(
+    grid_points: &[Vec<(usize, f64)>],
+    axis_ranges: &[(f64, f64)],
+    gi: usize,
+) -> Vec<f64> {
+    grid_points[gi].iter().enumerate().map(|(k, &(_, v))| {
+        let (mn, mx) = axis_ranges[k];
+        if (mx - mn).abs() < 1e-12 { 0.0 } else { (v - mn) / (mx - mn) }
+    }).collect()
+}
+
+/// Squared Euclidean distance between two normalized cell coordinate vectors
+/// (see [`profile_cell_norm`]). Squared — ordering only needs the monotone
+/// comparison.
+fn profile_cell_dist2(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum()
+}
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // Parse the CLI strings into the typed registry entry (the string boundary);
@@ -1154,9 +1174,25 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // (multi-seed only) the cross-seed summary.tsv (2s throttle, since
     // it reads N seeds' rollups). Last-completion-wins.
 
-    // ── Run remaining jobs in parallel ──────────────────────────────
-    let run_sweep = || {
-    remaining.par_iter().for_each(|&ji| {
+    // ── Run remaining jobs: greedy priority work-queue ──────────────
+    // Per focal axis, its grid's value range — for normalizing cell
+    // coordinates so the nearest-to-best ordering is scale-fair.
+    let axis_ranges: Vec<(f64, f64)> = focal_grids.iter().map(|fg| {
+        let mn = fg.values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let mx = fg.values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        (mn, mx)
+    }).collect();
+    let cell_norm: Vec<Vec<f64>> = (0..grid_points.len())
+        .map(|gi| profile_cell_norm(&grid_points, &axis_ranges, gi))
+        .collect();
+    // The best (finite) profile-loglik seen and the grid cell that produced
+    // it. Workers drill toward this cell; the bar surfaces the loglik. This is
+    // a read-only side-channel — each job writes its own identity-keyed leaf,
+    // so it never changes any output, only the order cells are visited in.
+    let best: std::sync::Mutex<(f64, Option<usize>)> =
+        std::sync::Mutex::new((f64::NEG_INFINITY, None));
+
+    let eval_job = |ji: usize| {
         let (seed_idx, grid_idx, start_idx, ref resolved_pt_id, ref cas_path) = resolved_jobs[ji];
         let process = Arc::clone(&process);
         let obs_model_obj = Arc::clone(&obs_model_obj);
@@ -1558,6 +1594,18 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         };
         let elapsed = job_t0.elapsed().as_secs_f64();
 
+        // Report this cell's loglik to the shared best: the drill target for
+        // the work-queue and the bar's researcher metric. Never gates the leaf
+        // write below (order-independent output).
+        if final_loglik.is_finite() {
+            if let Ok(mut b) = best.lock() {
+                if final_loglik > b.0 {
+                    *b = (final_loglik, Some(grid_idx));
+                    bar.set(crate::progress::best_ll(final_loglik));
+                }
+            }
+        }
+
         // gh#147 (M3.3): claim the CAS leaf, write the cell's mle.toml there,
         // finalize. The profile-base is never written (path segment only);
         // each (point, stage, seed, start) is its own leaf. The display
@@ -1627,8 +1675,53 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // Passive progress tick. `Task` handles Pretty (redraw) / Plain
         // (throttled `profile pos/len` log line) / None (no-op) internally.
         bar.inc(1);
+    };
 
-    });
+    // N workers pull the pending job whose cell is nearest the current best
+    // cell, keeping every core busy while evaluation drills toward the
+    // optimum. Order-independent (each job writes its own identity-keyed
+    // leaf), so no barrier and no determinism requirement — the pick just
+    // reorders which cell a freed core visits next.
+    let pending: std::sync::Mutex<Vec<usize>> =
+        std::sync::Mutex::new(remaining.clone());
+    let worker = || {
+        loop {
+            // Snapshot the drill target (release the lock before touching
+            // `pending`, so the two locks never nest).
+            let target = best.lock().map(|b| b.1).unwrap_or(None);
+            let ji = {
+                let mut p = match pending.lock() {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                if p.is_empty() { break; }
+                let pick = match target {
+                    // Nearest unevaluated cell to the best so far.
+                    Some(bc) => {
+                        let mut best_i = 0usize;
+                        let mut best_d = f64::INFINITY;
+                        for (i, &cand) in p.iter().enumerate() {
+                            let d = profile_cell_dist2(
+                                &cell_norm[resolved_jobs[cand].1], &cell_norm[bc]);
+                            if d < best_d { best_d = d; best_i = i; }
+                        }
+                        best_i
+                    }
+                    // No finite best yet — take the next pending job.
+                    None => 0,
+                };
+                p.swap_remove(pick)
+            };
+            eval_job(ji);
+        }
+    };
+    let run_sweep = || {
+        let n_workers = rayon::current_num_threads().max(1);
+        rayon::scope(|s| {
+            for _ in 0..n_workers {
+                s.spawn(|_| worker());
+            }
+        });
     };
     match &prof_pool {
         Some(pool) => pool.install(run_sweep),

@@ -664,16 +664,15 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
             None
         }
     };
-    // The method's own summary first (via the one naming seam), then each
-    // sampler's as a fallback for a stage dir we couldn't name.
+    // Each method reads its OWN `<algorithm>_summary.json` via the naming seam —
+    // no cross-name fallback. A missing summary (an unnamed stage dir, or a
+    // pre-rename mh fit that stored `pmmh_summary.json`) is NotAssessed, never
+    // read under a sibling's name. The mh-summary rename is a clean break: a fit
+    // produced before it must be re-run to be assessed here.
     method
         .map(|m| m.summary_filename())
         .as_deref()
         .and_then(try_read)
-        .or_else(|| try_read("pgas_summary.json"))
-        .or_else(|| try_read("pmmh_summary.json"))
-        .or_else(|| try_read("mh_summary.json"))
-        .or_else(|| try_read("nuts_summary.json"))
         .unwrap_or(ConvergenceStatus::NotAssessed)
 }
 
@@ -984,7 +983,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     let (compiled_ir, _ir_tmp): (String, Option<std::path::PathBuf>) = if archived_ir.is_file() {
         (archived_ir.to_string_lossy().into_owned(), None)
     } else {
-        crate::util::resolve_ir_path(&config.model.camdl)?
+        // `fit predict` replays forward trajectories from stored draws — it never
+        // recomputes an ODE gradient, so compile lean (`needs_state_grad = false`,
+        // gh#439 A2).
+        crate::util::resolve_ir_path(&config.model.camdl, false)?
     };
     let (model, _) = crate::util::load_model(&compiled_ir)?;
     // One calendar block for every sidecar manifest this run writes
@@ -2129,6 +2131,29 @@ mod tests {
             }
             _ => panic!("mh stage must resolve its own mh_summary.json, not NotAssessed"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_convergence_clean_break_no_pmmh_fallback() {
+        // Clean break: a pre-rename mh fit (only `pmmh_summary.json` on disk) is
+        // NOT silently read under the old name — it is NotAssessed, so the fit
+        // must be re-run. Asserts the cross-name fallback was removed.
+        let dir = std::env::temp_dir().join("camdl_read_convergence_clean_break_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pmmh_summary.json"),
+            r#"{"rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                read_convergence(&dir, Some(FitAlgorithm::Mh)),
+                ConvergenceStatus::NotAssessed
+            ),
+            "an mh fit must not fall back to pmmh_summary.json (clean break)"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -252,6 +252,86 @@ let test_constant_fold_collapses_sparse_foi_reduce () =
   Alcotest.(check int) "fold collapses FOI Reduce to k=2 terms" 2 after;
   Alcotest.(check bool) "fold strictly shrank the FOI Reduce" true (after < before)
 
+(* ── gh#439: --no-state-grad gates the WrtPop state-Jacobian emission ──────────
+   The state-Jacobian (rate_state_grad / projection_state_grad) is consumed only
+   by the ODE forward-sensitivity gradient; forward sim, IF2, PMMH, PF, and MH
+   never read it, and on a mean-field-coupled model it is a dense one-entry-per-
+   stratum map that dominates the IR (gh#439). The `Compiler.no_state_grad` gate
+   (set by `camdlc --no-state-grad`) drops it while leaving the dynamics [rate]
+   and the parameter gradient [rate_grad] intact. Default (gate off) still emits
+   it, so goldens are unchanged. sparse_ring's `infection` couples across patches,
+   so its state-Jacobian is non-empty in the baseline. *)
+let test_no_state_grad_gates_state_jacobian () =
+  let find_infection (m : Ir.model) =
+    List.find (fun (t : Ir.transition) ->
+      String.length t.name >= 9 && String.sub t.name 0 9 = "infection")
+      m.Ir.transitions
+  in
+  let compile_ring () =
+    match Compiler.compile ~name:"sparse_ring" sparse_ring_src with
+    | Ok m -> m
+    | Error e -> Alcotest.failf "compile failed: %s" e
+  in
+  Compiler.no_state_grad := false;
+  let m_full = compile_ring () in
+  let inf_full = find_infection m_full in
+  Alcotest.(check bool) "baseline: infection rate_state_grad populated"
+    true (inf_full.Ir.rate_state_grad <> []);
+  Alcotest.(check bool) "baseline: infection rate_grad populated"
+    true (inf_full.Ir.rate_grad <> []);
+  Compiler.no_state_grad := true;
+  let m_gated =
+    Fun.protect ~finally:(fun () -> Compiler.no_state_grad := false) compile_ring
+  in
+  List.iter (fun (t : Ir.transition) ->
+    Alcotest.(check bool)
+      (Printf.sprintf "gated: %s rate_state_grad empty" t.name)
+      true (t.Ir.rate_state_grad = []))
+    m_gated.Ir.transitions;
+  let inf_gated = find_infection m_gated in
+  Alcotest.(check bool) "gated: infection rate_grad preserved"
+    true (inf_gated.Ir.rate_grad <> []);
+  Alcotest.(check bool) "gated: dynamics rate unchanged (WrtPop-only gate)"
+    true (inf_gated.Ir.rate = inf_full.Ir.rate)
+
+(* ── gh#440: beta likelihood for a continuous proportion ──────────────────────
+   Parse → expand → IR: `beta(mean, concentration)` must lower to `Ir.Beta` with
+   both differentiable args populated. The scorer/sampler/gradient live Rust-side
+   (obs_loglik/obs_model, FD-verified there); this pins the OCaml frontend. *)
+let test_beta_likelihood_compiles () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    let N = S + I
+    parameters { beta : rate  phi : real in [1.0, 1000.0] }
+    transitions { infection : S --> I @ beta * S * I / N }
+    observations {
+      positivity {
+        columns       { time : time, positivity : real }
+        projected     = prevalence(I)
+        emit_schedule = every 7 'days
+        positivity  ~ beta(mean = projected / N, concentration = phi)
+      }
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} in
+  match Compiler.compile ~name:"beta_test" src with
+  | Error e -> Alcotest.failf "beta model must compile: %s" e
+  | Ok m ->
+    let beta_om =
+      List.find_opt (fun (o : Ir.observation_model) ->
+        match o.Ir.likelihood with Ir.Beta _ -> true | _ -> false)
+        m.Ir.observations
+    in
+    (match beta_om with
+     | Some { Ir.likelihood = Ir.Beta b; _ } ->
+       Alcotest.(check bool) "beta mean arg populated"
+         true (b.Ir.mean.Ir.expr <> Ir.Const 0.0);
+       Alcotest.(check bool) "beta concentration arg populated"
+         true (b.Ir.concentration.Ir.expr <> Ir.Const 0.0)
+     | _ -> Alcotest.fail "positivity stream did not compile to Ir.Beta")
+
 (* ── gh#272 LICM pass ─────────────────────────────────────────────────────────
    Loop-invariant code motion hoists param/table-only subexpressions out of the
    dynamics rates into `per_eval_bindings`. These pin the variant/invariant
@@ -1924,7 +2004,7 @@ let test_intervention_transfer_count_and_fraction_rejected () =
   compile_expect_error_code ~code:"E261" ~contains:"mutually exclusive" src
 
 (* ── Recurring intervention block syntax ─────────────────────────────────
-   transfer(...) { every = T, from = T0, until = T1 } — exists alongside
+   transfer(...) { every = T, from = T0, to    = T1 } — exists alongside
    the existing at [t1, t2, ...] form. *)
 
 let test_recurring_block_transfer () =
@@ -1939,7 +2019,7 @@ let test_recurring_block_transfer () =
       routine : transfer(fraction = vacc_rate, from = S, to = V) {
         every = 30 'days
         from  = 0 'days
-        until = 365 'days
+        to    = 365 'days
       }
     }
   |} in
@@ -1955,7 +2035,7 @@ let test_recurring_block_transfer () =
      | _ -> Alcotest.fail "expected Recurring schedule")
 
 let test_recurring_kwargs_any_order () =
-  (* until / from / every in arbitrary order — all should work. *)
+  (* to / from / every in arbitrary order — all should work. *)
   let src = {|
     time_unit = 'days
     compartments { S, V }
@@ -1964,7 +2044,7 @@ let test_recurring_kwargs_any_order () =
     simulate { from = 0 'days  to = 100 'days }
     interventions {
       r : transfer(fraction = 0.1, from = S, to = V) {
-        until = 100 'days
+        to    = 100 'days
         every = 7 'days
         from  = 14 'days
       }
@@ -1993,7 +2073,7 @@ let test_recurring_unit_conversion () =
       r : transfer(fraction = 0.1, from = S, to = V) {
         every = 30 'days
         from  = 0 'days
-        until = 1 'years
+        to    = 1 'years
       }
     }
   |} in
@@ -2021,7 +2101,7 @@ let test_recurring_add_action () =
       influx : add(S, 50) {
         every = 10 'days
         from  = 0 'days
-        until = 100 'days
+        to    = 100 'days
       }
     }
   |} in
@@ -2038,7 +2118,7 @@ let test_recurring_add_action () =
      | _ -> Alcotest.fail "expected Add action")
 
 let test_recurring_default_from_until () =
-  (* 'from' and 'until' default to simulate.from / simulate.to when omitted.
+  (* 'from' and 'to' default to simulate.from / simulate.to when omitted.
      Only 'every' is required. *)
   let src = {|
     time_unit = 'days
@@ -2109,13 +2189,13 @@ let test_recurring_e240_zero_every () =
       r : transfer(fraction = 0.1, from = S, to = V) {
         every = 0 'days
         from  = 0 'days
-        until = 10 'days
+        to    = 10 'days
       }
     }
   |}
 
 let test_recurring_e241_inverted_range () =
-  compile_expect_error_code ~code:"E241" ~contains:"must be <= 'until'" {|
+  compile_expect_error_code ~code:"E241" ~contains:"must be <= 'to'" {|
     time_unit = 'days
     compartments { S, V }
     transitions {}
@@ -2125,7 +2205,7 @@ let test_recurring_e241_inverted_range () =
       r : transfer(fraction = 0.1, from = S, to = V) {
         every = 1 'days
         from  = 20 'days
-        until = 10 'days
+        to    = 10 'days
       }
     }
   |}
@@ -2142,7 +2222,7 @@ let test_recurring_e242_schedule_too_long () =
       r : transfer(fraction = 0.1, from = S, to = V) {
         every = 0.000001 'days
         from  = 0 'days
-        until = 10 'days
+        to    = 10 'days
       }
     }
   |}
@@ -2565,8 +2645,8 @@ let test_l403_fires_on_div_conversion () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
-      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
+      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = linear }
     }
     transitions {
       births : S --> I @ birthrate(t) * popsize(t) / 365.25
@@ -2595,7 +2675,7 @@ let test_l403_fires_on_reciprocal_mul () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       births : S --> I @ birthrate(t) * (1 / 365.25) * S
@@ -2621,7 +2701,7 @@ let test_l403_no_fire_on_plain_use () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       births : S --> I @ birthrate(t) * S
@@ -2646,8 +2726,8 @@ let test_l403_no_fire_on_non_rate_forcing () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      seasonal : interpolated 'ratio { times = [0, 100]  values = [1.0, 1.2]  method = "linear" }
-      popsize  : interpolated 'count { times = [0, 100]  values = [1000, 1100]  method = "linear" }
+      seasonal : interpolated 'ratio { times = [0, 100]  values = [1.0, 1.2]  method = linear }
+      popsize  : interpolated 'count { times = [0, 100]  values = [1000, 1100]  method = linear }
     }
     transitions {
       a : S --> I @ seasonal(t) / 365.25 * R0 * S
@@ -2693,7 +2773,7 @@ let test_gh345_indexed_file_backed_forcing () =
     forcing {
       cforce[p in patch] : interpolated 'ratio {
         data = "camdl_gh345_temps.tsv"
-        key_col = patch  time_col = week  value_col = cval  method = "linear"
+        key_col = "patch"  time_col = "week"  value_col = "cval"  method = linear
       }
     }
     transitions {
@@ -2757,7 +2837,7 @@ let test_gh345_table_backed_forcing () =
       cforce[p in patch] : interpolated 'ratio {
         table    = temp_data
         time_dim = climate_week
-        method   = "linear"
+        method   = linear
       }
     }
     transitions {
@@ -2822,7 +2902,7 @@ let test_gh345_table_unaccounted_dim_rejected () =
       cforce[p in patch] : interpolated 'ratio {
         table    = clim
         time_dim = week
-        method   = "linear"
+        method   = linear
       }
     }
     transitions {
@@ -2854,7 +2934,7 @@ let test_l403_no_fire_on_unrelated_div () =
       mu : rate in [0.001, 1.0]
     }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       decay : I --> S @ mu * S / 365.25
@@ -2880,8 +2960,8 @@ let test_l403_fires_via_hoisted_binding () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
-      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = "linear" }
+      birthrate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
+      popsize   : interpolated 'count    { times = [0, 100]  values = [1000, 1100]  method = linear }
     }
     let birth_flow = birthrate(t) * popsize(t) / 365.25
     transitions {
@@ -2913,7 +2993,7 @@ let test_l403_no_fire_on_same_unit_forcing () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      rate_pd : interpolated 'per_day { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      rate_pd : interpolated 'per_day { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       x : S --> I @ rate_pd(t) * S / 60
@@ -2941,7 +3021,7 @@ let test_l403_no_fire_on_structural_divisor () =
     compartments { S, I }
     parameters { R0 : rate in [0.1, 5.0] }
     forcing {
-      import_rate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = "linear" }
+      import_rate : interpolated 'per_year { times = [0, 100]  values = [0.02, 0.03]  method = linear }
     }
     transitions {
       imp : S --> I @ import_rate(t) * S / 12
@@ -3456,7 +3536,7 @@ let test_forcing_with_literal_lag () =
       vc : interpolated 'ratio {
         times  = [0.0, 10.0, 20.0]
         values = [1.0, 2.0, 3.0]
-        method = "linear"
+        method = linear
         lag    = 10 'days
       }
     }
@@ -3495,7 +3575,7 @@ let test_forcing_with_param_lag () =
       vc : interpolated 'ratio {
         times  = [0.0, 10.0, 20.0]
         values = [1.0, 2.0, 3.0]
-        method = "linear"
+        method = linear
         lag    = tau
       }
     }
@@ -3805,6 +3885,118 @@ let test_indexed_param_variable_index () =
     let infection_b = find_transition m "infection_b" in
     Alcotest.(check bool) "infection_b rate has R0_b" true
       (contains_param "R0_b" (tr_rate infection_b))
+
+(* ── Multi-index parameters (mu[village, season]) ──────────────────────────
+   Indexed param declarations accept N dimensions, expanding to one scalar
+   param per cell of the cartesian product. The use side, arity checking, obs
+   multi-column matching, and dimcheck were already N-dim; these pin the
+   declaration change and its two guards (E330 unknown/empty dim, E331 dup). *)
+
+let test_multi_index_param_expansion () =
+  let src = {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    parameters { mu[village, season] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |} in
+  let m = compile_expect_ok src in
+  let names = List.map (fun (p : Ir.parameter) -> p.Ir.name) m.Ir.parameters in
+  List.iter (fun expected ->
+    if not (List.mem expected names) then
+      Alcotest.failf "expected cell '%s'; got: %s" expected (String.concat ", " names))
+    ["mu_kwaru_wet"; "mu_kwaru_dry"; "mu_ajura_wet"; "mu_ajura_dry"];
+  Alcotest.(check int) "exactly 4 cells" 4 (List.length names)
+
+let test_multi_index_param_3dim () =
+  let src = {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry]  species = [gam, fun_] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    stratify(by = species)
+    parameters { m[village, season, species] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |} in
+  let m = compile_expect_ok src in
+  let names = List.map (fun (p : Ir.parameter) -> p.Ir.name) m.Ir.parameters in
+  Alcotest.(check int) "2x2x2 = 8 cells" 8 (List.length names);
+  List.iter (fun expected ->
+    if not (List.mem expected names) then
+      Alcotest.failf "expected cell '%s'; got: %s" expected (String.concat ", " names))
+    ["m_kwaru_wet_gam"; "m_ajura_dry_fun_"]
+
+let test_multi_index_param_use () =
+  let src = {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    parameters {
+      mu[village, season] : positive 'ratio in [0.1, 5.0]
+      b[village]          : positive 'ratio in [0.1, 5.0]
+    }
+    let C[v in village, s in season] = mu[v,s] * b[v]
+    observations {
+      parity[v in village, s in season] {
+        columns { time : time, village : dim, season : dim, n_parous : count, n_dissected : count }
+        projected = min(max(C[v,s], 1e-4), 1.0 - 1e-4)
+        n_parous ~ binomial(n = n_dissected, p = projected)
+      }
+    }
+    simulate { from = 0  to = 10 }
+  |} in
+  (* compiles: mu[v,s] resolves to the right cell, obs matches village+season *)
+  let _ = compile_expect_ok src in ()
+
+let test_multi_index_dup_dim_e331 () =
+  compile_expect_error_code ~code:"E331" ~contains:"repeats a dimension" {|
+    dimensions { village = [kwaru, ajura] }
+    compartments { }
+    stratify(by = village)
+    parameters { mu[village, village] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |}
+
+let test_multi_index_unknown_dim_e330 () =
+  compile_expect_error_code ~code:"E330" ~contains:"unknown dimension" {|
+    dimensions { village = [kwaru, ajura] }
+    compartments { }
+    stratify(by = village)
+    parameters { mu[village, nonesuch] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |}
+
+let test_multi_index_empty_dim_e330 () =
+  compile_expect_error_code ~code:"E330" ~contains:"no levels" {|
+    dimensions { village = [kwaru, ajura]  empty = [] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = empty)
+    parameters { mu[village, empty] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |}
+
+let test_multi_index_use_arity_e299 () =
+  (* `mu[v]` under-indexes a 2-D param; the arity check fires when the value is
+     resolved, so the projection must actually use it. *)
+  compile_expect_error_code ~code:"E299" ~contains:"expects 2 indices" {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    parameters { mu[village, season] : positive 'ratio in [0.1, 5.0] }
+    let C[v in village] = mu[v]
+    observations {
+      obs[v in village] {
+        columns { time : time, village : dim, y : count, n : count }
+        projected = min(max(C[v], 1e-4), 1.0 - 1e-4)
+        y ~ binomial(n = n, p = projected)
+      }
+    }
+    simulate { from = 0  to = 10 }
+  |}
 
 let test_indexed_param_literal_index () =
   let src = {|
@@ -5592,7 +5784,7 @@ let test_interpolated_iso_date_time_col () =
     compartments { S }
     parameters { dummy : rate }
     forcing {
-      eff : interpolated 'count { data = "%s"  time_col = time  value_col = value  method = "linear" }
+      eff : interpolated 'count { data = "%s"  time_col = "time"  value_col = "value"  method = linear }
     }
     transitions { drain : S --> @ dummy * eff * S }
     init { S = 100 }
@@ -5619,7 +5811,7 @@ let test_interpolated_numeric_time_col () =
     compartments { S }
     parameters { dummy : rate }
     forcing {
-      eff : interpolated 'count { data = "%s"  time_col = day  value_col = value  method = "linear" }
+      eff : interpolated 'count { data = "%s"  time_col = "day"  value_col = "value"  method = linear }
     }
     transitions { drain : S --> @ dummy * eff * S }
     init { S = 100 }
@@ -5644,7 +5836,7 @@ let test_interpolated_iso_date_no_origin_errors () =
     compartments { S }
     parameters { dummy : rate }
     forcing {
-      eff : interpolated 'count { data = "%s"  time_col = time  value_col = value  method = "linear" }
+      eff : interpolated 'count { data = "%s"  time_col = "time"  value_col = "value"  method = linear }
     }
     transitions { drain : S --> @ dummy * eff * S }
     init { S = 100 }
@@ -6535,7 +6727,7 @@ let test_origin_absent_no_rata_die () =
    Rules tested below:
      E320 — time_unit = 'months/'years under `origin = date(...)`.
      E321 — Instant + CalendarDuration (literal or `let`-laundered).
-     E322 — Calendar duration in recurring schedule `every`/`from`/`until`.
+     E322 — Calendar duration in recurring schedule `every`/`from`/`to`.
      E323 — Bare-numeric entries inside `on=[...]` of a periodic forcing
             in anchored mode.
      W324 — Bare-numeric `simulate.from` / `simulate.to` in anchored mode.
@@ -7474,6 +7666,312 @@ let test_simulate_unknown_key_errors () =
     simulate { from = 0 'days  to = 100 'days  step = 0.5 }
   |})
 
+(* Like [compile_expect_error_code] but asserts several substrings are all
+   present in the diagnostic payload (code + directional message + block name). *)
+let compile_expect_error_all ~code ~contains src =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"sep_err" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.failf "expected error %s but compile succeeded" code
+  | Error e ->
+    if not (contains_substring ~needle:code e) then
+      Alcotest.failf "expected error code %s, got: %s" code e;
+    List.iter (fun n ->
+      if not (contains_substring ~needle:n e) then
+        Alcotest.failf "expected error to contain %S, got: %s" n e) contains
+
+(* ── Phase 0 (gh#414): directional block-separator diagnostics ────────────────
+   A stray comma between members of a WHITESPACE block, or a missing comma
+   between `compartments` members, was a bare `E001 syntax error`. It is now a
+   directional E001 naming the block and the fix. These assert the new message
+   fires; a bare E001 contains neither "separates members with whitespace" nor
+   "comma-separated". *)
+let sep_model_compartments = "compartments { S, I, R }\n"
+let sep_model_rest = {|
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |}
+
+let test_sep_comma_in_parameters () =
+  compile_expect_error_all ~code:"E001"
+    ~contains:["separates members with whitespace"; "parameters"]
+    (sep_model_compartments
+     ^ "parameters { beta : rate, gamma : rate }\n"
+     ^ sep_model_rest)
+
+let test_sep_comma_in_transitions () =
+  compile_expect_error_all ~code:"E001"
+    ~contains:["separates members with whitespace"; "transitions"]
+    (sep_model_compartments
+     ^ "parameters { beta : rate  gamma : rate }\n"
+     ^ {|
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N,
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |})
+
+let test_sep_comma_in_dimensions () =
+  compile_expect_error_all ~code:"E001"
+    ~contains:["separates members with whitespace"; "dimensions"]
+    ({|
+    dimensions { age = [young, old], region = [north, south] }
+    |}
+     ^ sep_model_compartments
+     ^ "parameters { beta : rate  gamma : rate }\n"
+     ^ sep_model_rest)
+
+let test_sep_missing_comma_in_compartments () =
+  compile_expect_error_all ~code:"E001"
+    ~contains:["comma-separated"; "compartments"]
+    ("compartments { S I R }\n"
+     ^ "parameters { beta : rate  gamma : rate }\n"
+     ^ sep_model_rest)
+
+(* Golden-neutral guard: the canonical separators (comma-separated compartments,
+   whitespace-separated parameters/transitions) still compile with no error. *)
+let test_sep_canonical_separators_compile () =
+  let src =
+    sep_model_compartments
+    ^ "parameters { beta : rate  gamma : rate }\n"
+    ^ sep_model_rest in
+  match Compiler.compile ~name:"sep_ok" src with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "canonical separators should compile, got: %s" e
+
+(* ── Phase 0 (gh#423 companion): forcing unknown-kwarg rejection ──────────────
+   The forcing arg handler was the one kwarg surface that silently ignored a
+   typo — `value_column = ...` (for `value_col`) was dropped and the selector
+   fell back to its default. It is now an E409 naming the unknown key. *)
+let forcing_kwarg_model extra_kw = {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    forcing {
+      cov : interpolated 'ratio {
+        times = [0, 100, 200]
+        values = [1.0, 1.5, 1.2]
+|} ^ extra_kw ^ {|
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * cov(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |}
+
+let test_forcing_unknown_kwarg_e409 () =
+  compile_expect_error_all ~code:"E409"
+    ~contains:["value_column"; "cov"]
+    (forcing_kwarg_model "        value_column = 3\n")
+
+let test_forcing_known_kwargs_ok () =
+  (* The same model with only recognized kwargs (times/values) compiles — the
+     unknown-kwarg check does not reject valid arguments. *)
+  match Compiler.compile ~name:"forcing_ok" (forcing_kwarg_model "") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "forcing with only known kwargs should compile, got: %s" e
+
+(* ── gh#423: typed forcing arg values (FStr | FExpr) ──────────────────────────
+   A quoted STRING in a forcing kwarg names the outside world (a data file or a
+   file column); a bare word names something inside the model (a param, a table,
+   a dimension) or a closed enum. Consumers require the arm matching each
+   kwarg's role, so `value_col = C` (bare) → E410, `method = "linear"` (quoted)
+   → E411, `method = banana` → E411; the happy paths (`method = linear`, quoted
+   selectors) compile. Proposal: docs/dev/proposals/2026-07-10-dsl-surface-consistency.md §1.2. *)
+let gh423_inline_forcing extra = {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    forcing {
+      cov : interpolated 'ratio {
+        times = [0, 100, 200]
+        values = [1.0, 1.5, 1.2]
+|} ^ extra ^ {|
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * cov(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |}
+
+let test_forcing_method_bare_linear_ok () =
+  match Compiler.compile ~name:"m_ok" (gh423_inline_forcing "        method = linear\n") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "bare `method = linear` should compile, got: %s" e
+
+let test_forcing_method_quoted_e411 () =
+  compile_expect_error_code ~code:"E411" ~contains:"bare enum"
+    (gh423_inline_forcing "        method = \"linear\"\n")
+
+let test_forcing_method_unknown_e411 () =
+  compile_expect_error_code ~code:"E411" ~contains:"banana"
+    (gh423_inline_forcing "        method = banana\n")
+
+(* F36 regression: an indexed let-family reference in `projected`
+   (`projected = m[v]` with `let m[v in village] = …`) must resolve as a
+   derived expression, not fall through to transition-incidence and E507. This
+   is symmetric to a bare let ref and — the point garki mis-diagnosed —
+   independent of the likelihood family. Both a count and a proportion family
+   must compile the identical projection. *)
+let projection_indexed_let ~lik =
+  Printf.sprintf {|
+time_unit = 'days
+compartments { S, I }
+dimensions { village = [va, vb] }
+stratify(by = village)
+parameters { beta : rate in [0,1]  mm : count in [0,1000] }
+transitions { inf[v in village] : S[v] --> I[v] @ beta * S[v] }
+let m[v in village] = mm
+observations {
+  catch[v in village] {
+    columns { time : time, village : dim, y : count }
+    projected = m[v]
+    %s
+  }
+}
+init { S[va] = 100  S[vb] = 100  I[va] = 1  I[vb] = 1 }
+simulate { from = 0 'days  to = 5 'days }
+|} lik
+
+let test_projection_indexed_let_count_ok () =
+  match Compiler.compile ~name:"f36_count"
+    (projection_indexed_let ~lik:"y ~ neg_binomial(mean = projected, r = 1.0)") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "indexed-let projection (count) should compile, got: %s" e
+
+let test_projection_indexed_let_prop_ok () =
+  match Compiler.compile ~name:"f36_prop"
+    (projection_indexed_let ~lik:"y ~ binomial(n = 100, p = projected)") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "indexed-let projection (proportion) should compile, got: %s" e
+
+(* A file-backed forcing whose time_col/value_col literals are spliced in, so a
+   bare (unquoted) selector can be contrasted with the quoted form. Writes its
+   data file to a temp dir the model's `data =` path resolves against. *)
+let gh423_file_forcing ~time_col ~value_col =
+  let dir = Filename.get_temp_dir_name () in
+  let tsv = Filename.concat dir "camdl_gh423_cov.tsv" in
+  let oc  = open_out tsv in
+  output_string oc "t\tforce\n0\t1.0\n100\t1.5\n200\t1.2\n";
+  close_out oc;
+  let src = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    forcing {
+      cov : interpolated 'ratio {
+        data      = "camdl_gh423_cov.tsv"
+        time_col  = %s
+        value_col = %s
+        method    = linear
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * cov(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |} time_col value_col in
+  Compiler.compile ~name:"gh423f" ~filename:(Filename.concat dir "m.camdl") src
+
+let test_forcing_selector_quoted_ok () =
+  match gh423_file_forcing ~time_col:"\"t\"" ~value_col:"\"force\"" with
+  | Ok _    -> ()
+  | Error e -> Alcotest.failf "quoted file-column selectors should compile, got: %s" e
+
+let test_forcing_selector_bare_e410 () =
+  Diagnostics.json_errors_mode := true;
+  let r = gh423_file_forcing ~time_col:"\"t\"" ~value_col:"force" in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _    -> Alcotest.failf "a bare `value_col = force` selector should be rejected (E410)"
+  | Error e ->
+    if not (contains_substring ~needle:"E410" e) then
+      Alcotest.failf "expected E410, got: %s" e;
+    if not (contains_substring ~needle:"quoted column name" e) then
+      Alcotest.failf "E410 must name the quote fix, got: %s" e
+
+(* ── gh#423 schedule cleanup: retire `until` → `to` ───────────────────────────
+   The recurring window end is now spelled `to` everywhere (matching `set`
+   blocks and `simulate { from … to … }`). `until` is rejected with a migration
+   diagnostic (E113) that names the rewrite, not a bare E001. *)
+let gh423_sched_model end_kw = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, V, I, R }
+    parameters { beta : rate  gamma : rate }
+    interventions {
+      vacc : transfer(fraction = 0.1, from = S, to = V) { every = 30 'days  from = 0 'days  %s = 90 'days }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 365 'days }
+  |} end_kw
+
+let test_schedule_to_recurring_ok () =
+  match Compiler.compile ~name:"sched_to" (gh423_sched_model "to") with
+  | Ok _    -> ()
+  | Error e -> Alcotest.failf "`to = ` recurring window end should compile, got: %s" e
+
+let test_schedule_until_migration_e113 () =
+  compile_expect_error_code ~code:"E113" ~contains:"until"
+    (gh423_sched_model "until")
+
+(* ── Phase 0: unknown-unit E102 is reachable (was dead code) ──────────────────
+   Before: the lexer emitted UNIT_IDENT only for ten hardcoded literals, so a
+   typo'd unit like `'per_capita` never reached the parser — it died on the
+   catch-all as a raw `unexpected character '''` lex error, and the friendly
+   E102 "unknown unit" production in `unit_lit` was unreachable dead code.
+   After: the lexer lexes a general `'<name>` into UNIT_IDENT, so the typo
+   reaches `unit_lit` and fires E102 with its "expected one of …" list. *)
+let test_unknown_unit_literal_e102 () =
+  compile_expect_error_code ~code:"E102" ~contains:"per_capita"
+    {|
+    compartments { S, I, R }
+    parameters { beta : positive 'per_capita  gamma : rate }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |}
+
+(* The ten known unit literals still lex identically through the general rule —
+   a model using `'per_day` compiles without an E102. *)
+let test_known_unit_literal_still_ok () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : positive 'per_day  gamma : rate }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |} in
+  match Compiler.compile ~name:"known_unit" src with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "model with 'per_day should compile, got: %s" e
+
 (* ── gh#181 step 1: structured, non-raising compile_outcome ──────────────────
    compile_outcome returns every diagnostic as a value and never raises;
    on a POST-EXPANSION error (Validate E507) both surfaces return it as a
@@ -8247,9 +8745,9 @@ let forcing_data_model ~path =
     forcing {
       clim : interpolated 'ratio {
         data      = "%s"
-        time_col  = t
-        value_col = force
-        method    = "linear"
+        time_col  = "t"
+        value_col = "force"
+        method    = linear
       }
     }
     transitions {
@@ -8745,6 +9243,14 @@ let () =
       Alcotest.test_case "sparse ring FOI Reduce P=4 collapses to k=2"
         `Quick test_constant_fold_collapses_sparse_foi_reduce;
     ];
+    "no_state_grad", [
+      Alcotest.test_case "--no-state-grad drops rate_state_grad, keeps rate_grad + rate (gh#439)"
+        `Quick test_no_state_grad_gates_state_jacobian;
+    ];
+    "beta_likelihood", [
+      Alcotest.test_case "beta(mean, concentration) compiles to Ir.Beta (gh#440)"
+        `Quick test_beta_likelihood_compiles;
+    ];
     "licm", [
       Alcotest.test_case "invariant/variant classification (Dt/Time/forcing/state are variant)"
         `Quick test_licm_invariant_classification;
@@ -8897,15 +9403,15 @@ let () =
         `Quick test_reactive_unknown_action_target_rejected;
     ];
     "recurring_interventions", [
-      Alcotest.test_case "transfer(...) { every, from, until }"     `Quick test_recurring_block_transfer;
+      Alcotest.test_case "transfer(...) { every, from, to }"     `Quick test_recurring_block_transfer;
       Alcotest.test_case "kwargs accepted in any order"             `Quick test_recurring_kwargs_any_order;
       Alcotest.test_case "unit conversion applies to interval args" `Quick test_recurring_unit_conversion;
-      Alcotest.test_case "add(...) { every, from, until } in events" `Quick test_recurring_add_action;
-      Alcotest.test_case "from / until default to simulation bounds" `Quick test_recurring_default_from_until;
+      Alcotest.test_case "add(...) { every, from, to } in events" `Quick test_recurring_add_action;
+      Alcotest.test_case "from / to default to simulation bounds" `Quick test_recurring_default_from_until;
       Alcotest.test_case "at [...] form still compiles (regression)" `Quick test_recurring_at_times_still_works;
       Alcotest.test_case "E213 block transition missing rate is rejected" `Quick test_block_transition_missing_rate_e213;
       Alcotest.test_case "E240 every = 0 is rejected"               `Quick test_recurring_e240_zero_every;
-      Alcotest.test_case "E241 from > until is rejected"            `Quick test_recurring_e241_inverted_range;
+      Alcotest.test_case "E241 from > to is rejected"            `Quick test_recurring_e241_inverted_range;
       Alcotest.test_case "E242 expanded schedule too long"          `Quick test_recurring_e242_schedule_too_long;
     ];
     "scenario_extends", [
@@ -9008,6 +9514,13 @@ let () =
       Alcotest.test_case "no default → value = 0.0"         `Quick test_indexed_param_no_default;
       Alcotest.test_case "bad index value → E100"            `Quick test_indexed_param_bad_index;
       Alcotest.test_case "let shadows stratum → W103"        `Quick test_indexed_param_shadow_warning;
+      Alcotest.test_case "multi-index mu[village,season] → 4 cells" `Quick test_multi_index_param_expansion;
+      Alcotest.test_case "multi-index 3-dim → 8 cells"       `Quick test_multi_index_param_3dim;
+      Alcotest.test_case "multi-index use mu[v,s] resolves + obs" `Quick test_multi_index_param_use;
+      Alcotest.test_case "duplicate dim → E331"              `Quick test_multi_index_dup_dim_e331;
+      Alcotest.test_case "unknown dim → E330"                `Quick test_multi_index_unknown_dim_e330;
+      Alcotest.test_case "empty-levels dim → E330"           `Quick test_multi_index_empty_dim_e330;
+      Alcotest.test_case "multi-index under-index use → E299" `Quick test_multi_index_use_arity_e299;
     ];
     "param_bounds", [
       Alcotest.test_case "scalar param in [lo, hi]"          `Quick test_scalar_bounds;
@@ -9262,5 +9775,53 @@ let () =
         `Quick test_simulate_dt_unit_aware;
       Alcotest.test_case "E106 unknown simulate key (typo) errors"
         `Quick test_simulate_unknown_key_errors;
+    ];
+    "unit_literals", [
+      Alcotest.test_case "E102 typo'd unit 'per_capita is a diagnostic, not a lex error"
+        `Quick test_unknown_unit_literal_e102;
+      Alcotest.test_case "known unit 'per_day still lexes and compiles"
+        `Quick test_known_unit_literal_still_ok;
+    ];
+    "forcing_kwargs", [
+      Alcotest.test_case "E409 unknown forcing kwarg (value_column typo) errors"
+        `Quick test_forcing_unknown_kwarg_e409;
+      Alcotest.test_case "known forcing kwargs still compile"
+        `Quick test_forcing_known_kwargs_ok;
+    ];
+    "forcing_typed_args_gh423", [
+      Alcotest.test_case "method = linear (bare, valid) compiles"
+        `Quick test_forcing_method_bare_linear_ok;
+      Alcotest.test_case "method = \"linear\" (quoted) → E411 bare-enum migration"
+        `Quick test_forcing_method_quoted_e411;
+      Alcotest.test_case "method = banana (unknown value) → E411"
+        `Quick test_forcing_method_unknown_e411;
+      Alcotest.test_case "quoted file-column selectors compile"
+        `Quick test_forcing_selector_quoted_ok;
+      Alcotest.test_case "bare value_col = force → E410 quote-the-column"
+        `Quick test_forcing_selector_bare_e410;
+    ];
+    "schedule_until_to_gh423", [
+      Alcotest.test_case "recurring `to = ` window end compiles"
+        `Quick test_schedule_to_recurring_ok;
+      Alcotest.test_case "recurring `until = ` → E113 until→to migration"
+        `Quick test_schedule_until_migration_e113;
+    ];
+    "block_separators", [
+      Alcotest.test_case "comma between `parameters` members → directional E001"
+        `Quick test_sep_comma_in_parameters;
+      Alcotest.test_case "comma between `transitions` members → directional E001"
+        `Quick test_sep_comma_in_transitions;
+      Alcotest.test_case "comma between `dimensions` members → directional E001"
+        `Quick test_sep_comma_in_dimensions;
+      Alcotest.test_case "missing comma between `compartments` members → directional E001"
+        `Quick test_sep_missing_comma_in_compartments;
+      Alcotest.test_case "canonical separators still compile (golden-neutral)"
+        `Quick test_sep_canonical_separators_compile;
+    ];
+    "projection_indexed_let_f36", [
+      Alcotest.test_case "indexed let-family projection compiles (count family)"
+        `Quick test_projection_indexed_let_count_ok;
+      Alcotest.test_case "indexed let-family projection compiles (proportion family)"
+        `Quick test_projection_indexed_let_prop_ok;
     ];
   ]

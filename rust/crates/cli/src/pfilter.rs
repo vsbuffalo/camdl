@@ -228,7 +228,9 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             ir::observation::Likelihood::Poisson(_)      => "poisson",
             ir::observation::Likelihood::Binomial(_)     => "binomial",
             ir::observation::Likelihood::BetaBinomial(_) => "beta_binomial",
+            ir::observation::Likelihood::Beta(_)         => "beta",
             ir::observation::Likelihood::Bernoulli(_)    => "bernoulli",
+            ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "zero_inflated_neg_binomial",
         })).collect::<Vec<_>>().join(", "));
 
     // gh#90: emit unbound-streams warning if a multi-block model is only
@@ -1176,7 +1178,9 @@ pub fn stream_aux_columns(obs: &ir::observation::ObservationModel) -> Vec<String
         L::Normal(n) => vec![&n.mean.expr, &n.sd.expr],
         L::Binomial(b) => vec![&b.n, &b.p.expr],
         L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha.expr, &bb.beta.expr],
+        L::Beta(b) => vec![&b.mean.expr, &b.concentration.expr],
         L::Bernoulli(b) => vec![&b.p.expr],
+        L::ZeroInflatedNegBinomial(zi) => vec![&zi.mean, &zi.dispersion, &zi.pi],
     };
     let mut out = Vec::new();
     for e in args { walk(e, &mut out); }

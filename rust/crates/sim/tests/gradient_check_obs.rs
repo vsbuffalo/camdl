@@ -292,9 +292,19 @@ fn obs_sd_for_likelihood(
             let var = n_val * p * (1.0 - p) * (a + b + n_val) / (a + b + 1.0);
             var.max(0.0).sqrt()
         }
+        ResolvedLikelihood::Beta { mean, concentration, .. } => {
+            // Var[Beta(a, b)] = ab / ((a+b)^2 (a+b+1)); with a = mean·φ,
+            // b = (1−mean)·φ (a+b = φ) this is mean·(1−mean)/(φ+1).
+            let m = eval_resolved(mean, &ctx(projected)).clamp(0.0, 1.0);
+            let c = eval_resolved(concentration, &ctx(projected)).max(1e-30);
+            (m * (1.0 - m) / (c + 1.0)).max(0.0).sqrt()
+        }
         ResolvedLikelihood::Bernoulli { p, .. } => {
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             (p_val * (1.0 - p_val)).max(0.0).sqrt()
+        }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => {
+            unreachable!("zero-inflated NB is non-differentiable; the obs gradient check does not cover it")
         }
     }
 }
@@ -330,7 +340,11 @@ fn obs_mean_for_likelihood(
             let denom = (a + b).max(1e-300);
             n_val * (a / denom)
         }
+        ResolvedLikelihood::Beta { mean, .. } => eval_resolved(mean, &ctx(projected)),
         ResolvedLikelihood::Bernoulli { p, .. } => eval_resolved(p, &ctx(projected)),
+        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => {
+            unreachable!("zero-inflated NB is non-differentiable; the obs gradient check does not cover it")
+        }
     }
 }
 

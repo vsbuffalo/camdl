@@ -179,6 +179,39 @@ pub fn negbin_logpmf(y: f64, mu: f64, k: f64) -> f64 {
         + y * (1.0 - p).ln()
 }
 
+/// Stable two-term log-sum-exp of already-logged terms:
+/// `log(exp(la) + exp(lb))`, with `-inf` inputs handled.
+fn log_add_exp(la: f64, lb: f64) -> f64 {
+    if la == f64::NEG_INFINITY { return lb; }
+    if lb == f64::NEG_INFINITY { return la; }
+    let m = la.max(lb);
+    m + ((la - m).exp() + (lb - m).exp()).ln()
+}
+
+/// Zero-inflated Negative-Binomial log-PMF.
+///
+/// A structural-zero mass `pi ∈ [0, 1]` mixed with `NegBinomial(mu, k)`:
+///   `P(Y = 0)   = pi + (1 - pi)·f_NB(0)`
+///   `P(Y = j>0) = (1 - pi)·f_NB(j)`
+/// where `f_NB(·; mu, k)` is [`negbin_logpmf`]'s distribution. `pi = 0` recovers
+/// the plain NegBinomial exactly. `pi` is clamped to `[0, 1]` so a numerical
+/// excursion (e.g. an MH proposal stepping slightly out of range before the
+/// chain concentrates) cannot produce a NaN log-probability.
+pub fn zi_negbin_logpmf(y: f64, mu: f64, k: f64, pi: f64) -> f64 {
+    let pi = pi.clamp(0.0, 1.0);
+    let base = negbin_logpmf(y, mu, k); // log f_NB(y)
+    if y.round() == 0.0 {
+        let log_pi = if pi > 0.0 { pi.ln() } else { f64::NEG_INFINITY };
+        let log_rest = if pi < 1.0 { (1.0 - pi).ln() + base } else { f64::NEG_INFINITY };
+        log_add_exp(log_pi, log_rest)
+    } else if pi < 1.0 {
+        (1.0 - pi).ln() + base
+    } else {
+        // pi == 1: all mass at zero, so any positive count is impossible.
+        f64::NEG_INFINITY
+    }
+}
+
 /// Normal log-PDF.
 ///
 /// log p(y | mu, sigma) = -0.5·((y-mu)/sigma)² - log(sigma) - 0.5·log(2π)
@@ -307,6 +340,57 @@ pub fn beta_binomial_logpmf(k: u64, n: u64, alpha: f64, beta: f64) -> f64 {
         - lbeta(alpha, beta)
 }
 
+/// Beta log-density for a continuous proportion `x ∈ (0, 1)`, mean-linked.
+///
+/// With shape parameters `a = mean·φ`, `b = (1 − mean)·φ` (so `a + b = φ`, the
+/// concentration):
+///
+///   log f(x | mean, φ) = (a−1)·ln x + (b−1)·ln(1−x) + lgamma(φ) − lgamma(a) − lgamma(b)
+///
+/// Models an observed rate / coverage / positivity given directly as a fraction
+/// (not a `k`-of-`n` count — that is [`beta_binomial_logpmf`]). Returns
+/// `NEG_INFINITY` outside the open unit interval or for a non-positive shape.
+pub fn beta_logpdf(x: f64, mean: f64, concentration: f64) -> f64 {
+    if !(x > 0.0 && x < 1.0) {
+        return f64::NEG_INFINITY;
+    }
+    let a = mean * concentration;
+    let b = (1.0 - mean) * concentration;
+    if a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    (a - 1.0) * x.ln() + (b - 1.0) * (1.0 - x).ln() + lgamma(concentration) - lgamma(a)
+        - lgamma(b)
+}
+
+/// Gradient of `beta_logpdf` w.r.t. (mean, concentration).
+///
+/// With ψ = digamma, `a = mean·φ`, `b = (1 − mean)·φ` (so `a + b = φ`):
+///
+///   ∂log f/∂mean = φ·[ln x − ln(1−x) − ψ(a) + ψ(b)]
+///   ∂log f/∂φ    = mean·(ln x − ψ(a)) + (1−mean)·(ln(1−x) − ψ(b)) + ψ(φ)
+///
+/// The `lgamma(a+b) = lgamma(φ)` term contributes `ψ(φ)·∂φ/∂θ` — zero for the
+/// mean partial (a+b is constant in mean), one for the concentration partial.
+/// Returns `(0.0, 0.0)` outside the domain, matching the value function's
+/// `NEG_INFINITY` clamp — the gradient of a constant `-inf` floor is zero, as in
+/// the other helpers.
+pub fn beta_logpdf_grad(x: f64, mean: f64, concentration: f64) -> (f64, f64) {
+    let a = mean * concentration;
+    let b = (1.0 - mean) * concentration;
+    if !(x > 0.0 && x < 1.0) || a <= 0.0 || b <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let lx = x.ln();
+    let l1mx = (1.0 - x).ln();
+    let psi_a = digamma(a);
+    let psi_b = digamma(b);
+    let d_mean = concentration * (lx - l1mx - psi_a + psi_b);
+    let d_concentration =
+        mean * (lx - psi_a) + (1.0 - mean) * (l1mx - psi_b) + digamma(concentration);
+    (d_mean, d_concentration)
+}
+
 /// Poisson log-PMF.
 ///
 /// log p(y | lambda) = y·log(lambda) - lambda - lgamma(y+1)
@@ -321,6 +405,49 @@ pub fn poisson_logpmf(y: f64, lambda: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn beta_logpdf_grad_matches_finite_difference() {
+        // Analytic ∂/∂(mean, concentration) vs central finite differences of the
+        // value function — the FD oracle is ground truth for the digamma-based
+        // analytic gradient (gh#440).
+        let h = 1e-6;
+        for &(x, mean, conc) in &[
+            (0.3_f64, 0.4_f64, 20.0_f64),
+            (0.7, 0.5, 5.0),
+            (0.15, 0.2, 50.0),
+            (0.85, 0.75, 8.0),
+        ] {
+            let (d_mean, d_conc) = beta_logpdf_grad(x, mean, conc);
+            let fd_mean =
+                (beta_logpdf(x, mean + h, conc) - beta_logpdf(x, mean - h, conc)) / (2.0 * h);
+            let fd_conc =
+                (beta_logpdf(x, mean, conc + h) - beta_logpdf(x, mean, conc - h)) / (2.0 * h);
+            assert!(
+                (d_mean - fd_mean).abs() < 1e-4,
+                "∂/∂mean at (x={x}, mean={mean}, conc={conc}): analytic {d_mean}, FD {fd_mean}"
+            );
+            assert!(
+                (d_conc - fd_conc).abs() < 1e-4,
+                "∂/∂conc at (x={x}, mean={mean}, conc={conc}): analytic {d_conc}, FD {fd_conc}"
+            );
+        }
+    }
+
+    #[test]
+    fn beta_logpdf_value_and_domain() {
+        // Beta(a=b=1) ≡ Uniform(0,1): mean=0.5, conc=2 ⇒ logpdf = 0 on the interior.
+        for &x in &[0.1_f64, 0.5, 0.9] {
+            assert!(beta_logpdf(x, 0.5, 2.0).abs() < 1e-9, "Uniform beta logpdf at {x}");
+        }
+        // Outside the open unit interval → −inf; gradient of the floor is 0.
+        assert_eq!(beta_logpdf(0.0, 0.4, 20.0), f64::NEG_INFINITY);
+        assert_eq!(beta_logpdf(1.0, 0.4, 20.0), f64::NEG_INFINITY);
+        assert_eq!(beta_logpdf(-0.1, 0.4, 20.0), f64::NEG_INFINITY);
+        assert_eq!(beta_logpdf_grad(0.0, 0.4, 20.0), (0.0, 0.0));
+        let (gm, gc) = beta_logpdf_grad(0.3, 0.4, 20.0);
+        assert!(gm.is_finite() && gc.is_finite());
+    }
 
     #[test]
     fn normal_quantile_inverts_normal_cdf() {
@@ -397,6 +524,41 @@ mod tests {
         assert_eq!(negbin_logpmf(0.0, 0.0, 0.0), 0.0);
         // y > 0 with μ=0 is still impossible, k irrelevant.
         assert_eq!(negbin_logpmf(1.0, 0.0, 0.0), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_zi_negbin_reduces_to_negbin_at_pi_zero() {
+        // pi = 0 must recover the plain NegBinomial exactly.
+        for &(y, mu, k) in &[(0.0, 5.0, 2.0), (3.0, 5.0, 2.0), (10.0, 5.0, 2.0)] {
+            let zi = zi_negbin_logpmf(y, mu, k, 0.0);
+            let nb = negbin_logpmf(y, mu, k);
+            assert!((zi - nb).abs() < 1e-12, "y={y}: zi={zi} nb={nb}");
+        }
+    }
+
+    #[test]
+    fn test_zi_negbin_mixture_math_and_normalization() {
+        let (mu, k, pi) = (5.0, 2.0, 0.3);
+        // P(Y=0) = pi + (1-pi)·f_NB(0).
+        let f0 = negbin_logpmf(0.0, mu, k).exp();
+        let expected0 = (pi + (1.0 - pi) * f0).ln();
+        let got0 = zi_negbin_logpmf(0.0, mu, k, pi);
+        assert!((got0 - expected0).abs() < 1e-12, "P(0): got {got0} expected {expected0}");
+        // Negative control: zero-inflation must RAISE P(0) above the base NB —
+        // catches a `pi` silently dropped from the zero branch.
+        assert!(got0 > negbin_logpmf(0.0, mu, k), "zero-inflation must raise P(0)");
+        // P(Y=2) = (1-pi)·f_NB(2): base shifted down by log(1-pi), and finite.
+        let got2 = zi_negbin_logpmf(2.0, mu, k, pi);
+        let expected2 = (1.0 - pi).ln() + negbin_logpmf(2.0, mu, k);
+        assert!((got2 - expected2).abs() < 1e-12, "P(2): got {got2} expected {expected2}");
+        assert!(got2.is_finite());
+        // Boundary: pi = 1 puts all mass at 0.
+        assert_eq!(zi_negbin_logpmf(0.0, mu, k, 1.0), 0.0);
+        assert_eq!(zi_negbin_logpmf(1.0, mu, k, 1.0), f64::NEG_INFINITY);
+        // The whole PMF must sum to 1 over a wide support — the strongest check
+        // that the mixture is a proper distribution.
+        let total: f64 = (0..200).map(|j| zi_negbin_logpmf(j as f64, mu, k, pi).exp()).sum();
+        assert!((total - 1.0).abs() < 1e-6, "ZI-NB pmf must sum to 1; got {total}");
     }
 
     #[test]
