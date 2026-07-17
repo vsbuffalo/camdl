@@ -238,10 +238,11 @@ results/fits/{fit_toml_stem}-{fit_hash[:8]}/
 #### 2.2.1 `fit.meta.json` — fit-level sidecar
 
 The fit segment carries a `fit.meta.json` sidecar holding fit-wide provenance
-that has no `RunRecord` of its own: the user `--label`, the resolved per-parameter
-prior sources, the `estimated` / `fixed` parameter roles, data hashes, and a
-machine-readable **observation/dimension schema** under the `schema` key. The
-schema lets a consumer facet any stream and label panels with no DSL parsing:
+that has no `RunRecord` of its own: the user `--label`, the resolved
+per-parameter prior sources, the `estimated` / `fixed` parameter roles, data
+hashes, and a machine-readable **observation/dimension schema** under the
+`schema` key. The schema lets a consumer facet any stream and label panels with
+no DSL parsing:
 
 ```json
 {
@@ -261,13 +262,14 @@ schema lets a consumer facet any stream and label panels with no DSL parsing:
 ```
 
 `dimensions` maps each indexing dimension to its ordered levels (union over all
-streams). `streams` carries one descriptor per **logical** stream (grouped by the
-`from <label>` data-source key, so a stratified `onset[patch]` is one entry with
-`index_dims = ["patch"]`, never one per expanded leaf): `name`, `index_dims`,
-`value_column` (the scored `~` LHS), `value_kind` (the DSL role — `count` /
-`real` / `probability`; omitted when the model declares no `columns {}` block),
-and `likelihood` (the family tag). It is a pure fold over the same observation
-leaves the particle filter binds, so it cannot disagree with what was fit.
+streams). `streams` carries one descriptor per **logical** stream (grouped by
+the `from <label>` data-source key, so a stratified `onset[patch]` is one entry
+with `index_dims = ["patch"]`, never one per expanded leaf): `name`,
+`index_dims`, `value_column` (the scored `~` LHS), `value_kind` (the DSL role —
+`count` / `real` / `probability`; omitted when the model declares no
+`columns {}` block), and `likelihood` (the family tag). It is a pure fold over
+the same observation leaves the particle filter binds, so it cannot disagree
+with what was fit.
 
 #### 2.2.2 `fit predict` predictive artifact
 
@@ -283,14 +285,15 @@ results/fits/<stem>-<hash[:8]>/observed/<stream>.tsv
 ```
 
 - `predictive/<stream>.tsv` — the model's distribution over the observable,
-  summarized as the `q05…q95` quantiles of sampled `y_rep` per `(time, stratum)`.
-  The `horizon` column (`free_forward` / `one_step`) and `treatment` column
-  (`posterior`) make the two predictive axes explicit; `rhat_max` / `ess_min`
-  carry the producing stage's convergence numbers (empty cells when the stage
-  reported none), and `n_draws` the cloud size behind each band. Both horizons,
-  when emitted, stack under one header — distinguished by the `horizon` column,
-  so a new predictive cell is more rows, never new consumer code. A stratified
-  stream is one file with its index dims as key columns.
+  summarized as the `q05…q95` quantiles of sampled `y_rep` per
+  `(time, stratum)`. The `horizon` column (`free_forward` / `one_step`) and
+  `treatment` column (`posterior`) make the two predictive axes explicit;
+  `rhat_max` / `ess_min` carry the producing stage's convergence numbers (empty
+  cells when the stage reported none), and `n_draws` the cloud size behind each
+  band. Both horizons, when emitted, stack under one header — distinguished by
+  the `horizon` column, so a new predictive cell is more rows, never new
+  consumer code. A stratified stream is one file with its index dims as key
+  columns.
 - `observed/<stream>.tsv` — the recorded value per `(time, stratum)`, a derived
   series in the same tidy keys as `predictive`. A hole (a scheduled but
   unobserved cell) renders as an empty `value`, distinct from an observed zero.
@@ -299,10 +302,10 @@ A consumer reads both, joins on `(time, <dims>)`, and plots `observed` over the
 `predictive` ribbon, one facet per stratum — using the `index_dims` from the
 `fit.meta.json` schema, with no run-store, DSL, or likelihood knowledge.
 
-**Calendar semantics travel with the artifact.** Each `.json` sidecar
-manifest — `predictive.json`, `observed.json`, `quantities.json`, and the
-inference `trajectories.json` — carries a top-level `calendar` block so a
-consumer maps the numeric `time` column to a date without re-deriving it:
+**Calendar semantics travel with the artifact.** Each `.json` sidecar manifest —
+`predictive.json`, `observed.json`, `quantities.json`, and the inference
+`trajectories.json` — carries a top-level `calendar` block so a consumer maps
+the numeric `time` column to a date without re-deriving it:
 
 ```jsonc
 "calendar": { "time_unit": "days", "origin": "1910-01-01", "days_per_unit": 1.0 }
@@ -314,12 +317,12 @@ bare-numeric-time model (no `origin` declared) — the signal to plot `time`
 numerically. `days_per_unit` is the exact length of one `time_unit` in days
 (`days`=1, `weeks`=7, `months`=365.2425/12, `years`=365.2425). A consumer maps
 `time → date` as `origin + time · days_per_unit` **days** (e.g. `d3.utcFormat`
-on a JS axis). A calendar-anchored model is constrained to `days`/`weeks`
-(camdl rejects `origin` with `months`/`years` — E320), so wherever there is an
-`origin` to map, `days_per_unit` is 1 or 7 and the mapping is exact and
-identical to camdl's own rendered `date` column. Numeric `time` stays the
-canonical, diff-stable axis; the `calendar` block is additive metadata, not a
-re-encoding of it.
+on a JS axis). A calendar-anchored model is constrained to `days`/`weeks` (camdl
+rejects `origin` with `months`/`years` — E320), so wherever there is an `origin`
+to map, `days_per_unit` is 1 or 7 and the mapping is exact and identical to
+camdl's own rendered `date` column. Numeric `time` stays the canonical,
+diff-stable axis; the `calendar` block is additive metadata, not a re-encoding
+of it.
 
 ### 2.3 Sweep Subdirectories
 
@@ -389,6 +392,69 @@ results/sims/
 A scenario with no overrides, enables, or disables always produces
 `scen_hash = sha256("")` → `00000000` prefix, visually identifying it as the
 unmodified baseline.
+
+### 2.5 Output column schema (`run.json.output_schema`)
+
+Every command writes tabular TSV outputs (`traj.tsv`, `obs.tsv`, `draws.tsv`,
+per-chain `trace.tsv`, predictive bands, …). So a consumer can render or join
+any of them without reverse-engineering a header — which column is the x-axis,
+which are grouping keys, which are model quantities versus sampler diagnostics —
+`run.json` carries an `output_schema` declaring each tabular file's columns and
+their roles. Like `artifacts`, `children`, and `provenance`, it is
+**recorded-not-hashed**: adding it never re-keys a run, and it is omitted
+entirely when empty, so existing manifests round-trip unchanged.
+
+The map is keyed by leaf-relative path; `{n}` is a per-chain wildcard (the real
+files are `chain_1/…`, `chain_2/…`, all sharing one schema):
+
+```json
+"output_schema": {
+  "draws.tsv": {
+    "role": "posterior_cloud",
+    "columns": [
+      { "name": "chain", "role": "chain" },
+      { "name": "draw",  "role": "iteration" },
+      { "name": "beta",  "role": "param_estimated" },
+      { "name": "gamma", "role": "param_fixed" }
+    ]
+  },
+  "chain_{n}/trace.tsv": {
+    "role": "trace",
+    "columns": [
+      { "name": "sweep",         "role": "iteration" },
+      { "name": "log_posterior", "role": "diagnostic" },
+      { "name": "beta",          "role": "param_estimated" }
+    ]
+  }
+}
+```
+
+A column `role` is one of:
+
+| role                              | meaning                       | examples                                             |
+| --------------------------------- | ----------------------------- | ---------------------------------------------------- |
+| `time`                            | physical/calendar axis        | `t`, `time`, `date`                                  |
+| `iteration`                       | sampler/optimizer axis        | `sweep`, `step`, `draw`, `iteration`, `point_id`     |
+| `chain`                           | MCMC chain key                | `chain`                                              |
+| `replicate` / `scenario`          | ensemble / scenario keys      | `replicate`, `scenario`                              |
+| `dimension`                       | stratification key            | `patch`, `age`                                       |
+| `state` / `flow` / `incidence`    | trajectory columns            | `S`, `flow_infection`, `inc_cases`                   |
+| `param_estimated` / `param_fixed` | model parameter               | `beta` (sampled) / `gamma` (held)                    |
+| `observable`                      | an observation stream's value | `onset`                                              |
+| `quantile`                        | predictive band               | `q05` … `q95`                                        |
+| `diagnostic`                      | sampler/fit diagnostic        | `loglik`, `log_posterior`, `ESS`, `rhat`, `accepted` |
+
+A table `role` is one of `trajectory`, `observation`, `posterior_cloud`,
+`trace`, `predictive`, `landscape`. The rendering rule is then mechanical:
+x-axis = the `time` or `iteration` column; group by `chain`/`replicate`/
+`scenario`; facet by `dimension`; series = `state`/`param_estimated`/
+`observable`; ribbons = `quantile`; overlays = `diagnostic`. The index column is
+spelled differently by method (`sweep`/`step`/`draw`/`iteration`) — a consumer
+reads the role, never the name.
+
+The schema is derived by classifying each written file's real header, so it
+cannot disagree with the file it describes. It is populated at fit stages today;
+simulate, predict, survey, and profile follow the same seam.
 
 ---
 
@@ -646,17 +712,17 @@ pub enum DrawsSpec {
 On the command line, `--draws` accepts four source forms, resolved to a draws
 cloud before simulation:
 
-| `--draws <value>` | Source                                                                                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<file.tsv>`      | A TSV of complete parameter vectors (one row per draw, columns = parameter names).                                                                       |
-| `prior`           | Sample the priors declared in a `fit.toml` (requires `--fit <fit.toml>`).                                                                                |
-| `uniform`         | Space-fill from the model's parameter bounds.                                                                                                            |
-| `posterior`       | Resolve a completed fit's canonical post-warm-up `draws.tsv` — the terminal Bayesian stage's cloud (requires `--fit <fit results dir>`).                 |
+| `--draws <value>` | Source                                                                                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `<file.tsv>`      | A TSV of complete parameter vectors (one row per draw, columns = parameter names).                                                       |
+| `prior`           | Sample the priors declared in a `fit.toml` (requires `--fit <fit.toml>`).                                                                |
+| `uniform`         | Space-fill from the model's parameter bounds.                                                                                            |
+| `posterior`       | Resolve a completed fit's canonical post-warm-up `draws.tsv` — the terminal Bayesian stage's cloud (requires `--fit <fit results dir>`). |
 
 `--draws posterior --fit <fit results dir>` reads the same draws the terminal
-PGAS / PMMH / MH stage wrote (burn-in already applied), so a posterior-predictive
-check feeds the fit's own cloud back through the model without re-discarding
-warm-up.
+PGAS / PMMH / MH stage wrote (burn-in already applied), so a
+posterior-predictive check feeds the fit's own cloud back through the model
+without re-discarding warm-up.
 
 `--draws <file.tsv> --fit <config-or-run>` additionally **backfills** any
 parameter absent from the file's columns from the fit's `[fixed]` block, never

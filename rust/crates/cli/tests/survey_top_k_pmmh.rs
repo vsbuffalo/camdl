@@ -153,6 +153,7 @@ fn write_survey_artifact(
         deps: Vec::new(),
         status: runid::RunStatus::Completed,
         artifacts: Default::default(),
+        output_schema: Default::default(),
         children: Default::default(),
         inputs: serde_json::json!({
             "model_identity": model_identity,

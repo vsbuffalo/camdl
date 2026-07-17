@@ -2212,6 +2212,24 @@ impl FitConfigV2 {
             params_with_priors.join(", ")))
     }
 
+    /// gh#439 A2: does any fit stage read the WrtPop state-Jacobian
+    /// (`rate_state_grad` / `projection_state_grad`)? Only `nuts` on the `ode`
+    /// backend does — it drives the ODE forward-sensitivity gradient
+    /// (`ode_grad::det_grad`). Every other (algorithm, backend) cell — IF2, PGAS,
+    /// PMMH, `mh`, the particle filter — is gradient-free with respect to the
+    /// state, so the model can compile lean (`camdlc --no-state-grad`), dropping
+    /// the dense ~O(G^3) Jacobian that dominates coupled-model IR. Consumed by
+    /// `cmd_fit_run_v2` to pick the compile mode; the resulting bit is folded into
+    /// the IR-cache key, so a lean entry is never reused for a nuts+ode fit (and
+    /// run identity is gradient-independent, so lean vs full hash the same model).
+    pub fn needs_state_grad(&self) -> bool {
+        use crate::run_meta::{FitAlgorithm, InferenceBackend};
+        self.stages.values().any(|s| {
+            s.method_kind() == FitAlgorithm::Nuts
+                && s.backend() == InferenceBackend::Ode
+        })
+    }
+
     /// gh#71: warn when a posterior-sampling stage (PGAS / PMMH) runs
     /// multiple chains from a single shared initialisation.
     ///
@@ -4825,6 +4843,61 @@ cooling = 0.70
         let resolved = config.fixed.resolve().unwrap();
         assert_eq!(resolved["N0"], 1000000.0);
         assert_eq!(resolved["I0"], 50.0); // inline overrides from_file
+    }
+
+    /// gh#439 A2: `needs_state_grad` is true for exactly the nuts+ode cell — the
+    /// only consumer of the WrtPop state-Jacobian — and false for every other
+    /// (algorithm, backend) combination, including the near-miss `mh` on `ode`
+    /// (Bayesian on the ODE backend, but gradient-free → must compile lean).
+    #[test]
+    fn needs_state_grad_only_for_nuts_ode() {
+        let cfg = |stage: &str| -> FitConfigV2 {
+            let toml_str = format!(
+                "[model]\ncamdl = \"models/sir.camdl\"\n\n\
+                 [data.observations]\ncases = \"data/cases.tsv\"\n\n\
+                 [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n\n\
+                 [fixed]\nN0 = 1000\n\n{stage}"
+            );
+            toml::from_str(&toml_str).unwrap_or_else(|e| panic!("parse {stage:?}: {e}"))
+        };
+
+        // nuts + ode → the sole state-Jacobian consumer (true).
+        assert!(
+            cfg("[stages.post]\nalgorithm = \"nuts\"\nbackend = \"ode\"\nchains = 2")
+                .needs_state_grad(),
+            "nuts+ode drives the ODE forward-sensitivity gradient — needs the Jacobian"
+        );
+
+        // mh + ode → gradient-free Bayesian on the ODE backend → lean (false).
+        assert!(
+            !cfg("[stages.post]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 100")
+                .needs_state_grad(),
+            "mh on ode is gradient-free — must compile lean"
+        );
+
+        // if2 + chain_binomial → gradient-free MLE → lean (false).
+        assert!(
+            !cfg("[stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+                  chains = 4\nparticles = 100\niterations = 10\ncooling = 0.7")
+                .needs_state_grad(),
+            "if2+chain_binomial never reads the state-Jacobian"
+        );
+
+        // Multi-stage: any nuts+ode stage flips the whole compile to full, even
+        // when an earlier gradient-free stage would compile lean on its own.
+        let multi: FitConfigV2 = toml::from_str(
+            "[model]\ncamdl = \"models/sir.camdl\"\n\n\
+             [data.observations]\ncases = \"data/cases.tsv\"\n\n\
+             [estimate]\nbeta = { bounds = [0.01, 2.0] }\n\n\
+             [fixed]\nN0 = 1000\n\n\
+             [stages.scout]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 100\n\n\
+             [stages.post]\nalgorithm = \"nuts\"\nbackend = \"ode\"\nchains = 2\n",
+        )
+        .unwrap();
+        assert!(
+            multi.needs_state_grad(),
+            "a nuts+ode stage anywhere in the arc requires the Jacobian (any-semantics)"
+        );
     }
 
     // ── Synthetic / fit_seeds schema extension ─────────────────────────────

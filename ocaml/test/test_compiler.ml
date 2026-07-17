@@ -252,6 +252,86 @@ let test_constant_fold_collapses_sparse_foi_reduce () =
   Alcotest.(check int) "fold collapses FOI Reduce to k=2 terms" 2 after;
   Alcotest.(check bool) "fold strictly shrank the FOI Reduce" true (after < before)
 
+(* ── gh#439: --no-state-grad gates the WrtPop state-Jacobian emission ──────────
+   The state-Jacobian (rate_state_grad / projection_state_grad) is consumed only
+   by the ODE forward-sensitivity gradient; forward sim, IF2, PMMH, PF, and MH
+   never read it, and on a mean-field-coupled model it is a dense one-entry-per-
+   stratum map that dominates the IR (gh#439). The `Compiler.no_state_grad` gate
+   (set by `camdlc --no-state-grad`) drops it while leaving the dynamics [rate]
+   and the parameter gradient [rate_grad] intact. Default (gate off) still emits
+   it, so goldens are unchanged. sparse_ring's `infection` couples across patches,
+   so its state-Jacobian is non-empty in the baseline. *)
+let test_no_state_grad_gates_state_jacobian () =
+  let find_infection (m : Ir.model) =
+    List.find (fun (t : Ir.transition) ->
+      String.length t.name >= 9 && String.sub t.name 0 9 = "infection")
+      m.Ir.transitions
+  in
+  let compile_ring () =
+    match Compiler.compile ~name:"sparse_ring" sparse_ring_src with
+    | Ok m -> m
+    | Error e -> Alcotest.failf "compile failed: %s" e
+  in
+  Compiler.no_state_grad := false;
+  let m_full = compile_ring () in
+  let inf_full = find_infection m_full in
+  Alcotest.(check bool) "baseline: infection rate_state_grad populated"
+    true (inf_full.Ir.rate_state_grad <> []);
+  Alcotest.(check bool) "baseline: infection rate_grad populated"
+    true (inf_full.Ir.rate_grad <> []);
+  Compiler.no_state_grad := true;
+  let m_gated =
+    Fun.protect ~finally:(fun () -> Compiler.no_state_grad := false) compile_ring
+  in
+  List.iter (fun (t : Ir.transition) ->
+    Alcotest.(check bool)
+      (Printf.sprintf "gated: %s rate_state_grad empty" t.name)
+      true (t.Ir.rate_state_grad = []))
+    m_gated.Ir.transitions;
+  let inf_gated = find_infection m_gated in
+  Alcotest.(check bool) "gated: infection rate_grad preserved"
+    true (inf_gated.Ir.rate_grad <> []);
+  Alcotest.(check bool) "gated: dynamics rate unchanged (WrtPop-only gate)"
+    true (inf_gated.Ir.rate = inf_full.Ir.rate)
+
+(* ── gh#440: beta likelihood for a continuous proportion ──────────────────────
+   Parse → expand → IR: `beta(mean, concentration)` must lower to `Ir.Beta` with
+   both differentiable args populated. The scorer/sampler/gradient live Rust-side
+   (obs_loglik/obs_model, FD-verified there); this pins the OCaml frontend. *)
+let test_beta_likelihood_compiles () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    let N = S + I
+    parameters { beta : rate  phi : real in [1.0, 1000.0] }
+    transitions { infection : S --> I @ beta * S * I / N }
+    observations {
+      positivity {
+        columns       { time : time, positivity : real }
+        projected     = prevalence(I)
+        emit_schedule = every 7 'days
+        positivity  ~ beta(mean = projected / N, concentration = phi)
+      }
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} in
+  match Compiler.compile ~name:"beta_test" src with
+  | Error e -> Alcotest.failf "beta model must compile: %s" e
+  | Ok m ->
+    let beta_om =
+      List.find_opt (fun (o : Ir.observation_model) ->
+        match o.Ir.likelihood with Ir.Beta _ -> true | _ -> false)
+        m.Ir.observations
+    in
+    (match beta_om with
+     | Some { Ir.likelihood = Ir.Beta b; _ } ->
+       Alcotest.(check bool) "beta mean arg populated"
+         true (b.Ir.mean.Ir.expr <> Ir.Const 0.0);
+       Alcotest.(check bool) "beta concentration arg populated"
+         true (b.Ir.concentration.Ir.expr <> Ir.Const 0.0)
+     | _ -> Alcotest.fail "positivity stream did not compile to Ir.Beta")
+
 (* ── gh#272 LICM pass ─────────────────────────────────────────────────────────
    Loop-invariant code motion hoists param/table-only subexpressions out of the
    dynamics rates into `per_eval_bindings`. These pin the variant/invariant
@@ -3805,6 +3885,118 @@ let test_indexed_param_variable_index () =
     let infection_b = find_transition m "infection_b" in
     Alcotest.(check bool) "infection_b rate has R0_b" true
       (contains_param "R0_b" (tr_rate infection_b))
+
+(* ── Multi-index parameters (mu[village, season]) ──────────────────────────
+   Indexed param declarations accept N dimensions, expanding to one scalar
+   param per cell of the cartesian product. The use side, arity checking, obs
+   multi-column matching, and dimcheck were already N-dim; these pin the
+   declaration change and its two guards (E330 unknown/empty dim, E331 dup). *)
+
+let test_multi_index_param_expansion () =
+  let src = {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    parameters { mu[village, season] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |} in
+  let m = compile_expect_ok src in
+  let names = List.map (fun (p : Ir.parameter) -> p.Ir.name) m.Ir.parameters in
+  List.iter (fun expected ->
+    if not (List.mem expected names) then
+      Alcotest.failf "expected cell '%s'; got: %s" expected (String.concat ", " names))
+    ["mu_kwaru_wet"; "mu_kwaru_dry"; "mu_ajura_wet"; "mu_ajura_dry"];
+  Alcotest.(check int) "exactly 4 cells" 4 (List.length names)
+
+let test_multi_index_param_3dim () =
+  let src = {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry]  species = [gam, fun_] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    stratify(by = species)
+    parameters { m[village, season, species] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |} in
+  let m = compile_expect_ok src in
+  let names = List.map (fun (p : Ir.parameter) -> p.Ir.name) m.Ir.parameters in
+  Alcotest.(check int) "2x2x2 = 8 cells" 8 (List.length names);
+  List.iter (fun expected ->
+    if not (List.mem expected names) then
+      Alcotest.failf "expected cell '%s'; got: %s" expected (String.concat ", " names))
+    ["m_kwaru_wet_gam"; "m_ajura_dry_fun_"]
+
+let test_multi_index_param_use () =
+  let src = {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    parameters {
+      mu[village, season] : positive 'ratio in [0.1, 5.0]
+      b[village]          : positive 'ratio in [0.1, 5.0]
+    }
+    let C[v in village, s in season] = mu[v,s] * b[v]
+    observations {
+      parity[v in village, s in season] {
+        columns { time : time, village : dim, season : dim, n_parous : count, n_dissected : count }
+        projected = min(max(C[v,s], 1e-4), 1.0 - 1e-4)
+        n_parous ~ binomial(n = n_dissected, p = projected)
+      }
+    }
+    simulate { from = 0  to = 10 }
+  |} in
+  (* compiles: mu[v,s] resolves to the right cell, obs matches village+season *)
+  let _ = compile_expect_ok src in ()
+
+let test_multi_index_dup_dim_e331 () =
+  compile_expect_error_code ~code:"E331" ~contains:"repeats a dimension" {|
+    dimensions { village = [kwaru, ajura] }
+    compartments { }
+    stratify(by = village)
+    parameters { mu[village, village] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |}
+
+let test_multi_index_unknown_dim_e330 () =
+  compile_expect_error_code ~code:"E330" ~contains:"unknown dimension" {|
+    dimensions { village = [kwaru, ajura] }
+    compartments { }
+    stratify(by = village)
+    parameters { mu[village, nonesuch] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |}
+
+let test_multi_index_empty_dim_e330 () =
+  compile_expect_error_code ~code:"E330" ~contains:"no levels" {|
+    dimensions { village = [kwaru, ajura]  empty = [] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = empty)
+    parameters { mu[village, empty] : positive 'ratio in [0.1, 5.0] }
+    simulate { from = 0  to = 10 }
+  |}
+
+let test_multi_index_use_arity_e299 () =
+  (* `mu[v]` under-indexes a 2-D param; the arity check fires when the value is
+     resolved, so the projection must actually use it. *)
+  compile_expect_error_code ~code:"E299" ~contains:"expects 2 indices" {|
+    dimensions { village = [kwaru, ajura]  season = [wet, dry] }
+    compartments { }
+    stratify(by = village)
+    stratify(by = season)
+    parameters { mu[village, season] : positive 'ratio in [0.1, 5.0] }
+    let C[v in village] = mu[v]
+    observations {
+      obs[v in village] {
+        columns { time : time, village : dim, y : count, n : count }
+        projected = min(max(C[v], 1e-4), 1.0 - 1e-4)
+        y ~ binomial(n = n, p = projected)
+      }
+    }
+    simulate { from = 0  to = 10 }
+  |}
 
 let test_indexed_param_literal_index () =
   let src = {|
@@ -7628,6 +7820,44 @@ let test_forcing_method_unknown_e411 () =
   compile_expect_error_code ~code:"E411" ~contains:"banana"
     (gh423_inline_forcing "        method = banana\n")
 
+(* F36 regression: an indexed let-family reference in `projected`
+   (`projected = m[v]` with `let m[v in village] = …`) must resolve as a
+   derived expression, not fall through to transition-incidence and E507. This
+   is symmetric to a bare let ref and — the point garki mis-diagnosed —
+   independent of the likelihood family. Both a count and a proportion family
+   must compile the identical projection. *)
+let projection_indexed_let ~lik =
+  Printf.sprintf {|
+time_unit = 'days
+compartments { S, I }
+dimensions { village = [va, vb] }
+stratify(by = village)
+parameters { beta : rate in [0,1]  mm : count in [0,1000] }
+transitions { inf[v in village] : S[v] --> I[v] @ beta * S[v] }
+let m[v in village] = mm
+observations {
+  catch[v in village] {
+    columns { time : time, village : dim, y : count }
+    projected = m[v]
+    %s
+  }
+}
+init { S[va] = 100  S[vb] = 100  I[va] = 1  I[vb] = 1 }
+simulate { from = 0 'days  to = 5 'days }
+|} lik
+
+let test_projection_indexed_let_count_ok () =
+  match Compiler.compile ~name:"f36_count"
+    (projection_indexed_let ~lik:"y ~ neg_binomial(mean = projected, r = 1.0)") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "indexed-let projection (count) should compile, got: %s" e
+
+let test_projection_indexed_let_prop_ok () =
+  match Compiler.compile ~name:"f36_prop"
+    (projection_indexed_let ~lik:"y ~ binomial(n = 100, p = projected)") with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "indexed-let projection (proportion) should compile, got: %s" e
+
 (* A file-backed forcing whose time_col/value_col literals are spliced in, so a
    bare (unquoted) selector can be contrasted with the quoted form. Writes its
    data file to a temp dir the model's `data =` path resolves against. *)
@@ -9013,6 +9243,14 @@ let () =
       Alcotest.test_case "sparse ring FOI Reduce P=4 collapses to k=2"
         `Quick test_constant_fold_collapses_sparse_foi_reduce;
     ];
+    "no_state_grad", [
+      Alcotest.test_case "--no-state-grad drops rate_state_grad, keeps rate_grad + rate (gh#439)"
+        `Quick test_no_state_grad_gates_state_jacobian;
+    ];
+    "beta_likelihood", [
+      Alcotest.test_case "beta(mean, concentration) compiles to Ir.Beta (gh#440)"
+        `Quick test_beta_likelihood_compiles;
+    ];
     "licm", [
       Alcotest.test_case "invariant/variant classification (Dt/Time/forcing/state are variant)"
         `Quick test_licm_invariant_classification;
@@ -9276,6 +9514,13 @@ let () =
       Alcotest.test_case "no default → value = 0.0"         `Quick test_indexed_param_no_default;
       Alcotest.test_case "bad index value → E100"            `Quick test_indexed_param_bad_index;
       Alcotest.test_case "let shadows stratum → W103"        `Quick test_indexed_param_shadow_warning;
+      Alcotest.test_case "multi-index mu[village,season] → 4 cells" `Quick test_multi_index_param_expansion;
+      Alcotest.test_case "multi-index 3-dim → 8 cells"       `Quick test_multi_index_param_3dim;
+      Alcotest.test_case "multi-index use mu[v,s] resolves + obs" `Quick test_multi_index_param_use;
+      Alcotest.test_case "duplicate dim → E331"              `Quick test_multi_index_dup_dim_e331;
+      Alcotest.test_case "unknown dim → E330"                `Quick test_multi_index_unknown_dim_e330;
+      Alcotest.test_case "empty-levels dim → E330"           `Quick test_multi_index_empty_dim_e330;
+      Alcotest.test_case "multi-index under-index use → E299" `Quick test_multi_index_use_arity_e299;
     ];
     "param_bounds", [
       Alcotest.test_case "scalar param in [lo, hi]"          `Quick test_scalar_bounds;
@@ -9572,5 +9817,11 @@ let () =
         `Quick test_sep_missing_comma_in_compartments;
       Alcotest.test_case "canonical separators still compile (golden-neutral)"
         `Quick test_sep_canonical_separators_compile;
+    ];
+    "projection_indexed_let_f36", [
+      Alcotest.test_case "indexed let-family projection compiles (count family)"
+        `Quick test_projection_indexed_let_count_ok;
+      Alcotest.test_case "indexed let-family projection compiles (proportion family)"
+        `Quick test_projection_indexed_let_prop_ok;
     ];
   ]

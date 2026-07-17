@@ -163,6 +163,21 @@ let compile_detail_result ?(name = "model") ?(filename = "<input>") (src : strin
 
 let no_dim_check = ref false
 
+(** Suppress emission of the state-Jacobian — the WrtPop maps
+    [rate_state_grad] (∂rate/∂compartment) and [projection_state_grad]
+    (∂projection/∂compartment). These are consumed ONLY by the ODE
+    forward-sensitivity gradient (`fit --method nuts` on the ODE backend);
+    forward `simulate`, IF2, PMMH, and the bootstrap particle filter never
+    read them. On a model with global/mean-field coupling the state-Jacobian
+    is a dense one-entry-per-stratum map per coupled transition and dominates
+    the IR (95–98 %), making large coupled models uncompilable (gh#439), so
+    suppressing it lets forward-only and gradient-free compiles scale. Off by
+    default (full emission preserved, so goldens are unchanged); the
+    `--no-state-grad` compile flag sets it. The parameter gradient [rate_grad]
+    and the IC seed [ic_grad] are unaffected — the blowup is the state
+    gradient specifically. *)
+let no_state_grad = ref false
+
 (** Run the sparse-coupling constant-fold pass. On by default; the
     CAMDL_NO_CONSTANT_FOLD escape hatch forces it off (see the call site).
     Exposed as a ref so tests that assert on the *unfolded* IR shape (the
@@ -415,8 +430,9 @@ let differentiate_transitions (d : compile_detail)
     Passtime.time "autodiff" (fun () ->
       List.map (fun (t : Ir.transition) ->
         let rate_state_grad =
-          Autodiff.differentiate_rate_state t.rate comp_names
-            d.model.Ir.time_functions d.model.Ir.tables bindings
+          if !no_state_grad then []
+          else Autodiff.differentiate_rate_state t.rate comp_names
+                 d.model.Ir.time_functions d.model.Ir.tables bindings
         in
         match Autodiff.differentiate_rate t.rate param_names
                 d.model.Ir.time_functions d.model.Ir.tables with
@@ -560,7 +576,8 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
         List.map
           (fun (om : Ir.observation_model) ->
             { om with Ir.projection_state_grad =
-                Autodiff.differentiate_projection om.projection comp_names tfs tbls bindings })
+                if !no_state_grad then []
+                else Autodiff.differentiate_projection om.projection comp_names tfs tbls bindings })
           observations)
     in
     (* Initial-condition autodiff (gh#275 §1c C-seed): ∂(initial_state)/∂θ for a
