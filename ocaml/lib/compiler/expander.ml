@@ -1506,7 +1506,9 @@ let lower_via_transitions ctx =
               | LikNormal a       -> LikNormal       (rw_kwargs a)
               | LikBinomial a     -> LikBinomial     (rw_kwargs a)
               | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
+              | LikBeta a         -> LikBeta         (rw_kwargs a)
               | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
+              | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
             in
             { om with om_lik }) od.omeasurement
           in
@@ -1783,7 +1785,9 @@ let lower_via_transitions ctx =
                 | LikNormal a       -> LikNormal       (rw_kwargs a)
                 | LikBinomial a     -> LikBinomial     (rw_kwargs a)
                 | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
+                | LikBeta a         -> LikBeta         (rw_kwargs a)
                 | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
+                | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
               in
               { om with om_lik }) od.omeasurement in
             { od with oprojection; omeasurement }
@@ -2153,11 +2157,9 @@ let build_lookup_tables ctx =
   (* expanded indexed param names: "R0_urban" etc. -> unit *)
   let ept = Hashtbl.create 16 in
   List.iter (fun pd -> match pd with
-    | PIndexed { pname; pdims = [dim]; _ } ->
-      let vals = match List.assoc_opt dim ctx.dim_registry with
-        | Some vs -> vs | None -> []
-      in
-      List.iter (fun v -> Hashtbl.replace ept (pname ^ "_" ^ v) ()) vals
+    | PIndexed { pname; pdims; _ } ->
+      List.iter (fun nm -> Hashtbl.replace ept nm ())
+        (expand_indexed_decl_names ctx pname pdims)
     | _ -> ()
   ) ctx.param_decls;
   ctx.expanded_param_tbl <- ept;
@@ -4792,46 +4794,63 @@ let expand_parameters ctx =
          Ir.param_kind = pk;
          Ir.param_dim  = dim;
        }]
-    | PIndexed { pname; pdims = [dim]; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
-      let vals = dim_values ctx dim in
-      let bounds = resolve_bounds ctx pbounds in
-      let pk = Some (ir_param_kind_of_ast pkind) in
+    | PIndexed { pname; pdims; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
+      (* N-dim indexed parameter: one scalar param per cell of the cartesian
+         product of the index dimensions' levels. Names mangle
+         `<base>_<l1>_<l2>_…` via `expand_indexed_decl_names` (the same producer
+         the lookup table and collision guard use). Two guards run first because
+         the cartesian product is silent on both: it does no dedup (a repeated
+         axis would emit nonsense diagonal cells) and returns [] on an
+         unknown/empty dim (zero cells, no error). *)
       let loc = diag_loc_of_ast_ctx ctx ploc in
-      let resolved_dim = resolve_param_dim ctx ~loc ~pname pkind pdim_ann punit in
-      let (prior, hierarchical) = match pprior with
-        | None -> (None, None)
-        | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with
-                      | `Plain p        -> (Some p, None)
-                      | `Hierarchical h -> (None, Some h))
-      in
-      List.map (fun v ->
-        { Ir.name       = pname ^ "_" ^ v;
-          Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
-          Ir.param_kind = pk;
-          Ir.param_dim  = resolved_dim;
-        }
-      ) vals
-    | PIndexed { pname; pdims; _ } ->
-      (* The parser only produces single-dim indexed params
-         (pdims = [dim]). The single-dim arm above matches that; this
-         fallback is defensive. M10 in the 2026-04-19 review —
-         previously this raised `failwith` which produced a bare
-         stack trace in production via compile_detail_result's
-         generic exn → Error catch. Even though the review's author
-         identified this as "parser only produces single-dim", a
-         future parser extension to multi-dim indexed params would
-         regress this into a crash. Emit a real diagnostic instead. *)
-      Diagnostics.error ctx.diags
-        ~code:"E274"
-        ~loc:Diagnostics.no_loc
-        ~message:(Printf.sprintf
-          "indexed parameter '%s' has %d dimensions; only single-dim \
-           indexed parameters are supported"
-          pname (List.length pdims))
-        ~hint:"declare one parameter per stratified axis, e.g. \
-               `R0[patch] : positive` rather than `R0[patch, age]`"
-        ();
-      []
+      let has_dup =
+        List.length pdims <> List.length (List.sort_uniq compare pdims) in
+      if has_dup then
+        Diagnostics.error ctx.diags
+          ~code:"E331" ~loc
+          ~message:(Printf.sprintf
+            "indexed parameter '%s' repeats a dimension in [%s]"
+            pname (String.concat ", " pdims))
+          ~hint:"each index axis must be a distinct dimension"
+          ();
+      let bad_dim = ref false in
+      List.iter (fun d ->
+        match List.assoc_opt d ctx.dim_registry with
+        | None ->
+          bad_dim := true;
+          Diagnostics.error ctx.diags
+            ~code:"E330" ~loc
+            ~message:(Printf.sprintf
+              "indexed parameter '%s': unknown dimension '%s'" pname d)
+            ~hint:"the index must name a declared `stratify` dimension"
+            ()
+        | Some [] ->
+          bad_dim := true;
+          Diagnostics.error ctx.diags
+            ~code:"E330" ~loc
+            ~message:(Printf.sprintf
+              "indexed parameter '%s': dimension '%s' has no levels" pname d)
+            ()
+        | Some _ -> ()) pdims;
+      if has_dup || !bad_dim then []
+      else begin
+        let bounds = resolve_bounds ctx pbounds in
+        let pk = Some (ir_param_kind_of_ast pkind) in
+        let resolved_dim = resolve_param_dim ctx ~loc ~pname pkind pdim_ann punit in
+        let (prior, hierarchical) = match pprior with
+          | None -> (None, None)
+          | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with
+                        | `Plain p        -> (Some p, None)
+                        | `Hierarchical h -> (None, Some h))
+        in
+        List.map (fun nm ->
+          { Ir.name       = nm;
+            Ir.value      = mk_estimated_or_required ~bounds ~prior ~hierarchical;
+            Ir.param_kind = pk;
+            Ir.param_dim  = resolved_dim;
+          }
+        ) (expand_indexed_decl_names ctx pname pdims)
+      end
   ) ctx.param_decls in
   (* Typed const let bindings → fixed-value parameters *)
   let from_lets = List.filter_map (fun (lb : let_binding) ->
@@ -5414,6 +5433,25 @@ let load_interpolated_for_level ctx path ~key_col ~key_val ~time_col ~value_col 
 
 let expand_time_function_one ctx fname (env : (string * string) list)
     (findices : index_binding list) fkind (funit : unit_lit) fargs =
+  (* gh#423: forcing args carry a typed [farg_value] (FStr | FExpr). Each
+     consumer below requires the arm matching its kwarg's role, so a wrong-form
+     value (a bare word where a file column is meant, a quoted string where a
+     model name is meant, a quoted `method`) is a signposted diagnostic naming
+     the fix — never a silent fallback via `dummy_loc`. Reader's rule: quoted =
+     outside the model (file), bare = inside the model or a closed enum. *)
+
+  (* Unwrap a model-expression arg (amplitude, period, values, on, lag, …). A
+     quoted string in one of these positions is a value-shape error (E412). *)
+  let expr_of_farg key = function
+    | FExpr e -> Some e
+    | FStr _  ->
+      Diagnostics.error ctx.diags ~code:"E412" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': `%s` takes a model expression, not a quoted string" fname key)
+        ~hint:(Printf.sprintf "remove the quotes: `%s = <expression>`" key)
+        ();
+      None
+  in
   let get_kw key =
     match List.assoc_opt key fargs with
     | None   ->
@@ -5422,7 +5460,9 @@ let expand_time_function_one ctx fname (env : (string * string) list)
         ~hint:(Printf.sprintf "Add '%s = <value>' to the forcing function body." key)
         ();
       Ir.Const 0.0
-    | Some e -> resolve_expr ctx env e
+    | Some fv -> (match expr_of_farg key fv with
+                  | Some e -> resolve_expr ctx env e
+                  | None   -> Ir.Const 0.0)
   in
   let get_kw_list key =
     match List.assoc_opt key fargs with
@@ -5432,13 +5472,93 @@ let expand_time_function_one ctx fname (env : (string * string) list)
         ~hint:(Printf.sprintf "Add '%s = <value>' to the forcing function body." key)
         ();
       []
-    | Some e -> match e with
-      | EList es -> List.map (resolve_expr ctx env) es
-      | _ -> [resolve_expr ctx env e]
+    | Some fv -> match expr_of_farg key fv with
+      | Some (EList es) -> List.map (resolve_expr ctx env) es
+      | Some e          -> [resolve_expr ctx env e]
+      | None            -> []
   in
-  let get_str_kw key default = match List.assoc_opt key fargs with
-    | Some (EIdent (s, _)) -> s
-    | Some _ | None -> default
+  (* A file selector (a `data =` path or a `*_col =` file column): REQUIRE a
+     quoted string (E410 if bare). A bare identifier here would be
+     indistinguishable from a model name — the gh#423 collision this closes. *)
+  let get_file_col key default =
+    match List.assoc_opt key fargs with
+    | None                          -> default
+    | Some (FStr s)                 -> s
+    | Some (FExpr (EIdent (name, _))) ->
+      Diagnostics.error ctx.diags ~code:"E410" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': %s must be a quoted column name — write %s = \"%s\""
+          fname key key name)
+        ~hint:"a quoted string names a data-file column (outside the model); a \
+               bare word names a model construct (gh#423)"
+        ();
+      (* Resolve to the bare name the author meant (not the generic default) so
+         the E410 is the single clear error, without a misleading "column
+         'value' not found" cascade from the file load. *)
+      name
+    | Some (FExpr _) ->
+      Diagnostics.error ctx.diags ~code:"E410" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': %s must be a quoted column name — write %s = \"...\""
+          fname key key)
+        ~hint:"a quoted string names a data-file column (outside the model)"
+        ();
+      default
+  in
+  (* A model-name arg (`table`, `time_dim`): REQUIRE a bare identifier naming a
+     model construct (E412 if quoted). *)
+  let get_model_name key default =
+    match List.assoc_opt key fargs with
+    | None                            -> default
+    | Some (FExpr (EIdent (s, _)))    -> s
+    | Some (FStr s)                   ->
+      Diagnostics.error ctx.diags ~code:"E412" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': `%s` names a model construct — remove the quotes: `%s = %s`"
+          fname key key s)
+        ~hint:"a bare word names something inside the model (a table / dimension); \
+               quotes are for external files (gh#423)"
+        ();
+      default
+    | Some (FExpr _) ->
+      Diagnostics.error ctx.diags ~code:"E412" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': `%s` must be a bare model name — write `%s = <name>`"
+          fname key key)
+        ~hint:"it names a `tables {}` entry or a dimension"
+        ();
+      default
+  in
+  (* `method` is a BARE closed enum (gh#423 / spec bug #4a): linear | constant |
+     spline. Reject a quoted string (the pre-gh#423 spelling) AND any value
+     outside the set — the sim's `InterpMethod` accepts only these three, so an
+     unvalidated `method = "banana"` was silently wrong at the sim boundary. *)
+  let get_method () =
+    match List.assoc_opt "method" fargs with
+    | None -> "linear"
+    | Some (FExpr (EIdent (("linear" | "constant" | "spline") as v, _))) -> v
+    | Some (FExpr (EIdent (v, _))) ->
+      Diagnostics.error ctx.diags ~code:"E411" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': unknown interpolation method '%s' — expected linear, constant, or spline"
+          fname v)
+        ~hint:"method is a bare enum: `method = linear`"
+        ();
+      "linear"
+    | Some (FStr _) ->
+      Diagnostics.error ctx.diags ~code:"E411" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': method is now a bare enum — write method = linear" fname)
+        ~hint:"remove the quotes; one of: linear, constant, spline"
+        ();
+      "linear"
+    | Some (FExpr _) ->
+      Diagnostics.error ctx.diags ~code:"E411" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': method must be a bare enum — write method = linear" fname)
+        ~hint:"one of: linear, constant, spline"
+        ();
+      "linear"
   in
   (* gh#345: a table-backed interpolated forcing draws its per-stratum series
      from a `tables {}` matrix. `table = temp_data` names the source; `time_dim =
@@ -5450,7 +5570,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
   let table_backed_knots tbl =
     let err ?hint msg =
       Diagnostics.error ctx.diags ~code:"E229" ~loc:Diagnostics.no_loc ~message:msg ?hint () in
-    let time_dim = get_str_kw "time_dim" "" in
+    let time_dim = get_model_name "time_dim" "" in
     let tdims    = table_dims ctx tbl in
     let stratum  = List.filter_map (function IBind (v, d) -> Some (v, d) | _ -> None) findices in
     if tdims = [] then
@@ -5518,6 +5638,31 @@ let expand_time_function_one ctx fname (env : (string * string) list)
       end
     end
   in
+  (* gh#423 companion: reject unknown forcing kwargs (no loose semantics). The
+     forcing arg handler was the one kwarg surface in the compiler that silently
+     ignored typos — `value_column = C` was dropped and the selector fell back
+     to its default. Each kind's accepted keys are listed below; `lag` applies
+     to every kind. An unknown kind is left to the E408 default arm. *)
+  (match (match fkind with
+          | "sinusoidal"      -> Some ["amplitude"; "period"; "phase"; "baseline"]
+          | "piecewise"       -> Some ["breakpoints"; "values"]
+          | "interpolated"    -> Some ["method"; "data"; "time_col"; "value_col";
+                                       "key_col"; "table"; "time_dim"; "times"; "values"]
+          | "periodic"        -> Some ["period"; "on"; "step"; "values"]
+          | "fourier"         -> Some ["period"; "harmonics"]
+          | "periodic_spline" -> Some ["period"; "n_basis"; "degree"; "coefs"]
+          | _                 -> None) with
+   | None -> ()
+   | Some keys ->
+     let known = "lag" :: keys in
+     List.iter (fun (k, _) ->
+       if not (List.mem k known) then
+         Diagnostics.error ctx.diags ~code:"E409" ~loc:Diagnostics.no_loc
+           ~message:(Printf.sprintf
+             "forcing '%s': `%s` forcing has no argument '%s'" fname fkind k)
+           ~hint:(Printf.sprintf "accepted arguments: %s, lag"
+                    (String.concat ", " keys))
+           ()) fargs);
   let kind = match fkind with
     | "sinusoidal" ->
       Ir.Sinusoidal {
@@ -5532,12 +5677,13 @@ let expand_time_function_one ctx fname (env : (string * string) list)
         values      = get_kw_list "values";
       }
     | "interpolated" ->
-      let method_ = get_str_kw "method" "linear" in
-      (* File-backed form: data = "path" key_col = X time_col = Y value_col = Z *)
+      let method_ = get_method () in
+      (* File-backed form: data = "path" key_col = "X" time_col = "Y" value_col = "Z".
+         All four are file selectors and REQUIRE a quoted string (gh#423). *)
       (match List.assoc_opt "data" fargs with
-       | Some (EIdent (path, _)) ->
-         let time_col  = get_str_kw "time_col"  "time"  in
-         let value_col = get_str_kw "value_col" "value" in
+       | Some (FStr path) ->
+         let time_col  = get_file_col "time_col"  "time"  in
+         let value_col = get_file_col "value_col" "value" in
          (* The stratum filter. For an indexed forcing the level comes from its
             single index binding (env = [(binder_var, level)]); it is
             independent of both the binder name (`p`) and the data column name
@@ -5546,7 +5692,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
             single key column. *)
          let (key_col, key_val) = match env with
            | []                -> ("", "")
-           | [ (_var, level) ] -> (get_str_kw "key_col" "key", level)
+           | [ (_var, level) ] -> (get_file_col "key_col" "key", level)
            | _ ->
              Diagnostics.error ctx.diags ~code:"E226" ~loc:Diagnostics.no_loc
                ~message:(Printf.sprintf
@@ -5556,7 +5702,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                ~hint:"index the forcing by one dimension, or pre-join the data \
                       to a single key column"
                ();
-             (get_str_kw "key_col" "key", "")
+             (get_file_col "key_col" "key", "")
          in
          let (times, values) =
            load_interpolated_for_level ctx path ~key_col ~key_val ~time_col ~value_col
@@ -5585,15 +5731,38 @@ let expand_time_function_one ctx fname (env : (string * string) list)
            values  = List.map (fun f -> Ir.Const f) values;
            method_;
          }
-       | _ ->
+       | Some (FExpr (EIdent (name, _))) ->
+         (* `data` names an external file; a bare word needs quotes (gh#423). *)
+         Diagnostics.error ctx.diags ~code:"E410" ~loc:Diagnostics.no_loc
+           ~message:(Printf.sprintf
+             "forcing '%s': data must be a quoted file path — write data = \"%s\"" fname name)
+           ~hint:"a quoted string names the data file (outside the model)"
+           ();
+         Ir.Interpolated { times = []; values = []; method_ }
+       | Some (FExpr _) ->
+         Diagnostics.error ctx.diags ~code:"E410" ~loc:Diagnostics.no_loc
+           ~message:(Printf.sprintf
+             "forcing '%s': data must be a quoted file path — write data = \"...\"" fname)
+           ~hint:"a quoted string names the data file (outside the model)"
+           ();
+         Ir.Interpolated { times = []; values = []; method_ }
+       | None ->
          match List.assoc_opt "table" fargs with
-         | Some (EIdent (tbl, _)) ->
+         | Some (FExpr (EIdent (tbl, _))) ->
            let knots = table_backed_knots tbl in
            Ir.Interpolated {
              times  = List.map (fun (t, _) -> Ir.Const t) knots;
              values = List.map (fun (_, c) -> c) knots;
              method_;
            }
+         | Some (FStr _) ->
+           (* `table` names a `tables {}` entry; quotes are for files (gh#423). *)
+           Diagnostics.error ctx.diags ~code:"E412" ~loc:Diagnostics.no_loc
+             ~message:(Printf.sprintf
+               "forcing '%s': `table` names a model construct — remove the quotes: `table = <name>`" fname)
+             ~hint:"a bare word names a `tables {}` entry; quotes are for external files (gh#423)"
+             ();
+           Ir.Interpolated { times = []; values = []; method_ }
          | _ ->
            Ir.Interpolated {
              times   = get_kw_list "times";
@@ -5603,12 +5772,12 @@ let expand_time_function_one ctx fname (env : (string * string) list)
     | "periodic" ->
       let period_expr = get_kw "period" in
       let values =
-        match List.assoc_opt "on" fargs with
+        match Option.bind (List.assoc_opt "on" fargs) (expr_of_farg "on") with
         | Some on_expr ->
           (* Range-based periodic: on = [7:100, 115:199, ...]
              step = bin width (required with on).
              Generates a binary values array: 1.0 for bins in ranges, 0.0 otherwise. *)
-          let step_expr = match List.assoc_opt "step" fargs with
+          let step_expr = match Option.bind (List.assoc_opt "step" fargs) (expr_of_farg "step") with
             | Some e -> resolve_expr ctx env e
             | None ->
               Diagnostics.error ctx.diags ~code:"E404" ~loc:Diagnostics.no_loc
@@ -5718,7 +5887,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
          DSL — the parser produces EList of E2-tuples / lists. *)
       let period_expr = get_kw "period" in
       let harm_arg = match List.assoc_opt "harmonics" fargs with
-        | Some e -> e
+        | Some fv -> (match expr_of_farg "harmonics" fv with Some e -> e | None -> EList [])
         | None ->
           Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
             ~message:(Printf.sprintf "fourier forcing '%s' requires 'harmonics'" fname)
@@ -5776,11 +5945,11 @@ let expand_time_function_one ctx fname (env : (string * string) list)
             ~hint:"Add 'n_basis = <int>' (number of basis functions, e.g. 6)"
             ();
           1
-        | Some e -> unwrap_int_const e "n_basis" 1
+        | Some fv -> (match expr_of_farg "n_basis" fv with Some e -> unwrap_int_const e "n_basis" 1 | None -> 1)
       in
       let degree = match List.assoc_opt "degree" fargs with
         | None -> 3
-        | Some e -> unwrap_int_const e "degree" 3
+        | Some fv -> (match expr_of_farg "degree" fv with Some e -> unwrap_int_const e "degree" 3 | None -> 3)
       in
       let coefs = get_kw_list "coefs" in
       if n_basis <= degree then
@@ -5847,7 +6016,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
      bare parameter reference (`lag = tau`) is preserved as `Param`. Absent
      ⇒ `None` ⇒ no shift. The dim-checker validates that `lag` carries a time
      dimension. *)
-  let lag = match List.assoc_opt "lag" fargs with
+  let lag = match Option.bind (List.assoc_opt "lag" fargs) (expr_of_farg "lag") with
     | None   -> None
     | Some e -> Some (resolve_expr ctx env e)
   in
@@ -6055,7 +6224,7 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
           if start > end_ then
             Diagnostics.error ctx.diags
               ~code:"E241" ~loc:iv_loc
-              ~message:(Printf.sprintf "intervention '%s': 'from' (%g) must be <= 'until' (%g)" iv.ivname start end_)
+              ~message:(Printf.sprintf "intervention '%s': 'from' (%g) must be <= 'to' (%g)" iv.ivname start end_)
               ~hint:"Either reorder the values or check unit conversions (e.g. years → days)."
               ();
           (* Cap expanded schedule length to catch accidental year-at-minute schedules. *)
@@ -6423,7 +6592,8 @@ let expand_observations ctx =
         in
         match meas_v.om_lik with
         | LikNegBinomial k | LikPoisson k | LikNormal k
-        | LikBinomial k | LikBetaBinomial k | LikBernoulli k ->
+        | LikBinomial k | LikBetaBinomial k | LikBeta k | LikBernoulli k
+        | LikZeroInflatedNegBinomial k ->
           List.concat_map (fun (_, e) -> names_of e) k
       in
       if has_real_measurement && od.ocolumns <> None then
@@ -6576,10 +6746,20 @@ let expand_observations ctx =
           prevalence_projection name []
         else
           Ir.CumulativeFlow name
-      | ProjDerived (EIndex (name, idxs, _)) ->
+      | ProjDerived (EIndex (name, idxs, _) as e) ->
         let idx_vals = List.map (index_item_to_str env) idxs in
         let concrete = String.concat "_" (name :: idx_vals) in
-        if Hashtbl.mem ctx.expanded_comp_tbl concrete then
+        (* An indexed let-family reference (e.g. `projected = m[v]` with
+           `let m[v in village] = …`) must inline the let body via the
+           canonical resolver — symmetric to the bare-`EIdent` arm above.
+           let_tbl is keyed by base name; without this check an indexed let
+           ref falls through to `CumulativeFlow` and E507s as if it named a
+           transition (a covariate-driven mean projection is inexpressible
+           only because of this omission — the likelihood family is
+           irrelevant here). *)
+        if Hashtbl.mem ctx.let_tbl name then
+          Ir.DerivedExpr (resolve_expr ctx env e)
+        else if Hashtbl.mem ctx.expanded_comp_tbl concrete then
           Ir.CurrentPop concrete
         else if Hashtbl.mem ctx.comp_tbl name then
           prevalence_projection name idx_vals
@@ -6628,19 +6808,27 @@ let expand_observations ctx =
       | LikNormal _       -> "normal"
       | LikBinomial _     -> "binomial"
       | LikBetaBinomial _ -> "beta_binomial"
+      | LikBeta _         -> "beta"
       | LikBernoulli _    -> "bernoulli"
+      | LikZeroInflatedNegBinomial _ -> "zero_inflated_neg_binomial"
     in
     let required_kwargs = match lik_v with
       | LikNegBinomial _  -> ["mean"; "r"]
       | LikPoisson _      -> ["rate"]
       | LikNormal _       -> ["mean"; "sd"]
       | LikBinomial _     -> ["n"; "p"]
-      | LikBetaBinomial _ -> ["n"; "alpha"; "beta"]
+      (* Two accepted parameterizations (gh#402): raw (alpha, beta) or the
+         (mean, concentration) sugar that lowers to them. The construction site
+         below enforces exclusivity (E252) and the per-form required args (E250). *)
+      | LikBetaBinomial _ -> ["n"; "alpha"; "beta"; "mean"; "concentration"]
+      | LikBeta _         -> ["mean"; "concentration"]
       | LikBernoulli _    -> ["p"]
+      | LikZeroInflatedNegBinomial _ -> ["mean"; "r"; "pi"]
     in
     let current_kwargs = match lik_v with
       | LikNegBinomial k | LikPoisson k | LikNormal k
-      | LikBinomial k | LikBetaBinomial k | LikBernoulli k -> k
+      | LikBinomial k | LikBetaBinomial k | LikBeta k | LikBernoulli k
+      | LikZeroInflatedNegBinomial k -> k
     in
     (* Report unknown kwargs and positional args up front. *)
     List.iter (fun (k, _) ->
@@ -6715,13 +6903,63 @@ let expand_observations ctx =
           Ir.p = diff (resolve_kw kwargs "p");
         }
       | LikBetaBinomial kwargs ->
-        Ir.BetaBinomial {
-          Ir.n     = resolve_kw kwargs "n";
-          Ir.alpha = diff (resolve_kw kwargs "alpha");
-          Ir.beta  = diff (resolve_kw kwargs "beta");
+        (* Two parameterizations, same {n, alpha, beta} IR:
+             raw:   beta_binomial(n, alpha, beta)
+             sugar: beta_binomial(n, mean, concentration)
+                    -> alpha = mean * concentration
+                       beta  = (1 - mean) * concentration
+           The sugar lowers here, so the obs-autodiff already threads d/dtheta
+           through alpha/beta (the concentration included: d alpha/d conc = mean).
+           No IR/schema change. NOTE (see gh#402): we deliberately do NOT invent a
+           dispersion-scale transform/prior — that is the modeler's parameterization
+           choice (Stan does the same); reciprocal-dispersion is a docs convention. *)
+        let n = resolve_kw kwargs "n" in
+        let has k = List.mem_assoc k kwargs in
+        let raw   = has "alpha" || has "beta" in
+        let sugar = has "mean"  || has "concentration" in
+        if raw && sugar then begin
+          Diagnostics.error ctx.diags ~code:"E252" ~loc:Diagnostics.no_loc
+            ~message:(Printf.sprintf
+              "observation '%s': beta_binomial mixes parameterizations — give either \
+               (alpha, beta) or (mean, concentration), not both" od.oname)
+            ~hint:"e.g. beta_binomial(n = n_examined, mean = p, concentration = phi)" ();
+          Ir.BetaBinomial { Ir.n; Ir.alpha = diff (Ir.Const 0.0); Ir.beta = diff (Ir.Const 0.0) }
+        end
+        else if sugar then begin
+          let mean = resolve_kw kwargs "mean" in
+          let conc = resolve_kw kwargs "concentration" in
+          let mul l r = Ir.BinOp { op = Ir.Mul; left = l; right = r } in
+          let sub l r = Ir.BinOp { op = Ir.Sub; left = l; right = r } in
+          Ir.BetaBinomial {
+            Ir.n;
+            Ir.alpha = diff (mul mean conc);
+            Ir.beta  = diff (mul (sub (Ir.Const 1.0) mean) conc);
+          }
+        end
+        else
+          Ir.BetaBinomial {
+            Ir.n;
+            Ir.alpha = diff (resolve_kw kwargs "alpha");
+            Ir.beta  = diff (resolve_kw kwargs "beta");
+          }
+      | LikBeta kwargs ->
+        (* Continuous proportion x ∈ (0,1), mean-linked: alpha = mean·conc,
+           beta = (1 − mean)·conc formed in the Rust scorer/sampler. The obs
+           autodiff threads d/dθ through both diffable args. *)
+        Ir.Beta {
+          Ir.mean          = diff (resolve_kw kwargs "mean");
+          Ir.concentration = diff (resolve_kw kwargs "concentration");
         }
       | LikBernoulli kwargs ->
         Ir.Bernoulli { Ir.p = diff (resolve_kw kwargs "p") }
+      | LikZeroInflatedNegBinomial kwargs ->
+        (* Scoring-only: bare exprs, no `diff` wrapper. `r` -> dispersion,
+           matching the NegBinomial base; `pi` is the structural-zero prob. *)
+        Ir.ZeroInflatedNegBinomial {
+          Ir.mean       = resolve_kw kwargs "mean";
+          Ir.dispersion = resolve_kw kwargs "r";
+          Ir.pi         = resolve_kw kwargs "pi";
+        }
     in
     ctx.obs_aux_cols <- [];
     let parts = name_parts_from_bindings od.oindices env in
@@ -7511,7 +7749,8 @@ let check_no_shadowing ctx =
      | Some om ->
        let kwargs = match om.om_lik with
          | LikNegBinomial a | LikPoisson a | LikNormal a
-         | LikBinomial a | LikBetaBinomial a | LikBernoulli a -> a
+         | LikBinomial a | LikBetaBinomial a | LikBeta a | LikBernoulli a
+         | LikZeroInflatedNegBinomial a -> a
        in
        List.iter (fun (_, e) -> walk decl seed e) kwargs
      | None -> ())
@@ -7535,7 +7774,7 @@ let check_no_shadowing ctx =
   List.iter (fun (fd : func_decl) ->
     let decl = Printf.sprintf "forcing '%s'" fd.fname in
     let seed = loop_vars_of_indices fd.findices in
-    List.iter (fun (_, e) -> walk decl seed e) fd.fargs
+    List.iter (fun (_, fv) -> match farg_expr_opt fv with Some e -> walk decl seed e | None -> ()) fd.fargs
   ) ctx.func_decls
 
 (** W105: a transition indexed by two levels of the SAME dimension where one of
@@ -7861,9 +8100,12 @@ let check_surface_time_typing ctx =
      because that's where the EList is unwrapped. Here we still
      Rule-1-walk every kwarg in case a date() + 'months sneaks in. *)
   List.iter (fun (fd : func_decl) ->
-    List.iter (fun (_, e) ->
-      walk_expr_rule1 ~loc:Diagnostics.no_loc
-        ~context:(Printf.sprintf "forcing '%s'" fd.fname) e
+    List.iter (fun (_, fv) ->
+      match farg_expr_opt fv with
+      | Some e ->
+        walk_expr_rule1 ~loc:Diagnostics.no_loc
+          ~context:(Printf.sprintf "forcing '%s'" fd.fname) e
+      | None -> ()
     ) fd.fargs
   ) ctx.func_decls;
 
@@ -8114,12 +8356,10 @@ let expand_scenarios ctx : Ir.preset list =
     (* Accept both the family name ("N") and the fully-expanded
        per-stratum name ("N_rural", "N_urban"). The expansion table
        is populated by `build_lookup_tables` upstream of this call
-       site (verified at line ~741: `ctx.expanded_param_tbl <- ept`).
-       Multi-dim indexed params: `build_lookup_tables` populates the
-       expanded set only for single-dim indexed params today; a
-       multi-dim parameter's family name is still accepted via the
-       PIndexed branch below. That mirrors today's user-facing
-       behaviour and avoids false-positives on existing models. *)
+       site (`ctx.expanded_param_tbl <- ept`). It covers indexed params
+       of any arity — a multi-dim `mu[village, season]` contributes its
+       cartesian-product cell names ("mu_kwaru_wet", …), so a scenario
+       key naming a specific cell validates like any single-dim stratum. *)
     let t = Hashtbl.create (List.length ctx.param_decls) in
     List.iter (fun (pd : param_decl) ->
       let n = match pd with

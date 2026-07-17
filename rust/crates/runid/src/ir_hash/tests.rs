@@ -256,7 +256,14 @@ fn model_golden_hash() {
     // projection-gradient change re-keys a gradient fit); empty on the
     // representative model, so its length-0 prefix shifts the hash once at the
     // 0.29 bump — a deliberate, version-bumped re-key.
-    const GOLDEN: &str = "1210b8fc04716225aa43c2e7a010490ef0f6270eaa2c0cffefc601d99d1d96bd";
+    // SV=2 (2026-07-16, proposal 2026-07-16-gradient-maps-out-of-run-identity.md):
+    // model identity is now gradient-independent. All the compiler-derived gradient
+    // maps folded above (`rate_grad`, `rate_state_grad`, `sigma_sq_grad`,
+    // `projection_state_grad`, `ic_grad`, obs `grad`/`proj_grad`) are dropped from
+    // `hash_into`, and the SV header bumps 1→2. The representative model carries a
+    // `rate_grad` (∂/∂beta), so removing it AND the SV bump move the hash once — a
+    // deliberate, version-bumped re-key (gradients are derived, not identity).
+    const GOLDEN: &str = "33c669da9a280e8519592fe1ad7a4d1764b19b908d2fff6e52bbf61424948356";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -282,50 +289,57 @@ fn ir_per_eval_bindings_changes_hash() {
     );
 }
 
-/// gh#275: a non-empty `rate_state_grad` (∂rate/∂compartment, `J_x`) must change
-/// the model hash. Same blocker as `per_eval_bindings`: adding the struct field +
-/// the `hash_into` line is invisible to `model_golden_hash` on its own (an empty
-/// map hashes the same folded or not). This pins that the field is genuinely read,
-/// so a model that computes a state gradient cannot collide `run_id` with one that
-/// does not — a state gradient changes the fit and must re-key.
+/// Model identity is gradient-independent (proposal
+/// 2026-07-16-gradient-maps-out-of-run-identity.md): `rate_state_grad`
+/// (∂rate/∂compartment, `J_x`, gh#275) is compiler-derived autodiff of `rate`, so
+/// it is NOT hashed. A model that carries a state gradient must therefore produce
+/// the SAME model hash as one that does not — the lean-vs-full guarantee that lets
+/// `camdlc --no-state-grad` (gh#439) dispatch by method without re-keying.
+/// (Previously asserted the opposite; flipped by the proposal.)
 #[test]
-fn ir_rate_state_grad_changes_hash() {
+fn ir_rate_state_grad_is_inert() {
     use ir::deriv::{CompGradMap, DerivEntry};
     let base = representative_model().content_hash();
     let mut m = representative_model();
     let mut g = std::collections::HashMap::new();
     g.insert("S".to_string(), DerivEntry::Grad(Expr::param("beta")));
     m.transitions[0].rate_state_grad = CompGradMap(g);
-    assert_ne!(
+    assert_eq!(
         base,
         m.content_hash(),
-        "a non-empty rate_state_grad must change the model hash (state gradients are run identity)"
+        "a non-empty rate_state_grad must NOT change the model hash (gradients are \
+         derived, not identity)"
     );
 }
 
-/// gh#275: a non-empty `ic_grad` (∂init/∂θ, the forward-sensitivity seed) must
-/// change the model hash — the IC/state sensitivity axis is run identity for the
-/// same reason as `rate_grad`.
+/// Model identity is gradient-independent (proposal
+/// 2026-07-16-gradient-maps-out-of-run-identity.md): `ic_grad` (∂init/∂θ, the
+/// forward-sensitivity seed, gh#275) is compiler-derived, so it is NOT hashed —
+/// a model with an IC gradient hashes the same as one without.
+/// (Previously asserted the opposite; flipped by the proposal.)
 #[test]
-fn ir_ic_grad_changes_hash() {
+fn ir_ic_grad_is_inert() {
     use ir::deriv::DerivEntry;
     let base = representative_model().content_hash();
     let mut m = representative_model();
     let mut inner = std::collections::HashMap::new();
     inner.insert("beta".to_string(), DerivEntry::Grad(Expr::param("beta")));
     m.ic_grad.insert("I".to_string(), inner);
-    assert_ne!(
+    assert_eq!(
         base,
         m.content_hash(),
-        "a non-empty ic_grad must change the model hash (the IC sensitivity seed is run identity)"
+        "a non-empty ic_grad must NOT change the model hash (gradients are derived, \
+         not identity)"
     );
 }
 
-/// gh#275: a non-empty `proj_grad` (∂arg/∂projected, the observation FACTOR-2
-/// derivative) must change the model hash — an obs gradient change alters a
-/// gradient fit's posterior, so it is run identity like `grad`/`rate_grad`.
+/// Model identity is gradient-independent (proposal
+/// 2026-07-16-gradient-maps-out-of-run-identity.md): a likelihood `Diffable`'s
+/// `proj_grad` (∂arg/∂projected, the obs FACTOR-2 derivative, gh#275) is
+/// compiler-derived, so it is NOT hashed — only the argument `expr` is identity.
+/// (Previously asserted the opposite; flipped by the proposal.)
 #[test]
-fn ir_proj_grad_changes_hash() {
+fn ir_proj_grad_is_inert() {
     use ir::deriv::DerivEntry;
     use ir::observation::Likelihood;
     let base = representative_model().content_hash();
@@ -336,19 +350,21 @@ fn ir_proj_grad_changes_hash() {
         }
         other => panic!("representative model's first obs must be Poisson, got {other:?}"),
     }
-    assert_ne!(
+    assert_eq!(
         base,
         m.content_hash(),
-        "a non-empty proj_grad must change the model hash (obs gradients are run identity)"
+        "a non-empty proj_grad must NOT change the model hash (gradients are derived, \
+         not identity)"
     );
 }
 
-/// gh#275 §1h: a non-empty `projection_state_grad` (∂projection/∂compartment, the
-/// DerivedExpr factor-2 ingredient) must change the model hash — a
-/// projection-gradient change alters a gradient fit's posterior, so it is run
-/// identity like `rate_state_grad`.
+/// Model identity is gradient-independent (proposal
+/// 2026-07-16-gradient-maps-out-of-run-identity.md): `projection_state_grad`
+/// (∂projection/∂compartment, the DerivedExpr factor-2 ingredient, gh#275 §1h) is
+/// compiler-derived, so it is NOT hashed — a model with it hashes the same as one
+/// without. (Previously asserted the opposite; flipped by the proposal.)
 #[test]
-fn ir_projection_state_grad_changes_hash() {
+fn ir_projection_state_grad_is_inert() {
     use ir::deriv::DerivEntry;
     let base = representative_model().content_hash();
     let mut m = representative_model();
@@ -356,63 +372,141 @@ fn ir_projection_state_grad_changes_hash() {
         .projection_state_grad
         .0
         .insert("I".to_string(), DerivEntry::Grad(Expr::param("beta")));
-    assert_ne!(
+    assert_eq!(
         base,
         m.content_hash(),
-        "a non-empty projection_state_grad must change the model hash (projection gradients are run identity)"
+        "a non-empty projection_state_grad must NOT change the model hash (gradients \
+         are derived, not identity)"
     );
 }
 
-/// gh#275: the OUTER `ic_grad` map is hand-sorted in `Model::hash_into` (unlike
-/// the inner param-maps, which ride `write_str_map`'s sort — pinned by
-/// `rate_grad_map_order_invariant`). Build the same two-compartment `ic_grad` in
-/// two insertion orders and assert an identical hash — pins that outer sort so a
-/// future refactor that drops it cannot make `run_id` depend on `HashMap`
-/// iteration order (the gh#160 non-determinism class).
+/// Model identity is gradient-independent (proposal
+/// 2026-07-16-gradient-maps-out-of-run-identity.md): the transition `rate_grad`
+/// (∂rate/∂θ) is compiler-derived, so it is NOT hashed. Populating it — even with
+/// distinct compartment/param derivatives — must NOT change the model hash. This
+/// is the rate-side lean-vs-full guarantee (the flipped form of the removed
+/// `rate_grad_map_order_invariant`, which pinned the now-deleted rate_grad sort).
 #[test]
-fn ic_grad_map_order_invariant() {
-    let grad_for = |p: &str| -> HashMap<String, ir::deriv::DerivEntry> {
-        let mut h = HashMap::new();
-        h.insert(p.to_string(), ir::deriv::DerivEntry::Grad(Expr::param("beta")));
-        h
+fn ir_rate_grad_is_inert() {
+    use ir::deriv::DerivEntry;
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    let mut rg: HashMap<String, DerivEntry> = HashMap::new();
+    rg.insert("beta".to_string(), DerivEntry::Grad(Expr::pop("S")));
+    rg.insert("gamma".to_string(), DerivEntry::Grad(Expr::pop("I")));
+    m.transitions[0].rate_grad = rg;
+    assert_eq!(
+        base,
+        m.content_hash(),
+        "a non-empty rate_grad must NOT change the model hash (gradients are derived, \
+         not identity)"
+    );
+}
+
+/// Model identity is gradient-independent: the overdispersion `sigma_sq_grad`
+/// (∂σ²/∂θ) is compiler-derived, so it is NOT hashed. The semantic σ² expression
+/// still is (a negative control below). Proposal
+/// 2026-07-16-gradient-maps-out-of-run-identity.md.
+#[test]
+fn ir_sigma_sq_grad_is_inert() {
+    use ir::deriv::DerivEntry;
+    use ir::transition::DrawMethod;
+    let mk = |grad: bool| {
+        let mut m = representative_model();
+        let mut sg: HashMap<String, DerivEntry> = HashMap::new();
+        if grad {
+            sg.insert("k".to_string(), DerivEntry::Grad(Expr::const_(1.0)));
+        }
+        m.transitions[0].draw_method = DrawMethod::Overdispersed {
+            sigma_sq: Expr::param("sigma_se"),
+            sigma_sq_grad: sg,
+        };
+        m.content_hash()
     };
+    assert_eq!(
+        mk(true),
+        mk(false),
+        "sigma_sq_grad must NOT change the model hash (gradients are derived, not identity)"
+    );
+
+    // Negative control: the semantic σ² expression IS identity — a different σ²
+    // (still gradient-free) must re-key.
+    let mut m_other = representative_model();
+    m_other.transitions[0].draw_method = DrawMethod::Overdispersed {
+        sigma_sq: Expr::param("sigma_other"),
+        sigma_sq_grad: HashMap::new(),
+    };
+    assert_ne!(
+        mk(false),
+        m_other.content_hash(),
+        "the σ² expression itself is identity (only its gradient is stripped)"
+    );
+}
+
+/// Model identity is gradient-independent: a likelihood `Diffable`'s `grad` map
+/// (∂arg/∂θ, the obs autodiff sibling of `proj_grad`) is compiler-derived, so it
+/// is NOT hashed — only the argument `expr` is identity. The negative control
+/// pins that the argument expression itself still re-keys. Proposal
+/// 2026-07-16-gradient-maps-out-of-run-identity.md.
+#[test]
+fn ir_likelihood_grad_is_inert() {
+    use ir::deriv::DerivEntry;
+    use ir::observation::Likelihood;
+    let base = representative_model().content_hash();
+    let mut m = representative_model();
+    match &mut m.observations[0].likelihood {
+        Likelihood::Poisson(p) => {
+            p.rate.grad.insert("rho".to_string(), DerivEntry::Grad(Expr::pop("S")));
+        }
+        other => panic!("representative model's first obs must be Poisson, got {other:?}"),
+    }
+    assert_eq!(
+        base,
+        m.content_hash(),
+        "a likelihood Diffable's grad must NOT change the model hash (gradients are \
+         derived, not identity)"
+    );
+
+    // Negative control: the argument `expr` IS identity.
+    let mut m_expr = representative_model();
+    match &mut m_expr.observations[0].likelihood {
+        Likelihood::Poisson(p) => p.rate.expr = Expr::param("rho_changed"),
+        other => panic!("expected Poisson, got {other:?}"),
+    }
+    assert_ne!(
+        base,
+        m_expr.content_hash(),
+        "the likelihood argument expr is identity (only its gradient is stripped)"
+    );
+}
+
+/// The `write_str_map` sort (gh#160 non-determinism guard) must still make
+/// `HashMap` iteration order irrelevant for the maps that remain in the hash.
+/// `compartment_dims` is a still-hashed `HashMap<String, Vec<String>>`
+/// (`ModelStructure::hash_into`); building it in two insertion orders must yield
+/// the same model hash. (Replaces the removed `rate_grad_map_order_invariant`,
+/// whose map is no longer hashed.)
+#[test]
+fn compartment_dims_map_order_invariant() {
     let build = |order_ab: bool| -> Model {
         let mut m = representative_model();
-        let a = ("I".to_string(), grad_for("beta"));
-        let b = ("R".to_string(), grad_for("gamma"));
+        let ms = m.model_structure.as_mut().expect("representative model has structure");
+        ms.compartment_dims.clear();
+        let a = ("S".to_string(), vec!["age".to_string()]);
+        let b = ("I".to_string(), vec!["risk".to_string()]);
         if order_ab {
-            m.ic_grad.insert(a.0.clone(), a.1.clone());
-            m.ic_grad.insert(b.0.clone(), b.1.clone());
+            ms.compartment_dims.insert(a.0.clone(), a.1.clone());
+            ms.compartment_dims.insert(b.0.clone(), b.1.clone());
         } else {
-            m.ic_grad.insert(b.0.clone(), b.1.clone());
-            m.ic_grad.insert(a.0.clone(), a.1.clone());
+            ms.compartment_dims.insert(b.0.clone(), b.1.clone());
+            ms.compartment_dims.insert(a.0.clone(), a.1.clone());
         }
         m
     };
     assert_eq!(
         build(true).content_hash(),
         build(false).content_hash(),
-        "ic_grad compartment insertion order must not change the model hash (the outer sort)"
-    );
-}
-
-/// gh#275: injectivity — two `ic_grad`s that differ (here by compartment key)
-/// must hash differently, not merely differ from empty. Pins that the outer
-/// compartment key is folded into the digest (the encoding is length-prefixed
-/// and thus injective; this locks that property).
-#[test]
-fn ic_grad_distinct_values_hash_differently() {
-    let mk = |comp: &str| {
-        let mut m = representative_model();
-        let mut inner = HashMap::new();
-        inner.insert("beta".to_string(), ir::deriv::DerivEntry::Grad(Expr::param("beta")));
-        m.ic_grad.insert(comp.to_string(), inner);
-        m.content_hash()
-    };
-    assert_ne!(
-        mk("I"),
-        mk("R"),
-        "ic_grad keyed by different compartments must hash differently"
+        "compartment_dims insertion order must not change the model hash (write_str_map sort)"
     );
 }
 
@@ -531,32 +625,10 @@ fn ir_const_signed_zero_is_distinct() {
     );
 }
 
-/// The sorted-map rule must flow through the hand impls: building the same
-/// model twice with different `rate_grad` insertion order yields the same
-/// hash. (We add a second gradient key in two orders.)
-#[test]
-fn rate_grad_map_order_invariant() {
-    let build = |order_ab: bool| -> Model {
-        let mut m = representative_model();
-        let mut rg: HashMap<String, ir::deriv::DerivEntry> = HashMap::new();
-        let a = ("beta".to_string(), ir::deriv::DerivEntry::Grad(Expr::pop("S")));
-        let b = ("gamma".to_string(), ir::deriv::DerivEntry::Grad(Expr::pop("I")));
-        if order_ab {
-            rg.insert(a.0.clone(), a.1.clone());
-            rg.insert(b.0.clone(), b.1.clone());
-        } else {
-            rg.insert(b.0.clone(), b.1.clone());
-            rg.insert(a.0.clone(), a.1.clone());
-        }
-        m.transitions[0].rate_grad = rg;
-        m
-    };
-    assert_eq!(
-        build(true).content_hash(),
-        build(false).content_hash(),
-        "rate_grad insertion order must not change the model hash"
-    );
-}
+// (`rate_grad_map_order_invariant` removed: `rate_grad` is no longer hashed
+// (SV = 2; proposal 2026-07-16-gradient-maps-out-of-run-identity.md). The
+// `write_str_map` sort it exercised is now pinned by
+// `compartment_dims_map_order_invariant` above, over a still-hashed map.)
 
 /// gh#166: the chosen integrator is part of the model's content identity (it
 /// changes the numerics), so it must flow into the run-id — but the `Rk4`
@@ -619,27 +691,29 @@ fn changing_a_field_changes_the_hash() {
 #[test]
 fn projection_variant_hashes_are_pinned() {
     let hex = |p: Projection| p.content_hash().to_hex();
-    // Indices 0-3 are byte-identical to the pre-gh#160 `ir_hash` arms, so
-    // these four pins equal existing run_ids (no churn); 4 is the appended
-    // `CumulativeFlowSum`.
+    // The variant *indices* (0-4) are permanent — the property this pins. The
+    // absolute hexes moved once at SV=2 (2026-07-16, gradients out of identity:
+    // the per-type `header` folds the SV, so bumping it re-keys every ir hash),
+    // a deliberate, version-bumped re-key; the *relative* ordering/injectivity of
+    // the variants is unchanged.
     assert_eq!(
         hex(Projection::CumulativeFlow("x".into())),
-        "bae333c82bc85a194d4899c1c76fd8f50120f506f4bf07ccbf4e6f1681a6c38e"
+        "e2d143527737965155c5b9ab7d36dc38ec6af37d2ce4279fcbbc2b84ca9c46ca"
     );
     assert_eq!(
         hex(Projection::CurrentPop("x".into())),
-        "bce336b063891b80dd2c16513f0e4938597ee2b1d600425e56ee0f7b88e5f30f"
+        "f0d6fc200544318ad4724b41335177b069b91ff2765caae38d61a38479b12a02"
     );
     assert_eq!(
         hex(Projection::CurrentPopSum(vec!["x".into()])),
-        "2b4a65d0eb4d300730fee44b465903c6b615464a67ed503f4421a6ccaac9e8d6"
+        "bb7ede75805e3a90522a4511f66ff9bfeb106934f57e46639764643986852206"
     );
     assert_eq!(
         hex(Projection::DerivedExpr(Expr::const_(1.0))),
-        "eea65976e3ecc65043310f5f9ba5df473ade14554ee2f2f05b761142e73257cf"
+        "e726f60975126a21179c87f7a7bd77853a76fedce0541374fb2a80334347c06c"
     );
     assert_eq!(
         hex(Projection::CumulativeFlowSum(vec!["x".into()])),
-        "439f6c25062e7e8e22487f37d5d2536725ae6487a902fd1b2e4cc9e51e54b0a1"
+        "df05acb4d865d837590a535138e7be26546f019da197fb68d7d92603c020f09a"
     );
 }

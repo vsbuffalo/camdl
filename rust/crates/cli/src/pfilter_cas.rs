@@ -45,10 +45,14 @@ pub struct PfilterCtx<'a> {
     /// folds into the `config` level (cf. the n_trajectories collision class).
     pub replicates: u32,
     pub dt: f64,
-    /// Resolved obs-block name (which observation series drives the likelihood).
+    /// Obs-block override name. Vestigial since the `--flow` / `--obs-model`
+    /// override was removed (projections now always come from `observations {}`);
+    /// always `""`. Retained in the hashed context so a pre-removal `--flow`-free
+    /// `run_id` is unchanged (removing the field would re-key every pfilter leaf).
     pub obs_block: &'a str,
-    /// Resolved `--flow` transition indices (empty when scoring the obs block
-    /// directly rather than a flow sum).
+    /// Flow-override transition indices. Vestigial (see `obs_block`); always
+    /// empty. Kept so the content-addressed `run_id` of a `--flow`-free run is
+    /// bit-stable across the override's removal.
     pub flow_indices: &'a [u32],
     /// The resolved pfilter seed (the `seed` level hashes this).
     pub seed: u64,

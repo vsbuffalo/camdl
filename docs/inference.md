@@ -422,12 +422,8 @@ particle filter) rather than brute-force N.
 ```bash
 camdl pfilter model.camdl --params p.toml --data cases.tsv \
     --particles 5000 --dt 1 --seed 42 \
-    --flow recovery \
     --trace -
 ```
-
-**`--flow recovery`**: Which transition's cumulative flow to use as the
-projected quantity. Must match what the data measures.
 
 **`--trace -`**: Write per-observation diagnostics (ll increment, ESS, the
 filter's predictive quantiles vs the observed value) as a TSV. Use `-` for
@@ -891,6 +887,49 @@ The fit CAS identity includes the model IR (the model digest in `FitDigest`, via
 hash additionally keys on `fit_toml_hash` + resolved per-parameter prior sources
 so re-running against the same model with a different `--fit` flag produces a
 different umbrella.
+
+### Reparameterization for better sampler geometry
+
+The _parameterization_ a model is written in — not just its priors — determines
+how hard the posterior is to sample. camdl assigns the inference-scale transform
+from a parameter's _constraint_ (`positive` → log, `probability` → logit, with
+the Jacobian handled), exactly as Stan does; it does **not** second-guess your
+parameterization by role. So when a parameter's natural scale is a poor sampling
+geometry, the fix is to reparameterize the model, not to expect a magic
+transform.
+
+**Overdispersion parameters are the classic case.** For a
+`neg_binomial(mean, r)` or `beta_binomial(mean, concentration)` model, the
+dispersion parameter (`r`, `concentration` — call it `φ`) has a treacherous
+scale: the likelihood is _flat_ as `φ → ∞` (the Poisson/binomial
+no-overdispersion limit is a plateau), so a generic prior and a
+boundary-avoiding init put mass on, and strand chains in, the
+near-no-overdispersion region. This is a documented failure mode (Stan
+Prior-Choice Recommendations: _"putting priors on the over-dispersion parameter
+of the negative binomial"_ fails because "most of the prior mass is on models
+with a large amount of over-dispersion").
+
+**The fix (Stan's recommendation): put the parameter on the _reciprocal_
+scale.** The generic prior "works much much better on the parameter `1/φ`. Even
+better, you can use `1/√φ`" — because `1/φ → 0` _is_ the no-overdispersion
+limit, so a half-normal / exponential prior there has mass exactly where the
+data usually lives and regularizes the plateau. In camdl, declare the reciprocal
+as the estimated parameter and derive `φ` from it:
+
+```camdl
+parameters {
+  phi_inv : positive   # the SAMPLED parameter, prior lives here
+    ~ half_normal(sigma = 1)
+}
+# ... where the concentration is used:
+#   ... concentration = 1.0 / phi_inv
+```
+
+Then `phi_inv → 0` is the binomial limit, the init lands near it, and a gradient
+or adaptive-MH sampler moves off the plateau. This is a modeling choice you make
+— camdl (like Stan) gives you the constraint transform and the prior machinery;
+the reciprocal parameterization is yours to apply where the geometry calls for
+it.
 
 ### Per-cell diagnostics
 

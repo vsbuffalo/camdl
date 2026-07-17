@@ -254,6 +254,27 @@ pub fn format_decibans_spread_verdict(
         msg.push_str(&format!("    chain {:<2}  ℓ = {:>9.2}  ({:+.2} dB from worst)\n",
             i + 1, ll, (ll - lo) * NATS_TO_DB));
     }
+
+    // Name the chains DRIVING the spread, so the fix points at a chain index —
+    // not just "the spread is wide". Same robust seam the `fit summary` per-chain
+    // table uses (a modified z-score on per-chain clean loglik, centred on the
+    // median and scaled by the MAD), so co-stuck chains are all flagged rather
+    // than masking each other. The worst-chain fallback is belt-and-suspenders
+    // for a smooth spread with no single robust outlier.
+    let scores = super::chain_diagnostics::chain_loglik_mod_zscores(chain_logliks);
+    let flagged = super::chain_diagnostics::outlier_labels(&scores);
+    if !flagged.is_empty() {
+        msg.push_str(&format!(
+            "\n  Outlier chains (|modified z| > {:.1} on per-chain clean loglik): {}\n",
+            super::chain_diagnostics::CHAIN_LOGLIK_OUTLIER_MODZ, flagged.join(", ")));
+    } else if let Some((worst_i, _)) = chain_logliks.iter().enumerate()
+        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        msg.push_str(&format!(
+            "\n  Chain driving the spread (lowest clean loglik): chain {}\n",
+            worst_i + 1));
+    }
+
     msg.push_str("\n  Pick one:\n    \
                   - re-run scout with more chains (the wider the spread,\n      \
                     the higher the chance one chain is in the right basin)\n    \
@@ -564,6 +585,61 @@ mod tests {
         let scout_lls = vec![-60.2, -62.5, -63.3];
         check_loglik_regression(-60.2, -58.0, &scout_lls)
             .expect("refine improvement must pass");
+    }
+
+    /// gh#406: the DecibansSpread message must NAME the outlier chain, not just
+    /// report the aggregate spread. A single clear low outlier among six chains
+    /// clears the modified-z threshold, so the "Outlier chains" line names it.
+    #[test]
+    fn decibans_message_names_a_clear_outlier_chain() {
+        // Five chains near -60, chain 6 stuck at -300 (index 5 → "chain 6").
+        let chain_logliks = vec![-60.0, -61.0, -59.0, -60.5, -60.2, -300.0];
+        let msg = format_decibans_spread_verdict(240.0, 30.0, 0.5, &chain_logliks);
+        assert!(
+            msg.contains("Outlier chains"),
+            "message must flag the outlier chain, not just the spread:\n{msg}"
+        );
+        assert!(
+            msg.contains("Outlier chains (|modified z| > 3.5 on per-chain clean loglik): chain 6"),
+            "message must name chain 6 as the outlier:\n{msg}"
+        );
+    }
+
+    /// gh#406 (robust upgrade): two co-stuck chains among six are BOTH named now
+    /// — the classic mean/SD z masked them, the robust median/MAD modified z does
+    /// not. Good chains carry realistic jitter (real chain means never coincide).
+    #[test]
+    fn decibans_message_names_both_co_stuck_chains() {
+        // Four good (jittered) near -60, two stuck near -400 (chains 5 and 6).
+        let chain_logliks = vec![-60.0, -61.0, -59.0, -60.5, -400.0, -401.0];
+        let msg = format_decibans_spread_verdict(340.0, 30.0, 0.5, &chain_logliks);
+        assert!(msg.contains("Outlier chains"), "both co-stuck chains must be flagged:\n{msg}");
+        assert!(msg.contains("chain 5"), "must name chain 5:\n{msg}");
+        assert!(msg.contains("chain 6"), "must name chain 6:\n{msg}");
+        assert!(
+            !msg.contains("Chain driving the spread"),
+            "the fallback must NOT fire when robust outliers are found:\n{msg}"
+        );
+    }
+
+    /// gh#406: the belt-and-suspenders fallback. A smooth spread (a gradient of
+    /// chains, no single robust outlier) still triggers the gate, so the message
+    /// names the single worst chain driving the low end — always actionable.
+    #[test]
+    fn decibans_message_fallback_names_worst_on_smooth_spread() {
+        let chain_logliks = vec![-60.0, -70.0, -80.0, -90.0, -100.0, -110.0];
+        let scores = super::super::chain_diagnostics::chain_loglik_mod_zscores(&chain_logliks);
+        assert!(
+            scores.iter().all(|s| !s.is_outlier),
+            "precondition: a smooth gradient has no single robust outlier: {:?}",
+            scores.iter().map(|s| s.mod_z).collect::<Vec<_>>()
+        );
+        let msg = format_decibans_spread_verdict(150.0, 30.0, 0.5, &chain_logliks);
+        assert!(
+            msg.contains("Chain driving the spread (lowest clean loglik): chain 6"),
+            "fallback must name the worst chain (-110 → chain 6):\n{msg}"
+        );
+        assert!(!msg.contains("Outlier chains"), "no robust outlier line on a smooth spread:\n{msg}");
     }
 
     #[test]

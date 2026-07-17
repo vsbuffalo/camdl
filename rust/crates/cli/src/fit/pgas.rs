@@ -530,6 +530,7 @@ pub fn run_stage(
     let traj_model_hash = crate::resolve::model_identity_from_ir(&config.model_ir_json);
     let traj_date_origin: Option<(String, String)> = config.model.origin.as_ref()
         .map(|o| (o.clone(), config.model.time_unit.clone()));
+    let traj_calendar = io::CalendarMeta::from_model(&config.model);
 
     // Run chains in parallel (each chain is independent: own seed, own
     // trajectory, own RNG). Same pattern as PMMH.
@@ -749,6 +750,7 @@ pub fn run_stage(
                     // file isn't produced by `fit`, so none is recorded here.
                     // (`simulate --obs` on the posterior draws would produce it.)
                     predictive_obs_file: None,
+                    calendar: traj_calendar.clone(),
                 };
                 let _ = manifest.write(&chain_dir.join("trajectories.json"));
             }
@@ -1164,7 +1166,7 @@ fn write_summary(
         "thin": thin,
     });
 
-    let path = dir.join("pgas_summary.json");
+    let path = dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
     let contents = serde_json::to_string_pretty(&summary)
         .map_err(|e| format!("json error: {}", e))?;
     std::fs::write(&path, contents)

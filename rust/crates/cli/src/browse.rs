@@ -1885,6 +1885,7 @@ mod tests {
             deps: vec![],
             status: runid::RunStatus::Completed,
             artifacts: Default::default(),
+            output_schema: Default::default(),
             children: Default::default(),
             inputs: serde_json::Value::Null,
             provenance: runid::Provenance::default(),

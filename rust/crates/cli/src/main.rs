@@ -7,8 +7,10 @@ mod cas_read;       // generic RunRecord reader (new-format sims); transitional 
 mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)
 mod hashing;
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
+mod output_schema;  // run.json output_schema: column roles for tabular outputs (proposal 2026-07-15)
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
+mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
 mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by fit predict + simulate)
 mod run_paths;      // canonical output-path helpers
 mod cas;
@@ -230,6 +232,20 @@ Examples:
   camdl inspect sir.camdl --transitions
 "))]
     Inspect(Passthrough),
+
+    /// Render a .camdl model as LaTeX or display JSON (delegates to camdlc)
+    #[command(long_about = "\
+Render a model for reading or display (delegates to camdlc).
+
+  # LaTeX document (indexed form) to stdout
+  camdl render sir.camdl
+
+  # Structured JSON for a web viewer (KaTeX-ready blocks)
+  camdl render sir.camdl --format json
+
+  # Expand chosen dimensions to their literal strata
+  camdl render seir_age.camdl --expand age")]
+    Render(Passthrough),
 
     /// Show embedded usage guides (offline, version-matched to this binary)
     Docs(args::DocsArgs),
@@ -576,6 +592,13 @@ fn main() {
                 eprintln!("error: {}", e); std::process::exit(1);
             });
         }
+        Command::Render(a) => {
+            let mut refs = vec!["render"];
+            refs.extend(a.args.iter().map(String::as_str));
+            util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
+                eprintln!("error: {}", e); std::process::exit(1);
+            });
+        }
         Command::Docs(a)                => docs::cmd_docs(&a),
         Command::Mre(MreCmd::Fit(a))      => mre::cmd_mre_fit(&a),
         Command::Mre(MreCmd::Simulate(a)) => mre::cmd_mre_simulate(&a),
@@ -635,7 +658,9 @@ fn run_simulate(a: &args::SimulateArgs) {
     // `ir_path` (the original `.camdl`) is preserved for display + provenance
     // (dry-run model line, CAS `model_path`/`model_stem`); `ir_path_compiled`
     // is the resolved IR used for all compilation.
-    let (ir_path_compiled, _ir_tmp) = util::resolve_ir_path(&ir_path).unwrap_or_else(|e| {
+    // `simulate` never reads the state-Jacobian, so compile lean
+    // (`needs_state_grad = false`, gh#439 A2 — `--no-state-grad`).
+    let (ir_path_compiled, _ir_tmp) = util::resolve_ir_path(&ir_path, false).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
@@ -1241,6 +1266,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 eval: None,
                 draws: Vec::new(),
                 times: Vec::new(),
+                calendar: io::CalendarMeta::from_model(&q_model),
             })
         } else {
             let n = q_model.quantities.len();
@@ -1378,6 +1404,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 crate::quantity_output::render_quantities(
                     &q.quantities, &q.draws, &q.times, mode,
                     crate::quantity_output::DesignCoords::none(),
+                    &q.calendar,
                 )
                     .unwrap_or_else(|e| {
                         eprintln!("error rendering quantities: {}", e);
@@ -1492,6 +1519,9 @@ struct SimQuantities {
     /// The trajectory snapshot times, captured once (every cell shares the output
     /// cadence) — the time axis a series quantity is rendered against.
     times: Vec<f64>,
+    /// Calendar semantics for the `time` axis, stamped into `quantities.json` so
+    /// a consumer maps `time → Date` without re-deriving `origin`/`time_unit`.
+    calendar: io::CalendarMeta,
 }
 
 /// Materialize the per-draw `y_sim` for the streams an `observations.<stream>`
@@ -1521,7 +1551,7 @@ fn materialize_obs_for_quantities(
         let mut vals = Vec::with_capacity(times.len());
         for (ti, &t) in times.iter().enumerate() {
             let snap = snap_at(traj, t);
-            vals.push(sampler(projected[ti], t, &snap.int_state.counts, &mut obs_rng));
+            vals.push(sampler(projected[ti], t, &snap.int_state.counts, &[], &mut obs_rng));
         }
         out.insert(obs_ir.name.clone(), (times, vals));
     }
@@ -1649,8 +1679,10 @@ fn build_simulate_cas_sink(
     total_runs: usize,
 ) -> Result<crate::batch::CasSink, String> {
     // Parse the raw IR (envelope-aware) — params NOT applied (batch parity).
-    // `run.ir_path` is already the compiled IR, so this short-circuits.
-    let (ir_path_resolved, _tmp) = util::resolve_ir_path(&run.ir_path)?;
+    // `run.ir_path` is already the compiled IR, so this short-circuits; the
+    // forward CAS-sink path never reads the state-Jacobian either
+    // (`needs_state_grad = false`, gh#439 A2).
+    let (ir_path_resolved, _tmp) = util::resolve_ir_path(&run.ir_path, false)?;
     let src = std::fs::read_to_string(&ir_path_resolved)
         .map_err(|e| format!("cannot read {}: {}", ir_path_resolved, e))?;
     let base_model: ir::Model = ir::from_str(&src)
@@ -2034,7 +2066,7 @@ impl engine::RunSink for StreamSink {
                     // references like `N = S + I + R`.
                     let snap = snap_at(traj, obs_t);
                     let draw = sampler(
-                        projected_values[ti], obs_t, &snap.int_state.counts, &mut obs_rng,
+                        projected_values[ti], obs_t, &snap.int_state.counts, &[], &mut obs_rng,
                     );
                     self.obs_data[si].push(ObsRow {
                         time: obs_t,
@@ -2838,6 +2870,7 @@ fn write_draws_tsv(path: &str, draws: &[HashMap<String, f64>]) -> Result<(), Str
 /// One parsed `draws.tsv` row: the optional `(chain, draw)` posterior key
 /// (gh#322 — the join key to the smoothed `trajectories.tsv`; `None` for a
 /// pre-key, param-only file) plus the model parameters.
+#[derive(Debug, Clone)]
 pub(crate) struct KeyedDraw {
     pub chain: Option<usize>,
     pub draw: Option<usize>,

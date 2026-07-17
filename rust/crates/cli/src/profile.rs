@@ -1,4 +1,5 @@
-//! `camdl profile` — profile likelihood via parallel IF2 runs.
+//! `camdl profile` — profile likelihood via parallel per-cell optimization
+//! (IF2, PMMH, or deterministic nl-* MLE, per `--algorithm`).
 //!
 //! For one or more focal parameters, fix them at a grid of values and
 //! run IF2 to maximise over the remaining parameters at each grid
@@ -28,14 +29,12 @@
 //! cross-seed summary are cross-leaf aggregates with no single home in
 //! the factored tree — they are rebuilt from the derived index.
 
-use rayon::prelude::*;
 use sim::{
     compiled_model::CompiledModel,
     inference::{
         if2::{run_if2, IF2Config, Observation},
         pmmh::{run_pmmh, PMMHConfig, Prior},
         BoundObs, ChainBinomialProcess, MultiStreamObsModel,
-        multi_stream_obs::StreamSpec,
     },
 };
 use std::collections::HashMap;
@@ -101,6 +100,27 @@ impl ProfileAlgo {
 // name starts with `<root>_`, and `--data NAME=PATH` (gh#90 named form)
 // also expands NAME as a family root. Same semantics, single dispatch.
 
+/// Normalized coordinates of grid cell `gi` — each focal value mapped to
+/// `[0, 1]` over its axis's grid range, so the nearest-to-best ordering is
+/// scale-fair across axes with very different magnitudes. Ordering only; it
+/// never touches a loglik or a leaf.
+fn profile_cell_norm(
+    grid_points: &[Vec<(usize, f64)>],
+    axis_ranges: &[(f64, f64)],
+    gi: usize,
+) -> Vec<f64> {
+    grid_points[gi].iter().enumerate().map(|(k, &(_, v))| {
+        let (mn, mx) = axis_ranges[k];
+        if (mx - mn).abs() < 1e-12 { 0.0 } else { (v - mn) / (mx - mn) }
+    }).collect()
+}
+
+/// Squared Euclidean distance between two normalized cell coordinate vectors
+/// (see [`profile_cell_norm`]). Squared — ordering only needs the monotone
+/// comparison.
+fn profile_cell_dist2(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum()
+}
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // Parse the CLI strings into the typed registry entry (the string boundary);
@@ -169,8 +189,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // PMMH per-cell knobs (ignored when --algorithm is not pmmh).
     let pmmh_steps = a.pmmh_steps;
     let pmmh_particles = a.pmmh_particles;
-    // Per spec: `--pmmh-rho 0.0` (or any non-positive) disables CPM.
-    let pmmh_rho_opt: Option<f64> = if a.pmmh_rho > 0.0 {
+    // The CPM correlated-noise machinery belongs to `--algorithm pmmh` only.
+    // For if2 / nl-* the knob is inert — a deterministic (nl-*) or bootstrap-PF
+    // (if2) profile must NOT be dragged through the CPM uniform-window preflight
+    // by a default rho. Per spec, `--pmmh-rho 0.0` (or non-positive) also
+    // disables CPM within pmmh.
+    let is_pmmh = matches!(profile_algo, ProfileAlgo::Pmmh);
+    let pmmh_rho_opt: Option<f64> = if is_pmmh && a.pmmh_rho > 0.0 {
         if !(a.pmmh_rho < 1.0) {
             eprintln!(
                 "error: --pmmh-rho = {} must be in [0, 1). Use 0.0 (or negative) \
@@ -185,7 +210,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     };
     let output_tsv_path: Option<String> = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
     let scenario_name = a.scenario.scenario.clone();
-    let flow_name = a.flow.flow.clone();
     let label_arg: Option<String> = match a.label.as_deref() {
         Some(raw) => match crate::fit::validate_label(raw) {
             Ok(l) => Some(l),
@@ -392,7 +416,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // fit-toml fallback: when no `--data` flags supplied AND `--fit`
     // is, read `[data]` / `[data.observations]` from the toml. CLI
     // flags always win when both are supplied.
-    let obs_name_arg = a.flow.obs.clone();
+    let obs_name_arg = a.stream.obs.clone();
     let model_obs_names: Vec<String> = model.observations.iter()
         .map(|o| o.name.clone()).collect();
     let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
@@ -426,70 +450,18 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         std::process::exit(1);
     }
 
-    // Resolved IR observation models, one per bound stream. Family
-    // expansion happened inside the resolver; here every bound name
-    // is an exact leaf match.
-    let resolved_obs: Vec<&ir::observation::ObservationModel> = {
-        let mut v = Vec::with_capacity(bound_streams.len());
-        for (sname, _) in &bound_streams {
-            match model.observations.iter().find(|o| &o.name == sname) {
-                Some(o) => v.push(o),
-                None => {
-                    eprintln!("error: bound stream '{}' has no matching IR \
-                        observation block (resolver bug). Available: {}",
-                        sname,
-                        model.observations.iter().map(|o| o.name.as_str())
-                            .collect::<Vec<_>>().join(", "));
-                    std::process::exit(1);
-                }
-            }
-        }
-        v
-    };
-
-    if resolved_obs.len() > 1 && flow_name.is_some() {
-        eprintln!(
-            "error: --flow <NAME> is incompatible with multi-stream --data \
-             ({} streams bound). --flow rewrites a single stream's projection; \
-             for multi-stream profile each stream uses its own IR projection.",
-            resolved_obs.len(),
-        );
-        std::process::exit(1);
-    }
-
-    if resolved_obs.len() > 1 {
-        eprintln!(
-            "profile: {} streams bound (joint loglik = sum across all): {}",
-            resolved_obs.len(),
-            resolved_obs.iter().map(|o| o.name.as_str())
-                .collect::<Vec<_>>().join(", "),
-        );
-    } else {
-        eprintln!("profile: using observation model '{}' from IR",
-            resolved_obs[0].name);
-    }
-
-    // gh#90: silent-wrong-answer warning. If the model declares N>1
-    // observation blocks but only M<N are bound, the unbound streams
-    // contribute zero to the likelihood — the result looks plausible
-    // but is methodologically wrong (those parameters fall back to
-    // priors). Fires whether the user used --data PATH --obs NAME
-    // (intentional single-stream subset) or named pairs covering a
-    // subset of the model's blocks.
-    {
-        let bound_names: Vec<String> = bound_streams.iter()
-            .map(|(n, _)| n.clone()).collect();
-        if let Some(w) = crate::util::format_unbound_streams_warning(
-            "profile", &model_obs_names, &bound_names,
-        ) {
-            eprint!("{}", w);
-        }
-    }
-
-    // Per-stream load: each binding picks its column from the bound
-    // file by stream name. For a single-stream binding fall back to
-    // the 2-col TSV loader when the file has no matching column —
-    // preserves the legacy (`time,value`) schema.
+    // Resolve the bound observation streams (BY SOURCE) and load each one's
+    // per-observation values + aux via the single shared seam that `fit run`
+    // and `pfilter` also route through (`fit::runner::resolve_and_load_obs_streams`).
+    // The seam filters `model.observations` by `source`, dispatches long-form vs
+    // wide loading (holes + aux), resolves each projection, and runs the per-
+    // stream origin / first-window guards — so a stratified family bound by its
+    // ROOT (`[data.observations] prevalence = FILE`, source `prevalence`) fans
+    // out to every leaf exactly as `fit run` binds it. `bound_streams` (the
+    // CLI/toml key-space bindings) is mapped to the by-source `effective` map at
+    // the boundary; it is retained below only for the CAS data-hash, whose
+    // key-space (leaf name / family root) must not change. The typo guard (a
+    // binding key matching no source or name) lives in the adapter.
     let time_opts = crate::caltime_load::TimeOpts {
         origin: model.origin.as_deref(),
         time_unit: &model.time_unit,
@@ -497,35 +469,38 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         t_start: compiled.model.simulation.t_start,
         format: a.inference.time_format,
     };
+    let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
+        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    let streams = crate::fit::runner::resolve_and_load_obs_streams(
+        &model, &compiled, &effective, dt, &time_opts,
+    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
 
-    let mut per_stream_obs: Vec<Vec<Observation>> = Vec::with_capacity(bound_streams.len());
-    for (sname, spath) in &bound_streams {
-        let path_str = spath.to_string_lossy().into_owned();
-        // Strict by-name binding — no positional fallback (G1). The declared
-        // `time` column is the axis (by-name-time flip) and `scored` is the
-        // value; both must match the file header exactly (a typo'd/wrong-cased
-        // header is a located error, not a silent positional bind).
-        let obs_block = model.observations.iter()
-            .find(|o| &o.name == sname)
-            .unwrap_or_else(|| {
-                eprintln!("error: no observation block named '{}'", sname);
-                std::process::exit(1);
-            });
-        let time_col = crate::pfilter::obs_time_column(obs_block).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        });
-        let result = crate::pfilter::load_data_tsv_column(
-            &path_str, time_col, &obs_block.scored, &time_opts);
-        let stream_obs: Vec<Observation> = match result {
-            Ok(v) => v.into_iter().map(|o| Observation { time: o.time, value: o.value }).collect(),
-            Err(e) => {
-                eprintln!("error: cannot load data column '{}' from {}: {}",
-                    sname, path_str, e);
-                std::process::exit(1);
-            }
-        };
-        per_stream_obs.push(stream_obs);
+    if streams.len() > 1 {
+        eprintln!(
+            "profile: {} streams bound (joint loglik = sum across all): {}",
+            streams.len(),
+            streams.iter().map(|s| s.name.as_str())
+                .collect::<Vec<_>>().join(", "),
+        );
+    } else {
+        eprintln!("profile: using observation model '{}' from IR",
+            streams[0].name);
+    }
+
+    // gh#90: silent-wrong-answer warning. If the model declares N>1 observation
+    // blocks but only M<N are bound, the unbound streams contribute zero to the
+    // likelihood — the result looks plausible but is methodologically wrong. The
+    // bound set is the RESOLVED leaf names (a family root fans out to its
+    // leaves), not the raw binding keys — else an indexed family bound by its
+    // root would look entirely unbound and false-warn.
+    {
+        let bound_names: Vec<String> = streams.iter()
+            .map(|s| s.name.clone()).collect();
+        if let Some(w) = crate::util::format_unbound_streams_warning(
+            "profile", &model_obs_names, &bound_names,
+        ) {
+            eprint!("{}", w);
+        }
     }
 
     // Canonical schedule: the sorted-unique UNION of every stream's observation
@@ -535,18 +510,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `at_union` membership. The old "must share identical observation times"
     // guard was the no-silent-gaps stance for machinery that did not yet exist.
     let observations: Vec<Observation> = {
-        let mut times: Vec<f64> = per_stream_obs.iter()
-            .flat_map(|obs| obs.iter().map(|o| o.time))
+        let mut times: Vec<f64> = streams.iter()
+            .flat_map(|s| s.data.iter().map(|o| o.time))
             .collect();
         times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
         times.dedup();
         times.into_iter().map(|time| Observation { time, value: 0.0 }).collect()
     };
     let observations = Arc::new(observations);
-
-    let flow_indices = crate::util::resolve_flow_indices(&model, flow_name.as_deref())
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    let flow_indices = Arc::new(flow_indices);
 
     for sw in &a.sweep {
         let idx = compiled.param_index.get(sw.name.as_str()).copied()
@@ -759,12 +730,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         };
 
     let process = Arc::new(ChainBinomialProcess::new(compiled.clone()));
-    // Build one StreamSpec per resolved IR observation. For
-    // single-stream profiles `--flow <name>` overrides the IR
-    // projection (forces incidence over the named transition family);
-    // for multi-stream we always use each stream's IR projection
-    // (the `--flow` + multi-stream combination was already rejected
-    // upstream).
+    // Build the multi-stream observation model from the loaded `ObsStream`s via
+    // the single shared builder. Each stream's projection + likelihood come from
+    // its `observations { }` block (the modern observation system, exactly as
+    // `fit run` / `pfilter` resolve them) — there is no `--flow` override.
     // Concrete `Arc<MultiStreamObsModel>` — the IF2 per-cell call site
     // accepts `&dyn ObservationModel<ParticleState>` (auto-coerced from
     // `&MultiStreamObsModel`); the NLopt path needs the concrete type
@@ -789,31 +758,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     }
 
     let obs_model_obj: Arc<MultiStreamObsModel> = {
-        let mut stream_specs = Vec::with_capacity(resolved_obs.len());
-        for (obs, stream_obs) in resolved_obs.iter().zip(per_stream_obs.iter()) {
-            let projection = if resolved_obs.len() == 1 && flow_name.is_some() {
-                sim::inference::multi_stream_obs::StreamProjection::FlowSum(
-                    flow_indices.to_vec(),
-                )
-            } else {
-                sim::inference::multi_stream_obs::StreamProjection::from_ir(
-                    &obs.projection, &compiled, &obs.name,
-                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
-            };
-            // profile is dense + aux-free in v1 (survey denominators are a
-            // `camdl fit` / `pfilter` feature; profile rejects NA upstream).
-            // Multi-cadence (§3.3): feed each stream its OWN schedule (from
-            // `stream_obs`), NOT the union `obs_times_vec`. `bind` re-merges to
-            // the union and records per-stream `at_union` membership; the dense
-            // cells have len == this stream's own obs_times.len().
-            stream_specs.push(StreamSpec::dense(
-                projection,
-                (*obs).clone(),
-                sim::inference::dense_cells(
-                    stream_obs.iter().map(|o| o.value).collect()),
-                stream_obs.iter().map(|o| o.time).collect(),
-            ));
-        }
+        // The `ObsStream -> StreamSpec` mapping is the single shared builder
+        // (`stream_specs_from_obs_streams`): authoritative per-grid-time cells
+        // (holes = `None`, skipped in the likelihood) + survey denominators
+        // (`aux`), each stream fed its OWN schedule; `bind` re-merges to the
+        // union and validates aux — identical to how `fit run` and `pfilter`
+        // build their obs model, so an indexed survey family scores identically.
+        let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
         let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
             eprintln!("error: observation data invalid:\n{}", report.render());
             std::process::exit(1);
@@ -873,7 +824,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // sole IR observation's name (so two profiles on the same model
     // with one obs and the same params still hit the cache).
     let obs_family_key = obs_name_arg.clone()
-        .unwrap_or_else(|| resolved_obs[0].name.clone());
+        .unwrap_or_else(|| streams[0].name.clone());
 
     // gh#39 + gh#90: hash every bound stream's data file bytes at
     // launch. Each (stream_name, content_hash) pair participates in
@@ -1066,17 +1017,26 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let dim_str = focal_grids.iter()
         .map(|fg| format!("{}={}", fg.name, fg.values.len()))
         .collect::<Vec<_>>().join(" × ");
-    // Banner shape preserved from the IF2/NLopt era; PMMH lands the
-    // accurate per-cell budget through a second one-line summary
-    // below so we don't reshape this format for callers that grep
-    // "IF2 runs". (PMMH banner is additive.)
-    eprintln!("profile: {} grid ({}) × {} starts × {} seeds = {} IF2 runs ({} particles × {} iter each)",
-        grid_points.len(), dim_str, n_starts, seeds.len(), total_jobs,
-        n_particles, n_iterations);
-    if matches!(profile_algo, ProfileAlgo::Pmmh) {
-        eprintln!("profile: PMMH per cell = {} particles × {} MCMC steps (rho = {})",
+    // Banner names the actual per-cell optimizer + its real budget — a
+    // deterministic nl-* cell has no particles/iterations, so labelling every
+    // run "IF2 (N particles × M iter)" was misleading.
+    let algo_label = match profile_algo {
+        ProfileAlgo::If2 => "IF2",
+        ProfileAlgo::Pmmh => "PMMH",
+        ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx) => "nl-sbplx",
+        ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa) => "nl-bobyqa",
+    };
+    eprintln!("profile: {} grid ({}) × {} starts × {} seeds = {} {} runs",
+        grid_points.len(), dim_str, n_starts, seeds.len(), total_jobs, algo_label);
+    match profile_algo {
+        ProfileAlgo::If2 => eprintln!(
+            "profile: IF2 per cell = {} particles × {} iterations", n_particles, n_iterations),
+        ProfileAlgo::Nlopt(_) => eprintln!(
+            "profile: deterministic ODE MLE per cell (no particle filter)"),
+        ProfileAlgo::Pmmh => eprintln!(
+            "profile: PMMH per cell = {} particles × {} MCMC steps (rho = {})",
             pmmh_particles, pmmh_steps,
-            pmmh_rho_opt.map(|r| r.to_string()).unwrap_or_else(|| "off".into()));
+            pmmh_rho_opt.map(|r| r.to_string()).unwrap_or_else(|| "off".into())),
     }
 
     // ── Progress + cache scan ─────────────────────────────────────────
@@ -1214,9 +1174,25 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // (multi-seed only) the cross-seed summary.tsv (2s throttle, since
     // it reads N seeds' rollups). Last-completion-wins.
 
-    // ── Run remaining jobs in parallel ──────────────────────────────
-    let run_sweep = || {
-    remaining.par_iter().for_each(|&ji| {
+    // ── Run remaining jobs: greedy priority work-queue ──────────────
+    // Per focal axis, its grid's value range — for normalizing cell
+    // coordinates so the nearest-to-best ordering is scale-fair.
+    let axis_ranges: Vec<(f64, f64)> = focal_grids.iter().map(|fg| {
+        let mn = fg.values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let mx = fg.values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        (mn, mx)
+    }).collect();
+    let cell_norm: Vec<Vec<f64>> = (0..grid_points.len())
+        .map(|gi| profile_cell_norm(&grid_points, &axis_ranges, gi))
+        .collect();
+    // The best (finite) profile-loglik seen and the grid cell that produced
+    // it. Workers drill toward this cell; the bar surfaces the loglik. This is
+    // a read-only side-channel — each job writes its own identity-keyed leaf,
+    // so it never changes any output, only the order cells are visited in.
+    let best: std::sync::Mutex<(f64, Option<usize>)> =
+        std::sync::Mutex::new((f64::NEG_INFINITY, None));
+
+    let eval_job = |ji: usize| {
         let (seed_idx, grid_idx, start_idx, ref resolved_pt_id, ref cas_path) = resolved_jobs[ji];
         let process = Arc::clone(&process);
         let obs_model_obj = Arc::clone(&obs_model_obj);
@@ -1618,6 +1594,18 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         };
         let elapsed = job_t0.elapsed().as_secs_f64();
 
+        // Report this cell's loglik to the shared best: the drill target for
+        // the work-queue and the bar's researcher metric. Never gates the leaf
+        // write below (order-independent output).
+        if final_loglik.is_finite() {
+            if let Ok(mut b) = best.lock() {
+                if final_loglik > b.0 {
+                    *b = (final_loglik, Some(grid_idx));
+                    bar.set(crate::progress::best_ll(final_loglik));
+                }
+            }
+        }
+
         // gh#147 (M3.3): claim the CAS leaf, write the cell's mle.toml there,
         // finalize. The profile-base is never written (path segment only);
         // each (point, stage, seed, start) is its own leaf. The display
@@ -1687,8 +1675,53 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // Passive progress tick. `Task` handles Pretty (redraw) / Plain
         // (throttled `profile pos/len` log line) / None (no-op) internally.
         bar.inc(1);
+    };
 
-    });
+    // N workers pull the pending job whose cell is nearest the current best
+    // cell, keeping every core busy while evaluation drills toward the
+    // optimum. Order-independent (each job writes its own identity-keyed
+    // leaf), so no barrier and no determinism requirement — the pick just
+    // reorders which cell a freed core visits next.
+    let pending: std::sync::Mutex<Vec<usize>> =
+        std::sync::Mutex::new(remaining.clone());
+    let worker = || {
+        loop {
+            // Snapshot the drill target (release the lock before touching
+            // `pending`, so the two locks never nest).
+            let target = best.lock().map(|b| b.1).unwrap_or(None);
+            let ji = {
+                let mut p = match pending.lock() {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                if p.is_empty() { break; }
+                let pick = match target {
+                    // Nearest unevaluated cell to the best so far.
+                    Some(bc) => {
+                        let mut best_i = 0usize;
+                        let mut best_d = f64::INFINITY;
+                        for (i, &cand) in p.iter().enumerate() {
+                            let d = profile_cell_dist2(
+                                &cell_norm[resolved_jobs[cand].1], &cell_norm[bc]);
+                            if d < best_d { best_d = d; best_i = i; }
+                        }
+                        best_i
+                    }
+                    // No finite best yet — take the next pending job.
+                    None => 0,
+                };
+                p.swap_remove(pick)
+            };
+            eval_job(ji);
+        }
+    };
+    let run_sweep = || {
+        let n_workers = rayon::current_num_threads().max(1);
+        rayon::scope(|s| {
+            for _ in 0..n_workers {
+                s.spawn(|_| worker());
+            }
+        });
     };
     match &prof_pool {
         Some(pool) => pool.install(run_sweep),

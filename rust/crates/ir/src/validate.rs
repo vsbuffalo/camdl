@@ -630,8 +630,17 @@ fn check_likelihood_exprs(
             check_expr(&l.alpha.expr, ctx, true, errors);
             check_expr(&l.beta.expr,  ctx, true, errors);
         }
+        Likelihood::Beta(l) => {
+            check_expr(&l.mean.expr, ctx, true, errors);
+            check_expr(&l.concentration.expr, ctx, true, errors);
+        }
         Likelihood::Bernoulli(l) => {
             check_expr(&l.p.expr, ctx, true, errors);
+        }
+        Likelihood::ZeroInflatedNegBinomial(l) => {
+            check_expr(&l.mean, ctx, true, errors);
+            check_expr(&l.dispersion, ctx, true, errors);
+            check_expr(&l.pi, ctx, true, errors);
         }
     }
 }

@@ -28,6 +28,7 @@ pub mod nuts;  // gh#275 Phase 2: nuts on ode
 pub mod trace_writer;
 pub mod synthetic;
 pub mod gating;
+pub mod chain_diagnostics;  // gh#406: per-chain loglik outlier z-scores (read-side)
 pub mod dt_check;
 pub mod init;
 pub mod chain_starts;
@@ -192,7 +193,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // untouched so the fit's content hash still hashes the original `.camdl`
     // source bytes (identity is unchanged by the hoist). The temp IR persists
     // for the process — `resolve_ir_path`'s returned path is not a drop guard.
-    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.model.camdl)
+    //
+    // gh#439 A2: only `nuts` on the `ode` backend reads the WrtPop state-Jacobian
+    // (`rate_state_grad` / `projection_state_grad`, via the ODE forward-sensitivity
+    // gradient in `ode_grad::det_grad`). If no stage is nuts+ode, compile lean
+    // (`--no-state-grad`), which omits the dense ~O(G^3) Jacobian that dominates
+    // coupled-model IR. The bit is folded into the IR-cache key, so a lean entry is
+    // never reused for a nuts+ode fit (and run identity is gradient-independent, so
+    // lean vs full share the same model digest).
+    let needs_state_grad = config.needs_state_grad();
+    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.model.camdl, needs_state_grad)
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
             std::process::exit(1);
@@ -828,6 +838,20 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             "warning: cannot read compiled IR {} to archive: {}", ir_src, e),
                     }
                 }
+                // Archive the model's display render (`model.render.json`) beside
+                // the IR so a viewer (camdl-watch) can show the model's math
+                // without recompiling. Best-effort + identity-neutral, like the
+                // IR archive above; a render failure never aborts the fit.
+                match crate::util::render_model_json(std::path::Path::new(&config.model.camdl)) {
+                    Ok(json) => {
+                        let dest = seg.join("model.render.json");
+                        if let Err(e) = std::fs::write(&dest, &json) {
+                            eprintln!("warning: cannot archive model render {}: {}",
+                                dest.display(), e);
+                        }
+                    }
+                    Err(e) => eprintln!("warning: cannot render model for archive: {}", e),
+                }
             }
         }
         let store = runid::FsCasStore::new(&cas_root);
@@ -854,7 +878,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let meta = crate::resolve::RecordMeta::new(
             &ir_version_str, &sweep_config.model.camdl, None)
             .with_deps(deps.clone());
-        let write = match crate::resolve::begin_resolved_write(
+        let mut write = match crate::resolve::begin_resolved_write(
             &store, &cas_root, &resolved_artifact, &meta,
             crate::resolve::WriteMode::Streaming,
         ) {
@@ -1710,6 +1734,23 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
             "wall_time_seconds": stage_elapsed.as_secs_f64(),
         });
+        // Declare the tabular outputs' column schema in run.json (proposal
+        // 2026-07-15): classify each written file's real header so a consumer
+        // reads roles instead of reverse-engineering columns. Recorded, not
+        // hashed — the run's identity was fixed at claim time.
+        {
+            let estimated: std::collections::HashSet<&str> =
+                fit_sidecar.estimated.iter().map(String::as_str).collect();
+            let all_params: std::collections::HashSet<&str> = fit_sidecar
+                .estimated
+                .iter()
+                .map(String::as_str)
+                .chain(fit_sidecar.fixed.keys().map(String::as_str))
+                .collect();
+            let schema =
+                crate::output_schema::fit_output_schema(write.dir(), &all_params, &estimated);
+            write.set_output_schema(schema);
+        }
         let dest = match write.finalize(inputs_json) {
             Ok(d) => d,
             Err(e) => {

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 
+use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::posterior_draws;
 use crate::run_meta::{FitAlgorithm, ObsSchema};
 
@@ -160,6 +161,12 @@ pub struct PosteriorDraws {
     pub backend: crate::args::types::ForwardBackend,
     /// The stage's convergence summary.
     pub convergence: ConvergenceStatus,
+    /// The read-side chain selection that produced this cloud, when one was
+    /// active (`--exclude-chains`). `None` for a full-cloud posterior. Carried
+    /// so the predictive artifact can stamp its provenance (`predictive.json`
+    /// `chain_selection`) — a chain-subset band is never mistakable for a
+    /// full-cloud one.
+    pub selection: Option<SubsetInfo>,
 }
 
 impl PosteriorDraws {
@@ -179,7 +186,18 @@ impl PosteriorDraws {
                  that burn-in did not discard every sweep)"
             ));
         }
-        Ok(PosteriorDraws { draws, stage, method, backend, convergence })
+        Ok(PosteriorDraws { draws, stage, method, backend, convergence, selection: None })
+    }
+
+    /// Attach the chain-selection provenance (`--exclude-chains`) to the cloud.
+    pub fn with_selection_info(mut self, info: Option<SubsetInfo>) -> Self {
+        self.selection = info;
+        self
+    }
+
+    /// The chain-selection provenance, when a selection was active.
+    pub fn selection(&self) -> Option<&SubsetInfo> {
+        self.selection.as_ref()
     }
 
     /// The draw cloud (read-only).
@@ -551,11 +569,21 @@ impl FitResult {
     /// A stage that wrote a `draws.tsv` → [`FitResult::Posterior`]; an
     /// optimizer-only fit (no cloud) → [`FitResult::PointEstimate`]; nothing
     /// resolvable → the resolver's actionable error.
-    pub fn resolve(segment: &Path, stage: Option<&str>) -> Result<FitResult, String> {
+    ///
+    /// `selection` (`--exclude-chains`) is applied to the cloud through the
+    /// draws authority ([`PosteriorDrawsRef::load_params_with_info`]) — the one
+    /// place a chain filter meets a cloud — and its provenance is carried onto
+    /// the returned [`PosteriorDraws`].
+    pub fn resolve(
+        segment: &Path,
+        stage: Option<&str>,
+        selection: Option<ChainSelection>,
+    ) -> Result<FitResult, String> {
         let seg_str = segment.to_str().ok_or("fit path is not valid UTF-8")?;
         match posterior_draws::resolve_posterior_draws(seg_str, stage) {
             Ok(pref) => {
-                let rows = crate::load_draws_tsv(&pref.draws_path.to_string_lossy())?;
+                let pref = pref.with_selection(selection);
+                let (rows, sel_info) = pref.load_params_with_info()?;
                 let draws: Vec<IndexMap<String, f64>> = rows
                     .into_iter()
                     .map(|m| m.into_iter().collect())
@@ -565,20 +593,34 @@ impl FitResult {
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| segment.to_path_buf());
-                let convergence = read_convergence(&stage_dir, pref.method);
+                // Convergence for the band. With NO chain selection this is the
+                // stage's stored full-cloud summary. With `--exclude-chains`
+                // active the stored summary describes the WHOLE cloud (including
+                // the dropped chains), so it must not label a subset band — a
+                // band drawn from the clean chains would carry a "did not
+                // converge" verdict about a subset that did. Recompute R̂ / ESS
+                // over the RETAINED chains through the same seam `fit summary`
+                // uses, so the two agree on the same fit + selection (gh#409).
+                let convergence = match &pref.chain_selection {
+                    Some(sel) => subset_convergence(&pref.draws_path, sel)?,
+                    None => read_convergence(&stage_dir, pref.method),
+                };
                 // Replay on the SAME backend the stage ran on; default only when
                 // a bare stage dir was passed (no fit view to read it from).
                 let backend = pref
                     .backend
                     .map(crate::args::types::ForwardBackend::from)
                     .unwrap_or(crate::args::types::ForwardBackend::ChainBinomial);
-                Ok(FitResult::Posterior(PosteriorDraws::new(
-                    draws,
-                    pref.stage,
-                    pref.method,
-                    backend,
-                    convergence,
-                )?))
+                Ok(FitResult::Posterior(
+                    PosteriorDraws::new(
+                        draws,
+                        pref.stage,
+                        pref.method,
+                        backend,
+                        convergence,
+                    )?
+                    .with_selection_info(sel_info),
+                ))
             }
             // No cloud: classify as a point-estimate fit. Report the stage the
             // user asked for (`--stage`), not the terminal one, so the refusal
@@ -602,15 +644,11 @@ impl FitResult {
     }
 }
 
-/// Read a Bayesian stage's convergence summary (`pgas_summary.json` /
-/// `pmmh_summary.json`): `max` over its R̂ map, `min` over its ESS map. Returns
+/// Read a Bayesian stage's convergence summary (`<algorithm>_summary.json`):
+/// `max` over its R̂ map, `min` over its ESS map. Returns
 /// [`ConvergenceStatus::NotAssessed`] when no summary or no R̂ is present (a
 /// single-chain stage), so a band is never silently "converged".
 fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> ConvergenceStatus {
-    let file = match method {
-        Some(FitAlgorithm::Pmmh) | Some(FitAlgorithm::Mh) => "pmmh_summary.json",
-        _ => "pgas_summary.json",
-    };
     let try_read = |name: &str| -> Option<ConvergenceStatus> {
         let bytes = std::fs::read(stage_dir.join(name)).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -626,11 +664,47 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
             None
         }
     };
-    // Try the method's summary, then the other (a stage dir we couldn't name).
-    try_read(file)
-        .or_else(|| try_read("pgas_summary.json"))
-        .or_else(|| try_read("pmmh_summary.json"))
+    // Each method reads its OWN `<algorithm>_summary.json` via the naming seam —
+    // no cross-name fallback. A missing summary (an unnamed stage dir, or a
+    // pre-rename mh fit that stored `pmmh_summary.json`) is NotAssessed, never
+    // read under a sibling's name. The mh-summary rename is a clean break: a fit
+    // produced before it must be re-run to be assessed here.
+    method
+        .map(|m| m.summary_filename())
+        .as_deref()
+        .and_then(try_read)
         .unwrap_or(ConvergenceStatus::NotAssessed)
+}
+
+/// Recompute a band's convergence over the RETAINED chains of a
+/// `--exclude-chains` selection, so a chain-subset predictive band is labelled
+/// with the R̂ / ESS of the subset it was drawn from — never the stored
+/// full-cloud summary (which includes the dropped chains). Uses the ONE shared
+/// recompute seam ([`crate::chain_selection::recompute_subset_diagnostics`] →
+/// `runner::compute_rhat_ess` over the same `apply_keyed` filter) that
+/// `fit summary --exclude-chains` uses, so the two agree on the same fit +
+/// selection (gh#409).
+///
+/// Scores every param column (`None`); fixed columns yield a non-finite R̂ / ESS
+/// that the `max` / `min` skip. Reduces to max R̂ / min ESS the same way
+/// [`crate::fit::method_result::PosteriorDiagnostics::max_rhat`] /
+/// [`min_ess`](crate::fit::method_result::PosteriorDiagnostics::min_ess) do —
+/// [`ConvergenceStatus::NotAssessed`] when no param has a finite R̂ (e.g. a
+/// single retained chain), rather than a falsely-converged band.
+fn subset_convergence(
+    draws_path: &Path,
+    selection: &ChainSelection,
+) -> Result<ConvergenceStatus, String> {
+    let sub = crate::chain_selection::recompute_subset_diagnostics(draws_path, selection, None)?;
+    let rhat_max = sub.rhat_per_param.values().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !rhat_max.is_finite() {
+        return Ok(ConvergenceStatus::NotAssessed);
+    }
+    // Min ESS over the scored params; non-finite entries (non-finite-R̂ / R̂ > 1.1
+    // params) are skipped by `f64::min`, matching `min_ess`. `None` (no params)
+    // cannot occur here — a finite `rhat_max` proves at least one scored param.
+    let ess_min = sub.ess_per_param.values().copied().reduce(f64::min).unwrap_or(f64::INFINITY);
+    Ok(ConvergenceStatus::Reported { rhat_max, ess_min })
 }
 
 // ── The engine sink: sample y_rep per draw at the observed cadence ─────────
@@ -658,6 +732,11 @@ struct PredictiveSink {
     compiled: std::sync::Arc<sim::CompiledModel>,
     /// Per leaf (in `model.observations` order): the observation times to score.
     leaf_times: Vec<Vec<f64>>,
+    /// Per leaf, per time (aligned with `leaf_times`): the observed auxiliary
+    /// columns carried forward into the predictive draw (a data-supplied
+    /// binomial denominator `n = n_examined`). Empty inner vec = no aux at that
+    /// obs time (the likelihood's denominator then resolves data-free).
+    leaf_aux: Vec<Vec<Vec<(String, f64)>>>,
     /// The generated-quantities evaluator, `Some` iff the model declares a
     /// `quantities {}` block. Composed alongside the obs-sample accumulator (same
     /// draw, same params) — not a second [`RunSink`]. Held behind an `Arc` so a
@@ -731,10 +810,15 @@ impl crate::engine::RunSink for PredictiveSink {
                 &params,
             );
             let projected = crate::project_all_obs_times(&cell.traj, obs_ir, model, times);
+            let leaf_aux = &self.leaf_aux[si];
             let mut stream_vals: Vec<f64> = Vec::with_capacity(times.len());
             for (ti, &t) in times.iter().enumerate() {
                 let snap = crate::snap_at(&cell.traj, t);
-                let y = sampler(projected[ti], t, &snap.int_state.counts, &mut obs_rng);
+                // Carry the OBSERVED aux (survey denominator) at this obs time
+                // into the draw; `&[]` when the leaf has no aux (aligned 1:1 with
+                // `times`, so a wrong index is impossible).
+                let aux: &[(String, f64)] = leaf_aux.get(ti).map(|v| v.as_slice()).unwrap_or(&[]);
+                let y = sampler(projected[ti], t, &snap.int_state.counts, aux, &mut obs_rng);
                 stream_vals.push(y);
             }
             if want_obs {
@@ -793,12 +877,18 @@ pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
 }
 
 /// One fit leaf's loaded observed series: its logical stream, stratum, times,
-/// and observed cells (`None` = a hole).
+/// observed cells (`None` = a hole), and per-observation auxiliary columns
+/// (e.g. a survey denominator `n = n_examined`) aligned 1:1 with `times`.
 struct LeafObs {
     source: String,
     stratum: Vec<(String, String)>,
     times: Vec<f64>,
     observed: Vec<Option<f64>>,
+    /// `aux[i]` = the auxiliary `(column, value)` pairs observed at `times[i]`.
+    /// Carried into the free-forward predictive so a data-supplied denominator
+    /// (`binomial(n = n_examined, …)`) draws `y_rep ~ binomial(n_examined, p̂)`
+    /// rather than `binomial(0, …) = 0`.
+    aux: Vec<Vec<(String, f64)>>,
 }
 
 /// Expand the `--sweep` specs into Cartesian grid cells, each a sorted-by-name
@@ -836,7 +926,14 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         crate::fit::handle::resolve_fit(args.fit()?).map_err(|e| e.to_string())?;
 
     // 2. Resolve the posterior — by artifact. A point-estimate fit is refused.
-    let fit_result = FitResult::resolve(&segment, args.stage.as_deref())?;
+    //    `--exclude-chains` is parsed at the boundary into a typed selection and
+    //    applied to the cloud through the draws authority (one filter, once).
+    let selection = args
+        .exclude_chains
+        .as_deref()
+        .map(ChainSelection::parse_exclude)
+        .transpose()?;
+    let fit_result = FitResult::resolve(&segment, args.stage.as_deref(), selection)?;
     let treatment = fit_result.into_treatment();
     // The label the artifact carries, derived from the treatment before we
     // unwrap the cloud (v1 only ever reaches `posterior` here, but the label is
@@ -846,6 +943,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         ParamTreatment::Posterior(pd) => pd,
         ParamTreatment::PlugIn { method, stage } => return Err(plugin_refusal(method, &stage)),
     };
+
+    // A chain selection actually dropped chains — warn loudly (non-quietable),
+    // naming the dropped chains and the bias direction, before any output.
+    if let Some(info) = posterior.selection() {
+        warn_active_selection(info);
+    }
 
     // 2b. Resolve which horizon(s) to emit. The one-step horizon is gated by a
     // backend witness ([`FilterableFit`]); an explicit `--horizon one_step` on a
@@ -880,9 +983,15 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     let (compiled_ir, _ir_tmp): (String, Option<std::path::PathBuf>) = if archived_ir.is_file() {
         (archived_ir.to_string_lossy().into_owned(), None)
     } else {
-        crate::util::resolve_ir_path(&config.model.camdl)?
+        // `fit predict` replays forward trajectories from stored draws — it never
+        // recomputes an ODE gradient, so compile lean (`needs_state_grad = false`,
+        // gh#439 A2).
+        crate::util::resolve_ir_path(&config.model.camdl, false)?
     };
     let (model, _) = crate::util::load_model(&compiled_ir)?;
+    // One calendar block for every sidecar manifest this run writes
+    // (predictive / observed / quantities), read once off the model.
+    let calendar = io::CalendarMeta::from_model(&model);
     let dt = model.simulation.dt.unwrap_or(1.0);
 
     // 3b. Parse the prospective scenario overlay (reusing simulate's ScenarioRef
@@ -1099,6 +1208,21 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     .unwrap_or_default()
             })
             .collect();
+        // Observed aux per leaf, in the SAME model.observations order + the same
+        // per-leaf time alignment as `leaf_times` (both cloned from the matched
+        // `LeafObs`), so `leaf_aux[si][ti]` is the survey denominator at
+        // `leaf_times[si][ti]`.
+        let leaf_aux: Vec<Vec<Vec<(String, f64)>>> = model
+            .observations
+            .iter()
+            .map(|o| {
+                leaves
+                    .iter()
+                    .find(|l| leaf_matches(o, l))
+                    .map(|l| l.aux.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
 
         // The free-forward cells (one per sweep-point × scenario, engine canonical
         // order), plus the stacked quantity bodies + merged manifest entries — all
@@ -1141,6 +1265,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             let mut sink = PredictiveSink {
                 compiled: compiled.clone(),
                 leaf_times: leaf_times.clone(),
+                leaf_aux: leaf_aux.clone(),
                 quant_eval: quant_eval.clone(),
                 by_scenario: IndexMap::new(),
             };
@@ -1212,6 +1337,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                         &accum.quant_times,
                         crate::quantity_output::Mode::Banded,
                         coords,
+                        &calendar,
                     )?;
                     for (name, content) in outs {
                         // First design cell for this quantity: keep its header +
@@ -1412,10 +1538,17 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // (regenerated, overwritten in place). Written whenever any predictive
     // stream was emitted.
     if !predictive_manifest_entries.is_empty() {
-        let manifest = serde_json::json!({
+        let mut manifest = serde_json::json!({
             "schema": "camdl.predictive/v1",
+            "calendar": calendar.to_json(),
             "streams": predictive_manifest_entries,
         });
+        // Provenance: a chain-subset predictive records the selection alongside
+        // the streams, so a chain-subset artifact is never mistakable for a
+        // full-cloud one. Absent (no key) when the full cloud was used.
+        if let Some(info) = posterior.selection() {
+            manifest["chain_selection"] = info.to_json();
+        }
         let path = segment.join("predictive.json");
         let text = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing predictive manifest: {e}"))?;
@@ -1423,10 +1556,36 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         written.push(path);
     }
 
-    // The observed half, grouped by logical stream.
+    // The observed half, grouped by logical stream, plus an `observed.json`
+    // manifest carrying the calendar semantics for the `time` column — a sibling
+    // of `predictive.json`, NOT in the run_id-keyed CAS leaf (regenerated,
+    // overwritten in place).
+    let mut observed_manifest_entries: Vec<serde_json::Value> = Vec::new();
     for (source, index_dims, rows) in observed_by_stream(&leaves, schema.as_ref()) {
         let obs_tsv = render_observed_tsv(&index_dims, &rows);
         written.push(write_tsv(&segment, "observed", &source, &obs_tsv)?);
+        let file = format!("observed/{source}.tsv");
+        let mut coordinates: Vec<String> = vec!["time".to_string()];
+        coordinates.extend(index_dims.iter().cloned());
+        observed_manifest_entries.push(serde_json::json!({
+            "name": source,
+            "file": file,
+            "coordinates": coordinates,
+            "value_column": "value",
+        }));
+    }
+    if !observed_manifest_entries.is_empty() {
+        let manifest = serde_json::json!({
+            "schema": "camdl.observed/v1",
+            "calendar": calendar.to_json(),
+            "streams": observed_manifest_entries,
+        });
+        let path = segment.join("observed.json");
+        let text = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("serializing observed manifest: {e}"))?;
+        std::fs::write(&path, text)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        written.push(path);
     }
     // Generated quantities: one sidecar TSV per logical quantity + a manifest.
     // These are NOT in the run_id-keyed CAS leaf — a regenerated sidecar beside
@@ -1520,7 +1679,7 @@ fn load_leaf_obs(
         };
         let siblings: Vec<&ir::observation::ObservationModel> =
             model.observations.iter().filter(|o| o.source == obs_model.source).collect();
-        let (obs, cells, _aux) =
+        let (obs, cells, aux) =
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
         let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
         let observed: Vec<Option<f64>> = cells
@@ -1531,7 +1690,7 @@ fn load_leaf_obs(
             .collect();
         let stratum: Vec<(String, String)> =
             obs_model.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
-        out.push(LeafObs { source: obs_model.source.clone(), stratum, times, observed });
+        out.push(LeafObs { source: obs_model.source.clone(), stratum, times, observed, aux });
     }
     Ok(out)
 }
@@ -1653,17 +1812,19 @@ fn one_step_bands(
     schema: Option<&ObsSchema>,
 ) -> Result<(Vec<StreamBands>, usize), String> {
     use sim::inference::{
-        bootstrap_filter, multi_stream_obs::StreamProjection, multi_stream_obs::StreamSpec,
+        bootstrap_filter, multi_stream_obs::StreamProjection,
         traits::SMCConfig, BoundObs, ChainBinomialProcess, MultiStreamObsModel,
     };
+    use crate::fit::runner::ObsStream;
 
-    // ── Build the filter obs model ONCE. This mirrors `pfilter.rs:386-421` and
-    // `fit::runner::build_obs_model`: it is the THIRD copy of this obs-model
-    // assembly (pfilter.rs, runner, here). Consolidating the three onto a shared
-    // builder is a follow-up — NOT done here (the two existing copies are left
-    // untouched). Each bound leaf reuses `runner::load_observations` for its
-    // cells + cadence, then `StreamProjection::from_ir` + `bind` + the
-    // multi-stream model, the same way the fit's pfilter stage does.
+    // ── Build the filter obs model ONCE. Resolution here is predict-specific
+    // (skips a fit-only diagnostic stream whose source is unbound; honours the
+    // `--stream` filter; iterates in `model.observations` order so `stream_idx`
+    // maps back to its IR leaf via `bound_leaves`), so it does NOT route through
+    // `resolve_and_load_obs_streams`. But the `ObsStream -> StreamSpec` assembly
+    // (the bug-prone shared part) IS routed through the single shared builder
+    // `stream_specs_from_obs_streams`, the same one `fit run` and `pfilter` use.
+    // Each bound leaf reuses `runner::load_observations` for its cells + cadence.
     let data = config.data_spec().map_err(|e| {
         format!("this fit has no [data] block to read the observed series from: {e}")
     })?;
@@ -1682,7 +1843,7 @@ fn one_step_bands(
     // Bound leaves, in `model.observations` order, so `stream_idx` (the index
     // into the obs model's `stream_names()`) maps back to its IR leaf here.
     let mut bound_leaves: Vec<&ir::observation::ObservationModel> = Vec::new();
-    let mut specs: Vec<StreamSpec> = Vec::new();
+    let mut obs_streams: Vec<ObsStream> = Vec::new();
     for obs_model in &model.observations {
         if !stream_selected(obs_model, stream_filter) {
             continue;
@@ -1695,23 +1856,24 @@ fn one_step_bands(
         let (obs, cells, aux) =
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
         let projection = StreamProjection::from_ir(&obs_model.projection, &compiled, &obs_model.name)?;
-        let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
-        specs.push(StreamSpec {
+        obs_streams.push(ObsStream {
+            name: obs_model.name.clone(),
             projection,
-            ir_model: obs_model.clone(),
-            observations: cells,
-            obs_times: times,
+            obs_model_ir: obs_model.clone(),
+            data: obs,
+            cells,
             aux,
         });
         bound_leaves.push(obs_model);
     }
-    if specs.is_empty() {
+    if obs_streams.is_empty() {
         return Err("no observation streams to predict — check that the model's \
                     observation sources are bound to data in the fit config, and that \
                     --stream (if given) names a real stream"
             .into());
     }
 
+    let specs = crate::fit::runner::stream_specs_from_obs_streams(&obs_streams);
     let (bound, _report) = BoundObs::bind(specs)
         .map_err(|report| format!("observation data invalid:\n{}", report.render()))?;
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
@@ -1946,6 +2108,54 @@ fn plugin_refusal(method: Option<FitAlgorithm>, stage: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_convergence_finds_mh_summary_for_mh_method() {
+        // An mh(-ODE) stage writes `mh_summary.json` (NOT `pmmh_summary.json`),
+        // so read_convergence must resolve it via the algorithm's own name. On
+        // the pre-fix code — which searched only pgas/pmmh — this returned
+        // NotAssessed, silently dropping the mh stage's convergence.
+        let dir = std::env::temp_dir().join("camdl_read_convergence_mh_summary_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mh_summary.json"),
+            r#"{"rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
+        )
+        .unwrap();
+
+        match read_convergence(&dir, Some(FitAlgorithm::Mh)) {
+            ConvergenceStatus::Reported { rhat_max, ess_min } => {
+                assert!((rhat_max - 1.03).abs() < 1e-9, "rhat_max from mh_summary.json");
+                assert!((ess_min - 250.0).abs() < 1e-9, "ess_min from mh_summary.json");
+            }
+            _ => panic!("mh stage must resolve its own mh_summary.json, not NotAssessed"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_convergence_clean_break_no_pmmh_fallback() {
+        // Clean break: a pre-rename mh fit (only `pmmh_summary.json` on disk) is
+        // NOT silently read under the old name — it is NotAssessed, so the fit
+        // must be re-run. Asserts the cross-name fallback was removed.
+        let dir = std::env::temp_dir().join("camdl_read_convergence_clean_break_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pmmh_summary.json"),
+            r#"{"rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                read_convergence(&dir, Some(FitAlgorithm::Mh)),
+                ConvergenceStatus::NotAssessed
+            ),
+            "an mh fit must not fall back to pmmh_summary.json (clean break)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn quantile_linear_interpolation_matches_numpy() {

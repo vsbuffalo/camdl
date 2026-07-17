@@ -380,3 +380,123 @@ fn compare_derived_trace_equals_manual_pfilter() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// Recursively locate the single `draws.tsv` under a fit segment.
+fn find_draws_tsv(dir: &Path) -> Option<PathBuf> {
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(found) = find_draws_tsv(&p) {
+                return Some(found);
+            }
+        } else if p.file_name().and_then(|n| n.to_str()) == Some("draws.tsv") {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// The absolute elpd of the row named `name` from `compare --format json` stdout.
+fn elpd_of(json_stdout: &str, name: &str) -> f64 {
+    let v: serde_json::Value = serde_json::from_str(json_stdout).unwrap_or_else(|e| {
+        panic!("compare --format json did not emit JSON ({e}):\n{json_stdout}")
+    });
+    v["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .find(|r| r["name"] == name)
+        .unwrap_or_else(|| panic!("no row named {name} in:\n{json_stdout}"))["elpd"]
+        .as_f64()
+        .expect("elpd is a finite number")
+}
+
+#[test]
+fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
+    // gh#417/gh#418: `--exclude-chains @a:2` must drop chain 2 from @a's posterior
+    // BEFORE deriving its plug-in θ̂ — scoring the SAME subset a `predict` would
+    // band (predict/summary already do — gh#409) — while leaving every OTHER fit
+    // whole. Inject a stuck minority chain into @a's cloud: excluding it moves
+    // @a's θ̂ (hence prequential elpd), and @b (unnamed) must be byte-identical to
+    // the all-chains run. If the token bound cohort-wide, @b would move too; if it
+    // were ignored, @a would not move.
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_compare_excl_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("a.toml"), pgas_fit_toml(0.5)).unwrap();
+    std::fs::write(tmp.join("b.toml"), pgas_fit_toml(0.6)).unwrap();
+    for (cfg, label) in [("a.toml", "a"), ("b.toml", "b")] {
+        let out = run(&bin, &tmp, &["fit", "run", cfg, "--label", label, "--seed", "1"]);
+        assert!(
+            out.status.success(),
+            "pgas fit run {cfg} failed:\nstderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Overwrite @a's cloud with two chains: chain 1 (0-based 0) mixed at
+    // beta≈0.35; chain 2 (0-based 1) stuck at beta≈0.90 (a fast epidemic).
+    // Columns are this model's draws.tsv order — estimated (beta, gamma) then
+    // fixed (N0, I0, rho, k); the keyed loader maps by name, so what matters is
+    // that the stuck chain carries a materially different beta.
+    let seg_a = segment_with_label(&tmp.join("results"), "a");
+    let draws_a = find_draws_tsv(&seg_a).expect("@a wrote a draws.tsv");
+    let mut cloud = String::from("chain\tdraw\tbeta\tgamma\tN0\tI0\trho\tk\n");
+    for draw in 0..6 {
+        cloud.push_str(&format!("0\t{draw}\t0.35\t0.14\t10000\t10\t0.5\t10\n"));
+    }
+    for draw in 0..6 {
+        cloud.push_str(&format!("1\t{draw}\t0.90\t0.05\t10000\t10\t0.5\t10\n"));
+    }
+    std::fs::write(&draws_a, cloud).unwrap();
+
+    // Baseline pinned to @b so neither row's absolute elpd depends on which is
+    // baseline; JSON reports each row's own elpd.
+    let common = ["compare", "@a", "@b", "--baseline", "@b", "--format", "json",
+                  "--particles", "300", "--seed", "1"];
+    let all = run(&bin, &tmp, &common);
+    assert!(
+        all.status.success(),
+        "compare (all chains) failed:\nstderr={}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+    let all_out = String::from_utf8_lossy(&all.stdout);
+    let (e_a_all, e_b_all) = (elpd_of(&all_out, "@a"), elpd_of(&all_out, "@b"));
+
+    // Per-fit: drop @a's stuck chain, leave @b untouched.
+    let mut sub_args = common.to_vec();
+    sub_args.extend_from_slice(&["--exclude-chains", "@a:2"]);
+    let sub = run(&bin, &tmp, &sub_args);
+    assert!(
+        sub.status.success(),
+        "compare --exclude-chains @a:2 failed:\nstderr={}",
+        String::from_utf8_lossy(&sub.stderr)
+    );
+    let sub_out = String::from_utf8_lossy(&sub.stdout);
+    let (e_a_sub, e_b_sub) = (elpd_of(&sub_out, "@a"), elpd_of(&sub_out, "@b"));
+
+    // @a's θ̂ moves off the fast-epidemic pull → its elpd changes.
+    assert!(
+        (e_a_all - e_a_sub).abs() > 1e-6,
+        "excluding @a's stuck chain must change @a's elpd (θ̂ over the retained \
+         subset): all={e_a_all}, subset={e_a_sub}"
+    );
+    // @b was not named → byte-identical: the token bound per-fit, not cohort-wide.
+    assert!(
+        (e_b_all - e_b_sub).abs() < 1e-9,
+        "@b was not named in --exclude-chains @a:2, so its elpd must be unchanged \
+         (per-fit binding, not cohort-wide): all={e_b_all}, subset={e_b_sub}"
+    );
+
+    // The bias warning fired and named the targeted fit.
+    let sub_err = String::from_utf8_lossy(&sub.stderr);
+    assert!(
+        sub_err.contains("--exclude-chains") && sub_err.contains("fit '@a'"),
+        "compare --exclude-chains @a:2 must warn, naming fit @a:\nstderr={sub_err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

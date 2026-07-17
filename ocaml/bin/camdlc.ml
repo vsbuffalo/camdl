@@ -7,11 +7,15 @@ Usage:
   camdlc check   FILE.camdl                  parse + type-check; report diagnostics
   camdlc inspect FILE.camdl [OPTIONS]        print model structure (summary, dims, ...)
   camdlc doctest [--gate] FILE.md ...        compile the camdl blocks in Markdown docs
+  camdlc render  FILE.camdl [--format json]  render the model as LaTeX (or JSON, for display)
 
 Flags (compile):
   --set NAME=VALUE   override a parameter value
   --json-errors      emit diagnostics as a JSON array to stderr
   --no-dim-check     disable dimensional analysis (only for a confirmed false positive)
+  --no-state-grad    skip the state-Jacobian (rate_state_grad); smaller IR for
+                     forward sim + gradient-free fits (IF2/PMMH/PF/MH), but the
+                     IR can't be fit with `nuts` on the ODE backend
   --camdl-version    print the compiler's git hash
 
 To run models — simulate, fit, profile, survey, browse results — use `camdl`,
@@ -35,6 +39,10 @@ let () =
   (* ── camdlc doctest [--gate] [--verbose] FILE.md ... ──────────────── *)
   | "doctest" :: rest ->
     Doctest.main rest
+
+  (* ── camdlc render FILE.camdl  (LaTeX of the indexed, pre-expansion model) ── *)
+  | "render" :: rest ->
+    Latex.run rest
 
   (* ── camdlc --camdl-version ──────────────────────────────────────── *)
   | ["--camdl-version"] | "--camdl-version" :: _ ->
@@ -165,6 +173,12 @@ let () =
       ("--no-dim-check", Arg.Unit (fun () ->
         Compiler.no_dim_check := true
        ), " disable dimensional analysis checking");
+      ("--no-state-grad", Arg.Unit (fun () ->
+        Compiler.no_state_grad := true
+       ), " skip the state-Jacobian (rate_state_grad/projection_state_grad); \
+           shrinks the IR for forward simulation and gradient-free fits \
+           (IF2/PMMH/PF/MH). A model compiled this way cannot be fit with \
+           `nuts` on the ODE backend");
       ("-o", Arg.String set_output,
        "FILE  write IR JSON to FILE instead of stdout");
       ("--output", Arg.String set_output,

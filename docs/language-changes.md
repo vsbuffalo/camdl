@@ -13,6 +13,87 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-07-12 — indexed parameters accept multiple dimensions
+
+**What.** A parameter declaration may now index over more than one dimension,
+expanding to one scalar parameter per cell of the cartesian product:
+
+```camdl
+parameters {
+  mu[village, season]         : rate               # → mu_kwaru_wet, mu_kwaru_dry, …
+  m[village, season, species] : positive 'ratio     # → m_kwaru_wet_gam, …
+}
+let C[v in village, s in season] = mu[v,s] * m[v,s,gam]
+```
+
+This is a **widening** — no migration needed. A single-dimension declaration
+(`R0[patch]`) is unchanged, and every existing model compiles identically. Cell
+names mangle `<base>_<level1>_<level2>_…` in declaration-dim order; a use
+(`mu[v,s]`), a scenario key (`mu_kwaru_wet`), and an init/`--param-vec` override
+all address a specific cell by that name. Each index axis must name a declared
+`stratify` dimension.
+
+**Diagnostics.** A repeated axis (`mu[village, village]`) is **E331**; an
+unknown or empty index dimension is **E330**; under-indexing a use (`mu[v]` on a
+2-D param) remains **E299**.
+
+## 2026-07-10 — forcing selectors quoted, `method` a bare enum, `until` → `to`
+
+Three surface changes land together (gh#423). All are signposted: the old form
+is rejected with a diagnostic that names the new form.
+
+**What (1) — forcing file columns are quoted strings.** In a `forcing { }` block
+the file selectors — `data`, `time_col`, `value_col`, `key_col` — must now be
+**quoted strings**; a bare identifier is rejected. This carries the reader's
+rule in the syntax: **quoted = outside the model (a file or a file column), bare
+= inside the model** (a parameter, table, dimension, or a closed enum). The
+model-name arguments `table` and `time_dim` stay **bare** (they name a
+`tables {}` entry / a dimension), and quoting them is now rejected. The compiled
+IR is unchanged — selectors are consumed at expand time and never cross the IR
+seam.
+
+_Migration._ `time_col = t` → `time_col = "t"`; `value_col = C` →
+`value_col = "C"`; `key_col = village` → `key_col = "village"`; `data = f.tsv` →
+`data = "f.tsv"`. Leave `table = mymatrix` and `time_dim = week` bare.
+
+_Diagnostic._ A bare file selector → **E410**
+(`value_col must be a quoted
+column name — write value_col = "C"`). A quoted
+`table`/`time_dim` → **E412**
+(`table names a model construct — remove the quotes`).
+
+**What (2) — `method` is a bare, validated enum.** The interpolation method is
+now written **bare**: `method = linear` (also `constant`, `spline`), matching
+every other closed enum in the language (`integrator = rk45`, `format = tsv`).
+The quoted form is rejected, and — new — the value is **validated**: only
+`linear | constant | spline` are accepted. Previously an unquoted-vs-quoted
+`method` compiled either way and an unknown value (`method = "cubic_spline"`)
+was accepted by the compiler but failed to deserialize at the simulation
+boundary. The spec's `cubic_spline` / `pchip` never existed in the runtime and
+are removed.
+
+_Migration._ `method = "linear"` → `method = linear`. If you used
+`"cubic_spline"` or `"pchip"`, switch to `spline`.
+
+_Diagnostic._ A quoted `method` → **E411**
+(`method is now a bare enum — write
+method = linear`); an unknown value →
+**E411**
+(`unknown interpolation method
+'banana' — expected linear, constant, or spline`).
+
+**What (3) — the recurring window end is `to`, not `until`.** In a
+`transfer(...) { … }` / `add(...) { … }` recurring schedule body, the window end
+was spelled `until`, while a `set` block and `simulate { from … to … }` spelled
+the same slot `to`. `to` is now the only spelling.
+
+_Migration._ `{ every = 30 'days  from = 0 'days  until = 90 'days }` →
+`{ every = 30 'days  from = 0 'days  to = 90 'days }`.
+
+_Diagnostic._ `until = …` → **E113** (`` `until` is now `to` ``).
+
+---
+
 ## 2026-07-05 — ASCII `*` accepted as an alias for the `×` dimension separator
 
 **What.** The dimension-product separator — in table shapes

@@ -40,16 +40,16 @@ parameters {
 forcing {
   pop : interpolated 'count {
     data      = "data/he2010_london_covariates.tsv"
-    time_col  = t
-    value_col = pop
-    method    = "linear"
+    time_col  = "t"
+    value_col = "pop"
+    method    = linear
   }
 
   birthrate : interpolated 'per_year {
     data      = "data/he2010_london_covariates.tsv"
-    time_col  = t
-    value_col = birthrate
-    method    = "linear"
+    time_col  = "t"
+    value_col = "birthrate"
+    method    = linear
   }
 
   # UK school calendar matching pomp exactly:

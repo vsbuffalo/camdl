@@ -294,45 +294,6 @@ impl FitRunConfig {
                  [data.observations] (per-source paths).".into());
         }
 
-        let mut streams = Vec::new();
-
-        // Iterate the model's observation blocks whose `source` is BOUND to a
-        // data file (sorted by name for deterministic ordering — two fits with
-        // the same observations but different toml ordering hash identically
-        // downstream). A stream whose source is not in `[data.observations]` is
-        // not fit against — only the bound streams are loaded (the caller may
-        // deliberately fit a subset). Each stream resolves its file via its
-        // declared `source`; columns bind by name.
-        let mut obs_blocks: Vec<&ir::observation::ObservationModel> =
-            model.observations.iter()
-                .filter(|o| effective.contains_key(&o.source))
-                .collect();
-        obs_blocks.sort_by(|a, b| a.name.cmp(&b.name));
-
-        // Every bound source must name a real observation stream — a key in
-        // `[data.observations]` (or a `--data NAME=` source) that matches no
-        // stream's `source` is a typo, not a silent no-op.
-        for src in effective.keys() {
-            if !model.observations.iter().any(|o| &o.source == src) {
-                return Err(format!(
-                    "data source '{}' is bound to a file but matches no observation \
-                     stream's source. Available sources: {}",
-                    src,
-                    {
-                        let mut s: Vec<&str> = model.observations.iter()
-                            .map(|o| o.source.as_str()).collect();
-                        s.sort_unstable(); s.dedup();
-                        s.join(", ")
-                    }));
-            }
-        }
-        if obs_blocks.is_empty() {
-            return Err(
-                "no observation stream is bound to a data file — check that \
-                 [data.observations] / --data names match the model's stream \
-                 sources.".into());
-        }
-
         let time_opts = crate::caltime_load::TimeOpts {
             origin: model.origin.as_deref(),
             time_unit: &model.time_unit,
@@ -340,72 +301,13 @@ impl FitRunConfig {
             t_start: compiled.model.simulation.t_start,
             format: crate::caltime_load::TimeFormat::Auto,
         };
-        for obs_model in &obs_blocks {
-            let stream_name = obs_model.name.clone();
-            let data_path = effective.get(&obs_model.source)
-                .expect("filtered to bound sources above");
-            let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
-                .filter(|o| o.source == obs_model.source)
-                .collect();
-            let (obs, cells, aux) =
-                load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
-            let obs_model: ir::observation::ObservationModel = (*obs_model).clone();
-            let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
-                &obs_model.projection, &compiled, &stream_name,
-            )?;
-            let stream_name = stream_name.as_str();
 
-            // F4: reject an observation strictly before the model origin.
-            // The integrator never propagates a particle to a time it has
-            // already passed, so the window yields zero substeps yet the obs
-            // is still scored — a silent wrong answer. Hard error at load.
-            // gh#174: reject a positive incidence observation at the model
-            // origin (zero-width first window → -Inf masquerading as filter
-            // degeneracy). Hard error before any stage runs.
-            {
-                let obs_times: Vec<f64> = obs.iter().map(|o| o.time).collect();
-                crate::util::check_obs_before_origin(
-                    stream_name,
-                    compiled.model.simulation.t_start,
-                    &obs_times,
-                )?;
-                // The degenerate-origin-window check fires only when the FIRST
-                // observation sits exactly on the origin AND carries a positive
-                // incidence value. If the first cell is a HOLE there is no value
-                // scored at the origin (the term is omitted), so the -Inf risk
-                // does not arise — pass a non-positive sentinel so the check is a
-                // no-op. We must NOT substitute a later present value (it belongs
-                // to a later time, not the origin) nor a fictitious 0 that scores.
-                let first_value = match cells.first() {
-                    Some(Some(sim::inference::ObsCell::Scalar(v))) => *v,
-                    _ => 0.0, // first cell is a hole (or no obs) → check is a no-op
-                };
-                crate::util::check_incidence_origin_window(
-                    stream_name,
-                    &obs_model.projection,
-                    compiled.model.simulation.t_start,
-                    &obs_times,
-                    first_value,
-                )?;
-            }
-
-            // Multi-cadence (proposal 2026-06-10 §3.3): each stream keeps its
-            // OWN observation times + cells. `bind` merges the streams to the
-            // sorted-unique UNION axis and records per-stream membership
-            // (`at_union`); the per-stream incidence reset (Phase 2a) fires only
-            // where a stream is scheduled. The old "must have identical
-            // observation times" guard was the no-silent-gaps stance for
-            // machinery that did not yet exist — that machinery now exists.
-
-            streams.push(ObsStream {
-                name: stream_name.to_string(),
-                projection,
-                obs_model_ir: obs_model,
-                data: obs,
-                cells,
-                aux,
-            });
-        }
+        // Resolve the bound observation streams (by source) and load each one's
+        // per-observation values + aux, via the single shared seam that pfilter
+        // and profile also route through (multi-cadence: each stream keeps its
+        // OWN times + cells; `bind` merges to the union below).
+        let mut streams =
+            resolve_and_load_obs_streams(&model, &compiled, &effective, dt, &time_opts)?;
 
         // Canonical observations: the sorted-unique UNION of every stream's
         // observation times (multi-cadence, proposal 2026-06-10 §3.3). This is
@@ -712,24 +614,7 @@ impl FitRunConfig {
         sim::inference::ChainBinomialProcess::new(self.compiled.clone())
     }
     pub fn build_obs_model(&self) -> sim::inference::MultiStreamObsModel {
-        let specs: Vec<sim::inference::multi_stream_obs::StreamSpec> = self.streams.iter()
-            .map(|s| sim::inference::multi_stream_obs::StreamSpec {
-                projection: s.projection.clone(),
-                ir_model: s.obs_model_ir.clone(),
-                // Authoritative per-grid-time cells (holes = `None`). A hole
-                // contributes no likelihood term but its obs time stays in the
-                // grid, so the per-obs-index incidence reset still fires at it.
-                observations: s.cells.clone(),
-                // Multi-cadence (§3.3): feed each stream its OWN schedule, NOT
-                // the union (`self.observations`). `bind` re-merges these to the
-                // union and records per-stream `at_union` membership; `s.cells`
-                // is already this stream's own cells (cells.len() == this
-                // stream's obs_times.len()). The union `bind` produces equals
-                // `self.observations` (both sorted-unique over the same
-                // per-stream times).
-                obs_times: s.data.iter().map(|o| o.time).collect(),
-                aux: s.aux.clone(),
-            }).collect();
+        let specs = stream_specs_from_obs_streams(&self.streams);
         let (bound, _report) = sim::inference::BoundObs::bind(specs).unwrap_or_else(|report| {
             eprintln!("error: observation data invalid:\n{}", report.render());
             std::process::exit(1);
@@ -1341,6 +1226,210 @@ pub(crate) fn load_observations(
         })
         .collect();
     Ok((observations, cells, aux))
+}
+
+/// Convert a resolved data-binding list (`resolve_data_specs` for the CLI
+/// `--data NAME=PATH` form, or `load_data_observations_from_fit_toml` for the
+/// fit-toml `[data.observations]` form) into the by-SOURCE `effective` map that
+/// [`resolve_and_load_obs_streams`] consumes.
+///
+/// This is the boundary adapter between the CLI/toml key spaces and the seam.
+/// Each binding key is resolved to a stream `source`: a key equal to a stream's
+/// `source` (the fit-toml family-root / `[data.observations]` form) is used
+/// directly; a key equal to a leaf NAME (the CLI form, where `resolve_data_specs`
+/// has already expanded a family root to its leaf names) resolves to that leaf's
+/// source. Because a stratified family's leaves share one source, several leaf
+/// bindings to the same file dedup to one `(source → path)` entry, so the seam
+/// binds every leaf of the source from that one long-form file.
+///
+/// Errors:
+/// - a key matching neither a source nor a leaf name (a typo, not a silent
+///   no-op);
+/// - the same source bound to two DIFFERENT files (the seam loads one file per
+///   source — a stratified family shares one long-form file; split files across
+///   one source cannot be honoured).
+pub(crate) fn data_bindings_to_effective(
+    model: &ir::Model,
+    bindings: &[(String, std::path::PathBuf)],
+) -> Result<indexmap::IndexMap<String, String>, String> {
+    let mut effective: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+    for (key, path) in bindings {
+        let path_str = path.to_string_lossy().into_owned();
+        // Match by SOURCE first, then by leaf NAME — the same precedence
+        // `profile`'s prior fan-out used (`k == o.source || k == o.name`). Both
+        // realistic forms (a source family root, a CLI-expanded leaf name)
+        // resolve to the same source regardless of precedence.
+        let source = model.observations.iter()
+            .find(|o| &o.source == key)
+            .or_else(|| model.observations.iter().find(|o| &o.name == key))
+            .map(|o| o.source.clone());
+        let source = match source {
+            Some(s) => s,
+            None => {
+                let mut avail: Vec<&str> = model.observations.iter()
+                    .map(|o| o.source.as_str()).collect();
+                avail.sort_unstable();
+                avail.dedup();
+                return Err(format!(
+                    "data binding '{}' matches no observation stream (by source \
+                     or name). Available sources: {}", key, avail.join(", ")));
+            }
+        };
+        if let Some(existing) = effective.get(&source) {
+            if existing != &path_str {
+                return Err(format!(
+                    "observation source '{}' is bound to two different files \
+                     ('{}' and '{}'). A stratified family shares one long-form \
+                     file; split files across one source are not supported.",
+                    source, existing, path_str));
+            }
+        }
+        effective.insert(source, path_str);
+    }
+    Ok(effective)
+}
+
+/// Resolve the DATA-bound observation streams (BY SOURCE) and load each one's
+/// per-observation values + aux, returning one [`ObsStream`] per bound leaf.
+///
+/// `effective` maps observation SOURCE → data-file path — the `[data]`
+/// resolution the caller has already done (`DataSpec::effective_observations`
+/// for the fit-toml form, or `data_bindings_to_effective` for the CLI `--data`
+/// form). This function:
+///
+/// - filters `model.observations` to the blocks whose `source` is bound (sorted
+///   by name for deterministic ordering — two fits with the same observations
+///   but different toml ordering hash identically downstream),
+/// - hard-errors on a bound source that names no real stream (a typo, not a
+///   silent no-op),
+/// - for each bound leaf, dispatches [`load_observations`] (long-form vs wide,
+///   holes + aux), resolves its projection, and runs the per-stream
+///   origin / first-window guards.
+///
+/// This is the single seam that fit run, pfilter, and profile route through, so
+/// the resolve + slice + aux behaviour cannot be live in one command and
+/// silently absent in another. Conditioning-window (`condition_from` / W329)
+/// handling is NOT here — it is fit-specific and stays in `FitRunConfig::build`.
+pub(crate) fn resolve_and_load_obs_streams(
+    model: &ir::Model,
+    compiled: &CompiledModel,
+    effective: &indexmap::IndexMap<String, String>,
+    dt: f64,
+    time_opts: &crate::caltime_load::TimeOpts,
+) -> Result<Vec<ObsStream>, String> {
+    let mut obs_blocks: Vec<&ir::observation::ObservationModel> =
+        model.observations.iter()
+            .filter(|o| effective.contains_key(&o.source))
+            .collect();
+    obs_blocks.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Every bound source must name a real observation stream — a key in
+    // `[data.observations]` (or a `--data NAME=` source) that matches no
+    // stream's `source` is a typo, not a silent no-op.
+    for src in effective.keys() {
+        if !model.observations.iter().any(|o| &o.source == src) {
+            return Err(format!(
+                "data source '{}' is bound to a file but matches no observation \
+                 stream's source. Available sources: {}",
+                src,
+                {
+                    let mut s: Vec<&str> = model.observations.iter()
+                        .map(|o| o.source.as_str()).collect();
+                    s.sort_unstable(); s.dedup();
+                    s.join(", ")
+                }));
+        }
+    }
+    if obs_blocks.is_empty() {
+        return Err(
+            "no observation stream is bound to a data file — check that \
+             [data.observations] / --data names match the model's stream \
+             sources.".into());
+    }
+
+    let mut streams = Vec::new();
+    for obs_model in &obs_blocks {
+        let stream_name = obs_model.name.clone();
+        let data_path = effective.get(&obs_model.source)
+            .expect("filtered to bound sources above");
+        let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
+            .filter(|o| o.source == obs_model.source)
+            .collect();
+        let (obs, cells, aux) =
+            load_observations(data_path, obs_model, &siblings, dt, time_opts)?;
+        let obs_model: ir::observation::ObservationModel = (*obs_model).clone();
+        let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
+            &obs_model.projection, compiled, &stream_name,
+        )?;
+
+        // F4: reject an observation strictly before the model origin. The
+        // integrator never propagates a particle to a time it has already
+        // passed, so the window yields zero substeps yet the obs is still
+        // scored — a silent wrong answer. Hard error at load. gh#174: reject a
+        // positive incidence observation at the model origin (zero-width first
+        // window → -Inf masquerading as filter degeneracy).
+        {
+            let obs_times: Vec<f64> = obs.iter().map(|o| o.time).collect();
+            crate::util::check_obs_before_origin(
+                &stream_name,
+                compiled.model.simulation.t_start,
+                &obs_times,
+            )?;
+            // The degenerate-origin-window check fires only when the FIRST
+            // observation sits exactly on the origin AND carries a positive
+            // incidence value. A leading HOLE scores no value at the origin, so
+            // pass a non-positive sentinel (the check is a no-op then). We must
+            // NOT substitute a later present value nor a fictitious 0 that
+            // scores.
+            let first_value = match cells.first() {
+                Some(Some(sim::inference::ObsCell::Scalar(v))) => *v,
+                _ => 0.0,
+            };
+            crate::util::check_incidence_origin_window(
+                &stream_name,
+                &obs_model.projection,
+                compiled.model.simulation.t_start,
+                &obs_times,
+                first_value,
+            )?;
+        }
+
+        streams.push(ObsStream {
+            name: stream_name,
+            projection,
+            obs_model_ir: obs_model,
+            data: obs,
+            cells,
+            aux,
+        });
+    }
+    Ok(streams)
+}
+
+/// Map loaded [`ObsStream`]s to the [`StreamSpec`]s that
+/// [`sim::inference::BoundObs::bind`] consumes. Single source of the
+/// `ObsStream -> StreamSpec` mapping for every consumer (fit run's
+/// `build_obs_model`, and — once routed — pfilter/profile).
+///
+/// Multi-cadence (§3.3): each stream is fed its OWN schedule (`s.data`'s times),
+/// NOT the union; `bind` re-merges to the union and records per-stream
+/// `at_union` membership. `s.cells` is already this stream's own cells
+/// (`cells.len() == this stream's obs_times.len()`).
+pub(crate) fn stream_specs_from_obs_streams(
+    streams: &[ObsStream],
+) -> Vec<sim::inference::multi_stream_obs::StreamSpec> {
+    streams.iter()
+        .map(|s| sim::inference::multi_stream_obs::StreamSpec {
+            projection: s.projection.clone(),
+            ir_model: s.obs_model_ir.clone(),
+            // Authoritative per-grid-time cells (holes = `None`). A hole
+            // contributes no likelihood term but its obs time stays in the grid,
+            // so the per-obs-index incidence reset still fires at it.
+            observations: s.cells.clone(),
+            obs_times: s.data.iter().map(|o| o.time).collect(),
+            aux: s.aux.clone(),
+        })
+        .collect()
 }
 
 

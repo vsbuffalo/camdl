@@ -301,7 +301,16 @@ impl MethodResult {
             // this arm an `mh` fit was dropped from `fit table` / `fit summary`
             // entirely ("unknown fit-stage method `mh`") — a per-method allowlist
             // that excluded a method the rest of the system supports.
-            "pmmh" | "mh" => Ok(MethodResult::Pmmh(PmmhStageResult::load(stage_dir)?)),
+            "pmmh" | "mh" => {
+                // mh writes its OWN `mh_summary.json` (not `pmmh_summary.json`)
+                // though it shares the Pmmh result shape.
+                let algo = if method == "mh" {
+                    crate::run_meta::FitAlgorithm::Mh
+                } else {
+                    crate::run_meta::FitAlgorithm::Pmmh
+                };
+                Ok(MethodResult::Pmmh(PmmhStageResult::load(stage_dir, algo)?))
+            }
             "nuts" => Ok(MethodResult::Nuts(NutsStageResult::load(stage_dir)?)),
             "nl-sbplx" | "nl-bobyqa" => Ok(MethodResult::Nlopt(
                 NloptStageResult::load(stage_dir, method)?,
@@ -560,7 +569,8 @@ impl PgasStageResult {
         // Estimated parameter names from algorithm config — pgas
         // doesn't store them directly. Fall back to "every column in
         // draws.tsv" if not in algorithm.
-        let summary = read_summary_json(stage_dir, "pgas_summary.json")?;
+        let summary =
+            read_summary_json(stage_dir, &crate::run_meta::FitAlgorithm::Pgas.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let rhat_map = read_f64_map(&summary, "rhat");
@@ -635,11 +645,14 @@ impl PgasStageResult {
 // ── PmmhStageResult ─────────────────────────────────────────────────
 
 impl PmmhStageResult {
-    pub fn load(stage_dir: &Path) -> Result<Self, MethodResultError> {
+    pub fn load(
+        stage_dir: &Path,
+        algo: crate::run_meta::FitAlgorithm,
+    ) -> Result<Self, MethodResultError> {
         let inputs = read_stage_inputs(stage_dir)?;
         let n_chains = inputs_n_chains(&inputs);
         let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
-        let summary = read_summary_json(stage_dir, "pmmh_summary.json")?;
+        let summary = read_summary_json(stage_dir, &algo.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let rhat_map = read_f64_map(&summary, "rhat");
@@ -694,7 +707,8 @@ impl NutsStageResult {
         let inputs = read_stage_inputs(stage_dir)?;
         let n_chains = inputs_n_chains(&inputs);
         let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
-        let summary = read_summary_json(stage_dir, "nuts_summary.json")?;
+        let summary =
+            read_summary_json(stage_dir, &crate::run_meta::FitAlgorithm::Nuts.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
         let n_divergent = summary.get("n_divergent").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
@@ -1115,7 +1129,7 @@ mod tests {
         )
         .unwrap();
 
-        let r = PmmhStageResult::load(dir).unwrap();
+        let r = PmmhStageResult::load(dir, crate::run_meta::FitAlgorithm::Pmmh).unwrap();
         assert_eq!(r.diagnostics.n_chains, 2);
         assert_eq!(r.diagnostics.n_samples, 2);
         // Mean over the two posterior samples for R0.

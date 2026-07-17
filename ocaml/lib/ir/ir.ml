@@ -94,6 +94,11 @@ type unsupported_reason =
   | URNonsmoothState   (* gh#275: a nonsmooth function of state (floor/ceil/abs/
                           min/max of a compartment) in a WrtPop derivative — the
                           derivative is not smooth, so a gradient method is refused *)
+  | URZeroInflated     (* a param reaching a zero_inflated_neg_binomial likelihood,
+                          which is scoring-only (no emitted gradient). Detected at
+                          the Rust fit gate; never emitted into IR by the OCaml
+                          autodiff (ZI has no diffable field), so mirrored here only
+                          to keep the wire-name enum complete. *)
 
 type deriv_entry =
   | DEGrad of expr
@@ -109,6 +114,7 @@ let unsupported_reason_name = function
   | URMod                -> "mod"
   | URParametricN        -> "parametric_n"
   | URNonsmoothState     -> "nonsmooth_state"
+  | URZeroInflated       -> "zero_inflated"
 
 let unsupported_reason_of_name = function
   | "lag"                   -> Some URLag
@@ -118,6 +124,7 @@ let unsupported_reason_of_name = function
   | "mod"                   -> Some URMod
   | "parametric_n"          -> Some URParametricN
   | "nonsmooth_state"       -> Some URNonsmoothState
+  | "zero_inflated"         -> Some URZeroInflated
   | _                       -> None
 
 (* ── Compartment ─────────────────────────────────────────────────────────────── *)
@@ -378,15 +385,32 @@ type neg_binomial_likelihood = { mean: diffable; dispersion: diffable }
 type normal_likelihood       = { mean: diffable; sd: diffable }
 type binomial_likelihood     = { n: expr; p: diffable }
 type beta_binomial_likelihood = { n: expr; alpha: diffable; beta: diffable }
+(* Beta likelihood for a continuous proportion [x ∈ (0, 1)] — an observed rate,
+   coverage, or positivity given directly as a fraction (not a k-of-n count, which
+   is [beta_binomial_likelihood]). Mean-linked like [neg_binomial_likelihood]: the
+   model predicts [mean] and [concentration] (φ) is the dispersion knob, with shape
+   parameters [α = mean·φ], [β = (1 − mean)·φ]. *)
+type beta_likelihood         = { mean: diffable; concentration: diffable }
 type bernoulli_likelihood    = { p: diffable }
+(* Zero-inflated negative binomial: a structural-zero mass [pi] mixed with a
+   NegBinomial count. `P(Y=0) = pi + (1-pi)·f(0)`, `P(Y=k>0) = (1-pi)·f(k)`,
+   with `f` the NegBinomial(mean, dispersion) pmf. Scoring-only: [mean],
+   [dispersion], and [pi] are bare exprs (NOT [diffable]), so the family carries
+   no gradient and gradient-based inference (PGAS/NUTS) refuses a model
+   containing one via the Rust capability gate; MH/PMMH/PF/IF2 score it. The
+   surface is the `zero_inflated(base = neg_binomial(...), pi = ...)` wrapper,
+   desugared to this flat variant at parse time. See §12.2. *)
+type zi_neg_binomial_likelihood = { mean: expr; dispersion: expr; pi: expr }
 
 type likelihood =
-  | Poisson      of poisson_likelihood
-  | NegBinomial  of neg_binomial_likelihood
-  | Normal       of normal_likelihood
-  | Binomial     of binomial_likelihood
-  | BetaBinomial of beta_binomial_likelihood
-  | Bernoulli    of bernoulli_likelihood
+  | Poisson              of poisson_likelihood
+  | NegBinomial          of neg_binomial_likelihood
+  | Normal               of normal_likelihood
+  | Binomial             of binomial_likelihood
+  | BetaBinomial         of beta_binomial_likelihood
+  | Beta                 of beta_likelihood
+  | Bernoulli            of bernoulli_likelihood
+  | ZeroInflatedNegBinomial of zi_neg_binomial_likelihood
 
 (* DSL parameter-type keyword (the [param_kind] production in parser.mly:
    `rate`, `probability`, `count`, `positive`, `real`, `instant`,

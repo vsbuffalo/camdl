@@ -13,9 +13,9 @@ use crate::resolved_expr::{
 };
 use crate::state::{IntState, RealState};
 use crate::inference::obs_loglik::{
-    negbin_logpmf, discretized_normal_logpmf_tol, poisson_logpmf, DEFAULT_TOL,
+    negbin_logpmf, zi_negbin_logpmf, discretized_normal_logpmf_tol, poisson_logpmf, DEFAULT_TOL,
     negbin_logpmf_grad, discretized_normal_logpmf_grad, poisson_logpmf_grad,
-    beta_binomial_logpmf_grad,
+    beta_binomial_logpmf_grad, beta_logpdf, beta_logpdf_grad,
 };
 use crate::inference::types::LOG_PROB_FLOOR;
 use ir::observation::ObservationModel;
@@ -127,6 +127,11 @@ pub(crate) fn eval_likelihood_resolved(
             let n_int = n_val.round().max(0.0) as u64;
             crate::inference::obs_loglik::beta_binomial_logpmf(k, n_int, alpha_val, beta_val)
         }
+        ResolvedLikelihood::Beta { mean, concentration, .. } => {
+            let m = eval_resolved(mean, &ctx(projected));
+            let c = eval_resolved(concentration, &ctx(projected));
+            beta_logpdf(observed, m, c)
+        }
         ResolvedLikelihood::Bernoulli { p, .. } => {
             // Clamp p to [0, 1] before forming the log-probability.
             // Without the clamp, an out-of-range p (e.g. PGAS proposes
@@ -138,6 +143,12 @@ pub(crate) fn eval_likelihood_resolved(
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             if observed > 0.5 { p_val.max(LOG_PROB_FLOOR).ln() }
             else              { (1.0 - p_val).max(LOG_PROB_FLOOR).ln() }
+        }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi } => {
+            let m = eval_resolved(mean, &ctx(projected));
+            let k = eval_resolved(dispersion, &ctx(projected));
+            let p = eval_resolved(pi, &ctx(projected));
+            zi_negbin_logpmf(observed, m, k, p)
         }
     }
 }
@@ -253,6 +264,20 @@ pub(crate) fn eval_likelihood_resolved_grad(
                 grad[i] += d_alpha * da + d_beta * db;
             }
         }
+        ResolvedLikelihood::Beta { mean, mean_grad, concentration, concentration_grad, .. } => {
+            // log f = (a−1)ln x + (b−1)ln(1−x) + lgamma(φ) − lgamma(a) − lgamma(b),
+            // a = mean·φ, b = (1−mean)·φ. The (mean, φ) partials from
+            // `beta_logpdf_grad` chain-rule to each estimated param via the
+            // emitted mean/concentration gradient maps.
+            let m = eval_resolved(mean, &ctx);
+            let c = eval_resolved(concentration, &ctx);
+            let (d_mean, d_conc) = beta_logpdf_grad(observed, m, c);
+            for (i, &model_idx) in estimated_to_model.iter().enumerate() {
+                let dm = eval_emitted_grad(mean_grad, model_idx, &ctx);
+                let dc = eval_emitted_grad(concentration_grad, model_idx, &ctx);
+                grad[i] += d_mean * dm + d_conc * dc;
+            }
+        }
         ResolvedLikelihood::Bernoulli { p, p_grad, .. } => {
             // log L = log(p)         if observed > 0.5
             //       = log(1 - p)     otherwise
@@ -267,6 +292,10 @@ pub(crate) fn eval_likelihood_resolved_grad(
                 }
             }
         }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => unreachable!(
+            "zero_inflated_neg_binomial is scoring-only; gradient-based inference \
+             (PGAS/NUTS) must be refused by the gradient-capability gate before this point"
+        ),
     }
 }
 
@@ -360,6 +389,13 @@ pub(crate) fn dlogp_dprojected(
                 beta_binomial_logpmf_grad(observed, n_round, alpha_val, beta_val);
             d_alpha * eval_proj_grad(alpha_proj, &ctx) + d_beta * eval_proj_grad(beta_proj, &ctx)
         }
+        ResolvedLikelihood::Beta { mean, concentration, mean_proj, concentration_proj, .. } => {
+            let m = eval_resolved(mean, &ctx);
+            let c = eval_resolved(concentration, &ctx);
+            let (d_mean, d_conc) = beta_logpdf_grad(observed, m, c);
+            d_mean * eval_proj_grad(mean_proj, &ctx)
+                + d_conc * eval_proj_grad(concentration_proj, &ctx)
+        }
         ResolvedLikelihood::Bernoulli { p, p_proj, .. } => {
             let p_val = eval_resolved(p, &ctx);
             if p_val > 0.0 && p_val < 1.0 {
@@ -369,6 +405,10 @@ pub(crate) fn dlogp_dprojected(
                 0.0
             }
         }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => unreachable!(
+            "zero_inflated_neg_binomial is scoring-only; the ODE-gradient factor-2 path \
+             must be refused by the gradient-capability gate before this point"
+        ),
     }
 }
 
@@ -390,25 +430,28 @@ pub fn compile_obs_sample_pf(
     obs_model: &ObservationModel,
     compiled: Arc<CompiledModel>,
     params: &[f64],
-) -> Box<dyn Fn(f64, f64, &[i64], &mut crate::rng::StatefulRng) -> f64> {
+) -> Box<dyn Fn(f64, f64, &[i64], &[(String, f64)], &mut crate::rng::StatefulRng) -> f64> {
     let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled)
         .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {:?}", e));
     let params = params.to_vec();
     let real_s = RealState::new(compiled.real_local_to_global.len());
     let n_int  = compiled.int_local_to_global.len();
 
-    Box::new(move |projected: f64, t: f64, counts: &[i64], rng: &mut StatefulRng| {
+    Box::new(move |projected: f64, t: f64, counts: &[i64], aux: &[(String, f64)], rng: &mut StatefulRng| {
         // GH #6 fix: evaluate likelihood args against the real state,
         // not a zero-filled scratch. Caller is responsible for passing
         // the compartment snapshot at the obs time.
         assert_eq!(counts.len(), n_int,
             "compile_obs_sample_pf: counts length {} != expected {}", counts.len(), n_int);
         let int_s = IntState::from_vec(counts.to_vec());
-        // No per-observation aux at emission time (simulate --obs has no data
-        // file). A likelihood referencing an aux column (binomial `n = tested`)
-        // can't be sampled without a denominator — its `ObsColumnRef` would
-        // error at eval, the honest behaviour.
-        sample_obs_resolved(&resolved, t, projected, &[], &params, &compiled, &int_s, &real_s, rng)
+        // Per-observation aux (e.g. a binomial denominator `n = tested`) is the
+        // CALLER's to supply. `fit predict` forwards the OBSERVED aux at each obs
+        // time, so the posterior-predictive draws `y_rep ~ binomial(n_observed,
+        // p̂)` — the exogenous survey sample size carried forward. Data-free
+        // emitters (`simulate --obs`, synthetic generation) pass `&[]`; a
+        // likelihood that references an unavailable aux column then evaluates its
+        // denominator to 0 and draws 0, the honest data-free behaviour.
+        sample_obs_resolved(&resolved, t, projected, aux, &params, &compiled, &int_s, &real_s, rng)
     })
 }
 
@@ -470,11 +513,36 @@ pub(crate) fn sample_obs_resolved(
             let p = a / (a + b);
             rng.binomial(n_int, p.clamp(0.0, 1.0)) as f64
         }
+        ResolvedLikelihood::Beta { mean, concentration, .. } => {
+            // Draw x ~ Beta(a, b), a = mean·φ, b = (1−mean)·φ, via the
+            // Gamma(a,1)/(Gamma(a,1)+Gamma(b,1)) construction (same as the
+            // BetaBinomial p-draw) — the continuous proportion, not a count.
+            let m = eval_resolved(mean, &ctx(projected));
+            let c = eval_resolved(concentration, &ctx(projected));
+            let a = (m * c).max(LOG_PROB_FLOOR);
+            let b = ((1.0 - m) * c).max(LOG_PROB_FLOOR);
+            use rand_distr::{Distribution, Gamma};
+            let inner = rng.inner_mut();
+            let ga = Gamma::new(a, 1.0).map(|d| d.sample(inner)).unwrap_or(1.0);
+            let gb = Gamma::new(b, 1.0).map(|d| d.sample(inner)).unwrap_or(1.0);
+            ga / (ga + gb)
+        }
         ResolvedLikelihood::Bernoulli { p, .. } => {
             // Clamp before sampling — an out-of-range p would
             // otherwise always-1 (p > 1) or always-0 (p < 0).
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             if rng.uniform() < p_val { 1.0 } else { 0.0 }
+        }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi } => {
+            // With prob pi draw a structural zero; otherwise draw from the
+            // NegBinomial base (Gamma-Poisson mixture, mirroring the NB arm).
+            let p = eval_resolved(pi, &ctx(projected)).clamp(0.0, 1.0);
+            if rng.uniform() < p { return 0.0; }
+            let m = eval_resolved(mean, &ctx(projected));
+            let k = eval_resolved(dispersion, &ctx(projected));
+            if m <= 0.0 || k <= 0.0 { return 0.0; }
+            let g = Gamma::new(k, m / k).unwrap().sample(rng.inner_mut());
+            rng.poisson(g) as f64
         }
     }
 }
@@ -519,8 +587,18 @@ pub(crate) fn eval_obs_mean_resolved(
             let denom = (alpha_val + beta_val).max(LOG_PROB_FLOOR);
             n_val * (alpha_val / denom)
         }
+        ResolvedLikelihood::Beta { mean, .. } => {
+            // E[Beta(mean·φ, (1−mean)·φ)] = mean.
+            eval_resolved(mean, &ctx(projected))
+        }
         ResolvedLikelihood::Bernoulli { p, .. } => {
             eval_resolved(p, &ctx(projected))
+        }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { mean, pi, .. } => {
+            // E[Y] = (1 - pi)·E[NB] = (1 - pi)·mean.
+            let m = eval_resolved(mean, &ctx(projected));
+            let p = eval_resolved(pi, &ctx(projected)).clamp(0.0, 1.0);
+            (1.0 - p) * m
         }
     }
 }

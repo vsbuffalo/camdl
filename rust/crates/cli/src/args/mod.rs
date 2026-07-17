@@ -437,16 +437,17 @@ pub struct InferenceCore {
     pub pf_max_substeps: Option<u64>,
 }
 
-/// `--obs NAME` + `--flow NAME`
+/// Stream selection for the inference commands. The projection and
+/// likelihood for every stream come from the model's `observations { }` block
+/// (the modern observation system, as `fit run` uses) — there is no `--flow` /
+/// `--obs-model` projection override. `--obs` only selects WHICH declared
+/// stream (family) a single positional `--data FILE` binds to.
 #[derive(Args, Clone, Default)]
-pub struct FlowProjection {
-    /// Observation block name (required when model has more than one)
+pub struct StreamSelection {
+    /// Observation stream/family name a bare `--data FILE` binds to
+    /// (required when the model declares more than one).
     #[arg(long)]
     pub obs: Option<String>,
-
-    /// Flow name for incidence projection (overrides obs model default)
-    #[arg(long)]
-    pub flow: Option<String>,
 }
 
 // ─── simulate ─────────────────────────────────────────────────────────────────
@@ -1107,6 +1108,17 @@ pub struct FitSummaryArgs {
     /// cargo / pytest convention. See proposal §1, §6.
     #[arg(long)]
     pub strict: bool,
+
+    /// Recompute the posterior diagnostics (R̂ / ESS / mean) over a SUBSET of
+    /// the MCMC chains, dropping the named 1-based chain ids (comma-separated,
+    /// e.g. `--exclude-chains 3,5`). A view only — nothing on disk changes. The
+    /// header then reads `chains: K of N (excluded 3,5)`. Post-hoc exclusion
+    /// BIASES the posterior toward the retained mode and always prints a
+    /// warning; a chain id not in the fit, or excluding every chain, is a hard
+    /// error. Incompatible with `--params-only` (a single winner θ̂ is not a
+    /// chain average, so there is nothing to subset).
+    #[arg(long, value_name = "IDS", conflicts_with = "params_only")]
+    pub exclude_chains: Option<String>,
 }
 
 #[derive(Args)]
@@ -1197,6 +1209,15 @@ pub struct FitPredictArgs {
     /// RNG seed for the y_rep observation sampling (default 1).
     #[arg(long)]
     pub seed: Option<u64>,
+
+    /// Drop the named MCMC chains from the posterior cloud before banding —
+    /// a comma-separated list of 1-based chain ids (matching the `chain_N/`
+    /// dirs and the `fit summary` per-chain table), e.g. `--exclude-chains 3,5`.
+    /// The escape hatch for a known-stuck minority of chains; post-hoc exclusion
+    /// BIASES the posterior toward the retained mode and always prints a warning.
+    /// A chain id not in the fit, or excluding every chain, is a hard error.
+    #[arg(long, value_name = "IDS")]
+    pub exclude_chains: Option<String>,
 }
 
 /// The reserved scenario name for the no-overlay row — the fitted model as
@@ -1366,6 +1387,16 @@ pub struct FitTableArgs {
     /// (IF2 / NLopt) have no posterior cloud, so their cell renders `—`.
     #[arg(long = "quantity", value_name = "NAME")]
     pub quantities: Vec<String>,
+
+    /// Drop the named 1-based MCMC chains (comma-separated, e.g.
+    /// `--exclude-chains 3,5`) from each fit's posterior cloud when DERIVING a
+    /// `--quantity` cell. Only affects derived cells, so it requires
+    /// `--quantity`; the same drop set is applied to every fit in the cohort
+    /// (chain 3 of fit A is unrelated to chain 3 of fit B — pair with `--hash`
+    /// to project to one fit). Post-hoc exclusion BIASES the posterior toward
+    /// the retained mode and always prints a warning.
+    #[arg(long, value_name = "IDS", requires = "quantities")]
+    pub exclude_chains: Option<String>,
 }
 
 #[derive(Args)]
@@ -1474,7 +1505,7 @@ pub struct PfilterArgs {
     pub inference: InferenceCore,
 
     #[command(flatten)]
-    pub flow: FlowProjection,
+    pub stream: StreamSelection,
 
     /// Observation data TSV (with time column).
     ///
@@ -1657,7 +1688,7 @@ pub struct ProfileArgs {
     pub inference: InferenceCore,
 
     #[command(flatten)]
-    pub flow: FlowProjection,
+    pub stream: StreamSelection,
 
     /// Observation data TSV.
     ///
@@ -2527,6 +2558,25 @@ pub struct CompareArgs {
     /// prequential.json path (read as-is).
     #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_SEED)]
     pub seed: u64,
+
+    /// Drop MCMC chains from a fit's posterior cloud before deriving its plug-in
+    /// θ̂, so a comparison scores the SAME subset `fit predict`/`fit summary`
+    /// would band. PER-FIT (repeat the flag): `--exclude-chains @a:4` drops
+    /// chain 4 from the fit named `@a` only, leaving the others whole. The fit
+    /// name is matched VERBATIM against the name shown in the table (and matched
+    /// by `--baseline`): a fit given by run-store handle is `@a`, one given by
+    /// path is e.g. `ctl_rm.toml` with no `@` — do not add a spurious `@`. Bare
+    /// ids `--exclude-chains 3,4` apply COHORT-WIDE to every fit (convenient
+    /// only when the fits share a stuck-chain index — otherwise use the per-fit
+    /// form). Chain ids are 1-based (matching the `chain_N/` dirs and the `fit
+    /// summary` per-chain table). Mixing bare and `@fit:ids` tokens is rejected;
+    /// a fit with no posterior cloud (an optimizer fit, or an explicit
+    /// prequential.json) ignores the flag. Post-hoc exclusion BIASES the
+    /// posterior toward the retained mode and always prints a warning. A chain
+    /// id not in a fit, an unknown/ambiguous fit name, or excluding every chain
+    /// is a hard error.
+    #[arg(long, value_name = "[@FIT:]IDS")]
+    pub exclude_chains: Vec<String>,
 }
 
 // ─── mre (minimal-reproducible-example bundles) ──────────────────────────────

@@ -1,6 +1,28 @@
 %{
   open Ast
 
+  (* gh#414 — directional block-separator diagnostics. A `{}` block is either a
+     comma-separated SET (`compartments`) or a whitespace/newline-separated
+     STATEMENT LIST (everything else). Getting the separator wrong is otherwise
+     a bare `E001 syntax error`; these two helpers turn it into a diagnostic
+     that names the block and the fix. The offending token sits at the tail of
+     the reported span, so the caret localizes to it.
+
+     [comma_sep_error]: a stray comma between members of a whitespace block. *)
+  let comma_sep_error ~sp ~ep block =
+    Parser_errors.push_error ~sp ~ep ~code:"E001"
+      ~msg:(Printf.sprintf
+        "`%s` separates members with whitespace or newlines, not commas — \
+         put each member on its own line. See `camdl docs language-changes`."
+        block)
+
+  (* [compartment_missing_comma_error]: two adjacent compartment names with no
+     comma between them. `compartments` is the sole comma-separated block. *)
+  let compartment_missing_comma_error ~sp ~ep =
+    Parser_errors.push_error ~sp ~ep ~code:"E001"
+      ~msg:"`compartments` members are comma-separated — write \
+            `compartments { S, I, R }`. See `camdl docs language-changes`."
+
   let extract_ident_list = function
     | EList items -> List.filter_map (function EIdent (n, _) -> Some n | _ -> None) items
     | _ -> []
@@ -22,6 +44,7 @@
     | "normal"        -> LikNormal       args
     | "binomial"      -> LikBinomial     args
     | "beta_binomial" -> LikBetaBinomial args
+    | "beta"          -> LikBeta         args
     | "bernoulli"     -> LikBernoulli    args
     | "diagnostic_test" ->
       let find k = List.assoc_opt k args in
@@ -53,10 +76,42 @@
            ~code:"E254"
            ~msg:"diagnostic_test requires keyword args base = <binomial|bernoulli>(...), sens = <expr>, spec = <expr>";
          LikBinomial [])
+    | "zero_inflated" ->
+      (* Zero-inflation wrapper: `zero_inflated(base = neg_binomial(mean=, r=),
+         pi = )`. Desugar to the flat [LikZeroInflatedNegBinomial] by flattening
+         the base's kwargs with `pi`. Base is restricted to neg_binomial for
+         now; scoring-only (no gradient). *)
+      (* Reject any kwarg other than base/pi so a stray or typo'd argument is not
+         silently dropped (No loose semantics). *)
+      List.iter (fun (k, _) ->
+        if k <> "" && k <> "base" && k <> "pi" then
+          Parser_errors.push_error ~sp ~ep
+            ~code:"E251"
+            ~msg:(Printf.sprintf
+              "zero_inflated has no argument '%s'; expected base = neg_binomial(...), \
+               pi = <expr>" k))
+        args;
+      let find k = List.assoc_opt k args in
+      (match find "base", find "pi" with
+       | Some (EFuncCall (base_kind, base_args)), Some pi_e ->
+         (match base_kind with
+          | "neg_binomial" ->
+            LikZeroInflatedNegBinomial (base_args @ [("pi", pi_e)])
+          | other ->
+            Parser_errors.push_error ~sp ~ep
+              ~code:"E324"
+              ~msg:(Printf.sprintf
+                "zero_inflated base must be neg_binomial(...); got %s(...)" other);
+            LikZeroInflatedNegBinomial [])
+       | _ ->
+         Parser_errors.push_error ~sp ~ep
+           ~code:"E325"
+           ~msg:"zero_inflated requires keyword args base = neg_binomial(...), pi = <expr>";
+         LikZeroInflatedNegBinomial [])
     | s ->
       Parser_errors.push_error ~sp ~ep
         ~code:"E104"
-        ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test" s);
+        ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test, zero_inflated" s);
       LikPoisson args
 
   let build_obs_decl name ibs src kvs ~doc ~sp ~ep =
@@ -186,7 +241,7 @@ declaration:
             ~code:"E101"
             ~msg:"invalid origin declaration: expected origin = date(\"YYYY-MM-DD\")";
           DOrigin "" }
-  | DIMENSIONS LBRACE es = list(dim_entry) RBRACE
+  | DIMENSIONS LBRACE es = list(dim_entry_sep) RBRACE
       { DDimensions es }
   | COMPARTMENTS LBRACE cs = compartment_list RBRACE
       { DCompartments cs }
@@ -208,7 +263,7 @@ declaration:
       { DInterventions ivs }
   | EVENTS LBRACE evs = intervention_list RBRACE
       { DEvents evs }
-  | REACTIVE_INTERVENTIONS LBRACE rxs = list(reactive_decl) RBRACE
+  | REACTIVE_INTERVENTIONS LBRACE rxs = list(reactive_decl_sep) RBRACE
       { DReactiveInterventions rxs }
   | ODE LBRACE odes = ode_list RBRACE
       { DODE odes }
@@ -262,8 +317,21 @@ doc_opt:
 
 (* ── Compartment block ──────────────────────────────────────────────────── *)
 
+(* `compartments` is the sole comma-separated block. Two adjacent names with
+   no comma (`compartments { S I R }`) would otherwise be a bare E001; the
+   [compartment_tail] missing-comma alternative recovers and fires a directional
+   diagnostic pointing at the second name. A trailing comma stays an E001 (the
+   set/statement split; forgiving it is a separate, deliberate change). *)
 compartment_list:
-  | cs = separated_list(COMMA, compartment_decl) { cs }
+  |                                            { [] }
+  | c = compartment_decl cs = compartment_tail { c :: cs }
+
+compartment_tail:
+  | (* empty *)                                       { [] }
+  | COMMA c = compartment_decl cs = compartment_tail  { c :: cs }
+  | c = compartment_decl cs = compartment_tail
+      { compartment_missing_comma_error ~sp:$startpos(c) ~ep:$endpos(c);
+        c :: cs }
 
 compartment_decl:
   | d = doc_opt name = IDENT kind = compartment_kind_opt
@@ -278,7 +346,15 @@ compartment_kind_opt:
 (* ── Parameter block ────────────────────────────────────────────────────── *)
 
 param_list:
-  | ps = list(param_decl) { ps }
+  | ps = list(param_decl_sep) { ps }
+
+(* Whitespace-block member wrapper (gh#414): a stray comma between members is
+   caught here and reported directionally instead of as a bare E001. Same shape
+   as the scenario `set`/`scale` recovery below; the comma sits at the tail of
+   the member's span so the caret localizes to it. *)
+param_decl_sep:
+  | p = param_decl       { p }
+  | p = param_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "parameters"; p }
 
 param_decl:
   (* scalar, no bounds, no prior *)
@@ -298,20 +374,20 @@ param_decl:
       { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, no prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, with prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, no prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, with prior *)
-  | d = doc_opt name = IDENT LBRACKET dim = IDENT RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = [dim]; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 prior_clause:
@@ -424,7 +500,11 @@ param_kind:
 (* ── Table block ────────────────────────────────────────────────────────── *)
 
 table_list:
-  | ts = list(table_decl) { ts }
+  | ts = list(table_decl_sep) { ts }
+
+table_decl_sep:
+  | t = table_decl       { t }
+  | t = table_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "tables"; t }
 
 table_decl:
   | names = separated_nonempty_list(COMMA, IDENT) COLON dims = table_dims_nonempty COLON kind = param_kind EQ v = expr
@@ -453,7 +533,11 @@ table_dim_entry:
 (* ── Function block ─────────────────────────────────────────────────────── *)
 
 func_list:
-  | fs = list(func_decl) { fs }
+  | fs = list(func_decl_sep) { fs }
+
+func_decl_sep:
+  | f = func_decl       { f }
+  | f = func_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "forcing"; f }
 
 func_decl:
   (* Required tier-3 unit literal between kind and block — e.g.
@@ -467,13 +551,33 @@ func_decl:
 func_args:
   | kvs = list(func_arg) { kvs }
 
+(* A forcing kwarg's value carries the string-vs-expr distinction in the TYPE
+   (gh#423): a quoted STRING RHS is an [FStr] (a data-file path or file column),
+   any other expression is an [FExpr] (a model value, a model name, or a closed
+   enum like `method = linear`). The consumers in `expand_time_function_one`
+   require the arm matching each kwarg's role. A lone STRING resolves to [FStr]
+   here rather than to `expr`'s `STRING -> EIdent(_, dummy_loc)` atom — this is
+   the whole point of gh#423 (kill the dummy_loc discriminator).
+
+   Grammar note: the two rules overlap on a lone STRING (which `expr` can also
+   derive via the `STRING` atom needed for `date("…")`/`read("…")` args), so
+   menhir reports one reduce/reduce conflict in this state, resolved in favour
+   of the FIRST rule — i.e. [FStr]. That is exactly the wanted semantics (a
+   quoted forcing value is always a string), and the resolution is deterministic
+   as long as the FStr rule precedes the FExpr rule here. A bare STRING never
+   starts a compound expression in a forcing value, so nothing else is lost. *)
 func_arg:
-  | k = IDENT EQ v = expr { (k, v) }
+  | k = IDENT EQ s = STRING { (k, FStr s) }
+  | k = IDENT EQ v = expr   { (k, FExpr v) }
 
 (* ── Transitions block ──────────────────────────────────────────────────── *)
 
 transition_list:
-  | trs = list(transition_decl) { trs }
+  | trs = list(transition_decl_sep) { trs }
+
+transition_decl_sep:
+  | t = transition_decl       { t }
+  | t = transition_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "transitions"; t }
 
 transition_decl:
   (* inline: [#[lineage]] name[...] : srcs --> dsts @ rate where guard.
@@ -662,7 +766,11 @@ index_binding:
 (* ── Observations block ─────────────────────────────────────────────────── *)
 
 obs_list:
-  | obs = list(obs_decl) { obs }
+  | obs = list(obs_decl_sep) { obs }
+
+obs_decl_sep:
+  | o = obs_decl       { o }
+  | o = obs_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "observations"; o }
 
 (* Header: `name [p in dim] (from <source>)? { ... }` — NO colon (§2.2/§2.4).
    The old `name : { ... }` form is rejected by [obs_decl_colon] below with a
@@ -789,7 +897,14 @@ obs_projection:
 (* ── Interventions block ─────────────────────────────────────────────────── *)
 
 intervention_list:
-  | ivs = list(intervention_decl) { ivs }
+  | ivs = list(intervention_decl_sep) { ivs }
+
+(* Shared by both `interventions {}` and `events {}` (same member grammar), so
+   the diagnostic names both. *)
+intervention_decl_sep:
+  | i = intervention_decl       { i }
+  | i = intervention_decl COMMA
+      { comma_sep_error ~sp:$startpos ~ep:$endpos "interventions/events"; i }
 
 intervention_decl:
   | name = IDENT ibs = index_bindings_opt COLON LBRACE iv_kvs = list(iv_kv) RBRACE guard = where_clause_opt
@@ -804,7 +919,7 @@ intervention_decl:
   | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
-  (* transfer(...) { every = T, from = T0, until = T1 } — recurring schedule *)
+  (* transfer(...) { every = T, from = T0, to = T1 } — recurring schedule *)
   | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
@@ -812,7 +927,7 @@ intervention_decl:
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
-  (* add(COMP, EXPR) { every = T, from = T0, until = T1 } — recurring schedule *)
+  (* add(COMP, EXPR) { every = T, from = T0, to = T1 } — recurring schedule *)
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
@@ -826,6 +941,10 @@ intervention_decl:
    The predicate is a dedicated boolean grammar over comparison atoms; observed()
    / sum_observed() are ordinary IDENT funcalls recognised only here (the expander
    rejects them in rate expressions). *)
+reactive_decl_sep:
+  | r = reactive_decl       { r }
+  | r = reactive_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "reactive_interventions"; r }
+
 reactive_decl:
   | name = IDENT ibs = index_bindings_opt COLON WHEN pred = trig_pred LBRACE kvs = list(reactive_kv) RBRACE guard = where_clause_opt
       { let action   = ref None in
@@ -899,11 +1018,11 @@ recurring_body:
   | kvs = list(recurring_kv)
       { let every = ref None in
         let from_ = ref None in
-        let until = ref None in
+        let end_  = ref None in
         List.iter (function
           | `Every e  -> every := Some e
-          | `From  e  -> from_  := Some e
-          | `Until e  -> until := Some e
+          | `From  e  -> from_ := Some e
+          | `End   e  -> end_  := Some e
         ) kvs;
         let every_e = match !every with
           | Some e -> e
@@ -913,13 +1032,23 @@ recurring_body:
               ~msg:"recurring schedule missing required 'every = ...'";
             EConst 1.0
         in
-        (* from and until default to simulate.from / simulate.to respectively. *)
-        SRecurring (every_e, !from_, !until) }
+        (* from and to default to simulate.from / simulate.to respectively. *)
+        SRecurring (every_e, !from_, !end_) }
 
 recurring_kv:
   | EVERY EQ e = expr  { `Every e }
   | FROM  EQ e = expr  { `From  e }
-  | UNTIL EQ e = expr  { `Until e }
+  | TO    EQ e = expr  { `End   e }
+  (* Migration (gh#423 schedule cleanup): the recurring window end was spelled
+     `until` in a `transfer`/`add` body but `to` in a `set` block and in
+     `simulate { from … to … }`. `to` is now the only spelling; reject `until`
+     with the rewrite, not a bare E001. *)
+  | UNTIL EQ e = expr
+      { Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+          ~code:"E113"
+          ~msg:"`until` is now `to`"
+          ~hint:"write `to = <time>` for the recurring window end — see `camdl docs language-changes`";
+        `End e }
 
 transfer_kwarg:
   | k = IDENT EQ e = expr { (k, e) }
@@ -947,7 +1076,11 @@ iv_kv:
 (* ── ODE block ───────────────────────────────────────────────────────────── *)
 
 ode_list:
-  | odes = list(ode_decl) { odes }
+  | odes = list(ode_decl_sep) { odes }
+
+ode_decl_sep:
+  | o = ode_decl       { o }
+  | o = ode_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "ode"; o }
 
 ode_decl:
   | comp = IDENT EQ e = expr
@@ -960,7 +1093,11 @@ ode_decl:
    it means. Reduction function names (`final`, `max`, `time_of_max`, …) are NOT
    keywords; they lex as IDENT and dispatch by name in the classifier. *)
 quantity_list:
-  | qs = list(quantity_decl) { qs }
+  | qs = list(quantity_decl_sep) { qs }
+
+quantity_decl_sep:
+  | q = quantity_decl       { q }
+  | q = quantity_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "quantities"; q }
 
 quantity_decl:
   | d = doc_opt name = IDENT ibs = index_bindings_opt EQ body = expr
@@ -974,7 +1111,11 @@ quantity_decl:
    before the toggled intervention's fire time), and the result is naturally
    shaped over `[fork, run-end]`. *)
 contrast_list:
-  | cs = list(contrast_decl) { cs }
+  | cs = list(contrast_decl_sep) { cs }
+
+contrast_decl_sep:
+  | c = contrast_decl       { c }
+  | c = contrast_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "contrasts"; c }
 
 contrast_decl:
   | d = doc_opt name = IDENT EQ body = expr
@@ -1110,7 +1251,11 @@ integ_opt:
 (* ── Init block ──────────────────────────────────────────────────────────── *)
 
 init_list:
-  | ies = list(init_entry) { ies }
+  | ies = list(init_entry_sep) { ies }
+
+init_entry_sep:
+  | i = init_entry       { i }
+  | i = init_entry COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "init"; i }
 
 init_entry:
   | comp = IDENT LBRACKET ibs = separated_nonempty_list(COMMA, index_binding) RBRACKET EQ v = expr
@@ -1123,12 +1268,20 @@ init_entry:
 (* ── Timepoints block ────────────────────────────────────────────────────── *)
 
 timepoint_list:
-  | tps = list(timepoint_decl) { tps }
+  | tps = list(timepoint_decl_sep) { tps }
+
+timepoint_decl_sep:
+  | t = timepoint_decl       { t }
+  | t = timepoint_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "timepoints"; t }
 
 timepoint_decl:
   | name = IDENT EQ t = expr { { tpname = name; tptime = t } }
 
 (* ── Dimensions ─────────────────────────────────────────────────────────── *)
+
+dim_entry_sep:
+  | e = dim_entry       { e }
+  | e = dim_entry COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "dimensions"; e }
 
 dim_entry:
   | d = doc_opt name = IDENT EQ src = dim_source_expr { { dename = name; desrc = src; dedoc = d } }

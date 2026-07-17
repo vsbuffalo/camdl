@@ -152,7 +152,7 @@ fn generate_one_dataset(
         // arg expressions (e.g. p = projected / N) resolve correctly.
         let draws: Vec<f64> = times.iter().enumerate().map(|(ti, &obs_t)| {
             let snap = crate::snap_at(&traj, obs_t);
-            sampler(projected[ti], obs_t, &snap.int_state.counts, &mut obs_rng)
+            sampler(projected[ti], obs_t, &snap.int_state.counts, &[], &mut obs_rng)
         }).collect();
         all_times.push(times);
         all_draws.push(draws);

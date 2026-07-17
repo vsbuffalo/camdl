@@ -469,7 +469,7 @@ fn write_nuts_summary(
         // nuts draws are unthinned: n_samples (kept) × thin = raw sampling iters.
         "thin": 1,
     });
-    let path = dir.join("nuts_summary.json");
+    let path = dir.join(crate::run_meta::FitAlgorithm::Nuts.summary_filename());
     let contents =
         serde_json::to_string_pretty(&summary).map_err(|e| format!("json error: {}", e))?;
     std::fs::write(&path, contents)

@@ -459,10 +459,10 @@ katsina   28     28.9
 forcing {
   temperature[p in patch] : interpolated 'ratio {
     data      = "data/temperature.tsv"
-    key_col   = patch      # the column identifying the stratum
-    time_col  = week       # numeric time in the model's time_unit, or an ISO date
-    value_col = temp
-    method    = "linear"   # or "constant", "spline"
+    key_col   = "patch"      # the column identifying the stratum
+    time_col  = "week"       # numeric time in the model's time_unit, or an ISO date
+    value_col = "temp"
+    method    = linear   # bare enum: linear | constant | spline
   }
 }
 
@@ -498,7 +498,7 @@ forcing {
   temperature[p in patch] : interpolated 'ratio {
     table    = temp_data     # the source table
     time_dim = climate_week  # which dimension is the time axis (its levels are the knot times)
-    method   = "linear"
+    method   = linear
   }
 }
 ```
