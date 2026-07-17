@@ -406,15 +406,28 @@ pub struct SurveyInput {
 //                   (seed, start) pair pins the sub-fit's init deterministically.
 
 /// The shared `profile`-level digest: the inference problem being profiled,
-/// with the focal grid and method config excluded. `deps` carries the base
-/// fit's `starts_from` lineage (same deps-DAG mechanism as a fit stage).
-#[derive(Debug, Clone, PartialEq, Eq, RunInput)]
+/// including the sweep grid so a distinct grid is a distinct run. `deps`
+/// carries the base fit's `starts_from` lineage (same deps-DAG mechanism as a
+/// fit stage).
+///
+/// The grid is part of the identity (not `Eq` because it carries floats — same
+/// as [`ProfilePointConfig`]). Two runs with the same problem but a *different*
+/// grid — a wider range, more points, shifted bounds — get different base dirs
+/// rather than silently merging their cells onto one another (which produced a
+/// jagged union when the cell coordinates didn't line up). Re-running the
+/// *same* grid is stable (a cache hit); the method config still lives in the
+/// `stage` level, not here.
+#[derive(Debug, Clone, PartialEq, RunInput)]
 pub struct ProfileBase {
     pub model: ModelDigest,
     pub data: Vec<DataDigest>,
     /// Canonical digest of the base config (base params + fixed + obs + priors
-    /// + fit.toml) — grid and method config excluded.
+    /// + fit.toml) — method config excluded (it lives in `stage`).
     pub base_config: ContentHash,
+    /// The resolved sweep grid: each focal axis and its values, canonicalized
+    /// (axes sorted by name, values ascending) so the identity is independent
+    /// of `--sweep` argument order.
+    pub grid: Vec<(ParamId, Vec<FiniteF64>)>,
     pub engine: EngineVersion,
     pub deps: Deps,
 }
