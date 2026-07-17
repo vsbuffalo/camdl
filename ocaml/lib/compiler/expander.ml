@@ -2897,33 +2897,54 @@ let splice_date_ranges ctx (es : expr list) : expr list =
 
 (* ── Fix B: shared-binding extraction ─────────────────────────────────────── *)
 
-(* A reference inside a `let` body that makes it ineligible for hoisting: a
-   parameter (the body would have d/dp ≠ 0, but the BindingRef autodiff arm
-   yields 0 — a silent zero gradient) or another `let` (conservatively
-   excluded; it may transitively carry a parameter). Compartments, tables,
-   forcings, time, and constants are all fine — param-free, so d/dp ≡ 0. *)
-let rec body_refs_param_or_let ctx (e : expr) : bool =
-  let bad n =
-    is_indexed_param ctx n
-    || Hashtbl.mem ctx.scalar_param_tbl n
-    || Hashtbl.mem ctx.let_tbl n
+(* Does a `let` body transitively reach a parameter? A parameter disqualifies it
+   from hoisting: the body would have d/dp ≠ 0, but the BindingRef autodiff arm
+   yields 0 — a silent zero gradient. Compartments, tables, forcings, time, and
+   constants are all fine — param-free, so d/dp ≡ 0.
+
+   A reference to another `let` is disqualifying only if THAT let transitively
+   reaches a parameter, so we recurse into its body rather than reject on sight.
+   Param-freeness is exactly the contract (`validate.ml`'s ParamInBinding), and
+   it is closed under let-reference; a blanket "references a let ⇒ reject" is
+   strictly coarser than the property it guards. It also rejected the textbook
+   mean-field denominator — `let N[h in hh] = S[h] + ...` with
+   `let N_glob = sum(h in hh, N[h])` — because N_glob names N. N_glob then
+   inlined its O(H) sum into all H force-of-infection rates (and their
+   gradients): an O(H²) IR in the number of coupled strata.
+
+   [visited] guards the recursion against a self-referential let. A revisit is
+   either in-progress (a cycle — the least fixpoint is "no param found here";
+   such a let cannot survive inlining anyway) or already-proven param-free, since
+   a param-bearing body short-circuits to true on first visit. *)
+let body_refs_param_or_let ctx (e : expr) : bool =
+  let visited = Hashtbl.create 8 in
+  let rec go (e : expr) : bool =
+    let bad n =
+      is_indexed_param ctx n
+      || Hashtbl.mem ctx.scalar_param_tbl n
+      || (match Hashtbl.find_opt ctx.let_tbl n with
+          | None    -> false
+          | Some lb ->
+            if Hashtbl.mem visited n then false
+            else begin Hashtbl.replace visited n (); go lb.lbody end)
+    in
+    match e with
+    | EConst _ | EUnit _ -> false
+    | EIdent (n, _)      -> bad n
+    | EIndex (n, items, _)  ->
+      bad n
+      || List.exists (function IPosn e | INamed (_, e) -> go e) items
+    | EBinOp (_, l, r) -> go l || go r
+    | EUnOp (_, e)     -> go e
+    | ESum (_, _, _, b) -> go b
+    | ECond (p, t, f)  -> go p || go t || go f
+    | EFuncCall (_, args) -> List.exists (fun (_, e) -> go e) args
+    | EList es            -> List.exists go es
+    | ERange (lo, hi)     -> go lo || go hi
+    | EObsAccess _        -> false
+    | ERunMember _        -> false
   in
-  match e with
-  | EConst _ | EUnit _ -> false
-  | EIdent (n, _)      -> bad n
-  | EIndex (n, items, _)  ->
-    bad n
-    || List.exists (function IPosn e | INamed (_, e) -> body_refs_param_or_let ctx e) items
-  | EBinOp (_, l, r) -> body_refs_param_or_let ctx l || body_refs_param_or_let ctx r
-  | EUnOp (_, e)     -> body_refs_param_or_let ctx e
-  | ESum (_, _, _, b) -> body_refs_param_or_let ctx b
-  | ECond (p, t, f)  ->
-    body_refs_param_or_let ctx p || body_refs_param_or_let ctx t || body_refs_param_or_let ctx f
-  | EFuncCall (_, args) -> List.exists (fun (_, e) -> body_refs_param_or_let ctx e) args
-  | EList es            -> List.exists (body_refs_param_or_let ctx) es
-  | ERange (lo, hi)     -> body_refs_param_or_let ctx lo || body_refs_param_or_let ctx hi
-  | EObsAccess _        -> false
-  | ERunMember _        -> false
+  go e
 
 (* Every index-position variable in the body must be bound by the let's own
    declared indices or an enclosing `sum`; otherwise the resolved body depends
