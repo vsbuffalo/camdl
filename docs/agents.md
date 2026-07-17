@@ -141,9 +141,11 @@ than guessing: `camdl mre fit fit.toml` bundles the model, its compile-time
   `camdl fit diff`.
 - Edit a `.camdl` model file in response to a compile error from the error table
   (typo fix, missing declaration, dim-correction).
-- Edit a `fit.toml` to widen bounds in response to `ParamNearBound`, or add a
-  missing `[estimate.X.prior]` block (asking what shape the user wants if not
-  obvious).
+- Widen the search range in response to `ParamNearBound`: relax a _narrowed_
+  `fit.toml` bound back toward the model's declared range, or widen the declared
+  bounds in the **model** itself — a `fit.toml` bound may only narrow the model,
+  never widen past it (see the idiom below). Add a missing `[estimate.X.prior]`
+  block (asking what shape the user wants if not obvious).
 - Add `Cond` guards to rate expressions in response to
   `NumericalCollapse{DivByZero}` (this is the _correct_ fix, not a bypass).
 - Run `make build && make install` after pulling.
@@ -272,6 +274,21 @@ silent-zero (the runtime no longer silently zeros — it errors).
 **Reparameterise to natural support.** Use `transform = "log"` for rates and
 positives, `transform = "logit"` for probabilities. The MCMC moves on the
 transformed scale; bounds are enforced by construction.
+
+**A `fit.toml` `bounds` may only _narrow_ the model, never widen it.** The
+model's `parameters { p : rate in [lo, hi] }` range is the scientific claim
+about where `p` can plausibly live — the source of truth. A `[estimate.p]`
+`bounds` override is for a _tighter_ experiment-specific search (restrict a
+scout to a sub-range, pin a sensitivity sweep), so it must be a **subset** of
+the declared range. camdl enforces this: a fit whose bounds fall outside the
+model's — `p : rate in [0.001, 1.0]` in the model, `bounds = [0.01, 2.0]` in the
+fit.toml — is **rejected** at config resolution
+(`estimate.p: fit.toml bounds …
+lie outside model bounds …; a fit can tighten bounds but not loosen them`).
+To search a wider range the answer is not to loosen it in the config: **edit the
+declared bounds in the model.** That change is visible in the model file,
+travels with it, and re-keys the run identity; the same widening buried in a
+fit.toml would not, which is exactly why it's disallowed.
 
 **Reach for `camdl fit summary`, not eyeballed traces.** The summary already
 extracts R̂, ESS, the MLE table, and any fired diagnostics. Eyeballing trace TSVs
