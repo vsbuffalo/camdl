@@ -3134,6 +3134,91 @@ let test_trig_autodiff_matches_finite_diff () =
       "∂(b*sin(c))/∂b = sin(c)" (sin c) v
   | Some _ -> Alcotest.failf "expected DEGrad (Const), got a non-constant or refused derivative"
 
+(* ── Mean-field hoisting: a param-free aggregate-of-an-aggregate is shared ── *)
+
+(* Two-scale coupling, the shape every metapopulation mean-field model has: a
+   per-stratum total `N[h]`, a global total `N_glob` summing it, and a force of
+   infection mixing a within-stratum and a between-stratum term. *)
+let meanfield_src = {|
+time_unit = 'days
+compartments { S, I }
+dimensions { hh = [h0, h1, h2] }
+stratify(by = hh)
+parameters {
+  beta_w : rate in [0.0, 1.0]
+  beta_b : rate in [0.0, 1.0]
+  gamma  : rate in [0.0, 1.0]
+}
+let N[h in hh] = S[h] + I[h]
+let I_glob = sum(h in hh, I[h])
+let N_glob = sum(h in hh, N[h])
+let foi[h in hh] = beta_w * I[h] / N[h] + beta_b * I_glob / N_glob
+transitions {
+  infection[h in hh] : S[h] --> I[h] @ foi[h] * S[h]
+  recovery[h in hh]  : I[h] --> @ gamma * I[h]
+}
+init { S[h in hh] = 10.0
+       I[h in hh] = 1.0 }
+simulate { from = 0 'days
+           to   = 10 'days }
+|}
+
+let binding_names (m : Ir.model) = List.map (fun (b : Ir.binding) -> b.Ir.bname) m.bindings
+
+let test_meanfield_global_sum_is_hoisted () =
+  (* `N_glob = sum(h in hh, N[h])` is param-free — its only leaves are
+     compartments, reached through the param-free let `N`. It must hoist into
+     model.bindings and be referenced once, NOT inlined as an O(H) sum into each
+     of the H rates (and each of their gradients): that is the O(H²) blowup on a
+     dense mean-field coupling. *)
+  let m = compile_expect_ok meanfield_src in
+  let names = binding_names m in
+  List.iter (fun want ->
+    if not (List.mem want names) then
+      Alcotest.failf "'%s' is param-free and must hoist into model.bindings; got [%s]"
+        want (String.concat "; " names))
+    [ "N_glob"; "I_glob"; "N_h0"; "N_h1"; "N_h2" ];
+  (* The use site references the binding rather than re-inlining the sum. *)
+  let rec mentions_binding name (e : Ir.expr) = match e with
+    | Ir.BindingRef n -> n = name
+    | Ir.BinOp b -> mentions_binding name b.left || mentions_binding name b.right
+    | Ir.UnOp u  -> mentions_binding name u.arg
+    | Ir.Cond c  -> mentions_binding name c.pred || mentions_binding name c.then_
+                    || mentions_binding name c.else_
+    | Ir.Reduce ts -> List.exists (mentions_binding name) ts
+    | Ir.UncheckedDim u -> mentions_binding name u.inner
+    | _ -> false
+  in
+  let inf = List.find (fun (t : Ir.transition) -> t.name = "infection_h0") m.transitions in
+  Alcotest.(check bool) "infection_h0's rate references the shared N_glob binding"
+    true (mentions_binding "N_glob" inf.rate)
+
+let test_param_bearing_let_still_refuses_to_hoist () =
+  (* The contract the recursion must not break (validate.ml's ParamInBinding):
+     [autodiff] differentiates BindingRef to 0 under WrtParam, so a hoisted body
+     that reaches a Param would silently zero that parameter's gradient. `foi[h]`
+     reaches beta_w/beta_b, so it must stay inlined. *)
+  let m = compile_expect_ok meanfield_src in
+  let names = binding_names m in
+  List.iter (fun (b : Ir.binding) ->
+    match Validate.first_param b.Ir.bexpr with
+    | Some p ->
+      Alcotest.failf "binding '%s' reaches parameter '%s' — its gradient would \
+                      be a silent zero" b.Ir.bname p
+    | None -> ()) m.bindings;
+  if List.exists (fun n -> String.length n >= 3 && String.sub n 0 3 = "foi") names then
+    Alcotest.failf "param-bearing 'foi' must NOT hoist; got [%s]" (String.concat "; " names)
+
+let test_meanfield_grad_drops_unrelated_params () =
+  (* End-to-end payoff of both fixes: infection_h0's rate mentions only beta_w
+     and beta_b, so rate_grad must carry exactly those two. `gamma` appears
+     nowhere in the rate — a Reduce of zero derivatives must not keep it alive. *)
+  let m = compile_expect_ok meanfield_src in
+  let inf = List.find (fun (t : Ir.transition) -> t.name = "infection_h0") m.transitions in
+  Alcotest.(check (list string))
+    "rate_grad carries exactly the parameters the rate depends on"
+    [ "beta_w"; "beta_b" ] (List.map fst inf.rate_grad)
+
 (* ── Reduce-zero folding: d(Σ tᵢ)/dp with every dtᵢ = 0 is a genuine zero ── *)
 
 let test_reduce_of_zeros_folds_to_genuine_zero () =
@@ -9516,6 +9601,9 @@ let () =
       Alcotest.test_case "cos(dimensionless) compiles"              `Quick test_trig_cos_compiles_and_dimchecks;
       Alcotest.test_case "cos(t) rejected with E301"                `Quick test_trig_cos_rejects_dimensional_arg;
       Alcotest.test_case "autodiff emits rate_grad for sin(...)"    `Quick test_trig_autodiff_matches_finite_diff;
+      Alcotest.test_case "mean-field: param-free global sum hoists to a binding" `Quick test_meanfield_global_sum_is_hoisted;
+      Alcotest.test_case "mean-field: param-bearing let still refuses to hoist" `Quick test_param_bearing_let_still_refuses_to_hoist;
+      Alcotest.test_case "mean-field: rate_grad drops params absent from the rate" `Quick test_meanfield_grad_drops_unrelated_params;
       Alcotest.test_case "autodiff: Σ of zero derivatives folds to a genuine zero" `Quick test_reduce_of_zeros_folds_to_genuine_zero;
       Alcotest.test_case "autodiff: Σ with a live summand is not over-folded" `Quick test_reduce_partial_zeros_keeps_live_terms;
       Alcotest.test_case "rate_state_grad: ∂/∂compartment emits nonzero comps (gh#275)" `Quick test_rate_state_grad_smooth;
