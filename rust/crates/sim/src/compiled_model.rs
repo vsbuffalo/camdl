@@ -376,7 +376,11 @@ fn eval_table_expr(
                 UnOp::Cos   => a.cos(),
                 UnOp::Tanh  => a.tanh(),
             };
-            Ok(if r.is_nan() { 0.0 } else { r })
+            // Coerce any non-finite table value to 0: a NaN (sqrt of neg — the
+            // arm above), a −inf (log of non-positive), or a ±inf (overflow),
+            // matching the Pow arm's `is_infinite` guard. A non-finite constant
+            // table cell is never a valid coefficient.
+            Ok(if !r.is_finite() { 0.0 } else { r })
         }
         Expr::UncheckedDim(w) => eval_table_expr(&w.unchecked_dim.inner, param_index, params),
         _ => Err(SimError::Validation(
