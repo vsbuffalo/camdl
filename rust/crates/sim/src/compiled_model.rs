@@ -897,8 +897,50 @@ impl CompiledModel {
         // remains runtime-dependent is checked here: the integrator `dt` (a
         // config value) and the finiteness of resolved fire times (parametric
         // `AtTimesExpr` schedules resolve against `params`).
-        for times in self.resolve_fire_times(params) {
-            crate::time::validate_fire_times(&times)?;
+        for (iv_idx, times) in self.resolve_fire_times(params).iter().enumerate() {
+            crate::time::validate_fire_times(times)?;
+            // item 23: a `Recurring` schedule promises "exactly one fire per
+            // period regardless of `dt`" (§13.7). That promise breaks when `dt`
+            // is coarser than the period: consecutive targets (one period apart)
+            // round to the same integrator step via `round(t/dt)`, and the dedup
+            // `BTreeSet` in `resolve_fire_steps` silently drops a fire. `dt` is
+            // known here (unlike at construction), so detect the collision and
+            // hard-error instead of merging.
+            //
+            // Scoped to `Recurring` deliberately: an explicit `at [...]` list
+            // (`AtTimes`/`AtTimesExpr`) carries NO one-per-period promise, and a
+            // within-`dt` coincidence of two listed fires MERGES to one fire on
+            // purpose, for cross-backend agreement (gh#198). Only the recurring
+            // guarantee is at stake here.
+            if !matches!(
+                self.model.interventions[iv_idx].fire.schedule(),
+                Some(ir::intervention::InterventionSchedule::Recurring(_))
+            ) {
+                continue;
+            }
+            let mut step_of: std::collections::BTreeMap<i64, f64> =
+                std::collections::BTreeMap::new();
+            for &t in times {
+                let step = crate::time::time_to_step(t, dt);
+                match step_of.get(&step) {
+                    // Same step already claimed by an EARLIER, DISTINCT fire
+                    // time — the two would merge to one fire. (An exact
+                    // duplicate `t` is the same fire declared twice, not a
+                    // dropped fire, so it is allowed.)
+                    Some(&prev) if prev != t => {
+                        return Err(SimError::Validation(format!(
+                            "intervention '{}': fire times {prev} and {t} both round to \
+                             integrator step {step} at dt={dt}, so one fire per period would be \
+                             silently dropped (§13.7 guarantees exactly one fire per period). \
+                             Use a dt no coarser than the period, or widen the period.",
+                            self.model.interventions[iv_idx].name,
+                        )));
+                    }
+                    _ => {
+                        step_of.insert(step, t);
+                    }
+                }
+            }
         }
         Ok(())
     }
