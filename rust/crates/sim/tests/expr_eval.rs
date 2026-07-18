@@ -584,16 +584,29 @@ fn test_binop_le() {
 // ── NaN / edge-case guard tests ───────────────────────────────────────
 
 #[test]
-fn test_log_negative_returns_neg_inf() {
+fn test_log_nonpositive_errors_by_default() {
+    // gh#audit-C6 / S1, item 17: `log(x ≤ 0)` is a domain error (no real
+    // result), exactly like `sqrt(neg)` — it must route through the same typed
+    // NumericalCollapse under the strict default, NOT silently return −inf.
+    use sim::{CollapseKind, SimError};
     let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();
     let int_s = IntState::new(1);
     let real_s = RealState::new(0);
-    let expr = Expr::UnOp(UnOpWrap {
-        un_op: UnOpExpr { op: UnOp::Log, arg: Box::new(Expr::Const(ConstExpr { value: -1.0 })) },
-    });
     let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
-    let result = eval_expr(&expr, &ctx).unwrap();
-    assert!(result.is_infinite() && result < 0.0, "log(-1) should be -inf, got {}", result);
+    for value in [-1.0_f64, 0.0] {
+        let expr = Expr::UnOp(UnOpWrap {
+            un_op: UnOpExpr { op: UnOp::Log, arg: Box::new(Expr::Const(ConstExpr { value })) },
+        });
+        sim::eval_stats::set_allow_degenerate_rates(false);
+        let err = eval_expr(&expr, &ctx).unwrap_err();
+        assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::LogNonPositive, .. }),
+            "log({value}) must produce NumericalCollapse{{LogNonPositive}}, got {:?}", err);
+        // --allow-degenerate-rates coerces the degenerate rate to 0, like sqrt.
+        sim::eval_stats::set_allow_degenerate_rates(true);
+        assert_eq!(eval_expr(&expr, &ctx).unwrap(), 0.0,
+            "with --allow-degenerate-rates, log({value}) coerces to 0.0");
+        sim::eval_stats::set_allow_degenerate_rates(false);
+    }
 }
 
 #[test]
@@ -613,6 +626,89 @@ fn test_sqrt_negative_errors_by_default() {
         "Sqrt of negative must produce NumericalCollapse{{SqrtNegative}}, got {:?}", err);
     sim::eval_stats::set_allow_degenerate_rates(true);
     assert_eq!(eval_expr(&expr, &ctx).unwrap(), 0.0);
+    sim::eval_stats::set_allow_degenerate_rates(false);
+}
+
+// item 17: the fast (pre-resolved) propensity path must reject a `log(x ≤ 0)`
+// rate the same way `eval_expr` does — a −inf that used to slip past the
+// `is_nan` boundary guard is now caught and surfaced as a typed collapse.
+#[test]
+fn test_log_nonpositive_rate_errors_via_eval_propensities() {
+    use ir::transition::{StoichiometryEntry, Transition};
+    use sim::propensity::eval_propensities;
+
+    // rate = log(S - 5); with S = 1 the argument is -4 → domain error.
+    let mut m = minimal_model(vec![int_comp("S")], vec![]);
+    m.transitions.push(Transition {
+        rate_state_grad: Default::default(),
+        name: "leave_S".into(),
+        stoichiometry: vec![StoichiometryEntry("S".into(), -1)],
+        rate: Expr::UnOp(UnOpWrap { un_op: UnOpExpr {
+            op: UnOp::Log,
+            arg: Box::new(Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+                op: BinOp::Sub,
+                left: Box::new(Expr::Pop(PopExpr { pop: "S".into() })),
+                right: Box::new(Expr::Const(ConstExpr { value: 5.0 })),
+            }})),
+        }}),
+        metadata: None,
+        draw_method: Default::default(),
+        rate_grad: HashMap::new(),
+        lineage: None,
+    });
+    let model = CompiledModel::new(m).unwrap();
+    let int_s = IntState::from_vec(vec![1]); // S = 1 → log(-4)
+    let real_s = RealState::new(0);
+    let mut out = Vec::new();
+
+    sim::eval_stats::set_allow_degenerate_rates(false);
+    let res = eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out);
+    assert!(res.is_err(),
+        "log of a non-positive rate must hard-error under the strict default; got {:?}", out);
+    // --allow-degenerate-rates coerces the degenerate rate to a finite 0.
+    sim::eval_stats::set_allow_degenerate_rates(true);
+    eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out)
+        .expect("with --allow-degenerate-rates the degenerate rate coerces to 0");
+    assert_eq!(out, vec![0.0]);
+    sim::eval_stats::set_allow_degenerate_rates(false);
+}
+
+// item 17: a resolved propensity that is +inf (an overflow that escaped the
+// per-op guards, e.g. exp of a large argument) is not a usable rate. The
+// `is_finite` boundary guard must reject it rather than push +inf.
+#[test]
+fn test_infinite_propensity_is_rejected() {
+    use ir::transition::{StoichiometryEntry, Transition};
+    use sim::propensity::eval_propensities;
+
+    // rate = exp(1000 * S); with S = 1 this is exp(1000) = +inf.
+    let mut m = minimal_model(vec![int_comp("S")], vec![]);
+    m.transitions.push(Transition {
+        rate_state_grad: Default::default(),
+        name: "leave_S".into(),
+        stoichiometry: vec![StoichiometryEntry("S".into(), -1)],
+        rate: Expr::UnOp(UnOpWrap { un_op: UnOpExpr {
+            op: UnOp::Exp,
+            arg: Box::new(Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+                op: BinOp::Mul,
+                left: Box::new(Expr::Const(ConstExpr { value: 1000.0 })),
+                right: Box::new(Expr::Pop(PopExpr { pop: "S".into() })),
+            }})),
+        }}),
+        metadata: None,
+        draw_method: Default::default(),
+        rate_grad: HashMap::new(),
+        lineage: None,
+    });
+    let model = CompiledModel::new(m).unwrap();
+    let int_s = IntState::from_vec(vec![1]); // S = 1 → exp(1000) = +inf
+    let real_s = RealState::new(0);
+    let mut out = Vec::new();
+
+    sim::eval_stats::set_allow_degenerate_rates(false);
+    let res = eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out);
+    assert!(res.is_err(),
+        "a +inf resolved propensity must be rejected, not used as a rate; got {:?}", out);
     sim::eval_stats::set_allow_degenerate_rates(false);
 }
 
