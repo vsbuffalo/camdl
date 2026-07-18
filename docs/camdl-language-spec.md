@@ -2914,9 +2914,12 @@ NAME : add(COMP, EXPR) every PERIOD at_day DAY
 
 `at_day` is the absolute phase within the period, measured from `t = 0`. Fire
 times are `at_day + k * period` for the smallest `k` where `target >= t_start`.
-The engine fires on the single timestep where `|t - target| < 0.5 * dt`,
-guaranteeing exactly one fire per period regardless of `dt` or fractional-period
-drift.
+The engine fires on the single timestep where `|t - target| < 0.5 * dt`, so each
+period fires exactly once as long as `dt` is no coarser than the period
+(`dt <= period`). A coarser `dt` would round two consecutive targets onto the
+same integrator step, silently dropping a fire; rather than merge them, the
+engine rejects such a schedule at simulation start with a hard error (use a
+finer `dt`, or widen the period).
 
 Example: `every 365.25 'days at_day 251` fires on day 251 of each year. If
 simulation starts at `t = 100`, the first fire is at `t = 251` (not `t = 351`).
