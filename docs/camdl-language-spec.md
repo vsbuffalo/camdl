@@ -1,6 +1,6 @@
 # The camdl Language Specification
 
-**Version:** 0.3-draft **Date:** 2026-03-16
+**Version:** 0.3-draft **Date:** 2026-07-17
 
 _camdl (Compartmental Model Description Language) is a domain-specific language
 for specifying stochastic compartmental models. A `.camdl` file defines model
@@ -42,11 +42,14 @@ Two shapes are both first-class:
 carries names, kinds, dimensions, and optional priors only (§4, §4.2). Concrete
 values live elsewhere: a `params.toml` / `[fixed]` block, a CLI override
 (`--param`, `--set`), or — the only in-file form — a named scenario's
-`set = { ... }`. External configuration overrides in-file presets; the
-precedence chain is fixed (see `camdl-run-spec.md` §1.3 for forward simulation
-and `docs/inference.md` for inference). For a simulation's parameters, highest
-precedence first: `--param` CLI flags, then scenario `set = { ... }`, then sweep
-points, then the `params.toml` base values. The seed is always a CLI argument.
+`set = { ... }`. The precedence chain is fixed (see `camdl-run-spec.md` §1.3 for
+forward simulation and `docs/inference.md` for inference), and it is **not** a
+blanket "external beats in-file": an in-file scenario's `set`/`scale` overrides
+the external `params.toml` base and any sweep point, and only an explicit CLI
+`--param` / `--fixed` outranks the scenario. For a simulation's parameters,
+highest precedence first: `--param` CLI flags, then scenario `set = { ... }`,
+then sweep points, then the `params.toml` base values. The seed is always a CLI
+argument.
 
 What this design preserves — and what the IR's hash discipline enforces — is
 that _structural_ model identity (compartments, transitions, observation
@@ -516,7 +519,9 @@ via CLI flags, a `--params` TOML, or inference engines (§4.2).
 rate        : ≥ 0, dimension 1/time. Default transform: log.
 probability : ∈ [0, 1], dimensionless. Default transform: logit.
 positive    : > 0, dimensionless. Default transform: log.
-count       : integer ≥ 0.
+count       : dimension P (a population count). Integrality is not enforced —
+              `let iota : count = 1e-6` compiles; the type carries the [P]
+              dimension, not an integer constraint.
 real        : unconstrained (default if omitted).
 instant     : dimension [T], absolute time. Renders as a date in anchored
               mode (requires origin). Negative lower bounds allowed.
@@ -811,7 +816,9 @@ After this, S/E/I have dimensions `[age, sex]` but R has `[age, sex, immunity]`.
 S[child]                # first dimension = age
 S[child, female]        # age, then sex
 S                       # bare = sum over ALL strata (always global)
-S[child]                # if S has [age, sex]: sum over sex for age=child
+S[child]                # if S has [age, sex]: ERROR (E287) — a partial index
+                        #   has no defined cell; the bare name S sums, but
+                        #   S[child] neither sums nor picks a cell
 ```
 
 **Named indexing** (explicit dimension labels, any order):
@@ -819,8 +826,7 @@ S[child]                # if S has [age, sex]: sum over sex for age=child
 ```camdl
 S[age = child]                    # equivalent to S[child]
 S[sex = female, age = child]      # order doesn't matter
-S[patch = p1]                     # sum over age, specific patch
-incidence(infection[patch = p])   # sum over age, specific patch
+S[age = child, sex = female]      # a non-first dim named; every dim still specified
 ```
 
 Named indexing is useful when a compartment or transition has multiple
@@ -1484,26 +1490,22 @@ summed rate per patch; the compiler warns (W105) and points back to the
 
 ### 8.3 No Localization, No Magic
 
-The mixing formula in the base model uses global N:
+An unindexed global formula over a stratified compartment is a **hard error**,
+not silently localized. There is no auto-transform that turns a global rate into
+per-stratum indexed formulas: a bare mixing formula over stratified `S`/`I`
+hard-errors (`E272` — "compartment is stratified but used without indices"), so
+what runs is always what the user wrote.
 
-```camdl
-let N = S + I + R
-infection : S --> I  @ beta * S * I / N    # global N, no indices
-```
-
-After stratification, the compiler transforms this based on the coupling rules
-(see §10). The user writes the base model with global names. The coupling rules
-produce the correct indexed formulas in the IR.
-
-For explicit per-stratum FOI, the user writes the indexed form directly:
+The user writes the per-stratum force of infection explicitly:
 
 ```camdl
 infection[a in age] : S[a] --> I[a]
   @ beta * S[a] * sum(b in age, C_age[a,b] * I[b] / N_local[b])
 ```
 
-Both paths produce the same IR. The first uses sugar (§10); the second is the
-primitive.
+There is only one path to the indexed IR — the primitive above. The stratified
+transmission surface (§10) is that same explicit indexed form, not a global
+shorthand that expands behind the user's back.
 
 ### 8.4 Typed Let Bindings
 
@@ -2206,9 +2208,13 @@ recovery  : I --> R  @ gamma * I
 ```
 
 The first argument is the base rate (a standard propensity expression). The
-second is σ²_SE, the variance of the Gamma noise multiplier (which has mean 1).
-The resulting event count distribution is NegBinomial — the Poisson-Gamma
-compound.
+second is σ²_SE, the **intensity** of the Gamma white noise — the variance the
+underlying Gamma process accumulates per unit time (He et al. 2010). It is *not*
+the realized multiplier variance: over a substep of length `dt` the runtime
+draws a mean-one multiplicative factor `G ~ Gamma(shape = dt/σ², scale = σ²/dt)`,
+so `E[G] = 1` and `Var(G) = σ²/dt` — the realized variance scales inversely with
+the step. The resulting event count distribution is NegBinomial — the
+Poisson-Gamma compound.
 
 `overdispersed` is syntactically a function call in expression position. The
 compiler extracts it during expansion: the inner rate goes to `transition.rate`,
@@ -2452,7 +2458,7 @@ observations {
     columns       { time : time, detection : count }
     projected     = prevalence(I)
     emit_schedule = every 14 'days
-    detection     ~ bernoulli(p = p_detect)
+    detection     ~ bernoulli(p = p_detect * projected / N)
   }
 }
 ```
@@ -2529,21 +2535,24 @@ prevalence" shortcut, write the sum directly: `projected = x + y` is the general
 form; `prevalence(x)` is kept as sugar only for the single-compartment case
 where the named function clarifies intent.
 
-**Both indexed forms sum over unspecified dimensions.** The only difference is
-how the index is matched:
+**A partial index does not marginalize; state cross-strata aggregation
+explicitly.** Dropping *some* of a stratified family's dimensions is an error,
+not a silent sum: `incidence(infection[patch = north])` over a `[patch, age]`
+family resolves to a single expanded transition and fails if none matches
+(there is no `infection_north` — only `infection_north_child`, …). To sum a
+projection across a dimension, write the sum out:
 
-- **Positional** (`infection[north]`) binds to dimensions in declaration order.
-  In a model with `dimensions { patch, age }` and
-  `stratify(by = patch); stratify(by = age)`, `infection[north]` pins the
-  `patch` dimension to `north` and sums over `age`. If you later reorder
-  declarations to `{ age, patch }`, the same expression would try to match
-  `north` as an `age` stratum — a silent re-interpretation.
-- **Named** (`infection[patch = north]`) binds the `patch` dimension to `north`
-  regardless of declaration order, and sums over every other dimension (§5.1).
-  Order-independent and robust to dimension-reordering edits.
+- uniform reporting: `rho * sum(p in patch, incidence(infection[p]))`
+- per-stratum reporting: `sum(p in patch, rho[p] * incidence(infection[p]))`
 
-Use named indexing in any model with more than one dimension — it prevents the
-positional-binding failure mode above.
+A **bare, un-indexed** `incidence(infection)` over a stratified family on an
+un-indexed observation stream is rejected (`E280`) precisely so this aggregation
+decision is never made silently; the diagnostic prints the two explicit forms
+above. Where you *do* fully index, prefer **named** indexing
+(`infection[patch = north, age = child]`) over **positional**
+(`infection[north, child]`): named binding is order-independent and survives a
+later reordering of the dimension declarations, whereas positional binding
+silently re-interprets against the new order.
 
 Inside a likelihood expression, the keyword `projected` refers to the evaluated
 projection value for that observation.
@@ -3074,7 +3083,7 @@ runs the baseline without it.
 
 > **Partially implemented.** The `timepoints { }` block is parsed but the
 > declared timepoint values are currently discarded by the expander and not
-> available in expressions. Full timepoint support is planned for v0.2. The
+> available in expressions. Full timepoint support is not yet implemented. The
 > built-in reserved identifiers `t_start` and `t_end` are always available
 > regardless.
 
@@ -3547,6 +3556,7 @@ disable = [INTERVENTION, ...]      turn off interventions
 set     = { PARAM = EXPR, ... }    override parameter values
 scale   = { PARAM = FACTOR, ... }  multiply (compiler checks domain validity)
 compose = [SCENARIO, ...]          apply patches in sequence
+simulate { to = EXPR }             override only the end time (§17.2); dt/integrator are model-wide, not per-scenario (E106)
 ```
 
 **Indexed parameter syntax in set/scale.** For indexed parameters declared as
@@ -4709,11 +4719,14 @@ declaration :=
   | let_binding                       # let NAME = EXPR
 ```
 
-**Mandatory** for a runnable model: `compartments`, `transitions`, `init`,
-`simulate`, and `time_unit`. Everything else is optional.
+**Mandatory** for a runnable model: `compartments`, at least one of
+`transitions` or `ode` (integer compartments evolve via `transitions`, `real`
+compartments via `ode`; a model may use either or both), `init`, `simulate`, and
+`time_unit`. Everything else is optional.
 
-**Mandatory** for `camdl check` (validation only): `compartments` and
-`parameters`. No `simulate` or `init` required.
+**Mandatory** for `camdl check` (validation only): `compartments`. A param-free
+model checks cleanly and a pure-`ode` model (no `transitions` block) checks and
+compiles; no `parameters`, `simulate`, or `init` is required for validation.
 
 **Expander** (OCaml): indexed transitions → flat IR transitions,
 `c in compartments` → per-compartment transitions, `consecutive` → adjacent pair
@@ -5069,7 +5082,7 @@ transitions {
   recovery : I --> R  @ gamma + I
   # where gamma : rate ('per_day) and I : count
 }
-# ERROR at line 33: cannot add rate (1/time) and count (dimensionless).
+# ERROR at line 33: cannot add rate (1/time) and count (dimension P).
 #   Did you mean 'gamma * I'?
 ```
 
@@ -5105,26 +5118,40 @@ scenarios {
 
 ### 26.9 Self-Loop Detection
 
+A generated self-loop is a **hard error** (`E310`), not a warning. When an
+expanded transition's source and destination are the same compartment, its net
+stoichiometry cancels to empty, and the compiler rejects it rather than emitting
+a no-op transition:
+
 ```camdl
 migrate[c in compartments, src in patch, dst in patch]
   : c[src] --> c[dst]  @ mig[dst, src] * c[src]
-# WARNING: transition 'migrate' generates self-loops where
-#   src == dst. Self-loops waste computation (Gillespie fires
-#   them but state doesn't change). Add 'where src != dst' to
-#   filter, or ensure mig[i,i] = 0 for all i.
+# ERROR E310: transition 'migrate' has no net effect: sources and
+#   destinations cancel (the diagonal src == dst members are self-loops).
+#   Add 'where src != dst' to drop the diagonal, or ensure mig[i,i] = 0.
+```
+
+Add the guard to filter the diagonal:
+
+```camdl
+migrate[c in compartments, src in patch, dst in patch]
+  : c[src] --> c[dst]  @ mig[dst, src] * c[src]  where src != dst
 ```
 
 ### 26.10 Name Resolution
 
-Names are resolved in order: compartments → parameters → let bindings → forcing
-→ tables. The compiler reports errors for:
+A user-defined name lives in exactly one namespace. The same name declared in
+two of {compartments, parameters, let bindings, forcing, tables} is a
+**duplicate-declaration** error (`E278`), so there is never a legal
+cross-namespace collision for a resolution order to arbitrate — the compiler
+rejects the ambiguity rather than silently preferring one namespace. What is
+reported:
 
 - **Shadowing reserved identifiers**: `t_start`, `t_end`, `compartments`, etc.
-- **Duplicate declarations**: two parameters named `beta`, two compartments
-  named `S`.
-- **Ambiguous references**: a name exists in multiple namespaces (e.g., a
-  parameter and a compartment both named `N`). The compiler errors rather than
-  guessing.
+  (`E100`).
+- **Duplicate declarations** (`E278`): two parameters named `beta`, two
+  compartments named `S`, or the same name in two of the namespaces above (e.g.
+  a parameter and a compartment both named `N`).
 
 ### 26.11 Compiler Reporting
 
@@ -5197,11 +5224,11 @@ min(a, b), max(a, b)                element-wise min / max (binary)
 # Time
 t                                    current simulation time
 
-# Forcing (time-dependent functions)
-forcing { NAME : sinusoidal { ... } }     smooth seasonal
-forcing { NAME : periodic { ... } }       repeating step (values or on = [lo:hi, ...])
-forcing { NAME : piecewise { ... } }      non-repeating step
-forcing { NAME : interpolated { ... } }   data-driven (linear or spline)
+# Forcing (time-dependent functions) — the tier-3 unit literal 'UNIT is required (§7; E001 if omitted)
+forcing { NAME : sinusoidal 'UNIT { ... } }     smooth seasonal
+forcing { NAME : periodic 'UNIT { ... } }       repeating step (values or on = [lo:hi, ...])
+forcing { NAME : piecewise 'UNIT { ... } }      non-repeating step
+forcing { NAME : interpolated 'UNIT { ... } }   data-driven (linear or spline)
 
 # Reserved identifiers
 t, t_start, t_end, dt, pi, e                # genuinely reserved (E100)
