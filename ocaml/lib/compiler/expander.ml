@@ -5283,7 +5283,7 @@ let expand_output ctx =
   (* The output window's upper bound is no longer stored on the schedule
      (gh#143): `simulation.t_end` is the sole horizon authority, and the
      runtime derives output times from `[start, t_end]` at emission. Only
-     `start` is set here — a deliberate widening to `min(0, t_start)`. *)
+     `start` is set here — defaulting to `t_start` (see below). *)
   let t_start = match ctx.simulate with
     | None    -> 0.0
     | Some sd -> resolve_float_expr ctx sd.sim_from
@@ -5292,17 +5292,21 @@ let expand_output ctx =
     | Some { out_trajectories = Some ot; _ } -> ot.otformat
     | _ -> "tsv"
   in
-  (* Default the output schedule's start to cover the full integration
-     window. With anchored models that use `from = date(...)` before
-     `origin`, t_start is negative; an output schedule starting at 0
-     leaves no snapshots in [t_start, 0), and `--obs-only` / any
-     state-at-obs-time path (snap_at) can't find a snapshot for the
-     pre-origin observations and hard-exits. Defaulting to
-     min(0.0, t_start) preserves the existing start=0 behaviour for
-     unanchored models (t_start ≥ 0) and extends it to cover negative
-     t_start without changing the step or output cadence. (start applies
-     only to the regular schedule; `at = [...]` lists explicit times.) *)
-  let start = min 0.0 t_start in
+  (* Default the output schedule's start to the requested window origin,
+     t_start, so the trajectory covers exactly [t_start, t_end] = [from, to].
+     Two directions matter:
+       - t_start < 0 (anchored `from = date(...)` before `origin`): starting
+         at 0 would leave no snapshots in [t_start, 0), so `--obs-only` / any
+         state-at-obs-time path (snap_at) can't find a snapshot for the
+         pre-origin observations and hard-exits. start = t_start covers them.
+       - t_start > 0 (anchored `from` after `origin`, or unanchored from > 0):
+         starting at 0 would emit — and record — over [0, t_end] instead of
+         [from, to], yielding rows at times the dynamics never visited (and
+         non-monotonic time next to the t_start prologue snapshot).
+     start = t_start is correct in both directions (and trivially at t_start = 0).
+     (start applies only to the regular schedule; `at = [...]` lists explicit
+     times.) *)
+  let start = t_start in
   let times = match ctx.output_decl with
     | Some { out_trajectories = Some ot; _ } ->
       (match ot.otschedule with
