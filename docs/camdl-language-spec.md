@@ -50,15 +50,16 @@ points, then the `params.toml` base values. The seed is always a CLI argument.
 
 What this design preserves — and what the IR's hash discipline enforces — is
 that _structural_ model identity (compartments, transitions, observation
-projections, intervention semantics) is captured by `model_hash`, while
-_value-bearing_ content (base params, backend, dt) lives in `sim_hash`, the
-scenario delta in `scen_hash`, and inference inputs (priors, transforms, data,
-fit config) in `fit_hash`. So two analyses that share a structural model have
-the same `model_hash` even if one bakes in calibrated values and the other
-supplies them externally; changing a value is visible in `sim_hash` even when
-the underlying structure didn't change. The reviewer trying to tell "is this a
-structural change or a parameter sweep" reads the hash provenance, not the file
-shape.
+projections, intervention semantics) is captured by the **model** level of a
+run's factored identity, while _value-bearing_ content lives in later levels:
+base params in the **params** level, backend and `dt` in the **config** level,
+the scenario delta in the **scenario** level, and inference inputs (priors,
+transforms, data, fit config) in the **fit** level (§19). So two analyses that
+share a structural model share the same model-level hash even if one bakes in
+calibrated values and the other supplies them externally; changing a value is
+visible in the params or config level even when the underlying structure didn't
+change. The reviewer trying to tell "is this a structural change or a parameter
+sweep" reads the level hashes, not the file shape.
 
 **Typed and checked.** Index dimensions, table shapes, compartment arities,
 parameter domains, and unit dimensions are compiler-checked with clear error
@@ -3732,104 +3733,78 @@ Seed is always external (CLI `--seed`), never in the model file.
 
 ## 19. Content-Addressable Output
 
-Outputs are stored in a two-level content-addressable hierarchy inside an
-`output_dir` you choose:
+Outputs are stored in a **content-addressed store** under an `output_dir` you
+choose, partitioned by artifact kind (`sims/` for `simulate` and `batch`
+trajectories, `fits/` for inference stages, and so on):
 
 ```
 {output_dir}/
-  model.ir.json
-  geo/boundaries.geojson          (if geo= specified in experiment)
-  runs/
-    {sim_hash_8}/                 # model + base params + backend + dt
-      {scenario_slug}-{scen_hash_8}/   # scenario overrides
-        seed_{seed}/              # individual run
-          traj.tsv
-          run.json
+  sims/
+    {model}/{config}/{params}/{scenario}/{seed}/
+      traj.tsv
+      run.json
 ```
 
-Example with two scenarios after a base-param change:
+A `simulate` trajectory's address is a **factored tuple of five levels** —
+model, config, params, scenario, seed — nested in that order. Each path segment
+is `{label}-{hash8}`, e.g. `sir_basic-3a7f2c1d/chain_binomial-dt1-1fb03eee/…`:
+the `label` is a human-readable provenance tag (the model stem,
+`chain_binomial-dt1`, `seed_1`) and the `hash8` is the first eight hex chars of
+that level's structural content hash.
+
+Navigation and display read `run.json`, never the segment text, so the label is
+cosmetic. Renaming a scenario changes the directory name but not the identity,
+which produces a harmless cache miss (a fresh directory, one redundant re-run),
+never a wrong answer. There is **no** `00000000` special-case marker for an
+empty (baseline) scenario: an empty `enable`/`disable`/`set` hashes to a
+concrete level hash like any other input.
+
+### 19.1 Run identity
+
+A leaf's identity is its `run_id`: a single structural hash over the ordered
+list of the five per-level content hashes,
 
 ```
-runs/3a7f2c1d/baseline-00000000/seed_1/
-runs/3a7f2c1d/with_sia-f9e2b047/seed_1/
-# after tweaking with_sia only — baseline reused:
-runs/3a7f2c1d/with_sia-d4e2a391/seed_1/
-runs/3a7f2c1d/baseline-00000000/seed_1/   ← untouched, cached
-# after changing base params — nothing reused:
-runs/cc8b1a90/baseline-00000000/seed_1/
+run_id = hash(HASH_VERSION, kind, [model, config, params, scenario, seed])
 ```
 
-The `00000000` prefix for an empty-delta scenario is a **special-case display
-value** assigned by the path builder when the scenario has no
-overrides/enables/disables — it is not the hash of an empty input
-(`sha256("") = e3b0c442...`). The intent is a visually-distinct "identity
-scenario" marker; the actual `scen_hash` field in `run.json` is unset for these.
+recorded in full (64 hex chars) in `run.json`; the 8-hex path segments are a
+readable factoring of it. Each level hashes a **disjoint slice** of the resolved
+input set, and their union is the whole input:
 
-### 19.1 Hash Computation
+| Level      | Covers                                                                                                                                                                       |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`    | the structural IR — compartments, transitions, observations, ODE equations, tables, `init`, `time_unit` — presentation-normalized (output format and time rendering are stripped, since they don't change results) |
+| `config`   | backend, `dt`, `from` / `to`, the output schedule, the written-column selection (`--columns` / `--no-flows`), and degenerate-rate handling                                 |
+| `params`   | the resolved base parameter values and any loaded table data                                                                                                              |
+| `scenario` | the scenario **delta** only: the `enable` / `disable` lists and the `set` / `scale` parameter patch                                                                        |
+| `seed`     | the process and base RNG seeds                                                                                                                                             |
 
-```
-model_hash = sha256(IR JSON bytes)                         # full 64-char hex
+Two runs that share a structural model share the `model` level even if one bakes
+in calibrated values and the other supplies them externally; changing a
+parameter value re-keys the `params` level while the `model` level is untouched.
+The written-column selection is part of `config`, so two runs that request
+different columns are distinct leaves — a leaf's bytes and its `run_id` never
+disagree.
 
-sim_hash   = sha256(model_hash + canonical_base_params
-                    + backend + dt + tool_version)         # 64-char hex
-                                                           # first 8 used in dir name
+**Collision handling.** Eight hex chars per segment suffices because a collision
+requires *every* level on the path to collide at once; the full 64-char hashes
+in `run.json` are the authoritative check, and the store escalates a genuine
+path-prefix collision by suffixing the final segment.
 
-scen_hash  = sha256("enable\0" + sorted(enable, NUL-terminated)
-                    + "disable\0" + sorted(disable, NUL-terminated)
-                    + "params\0" + canonical_scen_params + "\0"
-                    + tool_version)                        # 64-char hex
-                                                           # first 8 used in dir name
+### 19.2 Cache reuse
 
-scenario_slug = scenario name lowercased,
-                non-[a-z0-9_] replaced with _
-seed_dir      = seed_{N}   (verbatim u64, no zero-padding)
-```
+A run is a **cache hit** when its factored path already exists. Because the
+levels nest independently, an unchanged level's subtree is reused verbatim:
 
-A scenario with no overrides, enables, or disables is the implicit baseline; the
-path builder assigns it the special-case display prefix `00000000` (see the note
-above — this is a marker, not `sha256("")` or the value of the formula above).
-
-`scen_hash` covers only the _delta_ (scenario overrides, enable, disable). It is
-domain-separated (each list is prefixed with its label and every element is
-NUL-terminated) and pinned to `tool_version` — the version component is
-load-bearing: a code change that alters how enables/disables resolve (e.g.
-family-name expansion) must not silently return stale cached results under an
-identical hash. Base params and model structure are captured in `sim_hash`.
-Renaming a scenario without changing its definition preserves the hash, so cached
-runs are reused.
-
-**Structural content** included in `model_hash` (via IR JSON):
-
-```
-compartments         # state variable declarations
-stratify             # index dimension declarations
-parameters           # names and types only (not values)
-tables               # dimension annotations + inline values
-let                  # all let bindings
-transitions          # all transition declarations
-interventions        # intervention definitions (including base_name)
-init                 # initial condition expressions
-time_unit            # canonical time unit
-```
-
-**Excluded** from `model_hash`:
-
-```
-simulate             # time range is analysis-specific
-scenarios            # counterfactual modifications, not structural
-data (file paths)    # external file paths change across machines
-```
-
-### 19.2 Cache Reuse Matrix
-
-| What changed                       | sim_hash  | scen_hash         | Reuse               |
-| ---------------------------------- | --------- | ----------------- | ------------------- |
-| IR / model                         | changes   | —                 | none                |
-| base params                        | changes   | —                 | none                |
-| backend or dt                      | changes   | —                 | none                |
-| scenario A's enable/disable/params | unchanged | A changes, B same | B's runs reused     |
-| add more seeds                     | unchanged | unchanged         | all existing reused |
-| rename a scenario                  | unchanged | unchanged         | reused (same sim)   |
+| What changed                        | Re-keys              | Reuse                                                       |
+| ----------------------------------- | -------------------- | ---------------------------------------------------------- |
+| model / IR                          | `model` + all below  | none                                                       |
+| base params or table data           | `params` + below     | none                                                       |
+| backend, `dt`, or column selection  | `config` + below     | none                                                       |
+| one scenario's enable/disable/patch | that `scenario` leaf | sibling scenarios reused                                   |
+| add more seeds                      | new `seed` leaves    | existing seeds reused                                      |
+| rename a scenario (same delta)      | nothing (label only) | identity unchanged, but the renamed path is a fresh directory → one harmless re-run |
 
 ### 19.3 Enumerating runs
 
