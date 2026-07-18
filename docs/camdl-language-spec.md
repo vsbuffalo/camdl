@@ -3313,7 +3313,7 @@ sampled on a schedule. With no `output {}` block the default schedule applies;
 declare one to set the cadence or give explicit output times.
 
 > **Default schedule.** Snapshots every `1` in the model's `time_unit`, covering
-> `[min(0, t_start), t_end]` — where the window is taken from the `simulate {}`
+> `[t_start, t_end]` — where the window is taken from the `simulate {}`
 > block (or `(0, 100)` if `simulate {}` is omitted). The simulate command writes
 > the trajectory to `--output` (or stdout) and writes observation files only when
 > `--obs` / `--obs-dir` / `--obs-only` is passed.
@@ -3346,9 +3346,10 @@ metadata.json         # run provenance (see §19)
 ### 16.2 IR Mapping
 
 The trajectories block compiles to the IR `output` schedule: `every = E` →
-`OutRegular { start, step }` (start defaults to `min(0, t_start)` so the
-schedule covers anchored models with a negative `t_start`); `at = [...]` →
-`OutAtTimes`. The runtime writes the trajectory directly during simulation.
+`OutRegular { start, step }` (start defaults to `t_start` so the schedule covers
+exactly the requested window `[from, to]`, including anchored models with a
+negative `t_start`); `at = [...]` → `OutAtTimes`. The runtime writes the
+trajectory directly during simulation.
 
 Output emission is confined to `[start, simulation.t_end]`: `simulation.t_end`
 is the sole horizon authority, and output times are derived from it at emission

@@ -800,16 +800,16 @@ let test_output_step_default () =
        Alcotest.(check (float 0.01)) "default output step" 1.0 r.Ir.step
      | _ -> Alcotest.fail "expected OutRegular schedule")
 
-(* Regression: the default output schedule must cover the full
-   integration window. With anchored models that resolve `from =
-   date(...)` to a negative t_start, the default `start = 0.0` would
-   leave [t_start, 0) without snapshots and the `--obs-only` writer
-   (and any state-at-obs-time consumer) would hard-exit with
-   "no snapshot at or before t=…" for pre-origin observations.
-   The fix: default `start = min(0.0, t_start)`. *)
+(* Regression: the default output schedule must cover exactly the requested
+   window [t_start, t_end]. With anchored models that resolve `from =
+   date(...)` to a negative t_start, a `start = 0.0` would leave [t_start, 0)
+   without snapshots and the `--obs-only` writer (and any state-at-obs-time
+   consumer) would hard-exit with "no snapshot at or before t=…" for pre-origin
+   observations. The default is `start = t_start`. *)
 
 let test_output_default_start_unanchored_stays_zero () =
-  (* Unanchored (no origin), positive t_start → output.start = 0.0 (no regression). *)
+  (* Unanchored (no origin), from = 0 → t_start = 0 → output.start = 0.0
+     (the common case; start = t_start is trivially 0 here). *)
   let src = {|
     compartments { S, I, R }
     parameters { beta : rate  gamma : rate  N0 : count  I0 : count }
@@ -855,6 +855,38 @@ let test_output_default_start_anchored_negative_t_start () =
      | Ir.OutRegular r ->
        Alcotest.(check (float 1e-9))
          "output.start covers negative t_start" (-34.0) r.Ir.start
+     | _ -> Alcotest.fail "expected OutRegular schedule")
+
+let test_output_default_start_anchored_positive_t_start () =
+  (* Anchored with `from = date("2020-07-01")` *after* `origin =
+     date("2020-01-01")` → t_start = 182. The default output schedule must
+     start at t_start (182), not 0: otherwise the trajectory is emitted over
+     [0, t_end] instead of the requested [from, to], producing rows at times
+     the dynamics never visited (and, alongside the t_start prologue snapshot,
+     non-monotonic time). This is the anchored-positive counterpart of the
+     negative-t_start case above. *)
+  let src = {|
+    time_unit = 'days
+    origin = date("2020-01-01")
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate  N0 : count  I0 : count }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = date("2020-07-01")  to = date("2020-07-12") }
+  |} in
+  match Compiler.compile ~name:"test_output_anchored_pos_start" src with
+  | Error e -> Alcotest.failf "compile failed: %s" e
+  | Ok m ->
+    Alcotest.(check (float 1e-9)) "t_start" 182.0 m.Ir.simulation.Ir.t_start;
+    (match m.Ir.output.Ir.times with
+     | Ir.OutRegular r ->
+       Alcotest.(check (float 1e-9))
+         "output.start = t_start (window is [from, to], not [0, to])"
+         182.0 r.Ir.start
      | _ -> Alcotest.fail "expected OutRegular schedule")
 
 (* Output trajectory customization (Phase 1): the trajectories block accepts
@@ -919,13 +951,14 @@ let test_output_every_and_at_conflict () =
   | Error _ -> ()  (* expected: conflicting schedule rejected *)
   | Ok _ -> Alcotest.fail "expected error: every and at are mutually exclusive"
 
-(* A.2 guard: observations and output share the `schedule_core` grammar/AST
-   but their expander lowerings are NOT identical — obs `every` lowers
-   start = t_start, output `every` lowers start = min(0, t_start). For
-   t_start > 0 they diverge (obs.start = t_start, output.start = 0). Pin it
-   so a future shared schedule_core lowering helper can't silently shift
-   observation times (which PGAS conditions on). *)
-let test_obs_output_start_divergence () =
+(* A.2 guard: observations and output share the `schedule_core` grammar/AST,
+   and their expander lowerings now agree — both lower `every` to
+   start = t_start. For t_start > 0 (here from = 10 'days) obs.start and
+   output.start both equal 10, so the trajectory covers [from, to] and the
+   observation times (which PGAS conditions on) line up with it. Pin the
+   agreement so a future shared schedule_core lowering helper stays honest and
+   the min(0, t_start) window bug can't silently return. *)
+let test_obs_output_start_agrees () =
   let src = {|
     compartments { S, I, R }
     parameters { beta : rate  gamma : rate  rho : rate  N0 : count  I0 : count }
@@ -951,14 +984,14 @@ let test_obs_output_start_divergence () =
   | Ok m ->
     (match m.Ir.output.Ir.times with
      | Ir.OutRegular r ->
-       Alcotest.(check (float 1e-9)) "output.start = min(0,t_start) = 0" 0.0 r.Ir.start
+       Alcotest.(check (float 1e-9)) "output.start = t_start = 10" 10.0 r.Ir.start
      | _ -> Alcotest.fail "expected OutRegular output schedule");
     (match m.Ir.observations with
      | om :: _ ->
        (match om.Ir.emit_schedule with
         | Some (Ir.ObsRegular r) ->
           Alcotest.(check (float 1e-9))
-            "obs.start = t_start = 10 (NOT min(0,t_start))" 10.0 r.Ir.start
+            "obs.start = t_start = 10 (agrees with output.start)" 10.0 r.Ir.start
         | _ -> Alcotest.fail "expected ObsRegular emit_schedule")
      | [] -> Alcotest.fail "expected an observation model")
 
@@ -9421,13 +9454,15 @@ let () =
         `Quick test_output_default_start_unanchored_stays_zero;
       Alcotest.test_case "anchored t_start<0 → output.start covers full integration window"
         `Quick test_output_default_start_anchored_negative_t_start;
+      Alcotest.test_case "anchored t_start>0 → output.start = t_start (window is [from, to])"
+        `Quick test_output_default_start_anchored_positive_t_start;
       Alcotest.test_case "every = E → OutRegular step" `Quick test_output_every_explicit;
       Alcotest.test_case "every = 0.5 → sub-unit cadence" `Quick test_output_every_subunit;
       Alcotest.test_case "at = [...] → OutAtTimes" `Quick test_output_at_times;
       Alcotest.test_case "format = parquet" `Quick test_output_format_parquet;
       Alcotest.test_case "every and at conflict → error" `Quick test_output_every_and_at_conflict;
-      Alcotest.test_case "obs.start=t_start vs output.start=0 (A.2 lowering divergence guard)"
-        `Quick test_obs_output_start_divergence;
+      Alcotest.test_case "obs.start = output.start = t_start (A.2 lowering agreement guard)"
+        `Quick test_obs_output_start_agrees;
       Alcotest.test_case "stratified obs header emits (dim,level) stratum + serde round-trip"
         `Quick test_stratified_observation_emits_stratum;
     ];
