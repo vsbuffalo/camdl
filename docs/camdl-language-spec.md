@@ -1628,9 +1628,17 @@ infect_v : S_v + I_h --> E_v + I_h   @ a * b_v * S_v * I_h / H
 react    : A + B --> C               @ k * A * B
 ```
 
-Atomic firing: a single Gillespie / chain-binomial step applies the
-_vector_ of deltas at once. For `bite`, `S_h` decrements and `I_h` increments
-together — no intermediate state.
+Atomic firing: a single Gillespie step applies the _vector_ of deltas at once.
+For `bite`, `S_h` decrements and `I_h` increments together — no intermediate
+state.
+
+**Backend requirement.** A multi-source transition requires **Gillespie or
+ODE**. Chain-binomial rejects it with a hard error (gh#121): its competing-risk
+draw bounds the drawn flow by a *single* source count, which is wrong when two
+sources jointly gate the event (the correct joint draw, bounded by the minimum
+over all sources, is not implemented). On chain-binomial, fall back to the
+single-source encoding with the second population referenced only in the rate
+(shown under "When to use it" below).
 
 **Catalyst collapse.** A compartment appearing on both sides of the arrow
 contributes `−1` and `+1`, which sum to `0`. Zero-delta entries are dropped from
@@ -1974,6 +1982,15 @@ integer is `E244`; giving both or neither of `mean`/`rate` is `E245`; an unknown
 last branch (or a missing one on any earlier branch) is `E256`; and duplicate
 branch labels are `E258`.
 
+**Entering and targeting a staged compartment.** Filling a staged compartment is
+asymmetric with reading it. `init` and inflow transitions (`--> E`) land in
+**stage 1** automatically — write the bare name and the compiler routes the
+arrival to `E_s1`. An intervention is stricter: `transfer(to = E)` naming the
+bare staged compartment is `E264`, because the bare name resolves to the sum
+over stages (`E_s1 + E_s2 + …`), which is not a single cell to add to — name the
+explicit stage (`transfer(to = E_s1, …)`) instead. Reads are unaffected: a bare
+`E` or `prevalence(E)` still sums every stage (the bare-name rule, §5.1).
+
 #### 9.4.2 Aging across a stratified model (canonical use case)
 
 `consecutive(dim)` is also the right primitive for **demographic aging across
@@ -2166,6 +2183,15 @@ entire rate expression and are extracted by the compiler during expansion.
 These are documented in §9.8 (overdispersion) and are compatible with the
 chain-binomial backend. Gillespie and ODE reject models with
 `overdispersed()` transitions.
+
+`deterministic(rate)` fires an exact count of `nearbyint(rate · dt)`, clamped to
+`[0, n_src]` — it never removes more than the source population. It is supported
+**only as the sole exit** from its source: a source that has a
+`deterministic(...)` exit *and* any other competing exit (a stochastic exit, or
+even a second `deterministic(...)`) is rejected (gh#122), because the flows would
+be drawn independently and could together over-draw the source. (The ODE backend
+runs *every* transition deterministically, so the restriction does not apply
+there.)
 
 **Compile-time vs runtime `if/else`.** The `if/then/else` expression has two
 evaluation modes depending on context:
@@ -2421,6 +2447,18 @@ Left side = compartment name, right side = time derivative. Creates a
 piecewise-deterministic Markov process (PDMP): stochastic events for integer
 compartments, ODE evolution for real compartments between events.
 
+**Interaction with transitions, effects, and balance (ODE backend).** When the
+whole model is run on the fully-deterministic ODE backend, *every* transition
+also feeds the derivatives: each adds `stoichiometry · rate` to its
+compartments' `dc/dt` (integer compartments evolve as deterministic flow, not by
+stochastic draws), and each `real` compartment's `dW/dt` comes from its `ode {}`
+equation. Scheduled effects (interventions and events) are applied as **exact
+discontinuities** — the integrator lands exactly on the effect time, applies the
+effect, records output post-effect (§13.10), and restarts from the modified
+state. A `balance {}` constraint is **not** available on ODE: balance is a
+chain-binomial-only capability, so a model carrying a `balance {}` block run on
+ODE fails at dispatch with a capability error naming the limitation.
+
 ---
 
 ## 12. Observations
@@ -2569,6 +2607,11 @@ beta_binomial(n = EXPR, mean = EXPR, concentration = EXPR)  overdispersed preval
 beta(mean = EXPR, concentration = EXPR)        continuous proportion in (0, 1)
 bernoulli(p = EXPR)                            binary outcome
 ```
+
+`neg_binomial(mean = μ, r = k)` is the **NB2** (mean–dispersion)
+parameterization: the mean is `μ` and the variance is `μ + μ²/r`, so a smaller
+`r` means more overdispersion and `r → ∞` recovers `poisson(μ)`. A prior on `r`
+is therefore a prior on the quadratic excess variance — pin it deliberately.
 
 The two `beta_binomial` spellings are equivalent: `mean`/`concentration` lowers to
 `alpha = mean · concentration`, `beta = (1 − mean) · concentration`. Use whichever
@@ -3051,10 +3094,21 @@ The policy body fields:
 | `once`     | `true` (default) fires at most once; `false` allows repeats.      |
 | `cooldown` | Minimum time between firings when `once = false`. Mutually exclusive with `once = true`. |
 
+**Engine semantics.** The trigger predicate is a **level** test evaluated at
+each observation-emission boundary (not continuously), gated by `once` and
+`cooldown`. A windowed reducer `sum_observed(stream, window = D)` folds the
+emissions in the half-open trailing window `(now − D, now]` — open on the left,
+closed on the right, so an emission landing exactly at `now` is included. When a
+policy fires, its effect is enqueued at `trigger_time + after`, and `cooldown`
+is measured from the **trigger time** (when the predicate crossed), not from the
+delayed effect time.
+
 The trigger always reads **reported surveillance** — the realized observation
-draw, shared across particles. Triggers that read latent model state (a
-particle-local scope) are deferred to a later phase; until then there is no
-`scope` key.
+draw at each emission boundary — never latent model state. Reactive policies run
+only on the chain-binomial *forward* backend, which has no particle ensemble
+(and never runs in inference; §13.9 Status), so there is nothing "shared across
+particles" today. A future particle-local `scope` reading latent state is
+deferred; until then there is no `scope` key.
 
 A reactive intervention is a **policy** (like `interventions {}`, not `events {}`):
 it is scenario-toggleable, so a `baseline` scenario can omit it and a
@@ -3076,6 +3130,31 @@ runs the baseline without it.
 > reactive policy there fails with a clear `REACTIVE_INTERVENTIONS` capability
 > error. A dormant (unenabled) reactive policy is inert, so a run that does not
 > enable it is accepted on every backend. The DSL and IR surface are stable.
+
+### 13.10 Within-substep effect ordering
+
+When several effects land at the same time step they apply in a fixed,
+backend-shared order, so a modeller can predict the state an observation or a
+later effect sees. For the fixed-step backends (chain-binomial and the
+discrete-time filters) the order is:
+
+1. **Inflow events** (`add`, source-less `--> D` events) are computed from the
+   **start-of-step snapshot** and fused into the transition draw.
+2. **Transition draws** advance the compartments (Euler-multinomial,
+   independent-Poisson, RK4, or SSA, per backend).
+3. **Residual events** — draining `transfer` events and `set` — apply to the
+   **post-transition** state.
+4. **Scheduled interventions** apply next, on the post-advance state, in
+   declaration order.
+5. **Balance** (chain-binomial only) overwrites its target last.
+6. The **non-negativity check** runs (the balance target is exempt — a negative
+   there signals a broken model, reported separately, not by this check).
+7. The trajectory row for this step is recorded **after** all of the above.
+
+The consequence a modeller must know: recorded output is **post-effect**. An
+observation emitted at a time when an intervention fires — a vaccination
+`transfer`, say — sees the **post-vaccination** state, not the pre-vaccination
+state.
 
 ---
 
@@ -3583,6 +3662,14 @@ The compiler warns on non-commutative compositions (overlapping write sets).
 `scale` on a `probability` parameter that would exceed [0,1] is a **compile
 error** — the user must handle clamping explicitly via `set` with an
 `if/then/else` expression. No implicit clamping.
+
+**Patch algebra.** Within one scenario, `set` applies before `scale`, so `scale`
+multiplies the value `set` produced (or the inherited value, when the parameter
+isn't `set`). Across a `compose` list, the composed sub-scenarios apply in listed
+order and the scenario's **own** patch applies last, so it wins any collision
+with a composed one. In `enable`/`disable`, an explicit `disable` beats an
+`enable` of the same intervention — a name appearing in both lists ends up
+disabled.
 
 ### 17.2 Scenario Inheritance — `extends`
 
