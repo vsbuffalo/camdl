@@ -649,12 +649,17 @@ pub struct ResolvedModel {
 }
 
 /// True if the expression tree references the runtime substep `dt`
-/// (`Expr::Dt`) anywhere. Used by `required_capabilities` to derive the
-/// `RUNTIME_DT` requirement from the rate ASTs (gh#54). Covers all 15
-/// `Expr` variants; the leaves (`Const`/`Param`/`Pop`/`PopSum`/`Time`/
-/// `Projected`/`BindingRef`) cannot contain `Dt`, the compound variants
-/// recurse into their children.
-fn expr_contains_dt(e: &Expr) -> bool {
+/// (`Expr::Dt`) anywhere, INCLUDING transitively through a model-level
+/// binding. Used by `required_capabilities` to derive the `RUNTIME_DT`
+/// requirement from the rate ASTs (gh#54). `bindings` maps a binding name to
+/// its body so a `BindingRef` is followed into `model.bindings` — a param-free
+/// `let dtf = dt` is hoisted there by the compiler (Fix-B), so treating
+/// `BindingRef` as a leaf would let a `dt`-scaled rate slip past the gate and
+/// run silently on Gillespie with a frozen nominal `dt`. This mirrors the
+/// sibling Gillespie-classification walkers `collect_int_comp_deps` and
+/// `expr_is_time_dependent`, which both recurse through `BindingRef`. Bindings
+/// are acyclic (topologically ordered), so the recursion terminates.
+fn expr_contains_dt(e: &Expr, bindings: &HashMap<&str, &Expr>) -> bool {
     match e {
         Expr::Dt(_) => true,
         Expr::Const(_)
@@ -664,26 +669,29 @@ fn expr_contains_dt(e: &Expr) -> bool {
         | Expr::Time(_)
         | Expr::Projected(_)
         | Expr::ObsColumnRef(_)
-        | Expr::BindingRef(_)
-        // gh#272: a per-eval body is param/table-only (no Dt) by the keystone
-        // invariant — enforced at CompiledModel::new — so this leaf is false
-        // without descending into the body.
+        // gh#272: a per-eval body is param/table-only — `per_eval_staging_violation`
+        // (enforced at CompiledModel::new) rejects `Dt` in a per-eval body — so
+        // this leaf is provably false without descending into the body.
         | Expr::PerEvalRef(_) => false,
+        // Fix B: a BindingRef references `dt` iff its body does. Follow it.
+        Expr::BindingRef(w) => bindings
+            .get(w.binding_ref.as_str())
+            .is_some_and(|body| expr_contains_dt(body, bindings)),
         Expr::BinOp(w) => {
-            expr_contains_dt(&w.bin_op.left) || expr_contains_dt(&w.bin_op.right)
+            expr_contains_dt(&w.bin_op.left, bindings) || expr_contains_dt(&w.bin_op.right, bindings)
         }
-        Expr::UnOp(w) => expr_contains_dt(&w.un_op.arg),
+        Expr::UnOp(w) => expr_contains_dt(&w.un_op.arg, bindings),
         Expr::Cond(w) => {
-            expr_contains_dt(&w.cond.pred)
-                || expr_contains_dt(&w.cond.then)
-                || expr_contains_dt(&w.cond.else_)
+            expr_contains_dt(&w.cond.pred, bindings)
+                || expr_contains_dt(&w.cond.then, bindings)
+                || expr_contains_dt(&w.cond.else_, bindings)
         }
         // A time_func is a named reference to a model-level forcing; its body
         // is not inline here and cannot itself read the substep `dt`.
         Expr::TimeFunc(_) => false,
-        Expr::TableLookup(w) => w.table_lookup.indices.iter().any(expr_contains_dt),
-        Expr::UncheckedDim(w) => expr_contains_dt(&w.unchecked_dim.inner),
-        Expr::Reduce(w) => w.reduce.iter().any(expr_contains_dt),
+        Expr::TableLookup(w) => w.table_lookup.indices.iter().any(|e| expr_contains_dt(e, bindings)),
+        Expr::UncheckedDim(w) => expr_contains_dt(&w.unchecked_dim.inner, bindings),
+        Expr::Reduce(w) => w.reduce.iter().any(|e| expr_contains_dt(e, bindings)),
     }
 }
 
@@ -1595,12 +1603,16 @@ impl CompiledModel {
         // the runtime substep `dt` (`Expr::Dt`) is only meaningful on a
         // backend that realizes a substep length. Gillespie freezes it to
         // the nominal `simulation.dt`-or-`1.0`, so it would silently produce
-        // a different trajectory. Walk the rate ASTs; if any contains
-        // `Expr::Dt`, require RUNTIME_DT so gillespie fails dispatch.
+        // a different trajectory. Walk the rate ASTs — following `BindingRef`
+        // into `model.bindings`, since a param-free `let dtf = dt` is hoisted
+        // there — and if any contains `Expr::Dt`, require RUNTIME_DT so
+        // gillespie fails dispatch.
+        let binding_bodies: HashMap<&str, &Expr> = self.model.bindings.iter()
+            .map(|b| (b.name.as_str(), &b.expr)).collect();
         let uses_dt = self.model.transitions.iter().any(|t| {
-            expr_contains_dt(&t.rate)
+            expr_contains_dt(&t.rate, &binding_bodies)
                 || t.rate_grad.values().any(|de| matches!(de,
-                    ir::deriv::DerivEntry::Grad(e) if expr_contains_dt(e)))
+                    ir::deriv::DerivEntry::Grad(e) if expr_contains_dt(e, &binding_bodies)))
         });
         if uses_dt {
             caps |= crate::Capabilities::RUNTIME_DT;
