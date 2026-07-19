@@ -70,11 +70,21 @@ impl Simulate for GillespieSim {
 /// recompute.)
 #[inline]
 fn eval_one(tr_idx: usize, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
-    let p = eval_resolved(&ctx.model.resolved.rates[tr_idx], ctx);
-    if p.is_nan() {
-        // Mirror eval_propensities: a NaN may be the sentinel an out-of-range
-        // table lookup left on the thread-local — surface the named, actionable
-        // error if so, else the generic numerical collapse. take() clears it.
+    let mut p = eval_resolved(&ctx.model.resolved.rates[tr_idx], ctx);
+    // item 17: kept in lockstep with `eval_propensities` — a non-finite
+    // propensity is never a usable rate, and the sparse and full paths must not
+    // disagree (gh#208). NaN is the strict-mode sentinel of a degenerate op
+    // (Div0 / Pow / Sqrt-neg / Log≤0), possibly a table-OOB (attributed first);
+    // ±inf is an overflow (e.g. `exp` of a state-dependent argument that grows
+    // as the epidemic progresses) that escaped the per-op guards — left on the
+    // old `is_nan()` guard, a +inf here would set `lambda_total = +inf` and
+    // force a burst of spurious zero-time firings until the periodic full
+    // recompute finally errored. Under --allow-degenerate-rates all coerce to a
+    // 0 rate; by default a typed hard error.
+    if !p.is_finite() {
+        // A NaN may be the sentinel an out-of-range table lookup left on the
+        // thread-local — surface the named, actionable error if so. take()
+        // clears it; ±inf leaves no record, so this is None and falls through.
         if let Some((table_idx, index, len)) = crate::resolved_expr::take_table_oob() {
             let table_name = ctx.model.model.tables[table_idx].name.clone();
             return Err(SimError::TableLookup(format!(
@@ -85,10 +95,14 @@ fn eval_one(tr_idx: usize, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                 ctx.model.model.transitions[tr_idx].name, ctx.t
             )));
         }
-        return Err(SimError::NumericalCollapse {
-            kind: crate::error::CollapseKind::DivByZero,
-            t: ctx.t,
-        });
+        if crate::eval_stats::allow_degenerate_rates() {
+            p = 0.0;
+        } else {
+            return Err(SimError::NumericalCollapse {
+                kind: crate::error::CollapseKind::DivByZero,
+                t: ctx.t,
+            });
+        }
     }
     if p < 0.0 {
         return Err(SimError::NegativePropensity {
@@ -487,4 +501,120 @@ pub fn run_gillespie_with_observer(
 
     traj.transition_diagnostics = diag_vec;
     Ok(traj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use ir::{
+        expr::{BinOp, BinOpExpr, BinOpWrap, ConstExpr, Expr, PopExpr, UnOp, UnOpExpr, UnOpWrap},
+        model::{
+            Compartment, CompartmentKind, InitialConditions, OutputConfig, OutputSchedule,
+            SimulationConfig,
+        },
+        transition::{StoichiometryEntry, Transition},
+        Model,
+    };
+
+    // A one-transition model whose rate is `exp(1000 * S)`; at S = 1 that is
+    // `exp(1000)` = +inf. A +inf rate is a state-dependent overflow that is
+    // finite at a small S but blows up as the epidemic grows — the case the
+    // sparse update path (`eval_one`) hits mid-run.
+    fn overflow_model() -> CompiledModel {
+        let m = Model {
+            ic_grad: Default::default(),
+            name: "overflow".into(),
+            version: "0.1".into(),
+            time_unit: "days".into(),
+            description: None,
+            origin: None,
+            origin_rata_die: None,
+            compartments: vec![
+                Compartment { name: "S".into(), kind: CompartmentKind::Integer },
+                Compartment { name: "I".into(), kind: CompartmentKind::Integer },
+            ],
+            transitions: vec![Transition {
+                rate_state_grad: Default::default(),
+                name: "blowup".into(),
+                stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
+                rate: Expr::UnOp(UnOpWrap { un_op: UnOpExpr {
+                    op: UnOp::Exp,
+                    arg: Box::new(Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+                        op: BinOp::Mul,
+                        left: Box::new(Expr::Const(ConstExpr { value: 1000.0 })),
+                        right: Box::new(Expr::Pop(PopExpr { pop: "S".into() })),
+                    }})),
+                }}),
+                metadata: None,
+                draw_method: Default::default(),
+                rate_grad: HashMap::new(),
+                lineage: None,
+            }],
+            ode_equations: vec![],
+            time_functions: vec![],
+            tables: vec![],
+            interventions: vec![],
+            observations: vec![],
+            bindings: vec![],
+            per_eval_bindings: vec![],
+            parameters: vec![],
+            initial_conditions: InitialConditions::Explicit({
+                let mut h = HashMap::new();
+                h.insert("S".into(), 1.0);
+                h.insert("I".into(), 0.0);
+                h
+            }),
+            output: OutputConfig {
+                times: OutputSchedule::AtTimes(vec![0.0, 1.0]),
+                format: "tsv".into(),
+                trajectory: true,
+                observations: false,
+            },
+            simulation: SimulationConfig {
+                t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
+                dt: Some(1.0), rng_seed: Some(1), integrator: Default::default(),
+            },
+            presets: vec![],
+            model_structure: None,
+            balance: None,
+            identity_tracked_compartments: vec![],
+            quantities: vec![],
+            contrasts: vec![],
+        };
+        CompiledModel::new(m).expect("overflow model compiles")
+    }
+
+    /// item 17 / gh#208: the sparse-update evaluator `eval_one` must reject a
+    /// +inf propensity with the SAME typed error the full `eval_propensities`
+    /// path raises — NOT return `Ok(+inf)`, which would set `lambda_total = +inf`
+    /// and force a burst of spurious zero-time firings. Asserts strict-mode
+    /// (the default) only: the allow-coerce arm is structurally identical to
+    /// `eval_propensities` (whose coercion is covered by the expr_eval
+    /// integration tests) and is not re-toggled here because
+    /// `ALLOW_DEGENERATE_RATES` is a process-global shared with concurrent tests.
+    #[test]
+    fn eval_one_rejects_infinite_rate_like_eval_propensities() {
+        let model = overflow_model();
+        let int_s = IntState::from_vec(vec![1, 0]); // S = 1 → exp(1000) = +inf
+        let real_s = RealState::new(0);
+        let ctx = EvalCtx {
+            model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0,
+            projected: None, aux: None, int_float_override: None, per_eval: None,
+        };
+
+        // Sparse path: must error, not return Ok(+inf).
+        let sparse = eval_one(0, &ctx);
+        assert!(
+            matches!(sparse, Err(SimError::NumericalCollapse { .. })),
+            "eval_one must reject a +inf propensity with NumericalCollapse (strict), got {sparse:?}"
+        );
+        // Full path agrees — the gh#208 "sparse and full cannot disagree" invariant.
+        let mut out = Vec::new();
+        let full = eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out);
+        assert!(
+            matches!(full, Err(SimError::NumericalCollapse { .. })),
+            "eval_propensities must reject the same +inf, got {full:?}"
+        );
+    }
 }
