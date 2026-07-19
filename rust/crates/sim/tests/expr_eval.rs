@@ -662,9 +662,13 @@ fn test_log_nonpositive_rate_errors_via_eval_propensities() {
     let mut out = Vec::new();
 
     sim::eval_stats::set_allow_degenerate_rates(false);
-    let res = eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out);
-    assert!(res.is_err(),
-        "log of a non-positive rate must hard-error under the strict default; got {:?}", out);
+    let err = eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out)
+        .expect_err("log of a non-positive rate must hard-error under the strict default");
+    // Must be a NumericalCollapse (the log −inf now routes through the is_finite
+    // boundary guard), NOT the NegativePropensity the old −inf produced — that
+    // distinction is what makes this assertion non-vacuous against the old code.
+    assert!(matches!(err, sim::SimError::NumericalCollapse { .. }),
+        "strict log(≤0) rate must be a NumericalCollapse, not NegativePropensity; got {err:?}");
     // --allow-degenerate-rates coerces the degenerate rate to a finite 0.
     sim::eval_stats::set_allow_degenerate_rates(true);
     eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out)
