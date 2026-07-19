@@ -866,6 +866,13 @@ impl CompiledModel {
     /// their entry point, before `resolve_fire_steps` and the substep
     /// loop.
     ///
+    /// KNOWN GAP (gh#449): this is called by the three forward backends but
+    /// NOT the inference/fit path — the PGAS producer calls
+    /// `resolve_fire_steps(dt, params)` directly. So the recurring-fire
+    /// collision guard below (item 23) fires on `simulate` but not on a
+    /// coarse-`dt` `fit`. Tracked for a fit-path pre-flight or a fallible
+    /// `resolve_fire_steps`.
+    ///
     /// This is the RELEASE-build guard: the per-conversion checks in
     /// `crate::time` are `debug_assert!`-only and compiled out of
     /// `--release`, so a bad (or parameter-proposed) `dt`/schedule would
