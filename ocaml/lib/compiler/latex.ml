@@ -475,6 +475,238 @@ let to_json (rm : rendered_model) : string =
 let of_model ?(name = "model") ?(expand = []) (decls : declaration list) : string =
   to_document (render_model ~name ~expand decls)
 
+(* ── Structured render: the compartmental flow graph (model.graph.json) ──────
+   The id-based sibling of `to_json`'s LaTeX transitions: a structured node/edge
+   graph a viewer can lay out as a compartmental flow diagram. Like the rest of
+   this module it is a pure projection of the pre-expansion `Ast` — base
+   compartments are the nodes, dimensions are the plates, transitions are the
+   edges — so a stratified model stays compact (one edge per transition family,
+   not one per stratum). *)
+
+type g_node    = { gn_id : string; gn_label : string }
+type g_plate   = { gp_name : string; gp_levels : string list }
+type g_edge    = {
+  ge_id         : string;
+  ge_from       : string option;   (* None ⇒ exogenous inflow (birth) *)
+  ge_to         : string option;   (* None ⇒ outflow (death) *)
+  ge_rate       : string;          (* KaTeX rate string, as in the reaction table *)
+  ge_advances   : string option;   (* the plate a consecutive(dim) binder steps along *)
+  ge_reads_pool : bool;            (* rate reads a full-dimension aggregate (mean-field) *)
+}
+type g_coupling = { gc_edge : string; gc_aggregate : string; gc_over : string list }
+
+type model_graph = {
+  mg_name      : string;
+  mg_nodes     : g_node list;
+  mg_plates    : g_plate list;
+  mg_edges     : g_edge list;
+  mg_couplings : g_coupling list;
+}
+
+let index_item_expr = function IPosn e | INamed (_, e) -> e
+
+(* Dimensions summed over by every `sum(i in dim, …)` (ESum) node anywhere in
+   [e], WITHOUT resolving through `let` bindings — nested sums are flattened
+   (`sum(a, sum(m, …))` → [a; m]), first-occurrence order, deduped. This is the
+   "full-dimension aggregate" predicate the mean-field pool detection is built
+   on: a `let` whose body has any ESum is a pool binding. *)
+let sum_dims_in (e : expr) : string list =
+  let acc = ref [] in
+  let add d = if not (List.mem d !acc) then acc := !acc @ [ d ] in
+  let rec go = function
+    | ESum (_, dim, _, body) -> add dim; go body
+    | EBinOp (_, l, r) -> go l; go r
+    | EUnOp (_, a) -> go a
+    | ECond (p, a, b) -> go p; go a; go b
+    | EFuncCall (_, args) -> List.iter (fun (_, e) -> go e) args
+    | EIndex (_, items, _) -> List.iter (fun it -> go (index_item_expr it)) items
+    | EList es -> List.iter go es
+    | ERange (a, b) -> go a; go b
+    | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> ()
+  in
+  go e; !acc
+
+(* `let`-binding name → the dimensions its body aggregates over, for every
+   binding that IS a pool (its body contains a `sum`). ctl_bb: inf_vil → [age],
+   Nvil → [age]; ajura: those over [age; imm; compound]. *)
+let pool_bindings (lets : let_binding list) : (string, string list) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  List.iter
+    (fun (l : let_binding) ->
+      match sum_dims_in l.lbody with [] -> () | dims -> Hashtbl.replace tbl l.lname dims)
+    lets;
+  tbl
+
+let let_body_table (lets : let_binding list) : (string, expr) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  List.iter (fun (l : let_binding) -> Hashtbl.replace tbl l.lname l.lbody) lets;
+  tbl
+
+(* The mean-field couplings a rate expression reads, resolving references
+   through *transparent* (non-pool) `let` bindings and terminating at either a
+   pool binding (aggregate = the binding's name, e.g. "inf_vil") or an inline
+   `sum(…)` in the rate itself (aggregate = "sum"). `over` is the summed
+   dimension(s). Deduped. A `where`-restricted sum is still reported (its guard
+   is not distinguished in v1). *)
+let rate_couplings (pools : (string, string list) Hashtbl.t)
+    (lets : (string, expr) Hashtbl.t) (rate : expr) : (string * string list) list =
+  let acc = ref [] in
+  let add name dims =
+    if not (List.mem (name, dims) !acc) then acc := !acc @ [ (name, dims) ]
+  in
+  let rec go visited (e : expr) =
+    match e with
+    | ESum (_, _, _, _) -> add "sum" (sum_dims_in e) (* inline aggregate; sum_dims_in already descends *)
+    | EIdent (n, _) ->
+      if Hashtbl.mem pools n then add n (Hashtbl.find pools n)
+      else if Hashtbl.mem lets n && not (List.mem n visited) then
+        go (n :: visited) (Hashtbl.find lets n)
+    | EIndex (n, items, _) ->
+      (if Hashtbl.mem pools n then add n (Hashtbl.find pools n)
+       else if Hashtbl.mem lets n && not (List.mem n visited) then
+         go (n :: visited) (Hashtbl.find lets n));
+      List.iter (fun it -> go visited (index_item_expr it)) items
+    | EBinOp (_, l, r) -> go visited l; go visited r
+    | EUnOp (_, a) -> go visited a
+    | ECond (p, a, b) -> go visited p; go visited a; go visited b
+    | EFuncCall (_, args) -> List.iter (fun (_, e) -> go visited e) args
+    | EList es -> List.iter (go visited) es
+    | ERange (a, b) -> go visited a; go visited b
+    | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> ()
+  in
+  go [] rate; !acc
+
+(* The plate a transition steps along: the dim of its `consecutive(dim)` binder
+   (aging `(a, a_next) in consecutive(age)`, immunity `consecutive(imm)`). *)
+let advances_of (t : transition_decl) : string option =
+  List.find_map (function IConsec (_, _, dim) -> Some dim | _ -> None) t.trindices
+
+(* Base compartment names of a stoichiometry side, first-occurrence, deduped.
+   NOTE these are the names *as written*: an ordinary transition yields a
+   declared compartment (S_naive), while the family transitions `aging` / `death`
+   move a compartment-iteration binder (`c[…] --> c[…]` over `c in compartments`),
+   so `from`/`to` there is the iterator variable `c` — signalling "every node".
+   We do NOT net-cancel same-name endpoints: `c[a] --> c[a_next]` is a real
+   move along the age plate (a self-loop with `advances=age`), not a no-op. *)
+let ref_bases (refs : stoich_ref list) : string list =
+  let seen = Hashtbl.create 8 in
+  List.filter_map
+    (fun (n, _) -> if Hashtbl.mem seen n then None else (Hashtbl.add seen n (); Some n))
+    refs
+
+(* One transition → its edges and their couplings. A single-source, single-
+   destination transition is one edge keyed by the transition name; a multi-
+   destination (branch or multi-`+` arrow) or multi-source transition fans out
+   to one edge per (source, destination) pair with a disambiguated id. *)
+let transition_graph (pools : (string, string list) Hashtbl.t)
+    (lets : (string, expr) Hashtbl.t) (t : transition_decl) : g_edge list * g_coupling list =
+  let advances = advances_of t in
+  let base_rate = rate_tex t.trdyn in
+  let couplings =
+    List.concat_map (rate_couplings pools lets) (trans_dynamics_exprs t.trdyn)
+    |> List.fold_left (fun acc c -> if List.mem c acc then acc else acc @ [ c ]) []
+  in
+  let reads_pool = couplings <> [] in
+  let from_opts =
+    match ref_bases t.trsrc with [] -> [ None ] | xs -> List.map (fun x -> Some x) xs
+  in
+  let to_specs =
+    match t.trdst with
+    | DstSum refs ->
+      (match ref_bases refs with [] -> [ (None, None) ] | xs -> List.map (fun x -> (Some x, None)) xs)
+    | DstBranch bs -> List.map (fun ((n, _), w) -> (Some n, Some w)) bs
+  in
+  let n_edges = List.length from_opts * List.length to_specs in
+  let name_or dflt = function Some s -> s | None -> dflt in
+  let edges =
+    List.concat_map
+      (fun from_opt ->
+        List.map
+          (fun (to_opt, w) ->
+            let id =
+              if n_edges = 1 then t.trname
+              else
+                Printf.sprintf "%s__%s__%s" t.trname (name_or "src" from_opt) (name_or "sink" to_opt)
+            in
+            let rate =
+              match w with
+              | None -> base_rate
+              | Some w -> Printf.sprintf "%s \\cdot %s" (tex w) base_rate
+            in
+            { ge_id = id; ge_from = from_opt; ge_to = to_opt; ge_rate = rate;
+              ge_advances = advances; ge_reads_pool = reads_pool })
+          to_specs)
+      from_opts
+  in
+  let couplings_out =
+    List.concat_map
+      (fun (e : g_edge) ->
+        List.map (fun (agg, over) -> { gc_edge = e.ge_id; gc_aggregate = agg; gc_over = over }) couplings)
+      edges
+  in
+  (edges, couplings_out)
+
+let build_graph ?(name = "model") (decls : declaration list) : model_graph =
+  populate_overrides decls;
+  let comps = compartments_of decls in
+  let dims = dims_of decls in
+  let pools = pool_bindings (lets_of decls) in
+  let lets = let_body_table (lets_of decls) in
+  let per_transition = List.map (transition_graph pools lets) (transitions_of decls) in
+  {
+    mg_name = name;
+    mg_nodes = List.map (fun (c : compartment_decl) -> { gn_id = c.cname; gn_label = sym c.cname }) comps;
+    mg_plates =
+      List.map
+        (fun (de : dimensions_entry) ->
+          match de.desrc with
+          | DInline levels -> { gp_name = de.dename; gp_levels = levels }
+          | DRead _ -> { gp_name = de.dename; gp_levels = [] })
+        dims;
+    mg_edges = List.concat_map fst per_transition;
+    mg_couplings = List.concat_map snd per_transition;
+  }
+
+(* The flow-graph shape a diagram consumer renders: nodes = base compartments,
+   plates = dimensions, edges = transitions (`from`/`to` null ⇒ birth/death),
+   couplings = the mean-field pools each edge reads. *)
+let to_graph_json (g : model_graph) : string =
+  let str s : Yojson.Safe.t = `String s in
+  let opt = function Some s -> str s | None -> `Null in
+  let j : Yojson.Safe.t =
+    `Assoc
+      [ ("model", str g.mg_name);
+        ("nodes", `List (List.map (fun n -> `Assoc [ ("id", str n.gn_id); ("label", str n.gn_label) ]) g.mg_nodes));
+        ( "plates",
+          `List
+            (List.map
+               (fun p -> `Assoc [ ("name", str p.gp_name); ("levels", `List (List.map str p.gp_levels)) ])
+               g.mg_plates) );
+        ( "edges",
+          `List
+            (List.map
+               (fun e ->
+                 `Assoc
+                   [ ("id", str e.ge_id);
+                     ("from", opt e.ge_from);
+                     ("to", opt e.ge_to);
+                     ("rate", str e.ge_rate);
+                     ("advances", opt e.ge_advances);
+                     ("reads_pool", `Bool e.ge_reads_pool) ])
+               g.mg_edges) );
+        ( "couplings",
+          `List
+            (List.map
+               (fun c ->
+                 `Assoc
+                   [ ("edge", str c.gc_edge);
+                     ("aggregate", str c.gc_aggregate);
+                     ("over", `List (List.map str c.gc_over)) ])
+               g.mg_couplings) );
+      ]
+  in
+  Yojson.Safe.pretty_to_string j
+
 (* ── Subcommand driver: `camdlc render FILE.camdl` ─────────────────────────── *)
 
 let read_file path =
@@ -490,8 +722,9 @@ let run (args : string list) : unit =
   let set_format = function
     | "json" -> format := `Json
     | "document" | "latex" | "tex" -> format := `Document
+    | "graph" -> format := `Graph
     | other ->
-      Printf.eprintf "camdlc render: unknown --format '%s' (want json|document)\n" other;
+      Printf.eprintf "camdlc render: unknown --format '%s' (want json|document|graph)\n" other;
       exit 2
   in
   let rec parse = function
@@ -509,7 +742,7 @@ let run (args : string list) : unit =
   parse args;
   match List.rev !files with
   | [] ->
-    prerr_endline "usage: camdlc render [--format json|document] [--expand DIM[,DIM]] FILE.camdl";
+    prerr_endline "usage: camdlc render [--format json|document|graph] [--expand DIM[,DIM]] FILE.camdl";
     exit 2
   | file :: _ ->
     let src = read_file file in
@@ -521,5 +754,11 @@ let run (args : string list) : unit =
        exit 1
      | Ok decls ->
        let name = Filename.remove_extension (Filename.basename file) in
-       let rm = render_model ~name ~expand:!expand decls in
-       print_string (match !format with `Json -> to_json rm | `Document -> to_document rm))
+       (* The flow graph is a pre-expansion projection (one edge per transition
+          family), so `--expand` — which unfolds strata for the LaTeX views —
+          does not apply to it. *)
+       print_string
+         (match !format with
+          | `Json -> to_json (render_model ~name ~expand:!expand decls)
+          | `Document -> to_document (render_model ~name ~expand:!expand decls)
+          | `Graph -> to_graph_json (build_graph ~name decls)))
