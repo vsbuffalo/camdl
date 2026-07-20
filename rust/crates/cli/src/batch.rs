@@ -608,6 +608,18 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         Err(e) => eprintln!("warning: could not render model for archive: {}", e),
     }
 
+    // Archive the structured flow graph (`model.graph.json`) beside the display
+    // render so a viewer can draw the compartmental flow diagram. Same
+    // best-effort, identity-neutral treatment as model.render.json above.
+    match crate::util::render_model_graph_json(std::path::Path::new(&model_path)) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(format!("{}/model.graph.json", output_dir), &json) {
+                eprintln!("warning: could not write model.graph.json: {}", e);
+            }
+        }
+        Err(e) => eprintln!("warning: could not render model graph for archive: {}", e),
+    }
+
     // Copy any boundary GeoJSON into the output tree as a sibling artifact
     // (a map viewer reads `<output>/geo/boundaries.geojson`).
     if let Some(ref geo_src) = exp.config.geo {

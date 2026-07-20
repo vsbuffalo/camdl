@@ -852,6 +852,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     }
                     Err(e) => eprintln!("warning: cannot render model for archive: {}", e),
                 }
+                // Archive the structured flow graph (`model.graph.json`) beside
+                // the display render so a viewer can draw the compartmental flow
+                // diagram. Same best-effort, identity-neutral treatment.
+                match crate::util::render_model_graph_json(std::path::Path::new(&config.model.camdl)) {
+                    Ok(json) => {
+                        let dest = seg.join("model.graph.json");
+                        if let Err(e) = std::fs::write(&dest, &json) {
+                            eprintln!("warning: cannot archive model graph {}: {}",
+                                dest.display(), e);
+                        }
+                    }
+                    Err(e) => eprintln!("warning: cannot render model graph for archive: {}", e),
+                }
             }
         }
         let store = runid::FsCasStore::new(&cas_root);

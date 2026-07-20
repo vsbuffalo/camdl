@@ -1147,6 +1147,27 @@ pub fn render_model_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, Strin
     Ok(out.stdout)
 }
 
+/// Render a `.camdl` model to its structured flow graph
+/// (`camdlc render --format graph`), capturing the bytes. Archived as
+/// `model.graph.json` beside `model.render.json` so a viewer can draw the
+/// model's compartmental flow diagram without recompiling. Best-effort — the
+/// caller treats an `Err` as "skip the archive", never a hard failure.
+pub fn render_model_graph_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, String> {
+    let camdlc = find_camdlc()?;
+    let out = std::process::Command::new(&camdlc)
+        .args(["render", "--format", "graph"])
+        .arg(model_camdl)
+        .output()
+        .map_err(|e| format!("cannot run camdlc render: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "camdlc render failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
+}
+
 
 // ─── Multi-stream binding diagnostics (gh#90) ───────────────────────────────
 
