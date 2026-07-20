@@ -2967,9 +2967,12 @@ NAME : add(COMP, EXPR) every PERIOD at_day DAY
 
 `at_day` is the absolute phase within the period, measured from `t = 0`. Fire
 times are `at_day + k * period` for the smallest `k` where `target >= t_start`.
-The engine fires on the single timestep where `|t - target| < 0.5 * dt`,
-guaranteeing exactly one fire per period regardless of `dt` or fractional-period
-drift.
+The engine fires on the single timestep where `|t - target| < 0.5 * dt`, so each
+period fires exactly once as long as `dt` is no coarser than the period
+(`dt <= period`). A coarser `dt` would round two consecutive targets onto the
+same integrator step, silently dropping a fire; rather than merge them, the
+engine rejects such a schedule at simulation start with a hard error (use a
+finer `dt`, or widen the period).
 
 Example: `every 365.25 'days at_day 251` fires on day 251 of each year. If
 simulation starts at `t = 100`, the first fire is at `t = 251` (not `t = 351`).
@@ -3399,7 +3402,7 @@ sampled on a schedule. With no `output {}` block the default schedule applies;
 declare one to set the cadence or give explicit output times.
 
 > **Default schedule.** Snapshots every `1` in the model's `time_unit`, covering
-> `[min(0, t_start), t_end]` — where the window is taken from the `simulate {}`
+> `[t_start, t_end]` — where the window is taken from the `simulate {}`
 > block (or `(0, 100)` if `simulate {}` is omitted). The simulate command writes
 > the trajectory to `--output` (or stdout) and writes observation files only when
 > `--obs` / `--obs-dir` / `--obs-only` is passed.
@@ -3432,9 +3435,10 @@ metadata.json         # run provenance (see §19)
 ### 16.2 IR Mapping
 
 The trajectories block compiles to the IR `output` schedule: `every = E` →
-`OutRegular { start, step }` (start defaults to `min(0, t_start)` so the
-schedule covers anchored models with a negative `t_start`); `at = [...]` →
-`OutAtTimes`. The runtime writes the trajectory directly during simulation.
+`OutRegular { start, step }` (start defaults to `t_start` so the schedule covers
+exactly the requested window `[from, to]`, including anchored models with a
+negative `t_start`); `at = [...]` → `OutAtTimes`. The runtime writes the
+trajectory directly during simulation.
 
 Output emission is confined to `[start, simulation.t_end]`: `simulation.t_end`
 is the sole horizon authority, and output times are derived from it at emission

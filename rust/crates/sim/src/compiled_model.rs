@@ -376,7 +376,11 @@ fn eval_table_expr(
                 UnOp::Cos   => a.cos(),
                 UnOp::Tanh  => a.tanh(),
             };
-            Ok(if r.is_nan() { 0.0 } else { r })
+            // Coerce any non-finite table value to 0: a NaN (sqrt of neg — the
+            // arm above), a −inf (log of non-positive), or a ±inf (overflow),
+            // matching the Pow arm's `is_infinite` guard. A non-finite constant
+            // table cell is never a valid coefficient.
+            Ok(if !r.is_finite() { 0.0 } else { r })
         }
         Expr::UncheckedDim(w) => eval_table_expr(&w.unchecked_dim.inner, param_index, params),
         _ => Err(SimError::Validation(
@@ -645,12 +649,17 @@ pub struct ResolvedModel {
 }
 
 /// True if the expression tree references the runtime substep `dt`
-/// (`Expr::Dt`) anywhere. Used by `required_capabilities` to derive the
-/// `RUNTIME_DT` requirement from the rate ASTs (gh#54). Covers all 15
-/// `Expr` variants; the leaves (`Const`/`Param`/`Pop`/`PopSum`/`Time`/
-/// `Projected`/`BindingRef`) cannot contain `Dt`, the compound variants
-/// recurse into their children.
-fn expr_contains_dt(e: &Expr) -> bool {
+/// (`Expr::Dt`) anywhere, INCLUDING transitively through a model-level
+/// binding. Used by `required_capabilities` to derive the `RUNTIME_DT`
+/// requirement from the rate ASTs (gh#54). `bindings` maps a binding name to
+/// its body so a `BindingRef` is followed into `model.bindings` — a param-free
+/// `let dtf = dt` is hoisted there by the compiler (Fix-B), so treating
+/// `BindingRef` as a leaf would let a `dt`-scaled rate slip past the gate and
+/// run silently on Gillespie with a frozen nominal `dt`. This mirrors the
+/// sibling Gillespie-classification walkers `collect_int_comp_deps` and
+/// `expr_is_time_dependent`, which both recurse through `BindingRef`. Bindings
+/// are acyclic (topologically ordered), so the recursion terminates.
+fn expr_contains_dt(e: &Expr, bindings: &HashMap<&str, &Expr>) -> bool {
     match e {
         Expr::Dt(_) => true,
         Expr::Const(_)
@@ -660,26 +669,29 @@ fn expr_contains_dt(e: &Expr) -> bool {
         | Expr::Time(_)
         | Expr::Projected(_)
         | Expr::ObsColumnRef(_)
-        | Expr::BindingRef(_)
-        // gh#272: a per-eval body is param/table-only (no Dt) by the keystone
-        // invariant — enforced at CompiledModel::new — so this leaf is false
-        // without descending into the body.
+        // gh#272: a per-eval body is param/table-only — `per_eval_staging_violation`
+        // (enforced at CompiledModel::new) rejects `Dt` in a per-eval body — so
+        // this leaf is provably false without descending into the body.
         | Expr::PerEvalRef(_) => false,
+        // Fix B: a BindingRef references `dt` iff its body does. Follow it.
+        Expr::BindingRef(w) => bindings
+            .get(w.binding_ref.as_str())
+            .is_some_and(|body| expr_contains_dt(body, bindings)),
         Expr::BinOp(w) => {
-            expr_contains_dt(&w.bin_op.left) || expr_contains_dt(&w.bin_op.right)
+            expr_contains_dt(&w.bin_op.left, bindings) || expr_contains_dt(&w.bin_op.right, bindings)
         }
-        Expr::UnOp(w) => expr_contains_dt(&w.un_op.arg),
+        Expr::UnOp(w) => expr_contains_dt(&w.un_op.arg, bindings),
         Expr::Cond(w) => {
-            expr_contains_dt(&w.cond.pred)
-                || expr_contains_dt(&w.cond.then)
-                || expr_contains_dt(&w.cond.else_)
+            expr_contains_dt(&w.cond.pred, bindings)
+                || expr_contains_dt(&w.cond.then, bindings)
+                || expr_contains_dt(&w.cond.else_, bindings)
         }
         // A time_func is a named reference to a model-level forcing; its body
         // is not inline here and cannot itself read the substep `dt`.
         Expr::TimeFunc(_) => false,
-        Expr::TableLookup(w) => w.table_lookup.indices.iter().any(expr_contains_dt),
-        Expr::UncheckedDim(w) => expr_contains_dt(&w.unchecked_dim.inner),
-        Expr::Reduce(w) => w.reduce.iter().any(expr_contains_dt),
+        Expr::TableLookup(w) => w.table_lookup.indices.iter().any(|e| expr_contains_dt(e, bindings)),
+        Expr::UncheckedDim(w) => expr_contains_dt(&w.unchecked_dim.inner, bindings),
+        Expr::Reduce(w) => w.reduce.iter().any(|e| expr_contains_dt(e, bindings)),
     }
 }
 
@@ -866,6 +878,13 @@ impl CompiledModel {
     /// their entry point, before `resolve_fire_steps` and the substep
     /// loop.
     ///
+    /// KNOWN GAP (gh#449): this is called by the three forward backends but
+    /// NOT the inference/fit path — the PGAS producer calls
+    /// `resolve_fire_steps(dt, params)` directly. So the recurring-fire
+    /// collision guard below (item 23) fires on `simulate` but not on a
+    /// coarse-`dt` `fit`. Tracked for a fit-path pre-flight or a fallible
+    /// `resolve_fire_steps`.
+    ///
     /// This is the RELEASE-build guard: the per-conversion checks in
     /// `crate::time` are `debug_assert!`-only and compiled out of
     /// `--release`, so a bad (or parameter-proposed) `dt`/schedule would
@@ -885,8 +904,50 @@ impl CompiledModel {
         // remains runtime-dependent is checked here: the integrator `dt` (a
         // config value) and the finiteness of resolved fire times (parametric
         // `AtTimesExpr` schedules resolve against `params`).
-        for times in self.resolve_fire_times(params) {
-            crate::time::validate_fire_times(&times)?;
+        for (iv_idx, times) in self.resolve_fire_times(params).iter().enumerate() {
+            crate::time::validate_fire_times(times)?;
+            // item 23: a `Recurring` schedule promises "exactly one fire per
+            // period regardless of `dt`" (§13.7). That promise breaks when `dt`
+            // is coarser than the period: consecutive targets (one period apart)
+            // round to the same integrator step via `round(t/dt)`, and the dedup
+            // `BTreeSet` in `resolve_fire_steps` silently drops a fire. `dt` is
+            // known here (unlike at construction), so detect the collision and
+            // hard-error instead of merging.
+            //
+            // Scoped to `Recurring` deliberately: an explicit `at [...]` list
+            // (`AtTimes`/`AtTimesExpr`) carries NO one-per-period promise, and a
+            // within-`dt` coincidence of two listed fires MERGES to one fire on
+            // purpose, for cross-backend agreement (gh#198). Only the recurring
+            // guarantee is at stake here.
+            if !matches!(
+                self.model.interventions[iv_idx].fire.schedule(),
+                Some(ir::intervention::InterventionSchedule::Recurring(_))
+            ) {
+                continue;
+            }
+            let mut step_of: std::collections::BTreeMap<i64, f64> =
+                std::collections::BTreeMap::new();
+            for &t in times {
+                let step = crate::time::time_to_step(t, dt);
+                match step_of.get(&step) {
+                    // Same step already claimed by an EARLIER, DISTINCT fire
+                    // time — the two would merge to one fire. (An exact
+                    // duplicate `t` is the same fire declared twice, not a
+                    // dropped fire, so it is allowed.)
+                    Some(&prev) if prev != t => {
+                        return Err(SimError::Validation(format!(
+                            "intervention '{}': fire times {prev} and {t} both round to \
+                             integrator step {step} at dt={dt}, so one fire per period would be \
+                             silently dropped (§13.7 guarantees exactly one fire per period). \
+                             Use a dt no coarser than the period, or widen the period.",
+                            self.model.interventions[iv_idx].name,
+                        )));
+                    }
+                    _ => {
+                        step_of.insert(step, t);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1591,12 +1652,16 @@ impl CompiledModel {
         // the runtime substep `dt` (`Expr::Dt`) is only meaningful on a
         // backend that realizes a substep length. Gillespie freezes it to
         // the nominal `simulation.dt`-or-`1.0`, so it would silently produce
-        // a different trajectory. Walk the rate ASTs; if any contains
-        // `Expr::Dt`, require RUNTIME_DT so gillespie fails dispatch.
+        // a different trajectory. Walk the rate ASTs — following `BindingRef`
+        // into `model.bindings`, since a param-free `let dtf = dt` is hoisted
+        // there — and if any contains `Expr::Dt`, require RUNTIME_DT so
+        // gillespie fails dispatch.
+        let binding_bodies: HashMap<&str, &Expr> = self.model.bindings.iter()
+            .map(|b| (b.name.as_str(), &b.expr)).collect();
         let uses_dt = self.model.transitions.iter().any(|t| {
-            expr_contains_dt(&t.rate)
+            expr_contains_dt(&t.rate, &binding_bodies)
                 || t.rate_grad.values().any(|de| matches!(de,
-                    ir::deriv::DerivEntry::Grad(e) if expr_contains_dt(e)))
+                    ir::deriv::DerivEntry::Grad(e) if expr_contains_dt(e, &binding_bodies)))
         });
         if uses_dt {
             caps |= crate::Capabilities::RUNTIME_DT;

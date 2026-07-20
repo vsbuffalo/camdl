@@ -577,7 +577,7 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
             let result = match op {
                 UnOp::Neg   => -a,
                 UnOp::Exp   => a.exp(),
-                UnOp::Log   => if a > 0.0 { a.ln() } else { f64::NEG_INFINITY },
+                UnOp::Log   => if a > 0.0 { a.ln() } else if allow { 0.0 } else { f64::NAN },
                 UnOp::Sqrt  => if a >= 0.0 { a.sqrt() } else if allow { 0.0 } else { f64::NAN },
                 UnOp::Abs   => a.abs(),
                 UnOp::Floor => a.floor(),

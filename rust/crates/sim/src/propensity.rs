@@ -174,19 +174,27 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
 
         Expr::UnOp(w) => {
             let a = eval_expr(&w.un_op.arg, ctx)?;
-            // Sqrt of negative is a domain error (no real result), not
-            // an IEEE-754 NaN cascade — flag it specifically so the
-            // user sees "Sqrt of negative" instead of a generic NaN.
+            // Sqrt of negative and log of non-positive are domain errors (no
+            // real result), not IEEE-754 NaN/−inf cascades — flag each
+            // specifically so the user sees "Sqrt of negative" / "Log of
+            // non-positive" instead of a value that silently poisons the rate
+            // (a −inf log used to slip past the is_nan guard below entirely).
             if matches!(w.un_op.op, UnOp::Sqrt) && a < 0.0 {
                 crate::eval_stats::inc_unop_nan();
                 return if allow_degenerate_rates() { Ok(0.0) }
                 else { Err(SimError::NumericalCollapse {
                     kind: CollapseKind::SqrtNegative, t: ctx.t }) };
             }
+            if matches!(w.un_op.op, UnOp::Log) && a <= 0.0 {
+                crate::eval_stats::inc_unop_nan();
+                return if allow_degenerate_rates() { Ok(0.0) }
+                else { Err(SimError::NumericalCollapse {
+                    kind: CollapseKind::LogNonPositive, t: ctx.t }) };
+            }
             let result = match w.un_op.op {
                 UnOp::Neg   => -a,
                 UnOp::Exp   => a.exp(),
-                UnOp::Log   => if a > 0.0 { a.ln() } else { f64::NEG_INFINITY },
+                UnOp::Log   => a.ln(),   // a > 0 guaranteed by check above
                 UnOp::Sqrt  => a.sqrt(),  // a ≥ 0 guaranteed by check above
                 UnOp::Abs   => a.abs(),
                 UnOp::Floor => a.floor(),
@@ -552,8 +560,16 @@ pub fn eval_propensities(
                 // gh#127 (#12): clear the table-OOB record before EACH rate (see
                 // the default path below for the full rationale).
                 crate::resolved_expr::clear_table_oob();
-                let p = flat_eval::eval_flat(vm, &vm.rates[i], &ctx, &mut st.scratch, &mut st.cache);
-                if p.is_nan() {
+                let mut p = flat_eval::eval_flat(vm, &vm.rates[i], &ctx, &mut st.scratch, &mut st.cache);
+                // item 17: a non-finite resolved propensity is never a usable
+                // rate. NaN is the strict-mode sentinel a degenerate sub-expr
+                // leaves (Div0 / Pow-NaN / Sqrt-neg / Log≤0), possibly a
+                // table-OOB (attributed first). ±inf is an overflow (e.g. exp)
+                // that escaped the per-op guards — a −inf used to be pushed as
+                // a NegativePropensity and a +inf used silently as a rate. Under
+                // --allow-degenerate-rates all coerce to a 0 rate (byte-
+                // identical to the default path below); by default a hard error.
+                if !p.is_finite() {
                     if let Some((table_idx, index, len)) = crate::resolved_expr::take_table_oob() {
                         let table_name = model.model.tables[table_idx].name.clone();
                         return Err(SimError::TableLookup(format!(
@@ -564,10 +580,14 @@ pub fn eval_propensities(
                             tr.name
                         )));
                     }
-                    return Err(SimError::NumericalCollapse {
-                        kind: crate::error::CollapseKind::DivByZero,
-                        t,
-                    });
+                    if allow_degenerate_rates() {
+                        p = 0.0;
+                    } else {
+                        return Err(SimError::NumericalCollapse {
+                            kind: crate::error::CollapseKind::DivByZero,
+                            t,
+                        });
+                    }
                 }
                 if p < 0.0 {
                     return Err(SimError::NegativePropensity {
@@ -599,22 +619,25 @@ pub fn eval_propensities(
         // selected (so the rate is finite) cannot be mis-attributed to a later
         // rate's NaN from an unrelated cause.
         crate::resolved_expr::clear_table_oob();
-        let p = if unresolved {
+        let mut p = if unresolved {
             // String-keyed evaluator. Errors (NumericalCollapse) propagate
             // directly; in the non-degenerate case it returns the same
-            // value as eval_resolved, so the is_nan/negative guards below
+            // value as eval_resolved, so the is_finite/negative guards below
             // and the resulting trajectory are unchanged.
             eval_expr(&tr.rate, &ctx)?
         } else {
             eval_resolved(&model.resolved.rates[i], &ctx)
         };
-        // gh#audit-C6 / S1. eval_resolved returns NaN under hard-fail
-        // mode when a degenerate path was hit (Div-by-zero, Pow → NaN,
-        // Sqrt of negative, etc.); convert to typed error so the
-        // inference layer's per-particle recovery (PF: line 188+) can
-        // decide whether to kill the particle (recoverable) or
-        // propagate (forward-sim CLI).
-        if p.is_nan() {
+        // gh#audit-C6 / S1 + item 17. eval_resolved is infallible and signals a
+        // degenerate rate out-of-band by a non-finite return: NaN under hard-
+        // fail mode for a domain error (Div-by-zero, Pow → NaN, Sqrt of
+        // negative, Log of non-positive), or ±inf for an overflow (e.g. exp)
+        // that escaped the per-op guards. Neither is a usable rate — a −inf
+        // used to be reported as a NegativePropensity and a +inf used silently
+        // as a rate. Convert to a typed error so the inference layer's per-
+        // particle recovery (PF: line 188+) can decide whether to kill the
+        // particle (recoverable) or propagate (forward-sim CLI).
+        if !p.is_finite() {
             // gh#127 (#12): a NaN here may be the sentinel an out-of-range table
             // lookup left behind (the infallible fast evaluator records the
             // offending lookup on a thread-local and returns NaN rather than
@@ -632,10 +655,17 @@ pub fn eval_propensities(
                     tr.name
                 )));
             }
-            return Err(SimError::NumericalCollapse {
-                kind: crate::error::CollapseKind::DivByZero, // generic; eval_stats counter has the specific kind
-                t,
-            });
+            // --allow-degenerate-rates coerces a degenerate/overflowing rate to
+            // 0 (its documented "rate legitimately undefined" escape hatch);
+            // otherwise a typed hard error.
+            if allow_degenerate_rates() {
+                p = 0.0;
+            } else {
+                return Err(SimError::NumericalCollapse {
+                    kind: crate::error::CollapseKind::DivByZero, // generic; eval_stats counter has the specific kind
+                    t,
+                });
+            }
         }
         if p < 0.0 {
             return Err(SimError::NegativePropensity {

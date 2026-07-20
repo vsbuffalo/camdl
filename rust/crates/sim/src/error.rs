@@ -161,6 +161,10 @@ pub enum CollapseKind {
     PowNanInf,
     UnOpNan,
     SqrtNegative,
+    /// `log(x)` for `x ≤ 0` — a domain error (no real result), the log
+    /// analogue of `SqrtNegative`. Routed through the same typed collapse
+    /// so `log` is not silently `−inf` while `sqrt` errors.
+    LogNonPositive,
     ModByZero,
 }
 
@@ -221,7 +225,7 @@ impl SimError {
     /// whole filter run.
     ///
     /// Recoverable: NumericalCollapse (DivByZero, PowNanInf, UnOpNan,
-    /// SqrtNegative, ModByZero), NegativeCount with cause
+    /// SqrtNegative, LogNonPositive, ModByZero), NegativeCount with cause
     /// BinomialOvershoot, NonFiniteParameter (gh#81 Phase 2 — a
     /// NUTS/PMMH proposal produced a NaN/Inf parameter), and TableLookup
     /// (gh#127 #12 — a state/parameter-dependent table index that went

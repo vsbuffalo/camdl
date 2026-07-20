@@ -121,16 +121,27 @@ Each construct reuses it and keeps its own extension rule; the expander lowers
 - **observations** use the full core (`SchedEvery`→`ObsRegular`,
   `SchedAt`→`ObsAtTimes`). (`ObsFromData` has no frontend producer today — it is
   an IR-only stub, not a live obs `from_data` rule — so the obs surface is
-  exactly the two-arm core.) **Critical — the obs and output lowerings are NOT
-  identical:** obs `every` lowers `start = t_start` (expander.ml:3922); output
-  lowers `start = min 0.0 t_start` (expander.ml:3217). They agree at
-  `t_start = 0` (the common case) and for negative `t_start` (where
-  `min(0, t_start) = t_start`), but **diverge for `t_start > 0`** — e.g.
-  `simulate { from = 10 }` or an anchored `from` after `origin`: obs.start = 10
-  while output.start = 0. Share only the grammar rule + AST type; keep the two
-  expander lowering sites distinct with their existing `start` expressions. Do
-  **not** factor a shared `lower_schedule_core` helper — that would silently
-  shift observation times (which PGAS conditions on).
+  exactly the two-arm core.)
+
+  > **Superseded (gh#143):** the obs/output lowering **divergence** described
+  > below was a bug — output lowered `start = min 0.0 t_start`, which clamped
+  > `t_start > 0` to 0 and emitted the trajectory over `[0, t_end]` instead of
+  > `[from, to]`. Output now lowers `start = t_start`, so **both surfaces
+  > agree** in all regimes, and a shared `lower_schedule_core` helper would be
+  > safe (indeed correct) for a future Option B. The historical reasoning is
+  > kept below as the decision record; do not act on the "keep the sites
+  > distinct" instruction.
+
+  **Critical — the obs and output lowerings are NOT identical:** obs `every`
+  lowers `start = t_start` (expander.ml:3922); output lowers
+  `start = min 0.0 t_start` (expander.ml:3217). They agree at `t_start = 0` (the
+  common case) and for negative `t_start` (where `min(0, t_start) = t_start`),
+  but **diverge for `t_start > 0`** — e.g. `simulate { from = 10 }` or an
+  anchored `from` after `origin`: obs.start = 10 while output.start = 0. Share
+  only the grammar rule + AST type; keep the two expander lowering sites
+  distinct with their existing `start` expressions. Do **not** factor a shared
+  `lower_schedule_core` helper — that would silently shift observation times
+  (which PGAS conditions on).
 - **output** use the full core (`→ OutRegular` / `OutAtTimes`); `format` stays
   its own field.
 - **interventions / events** reuse only the `SchedAt` arm (explicit times).

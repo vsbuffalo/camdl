@@ -61,6 +61,117 @@ fn gillespie_rejects_dt_in_rate() {
     );
 }
 
+/// item 19 / gh#54 hole: a rate whose only `dt` reference is transitive through a
+/// hoisted model-level binding (`let dtf = dt` — param-free, so the OCaml Fix-B
+/// hoister moves it into `model.bindings` and the rate becomes `binding_ref:
+/// dtf`) must STILL require RUNTIME_DT. `expr_contains_dt` treated `BindingRef`
+/// as a leaf that "cannot contain Dt", so gillespie ran such a model silently
+/// with a frozen nominal dt — while `collect_int_comp_deps` /
+/// `expr_is_time_dependent` (the sibling Gillespie-classification walkers) both
+/// recurse through `BindingRef`. The capability derivation must too.
+#[test]
+fn dt_hidden_in_binding_requires_runtime_dt() {
+    use std::collections::HashMap;
+    use ir::{
+        expr::{BinOp, BinOpExpr, BinOpWrap, BindingRefWrap, DtExpr, Expr, ParamExpr, PopExpr},
+        model::{
+            Binding, Compartment, CompartmentKind, InitialConditions, OutputConfig,
+            OutputSchedule, SimulationConfig,
+        },
+        parameter::{ParamValue, Parameter},
+        transition::{StoichiometryEntry, Transition},
+        Model,
+    };
+
+    // A rate `beta * S * dtf` where `dtf` is a model-level binding whose body is
+    // `Expr::Dt` — the exact shape the Fix-B hoister produces for `let dtf = dt`.
+    let m = Model {
+        ic_grad: Default::default(),
+        name: "hoisted_dt".into(),
+        version: "0.1".into(),
+        time_unit: "days".into(),
+        description: None,
+        origin: None,
+        origin_rata_die: None,
+        compartments: vec![
+            Compartment { name: "S".into(), kind: CompartmentKind::Integer },
+            Compartment { name: "I".into(), kind: CompartmentKind::Integer },
+        ],
+        transitions: vec![Transition {
+            rate_state_grad: Default::default(),
+            name: "infection".into(),
+            stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
+            rate: Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+                op: BinOp::Mul,
+                left: Box::new(Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+                    op: BinOp::Mul,
+                    left: Box::new(Expr::Param(ParamExpr { param: "beta".into() })),
+                    right: Box::new(Expr::Pop(PopExpr { pop: "S".into() })),
+                }})),
+                // the only `dt` in the whole model lives behind this binding_ref
+                right: Box::new(Expr::BindingRef(BindingRefWrap { binding_ref: "dtf".into() })),
+            }}),
+            metadata: None,
+            draw_method: Default::default(),
+            rate_grad: HashMap::new(),
+            lineage: None,
+        }],
+        ode_equations: vec![],
+        time_functions: vec![],
+        tables: vec![],
+        interventions: vec![],
+        observations: vec![],
+        bindings: vec![Binding { name: "dtf".into(), expr: Expr::Dt(DtExpr { dt: () }) }],
+        per_eval_bindings: vec![],
+        parameters: vec![Parameter {
+            name: "beta".into(),
+            value: ParamValue::Fixed { value: 0.5 },
+            param_kind: None,
+            param_dim: None,
+        }],
+        initial_conditions: InitialConditions::Explicit({
+            let mut h = HashMap::new();
+            h.insert("S".into(), 990.0);
+            h.insert("I".into(), 10.0);
+            h
+        }),
+        output: OutputConfig {
+            times: OutputSchedule::AtTimes(vec![0.0, 5.0]),
+            format: "tsv".into(),
+            trajectory: true,
+            observations: false,
+        },
+        simulation: SimulationConfig {
+            t_start: 0.0,
+            t_end: 5.0,
+            time_semantics: "continuous".into(),
+            dt: Some(1.0),
+            rng_seed: Some(1),
+            integrator: Default::default(),
+        },
+        presets: vec![],
+        model_structure: None,
+        balance: None,
+        identity_tracked_compartments: vec![],
+        quantities: vec![],
+        contrasts: vec![],
+    };
+
+    let compiled = CompiledModel::new(m).expect("hoisted-dt model compiles");
+    let required = compiled.required_capabilities();
+    assert!(
+        required.contains(Capabilities::RUNTIME_DT),
+        "a rate whose `dt` is hidden behind a hoisted binding must still require \
+         RUNTIME_DT (else gillespie runs it silently with a frozen nominal dt); \
+         got {required:?}"
+    );
+    // And therefore gillespie (no RUNTIME_DT) must be a capability mismatch.
+    assert!(
+        (required - GillespieSim.capabilities()).contains(Capabilities::RUNTIME_DT),
+        "gillespie must reject a dt-behind-binding model at the capability gate"
+    );
+}
+
 /// ODE and chain_binomial realize a substep dt, so they DO declare RUNTIME_DT
 /// and the dt_rate model dispatches and runs on them.
 #[test]
