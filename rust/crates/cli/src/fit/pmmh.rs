@@ -184,6 +184,27 @@ pub fn run_stage(
         Vec::new()
     };
     let ode_dt: f64 = if is_ode_mh { runner::ode_step_dt(&config) } else { dt };
+    // gh#396 follow-on: coarse warm-up step for the deterministic ODE-MH
+    // likelihood. Validated up front (same soundness rules as `nuts`: prevalence
+    // only, genuine warm-up window, step LARGER than dt) so a misconfigured fit
+    // fails before any chain runs; the per-substep `events`/`balance` refusal is
+    // enforced downstream in `run_ode`. `None` ⇒ `ode_dt` (off).
+    let ode_burnin_dt: f64 = if is_ode_mh {
+        let burnin_opt = match stage {
+            super::config_v2::Stage::Mh { burnin_dt, .. } => *burnin_dt,
+            _ => None,
+        };
+        let n_interval = ode_obs_model.as_ref().map_or(0, |m| m.n_interval_streams());
+        super::config_v2::validate_burnin_dt(
+            burnin_opt,
+            ode_dt,
+            n_interval,
+            ode_obs_times.first().copied(),
+            config.compiled.model.simulation.t_start,
+        )?
+    } else {
+        ode_dt
+    };
 
     // gh#193 preflight: correlated PMMH (CPM, rho > 0) pre-draws a fixed-size
     // noise block per observation window and so requires a (near-)uniform obs
@@ -316,7 +337,7 @@ pub fn run_stage(
         let obs_model = ode_obs_model.as_ref()
             .expect("ode_obs_model built on the is_ode_mh path");
         ll_mean = match sim::inference::compute_ode_loglik(
-            &config.compiled, obs_model, &ode_obs_times, ode_dt, &base,
+            &config.compiled, obs_model, &ode_obs_times, ode_dt, &base, ode_burnin_dt,
         ) {
             Ok(ll) => ll,
             Err(e) if e.is_structural() =>
@@ -592,7 +613,7 @@ pub fn run_stage(
                     .expect("ode_obs_model built on the is_ode_mh path");
                 match sim::inference::compute_ode_loglik(
                     &config.compiled, obs_model, &ode_obs_times, ode_dt,
-                    &chain_starts[chain_id],
+                    &chain_starts[chain_id], ode_burnin_dt,
                 ) {
                     Err(e) if e.is_structural() => {
                         return Err(format!(
@@ -708,7 +729,7 @@ pub fn run_stage(
                         let obs_model = ode_obs_model.as_ref()
                             .expect("ode_obs_model built on the is_ode_mh path");
                         match sim::inference::compute_ode_loglik(
-                            &config.compiled, obs_model, &ode_obs_times, ode_dt, params,
+                            &config.compiled, obs_model, &ode_obs_times, ode_dt, params, ode_burnin_dt,
                         ) {
                             Ok(ll) => Ok(ll),
                             Err(e) if e.is_structural() => Err(e),

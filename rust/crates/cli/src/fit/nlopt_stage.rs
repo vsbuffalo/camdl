@@ -460,6 +460,7 @@ pub fn optimize_cell(
             &obs_times_local,
             dt,
             &full_params,
+            dt, // burnin_dt = dt ⇒ coarse burn-in off (nlopt uses the fine step)
         )
         .unwrap_or(f64::NEG_INFINITY)
     };

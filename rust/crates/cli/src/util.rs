@@ -2889,7 +2889,9 @@ pub fn simulate_compiled(
         }
         ForwardBackend::Ode => {
             let cfg = OdeConfig { t_start, t_end, dt: run.dt };
-            sim::ode::run_ode(compiled, &params, &cfg, tick_opt.as_deref_mut())
+            // Forward simulate never coarsens — coarse burn-in is a fit-time
+            // likelihood option (see `compute_ode_loglik`), not a simulate surface.
+            sim::ode::run_ode(compiled, &params, &cfg, tick_opt.as_deref_mut(), None)
         }
     }
     .map_err(|e| format!("simulation error: {:?}", e))?;

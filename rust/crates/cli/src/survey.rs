@@ -1098,6 +1098,7 @@ fn eval_point_simulate(
     // trajectory; no replicates) → reported as 0.0.
     let loglik = sim::inference::compute_ode_loglik(
         compiled, obs_model, obs_times, dt, params,
+        dt, // burnin_dt = dt ⇒ coarse burn-in off (survey uses the fine step)
     )
     .unwrap_or(f64::NEG_INFINITY);
     LandscapeRow {

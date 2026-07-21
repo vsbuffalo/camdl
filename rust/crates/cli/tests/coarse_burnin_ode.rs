@@ -237,3 +237,87 @@ fn burnin_dt_below_dt_is_rejected() {
         "the error must explain burnin_dt must be larger than dt:\n{msg}"
     );
 }
+
+// ── MH-on-ODE (deterministic likelihood) coarse burn-in (gh#396 follow-on) ──────
+//
+// The `mh` path scores through `compute_ode_loglik` → `run_ode` (value-only), a
+// DIFFERENT integrator than `nuts`'s augmented `integrate_obs_sensitivity`, but the
+// same region-aware `CoarseBurnin::nominal` step rule and the same up-front
+// `validate_burnin_dt` gate. These cells prove the coarse warm-up carries through
+// the deterministic-likelihood surface too — the cell the garki fits (all `mh`+`ode`)
+// actually use.
+
+fn fit_toml_mh(out_dir: &Path, ir: &Path, data: &Path, stream: &str, burnin_line: &str) -> String {
+    format!(r#"
+output_dir = "{out}"
+[model]
+camdl = "{ir}"
+[data.observations]
+{stream} = "{data}"
+[estimate]
+beta = {{ bounds = [0.02, 2.0], start = 0.1, prior = {{ log_normal = {{ mu = -1.9, sigma = 0.8 }} }} }}
+[fixed]
+sigma = 0.2
+gamma = 0.1
+N0 = 10000
+[stages.posterior]
+algorithm = "mh"
+backend = "ode"
+chains = 2
+iterations = 800
+burn_in = 300
+init = "single"
+{burnin_line}
+"#, out = out_dir.display(), ir = ir.display(), data = data.display())
+}
+
+#[test]
+fn mh_ode_coarse_burnin_prevalence_recovers() {
+    let Some((tmp, ir, data)) = setup("mh_recover", PREV_MODEL) else { return };
+    let bin = camdl_bin();
+    let out_dir = tmp.path().join("out");
+    let fit = tmp.path().join("fit.toml");
+    std::fs::write(&fit, fit_toml_mh(&out_dir, &ir, &data, "prev", "burnin_dt = 5.0")).unwrap();
+
+    let status = Command::new(&bin)
+        .args(["fit", "run"]).arg(&fit)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .status().unwrap();
+    assert!(status.success(), "coarse `burnin_dt` mh+ode fit must succeed (exit 0)");
+
+    let traces = find_traces(&out_dir);
+    assert!(!traces.is_empty(), "no chain trace.tsv under {}", out_dir.display());
+    // MH already discards `burn_in` internally, so the written trace is post-burn-in;
+    // drop only a small guard margin (unlike nuts, whose warm-up is a separate phase).
+    let (mean, n) = beta_mean(&traces, 25);
+    assert!(n >= 200, "too few post-burn-in samples ({n})");
+    eprintln!("mh coarse burnin_dt=5: posterior mean beta = {mean:.4} (true {TRUE_BETA}), n={n}");
+    assert!(
+        (mean - TRUE_BETA).abs() < 0.05,
+        "coarse burn-in mh fit did not recover beta: mean {mean:.4}, true {TRUE_BETA}"
+    );
+}
+
+#[test]
+fn mh_burnin_dt_refuses_incidence_stream() {
+    // The shared `validate_burnin_dt` gate must fire on the mh path too: an
+    // incidence stream's first bin accumulates flow from t_start, which coarsening
+    // would bias.
+    let inc_model = PREV_MODEL.replace("projected     = I", "projected     = incidence(infection)");
+    let Some((tmp, ir, data)) = setup("mh_incidence", &inc_model) else { return };
+    let bin = camdl_bin();
+    let out_dir = tmp.path().join("out");
+    let fit = tmp.path().join("fit.toml");
+    std::fs::write(&fit, fit_toml_mh(&out_dir, &ir, &data, "prev", "burnin_dt = 5.0")).unwrap();
+
+    let out = Command::new(&bin)
+        .args(["fit", "run"]).arg(&fit)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().unwrap();
+    assert!(!out.status.success(), "burnin_dt on an incidence stream must be refused (nonzero exit)");
+    let msg = String::from_utf8_lossy(&out.stderr) + String::from_utf8_lossy(&out.stdout);
+    assert!(
+        msg.contains("burnin_dt") && msg.contains("incidence"),
+        "the refusal must name burnin_dt and incidence:\n{msg}"
+    );
+}

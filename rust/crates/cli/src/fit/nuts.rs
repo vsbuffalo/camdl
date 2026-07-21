@@ -130,47 +130,13 @@ pub fn run_stage(
     // is off (fine step throughout). The warm-up/scored split is the first
     // observation (derived inside `det_grad`); here we only reject the cases the
     // gradient path cannot coarsen soundly.
-    let burnin_dt: f64 = match opts.burnin_dt {
-        Some(b) if b > dt => {
-            // Incidence (interval) streams: the first scored bin accumulates flow
-            // from `t_start`, so coarsening the warm-up would bias a scored datum.
-            // Prevalence (state-scored) is safe (only the state at each obs matters).
-            if obs_model.n_interval_streams() > 0 {
-                return Err(format!(
-                    "burnin_dt = {b} is only supported for prevalence (state-scored) \
-                     streams in this release, but this fit has an incidence (interval) \
-                     stream whose first bin accumulates flow from t_start — coarsening \
-                     the warm-up would bias it. Remove burnin_dt (incidence \
-                     coarse-transient support is a follow-up)."
-                ));
-            }
-            // There must be an unscored warm-up window to coarsen.
-            let t_start = config.model.simulation.t_start;
-            match obs_times.first().copied() {
-                Some(fo) if fo > t_start => b,
-                first => {
-                    return Err(format!(
-                        "burnin_dt = {b} was set, but the first observation (t = {}) is \
-                         at or before the model start (t_start = {t_start}) — there is no \
-                         unscored warm-up window to coarsen. Remove burnin_dt, or start \
-                         the model earlier so there is a transient to integrate coarsely.",
-                        first.map(|f| f.to_string()).unwrap_or_else(|| "none".to_string())
-                    ));
-                }
-            }
-        }
-        Some(b) if b < dt => {
-            return Err(format!(
-                "burnin_dt = {b} is smaller than the integrator step dt = {dt}. The \
-                 coarse burn-in step must be LARGER than dt — it takes bigger steps on \
-                 the unscored warm-up; a smaller value would refine, not coarsen. Set \
-                 burnin_dt >= {dt} (e.g. 7.0), or remove it to integrate the whole \
-                 trajectory at dt."
-            ));
-        }
-        // Some(b) with b == dt, or None: off (fine step throughout).
-        _ => dt,
-    };
+    let burnin_dt: f64 = super::config_v2::validate_burnin_dt(
+        opts.burnin_dt,
+        dt,
+        obs_model.n_interval_streams(),
+        obs_times.first().copied(),
+        config.model.simulation.t_start,
+    )?;
 
     // Per-chain starting points. Honors the stage's `init` method: a dispersed
     // method (`uniform_unconstrained` / `lhs`) gives each chain its own
