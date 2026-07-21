@@ -142,11 +142,11 @@ fn ode_tick_does_not_change_trajectory() {
     let (model, params) = load_sir();
     let cfg = OdeConfig { t_start: 0.0, t_end: T_END, dt: 1.0 };
 
-    let traj_none = run_ode(&model, &params, &cfg, None).unwrap();
+    let traj_none = run_ode(&model, &params, &cfg, None, None).unwrap();
 
     let mut ticks: Vec<f64> = Vec::new();
     let mut tick = |t: f64| ticks.push(t);
-    let traj_ticked = run_ode(&model, &params, &cfg, Some(&mut tick)).unwrap();
+    let traj_ticked = run_ode(&model, &params, &cfg, Some(&mut tick), None).unwrap();
 
     assert_traj_eq(&traj_none, &traj_ticked, "ode");
     assert!(!ticks.is_empty(), "tick never fired — test is vacuous");
