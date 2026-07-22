@@ -1,6 +1,6 @@
 # The camdl Language Specification
 
-**Version:** 0.3-draft **Date:** 2026-03-16
+**Version:** 0.3-draft **Date:** 2026-07-17
 
 _camdl (Compartmental Model Description Language) is a domain-specific language
 for specifying stochastic compartmental models. A `.camdl` file defines model
@@ -42,23 +42,27 @@ Two shapes are both first-class:
 carries names, kinds, dimensions, and optional priors only (§4, §4.2). Concrete
 values live elsewhere: a `params.toml` / `[fixed]` block, a CLI override
 (`--param`, `--set`), or — the only in-file form — a named scenario's
-`set = { ... }`. External configuration overrides in-file presets; the
-precedence chain is fixed (see `camdl-run-spec.md` §1.3 for forward simulation
-and `docs/inference.md` for inference). For a simulation's parameters, highest
-precedence first: `--param` CLI flags, then scenario `set = { ... }`, then sweep
-points, then the `params.toml` base values. The seed is always a CLI argument.
+`set = { ... }`. The precedence chain is fixed (see `camdl-run-spec.md` §1.3 for
+forward simulation and `docs/inference.md` for inference), and it is **not** a
+blanket "external beats in-file": an in-file scenario's `set`/`scale` overrides
+the external `params.toml` base and any sweep point, and only an explicit CLI
+`--param` / `--fixed` outranks the scenario. For a simulation's parameters,
+highest precedence first: `--param` CLI flags, then scenario `set = { ... }`,
+then sweep points, then the `params.toml` base values. The seed is always a CLI
+argument.
 
 What this design preserves — and what the IR's hash discipline enforces — is
 that _structural_ model identity (compartments, transitions, observation
-projections, intervention semantics) is captured by `model_hash`, while
-_value-bearing_ content (base params, backend, dt) lives in `sim_hash`, the
-scenario delta in `scen_hash`, and inference inputs (priors, transforms, data,
-fit config) in `fit_hash`. So two analyses that share a structural model have
-the same `model_hash` even if one bakes in calibrated values and the other
-supplies them externally; changing a value is visible in `sim_hash` even when
-the underlying structure didn't change. The reviewer trying to tell "is this a
-structural change or a parameter sweep" reads the hash provenance, not the file
-shape.
+projections, intervention semantics) is captured by the **model** level of a
+run's factored identity, while _value-bearing_ content lives in later levels:
+base params in the **params** level, backend and `dt` in the **config** level,
+the scenario delta in the **scenario** level, and inference inputs (priors,
+transforms, data, fit config) in the **fit** level (§19). So two analyses that
+share a structural model share the same model-level hash even if one bakes in
+calibrated values and the other supplies them externally; changing a value is
+visible in the params or config level even when the underlying structure didn't
+change. The reviewer trying to tell "is this a structural change or a parameter
+sweep" reads the level hashes, not the file shape.
 
 **Typed and checked.** Index dimensions, table shapes, compartment arities,
 parameter domains, and unit dimensions are compiler-checked with clear error
@@ -515,7 +519,9 @@ via CLI flags, a `--params` TOML, or inference engines (§4.2).
 rate        : ≥ 0, dimension 1/time. Default transform: log.
 probability : ∈ [0, 1], dimensionless. Default transform: logit.
 positive    : > 0, dimensionless. Default transform: log.
-count       : integer ≥ 0.
+count       : dimension P (a population count). Integrality is not enforced —
+              `let iota : count = 1e-6` compiles; the type carries the [P]
+              dimension, not an integer constraint.
 real        : unconstrained (default if omitted).
 instant     : dimension [T], absolute time. Renders as a date in anchored
               mode (requires origin). Negative lower bounds allowed.
@@ -810,7 +816,9 @@ After this, S/E/I have dimensions `[age, sex]` but R has `[age, sex, immunity]`.
 S[child]                # first dimension = age
 S[child, female]        # age, then sex
 S                       # bare = sum over ALL strata (always global)
-S[child]                # if S has [age, sex]: sum over sex for age=child
+S[child]                # if S has [age, sex]: ERROR (E287) — a partial index
+                        #   has no defined cell; the bare name S sums, but
+                        #   S[child] neither sums nor picks a cell
 ```
 
 **Named indexing** (explicit dimension labels, any order):
@@ -818,8 +826,7 @@ S[child]                # if S has [age, sex]: sum over sex for age=child
 ```camdl
 S[age = child]                    # equivalent to S[child]
 S[sex = female, age = child]      # order doesn't matter
-S[patch = p1]                     # sum over age, specific patch
-incidence(infection[patch = p])   # sum over age, specific patch
+S[age = child, sex = female]      # a non-first dim named; every dim still specified
 ```
 
 Named indexing is useful when a compartment or transition has multiple
@@ -1483,26 +1490,22 @@ summed rate per patch; the compiler warns (W105) and points back to the
 
 ### 8.3 No Localization, No Magic
 
-The mixing formula in the base model uses global N:
+An unindexed global formula over a stratified compartment is a **hard error**,
+not silently localized. There is no auto-transform that turns a global rate into
+per-stratum indexed formulas: a bare mixing formula over stratified `S`/`I`
+hard-errors (`E272` — "compartment is stratified but used without indices"), so
+what runs is always what the user wrote.
 
-```camdl
-let N = S + I + R
-infection : S --> I  @ beta * S * I / N    # global N, no indices
-```
-
-After stratification, the compiler transforms this based on the coupling rules
-(see §10). The user writes the base model with global names. The coupling rules
-produce the correct indexed formulas in the IR.
-
-For explicit per-stratum FOI, the user writes the indexed form directly:
+The user writes the per-stratum force of infection explicitly:
 
 ```camdl
 infection[a in age] : S[a] --> I[a]
   @ beta * S[a] * sum(b in age, C_age[a,b] * I[b] / N_local[b])
 ```
 
-Both paths produce the same IR. The first uses sugar (§10); the second is the
-primitive.
+There is only one path to the indexed IR — the primitive above. The stratified
+transmission surface (§10) is that same explicit indexed form, not a global
+shorthand that expands behind the user's back.
 
 ### 8.4 Typed Let Bindings
 
@@ -1625,9 +1628,17 @@ infect_v : S_v + I_h --> E_v + I_h   @ a * b_v * S_v * I_h / H
 react    : A + B --> C               @ k * A * B
 ```
 
-Atomic firing: a single Gillespie / chain-binomial step applies the
-_vector_ of deltas at once. For `bite`, `S_h` decrements and `I_h` increments
-together — no intermediate state.
+Atomic firing: a single Gillespie step applies the _vector_ of deltas at once.
+For `bite`, `S_h` decrements and `I_h` increments together — no intermediate
+state.
+
+**Backend requirement.** A multi-source transition requires **Gillespie or
+ODE**. Chain-binomial rejects it with a hard error (gh#121): its competing-risk
+draw bounds the drawn flow by a *single* source count, which is wrong when two
+sources jointly gate the event (the correct joint draw, bounded by the minimum
+over all sources, is not implemented). On chain-binomial, fall back to the
+single-source encoding with the second population referenced only in the rate
+(shown under "When to use it" below).
 
 **Catalyst collapse.** A compartment appearing on both sides of the arrow
 contributes `−1` and `+1`, which sum to `0`. Zero-delta entries are dropped from
@@ -1971,6 +1982,15 @@ integer is `E244`; giving both or neither of `mean`/`rate` is `E245`; an unknown
 last branch (or a missing one on any earlier branch) is `E256`; and duplicate
 branch labels are `E258`.
 
+**Entering and targeting a staged compartment.** Filling a staged compartment is
+asymmetric with reading it. `init` and inflow transitions (`--> E`) land in
+**stage 1** automatically — write the bare name and the compiler routes the
+arrival to `E_s1`. An intervention is stricter: `transfer(to = E)` naming the
+bare staged compartment is `E264`, because the bare name resolves to the sum
+over stages (`E_s1 + E_s2 + …`), which is not a single cell to add to — name the
+explicit stage (`transfer(to = E_s1, …)`) instead. Reads are unaffected: a bare
+`E` or `prevalence(E)` still sums every stage (the bare-name rule, §5.1).
+
 #### 9.4.2 Aging across a stratified model (canonical use case)
 
 `consecutive(dim)` is also the right primitive for **demographic aging across
@@ -2164,6 +2184,15 @@ These are documented in §9.8 (overdispersion) and are compatible with the
 chain-binomial backend. Gillespie and ODE reject models with
 `overdispersed()` transitions.
 
+`deterministic(rate)` fires an exact count of `nearbyint(rate · dt)`, clamped to
+`[0, n_src]` — it never removes more than the source population. It is supported
+**only as the sole exit** from its source: a source that has a
+`deterministic(...)` exit *and* any other competing exit (a stochastic exit, or
+even a second `deterministic(...)`) is rejected (gh#122), because the flows would
+be drawn independently and could together over-draw the source. (The ODE backend
+runs *every* transition deterministically, so the restriction does not apply
+there.)
+
 **Compile-time vs runtime `if/else`.** The `if/then/else` expression has two
 evaluation modes depending on context:
 
@@ -2205,9 +2234,13 @@ recovery  : I --> R  @ gamma * I
 ```
 
 The first argument is the base rate (a standard propensity expression). The
-second is σ²_SE, the variance of the Gamma noise multiplier (which has mean 1).
-The resulting event count distribution is NegBinomial — the Poisson-Gamma
-compound.
+second is σ²_SE, the **intensity** of the Gamma white noise — the variance the
+underlying Gamma process accumulates per unit time (He et al. 2010). It is *not*
+the realized multiplier variance: over a substep of length `dt` the runtime
+draws a mean-one multiplicative factor `G ~ Gamma(shape = dt/σ², scale = σ²/dt)`,
+so `E[G] = 1` and `Var(G) = σ²/dt` — the realized variance scales inversely with
+the step. The resulting event count distribution is NegBinomial — the
+Poisson-Gamma compound.
 
 `overdispersed` is syntactically a function call in expression position. The
 compiler extracts it during expansion: the inner rate goes to `transition.rate`,
@@ -2414,6 +2447,18 @@ Left side = compartment name, right side = time derivative. Creates a
 piecewise-deterministic Markov process (PDMP): stochastic events for integer
 compartments, ODE evolution for real compartments between events.
 
+**Interaction with transitions, effects, and balance (ODE backend).** When the
+whole model is run on the fully-deterministic ODE backend, *every* transition
+also feeds the derivatives: each adds `stoichiometry · rate` to its
+compartments' `dc/dt` (integer compartments evolve as deterministic flow, not by
+stochastic draws), and each `real` compartment's `dW/dt` comes from its `ode {}`
+equation. Scheduled effects (interventions and events) are applied as **exact
+discontinuities** — the integrator lands exactly on the effect time, applies the
+effect, records output post-effect (§13.10), and restarts from the modified
+state. A `balance {}` constraint is **not** available on ODE: balance is a
+chain-binomial-only capability, so a model carrying a `balance {}` block run on
+ODE fails at dispatch with a capability error naming the limitation.
+
 ---
 
 ## 12. Observations
@@ -2451,7 +2496,7 @@ observations {
     columns       { time : time, detection : count }
     projected     = prevalence(I)
     emit_schedule = every 14 'days
-    detection     ~ bernoulli(p = p_detect)
+    detection     ~ bernoulli(p = p_detect * projected / N)
   }
 }
 ```
@@ -2528,21 +2573,24 @@ prevalence" shortcut, write the sum directly: `projected = x + y` is the general
 form; `prevalence(x)` is kept as sugar only for the single-compartment case
 where the named function clarifies intent.
 
-**Both indexed forms sum over unspecified dimensions.** The only difference is
-how the index is matched:
+**A partial index does not marginalize; state cross-strata aggregation
+explicitly.** Dropping *some* of a stratified family's dimensions is an error,
+not a silent sum: `incidence(infection[patch = north])` over a `[patch, age]`
+family resolves to a single expanded transition and fails if none matches
+(there is no `infection_north` — only `infection_north_child`, …). To sum a
+projection across a dimension, write the sum out:
 
-- **Positional** (`infection[north]`) binds to dimensions in declaration order.
-  In a model with `dimensions { patch, age }` and
-  `stratify(by = patch); stratify(by = age)`, `infection[north]` pins the
-  `patch` dimension to `north` and sums over `age`. If you later reorder
-  declarations to `{ age, patch }`, the same expression would try to match
-  `north` as an `age` stratum — a silent re-interpretation.
-- **Named** (`infection[patch = north]`) binds the `patch` dimension to `north`
-  regardless of declaration order, and sums over every other dimension (§5.1).
-  Order-independent and robust to dimension-reordering edits.
+- uniform reporting: `rho * sum(p in patch, incidence(infection[p]))`
+- per-stratum reporting: `sum(p in patch, rho[p] * incidence(infection[p]))`
 
-Use named indexing in any model with more than one dimension — it prevents the
-positional-binding failure mode above.
+A **bare, un-indexed** `incidence(infection)` over a stratified family on an
+un-indexed observation stream is rejected (`E280`) precisely so this aggregation
+decision is never made silently; the diagnostic prints the two explicit forms
+above. Where you *do* fully index, prefer **named** indexing
+(`infection[patch = north, age = child]`) over **positional**
+(`infection[north, child]`): named binding is order-independent and survives a
+later reordering of the dimension declarations, whereas positional binding
+silently re-interprets against the new order.
 
 Inside a likelihood expression, the keyword `projected` refers to the evaluated
 projection value for that observation.
@@ -2559,6 +2607,11 @@ beta_binomial(n = EXPR, mean = EXPR, concentration = EXPR)  overdispersed preval
 beta(mean = EXPR, concentration = EXPR)        continuous proportion in (0, 1)
 bernoulli(p = EXPR)                            binary outcome
 ```
+
+`neg_binomial(mean = μ, r = k)` is the **NB2** (mean–dispersion)
+parameterization: the mean is `μ` and the variance is `μ + μ²/r`, so a smaller
+`r` means more overdispersion and `r → ∞` recovers `poisson(μ)`. A prior on `r`
+is therefore a prior on the quadratic excess variance — pin it deliberately.
 
 The two `beta_binomial` spellings are equivalent: `mean`/`concentration` lowers to
 `alpha = mean · concentration`, `beta = (1 − mean) · concentration`. Use whichever
@@ -3044,10 +3097,21 @@ The policy body fields:
 | `once`     | `true` (default) fires at most once; `false` allows repeats.      |
 | `cooldown` | Minimum time between firings when `once = false`. Mutually exclusive with `once = true`. |
 
+**Engine semantics.** The trigger predicate is a **level** test evaluated at
+each observation-emission boundary (not continuously), gated by `once` and
+`cooldown`. A windowed reducer `sum_observed(stream, window = D)` folds the
+emissions in the half-open trailing window `(now − D, now]` — open on the left,
+closed on the right, so an emission landing exactly at `now` is included. When a
+policy fires, its effect is enqueued at `trigger_time + after`, and `cooldown`
+is measured from the **trigger time** (when the predicate crossed), not from the
+delayed effect time.
+
 The trigger always reads **reported surveillance** — the realized observation
-draw, shared across particles. Triggers that read latent model state (a
-particle-local scope) are deferred to a later phase; until then there is no
-`scope` key.
+draw at each emission boundary — never latent model state. Reactive policies run
+only on the chain-binomial *forward* backend, which has no particle ensemble
+(and never runs in inference; §13.9 Status), so there is nothing "shared across
+particles" today. A future particle-local `scope` reading latent state is
+deferred; until then there is no `scope` key.
 
 A reactive intervention is a **policy** (like `interventions {}`, not `events {}`):
 it is scenario-toggleable, so a `baseline` scenario can omit it and a
@@ -3070,13 +3134,38 @@ runs the baseline without it.
 > error. A dormant (unenabled) reactive policy is inert, so a run that does not
 > enable it is accepted on every backend. The DSL and IR surface are stable.
 
+### 13.10 Within-substep effect ordering
+
+When several effects land at the same time step they apply in a fixed,
+backend-shared order, so a modeller can predict the state an observation or a
+later effect sees. For the fixed-step backends (chain-binomial and the
+discrete-time filters) the order is:
+
+1. **Inflow events** (`add`, source-less `--> D` events) are computed from the
+   **start-of-step snapshot** and fused into the transition draw.
+2. **Transition draws** advance the compartments (Euler-multinomial,
+   independent-Poisson, RK4, or SSA, per backend).
+3. **Residual events** — draining `transfer` events and `set` — apply to the
+   **post-transition** state.
+4. **Scheduled interventions** apply next, on the post-advance state, in
+   declaration order.
+5. **Balance** (chain-binomial only) overwrites its target last.
+6. The **non-negativity check** runs (the balance target is exempt — a negative
+   there signals a broken model, reported separately, not by this check).
+7. The trajectory row for this step is recorded **after** all of the above.
+
+The consequence a modeller must know: recorded output is **post-effect**. An
+observation emitted at a time when an intervention fires — a vaccination
+`transfer`, say — sees the **post-vaccination** state, not the pre-vaccination
+state.
+
 ---
 
 ## 14. Timepoints and Reserved Identifiers
 
 > **Partially implemented.** The `timepoints { }` block is parsed but the
 > declared timepoint values are currently discarded by the expander and not
-> available in expressions. Full timepoint support is planned for v0.2. The
+> available in expressions. Full timepoint support is not yet implemented. The
 > built-in reserved identifiers `t_start` and `t_end` are always available
 > regardless.
 
@@ -3550,6 +3639,7 @@ disable = [INTERVENTION, ...]      turn off interventions
 set     = { PARAM = EXPR, ... }    override parameter values
 scale   = { PARAM = FACTOR, ... }  multiply (compiler checks domain validity)
 compose = [SCENARIO, ...]          apply patches in sequence
+simulate { to = EXPR }             override only the end time (§17.2); dt/integrator are model-wide, not per-scenario (E106)
 ```
 
 **Indexed parameter syntax in set/scale.** For indexed parameters declared as
@@ -3576,6 +3666,14 @@ The compiler warns on non-commutative compositions (overlapping write sets).
 `scale` on a `probability` parameter that would exceed [0,1] is a **compile
 error** — the user must handle clamping explicitly via `set` with an
 `if/then/else` expression. No implicit clamping.
+
+**Patch algebra.** Within one scenario, `set` applies before `scale`, so `scale`
+multiplies the value `set` produced (or the inherited value, when the parameter
+isn't `set`). Across a `compose` list, the composed sub-scenarios apply in listed
+order and the scenario's **own** patch applies last, so it wins any collision
+with a composed one. In `enable`/`disable`, an explicit `disable` beats an
+`enable` of the same intervention — a name appearing in both lists ends up
+disabled.
 
 ### 17.2 Scenario Inheritance — `extends`
 
@@ -3736,104 +3834,78 @@ Seed is always external (CLI `--seed`), never in the model file.
 
 ## 19. Content-Addressable Output
 
-Outputs are stored in a two-level content-addressable hierarchy inside an
-`output_dir` you choose:
+Outputs are stored in a **content-addressed store** under an `output_dir` you
+choose, partitioned by artifact kind (`sims/` for `simulate` and `batch`
+trajectories, `fits/` for inference stages, and so on):
 
 ```
 {output_dir}/
-  model.ir.json
-  geo/boundaries.geojson          (if geo= specified in experiment)
-  runs/
-    {sim_hash_8}/                 # model + base params + backend + dt
-      {scenario_slug}-{scen_hash_8}/   # scenario overrides
-        seed_{seed}/              # individual run
-          traj.tsv
-          run.json
+  sims/
+    {model}/{config}/{params}/{scenario}/{seed}/
+      traj.tsv
+      run.json
 ```
 
-Example with two scenarios after a base-param change:
+A `simulate` trajectory's address is a **factored tuple of five levels** —
+model, config, params, scenario, seed — nested in that order. Each path segment
+is `{label}-{hash8}`, e.g. `sir_basic-3a7f2c1d/chain_binomial-dt1-1fb03eee/…`:
+the `label` is a human-readable provenance tag (the model stem,
+`chain_binomial-dt1`, `seed_1`) and the `hash8` is the first eight hex chars of
+that level's structural content hash.
+
+Navigation and display read `run.json`, never the segment text, so the label is
+cosmetic. Renaming a scenario changes the directory name but not the identity,
+which produces a harmless cache miss (a fresh directory, one redundant re-run),
+never a wrong answer. There is **no** `00000000` special-case marker for an
+empty (baseline) scenario: an empty `enable`/`disable`/`set` hashes to a
+concrete level hash like any other input.
+
+### 19.1 Run identity
+
+A leaf's identity is its `run_id`: a single structural hash over the ordered
+list of the five per-level content hashes,
 
 ```
-runs/3a7f2c1d/baseline-00000000/seed_1/
-runs/3a7f2c1d/with_sia-f9e2b047/seed_1/
-# after tweaking with_sia only — baseline reused:
-runs/3a7f2c1d/with_sia-d4e2a391/seed_1/
-runs/3a7f2c1d/baseline-00000000/seed_1/   ← untouched, cached
-# after changing base params — nothing reused:
-runs/cc8b1a90/baseline-00000000/seed_1/
+run_id = hash(HASH_VERSION, kind, [model, config, params, scenario, seed])
 ```
 
-The `00000000` prefix for an empty-delta scenario is a **special-case display
-value** assigned by the path builder when the scenario has no
-overrides/enables/disables — it is not the hash of an empty input
-(`sha256("") = e3b0c442...`). The intent is a visually-distinct "identity
-scenario" marker; the actual `scen_hash` field in `run.json` is unset for these.
+recorded in full (64 hex chars) in `run.json`; the 8-hex path segments are a
+readable factoring of it. Each level hashes a **disjoint slice** of the resolved
+input set, and their union is the whole input:
 
-### 19.1 Hash Computation
+| Level      | Covers                                                                                                                                                                       |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`    | the structural IR — compartments, transitions, observations, ODE equations, tables, `init`, `time_unit` — presentation-normalized (output format and time rendering are stripped, since they don't change results) |
+| `config`   | backend, `dt`, `from` / `to`, the output schedule, the written-column selection (`--columns` / `--no-flows`), and degenerate-rate handling                                 |
+| `params`   | the resolved base parameter values and any loaded table data                                                                                                              |
+| `scenario` | the scenario **delta** only: the `enable` / `disable` lists and the `set` / `scale` parameter patch                                                                        |
+| `seed`     | the process and base RNG seeds                                                                                                                                             |
 
-```
-model_hash = sha256(IR JSON bytes)                         # full 64-char hex
+Two runs that share a structural model share the `model` level even if one bakes
+in calibrated values and the other supplies them externally; changing a
+parameter value re-keys the `params` level while the `model` level is untouched.
+The written-column selection is part of `config`, so two runs that request
+different columns are distinct leaves — a leaf's bytes and its `run_id` never
+disagree.
 
-sim_hash   = sha256(model_hash + canonical_base_params
-                    + backend + dt + tool_version)         # 64-char hex
-                                                           # first 8 used in dir name
+**Collision handling.** Eight hex chars per segment suffices because a collision
+requires *every* level on the path to collide at once; the full 64-char hashes
+in `run.json` are the authoritative check, and the store escalates a genuine
+path-prefix collision by suffixing the final segment.
 
-scen_hash  = sha256("enable\0" + sorted(enable, NUL-terminated)
-                    + "disable\0" + sorted(disable, NUL-terminated)
-                    + "params\0" + canonical_scen_params + "\0"
-                    + tool_version)                        # 64-char hex
-                                                           # first 8 used in dir name
+### 19.2 Cache reuse
 
-scenario_slug = scenario name lowercased,
-                non-[a-z0-9_] replaced with _
-seed_dir      = seed_{N}   (verbatim u64, no zero-padding)
-```
+A run is a **cache hit** when its factored path already exists. Because the
+levels nest independently, an unchanged level's subtree is reused verbatim:
 
-A scenario with no overrides, enables, or disables is the implicit baseline; the
-path builder assigns it the special-case display prefix `00000000` (see the note
-above — this is a marker, not `sha256("")` or the value of the formula above).
-
-`scen_hash` covers only the _delta_ (scenario overrides, enable, disable). It is
-domain-separated (each list is prefixed with its label and every element is
-NUL-terminated) and pinned to `tool_version` — the version component is
-load-bearing: a code change that alters how enables/disables resolve (e.g.
-family-name expansion) must not silently return stale cached results under an
-identical hash. Base params and model structure are captured in `sim_hash`.
-Renaming a scenario without changing its definition preserves the hash, so cached
-runs are reused.
-
-**Structural content** included in `model_hash` (via IR JSON):
-
-```
-compartments         # state variable declarations
-stratify             # index dimension declarations
-parameters           # names and types only (not values)
-tables               # dimension annotations + inline values
-let                  # all let bindings
-transitions          # all transition declarations
-interventions        # intervention definitions (including base_name)
-init                 # initial condition expressions
-time_unit            # canonical time unit
-```
-
-**Excluded** from `model_hash`:
-
-```
-simulate             # time range is analysis-specific
-scenarios            # counterfactual modifications, not structural
-data (file paths)    # external file paths change across machines
-```
-
-### 19.2 Cache Reuse Matrix
-
-| What changed                       | sim_hash  | scen_hash         | Reuse               |
-| ---------------------------------- | --------- | ----------------- | ------------------- |
-| IR / model                         | changes   | —                 | none                |
-| base params                        | changes   | —                 | none                |
-| backend or dt                      | changes   | —                 | none                |
-| scenario A's enable/disable/params | unchanged | A changes, B same | B's runs reused     |
-| add more seeds                     | unchanged | unchanged         | all existing reused |
-| rename a scenario                  | unchanged | unchanged         | reused (same sim)   |
+| What changed                        | Re-keys              | Reuse                                                       |
+| ----------------------------------- | -------------------- | ---------------------------------------------------------- |
+| model / IR                          | `model` + all below  | none                                                       |
+| base params or table data           | `params` + below     | none                                                       |
+| backend, `dt`, or column selection  | `config` + below     | none                                                       |
+| one scenario's enable/disable/patch | that `scenario` leaf | sibling scenarios reused                                   |
+| add more seeds                      | new `seed` leaves    | existing seeds reused                                      |
+| rename a scenario (same delta)      | nothing (label only) | identity unchanged, but the renamed path is a fresh directory → one harmless re-run |
 
 ### 19.3 Enumerating runs
 
@@ -4738,11 +4810,14 @@ declaration :=
   | let_binding                       # let NAME = EXPR
 ```
 
-**Mandatory** for a runnable model: `compartments`, `transitions`, `init`,
-`simulate`, and `time_unit`. Everything else is optional.
+**Mandatory** for a runnable model: `compartments`, at least one of
+`transitions` or `ode` (integer compartments evolve via `transitions`, `real`
+compartments via `ode`; a model may use either or both), `init`, `simulate`, and
+`time_unit`. Everything else is optional.
 
-**Mandatory** for `camdl check` (validation only): `compartments` and
-`parameters`. No `simulate` or `init` required.
+**Mandatory** for `camdl check` (validation only): `compartments`. A param-free
+model checks cleanly and a pure-`ode` model (no `transitions` block) checks and
+compiles; no `parameters`, `simulate`, or `init` is required for validation.
 
 **Expander** (OCaml): indexed transitions → flat IR transitions,
 `c in compartments` → per-compartment transitions, `consecutive` → adjacent pair
@@ -5098,7 +5173,7 @@ transitions {
   recovery : I --> R  @ gamma + I
   # where gamma : rate ('per_day) and I : count
 }
-# ERROR at line 33: cannot add rate (1/time) and count (dimensionless).
+# ERROR at line 33: cannot add rate (1/time) and count (dimension P).
 #   Did you mean 'gamma * I'?
 ```
 
@@ -5134,26 +5209,40 @@ scenarios {
 
 ### 26.9 Self-Loop Detection
 
+A generated self-loop is a **hard error** (`E310`), not a warning. When an
+expanded transition's source and destination are the same compartment, its net
+stoichiometry cancels to empty, and the compiler rejects it rather than emitting
+a no-op transition:
+
 ```camdl
 migrate[c in compartments, src in patch, dst in patch]
   : c[src] --> c[dst]  @ mig[dst, src] * c[src]
-# WARNING: transition 'migrate' generates self-loops where
-#   src == dst. Self-loops waste computation (Gillespie fires
-#   them but state doesn't change). Add 'where src != dst' to
-#   filter, or ensure mig[i,i] = 0 for all i.
+# ERROR E310: transition 'migrate' has no net effect: sources and
+#   destinations cancel (the diagonal src == dst members are self-loops).
+#   Add 'where src != dst' to drop the diagonal, or ensure mig[i,i] = 0.
+```
+
+Add the guard to filter the diagonal:
+
+```camdl
+migrate[c in compartments, src in patch, dst in patch]
+  : c[src] --> c[dst]  @ mig[dst, src] * c[src]  where src != dst
 ```
 
 ### 26.10 Name Resolution
 
-Names are resolved in order: compartments → parameters → let bindings → forcing
-→ tables. The compiler reports errors for:
+A user-defined name lives in exactly one namespace. The same name declared in
+two of {compartments, parameters, let bindings, forcing, tables} is a
+**duplicate-declaration** error (`E278`), so there is never a legal
+cross-namespace collision for a resolution order to arbitrate — the compiler
+rejects the ambiguity rather than silently preferring one namespace. What is
+reported:
 
 - **Shadowing reserved identifiers**: `t_start`, `t_end`, `compartments`, etc.
-- **Duplicate declarations**: two parameters named `beta`, two compartments
-  named `S`.
-- **Ambiguous references**: a name exists in multiple namespaces (e.g., a
-  parameter and a compartment both named `N`). The compiler errors rather than
-  guessing.
+  (`E100`).
+- **Duplicate declarations** (`E278`): two parameters named `beta`, two
+  compartments named `S`, or the same name in two of the namespaces above (e.g.
+  a parameter and a compartment both named `N`).
 
 ### 26.11 Compiler Reporting
 
@@ -5226,11 +5315,11 @@ min(a, b), max(a, b)                element-wise min / max (binary)
 # Time
 t                                    current simulation time
 
-# Forcing (time-dependent functions)
-forcing { NAME : sinusoidal { ... } }     smooth seasonal
-forcing { NAME : periodic { ... } }       repeating step (values or on = [lo:hi, ...])
-forcing { NAME : piecewise { ... } }      non-repeating step
-forcing { NAME : interpolated { ... } }   data-driven (linear or spline)
+# Forcing (time-dependent functions) — the tier-3 unit literal 'UNIT is required (§7; E001 if omitted)
+forcing { NAME : sinusoidal 'UNIT { ... } }     smooth seasonal
+forcing { NAME : periodic 'UNIT { ... } }       repeating step (values or on = [lo:hi, ...])
+forcing { NAME : piecewise 'UNIT { ... } }      non-repeating step
+forcing { NAME : interpolated 'UNIT { ... } }   data-driven (linear or spline)
 
 # Reserved identifiers
 t, t_start, t_end, dt, pi, e                # genuinely reserved (E100)
