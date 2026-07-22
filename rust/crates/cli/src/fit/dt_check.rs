@@ -372,7 +372,7 @@ pub fn run_richardson_ladder_ode(
     }
 
     run_ladder(dt_fit, config.n_halvings, threshold_floor, |dt, _rung_i| {
-        match compute_ode_loglik(compiled, obs_model, obs_times, dt, theta_hat) {
+        match compute_ode_loglik(compiled, obs_model, obs_times, dt, theta_hat, dt) {
             Ok(ll) => Ok((ll, 0.0)),
             // gh#224: a structural error (config bug, unknown compartment)
             // aborts the dt-check rather than poisoning the ladder; a per-θ

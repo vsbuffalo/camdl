@@ -1225,6 +1225,17 @@ pub enum Stage {
         /// Default: 300.
         #[serde(default = "default_pmmh_adapt_start")]
         adapt_start: usize,
+        /// Coarse RK4 step for the *unscored* warm-up `[t_start, first_obs)` on the
+        /// deterministic ODE likelihood (gh#396 follow-on). `None` (default) or a
+        /// value `<= dt` disables it — the whole trajectory integrates at `dt`. A
+        /// larger value takes big steps on the transient, cutting the per-eval cost
+        /// of a model whose origin is long before the data (no monodromy, so it is
+        /// dimension-free — unlike the equilibrium warm-start). Forcing-only warm-up
+        /// only: a model with `events {}` / `balance {}` in the warm-up is refused
+        /// (per-substep constructs cannot be coarsened). Identity-defining: it
+        /// changes the scored trajectory, so it re-keys the run.
+        #[serde(default)]
+        burnin_dt: Option<f64>,
     },
 
     #[serde(rename = "pfilter")]
@@ -1295,6 +1306,17 @@ pub enum Stage {
         /// frees wide-posterior parameters that identity mass leaves stuck.
         #[serde(default = "default_nuts_dense_mass")]
         dense_mass: bool,
+        /// Coarse RK4 step for the *unscored* warm-up `[t_start, first_obs)` on
+        /// the ODE gradient path (gh#396 follow-on). `None` (default) or a value
+        /// `<= dt` disables it — the whole trajectory integrates at `dt`. A larger
+        /// value takes big steps on the transient (state + sensitivity together,
+        /// so the NUTS gradient stays consistent with the coarsely-computed value),
+        /// cutting the per-gradient cost of a model whose origin is long before the
+        /// data. Prevalence (state-scored) streams only in this release; an
+        /// incidence stream is refused (its first bin would be coarsened). Identity-
+        /// defining: it changes the scored trajectory, so it re-keys the run.
+        #[serde(default)]
+        burnin_dt: Option<f64>,
     },
 
     /// NLopt Sbplx (subspace-searching simplex) — deterministic MLE on the
@@ -1566,11 +1588,14 @@ impl Stage {
             // Mh (deterministic ODE marginal-likelihood MH): omit ONLY
             // `iterations` (extension dimension). No `particles` / `rho`
             // (deterministic path has neither). All other fields — adapt /
-            // adapt_start AND the init selectors — are identity-defining,
-            // for the same reason as PMMH.
+            // adapt_start / burnin_dt AND the init selectors — are identity-
+            // defining, for the same reason as PMMH. `burnin_dt` changes the
+            // coarsely-integrated warm-up → the scored trajectory → the draws, so it
+            // MUST be listed here (leaving it swept into `..` would silently collide
+            // two fits that differ only in burnin_dt — the count-in-the-key rule).
             Stage::Mh {
                 backend, chains, starts_from, burn_in, thin,
-                adapt, adapt_start,
+                adapt, adapt_start, burnin_dt,
                 init_method, survey_path, survey_top_k_n,
                 ..
             } => json!({
@@ -1585,16 +1610,20 @@ impl Stage {
                 "thin": thin,
                 "adapt": adapt,
                 "adapt_start": adapt_start,
+                "burnin_dt": burnin_dt,
             }),
             // Nuts (deterministic ODE gradient sampler): omit ONLY `samples`
             // (extension dimension, folded via `cas_target_length` like Mh's
             // `iterations`). Every other field — warmup / max_tree_depth /
-            // target_accept / dense_mass AND the init selectors — is
-            // identity-defining, for the same reason as Mh.
+            // target_accept / dense_mass / burnin_dt AND the init selectors — is
+            // identity-defining, for the same reason as Mh. `burnin_dt` changes the
+            // coarsely-integrated warm-up → the scored trajectory → the draws, so it
+            // MUST be listed here (leaving it swept into `..` would silently collide
+            // two fits that differ only in burnin_dt — the count-in-the-key rule).
             Stage::Nuts {
                 backend, chains, warmup, starts_from,
                 init_method, survey_path, survey_top_k_n,
-                max_tree_depth, target_accept, dense_mass,
+                max_tree_depth, target_accept, dense_mass, burnin_dt,
                 ..
             } => json!({
                 "algorithm": "nuts",
@@ -1608,6 +1637,7 @@ impl Stage {
                 "max_tree_depth": max_tree_depth,
                 "target_accept": target_accept,
                 "dense_mass": dense_mass,
+                "burnin_dt": burnin_dt,
             }),
             // No extension dimension: hash the full stage. NLopt stages
             // also have no extension dimension — every knob (chains,
@@ -1699,6 +1729,59 @@ fn default_use_nuts() -> bool { true }
 fn default_nuts_warmup() -> usize { 500 }
 fn default_nuts_samples() -> usize { 500 }
 fn default_target_accept() -> f64 { 0.8 }
+
+/// Validate a `burnin_dt` coarse warm-up step (gh#396 follow-on) against the
+/// fit-wide `dt` and the observation streams. Shared by the `nuts` (gradient) and
+/// `mh` (deterministic) ODE paths — the soundness rules are identical: coarsening
+/// is valid only for a prevalence (state-scored) fit with a genuine unscored
+/// warm-up window and a step LARGER than `dt`. Returns the effective step: `dt`
+/// (off) for `None` / `== dt`; the validated `b` otherwise. The `events`/`balance`
+/// per-substep refusal is a model-structure gate enforced downstream in `run_ode`
+/// / the gradient integrator, not here.
+pub fn validate_burnin_dt(
+    burnin_dt: Option<f64>,
+    dt: f64,
+    n_interval_streams: usize,
+    first_obs: Option<f64>,
+    t_start: f64,
+) -> Result<f64, String> {
+    match burnin_dt {
+        Some(b) if b > dt => {
+            // Incidence (interval) streams: the first scored bin accumulates flow
+            // from `t_start`, so coarsening the warm-up would bias a scored datum.
+            // Prevalence (state-scored) is safe (only the state at each obs matters).
+            if n_interval_streams > 0 {
+                return Err(format!(
+                    "burnin_dt = {b} is only supported for prevalence (state-scored) \
+                     streams in this release, but this fit has an incidence (interval) \
+                     stream whose first bin accumulates flow from t_start — coarsening \
+                     the warm-up would bias it. Remove burnin_dt (incidence \
+                     coarse-transient support is a follow-up)."
+                ));
+            }
+            // There must be an unscored warm-up window to coarsen.
+            match first_obs {
+                Some(fo) if fo > t_start => Ok(b),
+                first => Err(format!(
+                    "burnin_dt = {b} was set, but the first observation (t = {}) is \
+                     at or before the model start (t_start = {t_start}) — there is no \
+                     unscored warm-up window to coarsen. Remove burnin_dt, or start \
+                     the model earlier so there is a transient to integrate coarsely.",
+                    first.map(|f| f.to_string()).unwrap_or_else(|| "none".to_string())
+                )),
+            }
+        }
+        Some(b) if b < dt => Err(format!(
+            "burnin_dt = {b} is smaller than the integrator step dt = {dt}. The \
+             coarse burn-in step must be LARGER than dt — it takes bigger steps on \
+             the unscored warm-up; a smaller value would refine, not coarsen. Set \
+             burnin_dt >= {dt} (e.g. 7.0), or remove it to integrate the whole \
+             trajectory at dt."
+        )),
+        // Some(b) with b == dt, or None: off (fine step throughout).
+        _ => Ok(dt),
+    }
+}
 
 // PMMH defaults
 fn default_pmmh_adapt() -> bool { true }

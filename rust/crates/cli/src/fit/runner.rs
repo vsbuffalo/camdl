@@ -4659,7 +4659,7 @@ dt = 1.0
             );
             let obs_model = MultiStreamObsModel::new(
                 BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap();
-            sim::inference::compute_ode_loglik(&compiled, &obs_model, &times, dt, &params).unwrap()
+            sim::inference::compute_ode_loglik(&compiled, &obs_model, &times, dt, &params, dt).unwrap()
         };
 
         let ll_one_week  = score(weekly);        // data@21 = 70  (reset fired)

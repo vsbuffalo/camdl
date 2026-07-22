@@ -100,6 +100,18 @@ impl OutputTimes {
     pub(crate) fn into_vec(self) -> Vec<f64> {
         self.0
     }
+
+    /// Retain only output times at or after `min_time`. Used by the ODE gradient
+    /// path (`integrate_obs_sensitivity`) to drop the dense *unscored* burn-in
+    /// output boundaries under a coarse `burnin_dt`, so a big warm-up step is not
+    /// clipped back to the fine output grid. Neutral for scoring: no observation
+    /// lies before the cutoff, and the per-interval incidence those boundaries
+    /// accumulate is additive (same total at the first obs, modulo the intended
+    /// coarse discretization). The caller bakes the obs-coincidence tolerance into
+    /// `min_time` so an output sitting a ULP below its coincident obs is kept.
+    pub(crate) fn retained_from(self, min_time: f64) -> Self {
+        OutputTimes(self.0.into_iter().filter(|&t| t >= min_time).collect())
+    }
 }
 
 /// Scheduled-effect boundary times.

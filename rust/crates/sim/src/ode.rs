@@ -10,6 +10,22 @@ use crate::{
     state::{Flows, IntState, RealState, Snapshot, Trajectory},
 };
 
+/// Relative threshold below which a compartment's post-step value counts as a
+/// *meaningful* negative excursion (a real RK4 overshoot), versus float roundoff
+/// on a near-zero compartment. Under the ODE gradient path a real clamp
+/// (`int_vals.max(0)`) is a nonsmooth operation the forward sensitivity does not
+/// model, so it is refused; roundoff clamps (scale·~1e-15, far below this) are
+/// tolerated. Compared against `max(|compartment|, 1)`, so it also floors at
+/// `1e-9` absolute for sub-unit compartments. See the clamp check in `rk4_step`.
+const NEG_STATE_CLAMP_EPS: f64 = 1e-9;
+
+/// Tolerance for treating two times as coincident on the ODE gradient recorder's
+/// obs grid: an integration boundary within this of an observation time counts as
+/// *at* that obs (record + reset), and the coarse-burn-in output filter keeps an
+/// output sitting within this of its coincident obs. One name for the one concept
+/// (was a bare `1e-9` at the record-match and overshoot-guard sites).
+const OBS_COINCIDENCE_EPS: f64 = 1e-9;
+
 pub struct OdeSim;
 
 impl Simulate for OdeSim {
@@ -27,7 +43,10 @@ impl Simulate for OdeSim {
                 got: config.variant_name(),
             }),
         };
-        run_ode(model, params, cfg, None)
+        // The generic `Simulate` (forward-sim) path never coarsens: coarse burn-in
+        // is a fit-time likelihood option threaded through `run_ode` directly (see
+        // `compute_ode_loglik`), never the plain simulate surface.
+        run_ode(model, params, cfg, None, None)
     }
 
     fn capabilities(&self) -> crate::Capabilities {
@@ -335,14 +354,42 @@ fn rk4_step(
         (Default::default(), Default::default())
     };
 
-    // Combine compartments (clamped ≥ 0).
+    // Combine compartments (clamped ≥ 0). Under the gradient path (`sens` present),
+    // a compartment driven meaningfully below zero trips the clamp — a nonsmooth
+    // operation the forward sensitivity `S` does NOT model, so the returned
+    // `(value, gradient)` pair would be inconsistent (a silent-wrong gradient NUTS
+    // would sample against). Refuse the step instead; the value-only path
+    // (`sens = None`, forward sim) keeps clamping silently and stays byte-identical.
+    // The relative `NEG_STATE_CLAMP_EPS` tolerates float roundoff on a near-zero
+    // compartment while catching a real RK4 overshoot (which is O(compartment
+    // scale) once the step exceeds a fast transition's stability limit — coarse
+    // `burnin_dt` steps make this reachable, so the check the old comment here
+    // *claimed* but never implemented finally exists).
+    let grad_path = sens.is_some();
+    let mut clamped_negative = false;
     for i in 0..ni {
-        int_vals[i] += dt / 6.0 * (k1i[i] + 2.0 * k2i[i] + 2.0 * k3i[i] + k4i[i]);
-        int_vals[i] = int_vals[i].max(0.0);
+        let combined = int_vals[i] + dt / 6.0 * (k1i[i] + 2.0 * k2i[i] + 2.0 * k3i[i] + k4i[i]);
+        if grad_path && combined < -NEG_STATE_CLAMP_EPS * int_vals[i].abs().max(1.0) {
+            clamped_negative = true;
+        }
+        int_vals[i] = combined.max(0.0);
     }
     for i in 0..nr {
-        real_vals[i] += dt / 6.0 * (k1r[i] + 2.0 * k2r[i] + 2.0 * k3r[i] + k4r[i]);
-        real_vals[i] = real_vals[i].max(0.0);
+        let combined = real_vals[i] + dt / 6.0 * (k1r[i] + 2.0 * k2r[i] + 2.0 * k3r[i] + k4r[i]);
+        if grad_path && combined < -NEG_STATE_CLAMP_EPS * real_vals[i].abs().max(1.0) {
+            clamped_negative = true;
+        }
+        real_vals[i] = combined.max(0.0);
+    }
+    if clamped_negative {
+        return Err(SimError::Validation(
+            "ODE gradient (nuts): a compartment was driven below zero and clamped to 0 \
+             during integration — a nonsmooth operation the forward sensitivity does not \
+             model, so the value and its gradient would be inconsistent. The step is too \
+             large for a fast (short-residence) transition; reduce `dt`, or lower \
+             `burnin_dt` if the clamp is in the coarse warm-up window (gh#275 §1c)."
+                .to_string(),
+        ));
     }
 
     // Combine augmented flow (NOT clamped).
@@ -354,8 +401,9 @@ fn rk4_step(
 
     // Combine the sensitivity blocks (NOT clamped — S and acc_sens are signed).
     // The clamp on the state above is a nonsmooth operation S does not model (§1c
-    // clamp caveat); under `nuts` an active clamp is refused, so a valid gradient
-    // trajectory never clamps. `acc_sens` mirrors the value `flow` combine.
+    // clamp caveat); a gradient step that actually clamps is refused by the guard
+    // above (returned before we reach here), so a valid gradient trajectory never
+    // clamps. `acc_sens` mirrors the value `flow` combine.
     if let Some(s) = sens {
         let [k1, k2, k3, k4] = &ks_state;
         for k in 0..stage_state {
@@ -402,6 +450,35 @@ trait OdeStepper {
     ) -> Result<f64, SimError>;
 }
 
+/// A coarse burn-in request (gh#396 follow-on): take big RK4 steps of `burnin_dt`
+/// on the unscored warm-up `[t_start, cond_from)`, exact `dt` on the scored window
+/// `[cond_from, t_end]`. `cond_from` is the warm-up/scored split (the first
+/// observation time). Threaded into the value-only [`run_ode`] — the deterministic
+/// ODE likelihood path shared by `mh`, `nlopt`/IF2, and `survey`; the augmented
+/// gradient path ([`integrate_obs_sensitivity`], `nuts`) carries the same split
+/// via the same [`CoarseBurnin::nominal`] step rule.
+#[derive(Debug, Clone, Copy)]
+pub struct CoarseBurnin {
+    pub burnin_dt: f64,
+    pub cond_from: f64,
+}
+
+impl CoarseBurnin {
+    /// Coarse stepping is active only when the step is genuinely larger than `dt`
+    /// AND there is a warm-up window to coarsen (`cond_from > t_start`). Otherwise
+    /// the ordinary fine path runs — so `burnin_dt <= dt` is a silent no-op, not an
+    /// error (the config surface rejects `burnin_dt < dt` up front).
+    fn active(&self, dt: f64, t_start: f64) -> bool {
+        self.burnin_dt > dt + MIN_STEP_EPS && self.cond_from > t_start
+    }
+    /// The region-aware nominal step at time `t`: `burnin_dt` on the unscored
+    /// warm-up `[t_start, cond_from)`, `dt` once `t` reaches `cond_from`. The
+    /// driver's `h_max` clip lands the last coarse step exactly on `cond_from`.
+    fn nominal(&self, t: f64, dt: f64) -> f64 {
+        if t < self.cond_from - MIN_STEP_EPS { self.burnin_dt } else { dt }
+    }
+}
+
 /// Fixed-step classic RK4 — today's integrator, the default and the golden
 /// reference. Carries `dt` (the nominal step) as the analogue of an adaptive
 /// stepper's carried step guess; one `advance` takes `min(dt, h_max)`. (The
@@ -412,9 +489,14 @@ trait OdeStepper {
 /// references the step size in a rate (`Expr::Dt` / RUNTIME_DT) the augmented
 /// flow has no single `dt` to thread through the stages, so those models keep
 /// the first-order Euler flow; every other model gets augmented (RK4) flow.
+///
+/// `coarse`, when `Some` and active, makes the nominal step region-aware for
+/// coarse burn-in (gh#396). The `h_max` clip is unchanged, so a coarse step still
+/// lands on the next boundary and never straddles one.
 struct Rk4Fixed {
     dt: f64,
     euler_flow: bool,
+    coarse: Option<CoarseBurnin>,
 }
 
 impl OdeStepper for Rk4Fixed {
@@ -427,9 +509,15 @@ impl OdeStepper for Rk4Fixed {
         state: &mut OdeState,
         per_eval: Option<&[f64]>,
     ) -> Result<f64, SimError> {
-        // Clip the nominal step to land on the boundary: `dt.min(h_max)`,
-        // bit-identical to the old `Schedule::substep` (= `dt.min(boundary - t)`).
-        let h = self.dt.min(h_max);
+        // Clip the nominal step to land on the boundary: `nominal.min(h_max)`,
+        // bit-identical to the old `Schedule::substep` (= `dt.min(boundary - t)`)
+        // when `coarse` is absent. With coarse burn-in the nominal is region-aware
+        // (`burnin_dt` on the unscored warm-up, `dt` after `cond_from`).
+        let nominal = match self.coarse {
+            Some(c) => c.nominal(t, self.dt),
+            None => self.dt,
+        };
+        let h = nominal.min(h_max);
 
         if self.euler_flow {
             // RUNTIME_DT models (B2): keep the O(h) Euler flow (`c += rate(t)·h`,
@@ -688,6 +776,7 @@ pub fn run_ode(
     params: &[f64],
     cfg: &OdeConfig,
     mut tick: Option<&mut dyn FnMut(f64)>,
+    coarse: Option<CoarseBurnin>,
 ) -> Result<Trajectory, SimError> {
     // gh#126: reject a non-finite/non-positive dt or a non-finite fire
     // time at the entry point — a RELEASE-build check (the per-conversion
@@ -715,13 +804,54 @@ pub fn run_ode(
         flow: vec![0.0; n_transitions],
     };
 
+    // Coarse burn-in (gh#396 follow-on): active only when the caller passed a
+    // genuinely larger `burnin_dt` AND there is an unscored warm-up window. When
+    // active, drop the dense unscored burn-in OUTPUT boundaries so a coarse step
+    // runs to `cond_from` instead of being clipped back to the fine output grid —
+    // neutral for scoring (no obs lies before `cond_from`). EFFECT boundaries are
+    // KEPT, so an intervention in the warm-up still clips the coarse step exactly
+    // onto it (per-substep `events`/`balance` are refused by the caller's gate).
+    let use_coarse = coarse.map_or(false, |c| c.active(cfg.dt, cfg.t_start));
+
+    // Coarse burn-in is valid only for a forcing-only warm-up (Phase 0 scope). A
+    // per-substep construct — `balance {}` or an `events {}` intervention — fires
+    // EVERY substep, so coarsening the warm-up grid changes how often it applies:
+    // a semantic change, not a bounded discretization error. Refuse rather than
+    // silently mis-fire it. (Scheduled `interventions {}` are fine: they survive
+    // as effect boundaries, so a coarse step clips exactly onto them.)
+    if use_coarse {
+        if model.model.balance.is_some() {
+            return Err(SimError::Validation(
+                "coarse burn-in (burnin_dt) is not supported for a model with a \
+                 `balance {}` block: population balance is applied every substep, so a \
+                 coarse warm-up step would change how often it fires. Remove burnin_dt \
+                 (or use the fine step) for this model."
+                    .to_string(),
+            ));
+        }
+        if model.model.interventions.iter().any(|i| i.kind.is_event()) {
+            return Err(SimError::Validation(
+                "coarse burn-in (burnin_dt) is not supported for a model with `events {}`: \
+                 an event fires every substep, so a coarse warm-up step would change how \
+                 often it fires. Remove burnin_dt (or use the fine step) for this model."
+                    .to_string(),
+            ));
+        }
+    }
+
+    let output_times = OutputTimes::from_model(model)?;
+    let output_times = match coarse {
+        Some(c) if use_coarse => output_times.retained_from(c.cond_from - OBS_COINCIDENCE_EPS),
+        _ => output_times,
+    };
+
     // Merged timeline spine. ODE is dt-independent, so EXACT and snap coincide;
     // it uses the EXACT policy (land on each output/effect boundary). Firing stays
     // inline; the schedule owns the sorted times and `cursor` walks them.
     let schedule = Schedule::exact_forward(
         cfg.dt,
         cfg.t_end,
-        OutputTimes::from_model(model)?,
+        output_times,
         EffectTimes::from_model(model, params)?,
     );
     let mut cursor = Cursor::default();
@@ -744,8 +874,22 @@ pub fn run_ode(
     // stepper the raw distance to the next boundary and re-enters until the
     // boundary is reached, so fixed RK4 and adaptive Dopri5 share one loop.
     let mut stepper: Box<dyn OdeStepper> = match &model.model.simulation.integrator {
-        ir::model::Integrator::Rk4 => Box::new(Rk4Fixed { dt: cfg.dt, euler_flow }),
+        ir::model::Integrator::Rk4 => Box::new(Rk4Fixed {
+            dt: cfg.dt,
+            euler_flow,
+            coarse: if use_coarse { coarse } else { None },
+        }),
         ir::model::Integrator::Rk45 { atol, rtol } => {
+            // Coarse burn-in requires a fixed step to coarsen; an adaptive rk45
+            // step has none. Honest hard error, never a silent fine-step fallback
+            // that would drop the requested speedup on the floor.
+            if use_coarse {
+                return Err(SimError::Validation(
+                    "coarse burn-in (burnin_dt) requires the fixed-step rk4 integrator: \
+                     an adaptive rk45 step has no fixed step size to coarsen — use \
+                     integrator = rk4.".to_string(),
+                ));
+            }
             // C3 capability gate: a `dt`-in-rate (RUNTIME_DT) model has no single
             // fixed step — adaptive stepping is undefined. Honest hard error, never
             // a silent rk4 fallback.
@@ -904,6 +1048,16 @@ struct AugState {
 /// Refuses (hard error, §1c/§1h) an adaptive integrator, a `dt`-in-rate
 /// (RUNTIME_DT) model, and any scheduled effect — none of which have a defined
 /// fixed-step forward sensitivity in v1.
+///
+/// `burnin_dt` is the coarse RK4 step for the *unscored* warm-up
+/// `[t_start, first_obs)` (gh#396 follow-on): when `burnin_dt > cfg.dt` the
+/// integrator takes big steps there (state AND sensitivity together, so the
+/// gradient stays consistent with the coarsely-computed value) and clips onto
+/// `first_obs`, then integrates the scored window at the exact `cfg.dt`. The
+/// dense burn-in output boundaries are dropped from the schedule so a coarse step
+/// is not clipped back to the fine grid — sound because no obs lies before
+/// `first_obs`. `burnin_dt <= cfg.dt` (or no warm-up region) ⇒ exactly the
+/// fine-step path, byte-identical.
 pub(crate) fn integrate_obs_sensitivity(
     model: &CompiledModel,
     params: &[f64],
@@ -911,6 +1065,7 @@ pub(crate) fn integrate_obs_sensitivity(
     state_sens_0: &[f64],
     cfg: &OdeConfig,
     obs_times: &[f64],
+    burnin_dt: f64,
 ) -> Result<Vec<ObsSensitivity>, SimError> {
     let d = param_model_idx.len();
     let n_tr = model.model.transitions.len();
@@ -964,10 +1119,31 @@ pub(crate) fn integrate_obs_sensitivity(
         },
     };
 
+    // Coarse burn-in (gh#396 follow-on): the warm-up/scored split is the first
+    // observation. Active only when `burnin_dt > cfg.dt` AND there is a warm-up
+    // window (`cond_from > t_start`); otherwise this is the ordinary fine path.
+    // Same `CoarseBurnin` step rule the value path (`run_ode`) uses — one seam.
+    let coarse = CoarseBurnin {
+        burnin_dt,
+        cond_from: obs_times.first().copied().unwrap_or(cfg.t_start),
+    };
+    let use_coarse = coarse.active(cfg.dt, cfg.t_start);
+
+    let output_times = OutputTimes::from_model(model)?;
+    let output_times = if use_coarse {
+        // Drop the dense unscored burn-in output boundaries so a coarse step runs
+        // to `cond_from` instead of being clipped to the fine output grid. Neutral
+        // for scoring (no obs before `cond_from`; the incidence those boundaries
+        // accumulate is additive). Phase 0 — the forcing-knot-aware, all-backends
+        // version is Phase 1 (`ForcingTimes` in the shared schedule spine).
+        output_times.retained_from(coarse.cond_from - OBS_COINCIDENCE_EPS)
+    } else {
+        output_times
+    };
     let schedule = Schedule::exact_forward(
         cfg.dt,
         cfg.t_end,
-        OutputTimes::from_model(model)?,
+        output_times,
         EffectTimes::from_model(model, params)?,
     );
     let mut cursor = Cursor::default();
@@ -993,7 +1169,7 @@ pub(crate) fn integrate_obs_sensitivity(
                           records: &mut Vec<ObsSensitivity>,
                           next_obs: &mut usize|
      -> bool {
-        if *next_obs < n_obs && (t - obs_times[*next_obs]).abs() < 1e-9 {
+        if *next_obs < n_obs && (t - obs_times[*next_obs]).abs() < OBS_COINCIDENCE_EPS {
             records.push(ObsSensitivity {
                 t,
                 counts: st.ode.int.clone(),
@@ -1023,8 +1199,16 @@ pub(crate) fn integrate_obs_sensitivity(
     while let Some(stop) = schedule.next_stop(&cursor, t) {
         let h_max = stop.t - t;
         if h_max > MIN_STEP_EPS {
-            // Fixed RK4 substep, clipped to the boundary; re-entered until arrival.
-            let h = cfg.dt.min(h_max);
+            // Region-aware fixed RK4 substep, clipped to the boundary and
+            // re-entered until arrival. Coarse `burnin_dt` on the unscored warm-up
+            // `[t_start, cond_from)`, exact `cfg.dt` on the scored window. The
+            // clip lands the last coarse step exactly on `cond_from` (a surviving
+            // output boundary). `burnin_dt` is a fixed config scalar, so the whole
+            // step sequence is θ-independent — the augmented `(x, S)` system stays
+            // a smooth composition and `S` is its exact derivative (the same §1c
+            // reason fixed-RK4 is sound and adaptive rk45 is refused).
+            let nominal = if use_coarse { coarse.nominal(t, cfg.dt) } else { cfg.dt };
+            let h = nominal.min(h_max);
             rk4_step(
                 model,
                 &mut st.ode.int,
@@ -1086,7 +1270,7 @@ pub(crate) fn integrate_obs_sensitivity(
             &mut records,
             &mut next_obs,
         );
-        if !recorded && next_obs < n_obs && t > obs_times[next_obs] + 1e-9 {
+        if !recorded && next_obs < n_obs && t > obs_times[next_obs] + OBS_COINCIDENCE_EPS {
             return Err(SimError::Validation(format!(
                 "ODE output grid has no snapshot at obs time {} (integration reached \
                  t = {} without landing on it); the [output] schedule must include \
@@ -1174,6 +1358,71 @@ mod tests {
         CompiledModel::new(model).expect("two_state with hand-set grads must compile")
     }
 
+    /// `pure_death` rewired to a CONSTANT-rate outflow: `rate = mu` (independent of
+    /// its source compartment `N`), so `dN/dt = -mu` and `N(t) = N0 - mu·t` crosses
+    /// zero at `t = N0/mu`. Unlike the self-limiting `mu·N` (whose RK4 stability
+    /// polynomial `R(z)` is positive for every real `z`, so it never goes negative),
+    /// a zeroth-order outflow overshoots below zero under a step larger than the
+    /// compartment can supply — the canonical trigger for the state clamp
+    /// (`int_vals.max(0)`). The value path clamps; the forward sensitivity `S`
+    /// does not model that clamp, so past the crossing `(value, gradient)` are
+    /// inconsistent — which the gradient path must refuse.
+    fn compiled_constant_drain() -> CompiledModel {
+        let mut model = load_golden("pure_death");
+        let death = &mut model.transitions[0];
+        death.rate = Expr::param("mu");
+        death.rate_grad.clear();
+        death.rate_grad.insert("mu".to_string(), DerivEntry::Grad(Expr::const_(1.0)));
+        death.rate_state_grad.0.clear(); // ∂(mu)/∂N = 0
+        CompiledModel::new(model).expect("constant-drain pure_death must compile")
+    }
+
+    /// A gradient step (`sens = Some`) that clamps a compartment negative is
+    /// REFUSED, not silently taken. `dN/dt = -mu` with `mu = 1`, `N0 = 100`, one
+    /// step of `dt = 200` drives `N` to `100 - 200 = -100`; the value path clamps
+    /// it to 0 but the sensitivity `S = ∂N/∂mu` keeps its unclamped slope, so the
+    /// returned `(value, gradient)` pair would be inconsistent — a silent-wrong
+    /// gradient NUTS would sample against. The forward-sim path (`sens = None`) is
+    /// unchanged: it still clamps, since a stochastic-adjacent ODE state at zero
+    /// is fine when no gradient consistency is required. (Coarse `burnin_dt` steps
+    /// make this overshoot materially more likely, which is why the guard the
+    /// S-combine comment long claimed — but never implemented — matters now.)
+    #[test]
+    fn rk4_gradient_step_refuses_clamping_a_compartment_negative() {
+        let cm = compiled_constant_drain();
+        let mu_idx = cm.model.parameters.iter().position(|p| p.name == "mu").unwrap();
+        let mut params = vec![0.0; cm.model.parameters.len()];
+        params[mu_idx] = 1.0;
+        let pmi = [mu_idx];
+        let nf = cm.model.transitions.len();
+
+        // Gradient path: refused.
+        let mut int = vec![100.0];
+        let mut real: Vec<f64> = vec![];
+        let mut flow = vec![0.0; nf];
+        let mut sens = Sens { state: vec![0.0; 1 * pmi.len()], flow: vec![0.0; nf * pmi.len()] };
+        let res = rk4_step(
+            &cm, &mut int, &mut real, Some(&mut flow), &params, 0.0, 200.0, None,
+            Some(&mut sens), &pmi,
+        );
+        assert!(
+            res.is_err(),
+            "a gradient step that clamps N negative must be refused (value/gradient \
+             would be inconsistent), got Ok with N = {}",
+            int[0]
+        );
+
+        // Forward-sim path: unchanged — clamps to 0, no error.
+        let mut int2 = vec![100.0];
+        let mut real2: Vec<f64> = vec![];
+        let mut flow2 = vec![0.0; nf];
+        let res2 = rk4_step(
+            &cm, &mut int2, &mut real2, Some(&mut flow2), &params, 0.0, 200.0, None, None, &[],
+        );
+        assert!(res2.is_ok(), "the forward-sim (value-only) path still clamps silently");
+        assert_eq!(int2[0], 0.0, "forward sim clamps N to 0");
+    }
+
     fn load_golden(name: &str) -> ir::Model {
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let path = std::path::PathBuf::from(&manifest)
@@ -1182,6 +1431,58 @@ mod tests {
         let contents =
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
         ir::from_str(&contents).unwrap_or_else(|e| panic!("parse {name}: {e}"))
+    }
+
+    /// gh#396 coarse-burn-in gate: a model with a `balance {}` block is REFUSED
+    /// under coarse burn-in — balance is applied every substep, so coarsening the
+    /// warm-up would change how often it fires (a semantic change, not a bounded
+    /// discretization error). `seir_pop_balance` (ocaml/golden) is the only
+    /// balance golden; load it directly (it lives outside `ir/golden`). The refusal
+    /// is coarse-SPECIFIC: without coarse the same model is not gated (control).
+    #[test]
+    fn run_ode_coarse_burnin_refuses_balance_model() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/seir_pop_balance.ir.json");
+        let mut model = ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Fixture params are `required` (no defaults); inject values so it compiles.
+        for p in &mut model.parameters {
+            if p.value.resolved_value().is_none() {
+                let v = match p.name.as_str() {
+                    "beta" => 0.3, "sigma" => 0.2, "gamma" => 0.1, "pop_mean" => 10000.0,
+                    "pop_amp" => 0.1, "I0" => 10.0, "immune0" => 100.0, _ => 0.5,
+                };
+                p.value = p.value.with_value(v);
+            }
+        }
+        let compiled = CompiledModel::new(model).unwrap();
+        assert!(compiled.model.balance.is_some(), "fixture must have a balance block");
+
+        let mut params = vec![0.0; compiled.param_index.len()];
+        for p in &compiled.model.parameters {
+            params[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+        }
+        let cfg = OdeConfig { t_start: 0.0, t_end: 200.0, dt: 1.0 };
+
+        // Coarse active (burnin_dt 5 > dt 1, cond_from 100 > t_start 0) ⇒ refused.
+        let coarse = Some(CoarseBurnin { burnin_dt: 5.0, cond_from: 100.0 });
+        match run_ode(&compiled, &params, &cfg, None, coarse) {
+            Err(SimError::Validation(m)) => assert!(
+                m.contains("balance") && m.contains("burnin_dt"),
+                "the gate must name balance + burnin_dt, got: {m}"
+            ),
+            other => panic!("expected a balance/burnin_dt Validation error, got {other:?}"),
+        }
+
+        // Control: the refusal is coarse-SPECIFIC. Without coarse the balance gate
+        // must NOT fire (any other outcome — Ok or an unrelated error — is fine).
+        match run_ode(&compiled, &params, &cfg, None, None) {
+            Err(SimError::Validation(m)) => assert!(
+                !(m.contains("balance") && m.contains("burnin_dt")),
+                "the balance/burnin_dt refusal must not fire without coarse: {m}"
+            ),
+            _ => {}
+        }
     }
 
     /// Integrate the compartments `x` and cumulative flow (and, when `with_sens`,
@@ -1426,7 +1727,7 @@ mod tests {
         let obs = [10.0f64, 20.0, 30.0];
         let seed = vec![0.0f64; ni * d]; // params don't enter two_state's initial counts
 
-        let recs = integrate_obs_sensitivity(&cm, &base, &pmi, &seed, &cfg, &obs).unwrap();
+        let recs = integrate_obs_sensitivity(&cm, &base, &pmi, &seed, &cfg, &obs, cfg.dt).unwrap();
         assert_eq!(recs.len(), 3, "one record per obs time");
 
         // Central FD in each parameter (hoisted: perturbation depends on the param,
@@ -1439,8 +1740,8 @@ mod tests {
                 pp[pk] += eps;
                 pm[pk] -= eps;
                 (
-                    integrate_obs_sensitivity(&cm, &pp, &pmi, &seed, &cfg, &obs).unwrap(),
-                    integrate_obs_sensitivity(&cm, &pm, &pmi, &seed, &cfg, &obs).unwrap(),
+                    integrate_obs_sensitivity(&cm, &pp, &pmi, &seed, &cfg, &obs, cfg.dt).unwrap(),
+                    integrate_obs_sensitivity(&cm, &pm, &pmi, &seed, &cfg, &obs, cfg.dt).unwrap(),
                 )
             })
             .collect();

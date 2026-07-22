@@ -27,10 +27,9 @@ pub fn compute_ode_loglik(
     obs_times: &[f64],
     dt: f64,
     params: &[f64],
+    burnin_dt: f64,
 ) -> Result<f64, crate::error::SimError> {
-    use crate::config::{OdeConfig, SimConfig};
-    use crate::ode::OdeSim;
-    use crate::Simulate;
+    use crate::config::OdeConfig;
 
     let model_sim = &compiled.model.simulation;
     let ode_cfg = OdeConfig {
@@ -38,12 +37,15 @@ pub fn compute_ode_loglik(
         t_end: model_sim.t_end,
         dt,
     };
-    let traj = OdeSim.run(
-        compiled,
-        params,
-        /* seed */ 0,
-        &SimConfig::Ode(ode_cfg),
-    )?;
+    // Coarse burn-in (gh#396 follow-on): coarsen the unscored warm-up
+    // `[t_start, first_obs)`. `run_ode` treats `burnin_dt <= dt` as inactive
+    // (fine path), so passing `Some` unconditionally is safe — the split is the
+    // first obs time. Value-path only (deterministic likelihood); the augmented
+    // gradient path derives the same split from `obs_times` itself.
+    let coarse = obs_times
+        .first()
+        .map(|&cond_from| crate::ode::CoarseBurnin { burnin_dt, cond_from });
+    let traj = crate::ode::run_ode(compiled, params, &ode_cfg, None, coarse)?;
 
     // Snapshot semantics: each snapshot's `flows` are accumulated since the
     // *previous* snapshot, with reset on every output time in
