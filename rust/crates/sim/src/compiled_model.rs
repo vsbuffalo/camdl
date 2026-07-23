@@ -546,10 +546,13 @@ pub struct CompiledModel {
     /// Indexed in the same order as model.time_functions / time_func_index.
     pub time_func_cache: Vec<CompiledTimeFunc>,
 
-    /// For each integer compartment (local index), the list of transition indices
-    /// whose rate expression references that compartment.
-    /// Used for sparse incremental propensity updates after stoichiometry changes.
-    pub comp_to_transitions: Vec<Vec<usize>>,
+    /// Gillespie's propensity-invalidation graph: for each integer compartment
+    /// (local index), the transitions whose rate references it. Built lazily via
+    /// [`CompiledModel::comp_to_transitions`] because it is O(transitions × deps),
+    /// which is quadratic for globally-coupled mean-field models, and only
+    /// Gillespie's sparse update reads it; chain-binomial / ODE / PGAS / PMMH
+    /// recompute every propensity each step and never touch it.
+    comp_to_transitions_cache: std::sync::OnceLock<Vec<Vec<usize>>>,
 
     /// Indices of transitions whose rate expression contains a time function.
     /// These must be re-evaluated whenever simulation time advances.
@@ -973,6 +976,38 @@ impl CompiledModel {
             .collect()
     }
 
+    /// Gillespie's propensity-invalidation graph: compartment (local int index) →
+    /// transitions whose rate depends on it. Built lazily on first call because it
+    /// is O(transitions × deps) — quadratic for globally-coupled mean-field models
+    /// where every rate references a global aggregate — and only the Gillespie
+    /// backend's sparse update needs it. The other backends recompute all
+    /// propensities each step, so they never trigger the build.
+    pub fn comp_to_transitions(&self) -> &[Vec<usize>] {
+        self.comp_to_transitions_cache.get_or_init(|| {
+            let binding_bodies: HashMap<&str, &Expr> = self
+                .model
+                .bindings
+                .iter()
+                .map(|b| (b.name.as_str(), &b.expr))
+                .collect();
+            let mut ctt: Vec<Vec<usize>> = vec![vec![]; self.int_local_to_global.len()];
+            for (tr_idx, tr) in self.model.transitions.iter().enumerate() {
+                let mut deps = std::collections::HashSet::new();
+                collect_int_comp_deps(
+                    &tr.rate,
+                    &self.comp_index,
+                    &self.global_to_int,
+                    &binding_bodies,
+                    &mut deps,
+                );
+                for local_idx in deps {
+                    ctt[local_idx].push(tr_idx);
+                }
+            }
+            ctt
+        })
+    }
+
     pub fn new(model: Model) -> Result<Self, SimError> {
         // gh#257: the output schedule's `t += step` and each recurring
         // intervention's `t += period` are infinite-loop hazards with the same
@@ -1076,8 +1111,6 @@ impl CompiledModel {
         // comp_to_transitions[local_int_idx] = [transition indices that reference it]
         // time_dep_transitions = [transition indices whose rate depends on time
         // `t` — via a TimeFunc forcing or a bare `Time` reference]
-        let n_int_comps = int_local_to_global.len();
-        let mut comp_to_transitions: Vec<Vec<usize>> = vec![vec![]; n_int_comps];
         let mut time_dep_transitions: Vec<usize> = Vec::new();
         // Fix B: binding name → body, so collect_int_comp_deps can see through
         // a BindingRef to the compartments the binding reads.
@@ -1099,11 +1132,6 @@ impl CompiledModel {
             }
         }
         for (tr_idx, tr) in model.transitions.iter().enumerate() {
-            let mut deps = std::collections::HashSet::new();
-            collect_int_comp_deps(&tr.rate, &comp_index, &global_to_int, &binding_bodies, &mut deps);
-            for local_idx in deps {
-                comp_to_transitions[local_idx].push(tr_idx);
-            }
             if expr_is_time_dependent(&tr.rate, &binding_bodies) {
                 time_dep_transitions.push(tr_idx);
             }
@@ -1625,7 +1653,7 @@ impl CompiledModel {
             table_values_cache,
             time_func_cache,
             source_groups,
-            comp_to_transitions,
+            comp_to_transitions_cache: std::sync::OnceLock::new(),
             time_dep_transitions,
             balance,
             fire_times,

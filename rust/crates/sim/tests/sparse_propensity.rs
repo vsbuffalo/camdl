@@ -59,12 +59,12 @@ fn test_comp_to_transitions_nonempty_for_sir() {
     let compiled = CompiledModel::new(model).unwrap();
 
     // SIR has 3 integer compartments (S, I, R) and 2 transitions (infection, recovery)
-    assert!(!compiled.comp_to_transitions.is_empty(),
+    assert!(!compiled.comp_to_transitions().is_empty(),
         "comp_to_transitions should not be empty");
 
     // Every entry that maps to an empty vec means a compartment has no effect on any transition.
     // For SIR, all 3 compartments appear in at least one rate expression.
-    let covered: usize = compiled.comp_to_transitions.iter().filter(|v| !v.is_empty()).count();
+    let covered: usize = compiled.comp_to_transitions().iter().filter(|v| !v.is_empty()).count();
     assert!(covered > 0,
         "at least one compartment should have dependent transitions");
 }
@@ -81,7 +81,7 @@ fn test_every_transition_reachable_from_graph() {
     let n_transitions = compiled.model.transitions.len();
     let mut reachable = vec![false; n_transitions];
 
-    for dep_list in &compiled.comp_to_transitions {
+    for dep_list in compiled.comp_to_transitions() {
         for &tr_idx in dep_list {
             reachable[tr_idx] = true;
         }
@@ -108,7 +108,7 @@ fn test_comp_to_transitions_age_stratified() {
     // seir_age has 2 age groups × 4 compartments = 8 integer compartments
     // Each infection[a] depends on I[b] for all b via the contact matrix sum
     // → all I compartments should have the infection transitions in their dep lists
-    let total_deps: usize = compiled.comp_to_transitions.iter().map(|v| v.len()).sum();
+    let total_deps: usize = compiled.comp_to_transitions().iter().map(|v| v.len()).sum();
     assert!(total_deps > compiled.model.transitions.len(),
         "age-stratified model should have more total deps than transitions (due to cross-group coupling)");
 }
