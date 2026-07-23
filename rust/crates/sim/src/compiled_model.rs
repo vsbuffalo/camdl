@@ -232,33 +232,59 @@ fn collect_int_comp_deps(
 /// rate that depends on bare `t` is frozen at its `t=0` value under Gillespie,
 /// silently producing wrong dynamics (the chain-binomial backend
 /// re-evaluate every substep regardless, so they are unaffected).
+// A memo-free convenience over `expr_is_time_dependent_memo`, used only by the
+// unit tests below (production callers share a memo across a transition scan).
+#[cfg(test)]
 fn expr_is_time_dependent(expr: &Expr, bindings: &HashMap<&str, &Expr>) -> bool {
+    expr_is_time_dependent_memo(expr, bindings, &mut HashMap::new())
+}
+
+/// Memoized `expr_is_time_dependent`. Caches, per hoisted binding, whether its
+/// body is time-dependent, so a rate that reuses a shared aggregate (e.g. a
+/// mean-field `sum` over H strata) does not re-descend the O(H) binding body
+/// once per transition. Share one `memo` across a whole transition scan to keep
+/// it O(1) in the binding rather than O(H) per transition (the O(H²) that
+/// otherwise dominates model build for globally-coupled models).
+fn expr_is_time_dependent_memo(
+    expr: &Expr,
+    bindings: &HashMap<&str, &Expr>,
+    memo: &mut HashMap<String, bool>,
+) -> bool {
     match expr {
         Expr::Time(_) | Expr::TimeFunc(_) => true,
         Expr::BinOp(w) => {
-            expr_is_time_dependent(&w.bin_op.left, bindings)
-                || expr_is_time_dependent(&w.bin_op.right, bindings)
+            expr_is_time_dependent_memo(&w.bin_op.left, bindings, memo)
+                || expr_is_time_dependent_memo(&w.bin_op.right, bindings, memo)
         }
-        Expr::UnOp(w) => expr_is_time_dependent(&w.un_op.arg, bindings),
+        Expr::UnOp(w) => expr_is_time_dependent_memo(&w.un_op.arg, bindings, memo),
         Expr::Cond(w) => {
-            expr_is_time_dependent(&w.cond.pred, bindings)
-                || expr_is_time_dependent(&w.cond.then, bindings)
-                || expr_is_time_dependent(&w.cond.else_, bindings)
+            expr_is_time_dependent_memo(&w.cond.pred, bindings, memo)
+                || expr_is_time_dependent_memo(&w.cond.then, bindings, memo)
+                || expr_is_time_dependent_memo(&w.cond.else_, bindings, memo)
         }
         Expr::TableLookup(w) => w.table_lookup.indices.iter()
-            .any(|e| expr_is_time_dependent(e, bindings)),
+            .any(|e| expr_is_time_dependent_memo(e, bindings, memo)),
         // A binding/sum that transitively reads a time function must count as
         // time-dependent, or Gillespie freezes it at t=0 (silent wrong dynamics).
-        Expr::Reduce(w) => w.reduce.iter().any(|e| expr_is_time_dependent(e, bindings)),
+        Expr::Reduce(w) => w.reduce.iter().any(|e| expr_is_time_dependent_memo(e, bindings, memo)),
         // Fix B: a BindingRef is time-dependent iff its body is. State-only FOI
         // aggregates (N, I_lga) are NOT time-dependent, so a rate that uses them
         // keeps the exact pre-extraction classification — Gillespie stays
         // byte-identical. A binding that transitively reads a forcing correctly
-        // propagates time-dependence. Bindings are acyclic → this terminates.
-        Expr::BindingRef(w) => match bindings.get(w.binding_ref.as_str()) {
-            Some(body) => expr_is_time_dependent(body, bindings),
-            None => false,
-        },
+        // propagates time-dependence. Bindings are acyclic → this terminates;
+        // the memo makes the per-binding descent happen at most once.
+        Expr::BindingRef(w) => {
+            let name = w.binding_ref.as_str();
+            if let Some(&v) = memo.get(name) {
+                return v;
+            }
+            let v = match bindings.get(name) {
+                Some(body) => expr_is_time_dependent_memo(body, bindings, memo),
+                None => false,
+            };
+            memo.insert(name.to_string(), v);
+            v
+        }
         // gh#272: a per-eval body is param/table-only (no Time/Dt/forcing) by the
         // keystone invariant, so it is never time-dependent.
         Expr::PerEvalRef(_) => false,
@@ -267,7 +293,7 @@ fn expr_is_time_dependent(expr: &Expr, bindings: &HashMap<&str, &Expr>) -> bool 
         // this arm a forcing wrapped to satisfy the dim-checker (e.g.
         // `unchecked_dim(seasonal(t), …)`) fell to `_ => false` and Gillespie
         // froze the propensity at `t=0` (silent wrong dynamics).
-        Expr::UncheckedDim(w) => expr_is_time_dependent(&w.unchecked_dim.inner, bindings),
+        Expr::UncheckedDim(w) => expr_is_time_dependent_memo(&w.unchecked_dim.inner, bindings, memo),
         _ => false,
     }
 }
@@ -662,7 +688,10 @@ pub struct ResolvedModel {
 /// sibling Gillespie-classification walkers `collect_int_comp_deps` and
 /// `expr_is_time_dependent`, which both recurse through `BindingRef`. Bindings
 /// are acyclic (topologically ordered), so the recursion terminates.
-fn expr_contains_dt(e: &Expr, bindings: &HashMap<&str, &Expr>) -> bool {
+/// Memoized `expr_contains_dt` — see `expr_is_time_dependent_memo`. Share one
+/// `memo` across a transition scan so a reused `BindingRef` (e.g. a mean-field
+/// aggregate) is descended at most once, not once per transition.
+fn expr_contains_dt_memo(e: &Expr, bindings: &HashMap<&str, &Expr>, memo: &mut HashMap<String, bool>) -> bool {
     match e {
         Expr::Dt(_) => true,
         Expr::Const(_)
@@ -676,25 +705,34 @@ fn expr_contains_dt(e: &Expr, bindings: &HashMap<&str, &Expr>) -> bool {
         // (enforced at CompiledModel::new) rejects `Dt` in a per-eval body — so
         // this leaf is provably false without descending into the body.
         | Expr::PerEvalRef(_) => false,
-        // Fix B: a BindingRef references `dt` iff its body does. Follow it.
-        Expr::BindingRef(w) => bindings
-            .get(w.binding_ref.as_str())
-            .is_some_and(|body| expr_contains_dt(body, bindings)),
-        Expr::BinOp(w) => {
-            expr_contains_dt(&w.bin_op.left, bindings) || expr_contains_dt(&w.bin_op.right, bindings)
+        // Fix B: a BindingRef references `dt` iff its body does. Follow it (memoized).
+        Expr::BindingRef(w) => {
+            let name = w.binding_ref.as_str();
+            if let Some(&v) = memo.get(name) {
+                return v;
+            }
+            let v = bindings
+                .get(name)
+                .is_some_and(|body| expr_contains_dt_memo(body, bindings, memo));
+            memo.insert(name.to_string(), v);
+            v
         }
-        Expr::UnOp(w) => expr_contains_dt(&w.un_op.arg, bindings),
+        Expr::BinOp(w) => {
+            expr_contains_dt_memo(&w.bin_op.left, bindings, memo)
+                || expr_contains_dt_memo(&w.bin_op.right, bindings, memo)
+        }
+        Expr::UnOp(w) => expr_contains_dt_memo(&w.un_op.arg, bindings, memo),
         Expr::Cond(w) => {
-            expr_contains_dt(&w.cond.pred, bindings)
-                || expr_contains_dt(&w.cond.then, bindings)
-                || expr_contains_dt(&w.cond.else_, bindings)
+            expr_contains_dt_memo(&w.cond.pred, bindings, memo)
+                || expr_contains_dt_memo(&w.cond.then, bindings, memo)
+                || expr_contains_dt_memo(&w.cond.else_, bindings, memo)
         }
         // A time_func is a named reference to a model-level forcing; its body
         // is not inline here and cannot itself read the substep `dt`.
         Expr::TimeFunc(_) => false,
-        Expr::TableLookup(w) => w.table_lookup.indices.iter().any(|e| expr_contains_dt(e, bindings)),
-        Expr::UncheckedDim(w) => expr_contains_dt(&w.unchecked_dim.inner, bindings),
-        Expr::Reduce(w) => w.reduce.iter().any(|e| expr_contains_dt(e, bindings)),
+        Expr::TableLookup(w) => w.table_lookup.indices.iter().any(|e| expr_contains_dt_memo(e, bindings, memo)),
+        Expr::UncheckedDim(w) => expr_contains_dt_memo(&w.unchecked_dim.inner, bindings, memo),
+        Expr::Reduce(w) => w.reduce.iter().any(|e| expr_contains_dt_memo(e, bindings, memo)),
     }
 }
 
@@ -1131,8 +1169,9 @@ impl CompiledModel {
                 )));
             }
         }
+        let mut td_memo: HashMap<String, bool> = HashMap::new();
         for (tr_idx, tr) in model.transitions.iter().enumerate() {
-            if expr_is_time_dependent(&tr.rate, &binding_bodies) {
+            if expr_is_time_dependent_memo(&tr.rate, &binding_bodies, &mut td_memo) {
                 time_dep_transitions.push(tr_idx);
             }
         }
@@ -1686,11 +1725,22 @@ impl CompiledModel {
         // gillespie fails dispatch.
         let binding_bodies: HashMap<&str, &Expr> = self.model.bindings.iter()
             .map(|b| (b.name.as_str(), &b.expr)).collect();
-        let uses_dt = self.model.transitions.iter().any(|t| {
-            expr_contains_dt(&t.rate, &binding_bodies)
-                || t.rate_grad.values().any(|de| matches!(de,
-                    ir::deriv::DerivEntry::Grad(e) if expr_contains_dt(e, &binding_bodies)))
-        });
+        let mut dt_memo: HashMap<String, bool> = HashMap::new();
+        let mut uses_dt = false;
+        'dt_scan: for t in &self.model.transitions {
+            if expr_contains_dt_memo(&t.rate, &binding_bodies, &mut dt_memo) {
+                uses_dt = true;
+                break;
+            }
+            for de in t.rate_grad.values() {
+                if let ir::deriv::DerivEntry::Grad(e) = de {
+                    if expr_contains_dt_memo(e, &binding_bodies, &mut dt_memo) {
+                        uses_dt = true;
+                        break 'dt_scan;
+                    }
+                }
+            }
+        }
         if uses_dt {
             caps |= crate::Capabilities::RUNTIME_DT;
         }
