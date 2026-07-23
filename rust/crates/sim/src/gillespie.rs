@@ -450,7 +450,7 @@ pub fn run_gillespie_with_observer(
 
             // Compartment-dependent transitions
             for &(local, _) in &model.transition_stoich[fired_idx] {
-                for &tr_idx in &model.comp_to_transitions[local] {
+                for &tr_idx in &model.comp_to_transitions()[local] {
                     if !updated.contains(&tr_idx) {
                         let old = propensities[tr_idx];
                         let new_p = eval_one(tr_idx, &ctx)?;
