@@ -4436,6 +4436,115 @@ let test_where_compartment_in_guard () =
   let found_e217 = List.exists (fun d -> d.Diagnostics.code = "E217") errors in
   Alcotest.(check bool) "E217 emitted for compartment in where guard" true found_e217
 
+(* gh#462: events and reactive policies share the intervention guard grammar,
+   so they must share its E217 validation. Without it a guard silently expands
+   the wrong support set: `p != keep` is vacuously true unless a dimension level
+   is literally named `keep`. *)
+
+let expand_errors ~name src =
+  let lexbuf = Lexing.from_string src in
+  let decls = try Parser.file Lexer.token lexbuf
+              with _ -> Alcotest.fail "parse failed" in
+  let (_model, ctx, _summary) = Expander.expand_detail name decls in
+  ctx.diags.Diagnostics.diags
+  |> List.filter (fun d -> d.Diagnostics.severity = Diagnostics.Error)
+
+let test_where_param_in_event_guard () =
+  (* 'keep' is a parameter — must not appear in an events {} where guard *)
+  let src = {|
+    time_unit = 'days
+    dimensions { patch = [north, south] }
+    compartments { S, I }
+    stratify(by = patch)
+    parameters { beta : rate  keep : probability }
+    transitions {}
+    events {
+      seed[p in patch] : transfer(count = 1, from = S[p], to = I[p])
+        at [1] where p != keep
+    }
+    init { S[p in patch] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  let errors = expand_errors ~name:"test_where_event_param" src in
+  let found_e217 = List.exists (fun d -> d.Diagnostics.code = "E217") errors in
+  Alcotest.(check bool) "E217 emitted for param in event where guard" true found_e217
+
+let test_where_compartment_in_event_guard () =
+  (* 'I' is a compartment — must not appear in an events {} where guard *)
+  let src = {|
+    time_unit = 'days
+    dimensions { patch = [north, south] }
+    compartments { S, I }
+    stratify(by = patch)
+    parameters { beta : rate }
+    transitions {}
+    events {
+      seed[p in patch] : transfer(count = 1, from = S[p], to = I[p])
+        at [1] where p != I
+    }
+    init { S[p in patch] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  let errors = expand_errors ~name:"test_where_event_comp" src in
+  let found_e217 = List.exists (fun d -> d.Diagnostics.code = "E217") errors in
+  Alcotest.(check bool) "E217 emitted for compartment in event where guard" true found_e217
+
+let test_where_param_in_reactive_guard () =
+  (* 'cov' is a parameter — must not appear in a reactive policy where guard *)
+  let src = {|
+    time_unit = 'days
+    dimensions { patch = [north, south] }
+    compartments { S, I, V }
+    stratify(by = patch)
+    parameters { beta : rate  cov : probability }
+    let N[p in patch] = S[p] + I[p] + V[p]
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p]
+    }
+    observations {
+      weekly[p in patch] {
+        columns       { time : time, patch : dim, weekly : count }
+        projected     = incidence(infection[p])
+        emit_schedule = every 7 'days
+        weekly        ~ poisson(rate = projected)
+      }
+    }
+    reactive_interventions {
+      sia[p in patch] : when observed(weekly[p]) >= 2 {
+        action = transfer(fraction = cov, from = S[p], to = V[p])
+      } where p != cov
+    }
+    init { S[p in patch] = 100  I[p in patch] = 1 }
+    simulate { from = 0 'days to = 60 'days }
+  |} in
+  let errors = expand_errors ~name:"test_where_reactive_param" src in
+  let found_e217 = List.exists (fun d -> d.Diagnostics.code = "E217") errors in
+  Alcotest.(check bool) "E217 emitted for param in reactive where guard" true found_e217
+
+let test_where_event_guard_still_filters () =
+  (* Positive control: a legitimate event guard must keep filtering by level.
+     Guards E217 does not fire on must survive the added validation. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { patch = [north, south] }
+    compartments { S, I }
+    stratify(by = patch)
+    parameters { beta : rate }
+    transitions {}
+    events {
+      seed[p in patch] : transfer(count = 1, from = S[p], to = I[p])
+        at [1] where p == north
+    }
+    init { S[p in patch] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"test_event_guard_filters" src with
+  | Error e -> Alcotest.failf "compile failed: %s" e
+  | Ok m ->
+    let names = List.map (fun (iv : Ir.intervention) -> iv.Ir.name) m.Ir.interventions in
+    Alcotest.(check bool) "seed_north kept"    true  (List.mem "seed_north" names);
+    Alcotest.(check bool) "seed_south dropped" false (List.mem "seed_south" names)
+
 let test_where_ivguard_filters () =
   (* ivguard where p == urban should skip rural intervention *)
   let src = {|
@@ -9703,6 +9812,10 @@ let () =
     "where_guards", [
       Alcotest.test_case "param in where guard → E217"        `Quick test_where_param_in_guard;
       Alcotest.test_case "compartment in where guard → E217"  `Quick test_where_compartment_in_guard;
+      Alcotest.test_case "param in event where guard → E217"        `Quick test_where_param_in_event_guard;
+      Alcotest.test_case "compartment in event where guard → E217"  `Quick test_where_compartment_in_event_guard;
+      Alcotest.test_case "param in reactive where guard → E217"     `Quick test_where_param_in_reactive_guard;
+      Alcotest.test_case "event where guard still filters"          `Quick test_where_event_guard_still_filters;
       Alcotest.test_case "ivguard filters intervention combos" `Quick test_where_ivguard_filters;
     ];
     "polio_models", [
