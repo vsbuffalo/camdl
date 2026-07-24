@@ -203,10 +203,12 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
   let par_loc  = Expander.param_loc       ctx in
   let obs_loc  = Expander.obs_loc         ctx in
   (* A reference error's loc is its enclosing construct's declaration. *)
+  let interv_loc = Expander.interv_loc ctx in
   let site_loc = function
-    | Validate.InTransition  n -> tr_loc n
-    | Validate.InOde         c -> comp_loc c
-    | Validate.InObservation n -> obs_loc n
+    | Validate.InTransition   n -> tr_loc n
+    | Validate.InOde          c -> comp_loc c
+    | Validate.InObservation  n -> obs_loc n
+    | Validate.InIntervention n -> interv_loc n
   in
   let (code, message, hint, loc) = match err with
     | DuplicateCompartment s ->
