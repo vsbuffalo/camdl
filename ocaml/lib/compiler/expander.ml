@@ -4061,22 +4061,33 @@ let loop_vars_of_indices indices =
     | IComp v            -> [v]
   ) indices
 
-(** Check all transition and intervention guards for E217 (non-evaluable idents). *)
+(** Check every compile-time guard for E217 (non-evaluable idents).
+
+    All four guard-carrying surfaces must be walked: [eval_guard] substitutes
+    loop variables and then treats any remaining identifier as a literal string,
+    so this pass is the only thing standing between a parameter/compartment name
+    in a guard and a silently wrong support set. Missing a surface here means a
+    model compiles while expanding the wrong instances (gh#462). *)
 let check_guards ctx =
-  List.iter (fun tr ->
-    match tr.trguard with
+  let check ~loc name indices guard =
+    match guard with
     | None -> ()
     | Some g ->
-      check_guard_compile_time ctx ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
-        tr.trname (loop_vars_of_indices tr.trindices) g
+      check_guard_compile_time ctx ~loc:(diag_loc_of_ast_ctx ctx loc)
+        name (loop_vars_of_indices indices) g
+  in
+  List.iter (fun tr ->
+    check ~loc:tr.trloc tr.trname tr.trindices tr.trguard
   ) ctx.transitions;
   List.iter (fun iv ->
-    match iv.ivguard with
-    | None -> ()
-    | Some g ->
-      check_guard_compile_time ctx iv.ivname
-        (loop_vars_of_indices iv.ivindices) g
-  ) ctx.interv_decls
+    check ~loc:iv.ivloc iv.ivname iv.ivindices iv.ivguard
+  ) ctx.interv_decls;
+  List.iter (fun ev ->
+    check ~loc:ev.ivloc ev.ivname ev.ivindices ev.ivguard
+  ) ctx.event_decls;
+  List.iter (fun rx ->
+    check ~loc:rx.rxloc rx.rxname rx.rxindices rx.rxguard
+  ) ctx.reactive_decls
 
 (* ── Transition expansion ────────────────────────────────────────────────── *)
 
