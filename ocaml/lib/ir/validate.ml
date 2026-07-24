@@ -7,6 +7,7 @@ type site =
   | InTransition  of string   (* transition name *)
   | InOde         of string   (* compartment whose ODE derivative *)
   | InObservation of string   (* observation name *)
+  | InIntervention of string  (* intervention/event name *)
 
 type error =
   | DuplicateCompartment  of string
@@ -207,6 +208,30 @@ let validate (m : model) : (unit, error list) result =
     if not (SS.mem k comp_names)
     then errors := InitUnknownCompartment k :: !errors
   ) init_keys;
+
+  (* Intervention/event action targets (gh#461). A dangling target is a silent
+     no-op at best. The expander enforces this at the frontend (E265); this is
+     the contract-boundary net, and it mirrors the Rust validator
+     (`rust/crates/ir/src/validate.rs`, `check_target`) so the two sides agree
+     by construction rather than by comment. *)
+  List.iter (fun (iv : intervention) ->
+    let site = InIntervention iv.name in
+    let check_target c =
+      if not (SS.mem c comp_names)
+      then errors := UnknownCompartment (c, site) :: !errors
+    in
+    List.iter (fun a ->
+      match a with
+      | FractionTransfer ft -> check_target ft.src; check_target ft.dst;
+                               check_expr_r ~site ft.fraction
+      | AbsoluteTransfer at -> check_target at.src; check_target at.dst;
+                               check_expr_r ~site at.count
+      | Set s               -> check_target s.compartment;
+                               check_expr_r ~site s.value
+      | AddAction a         -> check_target a.add_compartment;
+                               check_expr_r ~site a.add_count
+    ) iv.actions
+  ) m.interventions;
 
   if !errors = [] then Ok ()
   else Error (List.rev !errors)

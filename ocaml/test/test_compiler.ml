@@ -2036,6 +2036,124 @@ let test_intervention_transfer_count_and_fraction_rejected () =
   |} in
   compile_expect_error_code ~code:"E261" ~contains:"mutually exclusive" src
 
+(* ── gh#461: action targets must name exactly one expanded compartment ──────
+   `camdlc check` must not approve DSL that emits IR with a dangling or
+   ambiguous action target. `set` accepted a stratified base name; `add` was
+   not validated at all.                                                   ── *)
+
+let test_set_bare_stratified_target_rejected () =
+  (* `I` is a stratified family, not a single compartment — spec §13.1 says
+     write the expanded name (I_child) instead. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, I }
+    stratify(by = age)
+    parameters { x : rate }
+    transitions {}
+    interventions {
+      zap : { I = 0 at = [1] }
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E265" ~contains:"I_child" src
+
+let test_add_unknown_target_rejected () =
+  (* `Z` is not a declared compartment at all. *)
+  let src = {|
+    time_unit = 'days
+    compartments { S }
+    parameters { x : rate }
+    transitions {}
+    interventions {
+      seed : add(Z, 1) at [1]
+    }
+    init { S = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E265" ~contains:"Z" src
+
+let test_add_bare_stratified_target_rejected () =
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, I }
+    stratify(by = age)
+    parameters { x : rate }
+    transitions {}
+    interventions {
+      seed : add(I, 1) at [1]
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E265" ~contains:"I_child" src
+
+let test_action_targets_valid_still_compile () =
+  (* Positive control for both verbs: an expanded stratum name for `set`, a
+     plain declared compartment for `add`. Neither may regress. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, I }
+    stratify(by = age)
+    parameters { x : rate }
+    transitions {}
+    interventions {
+      zap  : { I_child = 0 at = [1] }
+      seed : add(I_adult, 1) at [2]
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"test_action_targets_ok" src with
+  | Error e -> Alcotest.failf "compile failed: %s" e
+  | Ok m ->
+    let names = List.map (fun (iv : Ir.intervention) -> iv.Ir.name) m.Ir.interventions in
+    Alcotest.(check bool) "zap emitted"  true (List.mem "zap" names);
+    Alcotest.(check bool) "seed emitted" true (List.mem "seed" names)
+
+let test_missing_transfer_from_single_diagnostic () =
+  (* One root cause, one diagnostic. A transfer missing `from =` resolves its
+     src to the "?" placeholder; the new IR-level target check (E503) must not
+     pile a second, more confusing error on top of the E261 that names the real
+     mistake. *)
+  let src = {|
+    time_unit = 'days
+    compartments { S, V }
+    parameters { x : rate }
+    transitions {}
+    interventions {
+      vacc : transfer(to = V, fraction = 0.5) at [1]
+    }
+    init { S = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"test_missing_from" src in
+  Diagnostics.json_errors_mode := false;
+  (match result with
+   | Ok _ -> Alcotest.fail "expected E261 but compile succeeded"
+   | Error e ->
+     Alcotest.(check bool) "E261 present" true (contains_substring ~needle:"E261" e);
+     Alcotest.(check bool) "no E503 pile-on" false (contains_substring ~needle:"E503" e))
+
+let test_event_add_unknown_target_rejected () =
+  (* Events share the action grammar, so they must share the validation. *)
+  let src = {|
+    time_unit = 'days
+    compartments { S }
+    parameters { x : rate }
+    transitions {}
+    events {
+      seed : add(Z, 1) at [1]
+    }
+    init { S = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E265" ~contains:"Z" src
+
 (* ── Recurring intervention block syntax ─────────────────────────────────
    transfer(...) { every = T, from = T0, to    = T1 } — exists alongside
    the existing at [t1, t2, ...] form. *)
@@ -9642,6 +9760,18 @@ let () =
         `Quick test_intervention_multi_set;
       Alcotest.test_case "E296 block intervention with no action rejected"
         `Quick test_intervention_no_action;
+      Alcotest.test_case "E265 set on a bare stratified family (gh#461)"
+        `Quick test_set_bare_stratified_target_rejected;
+      Alcotest.test_case "E265 add to an undeclared compartment (gh#461)"
+        `Quick test_add_unknown_target_rejected;
+      Alcotest.test_case "E265 add to a bare stratified family (gh#461)"
+        `Quick test_add_bare_stratified_target_rejected;
+      Alcotest.test_case "valid set/add targets still compile (gh#461)"
+        `Quick test_action_targets_valid_still_compile;
+      Alcotest.test_case "E265 add in an events block (gh#461)"
+        `Quick test_event_add_unknown_target_rejected;
+      Alcotest.test_case "missing transfer `from` stays one diagnostic (gh#461)"
+        `Quick test_missing_transfer_from_single_diagnostic;
     ];
     "indexed reference arity", [
       Alcotest.test_case "indexed let over-index rejected (E299)"

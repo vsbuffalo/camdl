@@ -2789,13 +2789,14 @@ NAME : { COMP = EXPR  at = [...] }                                    # override
 pre-intervention state, then `source -= delta, dest += delta` applied together.
 
 **Stratified compartments in actions.** `transfer(from = S, to = V)` with bare
-compartment names expands over all strata (see §25.10). The `set` block form
-assigns by **compartment name on the left-hand side**; that name must be a single
-declared compartment. On a stratified compartment the bare name (e.g. `I`) is
-not a single compartment after expansion, so write the **expanded stratum name**
-directly (`I_child_p1 = ...`) — the compiler verifies the name against the
-expanded compartment table and rejects an unknown target (E265). (Index-binder
-forms like `I[child, p1]` on the left of a `set` are not part of the grammar.)
+compartment names expands over all strata (see §25.10). `set` and `add` instead
+target a **single compartment by name**. On a stratified compartment the bare
+name (e.g. `I`) is not a single compartment after expansion, so write the
+**expanded stratum name** directly (`I_child_p1 = ...`, `add(I_child_p1, 5)`).
+The compiler verifies both verbs' targets against the expanded compartment
+table and rejects a stratified family or an unknown name with **E265**; the
+family case lists the available cells. (Index-binder forms like `I[child, p1]`
+on the left of a `set` are not part of the grammar.)
 
 ### 13.2 Scheduling
 
@@ -5091,7 +5092,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E100 | Error   | Reserved name used as a declaration; unknown index value; undeclared name/function         |
 | E200 | Error   | Undeclared compartment or parameter referenced in expression                              |
 | E202 | Error   | Table arity / shape mismatch (e.g. `table '%s' expects %d indices`)                        |
-| E265 | Error   | Intervention `set` assignment targets a compartment that is not declared                   |
+| E265 | Error   | Intervention `set`/`add` targets a name that is not one expanded compartment               |
 | E272 | Error   | Removed observation cadence form — use `emit_schedule = …` (§12.4)                         |
 | E278 | Error   | Duplicate declaration (a name declared more than once / in multiple namespaces)            |
 | E300 | Error   | Transition rate has the wrong dimension                                                    |

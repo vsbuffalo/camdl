@@ -709,6 +709,13 @@ let obs_loc ctx name =
     ~name_of:(fun (o : obs_decl) -> o.oname)
     ~loc_of:(fun o -> o.oloc) name
 
+(* Scheduled interventions and events share [intervention_decl] and both lower
+   into `model.interventions`, so one lookup spans both blocks (gh#461). *)
+let interv_loc ctx name =
+  find_decl_loc ctx ~decls:(ctx.interv_decls @ ctx.event_decls)
+    ~name_of:(fun (iv : intervention_decl) -> iv.ivname)
+    ~loc_of:(fun iv -> iv.ivloc) name
+
 (* Resolve a contrast name back to its declaration loc — used by the dimcheck
    contrast-dimension diagnostic (which runs on the IR and has no source spans).
    Exact-name match (contrasts are never stratified/expanded). *)
@@ -6102,9 +6109,47 @@ let expand_time_functions ctx : Ir.time_function list * (string * float) list =
   (List.map fst pairs,
    List.map (fun ((tf : Ir.time_function), s) -> (tf.Ir.name, s)) pairs)
 
+(* The expanded name a `set`/`add` target denotes. Both verbs build it the same
+   way, and both must then be validated — see [check_action_target]. *)
+let concrete_action_target env comp idxs =
+  match List.map (index_item_to_str env) idxs with
+  | []       -> comp
+  | idx_vals -> String.concat "_" (comp :: idx_vals)
+
+(* gh#461: a `set`/`add` target must name exactly ONE expanded compartment.
+   `set` previously also accepted a stratified base name and `add` was not
+   checked at all, so `camdlc check` could approve DSL whose IR carries a
+   dangling or ambiguous action target. Spec §13.1: "that name must be a single
+   declared compartment … write the expanded stratum name directly".
+
+   Two failure shapes, two diagnostics — mirroring the `init` membership check
+   (E277) so a family and a typo do not collapse into one vague message. *)
+let check_action_target ctx ~name ~loc ~verb ~base ~concrete =
+  if not (Hashtbl.mem ctx.expanded_comp_tbl concrete) then begin
+    if Hashtbl.mem ctx.comp_tbl base then
+      let cells = expand_compartment_name ctx base in
+      Diagnostics.error ctx.diags ~code:"E265" ~loc
+        ~message:(Printf.sprintf
+          "intervention '%s' %s '%s', which is not a single expanded \
+           compartment — '%s' is stratified"
+          name verb concrete base)
+        ~hint:(Printf.sprintf
+          "name one expanded cell, e.g. %s   (cells: %s)"
+          (List.hd cells) (String.concat ", " cells))
+        ()
+    else
+      Diagnostics.error ctx.diags ~code:"E265" ~loc
+        ~message:(Printf.sprintf
+          "intervention '%s' %s '%s', which is not a declared compartment"
+          name verb concrete)
+        ~hint:"check the `compartments` block; action targets must be real \
+               (expanded) compartment cells"
+        ()
+  end
+
 (* gh#204: the shared action resolver — used by both scheduled
    interventions/events and reactive policies, so the transfer-kwarg validation
-   (E261/E262) and the set target check (E265) live in ONE place rather than
+   (E261/E262) and the action target check (E265) live in ONE place rather than
    forking across the two fire sources. [name] is the expanded instance name
    (for diagnostics); [loc] its source location. *)
 let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.action list =
@@ -6156,24 +6201,12 @@ let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.a
          [Ir.AbsoluteTransfer { Ir.src; Ir.dst; Ir.count = resolve_expr ctx env ce }]
        | None -> [])
   | ASet (comp, idxs, expr) ->
-    let idx_vals = List.map (index_item_to_str env) idxs in
-    let concrete = if idx_vals = [] then comp
-      else String.concat "_" (comp :: idx_vals) in
-    if not (Hashtbl.mem ctx.expanded_comp_tbl concrete
-            || Hashtbl.mem ctx.comp_tbl comp) then
-      Diagnostics.error ctx.diags
-        ~code:"E265" ~loc
-        ~message:(Printf.sprintf
-          "intervention '%s' sets '%s' which is not a declared compartment"
-          name concrete)
-        ~hint:"check the compartments block, or fix the kwarg name \
-               (e.g. fraction, count, from, to)"
-        ();
+    let concrete = concrete_action_target env comp idxs in
+    check_action_target ctx ~name ~loc ~verb:"sets" ~base:comp ~concrete;
     [Ir.Set { Ir.compartment = concrete; Ir.value = resolve_expr ctx env expr }]
   | AAdd (comp, idxs, expr) ->
-    let idx_vals = List.map (index_item_to_str env) idxs in
-    let concrete = if idx_vals = [] then comp
-      else String.concat "_" (comp :: idx_vals) in
+    let concrete = concrete_action_target env comp idxs in
+    check_action_target ctx ~name ~loc ~verb:"adds to" ~base:comp ~concrete;
     [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }]
 
 let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
