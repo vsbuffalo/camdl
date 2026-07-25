@@ -118,7 +118,24 @@ fn run_profile(
             "--data", &data_path.to_string_lossy(),
             "--obs", obs_arg,
             "--sweep", "R0=lin(15,25,2)",
-            "--particles", "100", "--iterations", "1", "--starts", "1",
+            // 500, not 100. The sweep straddles the truth (the `true_params`
+            // scenario has R0 = 20), so the R0 = 15 cell is scored well off the
+            // optimum, and a 100-particle bootstrap filter on this 5-patch
+            // spatial SEIR loses the whole swarm there and returns −inf. That
+            // serialises as `"best_loglik": null` (JSON has no −inf), so the
+            // grid point vanishes from `collect_logliks` and the test fails
+            // with "expected 2 grid points" rather than on anything it means
+            // to check.
+            //
+            // The cell is NOT genuinely ruled out — it is under-sampled.
+            // Measured on this fixture, R0 = 15's loglik by particle count:
+            //     100 → null  (−inf; the swarm dies after ~8 ms)
+            //     500 → −1876.13
+            //    2000 → −1610.70
+            // 500 is the smallest of those that scores every cell. This gives
+            // the fixture enough particles to answer the question; every
+            // assertion below is unchanged.
+            "--particles", "500", "--iterations", "1", "--starts", "1",
             "--rw-sd", "auto",
             "--fixed", "sigma=0.125", "--fixed", "gamma=0.2",
             "--fixed", "kappa=0.05", "--fixed", "amplitude=0.3",

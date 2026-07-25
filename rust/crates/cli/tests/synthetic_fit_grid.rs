@@ -527,10 +527,40 @@ cooling    = 0.9
          from values {:?}. If this fails, the v2 dispatch isn't building \
          per-chain random starts.", range, betas);
 
-    // Assertion 2: IF2 actually used those starts — chain 1 and chain 2
-    // iter-0 rows in parameter_traces.tsv differ meaningfully, beyond
-    // what per-chain RNG noise on a shared base_params would produce.
-    // Use chain 1 vs chain 8 (widest expected spread at iter 0).
+    // Assertion 2: IF2 actually *used* those starts (the 2026-04-18 incident:
+    // the runner built per-chain specs and `run_if2` then overwrote them with
+    // `base_params`). chain_starts.tsv alone can't show that — it is written
+    // from the same `per_chain_params` slice the engine receives, so it would
+    // look identical either way. The iter-0 trace row is the engine's own
+    // report, so it is the one that can distinguish them.
+    //
+    // Pick the two chains by their ACTUAL extreme starts, not by index. The
+    // hard-coded "chain 1 vs chain 8" here assumed chain_starts came out
+    // ordered; it does not — the LHS draws land in arbitrary chain order, so
+    // the pair could be any two of the eight. A measured run:
+    //
+    //   chain  start_beta  iter0_beta
+    //     1      0.0366      1.9054
+    //     2      0.9311      0.9385
+    //     3      0.0214      2.2312   <- min start
+    //     4      0.8730      0.7535
+    //     5      0.0509      2.0929
+    //     6      0.0553      1.5353
+    //     7      0.0604      1.3580
+    //     8      1.7323      1.6384   <- max start
+    //
+    // chains 1 and 8 happen to land 0.267 apart while the swarm-wide spread is
+    // 1.477 (0.754 → 2.231). Choosing by extremity of start gives |2.2312 −
+    // 1.6384| = 0.593 on that run. The 0.3 threshold below is UNCHANGED.
+    //
+    // Note what the table shows about the property itself: the chains that
+    // started near the shared fallback (2, 4, 8 — starts 0.87…1.73) stay in
+    // 0.75…1.64, while the chains that started near the lower bound (1, 3, 5,
+    // 6, 7 — starts 0.02…0.06) are carried to 1.36…2.23. A run where every
+    // chain started from the shared `start = 1.0` could not produce the second
+    // group. The exact, threshold-free version of this check lives in
+    // `sim/tests/if2_honours_per_chain_initial.rs`; this one guards the
+    // runner→engine wiring end to end.
     let read_iter_0_beta = |chain: usize| -> f64 {
         let path = stage.join(format!("chain_{}", chain))
             .join("parameter_traces.tsv");
@@ -541,16 +571,23 @@ cooling    = 0.9
         // iteration\tloglik\tif2_perturbed_loglik\tbeta\tgamma
         first_data.split('\t').nth(3).unwrap().parse().unwrap()
     };
-    let iter0_c1 = read_iter_0_beta(1);
-    let iter0_c8 = read_iter_0_beta(8);
-    let iter0_spread = (iter0_c1 - iter0_c8).abs();
+    // Chain ids are 1-based; `betas[i]` is chain i+1.
+    let argmin = betas.iter().enumerate()
+        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0 + 1;
+    let argmax = betas.iter().enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0 + 1;
+    let iter0_lo = read_iter_0_beta(argmin);
+    let iter0_hi = read_iter_0_beta(argmax);
+    let iter0_spread = (iter0_lo - iter0_hi).abs();
     assert!(iter0_spread > 0.3,
-        "chain 1 and chain 8 iter-0 beta must differ meaningfully (> 0.3); \
-         got {:.4} vs {:.4} (spread {:.4}). If the spread is ~rw_sd ({:.3}), \
-         IF2 started both chains from the same base_params and only the \
-         per-chain RNG diverged them — the .initial-authoritative fix \
+        "the lowest-start chain ({}, start {:.4}) and the highest-start chain \
+         ({}, start {:.4}) must have iter-0 betas that differ meaningfully \
+         (> 0.3); got {:.4} vs {:.4} (spread {:.4}). If the spread is ~rw_sd \
+         ({:.3}), IF2 started both chains from the same base_params and only \
+         the per-chain RNG diverged them — the .initial-authoritative fix \
          didn't land.",
-         iter0_c1, iter0_c8, iter0_spread, 0.03);
+         argmin, betas[argmin - 1], argmax, betas[argmax - 1],
+         iter0_lo, iter0_hi, iter0_spread, 0.03);
 }
 
 // ── seeding parity: --obs-only and [synthetic] must produce byte-identical
