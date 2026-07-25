@@ -111,7 +111,7 @@
     | s ->
       Parser_errors.push_error ~sp ~ep
         ~code:"E104"
-        ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, bernoulli, diagnostic_test, zero_inflated" s);
+        ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, beta, bernoulli, diagnostic_test, zero_inflated" s);
       LikPoisson args
 
   let build_obs_decl name ibs src kvs ~doc ~sp ~ep =

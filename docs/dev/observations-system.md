@@ -34,17 +34,44 @@ Users invoke the observation system through these entry points:
 
 ## 2. Likelihoods and projections (IR)
 
-Six likelihood families are available in the DSL and compile to
+Eight likelihood families are available in the DSL and compile to
 `ir::observation::Likelihood`:
 
-| DSL keyword     | IR variant     | Kwargs           |
-| --------------- | -------------- | ---------------- |
-| `poisson`       | `Poisson`      | `rate`           |
-| `neg_binomial`  | `NegBinomial`  | `mean, r`        |
-| `normal`        | `Normal`       | `mean, sd`       |
-| `binomial`      | `Binomial`     | `n, p`           |
-| `beta_binomial` | `BetaBinomial` | `n, alpha, beta` |
-| `bernoulli`     | `Bernoulli`    | `p`              |
+| DSL keyword     | IR variant                | Kwargs                | Support     |
+| --------------- | ------------------------- | --------------------- | ----------- |
+| `poisson`       | `Poisson`                 | `rate`                | `{0,1,…}`   |
+| `neg_binomial`  | `NegBinomial`             | `mean, r`             | `{0,1,…}`   |
+| `normal`        | `Normal`                  | `mean, sd`            | `{0,1,…}` † |
+| `binomial`      | `Binomial`                | `n, p`                | `{0..n}`    |
+| `beta_binomial` | `BetaBinomial`            | `n, alpha, beta`      | `{0..n}`    |
+| `beta`          | `Beta`                    | `mean, concentration` | `(0,1)`     |
+| `bernoulli`     | `Bernoulli`               | `p`                   | `{0,1}`     |
+| `zero_inflated` | `ZeroInflatedNegBinomial` | `base, pi`            | `{0,1,…}`   |
+
+† `normal` is pomp/He-et-al.'s _discretized_-Normal count likelihood — it scores
+`y.round().max(0.0)` via a difference of normal CDFs
+(`obs_loglik.rs::discretized_normal_logpmf_tol`), not a continuous density. A
+clearly-fractional observation logs a one-time warning (`obs_model.rs:93`)
+rather than being silently coerced.
+
+`beta` is the only continuous family. Two consequences follow from its support
+being the **open** interval:
+
+- An observed value of exactly `0` or `1` scores `NEG_INFINITY`
+  (`obs_loglik.rs::beta_logpdf`), as does a non-positive shape (`mean·φ ≤ 0` or
+  `(1−mean)·φ ≤ 0`). A stream whose model-predicted mean can reach 0 — a
+  prevalence proportion after burnout, say — will emit exact zeros under
+  `simulate` that then cannot be scored back. Keep the mean off the boundary (a
+  baseline floor, or a link that cannot saturate) when the same model is used
+  for both.
+- `beta` is the family to reach for when the observation _is_ a proportion with
+  no reported denominator (an assay fraction, a coverage, a positivity).
+  `beta_binomial` is for `k`-of-`n` counts; using it for a bare proportion
+  requires inventing a pseudo-`n`, which changes the variance model.
+
+`ocaml/golden/surveillance_likelihoods.camdl` carries one stream per family for
+`normal`, `poisson`, `beta_binomial`, and `beta`, with the last two placed to
+make that contrast concrete.
 
 Four projection types map trajectory state to a scalar per observation time
 (`ir::observation::Projection`):
