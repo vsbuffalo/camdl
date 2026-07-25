@@ -919,12 +919,12 @@ impl CompiledModel {
     /// their entry point, before `resolve_fire_steps` and the substep
     /// loop.
     ///
-    /// KNOWN GAP (gh#449): this is called by the three forward backends but
-    /// NOT the inference/fit path — the PGAS producer calls
-    /// `resolve_fire_steps(dt, params)` directly. So the recurring-fire
-    /// collision guard below (item 23) fires on `simulate` but not on a
-    /// coarse-`dt` `fit`. Tracked for a fit-path pre-flight or a fallible
-    /// `resolve_fire_steps`.
+    /// The inference/fit path does NOT call this — it has no single dispatch
+    /// point holding both a `dt` and a resolved parameter vector, and the
+    /// parametric-schedule half genuinely needs params the fit gate has not
+    /// resolved yet. The half that does not need params —
+    /// [`Self::validate_recurring_dt_collisions`] — is factored out below and
+    /// called from the fit pre-flight instead (gh#449).
     ///
     /// This is the RELEASE-build guard: the per-conversion checks in
     /// `crate::time` are `debug_assert!`-only and compiled out of
@@ -945,30 +945,48 @@ impl CompiledModel {
         // remains runtime-dependent is checked here: the integrator `dt` (a
         // config value) and the finiteness of resolved fire times (parametric
         // `AtTimesExpr` schedules resolve against `params`).
-        for (iv_idx, times) in self.resolve_fire_times(params).iter().enumerate() {
+        for times in self.resolve_fire_times(params).iter() {
             crate::time::validate_fire_times(times)?;
-            // item 23: a `Recurring` schedule promises "exactly one fire per
-            // period regardless of `dt`" (§13.7). That promise breaks when `dt`
-            // is coarser than the period: consecutive targets (one period apart)
-            // round to the same integrator step via `round(t/dt)`, and the dedup
-            // `BTreeSet` in `resolve_fire_steps` silently drops a fire. `dt` is
-            // known here (unlike at construction), so detect the collision and
-            // hard-error instead of merging.
-            //
-            // Scoped to `Recurring` deliberately: an explicit `at [...]` list
-            // (`AtTimes`/`AtTimesExpr`) carries NO one-per-period promise, and a
-            // within-`dt` coincidence of two listed fires MERGES to one fire on
-            // purpose, for cross-backend agreement (gh#198). Only the recurring
-            // guarantee is at stake here.
+        }
+        self.validate_recurring_dt_collisions(dt)
+    }
+
+    /// item 23: a `Recurring` schedule promises "exactly one fire per period
+    /// regardless of `dt`" (§13.7). That promise breaks when `dt` is coarser
+    /// than the period: consecutive targets (one period apart) round to the
+    /// same integrator step via `round(t/dt)`, and the dedup `BTreeSet` in
+    /// [`Self::resolve_fire_steps`] silently drops a fire. `dt` is a runtime
+    /// value (unlike the period, checked at construction), so the collision is
+    /// detected here and hard-errors instead of merging.
+    ///
+    /// **Parameter-free by construction, and that is the point** (gh#449). A
+    /// `Recurring` schedule's fire times are baked at construction — the
+    /// `_ =>` arm of [`Self::resolve_fire_times`] returns `self.fire_times`
+    /// unchanged — so this check reads them directly rather than taking a
+    /// `params` argument it would have to be trusted not to misuse. That is
+    /// what lets the fit pre-flight call it: the fit gate runs before
+    /// estimated parameters are resolved and compiles the model with
+    /// *placeholder* values, so a params-taking check would resolve parametric
+    /// `AtTimesExpr` schedules against placeholders and could reject a valid
+    /// model on fire times the run will never use. Only the parametric half
+    /// needs params, and only that half stays in [`Self::validate_schedule`].
+    ///
+    /// Scoped to `Recurring` deliberately: an explicit `at [...]` list
+    /// (`AtTimes`/`AtTimesExpr`) carries NO one-per-period promise, and a
+    /// within-`dt` coincidence of two listed fires MERGES to one fire on
+    /// purpose, for cross-backend agreement (gh#198). Only the recurring
+    /// guarantee is at stake here.
+    pub fn validate_recurring_dt_collisions(&self, dt: f64) -> Result<(), SimError> {
+        for (iv_idx, iv) in self.model.interventions.iter().enumerate() {
             if !matches!(
-                self.model.interventions[iv_idx].fire.schedule(),
+                iv.fire.schedule(),
                 Some(ir::intervention::InterventionSchedule::Recurring(_))
             ) {
                 continue;
             }
             let mut step_of: std::collections::BTreeMap<i64, f64> =
                 std::collections::BTreeMap::new();
-            for &t in times {
+            for &t in &self.fire_times[iv_idx] {
                 let step = crate::time::time_to_step(t, dt);
                 match step_of.get(&step) {
                     // Same step already claimed by an EARLIER, DISTINCT fire
@@ -981,7 +999,7 @@ impl CompiledModel {
                              integrator step {step} at dt={dt}, so one fire per period would be \
                              silently dropped (§13.7 guarantees exactly one fire per period). \
                              Use a dt no coarser than the period, or widen the period.",
-                            self.model.interventions[iv_idx].name,
+                            iv.name,
                         )));
                     }
                     _ => {
