@@ -675,8 +675,22 @@ are model-declared parameters: list them under `[estimate]` in the `fit.toml`
 like any other parameter, and the fit estimates them. The filter jitters their
 initial values once when particles initialize, then holds them fixed as it runs
 forward — whereas a parameter like R₀ is perturbed at every observation time.
-PGAS draws stochastic initial states from these parameters (e.g.
-$S_0 \sim \text{Binomial}(N_0, s_0)$); see "IVP parameters (s0, e0)" below.
+
+Under IF2 that single t=0 jitter is the _only_ channel through which the data
+can inform an initial-condition parameter, so each particle then builds its own
+initial compartment counts from its own jittered value: particle $j$ starts at
+$x_0^{(j)} = \text{init}(\theta^{(j)})$, not at the swarm mean's initial state.
+That is what puts spread in the swarm at $t = 0$, and it is why the first
+reweight can discriminate between particles — the precondition `ic_free = true`
+relies on. A parameter that appears in `initial_conditions` and in no rate and
+in no observation model reaches the likelihood through this path and no other.
+
+PGAS instead draws a genuinely stochastic initial state
+($S_0 \sim \text{Binomial}(N_0, s_0)$) because its Gibbs step needs a tractable
+initial-state _density_ $p(x_0 \mid \theta)$ in the complete-data likelihood;
+see "IVP parameters (s0, e0)" below. IF2 needs only a draw, so it uses the
+model's own (deterministic) initial-condition expressions evaluated at each
+particle's parameters.
 
 ---
 
