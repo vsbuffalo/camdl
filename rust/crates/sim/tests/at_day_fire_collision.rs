@@ -149,3 +149,42 @@ fn explicit_at_times_within_one_dt_is_not_rejected() {
         .validate_schedule(1.0, &model.default_params)
         .expect("an explicit at[...] list must not be rejected — gh#198 merges it on purpose");
 }
+
+/// gh#449: the collision half of `validate_schedule` is factored out as
+/// `validate_recurring_dt_collisions(dt)` so the fit pre-flight — which runs
+/// before estimated parameters are resolved — can call it without inventing a
+/// parameter vector. Pin that the extraction is behaviour-preserving: for a
+/// `Recurring` schedule the two entry points must agree at every dt, since
+/// `resolve_fire_times` returns the baked `fire_times` unchanged on that arm.
+#[test]
+fn param_free_collision_check_agrees_with_validate_schedule() {
+    let model = model_with_schedule(recurring(2.0), 10.0);
+    for dt in [0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0] {
+        let full = model.validate_schedule(dt, &model.default_params);
+        let param_free = model.validate_recurring_dt_collisions(dt);
+        assert_eq!(
+            full.is_err(),
+            param_free.is_err(),
+            "dt={dt}: validate_schedule and validate_recurring_dt_collisions must agree; \
+             got {full:?} vs {param_free:?}"
+        );
+    }
+    // Negative control: the loop above is only meaningful if it spans BOTH
+    // outcomes. dt=4 must reject and dt=1 must accept, or the equality above
+    // would hold vacuously (e.g. if both sides always returned Ok).
+    assert!(model.validate_recurring_dt_collisions(4.0).is_err(),
+        "dt=4 > period=2 must be rejected — otherwise the agreement test is vacuous");
+    assert!(model.validate_recurring_dt_collisions(1.0).is_ok(),
+        "dt=1 < period=2 must be accepted — otherwise the agreement test is vacuous");
+}
+
+/// The param-free check must not need a parameter vector to be *correct*: an
+/// explicit `at [...]` list is still exempt (gh#198), same as through
+/// `validate_schedule`.
+#[test]
+fn param_free_collision_check_leaves_explicit_at_times_alone() {
+    let model = model_with_schedule(InterventionSchedule::AtTimes(vec![2.3, 2.4]), 5.0);
+    model
+        .validate_recurring_dt_collisions(1.0)
+        .expect("an explicit at[...] list must not be rejected — gh#198 merges it on purpose");
+}

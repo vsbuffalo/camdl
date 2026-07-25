@@ -58,10 +58,34 @@ pub fn cmd_fit_methods() {
 fn gate_run_stages_against_model(
     stages: &[(&str, &config_v2::Stage)],
     compiled: &sim::CompiledModel,
+    dt: f64,
 ) -> Result<(), String> {
     for (stage_name, stage) in stages {
         if let Err(msg) = methods::check_model_capabilities(stage.backend(), compiled) {
             return Err(format!("stage '{}': {}", stage_name, msg));
+        }
+        // gh#449: the recurring-fire collision guard (gh#447) lived only at the
+        // three forward backends' entry points; the inference path calls
+        // `resolve_fire_steps` directly, whose dedup `BTreeSet` is where a
+        // colliding fire is silently dropped. Check it here, per stage, so a
+        // coarse-`dt` fit fails loudly instead of quietly losing fires.
+        //
+        // Two step sizes reach the integrator on this path, and BOTH can
+        // collide. `burnin_dt` (gh#396) is the more dangerous of the two: it
+        // exists precisely to be COARSER than `dt` on the unscored warm-up, so
+        // a schedule safe at `dt` can still drop fires during warm-up. It
+        // postdates gh#447, which is why the original guard never considered
+        // it.
+        let burnin_dt = match stage {
+            config_v2::Stage::Mh { burnin_dt, .. }
+            | config_v2::Stage::Nuts { burnin_dt, .. } => *burnin_dt,
+            _ => None,
+        };
+        for (label, step) in [("dt", Some(dt)), ("burnin_dt", burnin_dt)] {
+            let Some(step) = step else { continue };
+            if let Err(e) = compiled.validate_recurring_dt_collisions(step) {
+                return Err(format!("stage '{}' ({} = {}): {}", stage_name, label, step, e));
+            }
         }
     }
     // gh#166 B2: warn (once) if any ODE-backed stage will fit a `dt`-in-rate model
@@ -359,7 +383,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             eprintln!("error: {:?}", e);
             std::process::exit(1);
         });
-        if let Err(msg) = gate_run_stages_against_model(&stages_to_run, &compiled) {
+        if let Err(msg) = gate_run_stages_against_model(&stages_to_run, &compiled, config.config.dt) {
             eprintln!("error: {}", msg);
             std::process::exit(1);
         }
@@ -2436,6 +2460,25 @@ mod tests {
         }
     }
 
+    /// An `mh`-on-ODE stage carrying `burnin_dt`, for the gh#449 warm-up-step
+    /// checks. Only `backend` and `burnin_dt` matter to the gate.
+    fn mh_stage_with_burnin_dt(burnin_dt: Option<f64>) -> config_v2::Stage {
+        config_v2::Stage::Mh {
+            backend: crate::run_meta::InferenceBackend::Ode,
+            chains: 1,
+            iterations: 1,
+            starts_from: config_v2::StartsFrom::default(),
+            init_method: Default::default(),
+            survey_path: None,
+            survey_top_k_n: None,
+            burn_in: None,
+            thin: None,
+            adapt: true,
+            adapt_start: 300,
+            burnin_dt,
+        }
+    }
+
     /// Load a golden envelope (`{ model: {...} }`) and fill null param
     /// values so the model compiles — values are irrelevant to the
     /// capability scan.
@@ -2472,7 +2515,7 @@ mod tests {
         );
         let stage = chain_binomial_if2_stage();
         let stages = vec![("scout", &stage)];
-        let err = gate_run_stages_against_model(&stages, &compiled)
+        let err = gate_run_stages_against_model(&stages, &compiled, 1.0)
             .expect_err("real-coupled model on a chain_binomial fit stage must be rejected");
         assert!(err.contains("gh#191"), "should cite the tracking issue: {err}");
         assert!(
@@ -2517,8 +2560,103 @@ mod tests {
         );
         let stage = chain_binomial_if2_stage();
         let stages = vec![("scout", &stage)];
-        gate_run_stages_against_model(&stages, &compiled).unwrap_or_else(|e| {
+        gate_run_stages_against_model(&stages, &compiled, 1.0).unwrap_or_else(|e| {
             panic!("fit run must ACCEPT a balance{{}} model on a chain_binomial stage: {e}")
+        });
+    }
+
+    // ── gh#449: recurring-fire collision guard on the FIT path ────
+
+    /// gh#449 (follow-up to gh#447). The recurring-fire collision guard was
+    /// added to `CompiledModel::validate_schedule`, which the three forward
+    /// backends call at entry — but nothing on the inference/fit path calls it.
+    /// The PGAS producer goes straight to `resolve_fire_steps(dt, params)`,
+    /// whose dedup `BTreeSet` is exactly where a colliding fire is silently
+    /// dropped. So a coarse-`dt` `fit` still silently drops recurring fires,
+    /// which is the item-23 silent-wrong condition surviving on the inference
+    /// cells — against the "every backend x method cell works or fails loudly"
+    /// doctrine.
+    ///
+    /// `seir_seasonal_importation` has a recurring importation on a 365.25-day
+    /// period; at dt = 400 consecutive fires round to the same integrator step.
+    #[test]
+    fn fit_run_rejects_coarse_dt_that_drops_recurring_fires() {
+        let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
+        // The fixture must actually carry a recurring schedule, or this test
+        // passes for the wrong reason.
+        assert!(
+            compiled.model.interventions.iter().any(|iv| matches!(
+                iv.fire.schedule(),
+                Some(ir::intervention::InterventionSchedule::Recurring(_))
+            )),
+            "fixture must carry a recurring schedule"
+        );
+        // Sanity: the forward path already rejects this dt. The bug is that the
+        // fit path does not.
+        assert!(
+            compiled.validate_recurring_dt_collisions(400.0).is_err(),
+            "precondition: dt=400 must collide on this model"
+        );
+
+        let stage = chain_binomial_if2_stage();
+        let stages = vec![("scout", &stage)];
+        let err = gate_run_stages_against_model(&stages, &compiled, 400.0)
+            .expect_err("a fit dt that drops recurring fires must be rejected, not silently merged");
+        assert!(err.contains("scout"), "should name the offending stage: {err}");
+        assert!(
+            err.contains("silently dropped"),
+            "should carry the collision diagnostic: {err}"
+        );
+    }
+
+    /// Negative control: a `dt` finer than the period must still be accepted on
+    /// the same model, so the guard above is not just rejecting everything.
+    #[test]
+    fn fit_run_accepts_dt_finer_than_the_recurrence_period() {
+        let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
+        let stage = chain_binomial_if2_stage();
+        let stages = vec![("scout", &stage)];
+        gate_run_stages_against_model(&stages, &compiled, 1.0).unwrap_or_else(|e| {
+            panic!("dt=1 is far finer than the 365.25-day period and must be accepted: {e}")
+        });
+    }
+
+    /// An `mh` stage with a coarse `burnin_dt` — the case gh#449 does not
+    /// mention and gh#447 could not have, since `burnin_dt` (gh#396) postdates
+    /// it. `burnin_dt` exists to be COARSER than `dt` on the unscored warm-up,
+    /// so a schedule that is perfectly safe at the run's `dt` can still drop
+    /// recurring fires during warm-up. The gate must check both step sizes.
+    #[test]
+    fn fit_run_rejects_coarse_burnin_dt_even_when_dt_is_fine() {
+        let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
+        let stage = mh_stage_with_burnin_dt(Some(400.0));
+        let stages = vec![("refine", &stage)];
+        // dt = 1.0 is fine on its own — proven by the negative control above —
+        // so any rejection here can only come from `burnin_dt`.
+        let err = gate_run_stages_against_model(&stages, &compiled, 1.0).expect_err(
+            "a coarse burnin_dt that drops recurring fires must be rejected even when dt is fine",
+        );
+        assert!(err.contains("refine"), "should name the offending stage: {err}");
+        assert!(
+            err.contains("burnin_dt"),
+            "should name burnin_dt as the offending step, not dt: {err}"
+        );
+        assert!(
+            err.contains("silently dropped"),
+            "should carry the collision diagnostic: {err}"
+        );
+    }
+
+    /// Negative control for the burnin_dt arm: the same stage with no
+    /// `burnin_dt` set must pass at the same `dt`, so the test above is
+    /// attributable to `burnin_dt` and not to the stage kind.
+    #[test]
+    fn fit_run_accepts_an_mh_stage_without_burnin_dt() {
+        let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
+        let stage = mh_stage_with_burnin_dt(None);
+        let stages = vec![("refine", &stage)];
+        gate_run_stages_against_model(&stages, &compiled, 1.0).unwrap_or_else(|e| {
+            panic!("an mh stage with no burnin_dt must be accepted at dt=1: {e}")
         });
     }
 
