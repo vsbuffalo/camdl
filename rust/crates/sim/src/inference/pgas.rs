@@ -1077,6 +1077,53 @@ pub fn complete_data_loglik(
     })
 }
 
+/// gh#82. Turn a **candidate** θ's complete-data likelihood outcome into the
+/// score the MH ratio consumes.
+///
+/// [`complete_data_loglik`] already returns `Ok(−∞)` for the ordinary "this θ
+/// cannot explain this trajectory / these data" outcomes. It returns `Err` only
+/// when the *rate evaluation itself* is unusable at that θ — its single
+/// fallible call is `log_transition_density_substep`, whose single fallible
+/// call is `eval_propensities`, so the whole reachable error surface here is
+/// `NonFiniteParameter`, `NumericalCollapse`, `TableLookup` and
+/// `NegativePropensity`. Every one of those is θ-dependent: the same
+/// expressions evaluated cleanly at the chain's *current* θ, which is why the
+/// sweep is running at all. Propagating one out of `run_pgas` turned a single
+/// bad proposal into a dead chain — and, via the CLI's `collect::<Result<…>>()?`
+/// over the per-chain rayon loop (`cli/src/fit/pgas.rs`), a dead fit.
+///
+/// The discriminator is [`SimError::is_structural`] (gh#224) — the same one
+/// every other whole-θ evaluation boundary uses (`fit/pmmh.rs`,
+/// `fit/runner.rs`, `fit/dt_check.rs`, `profile.rs`), and the same verdict the
+/// sibling NUTS branch in [`run_pgas`] already applies to a failed gradient
+/// evaluation. A structural failure (`Validation`, `Unknown*`,
+/// `ConfigMismatch`, …) fires for *every* θ, so it must surface rather than be
+/// laundered into a rejection that leaves a meaningless fit looking successful.
+///
+/// gh#82 proposes `is_per_particle_recoverable()` here. That answers the
+/// *per-particle* question — can a death mask absorb this inside one filter
+/// call ([`super::degeneracy::DeathMask`]) — and is strictly narrower: it would
+/// leave `NegativePropensity` and `DivisionByZero` killing the chain at a
+/// proposed θ, contradicting their own documented classification ("θ-dependent
+/// runtime conditions … reject this θ as −∞") and making PGAS disagree with
+/// PMMH about the very same θ. Every per-particle-recoverable variant is
+/// non-structural (pinned by `recoverable_errors_are_never_structural` in
+/// `error.rs`), so the issue's acceptance criteria hold a fortiori.
+fn theta_proposal_score(outcome: Result<LogLikComponents, SimError>) -> Result<f64, SimError> {
+    match outcome {
+        Ok(components) => Ok(components.total),
+        Err(e) if e.is_structural() => Err(e),
+        Err(e) => {
+            // Not silent: the `NonFiniteParameter` diagnostic itself promises
+            // "the chain rejects this proposal and continues; if you see
+            // thousands of these warnings …", so the rejections have to be
+            // observable somewhere.
+            log::debug!("pgas: rejecting proposed θ — likelihood evaluation failed: {e}");
+            Ok(f64::NEG_INFINITY)
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Forward simulation (initial trajectory)
 // ═══════════════════════════════════════════════════════════════════
@@ -2548,10 +2595,14 @@ pub fn run_pgas(
                     let mut proposed_params = rungs[rung].params.clone();
                     proposed_params[spec.index] = theta_new;
 
-                    let proposed_ll = complete_data_loglik(
+                    // gh#82: a failed evaluation at a PROPOSED θ is a rejected
+                    // proposal (−∞ ⇒ non-finite log α ⇒ the guard below
+                    // rejects), not a dead chain. Only a structural failure
+                    // still propagates — see `theta_proposal_score`.
+                    let proposed_ll = theta_proposal_score(complete_data_loglik(
                         model, &rungs[rung].trajectory, &proposed_params, observations,
                         config.dt, obs_model, &ivp_mappings, &obs_at_substep,
-                    )?.total;
+                    ))?;
 
                     let proposed_log_prior_i = priors[i].log_density(theta_new, z_new);
                     let current_log_prior_i = priors[i].log_density(
@@ -3119,6 +3170,94 @@ mod grid_tests {
         let map = build_obs_at_substep(&observations, 0.0, 1.0)
             .expect("non-colliding obs must build fine");
         assert_eq!(map.len(), 2, "both observations must be present");
+    }
+}
+
+#[cfg(test)]
+mod theta_proposal_score_tests {
+    //! gh#82. The θ-proposal boundary: which failures reject a proposal and
+    //! which ones tear the chain down.
+    //!
+    //! These sit here rather than in the integration test because a *structural*
+    //! error is unreachable from a built model's rate evaluation — every
+    //! name-resolution failure surfaces at `CompiledModel::new`
+    //! (`resolved_expr::resolve_expr`: "All name-not-found errors surface here
+    //! at model construction time"), so no `.camdl` fixture can drive the
+    //! propagate branch through `run_pgas`. Synthesizing the `SimError` is the
+    //! only way to exercise it, and leaving it unexercised is how a
+    //! "reject everything" regression would land unnoticed.
+    use super::*;
+    use crate::error::{CollapseKind, NegativeCountCause};
+
+    fn components(total: f64) -> LogLikComponents {
+        LogLikComponents { total, transition: total, observation: 0.0, ivp: 0.0 }
+    }
+
+    #[test]
+    fn a_successful_evaluation_passes_its_total_through() {
+        let score = theta_proposal_score(Ok(components(-12.5))).expect("Ok must not error");
+        assert_eq!(score, -12.5);
+        // Including the ordinary "this θ is ruled out" outcome, which
+        // `complete_data_loglik` already reports as Ok(−∞).
+        let score = theta_proposal_score(Ok(components(f64::NEG_INFINITY))).unwrap();
+        assert_eq!(score, f64::NEG_INFINITY);
+    }
+
+    /// The gh#82 fix: every θ-dependent failure becomes a rejected proposal.
+    /// `NonFiniteParameter` is the variant the issue names; `NegativePropensity`
+    /// is the one that distinguishes `is_structural()` from the narrower
+    /// `is_per_particle_recoverable()` and must reject too, so PGAS and PMMH
+    /// agree about the same θ.
+    #[test]
+    fn theta_dependent_failures_are_rejected_as_neg_infinity() {
+        let rejected: Vec<SimError> = vec![
+            SimError::NonFiniteParameter { name: "tau".into(), value: f64::NEG_INFINITY, t: -101.0 },
+            SimError::NumericalCollapse { kind: CollapseKind::DivByZero, t: 3.0 },
+            SimError::NumericalCollapse { kind: CollapseKind::SqrtNegative, t: 3.0 },
+            SimError::NegativeCount {
+                compartment: "S".into(), attempted_value: -2, t: 4.0,
+                cause: NegativeCountCause::BinomialOvershoot,
+            },
+            SimError::TableLookup("table 'k': index 5 out of bounds [0, 2)".into()),
+            SimError::NegativePropensity { transition: "foi".into(), value: -0.5, t: 2.0 },
+            SimError::DivisionByZero(7.0),
+        ];
+        for err in rejected {
+            let shown = err.to_string();
+            let score = theta_proposal_score(Err(err))
+                .unwrap_or_else(|e| panic!("{shown} must reject the proposal, not propagate: {e}"));
+            assert_eq!(
+                score, f64::NEG_INFINITY,
+                "a rejected proposal scores −∞ so log α is non-finite: {shown}",
+            );
+        }
+    }
+
+    /// Negative control. A structural failure fires for EVERY θ — rejecting it
+    /// would leave the chain sampling a meaningless posterior and exiting 0.
+    /// It must still propagate, verbatim.
+    #[test]
+    fn structural_failures_still_tear_the_chain_down() {
+        let structural: Vec<SimError> = vec![
+            SimError::Validation("model cannot run".into()),
+            SimError::UnknownParameter("ghost".into()),
+            SimError::UnknownCompartment("ghost".into()),
+            SimError::ConfigMismatch { expected: "chain_binomial", got: "ode" },
+            SimError::NegativeCount {
+                compartment: "S".into(), attempted_value: -2, t: 4.0,
+                cause: NegativeCountCause::InterventionAddNegative,
+            },
+        ];
+        for err in structural {
+            let shown = err.to_string();
+            assert!(err.is_structural(), "control must exercise the structural branch: {shown}");
+            let out = theta_proposal_score(Err(err));
+            assert!(
+                out.is_err(),
+                "a structural error must propagate out of run_pgas, got Ok({:?}) for {shown}",
+                out.ok(),
+            );
+        }
     }
 }
 
