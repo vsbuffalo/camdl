@@ -8363,6 +8363,59 @@ let test_known_unit_literal_still_ok () =
   | Ok _ -> ()
   | Error e -> Alcotest.failf "model with 'per_day should compile, got: %s" e
 
+(* ── gh#464: top-level `time_unit` must be a duration unit ───────────────────
+   The parser accepts any unit literal here. A rate/count/ratio unit has no day
+   mapping, so the model compiled clean until some path happened to call
+   `days_per` and surfaced an `Invalid_argument` as a bare E001.            ── *)
+
+let time_unit_model u = Printf.sprintf {|
+    time_unit = '%s
+    compartments { S }
+    parameters { x : rate }
+    transitions {}
+    init { S = 100 }
+    simulate { from = 0 to = 10 }
+  |} u
+
+let test_time_unit_rate_rejected () =
+  compile_expect_error_code ~code:"E228" ~contains:"per_day" (time_unit_model "per_day")
+
+let test_time_unit_count_rejected () =
+  compile_expect_error_code ~code:"E228" ~contains:"count" (time_unit_model "count")
+
+let test_time_unit_ratio_rejected () =
+  compile_expect_error_code ~code:"E228" ~contains:"ratio" (time_unit_model "ratio")
+
+let test_time_unit_durations_still_compile () =
+  (* Positive control: every duration unit must remain accepted. *)
+  List.iter (fun u ->
+    match Compiler.compile ~name:"tu_ok" (time_unit_model u) with
+    | Ok _ -> ()
+    | Error e -> Alcotest.failf "time_unit = '%s should compile, got: %s" u e
+  ) ["days"; "weeks"; "months"; "years"]
+
+let test_time_unit_bad_reported_before_e001 () =
+  (* The failure mode this replaces: a duration literal under a non-time
+     time_unit used to reach `days_per` and surface as
+     E001 Invalid_argument("days_per: non-time unit has no time scale").
+     The located E228 must fire instead, and no E001 may follow. *)
+  let src = {|
+    time_unit = 'count
+    compartments { S, I }
+    parameters { tau : duration }
+    transitions { rec : I --> S @ I / 5 'days }
+    init { S = 100  I = 1 }
+    simulate { from = 0 to = 10 }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"tu_e001" src in
+  Diagnostics.json_errors_mode := false;
+  (match result with
+   | Ok _ -> Alcotest.fail "expected E228 but compile succeeded"
+   | Error e ->
+     Alcotest.(check bool) "E228 present" true  (contains_substring ~needle:"E228" e);
+     Alcotest.(check bool) "no E001 fallout" false (contains_substring ~needle:"E001" e))
+
 (* ── gh#181 step 1: structured, non-raising compile_outcome ──────────────────
    compile_outcome returns every diagnostic as a value and never raises;
    on a POST-EXPANSION error (Validate E507) both surfaces return it as a
@@ -10195,6 +10248,14 @@ let () =
         `Quick test_unknown_unit_literal_e102;
       Alcotest.test_case "known unit 'per_day still lexes and compiles"
         `Quick test_known_unit_literal_still_ok;
+    ];
+    "time_unit_validation", [
+      Alcotest.test_case "E228 time_unit = 'per_day (rate unit)"  `Quick test_time_unit_rate_rejected;
+      Alcotest.test_case "E228 time_unit = 'count"                `Quick test_time_unit_count_rejected;
+      Alcotest.test_case "E228 time_unit = 'ratio"                `Quick test_time_unit_ratio_rejected;
+      Alcotest.test_case "duration time_units still compile"      `Quick test_time_unit_durations_still_compile;
+      Alcotest.test_case "E228 fires instead of the E001 days_per fallout"
+        `Quick test_time_unit_bad_reported_before_e001;
     ];
     "forcing_kwargs", [
       Alcotest.test_case "E409 unknown forcing kwarg (value_column typo) errors"
