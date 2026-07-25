@@ -100,6 +100,11 @@ time_unit = 'days
 
 All rates and durations are normalized to this unit at compile time.
 
+`time_unit` must be a **duration** unit: `'days`, `'weeks`, `'months` or
+`'years`. A rate (`'per_day`), `'count` or `'ratio` has no mapping to a length
+of time and is rejected with **E228** at the declaration. (`'months` and
+`'years` carry the additional anchored-mode restriction described in §2.2.)
+
 ### 2.1 Unit Literals
 
 Unit literals are distinguished from identifiers by the `'` prefix:
@@ -5092,6 +5097,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E100 | Error   | Reserved name used as a declaration; unknown index value; undeclared name/function         |
 | E200 | Error   | Undeclared compartment or parameter referenced in expression                              |
 | E202 | Error   | Table arity / shape mismatch (e.g. `table '%s' expects %d indices`)                        |
+| E228 | Error   | `time_unit` is not a duration unit (`'per_day` / `'count` / `'ratio`) — see §2               |
 | E265 | Error   | Intervention `set`/`add` targets a name that is not one expanded compartment               |
 | E272 | Error   | Removed observation cadence form — use `emit_schedule = …` (§12.4)                         |
 | E278 | Error   | Duplicate declaration (a name declared more than once / in multiple namespaces)            |

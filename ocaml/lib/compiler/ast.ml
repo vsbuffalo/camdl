@@ -533,7 +533,7 @@ type dimensions_entry = {
 type balance_decl = { bcomp: string; bexpr: expr }
 
 type declaration =
-  | DTimeUnit    of unit_lit
+  | DTimeUnit    of unit_lit * loc
   | DDescription of string
   | DOrigin      of string
   | DDimensions  of dimensions_entry list

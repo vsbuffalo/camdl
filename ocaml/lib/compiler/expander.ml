@@ -266,8 +266,10 @@ let parse_date_to_float origin_str date_str time_unit =
     | Months | PerMonth -> 365.2425 /. 12.0
     | Years | PerYear -> 365.2425
     | Count | Ratio ->
-      (* Unreachable: time_unit is validated to be a time unit at
-         parse time. Non-time unit here means upstream malformed the AST. *)
+      (* Unreachable from the DSL: [checked_time_unit] rejects a non-duration
+         `time_unit` with E228 and recovers to ['Days], so [ctx.time_unit] is
+         always a duration by the time anything calls this. A non-time unit
+         here means a caller passed something other than the model clock. *)
       invalid_arg "parse_date_to_float: time_unit must be a time unit"
   in
   float_of_int delta /. days time_unit
@@ -749,11 +751,47 @@ let check_reserved ?(loc = Diagnostics.no_loc) ctx name kind =
       ~message:(Printf.sprintf "%s name '%s' is reserved (math constant)" kind name)
       ~hint:"choose a different name" ()
 
+let unit_lit_to_string = function
+  | Days -> "days" | Weeks -> "weeks" | Months -> "months" | Years -> "years"
+  | PerDay -> "per_day" | PerWeek -> "per_week" | PerMonth -> "per_month" | PerYear -> "per_year"
+  | Count -> "count" | Ratio -> "ratio"
+
+(* gh#464: the top-level `time_unit` is the model's canonical clock, so it must
+   be a duration. The grammar accepts any unit literal, and a rate/count/ratio
+   unit has no day mapping — `days_per` raises [Invalid_argument] on those. That
+   surfaced as a bare, unlocated E001 carrying an OCaml exception string, but
+   only if some later path happened to need a conversion; otherwise the model
+   compiled clean with a nonsensical canonical unit in the IR. Reject it here,
+   at the declaration, where the source location is still in hand.
+
+   `'months` / `'years` are accepted at this gate; the separate anchored-mode
+   restriction on inexact calendar units still applies downstream.
+
+   Returns the unit expansion should proceed with. On a bad unit we record the
+   error and recover to ['Days] rather than stopping: `days_per` *raises* on a
+   non-time unit, and that exception is caught far away and rendered as an
+   unlocated E001 carrying the OCaml message — which would shadow the E228 that
+   actually names the mistake. Recovering keeps E228 the reported cause. The
+   compile still fails; E228 is an error. *)
+let checked_time_unit ctx ~loc u =
+  match u with
+  | Days | Weeks | Months | Years -> u
+  | PerDay | PerWeek | PerMonth | PerYear | Count | Ratio ->
+    Diagnostics.error ctx.diags ~code:"E228" ~loc
+      ~message:(Printf.sprintf
+        "`time_unit = '%s` is not a duration unit — the model clock must be \
+         a length of time" (unit_lit_to_string u))
+      ~hint:"use 'days, 'weeks, 'months or 'years; rate units like 'per_day \
+             belong on parameters, not on time_unit"
+      ();
+    Days
+
 let collect_declarations ctx decls =
   (* Use List.rev_append (prepend reversed chunk) during iteration, then
      reverse each list once at the end.  This avoids O(n) per append. *)
   List.iter (fun d -> match d with
-    | DTimeUnit u        -> ctx.time_unit <- u
+    | DTimeUnit (u, l)   ->
+      ctx.time_unit <- checked_time_unit ctx ~loc:(diag_loc_of_ast_ctx ctx l) u
     | DDescription s     -> ctx.description <- Some s
     | DOrigin s          -> ctx.origin <- Some s
     | DDimensions es     -> ctx.dim_decls <- List.rev_append es ctx.dim_decls
@@ -1961,11 +1999,6 @@ let days_per = function
    division/multiplication is a no-op and the result is identical to the
    old hardcoded behaviour.  With time_unit = 'weeks, 80 'days → 80/7 ≈ 11.4
    and 0.3 'per_day → 0.3 × 7 = 2.1. *)
-let unit_lit_to_string = function
-  | Days -> "days" | Weeks -> "weeks" | Months -> "months" | Years -> "years"
-  | PerDay -> "per_day" | PerWeek -> "per_week" | PerMonth -> "per_month" | PerYear -> "per_year"
-  | Count -> "count" | Ratio -> "ratio"
-
 let unit_to_model_time ctx f u =
   let tu = days_per ctx.time_unit in
   match u with

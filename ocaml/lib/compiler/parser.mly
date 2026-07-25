@@ -230,7 +230,7 @@ file:
 
 declaration:
   | TIME_UNIT EQ u = unit_lit
-      { DTimeUnit u }
+      { DTimeUnit (u, Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   | DESCRIPTION EQ s = STRING
       { DDescription s }
   | ORIGIN EQ e = expr

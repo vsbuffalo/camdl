@@ -126,26 +126,27 @@ let test_zero_day_errors () =
 
 (* ── 3. date() under a non-time time_unit: located error, not a bare E001 ── *)
 let test_nontime_unit_date_is_located () =
-  (* `time_unit = 'count` parses (parser.mly: unit_lit accepts count/ratio)
-     and combines with `origin = date(...)`. The model `date()` path must
-     not let the `Invalid_argument` from parse_date_to_float escape as a
-     generic E001 stack-trace — it must surface a located date diagnostic
-     (E223), the same exception-handling discipline the data-loader path
-     already applies. *)
+  (* `time_unit = 'count` lexes (parser.mly: unit_lit accepts count/ratio) and
+     combines with `origin = date(...)`. It must never surface as the generic
+     E001 stack-trace carrying
+     `Invalid_argument("parse_date_to_float: time_unit must be a time unit")`.
+
+     The reported code is E228 (gh#464): the mistake is the `time_unit`
+     declaration, not the `date()` call, so the diagnostic points at the
+     declaration. Before E228 existed, the closest available diagnostic was a
+     no-loc E223 raised from the `date()` conversion — the symptom rather than
+     the cause. The durable invariant across both is "no bare E001". *)
   let src =
     model ~time_unit:"count"
       ~from_expr:"date(\"1952-01-01\")" ~to_expr:"date(\"1963-09-08\")"
   in
   let codes = codes_of src in
-  (* Pre-fix: the only diagnostic is a bare E001 carrying
-     `Invalid_argument("parse_date_to_float: time_unit must be a time unit")`.
-     Post-fix: a located E223 (no E001). *)
   Alcotest.(check bool)
     "non-time time_unit date() does NOT surface a bare E001 stack-trace"
     false (List.mem "E001" codes);
   Alcotest.(check bool)
-    "non-time time_unit date() surfaces a located date diagnostic (E223)"
-    true (has_error_code src "E223")
+    "non-time time_unit is rejected at its declaration (E228)"
+    true (has_error_code src "E228")
 
 let () =
   Alcotest.run "model_date_literal"
@@ -158,5 +159,5 @@ let () =
            test_out_of_range_month_errors;
          Alcotest.test_case "zero-day date() errors (E223)" `Quick
            test_zero_day_errors;
-         Alcotest.test_case "non-time time_unit date() is located, not E001"
+         Alcotest.test_case "non-time time_unit is E228 at its decl, not E001"
            `Quick test_nontime_unit_date_is_located ]) ]
