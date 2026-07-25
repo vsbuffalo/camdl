@@ -21,9 +21,14 @@ use super::traits::Resettable;
 pub enum Transform {
     /// Log transform with bounds clamping on the inverse.
     /// Correct for rates, positive quantities, counts.
-    /// `from_transformed` clamps `z.exp()` to `[lo, hi]` — out-of-bounds
+    /// `from_transformed` saturates `z.exp()` at `[lo, hi]` — out-of-bounds
     /// particles get bad log-likelihood and are resampled away.
-    /// This is what Stan does for lower-bounded parameters.
+    ///
+    /// The declared bounds are a hard search box (`docs/camdl-inference-spec.md`
+    /// §3.2), so the target they induce is the posterior **truncated** to
+    /// `θ ∈ [lo, hi]`: inside, `θ = exp(z)` with log-Jacobian `z`; outside,
+    /// `dθ/dz = 0` and the density is zero. [`log_saturated`] is the single
+    /// definition of "outside", used by all three derivative accessors.
     Log { lo: f64, hi: f64 },
     /// Scaled logit mapping `[lo, hi]` to `(−∞, +∞)`.
     /// Correct for probabilities. Bounds enforced by the logistic function
@@ -64,6 +69,34 @@ pub struct EstimatedParam {
     pub ivp: bool,
 }
 
+/// Is `z` outside the `Log` transform's declared support `[lo, hi]`?
+///
+/// The single definition of "the inverse map is saturated here", shared by
+/// [`EstimatedParam::log_jacobian`], [`EstimatedParam::jacobian_grad`] and
+/// [`EstimatedParam::transform_deriv`] so a derivative can never describe a
+/// different map than the one `from_transformed` implements (gh#374: all three
+/// returned the derivatives of the *unclamped* `exp`, so a sampler pressed
+/// against a bound got a spuriously non-zero gradient instead of a flat one —
+/// and, in the MH ratio, a log-Jacobian `z` that grew without bound while the
+/// likelihood stayed pinned, rewarding ever-larger `z`).
+///
+/// The test is in **z-space** (`z ∉ [ln lo, ln hi]`) rather than θ-space
+/// (`exp(z) ∉ [lo, hi]`) so that it agrees with `to_transformed`, whose log
+/// branch always returns `ln(x.clamp(lo, hi))`. `exp(ln(hi))` rounds one ulp
+/// *above* `hi` for many ordinary bounds (10, 100, 0.1, 1e-3, 3, …), so a
+/// θ-space test would declare `z = ln(hi)` out-of-support and hand a chain
+/// initialised at its upper bound a `−∞` posterior. The two tests differ only
+/// within one ulp of the bound.
+///
+/// Non-finite and degenerate bounds fall out correctly, matching the sides on
+/// which `clamp` can actually fire: `hi = +∞ → ln hi = +∞` (never saturated
+/// above), `lo = 0 → ln lo = −∞` (never saturated below, and `exp(z) > 0`
+/// always), and `lo < 0 → ln lo = NaN`, whose comparison is `false` — again
+/// never saturated below, which is right because `exp(z) > 0 > lo`.
+fn log_saturated(z: f64, lo: f64, hi: f64) -> bool {
+    z < lo.ln() || z > hi.ln()
+}
+
 impl EstimatedParam {
     /// Map a natural-scale value to the unconstrained (z) scale.
     pub fn to_transformed(&self, x: f64) -> f64 {
@@ -100,8 +133,16 @@ impl EstimatedParam {
     /// Log-transform:   θ = exp(z)              → log-Jacobian = z
     /// Logit-transform: θ = lo + (hi−lo)·σ(z)   → log-Jacobian = log((hi−lo)·p·(1−p))
     /// No transform:    Jacobian = 1             → log-Jacobian = 0
+    ///
+    /// Where the `Log` inverse saturates at a declared bound the map is flat,
+    /// so `|dθ/dz| = 0` and this is `−∞`: the truncated target has no density
+    /// outside its support. Every consumer treats that as a clean rejection —
+    /// `mh_accept` (`pmmh.rs`) rejects a move *to* `−∞` and still accepts the
+    /// `+∞` escape *from* one, and NUTS scores a non-finite energy as divergent
+    /// and refuses to commit a non-finite proposal (`nuts.rs`).
     pub fn log_jacobian(&self, z: f64) -> f64 {
         match &self.transform {
+            Transform::Log { lo, hi } if log_saturated(z, *lo, *hi) => f64::NEG_INFINITY,
             Transform::Log { .. } => z,
             Transform::Logit { lo, hi } => {
                 let p = 1.0 / (1.0 + (-z).exp());
@@ -112,8 +153,14 @@ impl EstimatedParam {
     }
 
     /// d/dz log|dθ/dz| — derivative of the log-Jacobian w.r.t. z.
+    ///
+    /// Zero, not the unclamped `+1`, where the `Log` inverse saturates: the
+    /// log-Jacobian is constant (`−∞`) there, so it contributes no gradient.
+    /// Keeping it finite is what lets the leapfrog integrator carry a usable
+    /// momentum into the divergence check instead of a poisoned one.
     pub fn jacobian_grad(&self, z: f64) -> f64 {
         match &self.transform {
+            Transform::Log { lo, hi } if log_saturated(z, *lo, *hi) => 0.0,
             Transform::Log { .. } => 1.0,
             Transform::Logit { .. } => {
                 let p = 1.0 / (1.0 + (-z).exp());
@@ -125,8 +172,13 @@ impl EstimatedParam {
 
     /// dθ/dz — derivative of the natural-scale value with respect to z.
     /// Used in the chain rule: d(f(θ))/dz = d(f)/dθ × dθ/dz.
+    ///
+    /// Zero where the `Log` inverse saturates: θ is pinned at the bound, so
+    /// moving z there does not move θ and the data/prior term contributes
+    /// nothing to the z-gradient.
     pub fn transform_deriv(&self, z: f64) -> f64 {
         match &self.transform {
+            Transform::Log { lo, hi } if log_saturated(z, *lo, *hi) => 0.0,
             Transform::Log { .. } => z.exp(),
             Transform::Logit { lo, hi } => {
                 let p = 1.0 / (1.0 + (-z).exp());
@@ -522,5 +574,200 @@ mod tests {
         let mild = logw_variance(&[-0.1, 0.0, 0.1]);
         let sharp = logw_variance(&[-10.0, 0.0, 10.0]);
         assert!(sharp > mild);
+    }
+
+    // ── Log-transform saturation (gh#374) ────────────────────────────────
+    //
+    // `from_transformed` saturates θ at the declared bound. The three
+    // derivative accessors must describe THAT map, not the unclamped `exp`.
+
+    fn log_param(lo: f64, hi: f64) -> EstimatedParam {
+        EstimatedParam {
+            name: "beta".into(),
+            index: 0,
+            initial: (lo * hi).sqrt(),
+            rw_sd: 0.1,
+            transform: Transform::Log { lo, hi },
+            lower: lo,
+            upper: hi,
+            rw_sd_auto: false,
+            ivp: false,
+        }
+    }
+
+    /// Central finite difference of the inverse map — the ground truth
+    /// `transform_deriv` is supposed to reproduce.
+    fn fd_dtheta_dz(p: &EstimatedParam, z: f64) -> f64 {
+        let h = 1e-6;
+        (p.from_transformed(z + h) - p.from_transformed(z - h)) / (2.0 * h)
+    }
+
+    #[test]
+    fn log_transform_deriv_matches_the_map_above_the_upper_bound() {
+        let p = log_param(0.01, 10.0);
+        let z = 10.0f64.ln() + 1.0;
+        assert_eq!(p.from_transformed(z), 10.0,
+            "precondition: the inverse map saturates at hi here");
+        let fd = fd_dtheta_dz(&p, z);
+        assert_eq!(fd, 0.0, "precondition: a saturated map is flat");
+        assert!((p.transform_deriv(z) - fd).abs() < 1e-9,
+            "dθ/dz must differentiate the map it belongs to: \
+             transform_deriv={} vs finite difference={}",
+            p.transform_deriv(z), fd);
+    }
+
+    #[test]
+    fn log_transform_deriv_matches_the_map_below_the_lower_bound() {
+        let p = log_param(0.01, 10.0);
+        let z = 0.01f64.ln() - 1.0;
+        assert_eq!(p.from_transformed(z), 0.01,
+            "precondition: the inverse map saturates at lo here");
+        let fd = fd_dtheta_dz(&p, z);
+        assert_eq!(fd, 0.0, "precondition: a saturated map is flat");
+        assert!((p.transform_deriv(z) - fd).abs() < 1e-9,
+            "dθ/dz must differentiate the map it belongs to: \
+             transform_deriv={} vs finite difference={}",
+            p.transform_deriv(z), fd);
+    }
+
+    #[test]
+    fn log_jacobian_is_neg_inf_where_the_map_saturates() {
+        // dθ/dz = 0 ⇒ log|dθ/dz| = −∞: the declared bounds truncate the
+        // support, so the change-of-variables density is zero outside it.
+        let p = log_param(0.01, 10.0);
+        for &z in &[10.0f64.ln() + 1e-3, 10.0f64.ln() + 5.0,
+                    0.01f64.ln() - 1e-3, 0.01f64.ln() - 5.0] {
+            assert_eq!(p.log_jacobian(z), f64::NEG_INFINITY,
+                "z={z} is outside [ln lo, ln hi]; log-Jacobian must be −∞");
+        }
+    }
+
+    #[test]
+    fn jacobian_grad_is_zero_where_the_map_saturates() {
+        let p = log_param(0.01, 10.0);
+        for &z in &[10.0f64.ln() + 1e-3, 0.01f64.ln() - 1e-3] {
+            assert_eq!(p.jacobian_grad(z), 0.0,
+                "z={z} is outside the support; the z-gradient must be flat, \
+                 not the unclamped +1");
+        }
+    }
+
+    #[test]
+    fn log_transform_derivatives_are_exact_in_the_interior() {
+        // The whole interior is unchanged — every fit whose posterior lives
+        // inside the declared bounds is bit-for-bit unaffected.
+        let p = log_param(0.01, 10.0);
+        for &z in &[-4.0, -1.0, 0.0, 1.0, 2.0] {
+            assert_eq!(p.transform_deriv(z), z.exp());
+            assert_eq!(p.log_jacobian(z), z);
+            assert_eq!(p.jacobian_grad(z), 1.0);
+            let fd = fd_dtheta_dz(&p, z);
+            assert!(((p.transform_deriv(z) - fd) / fd).abs() < 1e-6,
+                "interior dθ/dz must match the finite difference");
+        }
+    }
+
+    #[test]
+    fn unbounded_log_params_are_never_saturated() {
+        // lo = 0 / hi = +∞ is the no-bounds default: `clamp` cannot fire on
+        // either side, so neither may the saturation test.
+        let p = log_param(0.0, f64::INFINITY);
+        for &z in &[-700.0, -1.0, 0.0, 1.0, 700.0] {
+            assert_eq!(p.log_jacobian(z), z);
+            assert_eq!(p.jacobian_grad(z), 1.0);
+            assert_eq!(p.transform_deriv(z), z.exp());
+        }
+    }
+
+    #[test]
+    fn a_value_at_the_declared_bound_stays_in_support() {
+        // `to_transformed` clamps into [lo, hi] and takes ln, so every z the
+        // sampler can be INITIALISED at must carry a finite log-Jacobian —
+        // otherwise `run_ode_nuts`'s "posterior is not finite at the initial
+        // parameters" probe would reject a legal start.
+        //
+        // This is why the saturation test is in z-space (z ∉ [ln lo, ln hi])
+        // rather than θ-space (exp(z) ∉ [lo, hi]): `exp(ln(hi))` rounds one
+        // ulp ABOVE hi for hi ∈ {10, 100, 0.1, 1e-3, 3, …}, so a θ-space test
+        // would call z = ln(hi) out-of-support.
+        for &(lo, hi) in &[(0.01, 10.0), (1e-3, 100.0), (1e-6, 0.1),
+                           (0.05, 5.0), (0.1, 3.0), (1.0, 2.0)] {
+            let p = log_param(lo, hi);
+            for &x in &[lo, hi, hi * 10.0, lo / 10.0, (lo * hi).sqrt()] {
+                let z = p.to_transformed(x);
+                assert!(p.log_jacobian(z).is_finite(),
+                    "bounds [{lo}, {hi}], x={x} → z={z}: a round-tripped \
+                     value must stay in support (log-Jacobian was −∞)");
+                assert!(p.transform_deriv(z) > 0.0,
+                    "bounds [{lo}, {hi}], x={x}: dθ/dz must be positive in support");
+                assert_eq!(p.jacobian_grad(z), 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn saturated_z_gives_a_clean_neg_inf_target_not_nan() {
+        // What the samplers actually assemble: ll + prior + log-Jacobian,
+        // with the gradient chained through `transform_deriv`. A log_normal
+        // prior is the sharp case — `Density::TransformedNormal` returns the
+        // natural-scale density (it pre-subtracts z) and relies on the caller
+        // adding `log_jacobian(z)` back, so the two must not cancel into NaN.
+        use crate::inference::pgas::prior_log_density_and_grad_z;
+        use crate::inference::prior::{Density, Prior};
+
+        let p = log_param(0.01, 10.0);
+        let z = 10.0f64.ln() + 2.0;
+        let theta = p.from_transformed(z);
+        let prior = Prior::Fixed(Density::TransformedNormal { mean: 0.0, sd: 1.0 });
+        let (prior_val, prior_grad_z) = prior_log_density_and_grad_z(&prior, &p, theta, z);
+
+        let ll = -12.5_f64;
+        let log_p = ll + prior_val + p.log_jacobian(z);
+        let grad_z = prior_grad_z + p.jacobian_grad(z);
+
+        assert!(!log_p.is_nan(), "the out-of-support target must not be NaN");
+        assert_eq!(log_p, f64::NEG_INFINITY,
+            "outside the declared bounds the target density is zero");
+        assert!(grad_z.is_finite(),
+            "the gradient must stay finite so the leapfrog momentum is not poisoned");
+    }
+
+    #[test]
+    fn nuts_rejects_a_leapfrog_step_into_the_saturated_region() {
+        // The stability question the −∞ choice raises: does a wall at the
+        // bound give a clean rejection, or a NaN/poisoned trajectory? NUTS
+        // treats a non-finite energy as divergent and refuses to commit a
+        // non-finite proposal, so the answer is: clean rejection, with the
+        // divergence surfaced to the user.
+        use crate::inference::nuts::{nuts_step, MassMatrix, NUTSConfig};
+        use crate::rng::StatefulRng;
+
+        let p = log_param(0.01, 10.0);
+        // Standard normal on z, truncated to the transform's support.
+        let target = |z: &[f64]| -> (f64, Vec<f64>) {
+            if !p.log_jacobian(z[0]).is_finite() {
+                return (f64::NEG_INFINITY, vec![0.0]);
+            }
+            (-0.5 * z[0] * z[0], vec![-z[0]])
+        };
+        let z0 = vec![10.0f64.ln() - 0.01]; // a hair inside the upper bound
+        let (log_p0, grad0) = target(&z0);
+        assert!(log_p0.is_finite(), "precondition: the start is in support");
+
+        let cfg = NUTSConfig {
+            max_tree_depth: 6,
+            step_size: 0.5, // large enough to leap over the wall
+            mass_matrix: MassMatrix::Diagonal(vec![1.0]),
+        };
+        let mut rng = StatefulRng::new(7);
+        for _ in 0..50 {
+            let r = nuts_step(&z0, log_p0, &grad0, &cfg, &target, &mut rng);
+            assert!(r.params[0].is_finite(), "NUTS must never return a NaN position");
+            assert!(r.log_posterior.is_finite(),
+                "NUTS must never commit a −∞ / NaN log-posterior");
+            assert!(p.log_jacobian(r.params[0]).is_finite(),
+                "NUTS accepted a position outside the transform's support: z={}",
+                r.params[0]);
+        }
     }
 }
