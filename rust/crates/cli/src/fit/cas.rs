@@ -28,8 +28,8 @@ use indexmap::IndexMap;
 use std::path::Path;
 
 use runid::inputs::{
-    ArtifactRef, DataDigest, Deps, EngineVersion, FitDigest, ResolvedObsAlignment, Seed,
-    StageConfig, StageLevel,
+    ArtifactRef, DataDigest, Deps, EngineVersion, FitDigest, ModelDigest, ResolvedObsAlignment,
+    Seed, StageConfig, StageLevel,
 };
 use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, RunRecord};
 
@@ -344,7 +344,13 @@ pub fn fit_level_digest(
     data_paths: &IndexMap<String, String>,
 ) -> Result<FitDigest, String> {
     Ok(FitDigest {
-        model: crate::resolve::model_digest(model, ir_version, engine_version),
+        // Presentation normalization is inside `from_model` (gh#442) — do not
+        // strip here.
+        model: ModelDigest::from_model(
+            model,
+            ir_version.to_string(),
+            EngineVersion(engine_version.to_string()),
+        ),
         data: build_data_digests(data_paths)?,
         holdout_data: build_holdout_digests(config)?,
         fit_toml: fit_config_blob_hash(config)?,

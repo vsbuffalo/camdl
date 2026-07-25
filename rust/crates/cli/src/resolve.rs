@@ -7,7 +7,10 @@
 //! the base `--seed`), and a non-finite resolved float is a `ResolveError`
 //! surfaced before any hashing. Presentation-only IR fields
 //! (`output.format`, `simulation.time_semantics`) are normalized out of the
-//! hashed model so `--format`/time rendering stay inert (provenance).
+//! hashed model so `--format`/time rendering stay inert (provenance) — that
+//! strip lives inside `runid::inputs::ModelDigest::from_model`, NOT here, so
+//! every artifact kind inherits it (gh#442). This module must never
+//! re-implement it.
 //!
 //! This is the identity half of the wiring; the caller supplies resolved
 //! config/params/scenario/seed (from `params_resolver`, the model, and the
@@ -82,32 +85,11 @@ fn backend(b: crate::args::types::ForwardBackend) -> Backend {
     }
 }
 
-/// Strip pure-presentation fields from a model before hashing, so they stay
-/// inert. `output.format` (parquet/tsv) and `simulation.time_semantics` never
-/// affect computed values — they render *views* of the canonical artifact at
-/// `cat` time.
-fn normalize_for_hash(model: &ir::Model) -> ir::Model {
-    let mut m = model.clone();
-    m.output.format = String::new();
-    m.simulation.time_semantics = String::new();
-    m
-}
-
-/// The M2-interim whole-IR model digest (presentation-normalized) + versions.
-pub fn model_digest(model: &ir::Model, ir_version: &str, engine_version: &str) -> ModelDigest {
-    let normalized = normalize_for_hash(model);
-    ModelDigest::from_model(
-        &normalized,
-        ir_version.to_string(),
-        EngineVersion(engine_version.to_string()),
-    )
-}
-
 /// The model's *structural* content identity, hex-encoded: the `runid` model
-/// content hash ([`ModelDigest::ir`] = `Model::content_hash`, presentation-
-/// normalized), rendered as hex. The single helper every recorded "model
-/// identity" string and the survey↔fit warm-start cross-check goes through, so
-/// the survey writer and the fit's recompute can never disagree.
+/// content hash ([`ModelDigest::ir`] = presentation-normalized
+/// `Model::content_hash`), rendered as hex. The single helper every recorded
+/// "model identity" string and the survey↔fit warm-start cross-check goes
+/// through, so the survey writer and the fit's recompute can never disagree.
 ///
 /// Takes the **raw compiled IR JSON** (the `model_ir_json` both survey and fit
 /// already carry), NOT an in-memory `ir::Model`: survey and fit each seed
@@ -130,13 +112,10 @@ pub fn model_digest(model: &ir::Model, ir_version: &str, engine_version: &str) -
 /// always a freshly-compiled, valid envelope, so the value is never empty there.
 pub fn model_identity_from_ir(model_ir_json: &str) -> String {
     match ir::from_str(model_ir_json) {
-        Ok(mut model) => {
-            // Mirror `normalize_for_hash`: strip the presentation-only fields so
-            // `--format` / time rendering stay inert.
-            model.output.format = String::new();
-            model.simulation.time_semantics = String::new();
-            model.content_hash().to_hex()
-        }
+        // `model_ir_hash` owns the presentation strip — the same function
+        // `ModelDigest::from_model` uses, so this string and the `model` level
+        // can never disagree about what "the same model" means (gh#442).
+        Ok(model) => runid::inputs::model_ir_hash(&model).to_hex(),
         Err(_) => String::new(),
     }
 }
@@ -198,7 +177,11 @@ use crate::fit::cas::level;
 /// factored levels (model/config/params/scenario/seed, in path order), and
 /// the `run_id` derived from them.
 pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, ResolveError> {
-    let model = model_digest(ctx.model, ctx.ir_version, ctx.engine_version);
+    let model = ModelDigest::from_model(
+        ctx.model,
+        ctx.ir_version.to_string(),
+        EngineVersion(ctx.engine_version.to_string()),
+    );
     let config = SimConfig {
         backend: backend(ctx.backend),
         dt: finite(ctx.dt)?,

@@ -60,17 +60,13 @@ fn tempdir(tag: &str) -> Tmp {
     Tmp(base)
 }
 
-/// Mirror of `crate::resolve::model_identity_from_ir` — same as
-/// `survey_top_k_pmmh.rs::model_identity_for_test`: the structural `runid`
-/// model content hash (presentation-normalized), hex-encoded.
+/// `crate::resolve::model_identity_from_ir` for the integration test — same as
+/// `survey_top_k_pmmh.rs::model_identity_for_test`. Calls the shared
+/// `runid::inputs::model_ir_hash` (gh#442) rather than re-implementing the
+/// presentation strip.
 fn model_identity_for_test(ir_json: &str) -> String {
-    use runid::ContentAddressed;
-    let mut model: ir::Model =
-        ir::from_str(ir_json).expect("model_identity_for_test: invalid IR");
-    // Mirror `resolve::normalize_for_hash` — strip presentation-only fields.
-    model.output.format = String::new();
-    model.simulation.time_semantics = String::new();
-    model.content_hash().to_hex()
+    let model: ir::Model = ir::from_str(ir_json).expect("model_identity_for_test: invalid IR");
+    runid::inputs::model_ir_hash(&model).to_hex()
 }
 
 fn sha256_hex_of_file(path: &Path) -> String {
