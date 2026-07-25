@@ -1630,6 +1630,26 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 "tolerance": 1e-4, "max_evals": 1500,
                 "dt": compiled.model.simulation.dt.unwrap_or(dt) }),
         };
+        // A non-finite cell loglik serialises as JSON `null` (JSON has no
+        // ±inf/NaN), and every consumer that reads `best_loglik` — the curve,
+        // the summary, the rollup — then has nothing to plot for this grid
+        // point. The leaf still exists and the run still reports "N cells
+        // written", so without this the point just *disappears* from the
+        // profile with no indication that anything went wrong. Say so on
+        // stderr: a dropped grid point is a result the user must see, not a
+        // gap to infer. The usual cause is a particle filter too small to
+        // score a θ far from the optimum (the swarm dies and the estimate is
+        // −inf); `--particles` is the lever.
+        if !final_loglik.is_finite() {
+            eprintln!(
+                "warning: profile grid point {} (start {}) produced a non-finite \
+                 log-likelihood ({}); its `best_loglik` is recorded as null and the \
+                 point will be MISSING from the profile curve. This is usually a \
+                 particle filter too small to score a θ this far from the optimum — \
+                 re-run with more `--particles`.",
+                grid_idx, start_idx, final_loglik,
+            );
+        }
         let inputs_json = serde_json::json!({
             "method": profile_algo.method_kind().as_str(),
             "seed": job_seed,
