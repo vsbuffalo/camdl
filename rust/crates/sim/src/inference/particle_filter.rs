@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use crate::rng::StatefulRng;
 use crate::error::SimError;
 use crate::schedule::Cursor;
-use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error};
+use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, DeathMask};
 use super::traits::{ProcessModel, ObservationModel, SMCConfig};
 use super::types::{ParticleState, ParticleSwarm, log_sum_exp, logw_variance, normalize_log_weights, RESAMPLE_RNG_STREAM, init_particle_rngs};
 use super::resampling::systematic_resample;
@@ -271,7 +271,9 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // get marked dead; their log-weight is set to −Inf so resampling
     // kills them. Hard errors (UnknownCompartment, config bugs, etc.)
     // still propagate immediately — they are not particle-specific.
-    let mut particle_dead: Vec<bool> = vec![false; n_particles];
+    // gh#367: the policy lives on `DeathMask` so the correlated PF applies
+    // exactly this one, rather than a second, subtly-different copy.
+    let mut deaths = DeathMask::new(n_particles);
 
     for obs_idx in 0..n_obs {
         let obs_time = obs_model.obs_time(obs_idx);
@@ -303,7 +305,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         let outcomes: Vec<Result<bool, SimError>> = swarm.states.par_iter_mut()
             .zip(rngs.par_iter_mut())
             .zip(scratches.par_iter_mut())
-            .zip(particle_dead.par_iter())
+            .zip(deaths.as_slice().par_iter())
             .map(|(((state, rng), scratch), &dead)| {
                 if dead { return Ok(true); }  // already dead; skip
                 // Shared inner-substep walk (Schedule::substeps); this body keeps
@@ -315,22 +317,20 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
                         Some(idx) => &scheduled.batches[idx],
                         None => &[],
                     };
-                    match process.step(state, params, t_local, step_dt, per_eval, rng, scratch, due_iv) {
-                        Ok(()) => {}
-                        Err(e) if e.is_per_particle_recoverable() => {
-                            // Mark dead — the caller folds this into the dead vec
-                            // and the outer loop sets log_weight = −∞.
-                            return Ok(true);
-                        }
-                        Err(e) => return Err(e),
+                    // `classify` is the shared policy (gh#367): `?` propagates a
+                    // non-recoverable error out of the whole filter; `true` marks
+                    // this particle dead — the caller folds it into the mask and
+                    // the outer loop sets log_weight = −∞.
+                    if DeathMask::classify(
+                        process.step(state, params, t_local, step_dt, per_eval, rng, scratch, due_iv)
+                    )? {
+                        return Ok(true);
                     }
                 }
                 Ok(false)
             })
             .collect();
-        for (i, r) in outcomes.into_iter().enumerate() {
-            if r? { particle_dead[i] = true; }
-        }
+        deaths.absorb(outcomes)?;
         t = schedule.window_end(cur, t);
 
         // FOLD (multi-cadence Phase 2a, "Option Z"): close this interval's flow
@@ -375,7 +375,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // Compute log-weights via observation model. Dead particles
         // (gh#audit-C5/C6) get −Inf so resampling discards them.
         for (i, state) in swarm.states.iter().enumerate() {
-            swarm.log_weights[i] = if particle_dead[i] {
+            swarm.log_weights[i] = if deaths.is_dead(i) {
                 f64::NEG_INFINITY
             } else {
                 obs_model.log_likelihood(state, obs_idx, params)
@@ -495,8 +495,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // deterministic). `obs_idx` + a display-only elapsed are captured
         // into the error so the diagnostic can surface where the bail
         // happened — elapsed never gates the bail.
-        let dead_count = particle_dead.iter().filter(|&&d| d).count();
-        if let Some(kind) = check_pf_degeneracy(&ess_trace, dead_count, n_particles) {
+        if let Some(kind) = check_pf_degeneracy(&ess_trace, deaths.count(), n_particles) {
             return Err(super::degeneracy::pf_bail_error(
                 kind, obs_idx, t0_call.elapsed().as_secs_f64(),
             ));
@@ -514,12 +513,12 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         }
         std::mem::swap(&mut swarm.states, &mut states_buf);
 
-        // gh#audit-C5/C6: clear particle_dead after resampling. Any
+        // gh#audit-C5/C6: clear the death mask after resampling. Any
         // particle that survived the systematic resample had finite
         // weight, so it can't be dead. Clearing is correct because
         // resampling shuffles particles by index, invalidating the
         // pre-resample dead vector anyway.
-        for d in &mut particle_dead { *d = false; }
+        deaths.clear();
 
         // Record the resampling indices as the ancestor map for the
         // NEXT step. Not needed after the last observation (no step

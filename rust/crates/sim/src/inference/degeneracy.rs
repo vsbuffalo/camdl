@@ -18,6 +18,11 @@
 //!      cumulative particle-substep count (default [`ITER_BUDGET`]), the
 //!      compute-blowup safety.
 //!
+//! The module also owns [`DeathMask`] — the per-particle recovery policy the
+//! `dead_count` those watchdogs read is derived from. It lives here rather than
+//! in either filter because both filters must apply the *same* policy; see its
+//! own docs (gh#367).
+//!
 //! gh#241: this module previously also carried a **wall-clock** timeout
 //! (`CAMDL_PF_WALLCLOCK_TIMEOUT_S` + a `--pf-wallclock-timeout` flag that set
 //! that env var). A wall-clock budget made the log-likelihood depend on
@@ -74,6 +79,109 @@ pub const ESS_COLLAPSE_WINDOWS: usize = 3;
 /// so it is independent of how many IF2 iterations or chains a fit runs. Never
 /// derived from core count, wall-clock, or any machine state.
 pub const ITER_BUDGET: u64 = 10_000_000_000; // 1e10 particle-substeps
+
+/// gh#audit-C5/C6, gh#367. The per-particle **death mask** — the single
+/// definition of "one bad particle must not kill the whole evaluation" shared
+/// by the two particle filters
+/// ([`super::particle_filter::bootstrap_filter`] and
+/// [`super::correlated_pf::bootstrap_filter_correlated`]).
+///
+/// The policy has three coupled parts, and they must not drift apart:
+///
+///   1. **Classify** ([`DeathMask::classify`]) — a particle that hits a
+///      *per-particle-recoverable* `SimError`
+///      ([`SimError::is_per_particle_recoverable`]: `NumericalCollapse`,
+///      `NegativeCount{BinomialOvershoot}`, `NonFiniteParameter`,
+///      `TableLookup`) is marked dead and stops propagating. **Every other**
+///      error propagates and tears the evaluation down.
+///   2. **Score** — a dead particle's log-weight is `−∞`, so systematic
+///      resampling discards it (call sites read [`DeathMask::is_dead`]).
+///   3. **Clear** ([`DeathMask::clear`]) — after resampling, every surviving
+///      particle had finite weight, and resampling shuffles by index anyway,
+///      so the mask is reset.
+///
+/// [`DeathMask::count`] feeds [`check_pf_degeneracy`]'s `AllParticlesDead`
+/// branch: the limit case where the mask has nothing left to absorb.
+///
+/// gh#367: the correlated PF previously had **no** mask — it propagated any
+/// particle's error out of the whole evaluation, which the PMMH driver maps to
+/// a `−∞` log-likelihood for that θ (`fit/pmmh.rs`: `Err(e) if
+/// e.is_structural() => Err(e), Err(_) => Ok(f64::NEG_INFINITY)`). One
+/// particle's recoverable excursion therefore rejected the entire proposal,
+/// silently biasing correlated PMMH against boundary regions where occasional
+/// particle failure is expected. Routing both filters through this type is
+/// what keeps the policy from being live in one filter and absent in the other.
+pub struct DeathMask {
+    dead: Vec<bool>,
+}
+
+impl DeathMask {
+    /// A mask with every particle alive.
+    pub fn new(n_particles: usize) -> Self {
+        Self { dead: vec![false; n_particles] }
+    }
+
+    /// Classify ONE particle's propagation outcome, inside the per-particle
+    /// (parallel) closure. `Ok(false)` = survived, keep stepping; `Ok(true)` =
+    /// died recoverably, stop stepping this particle; `Err` = not recoverable,
+    /// propagate out of the filter.
+    ///
+    /// Call sites read as `if DeathMask::classify(step(...))? { return
+    /// Ok(true); }` — the `?` is the "tear the run down" branch, the `true` is
+    /// the "kill this particle only" branch.
+    pub fn classify(outcome: Result<(), SimError>) -> Result<bool, SimError> {
+        match outcome {
+            Ok(()) => Ok(false),
+            Err(e) if e.is_per_particle_recoverable() => Ok(true),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Fold the swarm's per-particle outcomes (index-aligned with the swarm,
+    /// each the return of a closure that used [`DeathMask::classify`]) into the
+    /// mask. The first non-recoverable error propagates.
+    pub fn absorb(&mut self, outcomes: Vec<Result<bool, SimError>>) -> Result<(), SimError> {
+        assert_eq!(
+            outcomes.len(), self.dead.len(),
+            "death-mask outcomes must be index-aligned with the swarm",
+        );
+        for (i, r) in outcomes.into_iter().enumerate() {
+            if r? {
+                self.dead[i] = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Did particle `i` die this observation window? Its log-weight must then
+    /// be `−∞` rather than the observation model's score.
+    pub fn is_dead(&self, i: usize) -> bool {
+        self.dead[i]
+    }
+
+    /// Per-particle view, for zipping into a parallel iterator.
+    pub fn as_slice(&self) -> &[bool] {
+        &self.dead
+    }
+
+    /// Number of particles currently dead — the `dead_count` argument of
+    /// [`check_pf_degeneracy`].
+    pub fn count(&self) -> usize {
+        self.dead.iter().filter(|&&d| d).count()
+    }
+
+    /// Every particle is dead: the limit case the mask cannot absorb, because
+    /// the whole weight vector is `−∞` and resampling has nothing to select.
+    /// Non-vacuous only for a non-empty swarm.
+    pub fn all_dead(&self) -> bool {
+        !self.dead.is_empty() && self.dead.iter().all(|&d| d)
+    }
+
+    /// Reset after resampling.
+    pub fn clear(&mut self) {
+        self.dead.fill(false);
+    }
+}
 
 /// gh#110. Return the statistical degeneracy mode if the filter has bailed at
 /// this observation window, otherwise `None`. Pure: a function of the swarm
@@ -200,6 +308,83 @@ pub fn pf_bail_error(kind: PFDegenerateKind, obs_window: usize, elapsed_s: f64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{CollapseKind, NegativeCountCause};
+
+    /// gh#367. `classify` is the single definition of the recovery policy: a
+    /// per-particle-recoverable error kills the particle (`Ok(true)`); a
+    /// structural one propagates so the caller tears the evaluation down.
+    #[test]
+    fn classify_kills_recoverable_and_propagates_structural() {
+        assert!(!DeathMask::classify(Ok(())).unwrap(), "a clean step keeps the particle alive");
+
+        let recoverable = SimError::NumericalCollapse { kind: CollapseKind::DivByZero, t: 1.0 };
+        assert!(recoverable.is_per_particle_recoverable());
+        assert!(DeathMask::classify(Err(recoverable)).unwrap());
+
+        let overshoot = SimError::NegativeCount {
+            compartment: "S".into(), attempted_value: -1, t: 1.0,
+            cause: NegativeCountCause::BinomialOvershoot,
+        };
+        assert!(DeathMask::classify(Err(overshoot)).unwrap());
+
+        // Structural: must NOT be absorbed by the mask.
+        let structural = SimError::Validation("model cannot run".into());
+        assert!(structural.is_structural());
+        assert!(matches!(
+            DeathMask::classify(Err(structural)),
+            Err(SimError::Validation(_)),
+        ));
+
+        // Neither recoverable nor structural (a per-θ excursion): also NOT
+        // absorbed — only `is_per_particle_recoverable` opens the mask.
+        let neg_rate = SimError::NegativePropensity {
+            transition: "infection".into(), value: -1.0, t: 2.0,
+        };
+        assert!(!neg_rate.is_per_particle_recoverable());
+        assert!(matches!(
+            DeathMask::classify(Err(neg_rate)),
+            Err(SimError::NegativePropensity { .. }),
+        ));
+    }
+
+    /// gh#367. `absorb` folds per-particle outcomes index-aligned, and the
+    /// first non-recoverable error propagates instead of being folded.
+    #[test]
+    fn absorb_folds_index_aligned_and_propagates_errors() {
+        let mut mask = DeathMask::new(4);
+        mask.absorb(vec![Ok(false), Ok(true), Ok(false), Ok(true)]).unwrap();
+        assert_eq!(mask.as_slice(), &[false, true, false, true]);
+        assert_eq!(mask.count(), 2);
+        assert!(!mask.all_dead());
+        assert!(mask.is_dead(1) && !mask.is_dead(0));
+
+        // Deaths accumulate across windows until cleared.
+        mask.absorb(vec![Ok(true), Ok(false), Ok(false), Ok(false)]).unwrap();
+        assert_eq!(mask.as_slice(), &[true, true, false, true]);
+
+        mask.clear();
+        assert_eq!(mask.count(), 0);
+        assert!(!mask.all_dead(), "a cleared mask has no dead particles");
+
+        let err = mask
+            .absorb(vec![Ok(false), Err(SimError::Validation("boom".into())), Ok(true), Ok(false)])
+            .expect_err("a structural error must propagate out of absorb");
+        assert!(matches!(err, SimError::Validation(_)));
+    }
+
+    /// `all_dead` is the limit case the mask cannot absorb. Vacuously false on
+    /// an empty swarm (matching `check_pf_degeneracy`'s `n_particles > 0` guard).
+    #[test]
+    fn all_dead_only_when_every_particle_is_dead() {
+        let mut mask = DeathMask::new(3);
+        mask.absorb(vec![Ok(true), Ok(true), Ok(false)]).unwrap();
+        assert!(!mask.all_dead());
+        mask.absorb(vec![Ok(false), Ok(false), Ok(true)]).unwrap();
+        assert!(mask.all_dead());
+        assert_eq!(mask.count(), 3);
+
+        assert!(!DeathMask::new(0).all_dead(), "empty swarm is not 'all dead'");
+    }
 
     /// Healthy run: ESS comfortably above the floor, no dead particles.
     /// Must NOT bail.
