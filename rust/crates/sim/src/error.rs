@@ -405,6 +405,45 @@ mod tests {
         }.is_per_particle_recoverable());
     }
 
+    /// gh#82. The two discriminators must not drift apart: everything
+    /// `is_per_particle_recoverable()` admits must also be NON-structural.
+    ///
+    /// PGAS's θ-proposal boundary (`pgas.rs::theta_proposal_score`) rejects on
+    /// `!is_structural()`, so if a per-particle-recoverable variant were ever
+    /// classified structural it would start tearing chains down again — the
+    /// exact regression gh#82 fixed. The implication is one-directional: the
+    /// converse does not hold (`NegativePropensity`, `AbsorbingState` and
+    /// `PFDegenerate` are neither recoverable nor structural), which is why the
+    /// θ-eval boundary uses the wider `is_structural()` test.
+    #[test]
+    fn recoverable_errors_are_never_structural() {
+        let recoverable: Vec<SimError> = vec![
+            SimError::NumericalCollapse { kind: CollapseKind::DivByZero, t: 1.0 },
+            SimError::NumericalCollapse { kind: CollapseKind::PowNanInf, t: 1.0 },
+            SimError::NumericalCollapse { kind: CollapseKind::UnOpNan, t: 1.0 },
+            SimError::NumericalCollapse { kind: CollapseKind::SqrtNegative, t: 1.0 },
+            SimError::NumericalCollapse { kind: CollapseKind::LogNonPositive, t: 1.0 },
+            SimError::NumericalCollapse { kind: CollapseKind::ModByZero, t: 1.0 },
+            SimError::NegativeCount {
+                compartment: "S".into(), attempted_value: -1, t: 1.0,
+                cause: NegativeCountCause::BinomialOvershoot,
+            },
+            SimError::NonFiniteParameter { name: "tau".into(), value: f64::NEG_INFINITY, t: -101.0 },
+            SimError::TableLookup("table 'k': index 5 out of bounds [0, 2)".into()),
+        ];
+        for err in recoverable {
+            assert!(
+                err.is_per_particle_recoverable(),
+                "list must contain only recoverable variants; {err} is not one",
+            );
+            assert!(
+                !err.is_structural(),
+                "a per-particle-recoverable error must never be structural, or the \
+                 PGAS θ-proposal boundary would tear the chain down on it (gh#82): {err}",
+            );
+        }
+    }
+
     /// gh#224. The inference-eval discriminator must surface model/config
     /// errors as fatal while rejecting per-θ excursions and PF bails as
     /// −∞. The load-bearing case is `PFDegenerate`: it is NOT structural,
