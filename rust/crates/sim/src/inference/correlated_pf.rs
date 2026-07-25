@@ -7,12 +7,15 @@
 //!
 //! Reference: Deligiannidis, Doucet & Pitt (2018), JRSSB.
 
+use std::time::Instant;
+
 use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 use crate::chain_binomial::StepScratch;
 use crate::rng::StatefulRng;
-use crate::error::SimError;
+use crate::error::{PFDegenerateKind, SimError};
 use crate::schedule::{Cursor, Schedule, StepPolicy};
+use super::degeneracy::{pf_bail_error, DeathMask};
 use super::types::{ParticleState, ParticleSwarm, log_sum_exp, logw_variance, normalize_log_weights, LOG_PROB_FLOOR};
 use super::particle_filter::PFilterResult;
 use super::chain_binomial_process::ChainBinomialProcess;
@@ -452,6 +455,18 @@ pub fn bootstrap_filter_correlated(
         crate::resolved_expr::stage_per_eval(model, params, config.t_start, dt);
     let per_eval = per_eval_scratch.as_deref();
 
+    // gh#367. Per-particle death mask — the SAME policy object the bootstrap PF
+    // uses (`degeneracy::DeathMask`): a per-particle-recoverable error kills
+    // only that particle (−∞ weight, discarded at resampling); everything else
+    // still propagates out of the filter. Before this, one particle's
+    // recoverable excursion propagated out of the whole evaluation, which the
+    // PMMH driver reads as "θ ruled out" — a silent bias against boundary
+    // regions where occasional particle failure is expected.
+    let mut deaths = DeathMask::new(n_particles);
+    // Display-only diagnostic on the all-dead bail (how long the doomed call
+    // ran). Never gates anything — the bail is a pure function of the mask.
+    let t0_call = Instant::now();
+
     for obs_idx in 0..n_obs {
         // The substep walk terminates at this obs via Schedule::substeps (cursor
         // points at obs_idx); no explicit obs_time needed. The effect cursor is
@@ -467,7 +482,10 @@ pub fn bootstrap_filter_correlated(
         let gamma_row = &randoms.gamma_noise[obs_idx];
         let binom_row = &randoms.binomial_noise[obs_idx];
         let n_groups = randoms.n_source_groups;
-        let errors: Vec<Result<(), SimError>> = swarm.states.par_iter_mut()
+        // `Ok(true)` = this particle died recoverably (gh#367 death mask);
+        // `Ok(false)` = it propagated cleanly; `Err` = not recoverable, tear the
+        // evaluation down.
+        let outcomes: Vec<Result<bool, SimError>> = swarm.states.par_iter_mut()
             .zip(rngs.par_iter_mut())
             .zip(scratches.par_iter_mut())
             .enumerate()
@@ -552,17 +570,42 @@ pub fn bootstrap_filter_correlated(
                     let mut real = crate::state::RealState::new(
                         process.compiled.real_local_to_global.len());
                     // `step_dt` is the realized substep (clipped under Exact).
-                    crate::chain_binomial::step_one(
+                    // gh#367: route the step's outcome through the shared
+                    // death-mask policy — `?` propagates a non-recoverable
+                    // error out of the filter, `true` kills only this particle
+                    // and stops its walk for this window.
+                    if DeathMask::classify(crate::chain_binomial::step_one(
                         model, &mut state.counts, &mut state.flow_accumulators,
                         &mut real,
                         // gh#272 LICM: scratch staged once for this filter, threaded in.
                         params, t_local, step_dt, per_eval, rng, scratch,
-                    )?;
+                    ))? {
+                        return Ok(true);
+                    }
                 }
-                Ok(())
+                Ok(false)
             })
             .collect();
-        for r in errors { r?; }
+        deaths.absorb(outcomes)?;
+
+        // gh#367. Every particle died: the limit case the mask cannot absorb —
+        // the whole weight vector is −∞, so resampling has nothing to select
+        // and `normalize_log_weights` would fall back to uniform over dead
+        // states. Bail exactly as the bootstrap PF does. `PFDegenerate` is not
+        // structural, so the PMMH driver still reads it as "θ ruled out" (−∞) —
+        // the same outcome the pre-gh#367 code produced for this case.
+        //
+        // Scope note: the bootstrap PF reaches this through
+        // `check_pf_degeneracy`, which ALSO carries the ESS-collapse watchdog.
+        // The correlated PF has never had that watchdog, and adding it here
+        // would change the returned log-likelihood of existing correlated-PMMH
+        // fits — a separate policy decision, deliberately not folded into this
+        // fix.
+        if deaths.all_dead() {
+            return Err(pf_bail_error(
+                PFDegenerateKind::AllParticlesDead, obs_idx, t0_call.elapsed().as_secs_f64(),
+            ));
+        }
         t = schedule.window_end(cur, t);
 
         // FOLD (multi-cadence Phase 2a): close this interval's flow into each
@@ -573,9 +616,15 @@ pub fn bootstrap_filter_correlated(
             obs_model.fold_into_acc(&state.flow_accumulators, &mut state.acc);
         }
 
-        // Compute log-weights
+        // Compute log-weights. Dead particles (gh#367) get −∞ so the sorted
+        // systematic resample below discards them; the obs model is never
+        // scored on a particle whose propagation errored out.
         for (i, state) in swarm.states.iter().enumerate() {
-            swarm.log_weights[i] = obs_model.log_likelihood(state, obs_idx, params);
+            swarm.log_weights[i] = if deaths.is_dead(i) {
+                f64::NEG_INFINITY
+            } else {
+                obs_model.log_likelihood(state, obs_idx, params)
+            };
         }
 
         let ll_increment = log_sum_exp(&swarm.log_weights) - (n_particles as f64).ln();
@@ -629,6 +678,11 @@ pub fn bootstrap_filter_correlated(
             obs_model.reset_due_acc(obs_idx, &mut state.acc);
         }
         for lw in &mut swarm.log_weights { *lw = 0.0; }
+
+        // gh#367: clear the mask after resampling — every surviving slot was
+        // copied from a particle with finite weight, and resampling shuffles by
+        // index, so the pre-resample mask no longer refers to anything.
+        deaths.clear();
     }
 
     Ok(PFilterResult {
