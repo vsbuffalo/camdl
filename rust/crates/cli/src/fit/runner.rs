@@ -5201,6 +5201,7 @@ mu_d      = 0.002
 rho       = 0.2
 sigma_rel = 0.3
 kappa     = 40.0
+phi       = 60.0
 n_sero    = 1000
 N0        = 1000000
 
