@@ -8,6 +8,22 @@
 //! perturbation scale σ → 0 and the particle swarm concentrates
 //! around the MLE.
 //!
+//! Ionides et al. (2015) Algorithm 1 is the normative reference for what
+//! one iteration does, in what order:
+//!
+//! ```text
+//!   Θ^F_{0,j} ~ h_0(θ | Θ^{m-1}_j; σ_m)                      [t=0 perturbation]
+//!   X^F_{0,j} ~ f_{X_0}(x_0; Θ^F_{0,j})
+//!   for n in 1..N:
+//!     Θ^P_{n,j} ~ h_n(θ | Θ^F_{n-1,j}; σ_m)                  [perturb]
+//!     X^P_{n,j} ~ f_{X_n|X_{n-1}}(· | X^F_{n-1,j}; Θ^P_{n,j})[propagate]
+//!     w_{n,j}   = f_{Y_n|X_n}(y*_n | X^P_{n,j}; Θ^P_{n,j})   [weight]
+//!     resample (Θ, X) jointly
+//! ```
+//!
+//! The perturbation precedes the process step, so one Θ^P_n drives both
+//! the simulation and the measurement density (gh#365).
+//!
 //! Key property: IF2 finds the MLE without computing the transition
 //! density — it only needs the simulator (process model) and the
 //! observation log-likelihood (dmeasure). This makes it compatible
@@ -445,6 +461,44 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         let mut iters: u64 = 0;
 
         for obs_idx in 0..n_obs {
+            // PERTURB — Ionides et al. (2015) Algorithm 1, first line of the
+            // inner loop. This runs BEFORE the process step so the SAME
+            // Θ^P_n drives the simulation of X_n AND the measurement density
+            // g(y_n | X_n; Θ^P_n) below (gh#365). Propagating at Θ^F_{n-1}
+            // and scoring at Θ^P_n decouples the two: for a parameter living
+            // in both the process and the observation model that is a genuine
+            // error, not a phase offset that vanishes as σ → 0.
+            //
+            // pomp does the same — `pomp:::mif2_pfilter` (R/mif2.R, pomp
+            // 6.4.0.2): `randwalk_perturbation` → `rprocess` → `dmeasure`,
+            // all three on one `tparams`.
+            //
+            // IVP params and simplex members are skipped — IVP perturbed at
+            // t=0 only (pomp's `ivp()` in `rw.sd`), simplex members perturbed
+            // jointly at t=0 only (they're always IVP).
+            //
+            // `cooling_now` is also read by the per-parameter diagnostics
+            // after the weighting; the `global_step` accounting is unchanged
+            // (one t=0 step plus one per observation), so the SD applied at
+            // observation k is still `per_step_cooling^(k+1)`.
+            let cooling_now = per_step_cooling.powf(global_step as f64);
+            for i in 0..n {
+                for (pi, spec) in if2_params.iter().enumerate() {
+                    if spec.ivp || simplex_member_indices.contains(&spec.index) { continue; }
+                    let current = particle_params[i][spec.index];
+                    let sd = spec.transformed_sd(spec.rw_sd, current) * cooling_now;
+                    let z = spec.to_transformed(current);
+                    let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
+                    particle_params[i][spec.index] = new_val;
+                    if let Transform::Log { lo, hi } = &spec.transform {
+                        if (new_val - lo).abs() < 1e-10 || (new_val - hi).abs() < 1e-10 {
+                            clamp_counts[pi] += 1;
+                        }
+                    }
+                }
+            }
+            global_step += 1;
+
             // Propagate — batched parallel dispatch per observation interval.
             let obs_time = obs_model.obs_time(obs_idx);
             let t_start = t;
@@ -502,29 +556,8 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 obs_model.fold_into_acc(&s.flow_accumulators, &mut s.acc);
             }
 
-            // Perturb parameters at observation time (per-step cooling).
-            // IVP params and simplex members are skipped — IVP perturbed at t=0 only,
-            // simplex members perturbed jointly at t=0 only (they're always IVP).
-            let cooling_now = per_step_cooling.powf(global_step as f64);
-            for i in 0..n {
-                for (pi, spec) in if2_params.iter().enumerate() {
-                    if spec.ivp || simplex_member_indices.contains(&spec.index) { continue; }
-                    let current = particle_params[i][spec.index];
-                    let sd = spec.transformed_sd(spec.rw_sd, current) * cooling_now;
-                    let z = spec.to_transformed(current);
-                    let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
-                    particle_params[i][spec.index] = new_val;
-                    if let Transform::Log { lo, hi } = &spec.transform {
-                        if (new_val - lo).abs() < 1e-10 || (new_val - hi).abs() < 1e-10 {
-                            clamp_counts[pi] += 1;
-                        }
-                    }
-                }
-            }
-
-            global_step += 1;
-
-            // Weight by observation likelihood
+            // Weight by observation likelihood — at the SAME θ that drove the
+            // step above (gh#365).
             for i in 0..n {
                 log_weights[i] = obs_model.log_likelihood(&states[i], obs_idx, &particle_params[i]);
             }

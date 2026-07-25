@@ -523,19 +523,27 @@ the cloud converges to a point — the MLE.
 The structure is identical to the particle filter, with two additions:
 
 ```
-1. PROPAGATE: same as PF, but each particle uses its OWN params
-   particle_i simulates with particle_params[i], not shared θ
-
-2. PERTURB: jitter each particle's parameters (NEW in IF2)
+1. PERTURB: jitter each particle's parameters (NEW in IF2)
    For each particle i, for each estimated parameter:
      θ_i += Normal(0, rw_sd × cooling) on the transformed scale
    IVP parameters (initial conditions) are only perturbed at t=0.
 
-3. WEIGHT: same as PF — score against data
+2. PROPAGATE: same as PF, but each particle uses its OWN params
+   particle_i simulates with particle_params[i], not shared θ
+
+3. WEIGHT: same as PF — score against data, at the SAME θ that
+   just drove the propagation
 4. RESAMPLE: states AND parameters are copied together (NEW in IF2)
    Good (state, θ) pairs survive. Bad pairs die.
 5. RESET: same as PF
 ```
+
+Perturbing before the propagation is not cosmetic. It is what makes one
+perturbed θ drive both the simulation of the latent state and the measurement
+density that scores it — the coupling in Algorithm 1 of Ionides et al. (2015)
+and in pomp's `mif2`. Scoring at a θ the state was not simulated from breaks
+that coupling for any parameter appearing in both the process and the
+observation model.
 
 ### The cooling schedule
 
