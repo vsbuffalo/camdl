@@ -356,6 +356,16 @@ before assuming the language doesn't do something — it usually does.
 
 ## Recent and incoming changes
 
+- **`beta` likelihood** (gh#440) — scores a directly-observed **continuous
+  proportion**: `frac ~ beta(mean = projected, concentration = phi)`, with
+  shapes `α = mean·φ`, `β = (1−mean)·φ`. Mean-linked like `neg_binomial`, so the
+  model predicts the mean and `φ` is the dispersion knob. Reach for it when the
+  observation is a fraction with **no reported denominator** (assay fraction,
+  coverage, positivity); `beta_binomial` remains the `k`-of-`n` count family.
+  Support is the **open** interval — an observed exact `0` or `1` scores `-inf`,
+  so keep the predicted mean off the boundary. Differentiable (usable under
+  `nuts`). No new reserved word: `beta` is a likelihood only in `~` position,
+  distinct from the `beta` _prior_.
 - **`via` dwell laws** (gh#313) — non-exponential residence times on a draining
   transition: `E --> I via erlang(stages = 3, rate = sigma)` and
   `via hyper_erlang(branch(...), ...)`. Replaces the `@ rate` clause (a

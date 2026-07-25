@@ -1,11 +1,18 @@
-# SEIR with three surveillance streams — one per under-covered likelihood family.
+# SEIR with four surveillance streams — one per under-covered likelihood family.
 #
 # Golden-coverage purpose: the only model golden exercising the `poisson`,
-# `normal`, and `beta_binomial` observation likelihoods (spec §12.2), each placed
-# where it is epidemiologically defensible rather than as a bare syntax exercise:
-#   - weekly case reports  ~ normal        (large counts → normal approximation)
-#   - weekly disease deaths ~ poisson      (rare, well-ascertained events)
+# `normal`, `beta_binomial`, and `beta` observation likelihoods (spec §12.2),
+# each placed where it is epidemiologically defensible rather than as a bare
+# syntax exercise:
+#   - weekly case reports   ~ normal        (large counts → normal approximation)
+#   - weekly disease deaths ~ poisson       (rare, well-ascertained events)
 #   - periodic serosurvey   ~ beta_binomial (over-dispersed test positivity)
+#   - pooled-assay fraction ~ beta          (a proportion reported directly)
+#
+# The last two are the deliberate contrast: `beta_binomial` scores k-of-n
+# counts, `beta` scores a continuous proportion for which no denominator is
+# reported. Picking beta_binomial for the latter would require inventing a
+# pseudo-`n`.
 #
 # `incidence(disease_death)` observes flow through an outflow transition.
 
@@ -23,6 +30,7 @@ parameters {
   rho       : probability  # case reporting fraction
   sigma_rel : positive     # relative SD of the normal case-count noise
   kappa     : positive     # beta-binomial concentration (overdispersion)
+  phi       : positive     # beta concentration for the pooled-assay fraction
   n_sero    : count        # serosurvey sample size
   N0        : count
   I0        : count
@@ -62,6 +70,16 @@ observations {
                                   alpha = projected * kappa,
                                   beta  = (1 - projected) * kappa)
   }
+
+  # Pooled-assay infectious fraction: the lab reports a proportion, not a
+  # k-of-n count — there is no denominator to put in a binomial. Mean-linked
+  # like neg_binomial: the model predicts I/N and `phi` is the concentration.
+  inf_frac {
+    columns       { time : time, inf_frac : probability }
+    projected     = I / N
+    emit_schedule = every 30 'days
+    inf_frac      ~ beta(mean = projected, concentration = phi)
+  }
 }
 
 init {
@@ -85,6 +103,7 @@ scenarios {
       rho       = 0.2
       sigma_rel = 0.3
       kappa     = 40.0
+      phi       = 60.0
       n_sero    = 1000
       N0        = 1000000
       I0        = 100

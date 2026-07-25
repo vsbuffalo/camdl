@@ -162,7 +162,7 @@ fn project_trajectory_to_obs(
                 let mean = obs_mean_for_likelihood(
                     &resolved_lhs[si], t_obs, v, params, compiled, &int_s, &real_s,
                 );
-                per_stream[si].push(mean.max(0.0).round());
+                per_stream[si].push(round_to_support(&resolved_lhs[si], mean));
             }
             cum_flows.fill(0);
             next_obs += 1;
@@ -306,6 +306,22 @@ fn obs_sd_for_likelihood(
         ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => {
             unreachable!("zero-inflated NB is non-differentiable; the obs gradient check does not cover it")
         }
+    }
+}
+
+/// Snap a synthesized observation onto the likelihood's support.
+///
+/// Every count family (Poisson, NegBin, Binomial, BetaBinomial, Bernoulli) and
+/// the *discretized* Normal score integers, so their synthetic obs must be
+/// rounded. `Beta` is the one continuous family — its support is the open unit
+/// interval, and rounding a proportion would push it onto `{0, 1}` where
+/// `beta_logpdf` returns `NEG_INFINITY` (`obs_loglik.rs:353`), making the FD
+/// check vacuous against an `-inf` plateau.
+fn round_to_support(lh: &sim::resolved_expr::ResolvedLikelihood, mean: f64) -> f64 {
+    use sim::resolved_expr::ResolvedLikelihood;
+    match lh {
+        ResolvedLikelihood::Beta { .. } => mean,
+        _ => mean.max(0.0).round(),
     }
 }
 
@@ -837,6 +853,136 @@ fn gh76_beta_binomial_obs_grad_matches_fd() {
         &[a_obs_idx, b_obs_idx, beta_idx],
         dt, 1e-4,
         "gh76_beta_binomial_obs",
+    );
+}
+
+/// Build a Beta-obs version of seir_observations programmatically.
+///
+/// Models an observed **continuous proportion** (the gh#440 motivation: a
+/// human-to-mosquito infectiousness fraction, a coverage, a positivity) rather
+/// than a `k`-of-`n` count. The mean is linked to the trajectory as
+/// `m0 + q_obs · projected / N_ref` — an incidence-driven proportion on a
+/// baseline floor — and the concentration is the estimated `phi_obs`.
+///
+/// The baseline `m0 = 0.01` and the `N_ref = 10000` divisor keep the mean
+/// strictly inside `(0, 1)` for every obs time, including the pre-take-off
+/// weeks where `projected` is 0. That matters: `beta_logpdf` returns
+/// `NEG_INFINITY` at `mean·φ ≤ 0`, and an `-inf` plateau would make the FD
+/// comparison vacuous rather than failing loudly.
+///
+/// `q_obs` and `phi_obs` are estimated so the chain-rule path through the
+/// emitted `mean_grad` / `concentration_grad` maps is exercised on each in
+/// turn — `q_obs` through a projection-dependent derivative (`projected/N_ref`,
+/// not a bare constant), `phi_obs` through the digamma concentration partial.
+fn build_beta_seir() -> ir::Model {
+    use ir::expr::*;
+    use ir::observation::*;
+    use ir::parameter::Parameter;
+    const M0: f64 = 0.01;
+    const N_REF: f64 = 10000.0;
+    let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");
+    model.observations.retain(|o| o.name == "weekly_cases");
+
+    for (name, val, hi) in [("q_obs", 0.5, 10.0), ("phi_obs", 40.0, 1000.0)] {
+        model.parameters.push(Parameter { name: name.to_string(), value: ir::parameter::ParamValue::Estimated { init: Some(val), bounds: Some((0.01, hi)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: Some(ir::parameter::ParamKind::Positive), param_dim: None });
+    }
+
+    let konst = |v: f64| Expr::Const(ConstExpr { value: v });
+    let param = |n: &str| Expr::Param(ParamExpr { param: n.to_string() });
+    let projected = || Expr::Projected(ProjectedExpr { projected: () });
+    let binop = |op: BinOp, a: Expr, b: Expr| Expr::BinOp(BinOpWrap {
+        bin_op: BinOpExpr { op, left: Box::new(a), right: Box::new(b) },
+    });
+    let div = |a: Expr, b: Expr| binop(BinOp::Div, a, b);
+    let mul = |a: Expr, b: Expr| binop(BinOp::Mul, a, b);
+    let add = |a: Expr, b: Expr| binop(BinOp::Add, a, b);
+
+    for om in &mut model.observations {
+        if let Likelihood::NegBinomial(_) = &om.likelihood {
+            om.likelihood = Likelihood::Beta(BetaLikelihood {
+                // mean = M0 + q_obs · projected / N_REF
+                //   → ∂mean/∂q_obs = projected / N_REF
+                mean: ir::Diffable {
+                    expr: add(konst(M0), div(mul(param("q_obs"), projected()), konst(N_REF))),
+                    grad: grad1("q_obs", div(projected(), konst(N_REF))),
+                    proj_grad: None,
+                },
+                // concentration = phi_obs → ∂φ/∂phi_obs = 1.
+                concentration: ir::Diffable {
+                    expr: param("phi_obs"),
+                    grad: grad1("phi_obs", const1()),
+                    proj_grad: None,
+                },
+            });
+        }
+    }
+    model
+}
+
+#[test]
+fn gh440_beta_obs_grad_matches_fd() {
+    // gh#440. `beta_logpdf_grad` has a closed-form FD test at the density level
+    // (`obs_loglik.rs:410`); this pins the whole path end-to-end through
+    // `complete_data_loglik_grad` — resolution of the two `Diffable` args, the
+    // chain rule onto estimated params, and the accumulation into the obs term.
+    //
+    // The two arms differ in shape, which is the point of checking both:
+    //   ∂ll/∂q_obs   = φ·[ln x − ln(1−x) − ψ(a) + ψ(b)] · (projected / N_REF)
+    //   ∂ll/∂phi_obs = mean·(ln x − ψ(a)) + (1−mean)·(ln(1−x) − ψ(b)) + ψ(φ)
+    // The first routes a projection-dependent derivative through `mean_grad`;
+    // the second is the digamma concentration partial with ∂φ/∂θ = 1.
+    let mut model = build_beta_seir();
+    set_param_defaults(&mut model, &[
+        ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
+        ("rho", 0.5), ("k", 5.0), ("p_detect", 0.8),
+        ("N0", 10000.0), ("I0", 10.0),
+        ("q_obs", 0.5), ("phi_obs", 40.0),
+    ]);
+    model.simulation.t_end = 60.0;
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let (params, param_names) = build_params_and_names(&compiled);
+
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let dt = 1.0;
+    let mut rng = StatefulRng::new(48);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let n_substeps = trajectory.substeps.len();
+
+    let (substep_idx, obs_times) = obs_substep_indices_regular(
+        t_start, dt, n_substeps, 7.0, 7.0, t_end,
+    );
+
+    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    // Negative control: the synthetic proportions must be interior to (0,1),
+    // otherwise `beta_logpdf` is on its -inf floor and the FD check below
+    // would compare 0 against 0 and pass for the wrong reason.
+    for (i, &y) in per_stream[0].iter().enumerate() {
+        assert!(
+            y > 0.0 && y < 1.0,
+            "synthetic beta obs {} = {} is not interior to (0,1); the FD check would be vacuous",
+            i, y
+        );
+    }
+    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+    let observations: Vec<Observation> = obs_times.iter()
+        .map(|&t| Observation { time: t, value: 0.0 }).collect();
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let q_obs_idx = compiled.param_index["q_obs"];
+    let phi_obs_idx = compiled.param_index["phi_obs"];
+    let beta_idx = compiled.param_index["beta"];
+
+    fd_check(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices,
+        // q_obs (Beta mean arg) and phi_obs (concentration arg) are the new
+        // terms; beta is the regression check that the rate-density gradient
+        // is unaffected.
+        &[q_obs_idx, phi_obs_idx, beta_idx],
+        dt, 1e-4,
+        "gh440_beta_obs",
     );
 }
 
