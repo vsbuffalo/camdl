@@ -2160,6 +2160,51 @@ let test_stratified_transfer_shape_mismatch_rejected () =
     "transfer(fraction = cov, from = S, to = V)" in
   compile_expect_error_code ~code:"E237" ~contains:"V" src
 
+let test_transfer_shared_level_names_across_dimensions_rejected () =
+  (* Regression: the shape check must compare DECLARED DIMENSIONS, not the
+     stratum suffixes of expanded cell names. Two different dimensions sharing
+     level names (`[low, high]`, `[pos, neg]`, `[urban, rural]` are ordinary in
+     epi models) produce identical suffixes, so a string comparison accepts the
+     pairing and transfers each age stratum into the like-named risk stratum —
+     silently, with no diagnostic. Same hazard as gh#459. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [low, high]   risk = [low, high] }
+    compartments { S, V }
+    stratify(by = age,  only = [S])
+    stratify(by = risk, only = [V])
+    parameters { cov : probability }
+    transitions {}
+    interventions { vacc : transfer(fraction = cov, from = S, to = V) at [1] }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E237" ~contains:"risk" src
+
+let test_missing_transfer_from_no_shape_cascade () =
+  (* Regression: an absent `from =` must report only E261. Representing the
+     missing kwarg as a placeholder cell made the shape check additionally
+     claim `from` was "unstratified" when there was no `from` at all. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, V }
+    stratify(by = age)
+    parameters { cov : probability }
+    transitions {}
+    interventions { vacc : transfer(fraction = cov, to = V) at [1] }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"missing_from_strat" src in
+  Diagnostics.json_errors_mode := false;
+  (match result with
+   | Ok _ -> Alcotest.fail "expected E261 but compile succeeded"
+   | Error e ->
+     Alcotest.(check bool) "E261 present" true  (contains_substring ~needle:"E261" e);
+     Alcotest.(check bool) "no E237 cascade" false (contains_substring ~needle:"E237" e))
+
 let test_bare_stratified_transfer_count_rejected () =
   (* `count` is an ABSOLUTE quantity, so expanding it per stratum silently
      multiplies the total by the number of strata. The spec's §25.10 example
@@ -10082,6 +10127,10 @@ let () =
         `Quick test_bare_stratified_transfer_two_dimensions;
       Alcotest.test_case "E237 transfer endpoint shape mismatch (gh#460)"
         `Quick test_stratified_transfer_shape_mismatch_rejected;
+      Alcotest.test_case "E237 different dims sharing level names (gh#460)"
+        `Quick test_transfer_shared_level_names_across_dimensions_rejected;
+      Alcotest.test_case "missing transfer `from` on a stratified model: no E237 cascade (gh#460)"
+        `Quick test_missing_transfer_from_no_shape_cascade;
       Alcotest.test_case "E238 bare stratified transfer with count (gh#460)"
         `Quick test_bare_stratified_transfer_count_rejected;
       Alcotest.test_case "unstratified transfer unchanged (gh#460)"

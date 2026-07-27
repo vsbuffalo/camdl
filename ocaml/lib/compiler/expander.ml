@@ -6201,36 +6201,52 @@ let check_action_target ctx ~name ~loc ~verb ~base ~concrete =
         ()
   end
 
-(* A transfer endpoint, resolved to the concrete cells it denotes together with
-   the stratum suffix of each (gh#460).
+(* A transfer endpoint: the compartment it names, the dimensions that
+   compartment is DECLARED with, and the concrete cells it denotes (gh#460).
 
    `resolve_comp_name` accepts only a single `Ir.Pop`, so a bare stratified
    endpoint — which resolves to `Ir.PopSum` — was rejected outright, and spec
    §25.10's central idiom (`transfer(from = S, to = V)` expanding over all
-   strata) did not work. Endpoints are a *set* of cells; carrying the suffix
-   alongside each is what lets the two endpoints be paired by stratum rather
-   than by list position. *)
-type endpoint = { ep_cells : (string * string) list }  (* (suffix, cell) *)
+   strata) did not work.
 
-let suffix_of ~base cell =
-  let bl = String.length base in
-  if cell = base then ""
-  else if String.length cell > bl + 1 && String.sub cell 0 bl = base
-  then String.sub cell (bl + 1) (String.length cell - bl - 1)
-  else cell
+   [ep_dims] is the load-bearing field, and it must come from [comp_dims], not
+   from parsing cell names. Two endpoints pair only when they are stratified by
+   the same dimensions; deciding that by comparing the stratum *suffixes* of
+   their expanded names silently accepts two DIFFERENT dimensions that happen to
+   share level names (`age = [low, high]` against `risk = [low, high]`) and
+   transfers each age stratum into the like-named risk stratum. Level-name
+   collisions across dimensions are ordinary in epi models (`[low, high]`,
+   `[pos, neg]`, `[urban, rural]`), so this is the difference between a
+   diagnostic and a wrong answer. Same hazard as gh#459, asked in the right
+   vocabulary.
+
+   [ep_dims] is [] for a fully-indexed reference (`S[child]` names one cell) —
+   a partial index never reaches here, E287 rejects it during resolution. *)
+type endpoint = {
+  ep_base  : string;
+  ep_dims  : string list;
+  ep_cells : string list;
+}
 
 (* [None] when the expression is not a compartment reference at all — the
    caller emits E264, preserving the existing diagnostic for `from = S + R`. *)
 let resolve_action_endpoint ctx env (e : expr) : endpoint option =
   let base = match e with
-    | EIdent (s, _)        -> Some s
-    | EIndex (s, _, _)     -> Some s
-    | _                    -> None
+    | EIdent  (s, _)    -> Some s
+    | EIndex  (s, _, _) -> Some s
+    | _                 -> None
   in
   match base, resolve_expr ctx env e with
-  | Some b, Ir.Pop n     -> Some { ep_cells = [ (suffix_of ~base:b n, n) ] }
-  | Some b, Ir.PopSum ns -> Some { ep_cells = List.map (fun n -> (suffix_of ~base:b n, n)) ns }
+  | Some b, Ir.Pop n     -> Some { ep_base = b; ep_dims = []; ep_cells = [n] }
+  | Some b, Ir.PopSum ns -> Some { ep_base = b; ep_dims = comp_dims ctx b; ep_cells = ns }
   | _                    -> None
+
+(* The parsed form of a `transfer(...)` kwarg list. Absence is [None] rather
+   than a fabricated placeholder cell: encoding "no `from =`" as an
+   unstratified cell called "?" made the shape check report `from` as
+   unstratified when there was no `from` at all, piling a false E237 on top of
+   the E261 that names the real mistake. *)
+type transfer_amount = TFraction of expr | TCount of expr
 
 (* gh#204: the shared action resolver — used by both scheduled
    interventions/events and reactive policies, so the transfer-kwarg validation
@@ -6273,27 +6289,36 @@ let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.a
         "intervention '%s': unknown transfer kwarg '%s'" name k)
         "valid kwargs: from, to, fraction, count"
     ) unknown;
-    (* Resolve both endpoints to their cell sets and pair by stratum (gh#460).
-       [resolve_comp_name] is still the fallback for a non-compartment
-       expression, purely so `from = S + R` keeps its E264. *)
+    (* Parse the endpoints once. An absent kwarg is [None] — E261 above already
+       named it, and lowering nothing is better than inventing a placeholder
+       cell that the shape check would then misreport. [resolve_comp_name] is
+       the fallback for a non-compartment expression, purely so `from = S + R`
+       keeps its E264. *)
     let endpoint_of key =
       match List.assoc_opt key kwargs with
-      | None   -> Some { ep_cells = [ ("", "?") ] }
+      | None   -> None
       | Some e ->
         (match resolve_action_endpoint ctx env e with
          | Some ep -> Some ep
          | None    -> ignore (resolve_comp_name ctx env e); None)
     in
-    (match endpoint_of "from", endpoint_of "to" with
-     | Some s_ep, Some d_ep ->
-       let s_sfx = List.map fst s_ep.ep_cells
-       and d_sfx = List.map fst d_ep.ep_cells in
-       if s_sfx <> d_sfx then begin
-         (* No cell-to-cell pairing exists. Pairing positionally here would
-            silently move people between unrelated strata. *)
-         let shape ep = match List.map fst ep.ep_cells with
-           | [""] -> "unstratified"
-           | sfxs -> Printf.sprintf "[%s]" (String.concat ", " sfxs) in
+    let amount =
+      match List.assoc_opt "fraction" kwargs, List.assoc_opt "count" kwargs with
+      | Some fe, None -> Some (TFraction fe)
+      | None, Some ce -> Some (TCount ce)
+      | _             -> None   (* absent or both: E261 above *)
+    in
+    (match endpoint_of "from", endpoint_of "to", amount with
+     | Some s_ep, Some d_ep, Some amt ->
+       (* Pair only when both endpoints carry the SAME declared dimensions.
+          Comparing expanded cell names instead would accept two different
+          dimensions that share level names and transfer across them silently
+          (gh#459's hazard); comparing declarations cannot. *)
+       if s_ep.ep_dims <> d_ep.ep_dims then begin
+         let shape ep = match ep.ep_dims with
+           | []   -> Printf.sprintf "'%s' (unstratified, or a single cell)" ep.ep_base
+           | dims -> Printf.sprintf "'%s' stratified by [%s]"
+                       ep.ep_base (String.concat ", " dims) in
          Diagnostics.error ctx.diags ~code:"E237" ~loc
            ~message:(Printf.sprintf
              "intervention '%s': transfer endpoints have different stratum \
@@ -6306,42 +6331,40 @@ let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.a
            ();
          []
        end else begin
-         let pairs = List.combine (List.map snd s_ep.ep_cells)
-                                  (List.map snd d_ep.ep_cells) in
-         match List.assoc_opt "fraction" kwargs with
-         | Some fe ->
+         (* Equal declared dimensions ⇒ [expand_compartment_name] enumerated
+            both in the same order, so zipping is a keyed join. *)
+         let pairs = List.combine s_ep.ep_cells d_ep.ep_cells in
+         match amt with
+         | TFraction fe ->
            (* A fraction is scale-free, so the same value applies to every
               cell — exactly the spec §25.10 expansion. *)
            let fraction = resolve_expr ctx env fe in
            List.map (fun (src, dst) ->
              Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction }) pairs
-         | None ->
-           match List.assoc_opt "count" kwargs with
-           | Some ce ->
-             (* A count is ABSOLUTE. Fanning it out would move `count` people
-                out of EVERY stratum, multiplying the intended total by the
-                number of cells — 1548× on the spec's own national example.
-                "Split proportionally" is an equally plausible reading. The
-                spec specifies only the `fraction` expansion, so rather than
-                pick one silently, make the modeller say which they meant. *)
-             if List.length pairs > 1 then begin
-               Diagnostics.error ctx.diags ~code:"E238" ~loc
-                 ~message:(Printf.sprintf
-                   "intervention '%s': `count` on a bare stratified transfer is \
-                    ambiguous — it would move %d × count individuals in total, \
-                    one count out of each of the %d strata"
-                   name (List.length pairs) (List.length pairs))
-                 ~hint:"use `fraction =` (scale-free, expands per stratum), or \
-                        index the transfer so each instance names one cell \
-                        (e.g. `vacc[a in age] : transfer(count = n, from = \
-                        S[a], to = V[a], …)`)"
-                 ();
-               []
-             end else
-               let count = resolve_expr ctx env ce in
-               List.map (fun (src, dst) ->
-                 Ir.AbsoluteTransfer { Ir.src; Ir.dst; Ir.count }) pairs
-           | None -> []
+         | TCount _ when List.length pairs > 1 ->
+           (* A count is ABSOLUTE. Fanning it out would move `count` people out
+              of EVERY stratum, multiplying the intended total by the number of
+              cells — 1548× on the spec's own national example. "Split
+              proportionally" is an equally plausible reading. The spec
+              specifies only the `fraction` expansion, so rather than pick one
+              silently, make the modeller say which they meant. *)
+           Diagnostics.error ctx.diags ~code:"E238" ~loc
+             ~message:(Printf.sprintf
+               "intervention '%s': `count` on a bare stratified transfer is \
+                ambiguous — '%s' is stratified by [%s], so this would move \
+                %d × count individuals in total, one count out of each cell"
+               name s_ep.ep_base (String.concat ", " s_ep.ep_dims)
+               (List.length pairs))
+             ~hint:"use `fraction =` (scale-free, expands per stratum), or \
+                    index the transfer so each instance names one cell \
+                    (e.g. `vacc[a in age] : transfer(count = n, from = \
+                    S[a], to = V[a], …)`)"
+             ();
+           []
+         | TCount ce ->
+           let count = resolve_expr ctx env ce in
+           List.map (fun (src, dst) ->
+             Ir.AbsoluteTransfer { Ir.src; Ir.dst; Ir.count }) pairs
        end
      | _ -> [])
   | ASet (comp, idxs, expr) ->
