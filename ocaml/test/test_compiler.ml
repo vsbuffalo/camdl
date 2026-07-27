@@ -2090,6 +2090,152 @@ let test_add_bare_stratified_target_rejected () =
   |} in
   compile_expect_error_code ~code:"E265" ~contains:"I_child" src
 
+(* ── gh#460: bare stratified transfer expands per stratum ────────────────────
+   Spec §25.10: `transfer(fraction = 0.80, from = S, to = V)` on stratified
+   S and V emits ONE atomic transfer per cell, paired by stratum. The compiler
+   routed both endpoints through `resolve_comp_name`, which accepts only a
+   single `Ir.Pop`, so a bare stratified endpoint (an `Ir.PopSum`) was rejected
+   with E264 and the spec's central intervention idiom did not work.        ── *)
+
+let strat_transfer_model ?(dims = "age = [child, adult]")
+    ?(strat = "stratify(by = age)") ?(init_dim = "age") action =
+  Printf.sprintf {|
+    time_unit = 'days
+    dimensions { %s }
+    compartments { S, V }
+    %s
+    parameters { cov : probability }
+    transitions {}
+    interventions {
+      vacc : %s at [1]
+    }
+    init { S[i in %s] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} dims strat action init_dim
+
+let transfer_pairs (m : Ir.model) name =
+  let iv = List.find (fun (i : Ir.intervention) -> i.Ir.name = name) m.Ir.interventions in
+  List.filter_map (function
+    | Ir.FractionTransfer t -> Some (t.Ir.src, t.Ir.dst)
+    | Ir.AbsoluteTransfer t -> Some (t.Ir.src, t.Ir.dst)
+    | _ -> None) iv.Ir.actions
+
+let test_bare_stratified_transfer_expands_per_stratum () =
+  let src = strat_transfer_model
+    "transfer(fraction = cov, from = S, to = V)" in
+  match Compiler.compile ~name:"strat_transfer" src with
+  | Error e -> Alcotest.failf "bare stratified transfer should expand: %s" e
+  | Ok m ->
+    Alcotest.(check (list (pair string string)))
+      "one paired transfer per stratum, in declaration order"
+      [ ("S_child", "V_child"); ("S_adult", "V_adult") ]
+      (transfer_pairs m "vacc")
+
+let test_bare_stratified_transfer_two_dimensions () =
+  (* Pairing must be by stratum, not by list position — assert the full
+     cartesian product lines up cell-for-cell. *)
+  let src = strat_transfer_model
+    ~dims:"age = [child, adult]  patch = [north, south]"
+    ~strat:"stratify(by = age)\n    stratify(by = patch)"
+    ~init_dim:"age, j in patch"
+    "transfer(fraction = cov, from = S, to = V)" in
+  match Compiler.compile ~name:"strat_transfer_2d" src with
+  | Error e -> Alcotest.failf "2-D bare stratified transfer should expand: %s" e
+  | Ok m ->
+    let pairs = transfer_pairs m "vacc" in
+    Alcotest.(check int) "4 transfers" 4 (List.length pairs);
+    List.iter (fun (s, d) ->
+      let strip p n =
+        let pl = String.length p in
+        if String.length n > pl && String.sub n 0 pl = p
+        then String.sub n pl (String.length n - pl) else n in
+      Alcotest.(check string)
+        (Printf.sprintf "%s pairs with the same stratum" s)
+        (strip "S_" s) (strip "V_" d)) pairs
+
+let test_stratified_transfer_shape_mismatch_rejected () =
+  (* S is stratified, V is not: there is no cell-to-cell pairing. *)
+  let src = strat_transfer_model
+    ~strat:"stratify(by = age, only = [S])"
+    "transfer(fraction = cov, from = S, to = V)" in
+  compile_expect_error_code ~code:"E237" ~contains:"V" src
+
+let test_bare_stratified_transfer_count_rejected () =
+  (* `count` is an ABSOLUTE quantity, so expanding it per stratum silently
+     multiplies the total by the number of strata. The spec's §25.10 example
+     covers `fraction` only; rather than guess, reject and make the modeller
+     say which they meant. *)
+  let src = strat_transfer_model
+    "transfer(count = 10, from = S, to = V)" in
+  compile_expect_error_code ~code:"E238" ~contains:"count" src
+
+let test_unstratified_transfer_unchanged () =
+  (* Positive control: the ordinary single-cell case must not regress. *)
+  let src = {|
+    time_unit = 'days
+    compartments { S, V }
+    parameters { cov : probability }
+    transitions {}
+    interventions {
+      vacc : transfer(fraction = cov, from = S, to = V) at [1]
+    }
+    init { S = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"flat_transfer" src with
+  | Error e -> Alcotest.failf "unstratified transfer should compile: %s" e
+  | Ok m ->
+    Alcotest.(check (list (pair string string)))
+      "exactly one transfer" [ ("S", "V") ] (transfer_pairs m "vacc")
+
+let test_unstratified_transfer_count_still_allowed () =
+  (* Positive control: `count` is only ambiguous when it would fan out. On a
+     single cell it stays legal. *)
+  let src = {|
+    time_unit = 'days
+    compartments { S, V }
+    parameters { cov : probability }
+    transitions {}
+    interventions {
+      vacc : transfer(count = 10, from = S, to = V) at [1]
+    }
+    init { S = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"flat_transfer_count" src with
+  | Error e -> Alcotest.failf "unstratified count transfer should compile: %s" e
+  | Ok m ->
+    Alcotest.(check (list (pair string string)))
+      "exactly one transfer" [ ("S", "V") ] (transfer_pairs m "vacc")
+
+let test_explicitly_indexed_transfer_unchanged () =
+  (* Positive control: the workaround users write today — one indexed
+     intervention per stratum — must keep working, and `count` stays legal
+     there because each instance names a single cell. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, V }
+    stratify(by = age)
+    parameters { cov : probability }
+    transitions {}
+    interventions {
+      vacc[a in age] : transfer(count = 10, from = S[a], to = V[a]) at [1]
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"indexed_transfer" src with
+  | Error e -> Alcotest.failf "indexed transfer should compile: %s" e
+  | Ok m ->
+    let all = List.concat_map (fun (i : Ir.intervention) ->
+      List.filter_map (function
+        | Ir.AbsoluteTransfer t -> Some (t.Ir.src, t.Ir.dst)
+        | _ -> None) i.Ir.actions) m.Ir.interventions in
+    Alcotest.(check (list (pair string string)))
+      "one transfer per indexed instance"
+      [ ("S_child", "V_child"); ("S_adult", "V_adult") ] all
+
 let test_action_targets_valid_still_compile () =
   (* Positive control for both verbs: an expanded stratum name for `set`, a
      plain declared compartment for `add`. Neither may regress. *)
@@ -9930,6 +10076,20 @@ let () =
         `Quick test_action_targets_valid_still_compile;
       Alcotest.test_case "E265 add in an events block (gh#461)"
         `Quick test_event_add_unknown_target_rejected;
+      Alcotest.test_case "bare stratified transfer expands per stratum (gh#460)"
+        `Quick test_bare_stratified_transfer_expands_per_stratum;
+      Alcotest.test_case "bare stratified transfer, 2 dimensions (gh#460)"
+        `Quick test_bare_stratified_transfer_two_dimensions;
+      Alcotest.test_case "E237 transfer endpoint shape mismatch (gh#460)"
+        `Quick test_stratified_transfer_shape_mismatch_rejected;
+      Alcotest.test_case "E238 bare stratified transfer with count (gh#460)"
+        `Quick test_bare_stratified_transfer_count_rejected;
+      Alcotest.test_case "unstratified transfer unchanged (gh#460)"
+        `Quick test_unstratified_transfer_unchanged;
+      Alcotest.test_case "unstratified count transfer still allowed (gh#460)"
+        `Quick test_unstratified_transfer_count_still_allowed;
+      Alcotest.test_case "explicitly indexed transfer unchanged (gh#460)"
+        `Quick test_explicitly_indexed_transfer_unchanged;
       Alcotest.test_case "missing transfer `from` stays one diagnostic (gh#461)"
         `Quick test_missing_transfer_from_single_diagnostic;
     ];

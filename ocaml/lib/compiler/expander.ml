@@ -6201,6 +6201,37 @@ let check_action_target ctx ~name ~loc ~verb ~base ~concrete =
         ()
   end
 
+(* A transfer endpoint, resolved to the concrete cells it denotes together with
+   the stratum suffix of each (gh#460).
+
+   `resolve_comp_name` accepts only a single `Ir.Pop`, so a bare stratified
+   endpoint — which resolves to `Ir.PopSum` — was rejected outright, and spec
+   §25.10's central idiom (`transfer(from = S, to = V)` expanding over all
+   strata) did not work. Endpoints are a *set* of cells; carrying the suffix
+   alongside each is what lets the two endpoints be paired by stratum rather
+   than by list position. *)
+type endpoint = { ep_cells : (string * string) list }  (* (suffix, cell) *)
+
+let suffix_of ~base cell =
+  let bl = String.length base in
+  if cell = base then ""
+  else if String.length cell > bl + 1 && String.sub cell 0 bl = base
+  then String.sub cell (bl + 1) (String.length cell - bl - 1)
+  else cell
+
+(* [None] when the expression is not a compartment reference at all — the
+   caller emits E264, preserving the existing diagnostic for `from = S + R`. *)
+let resolve_action_endpoint ctx env (e : expr) : endpoint option =
+  let base = match e with
+    | EIdent (s, _)        -> Some s
+    | EIndex (s, _, _)     -> Some s
+    | _                    -> None
+  in
+  match base, resolve_expr ctx env e with
+  | Some b, Ir.Pop n     -> Some { ep_cells = [ (suffix_of ~base:b n, n) ] }
+  | Some b, Ir.PopSum ns -> Some { ep_cells = List.map (fun n -> (suffix_of ~base:b n, n)) ns }
+  | _                    -> None
+
 (* gh#204: the shared action resolver — used by both scheduled
    interventions/events and reactive policies, so the transfer-kwarg validation
    (E261/E262) and the action target check (E265) live in ONE place rather than
@@ -6242,18 +6273,77 @@ let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.a
         "intervention '%s': unknown transfer kwarg '%s'" name k)
         "valid kwargs: from, to, fraction, count"
     ) unknown;
-    let src = match List.assoc_opt "from" kwargs with
-      | Some e -> resolve_comp_name ctx env e | None -> "?" in
-    let dst = match List.assoc_opt "to" kwargs with
-      | Some e -> resolve_comp_name ctx env e | None -> "?" in
-    (match List.assoc_opt "fraction" kwargs with
-     | Some fe ->
-       [Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction = resolve_expr ctx env fe }]
-     | None ->
-       match List.assoc_opt "count" kwargs with
-       | Some ce ->
-         [Ir.AbsoluteTransfer { Ir.src; Ir.dst; Ir.count = resolve_expr ctx env ce }]
-       | None -> [])
+    (* Resolve both endpoints to their cell sets and pair by stratum (gh#460).
+       [resolve_comp_name] is still the fallback for a non-compartment
+       expression, purely so `from = S + R` keeps its E264. *)
+    let endpoint_of key =
+      match List.assoc_opt key kwargs with
+      | None   -> Some { ep_cells = [ ("", "?") ] }
+      | Some e ->
+        (match resolve_action_endpoint ctx env e with
+         | Some ep -> Some ep
+         | None    -> ignore (resolve_comp_name ctx env e); None)
+    in
+    (match endpoint_of "from", endpoint_of "to" with
+     | Some s_ep, Some d_ep ->
+       let s_sfx = List.map fst s_ep.ep_cells
+       and d_sfx = List.map fst d_ep.ep_cells in
+       if s_sfx <> d_sfx then begin
+         (* No cell-to-cell pairing exists. Pairing positionally here would
+            silently move people between unrelated strata. *)
+         let shape ep = match List.map fst ep.ep_cells with
+           | [""] -> "unstratified"
+           | sfxs -> Printf.sprintf "[%s]" (String.concat ", " sfxs) in
+         Diagnostics.error ctx.diags ~code:"E237" ~loc
+           ~message:(Printf.sprintf
+             "intervention '%s': transfer endpoints have different stratum \
+              shapes — `from` is %s but `to` is %s, so there is no \
+              cell-to-cell pairing"
+             name (shape s_ep) (shape d_ep))
+           ~hint:"give both endpoints the same dimensions, or index the \
+                  transfer explicitly (e.g. `vacc[a in age] : transfer(from = \
+                  S[a], to = V[a], …)`)"
+           ();
+         []
+       end else begin
+         let pairs = List.combine (List.map snd s_ep.ep_cells)
+                                  (List.map snd d_ep.ep_cells) in
+         match List.assoc_opt "fraction" kwargs with
+         | Some fe ->
+           (* A fraction is scale-free, so the same value applies to every
+              cell — exactly the spec §25.10 expansion. *)
+           let fraction = resolve_expr ctx env fe in
+           List.map (fun (src, dst) ->
+             Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction }) pairs
+         | None ->
+           match List.assoc_opt "count" kwargs with
+           | Some ce ->
+             (* A count is ABSOLUTE. Fanning it out would move `count` people
+                out of EVERY stratum, multiplying the intended total by the
+                number of cells — 1548× on the spec's own national example.
+                "Split proportionally" is an equally plausible reading. The
+                spec specifies only the `fraction` expansion, so rather than
+                pick one silently, make the modeller say which they meant. *)
+             if List.length pairs > 1 then begin
+               Diagnostics.error ctx.diags ~code:"E238" ~loc
+                 ~message:(Printf.sprintf
+                   "intervention '%s': `count` on a bare stratified transfer is \
+                    ambiguous — it would move %d × count individuals in total, \
+                    one count out of each of the %d strata"
+                   name (List.length pairs) (List.length pairs))
+                 ~hint:"use `fraction =` (scale-free, expands per stratum), or \
+                        index the transfer so each instance names one cell \
+                        (e.g. `vacc[a in age] : transfer(count = n, from = \
+                        S[a], to = V[a], …)`)"
+                 ();
+               []
+             end else
+               let count = resolve_expr ctx env ce in
+               List.map (fun (src, dst) ->
+                 Ir.AbsoluteTransfer { Ir.src; Ir.dst; Ir.count }) pairs
+           | None -> []
+       end
+     | _ -> [])
   | ASet (comp, idxs, expr) ->
     let concrete = concrete_action_target env comp idxs in
     check_action_target ctx ~name ~loc ~verb:"sets" ~base:comp ~concrete;
