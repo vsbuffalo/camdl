@@ -2205,6 +2205,138 @@ let test_missing_transfer_from_no_shape_cascade () =
      Alcotest.(check bool) "E261 present" true  (contains_substring ~needle:"E261" e);
      Alcotest.(check bool) "no E237 cascade" false (contains_substring ~needle:"E237" e))
 
+let test_indexed_family_bare_endpoint_rejected () =
+  (* An indexed family whose transfer endpoint is bare fans out inside EACH
+     instance, so every cell is transferred once per instance — with two strata
+     and cov = 0.5 that moves 75%, not 50%. Before bare endpoints expanded at
+     all this was E264, so without a guard the gh#460 feature turns a hard error
+     into a wrong number. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, V }
+    stratify(by = age)
+    parameters { cov : probability }
+    transitions {}
+    interventions {
+      vacc[a in age] : transfer(fraction = cov, from = S, to = V) at [1]
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E239" ~contains:"fans out" src
+
+let test_indexed_family_indexed_endpoints_still_compile () =
+  (* Positive control: the same family with binder-indexed endpoints is the
+     correct form and emits exactly one transfer per instance. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, V }
+    stratify(by = age)
+    parameters { cov : probability }
+    transitions {}
+    interventions {
+      vacc[a in age] : transfer(fraction = cov, from = S[a], to = V[a]) at [1]
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"indexed_family_ok" src with
+  | Error e -> Alcotest.failf "binder-indexed family should compile: %s" e
+  | Ok m ->
+    List.iter (fun (iv : Ir.intervention) ->
+      Alcotest.(check int)
+        (Printf.sprintf "%s applies exactly one transfer" iv.Ir.name)
+        1 (List.length iv.Ir.actions)) m.Ir.interventions
+
+let test_transfer_single_level_dimensions_rejected () =
+  (* A family with exactly ONE cell resolves to `Ir.Pop`, not `Ir.PopSum`.
+     Keying the shape on that constructor would give it no dimensions and let it
+     pair with anything — the same cross-dimension pairing E237 exists to stop,
+     just at cardinality 1. The shape must come from how the endpoint was
+     written (bare vs indexed), not from how many cells it has. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [only_a]   risk = [only_r] }
+    compartments { S, V }
+    stratify(by = age,  only = [S])
+    stratify(by = risk, only = [V])
+    parameters { cov : probability }
+    transitions {}
+    interventions { vacc : transfer(fraction = cov, from = S, to = V) at [1] }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E237" ~contains:"risk" src
+
+let test_transfer_indexed_cell_into_unstratified_compiles () =
+  (* A targeted stratum draining into a pooled compartment (`S[child] -> V`,
+     `S[p] -> Deaths`) is an ordinary single-cell transfer, not a fan-out. It
+     regressed once already while this feature was being built, so pin it. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, V }
+    stratify(by = age, only = [S])
+    parameters { cov : probability }
+    transitions {}
+    interventions { drain : transfer(fraction = cov, from = S[child], to = V) at [1] }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"asym_transfer" src with
+  | Error e -> Alcotest.failf "indexed cell into unstratified should compile: %s" e
+  | Ok m ->
+    Alcotest.(check (list (pair string string)))
+      "one transfer, S_child -> V" [ ("S_child", "V") ] (transfer_pairs m "drain")
+
+let test_staged_endpoint_hint_names_the_stage () =
+  (* A `via`-staged compartment must not leak its synthesized `__x_stage` axis
+     into the diagnostic, and the hint must be followable — "give both endpoints
+     the same dimensions" is impossible for a residence axis. *)
+  let src = {|
+    time_unit = 'days
+    compartments { S, V }
+    parameters { cov : probability  omega : rate }
+    transitions { waning : V --> S via erlang(stages = 3, rate = omega) }
+    interventions { vacc : transfer(fraction = cov, from = S, to = V) at [1] }
+    init { S = 100  V = 10 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"staged_endpoint" src in
+  Diagnostics.json_errors_mode := false;
+  (match result with
+   | Ok _ -> Alcotest.fail "expected E237 for a staged endpoint"
+   | Error e ->
+     Alcotest.(check bool) "E237" true (contains_substring ~needle:"E237" e);
+     Alcotest.(check bool) "no synthesized axis name leaked"
+       false (contains_substring ~needle:"__waning_stage" e);
+     Alcotest.(check bool) "hint names the explicit stage"
+       true (contains_substring ~needle:"V_s1" e))
+
+let test_event_bare_stratified_transfer_expands () =
+  (* events {} shares the action resolver, so it must fan out identically. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, V }
+    stratify(by = age)
+    parameters { cov : probability }
+    transitions {}
+    events { leak : transfer(fraction = cov, from = S, to = V) at [1] }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"event_transfer" src with
+  | Error e -> Alcotest.failf "event bare stratified transfer should expand: %s" e
+  | Ok m ->
+    Alcotest.(check (list (pair string string)))
+      "one paired transfer per stratum"
+      [ ("S_child", "V_child"); ("S_adult", "V_adult") ]
+      (transfer_pairs m "leak")
+
 let test_bare_stratified_transfer_count_rejected () =
   (* `count` is an ABSOLUTE quantity, so expanding it per stratum silently
      multiplies the total by the number of strata. The spec's §25.10 example
@@ -10133,6 +10265,18 @@ let () =
         `Quick test_missing_transfer_from_no_shape_cascade;
       Alcotest.test_case "E238 bare stratified transfer with count (gh#460)"
         `Quick test_bare_stratified_transfer_count_rejected;
+      Alcotest.test_case "E239 bare endpoint inside an indexed family (gh#460)"
+        `Quick test_indexed_family_bare_endpoint_rejected;
+      Alcotest.test_case "E237 single-level dimensions still compared (gh#460)"
+        `Quick test_transfer_single_level_dimensions_rejected;
+      Alcotest.test_case "indexed cell into unstratified compiles (gh#460)"
+        `Quick test_transfer_indexed_cell_into_unstratified_compiles;
+      Alcotest.test_case "staged endpoint hint names the stage (gh#460)"
+        `Quick test_staged_endpoint_hint_names_the_stage;
+      Alcotest.test_case "events {} bare stratified transfer expands (gh#460)"
+        `Quick test_event_bare_stratified_transfer_expands;
+      Alcotest.test_case "binder-indexed family emits one transfer each (gh#460)"
+        `Quick test_indexed_family_indexed_endpoints_still_compile;
       Alcotest.test_case "unstratified transfer unchanged (gh#460)"
         `Quick test_unstratified_transfer_unchanged;
       Alcotest.test_case "unstratified count transfer still allowed (gh#460)"

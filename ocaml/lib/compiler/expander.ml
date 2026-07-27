@@ -6231,13 +6231,19 @@ type endpoint = {
 (* [None] when the expression is not a compartment reference at all — the
    caller emits E264, preserving the existing diagnostic for `from = S + R`. *)
 let resolve_action_endpoint ctx env (e : expr) : endpoint option =
-  let base = match e with
-    | EIdent  (s, _)    -> Some s
-    | EIndex  (s, _, _) -> Some s
-    | _                 -> None
+  let base, bare = match e with
+    | EIdent  (s, _)    -> Some s, true    (* `S`    — the whole family *)
+    | EIndex  (s, _, _) -> Some s, false   (* `S[c]` — one named cell *)
+    | _                 -> None,   false
   in
+  (* The dimensions come from the DECLARATION, and whether they apply depends on
+     how the endpoint was written, not on how many cells it happens to have.
+     `resolve_expr` returns [Ir.Pop] rather than [Ir.PopSum] for a family with
+     exactly one cell, so keying on the constructor would give a one-level
+     dimension `ep_dims = []` and let it pair with anything. *)
+  let dims_of b = if bare then comp_dims ctx b else [] in
   match base, resolve_expr ctx env e with
-  | Some b, Ir.Pop n     -> Some { ep_base = b; ep_dims = []; ep_cells = [n] }
+  | Some b, Ir.Pop n     -> Some { ep_base = b; ep_dims = dims_of b; ep_cells = [n] }
   | Some b, Ir.PopSum ns -> Some { ep_base = b; ep_dims = comp_dims ctx b; ep_cells = ns }
   | _                    -> None
 
@@ -6253,7 +6259,7 @@ type transfer_amount = TFraction of expr | TCount of expr
    (E261/E262) and the action target check (E265) live in ONE place rather than
    forking across the two fire sources. [name] is the expanded instance name
    (for diagnostics); [loc] its source location. *)
-let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.action list =
+let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : action_decl) : Ir.action list =
   match action with
   | ATransfer kwargs ->
     let has_from     = List.mem_assoc "from"     kwargs in
@@ -6315,19 +6321,62 @@ let resolve_intervention_action ctx env ~name ~loc (action : action_decl) : Ir.a
           dimensions that share level names and transfer across them silently
           (gh#459's hazard); comparing declarations cannot. *)
        if s_ep.ep_dims <> d_ep.ep_dims then begin
-         let shape ep = match ep.ep_dims with
+         (* A `via erlang(...)` / `via hyper_erlang(...)` residence axis is
+            synthesized as `__<transition>_stage` (see the dim_name built during
+            via lowering). It is private to that transition and never pairs with
+            anything, so naming it in the diagnostic would show the user an
+            identifier they never wrote and the generic "give both endpoints the
+            same dimensions" advice would be impossible to follow. Point at the
+            explicit stage cell instead, per spec §9.4.1. *)
+         let staged ep =
+           List.exists (fun d -> String.length d > 2 && String.sub d 0 2 = "__")
+             ep.ep_dims in
+         let shape ep =
+           if staged ep then
+             Printf.sprintf "'%s' (given a staged residence by `via`)" ep.ep_base
+           else match ep.ep_dims with
            | []   -> Printf.sprintf "'%s' (unstratified, or a single cell)" ep.ep_base
            | dims -> Printf.sprintf "'%s' stratified by [%s]"
                        ep.ep_base (String.concat ", " dims) in
+         let hint =
+           if staged s_ep || staged d_ep then
+             Printf.sprintf
+               "a `via`-staged compartment is expanded over a residence axis \
+                private to its own transition, so it never pairs with another \
+                endpoint — name the explicit stage instead (e.g. `%s_s1`)"
+               (if staged d_ep then d_ep.ep_base else s_ep.ep_base)
+           else
+             "give both endpoints the same dimensions, or index the transfer \
+              explicitly (e.g. `vacc[a in age] : transfer(from = S[a], to = \
+              V[a], …)`)" in
          Diagnostics.error ctx.diags ~code:"E237" ~loc
            ~message:(Printf.sprintf
              "intervention '%s': transfer endpoints have different stratum \
               shapes — `from` is %s but `to` is %s, so there is no \
               cell-to-cell pairing"
              name (shape s_ep) (shape d_ep))
-           ~hint:"give both endpoints the same dimensions, or index the \
-                  transfer explicitly (e.g. `vacc[a in age] : transfer(from = \
-                  S[a], to = V[a], …)`)"
+           ~hint
+           ();
+         []
+       end else if binders <> [] && List.length s_ep.ep_cells > 1 then begin
+         (* A bare endpoint inside an INDEXED family fans out per instance, so
+            every cell receives the transfer once per instance — N× the intended
+            movement. Before bare endpoints expanded at all this was E264, so
+            without this guard the feature converts a hard error into a wrong
+            number. Inside `vacc[a in age]`, a bare `S` means `S[a]`; requiring
+            the modeller to write it keeps the meaning on the page. *)
+         Diagnostics.error ctx.diags ~code:"E239" ~loc
+           ~message:(Printf.sprintf
+             "intervention family '%s[%s]' expands to one instance per stratum, \
+              but its transfer endpoint '%s' is bare and fans out over all %d \
+              cells — every instance would move the same individuals again"
+             family (String.concat ", " binders) s_ep.ep_base
+             (List.length s_ep.ep_cells))
+           ~hint:(Printf.sprintf
+             "index the endpoints with the family's binder (e.g. `from = %s[%s], \
+              to = %s[%s]`), or drop the `[%s]` binder to fan out once"
+             s_ep.ep_base (List.hd binders) d_ep.ep_base (List.hd binders)
+             (String.concat ", " binders))
            ();
          []
        end else begin
@@ -6483,7 +6532,8 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
       in
       let actions =
         List.concat_map
-          (resolve_intervention_action ctx env ~name:iv_name ~loc:iv_loc)
+          (resolve_intervention_action ctx env ~name:iv_name ~family:iv.ivname
+             ~loc:iv_loc ~binders:(loop_vars_of_indices iv.ivindices))
           iv.ivaction
       in
       Some { Ir.name = iv_name; Ir.base_name; Ir.fire = Ir.Scheduled schedule;
@@ -6696,7 +6746,8 @@ let expand_reactive ctx decls =
                  repeating rate-limited policy set once = false"
           ();
       let actions =
-        resolve_intervention_action ctx env ~name:rx_name ~loc:rx_loc rx.rxaction
+        resolve_intervention_action ctx env ~name:rx_name ~family:rx.rxname
+          ~loc:rx_loc ~binders:(loop_vars_of_indices rx.rxindices) rx.rxaction
       in
       let trigger : Ir.reactive_trigger =
         { Ir.when_; Ir.after; Ir.once; Ir.cooldown }
