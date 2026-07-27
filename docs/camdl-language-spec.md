@@ -2009,10 +2009,11 @@ branch labels are `E258`.
 asymmetric with reading it. `init` and inflow transitions (`--> E`) land in
 **stage 1** automatically — write the bare name and the compiler routes the
 arrival to `E_s1`. An intervention is stricter: `transfer(to = E)` naming the
-bare staged compartment is `E264`, because the bare name resolves to the sum
-over stages (`E_s1 + E_s2 + …`), which is not a single cell to add to — name the
-explicit stage (`transfer(to = E_s1, …)`) instead. Reads are unaffected: a bare
-`E` or `prevalence(E)` still sums every stage (the bare-name rule, §5.1).
+bare staged compartment is **`E237`**, because the stage axis is synthesized per
+`via` transition and is private to it, so it never pairs cell-for-cell with the
+other endpoint's shape — name the explicit stage (`transfer(to = E_s1, …)`)
+instead, which is what the diagnostic's hint suggests. Reads are unaffected: a
+bare `E` or `prevalence(E)` still sums every stage (the bare-name rule, §5.1).
 
 #### 9.4.2 Aging across a stratified model (canonical use case)
 
@@ -2834,6 +2835,33 @@ The compiler verifies both verbs' targets against the expanded compartment
 table and rejects a stratified family or an unknown name with **E265**; the
 family case lists the available cells. (Index-binder forms like `I[child, p1]`
 on the left of a `set` are not part of the grammar.)
+
+**Pairing rule for a bare stratified `transfer`.** The two endpoints pair
+cell-for-cell, and may do so only when they are **declared with the same
+dimensions, in the same order**. The compiler compares declared dimension
+vectors, not expanded cell names, so two different dimensions that share level
+names (`age = [low, high]` against `risk = [low, high]`) never pair silently. A
+mismatch — one endpoint stratified and the other not, different dimensions, or
+the same dimensions in a different order — is **E237**, which names both shapes.
+A fully-indexed endpoint denotes one cell and carries no dimensions, so
+`transfer(from = S[child], to = S[adult])` and `transfer(from = S[child], to =
+V)` with `V` unstratified are ordinary single-cell transfers, not fan-outs. The
+`fraction` is one expression shared by every cell; for coverage that varies by
+stratum, write the indexed family form (§13.3).
+
+**A bare endpoint inside an indexed family is an error.** `vacc[a in age] :
+transfer(from = S, to = V)` would fan out over every cell *within each
+instance*, transferring each cell once per instance — with `P` strata the
+realised coverage is `1 − (1 − f)^P`, not `f`. That is **E239**; write
+`from = S[a], to = V[a]`, or drop the `[a in age]` binder to fan out once.
+
+**`count` does not fan out.** A fraction is scale-free, so the same value
+applies to every cell. A count is absolute: applying it per cell would move
+`count` individuals out of *each* stratum, multiplying the intended total by the
+number of cells — 1548× on the national example in §25.10. `count` on a bare
+stratified transfer is therefore **E238**. Write `fraction =`, or index the
+transfer so each instance names one cell. `count` is unrestricted wherever the
+transfer resolves to a single cell.
 
 ### 13.2 Scheduling
 
@@ -5105,6 +5133,10 @@ sia_round_1 : transfer(fraction = 0.80, from = S, to = V) at [180]
 
 Each `FractionTransfer` is atomic: `delta = floor(source * fraction)` from
 pre-intervention state, then `source -= delta, dest += delta`.
+
+Endpoints pair only when both are declared with the same dimensions in the same
+order; anything else is **E237**. `count =` on this bare form is **E238**, and a
+bare endpoint inside an indexed family is **E239** (all three: §13.1).
 
 ---
 

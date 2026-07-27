@@ -13,6 +13,43 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-07-27 — bare stratified `transfer(from = S, to = V)` expands per stratum
+
+**What.** A `transfer` endpoint may now name a bare stratified compartment. The
+action expands to one atomic transfer per cell, paired cell-for-cell, in every
+block that carries actions — `interventions {}`, `events {}`, and
+`reactive_interventions {}`. With `age = [child, adult]`,
+`vacc : transfer(fraction = cov, from = S, to = V) at [1]` emits
+`FractionTransfer(S_child, V_child, cov)` and
+`FractionTransfer(S_adult, V_adult, cov)`.
+
+This is a **widening** — the bare form was previously rejected with `E264`, so
+no model that compiled before is rejected now. The explicitly indexed form
+(`vacc[a in age] : transfer(from = S[a], to = V[a], …)`) is unchanged, as are
+single-cell transfers across strata (`from = S[child], to = S[adult]`) and into
+an unstratified compartment (`from = S[child], to = V`).
+
+**Four forms that used to report `E264` now report a specific code.**
+
+- Endpoints with different shapes — one stratified and one not, different
+  dimensions, or the same dimensions in a different order — are **E237**. The
+  check compares _declared dimension vectors_, so two dimensions sharing level
+  names (`age = [low, high]` vs `risk = [low, high]`) do not silently pair.
+- `count =` on a bare stratified transfer is **E238**: a count is absolute, so
+  fanning it out would move `count` individuals out of _every_ stratum.
+  _Migration._ `transfer(count = n, from = S, to = V)` →
+  `transfer(fraction = f, from = S, to = V)`, or
+  `vacc[a in age] : transfer(count = n, from = S[a], to = V[a])`.
+- A bare endpoint inside an **indexed family** is **E239**: it would fan out
+  within each instance, transferring every cell once per instance. _Migration._
+  `vacc[a in age] : transfer(from = S, to = V)` →
+  `vacc[a in age] : transfer(from = S[a], to = V[a])`, or drop the binder.
+- A bare **staged** compartment (`via erlang(...)`, spec §9.4) as an endpoint is
+  **E237** rather than `E264`. _Migration._ `transfer(to = E)` →
+  `transfer(to = E_s1)`.
+
+---
+
 ## 2026-07-12 — indexed parameters accept multiple dimensions
 
 **What.** A parameter declaration may now index over more than one dimension,
