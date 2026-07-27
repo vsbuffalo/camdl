@@ -1,44 +1,61 @@
 ---
-status: triaged
+status: triaged; 3 of 6 fixed
 date: 2026-07-19
 kind: compiler/spec review
 scope: OCaml compiler against `docs/camdl-language-spec.md`
 reviewer: Codex
 methodology: static audit of parser/AST/expander/validator plus targeted `camdlc check` repros; Rust runtime reviewed only where needed to compare validator coverage
 counts: 4 High / 2 Medium + 4 maintainability notes
-triage: all six re-reproduced against 84c3341e; filed gh#459-465
+triage: all six re-reproduced against 84c3341e; filed gh#459-465; 3, 4, 6 fixed in PR#477
 ---
 
 ## Triage (2026-07-24, against `84c3341e`)
 
-Every finding was re-run as a `camdlc check` repro. All six reproduce; none had
-been fixed. Filed:
+Every finding was re-run as a `camdlc check` repro. **All six reproduced; none
+had been fixed.** Findings 3, 4 and 6 are now fixed (PR#477, merged
+`85858629..c9300939`); 1, 2 and 5 remain open.
 
-| # | Issue                                                   | Title                                      |
-| - | ------------------------------------------------------- | ------------------------------------------ |
-| 1 | [gh#459](https://github.com/vsbuffalo/camdl/issues/459) | Named indexing resolved positionally       |
-| 2 | [gh#460](https://github.com/vsbuffalo/camdl/issues/460) | Bare stratified `transfer` rejected (E264) |
-| 3 | [gh#461](https://github.com/vsbuffalo/camdl/issues/461) | `set`/`add` action targets unvalidated     |
-| 4 | [gh#462](https://github.com/vsbuffalo/camdl/issues/462) | Event/reactive `where` guards skip E217    |
-| 5 | [gh#463](https://github.com/vsbuffalo/camdl/issues/463) | `hyper_erlang` rewrite misses action exprs |
-| 6 | [gh#464](https://github.com/vsbuffalo/camdl/issues/464) | `time_unit` accepts non-time units         |
+| # | Issue                                                   | Title                                      | State                |
+| - | ------------------------------------------------------- | ------------------------------------------ | -------------------- |
+| 1 | [gh#459](https://github.com/vsbuffalo/camdl/issues/459) | Named indexing resolved positionally       | open — see caveat §1 |
+| 2 | [gh#460](https://github.com/vsbuffalo/camdl/issues/460) | Bare stratified `transfer` rejected (E264) | open                 |
+| 3 | [gh#461](https://github.com/vsbuffalo/camdl/issues/461) | `set`/`add` action targets unvalidated     | **fixed** (PR#477)   |
+| 4 | [gh#462](https://github.com/vsbuffalo/camdl/issues/462) | Event/reactive `where` guards skip E217    | **fixed** (PR#477)   |
+| 5 | [gh#463](https://github.com/vsbuffalo/camdl/issues/463) | `hyper_erlang` rewrite misses action exprs | open                 |
+| 6 | [gh#464](https://github.com/vsbuffalo/camdl/issues/464) | `time_unit` accepts non-time units         | **fixed** (PR#477)   |
 
-Two corrections to the review as written.
+### One sub-claim did not survive verification
 
-Finding 1's **"additional drift"** sub-claim — that `S[patch = north]` in a rate
-expression should pin-and-sum — is a misread.
-`docs/camdl-language-spec.md:815-820` specifies E287 for a partial compartment
-index, so the compiler is correct there. The core of finding 1
-(order-dependence) stands and is the most serious of the six.
+**Finding 1, "Additional drift" — NOT A DEFECT.** The claim that
+`S[patch = north]` in a rate expression should pin the named dimension and sum
+over the rest is a misread of the spec. `docs/camdl-language-spec.md:815-820`
+specifies E287 for a partial compartment index in so many words: "a partial
+index has no defined cell; the bare name S sums, but `S[child]` neither sums nor
+picks a cell". The compiler's E287 is correct. Marked inline at the finding.
 
-That misread exposed a real doc-vs-doc bug: §12.1 line 2517 says a named index
-"sums over the rest" while line 2578 of the same section says "a partial index
-does not marginalize". Filed as
-[gh#465](https://github.com/vsbuffalo/camdl/issues/465).
+Everything else in the review verified. In particular both `Fix` sections that
+prescribe two-layer work were **already complete and correct** as written —
+finding 3 names `ocaml/lib/ir/validate.ml` alongside the expander change, and
+finding 5 names `ATransfer` `fraction`/`count` alongside `ASet`/`AAdd`. Only
+finding 5's _repro_ is narrower than its defect: it shows `add`, but the
+`count =` kwarg fails identically.
 
-Maintainability notes A–D all still hold: `expander.ml` is 9158 lines,
-`index_item_to_str` has 18 call sites, `eval_guard` still returns a bare `bool`
-(`expander.ml:3076`).
+### What the misread exposed
+
+Chasing that sub-claim surfaced a genuine doc-vs-doc bug the review did not
+name: §12.1 line 2517 describes a named index as pinning "and summing over the
+rest (order-independent)", while line 2578 of the same section says "A partial
+index does not marginalize". Both cannot hold. The code sides with 2578. Filed
+as [gh#465](https://github.com/vsbuffalo/camdl/issues/465) — worth fixing before
+gh#459, whose resolver has to implement whichever rule the spec settles on.
+
+### Maintainability notes
+
+A–D all still hold: `expander.ml` is 9158 lines, `index_item_to_str` has 18 call
+sites, `eval_guard` still returns a bare `bool` (`expander.ml:3076`). Note D
+(source locations on action errors) is partly addressed — the E265 and guard
+diagnostics added in PR#477 are located, and `check_guards` now supplies a
+`~loc` on the intervention arm, which it previously omitted.
 
 # OCaml compiler review against language spec - 2026-07-19
 
@@ -112,10 +129,38 @@ incidence(infection[patch = p])
 The current expression resolver rejects this with E287 for compartments because
 it treats it as a partial positional index, not a named projection/marginal.
 
+> **[TRIAGE 2026-07-24: NOT A DEFECT — this sub-claim is withdrawn.]** The spec
+> does not say this for compartments. `docs/camdl-language-spec.md:815-820`
+> specifies E287 for a partial index explicitly: "a partial index has no defined
+> cell; the bare name S sums, but `S[child]` neither sums nor picks a cell." The
+> compiler is correct to reject `S[patch = north]`. The premise came from §12.1
+> line 2517, which describes a named index as summing over the rest — and which
+> line 2578 of the same section contradicts. That contradiction is a real bug in
+> the spec, filed as gh#465, but it is not a compiler defect. **The rest of
+> finding 1 (order-dependence) stands and is confirmed** — see the verification
+> note below.
+
 **Why it matters** - Named indexing is the safe form the spec tells users to
 prefer for multidimensional models. The compiler currently rejects valid models
 and can misbind any case where a reversed named selector happens to form an
 existing concrete suffix.
+
+**[TRIAGE 2026-07-24: CONFIRMED, and it reaches further than the repro shows.]**
+The order-dependence also breaks the **observation** path, which is precisely
+where the spec pushes named indexing hardest (line 2590: prefer named because it
+"survives a later reordering of the dimension declarations"). On a
+`[age, patch]` family:
+
+```text
+incidence(infection[patch = north, age = child])
+  → error[E507]: unknown transition referenced in observation: 'infection_north_child'
+incidence(infection[age = child, patch = north])
+  → no errors
+```
+
+The spec promises order-independence in three separate places — lines 827, 2517
+and 2590 — and the compiler delivers the opposite at every one. Tracked as
+gh#459.
 
 **Fix** - Replace `index_item_to_str` for semantic resolution with a typed
 selector resolver:
@@ -135,6 +180,10 @@ projection/marginal contexts, arity errors where the spec requires full
 coordinates.
 
 ### 2. Bare stratified `transfer(from = S, to = V)` is rejected instead of expanded
+
+> **[TRIAGE 2026-07-24: CONFIRMED — open, gh#460.]** Reproduced verbatim; still
+> `error[E264]: expected a bare compartment name, got a sum of populations
+> (PopSum)`.
 
 **Location** - `ocaml/lib/compiler/expander.ml:5310-5340`,
 `ocaml/lib/compiler/expander.ml:6110-6120`
@@ -181,6 +230,12 @@ endpoints must expand to the same stratum shape, then emit paired transfers over
 that shape.
 
 ### 3. Action target validation is incomplete for `set` and absent for `add`
+
+> **[TRIAGE 2026-07-24: CONFIRMED — FIXED in PR#477, gh#461.]** Both repros
+> reproduced (`I = 0` on a stratified family and `add(Z, 1)` both exited 0). The
+> `Fix` below was complete as written: the OCaml validator did have zero
+> intervention coverage while the Rust one checked all four action targets, and
+> both layers were implemented.
 
 **Location** - `ocaml/lib/compiler/expander.ml:6122-6141`,
 `ocaml/lib/ir/validate.ml:108-212`
@@ -243,6 +298,10 @@ base name as a concrete target.
 
 ### 4. Event and reactive `where` guards skip compile-time guard validation
 
+> **[TRIAGE 2026-07-24: CONFIRMED — FIXED in PR#477, gh#462.]** Reproduced; the
+> event-block model compiled clean while the identical intervention-block guard
+> errored E217. `check_guards` now walks all four guard-carrying surfaces.
+
 **Location** - `ocaml/lib/compiler/parser.mly:902-935`,
 `ocaml/lib/compiler/parser.mly:948-970`, `ocaml/lib/compiler/ast.ml:404-413`,
 `ocaml/lib/compiler/expander.ml:3055-3063`,
@@ -304,6 +363,11 @@ Also consider making `eval_guard` return an error-aware result instead of a bare
 
 ### 5. `hyper_erlang` bare-source rewrite misses action expressions
 
+> **[TRIAGE 2026-07-24: CONFIRMED — open, gh#463.]** Reproduced
+> (`error[E100]: undeclared name 'I'`). The `Fix` below is correctly scoped;
+> only the repro is narrower than the defect — `transfer(count = I)` fails
+> identically to the `add(S, I)` shown.
+
 **Location** - `ocaml/lib/compiler/expander.ml:1236-1256`,
 `ocaml/lib/compiler/expander.ml:1752-1794`,
 `ocaml/lib/compiler/expander.ml:6074-6141`
@@ -358,6 +422,10 @@ the whole surface AST.
 implemented for finding 2, it should share the same lowered-source awareness.
 
 ### 6. `time_unit` accepts non-time units
+
+> **[TRIAGE 2026-07-24: CONFIRMED — FIXED in PR#477, gh#464.]** Both `'count`
+> and `'per_day` compiled clean, and forcing a conversion produced the predicted
+> bare `E001 Invalid_argument`. Now a located **E228** at the declaration.
 
 **Location** - `ocaml/lib/compiler/parser.mly:231-233`,
 `ocaml/lib/compiler/parser.mly:291-302`,
