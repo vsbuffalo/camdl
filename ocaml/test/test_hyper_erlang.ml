@@ -475,6 +475,133 @@ let test_no_via_model_compiles_plain () =
   Alcotest.(check int) "3 compartments" 3 (List.length m.Ir.compartments);
   Alcotest.(check int) "2 transitions" 2 (List.length m.Ir.transitions)
 
+(* ── gh#463: the bare-source rewrite must reach ACTION expressions ───────────
+   `hyper_erlang` deletes the base source compartment and replaces it with flat
+   per-branch stage cells, so every surviving bare `I` in an expression has to be
+   rewritten into the sum over those cells. The pass covered transition rates,
+   lets, init, balance and observations, but not intervention / event / reactive
+   action operands — so a pre-macro-valid expression became invalid after
+   lowering (`error[E100]: undeclared name 'I'`).
+
+   Endpoints (`from =` / `to =`) are deliberately NOT rewritten: those name a
+   compartment, and a staged source has no single cell to name. That is gh#460's
+   territory.                                                               ── *)
+
+let hyper_model_with_block block =
+  Printf.sprintf
+    "time_unit = 'days\n\
+     compartments { S, I, R }\n\
+     parameters {\n\
+    \  beta : rate  p : probability  tau_a : duration  tau_b : duration\n\
+     }\n\
+     transitions {\n\
+    \  infection : S --> I @ beta * S\n\
+    \  clearance : I --> R via hyper_erlang(\n\
+    \    branch(label = a, weight = p, stages = 1, mean = tau_a),\n\
+    \    branch(label = b, stages = 1, mean = tau_b)\n\
+    \  )\n\
+     }\n\
+     %s\n\
+     init { S = 100  I = 10 }\n\
+     simulate { from = 0 'days to = 10 'days }\n"
+    block
+
+(* Every stage cell the mixture creates, i.e. what a bare `I` must expand to. *)
+let stage_cells m =
+  List.filter
+    (fun n -> String.length n > 3 && String.sub n 0 3 = "I__")
+    (comp_names m)
+
+let action_expr_of_intervention (m : Ir.model) name =
+  let iv =
+    match List.find_opt (fun (i : Ir.intervention) -> i.Ir.name = name) m.Ir.interventions with
+    | Some i -> i
+    | None -> Alcotest.failf "no intervention named %S" name
+  in
+  match iv.Ir.actions with
+  | [ Ir.AddAction a ]         -> a.Ir.add_count
+  | [ Ir.Set s ]               -> s.Ir.value
+  | [ Ir.AbsoluteTransfer t ]  -> t.Ir.count
+  | [ Ir.FractionTransfer t ]  -> t.Ir.fraction
+  | _ -> Alcotest.failf "intervention %S: expected exactly one action" name
+
+(* The rewritten operand must name every stage cell and no bare `I`. *)
+let check_operand_rewritten m ~label expr =
+  let cells = stage_cells m in
+  Alcotest.(check bool)
+    (label ^ ": mixture produced stage cells") true (cells <> []);
+  let names = pop_names [] expr in
+  Alcotest.(check bool)
+    (label ^ ": no bare 'I' survives") false (List.mem "I" names);
+  List.iter
+    (fun c ->
+      Alcotest.(check bool)
+        (Printf.sprintf "%s: operand sums %s" label c) true (List.mem c names))
+    cells
+
+let test_add_count_operand_rewritten () =
+  let m = compile_ok (hyper_model_with_block
+    "interventions {\n\
+    \  pulse : add(S, I) at [1]\n\
+     }") in
+  check_operand_rewritten m ~label:"add count" (action_expr_of_intervention m "pulse")
+
+let test_set_value_operand_rewritten () =
+  let m = compile_ok (hyper_model_with_block
+    "interventions {\n\
+    \  zap : { S = I at = [1] }\n\
+     }") in
+  check_operand_rewritten m ~label:"set value" (action_expr_of_intervention m "zap")
+
+let test_transfer_count_operand_rewritten () =
+  let m = compile_ok (hyper_model_with_block
+    "interventions {\n\
+    \  pull : transfer(from = S, to = R, count = I) at [1]\n\
+     }") in
+  check_operand_rewritten m ~label:"transfer count" (action_expr_of_intervention m "pull")
+
+let test_event_action_operand_rewritten () =
+  (* Events share the action grammar, so they must share the rewrite. *)
+  let m = compile_ok (hyper_model_with_block
+    "events {\n\
+    \  seed : add(S, I) at [1]\n\
+     }") in
+  check_operand_rewritten m ~label:"event add count" (action_expr_of_intervention m "seed")
+
+let test_action_endpoints_not_rewritten () =
+  (* Negative control: the rewrite must touch operands only. `from`/`to` still
+     name plain compartments, unchanged by the mixture lowering. *)
+  let m = compile_ok (hyper_model_with_block
+    "interventions {\n\
+    \  pull : transfer(from = S, to = R, count = I) at [1]\n\
+     }") in
+  let iv = List.find (fun (i : Ir.intervention) -> i.Ir.name = "pull") m.Ir.interventions in
+  match iv.Ir.actions with
+  | [ Ir.AbsoluteTransfer t ] ->
+    Alcotest.(check string) "src untouched" "S" t.Ir.src;
+    Alcotest.(check string) "dst untouched" "R" t.Ir.dst
+  | _ -> Alcotest.fail "expected a single AbsoluteTransfer"
+
+let test_non_hyper_action_operand_untouched () =
+  (* Regression: with no `via` in the model, action operands are left alone. *)
+  let src =
+    "time_unit = 'days\n\
+     compartments { S, I, R }\n\
+     parameters { beta : rate  gamma : rate }\n\
+     transitions {\n\
+    \  infection : S --> I @ beta * S\n\
+    \  recovery  : I --> R @ gamma * I\n\
+     }\n\
+     interventions {\n\
+    \  pulse : add(S, I) at [1]\n\
+     }\n\
+     init { S = 990  I = 10 }\n\
+     simulate { from = 0 'days to = 10 'days }\n"
+  in
+  let m = compile_ok src in
+  let names = pop_names [] (action_expr_of_intervention m "pulse") in
+  Alcotest.(check bool) "plain model keeps bare I" true (List.mem "I" names)
+
 let () =
   Alcotest.run "hyper_erlang"
     [ ( "polio-same-endpoint",
@@ -531,6 +658,19 @@ let () =
       ( "deferred-stratified",
         [ Alcotest.test_case "stratified hyper_erlang → E248" `Quick
             test_err_stratified_hyper_deferred ] );
+      ( "action-operand-rewrite-gh463",
+        [ Alcotest.test_case "add(_, I) count operand sums stages" `Quick
+            test_add_count_operand_rewritten;
+          Alcotest.test_case "set value operand sums stages" `Quick
+            test_set_value_operand_rewritten;
+          Alcotest.test_case "transfer count operand sums stages" `Quick
+            test_transfer_count_operand_rewritten;
+          Alcotest.test_case "events {} action operand sums stages" `Quick
+            test_event_action_operand_rewritten;
+          Alcotest.test_case "transfer from/to endpoints NOT rewritten" `Quick
+            test_action_endpoints_not_rewritten ] );
       ( "regression",
         [ Alcotest.test_case "no-via model compiles plain" `Quick
-            test_no_via_model_compiles_plain ] ) ]
+            test_no_via_model_compiles_plain;
+          Alcotest.test_case "no-via action operand untouched" `Quick
+            test_non_hyper_action_operand_untouched ] ) ]

@@ -1838,6 +1838,27 @@ let lower_via_transitions ctx =
             { od with oprojection; omeasurement }
           ) ctx.obs_decls;
 
+          (* 6b. Action operands are ordinary expressions too, so a bare [src]
+                 in one must be rewritten like any other (gh#463). Rewrite the
+                 VALUE operands only — `set`/`add` amounts and a transfer's
+                 `fraction`/`count`. Endpoints (`from =` / `to =`) name a
+                 compartment, and a staged source has no single cell to name;
+                 rewriting them to a sum would only turn E100 into E264.
+                 Expanding a staged endpoint is gh#460's job. *)
+          let rw_action = function
+            | ATransfer kwargs ->
+              ATransfer (List.map (fun (k, e) ->
+                if k = "fraction" || k = "count" then (k, rw e) else (k, e)) kwargs)
+            | ASet (c, idxs, e) -> ASet (c, idxs, rw e)
+            | AAdd (c, idxs, e) -> AAdd (c, idxs, rw e)
+          in
+          let rw_iv (iv : intervention_decl) =
+            { iv with ivaction = List.map rw_action iv.ivaction } in
+          ctx.interv_decls   <- List.map rw_iv ctx.interv_decls;
+          ctx.event_decls    <- List.map rw_iv ctx.event_decls;
+          ctx.reactive_decls <- List.map (fun (rx : reactive_decl) ->
+            { rx with rxaction = rw_action rx.rxaction }) ctx.reactive_decls;
+
           (* 7. Remove the now-replaced base compartment [src] — its flat per-branch
                 cells carry the whole population, and a surviving bare `src`
                 compartment would shadow the Add-chain (and dangle, since no
