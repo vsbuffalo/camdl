@@ -74,6 +74,27 @@ fn param(name: &str, value: f64) -> Parameter {
 // OobPolicy::Error, tearing down the whole process — one bad particle could
 // crash an entire inference run. The fix routes it through the existing typed-
 // error boundary (eval_propensities): it must return a SimError, not panic.
+// ── Serialization for the degenerate-rate tests (gh#481) ─────────────────────
+//
+// `sim::eval_stats::allow_degenerate_rates` is a PROCESS-GLOBAL, and `cargo
+// test` runs the tests in a binary on parallel threads, so the tests below
+// clobber each other: one sets it `true` while another is mid-assertion that a
+// degenerate rate is *rejected*, and that one fails with the value allowed
+// through. Hold this lock for the whole of any test that touches the flag.
+//
+// The flag itself is deliberately left global — it is set once from the CLI at
+// startup and read by rayon workers, so making it thread-local would change
+// runtime semantics to fix a test-harness problem.
+static DEGENERATE_RATES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// Poison-tolerant: a genuine failure in one of these tests must not cascade
+// into six more by poisoning the mutex.
+fn degenerate_rates_guard() -> std::sync::MutexGuard<'static, ()> {
+    DEGENERATE_RATES_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn test_runtime_oob_table_lookup_returns_err_not_panic() {
     use ir::{
@@ -324,6 +345,7 @@ fn test_binop_div() {
 
 #[test]
 fn test_div_by_zero_errors_by_default() {
+    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1: division by zero used to silently return 0.0
     // (wrapped in Ok(_)) — masking malformed rate expressions. Now
     // it returns SimError::NumericalCollapse{DivByZero} by default;
@@ -585,6 +607,7 @@ fn test_binop_le() {
 
 #[test]
 fn test_log_nonpositive_errors_by_default() {
+    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1, item 17: `log(x ≤ 0)` is a domain error (no real
     // result), exactly like `sqrt(neg)` — it must route through the same typed
     // NumericalCollapse under the strict default, NOT silently return −inf.
@@ -611,6 +634,7 @@ fn test_log_nonpositive_errors_by_default() {
 
 #[test]
 fn test_sqrt_negative_errors_by_default() {
+    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1.
     use sim::{CollapseKind, SimError};
     let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();
@@ -634,6 +658,7 @@ fn test_sqrt_negative_errors_by_default() {
 // `is_nan` boundary guard is now caught and surfaced as a typed collapse.
 #[test]
 fn test_log_nonpositive_rate_errors_via_eval_propensities() {
+    let _degenerate_rates_guard = degenerate_rates_guard();
     use ir::transition::{StoichiometryEntry, Transition};
     use sim::propensity::eval_propensities;
 
@@ -682,6 +707,7 @@ fn test_log_nonpositive_rate_errors_via_eval_propensities() {
 // `is_finite` boundary guard must reject it rather than push +inf.
 #[test]
 fn test_infinite_propensity_is_rejected() {
+    let _degenerate_rates_guard = degenerate_rates_guard();
     use ir::transition::{StoichiometryEntry, Transition};
     use sim::propensity::eval_propensities;
 
@@ -718,6 +744,7 @@ fn test_infinite_propensity_is_rejected() {
 
 #[test]
 fn test_pow_negative_base_fractional_exp_errors_by_default() {
+    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1.
     use sim::{CollapseKind, SimError};
     let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();
@@ -742,6 +769,7 @@ fn test_pow_negative_base_fractional_exp_errors_by_default() {
 
 #[test]
 fn test_pow_zero_to_negative_errors_by_default() {
+    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1.
     use sim::{CollapseKind, SimError};
     let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();
