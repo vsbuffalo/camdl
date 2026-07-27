@@ -842,6 +842,24 @@ Positional and named indexing can be mixed: `S[child, sex = female]` is valid
 (first positional = age, second named = sex). But for clarity, use one style
 consistently.
 
+> **Status (gh#459).** The two paragraphs above describe the specified
+> behaviour; neither is implemented yet. The compiler discards the dimension
+> label and lowers named indices by **source order**, so it performs no
+> membership check and order does matter:
+>
+> ```text
+> # dimensions declared [age, patch]
+> S[age = child, patch = north]   → resolves to S_child_north   (correct, by luck of ordering)
+> S[patch = north, age = child]   → error[E100]: undeclared name 'S_north_child'
+> S[age = north, patch = child]   → error[E100]: undeclared name 'S_north_child'
+> #                                 ^ no membership error, though `north` is not an `age` level
+> ```
+>
+> Until gh#459 lands, write named indices in **declaration order**, and treat
+> the labels as documentation rather than as checked constraints. Where two
+> dimensions share level names the wrong order can silently name a *different
+> existing cell*.
+
 **Omitting ALL dimensions sums over them; a partial index is an error.** The
 compiler knows each compartment's arity and checks every access.
 
@@ -2517,13 +2535,18 @@ it (the data file's `time` column drives the fit).
 
 ```camdl
 incidence(transition)                    cumulative flow since last observation
-incidence(transition[stratum])           positional index: pins first declared
-                                         dimension, sums over the rest
-incidence(transition[patch = p])         named index: pins `patch = p`, sums
-                                         over the rest (order-independent)
+incidence(transition[north])             positional index, by declaration order
+incidence(transition[patch = north])     named index (order-independent)
 prevalence(compartment)                  current population
 prevalence(compartment[age = child])     named index on compartment
 ```
+
+An index on a projection **selects one cell of a stratified family; it never
+marginalizes.** Every declared dimension must be given, positionally or by name
+(the two forms may be mixed). Dropping a dimension is an error, not a silent sum
+— see "A partial index does not marginalize" below for the explicit forms to
+write instead. On a `[patch, age]` family, `infection[patch = north]` names no
+cell; `infection[patch = north, age = child]` names `infection_north_child`.
 
 **Arithmetic projections** (the general form). Beyond `incidence()` and
 `prevalence()` sugar, `projected` accepts any expression over compartment state,
@@ -2596,6 +2619,15 @@ above. Where you *do* fully index, prefer **named** indexing
 (`infection[north, child]`): named binding is order-independent and survives a
 later reordering of the dimension declarations, whereas positional binding
 silently re-interprets against the new order.
+
+> **Status (gh#459).** Order-independence is the specified behaviour but is
+> **not yet implemented**. The compiler currently lowers named indices by
+> source order, ignoring the dimension labels, so
+> `infection[patch = north, age = child]` on an `[age, patch]` family resolves
+> to `infection_north_child` and fails. Until gh#459 lands, write named indices
+> in declaration order. Take particular care when two dimensions share level
+> names: there the wrong order can name a *different existing cell* and bind
+> silently, with no diagnostic.
 
 Inside a likelihood expression, the keyword `projected` refers to the evaluated
 projection value for that observation.
