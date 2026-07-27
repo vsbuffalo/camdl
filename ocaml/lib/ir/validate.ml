@@ -152,6 +152,12 @@ let validate (m : model) : (unit, error list) result =
   (* observations *)
   List.iter (fun (obs: observation_model) ->
     let here = InObservation obs.name in
+    (* Projection reference check. The compartment arms were missing (gh#478):
+       `CurrentPop`/`CurrentPopSum` fell through the wildcard, so a projection
+       naming no real cell — e.g. `prevalence(I[child])` on a `[age, patch]`
+       family, which lowers to the non-existent `I_child` — passed `camdlc
+       check` and only failed at run time. Transitions were already checked;
+       both sides now are. *)
     (match obs.projection with
      | CumulativeFlow tn ->
        if not (SS.mem tn tr_set) then errors := UnknownTransition (tn, here) :: !errors
@@ -159,6 +165,12 @@ let validate (m : model) : (unit, error list) result =
        List.iter (fun tn ->
          if not (SS.mem tn tr_set) then errors := UnknownTransition (tn, here) :: !errors
        ) tns
+     | CurrentPop cn ->
+       if not (SS.mem cn comp_names) then errors := UnknownCompartment (cn, here) :: !errors
+     | CurrentPopSum cns ->
+       List.iter (fun cn ->
+         if not (SS.mem cn comp_names) then errors := UnknownCompartment (cn, here) :: !errors
+       ) cns
      | _ -> ());
     (* Walk observation-likelihood expressions. The likelihood AST
        may reference parameters, populations, tables, and the special

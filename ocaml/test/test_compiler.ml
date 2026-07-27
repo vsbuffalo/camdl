@@ -5564,6 +5564,113 @@ let test_incidence_unindexed_cross_strata_is_rejected () =
   |} in
   compile_expect_error_code ~code:"E280" ~contains:"sum" src
 
+(* ── gh#478: prevalence() must get the same gates incidence() has ────────────
+   The cross-strata aggregation gate and the reference check were both wired for
+   the transition side only, so on an IDENTICAL model `incidence(infection)` was
+   rejected (E280) while `prevalence(I)` compiled and ran, silently pooling every
+   stratum; and a partial index produced a dangling `current_pop` that only the
+   Rust runtime caught.                                                      ── *)
+
+let test_prevalence_partial_index_is_rejected_at_compile () =
+  (* `I` here is 1-D, so build a 2-D case: a partial index names no cell.
+     Must be caught by camdlc, not left for the runtime. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult]  patch = [north, south] }
+    compartments { S, I }
+    stratify(by = age)
+    stratify(by = patch)
+    parameters { beta : rate  rho : probability  k : positive }
+    transitions {
+      infection[a in age, p in patch] : S[a,p] --> I[a,p] @ beta * S[a,p]
+    }
+    observations {
+      cases {
+        columns       { time : time, cases : count }
+        projected     = prevalence(I[child])
+        emit_schedule = every 7 'days
+        cases ~ neg_binomial(mean = rho * projected, r = k)
+      }
+    }
+    init { S[a in age, p in patch] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E503" ~contains:"I_child" src
+
+let test_prevalence_full_index_still_compiles () =
+  (* Positive control: a fully-indexed cell is the supported form. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult]  patch = [north, south] }
+    compartments { S, I }
+    stratify(by = age)
+    stratify(by = patch)
+    parameters { beta : rate  rho : probability  k : positive }
+    transitions {
+      infection[a in age, p in patch] : S[a,p] --> I[a,p] @ beta * S[a,p]
+    }
+    observations {
+      cases {
+        columns       { time : time, cases : count }
+        projected     = prevalence(I[child, north])
+        emit_schedule = every 7 'days
+        cases ~ neg_binomial(mean = rho * projected, r = k)
+      }
+    }
+    init { S[a in age, p in patch] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"prev_full_idx" src with
+  | Error e -> Alcotest.failf "fully-indexed prevalence should compile: %s" e
+  | Ok m ->
+    (match (List.hd m.Ir.observations).Ir.projection with
+     | Ir.CurrentPop c -> Alcotest.(check string) "binds the cell" "I_child_north" c
+     | _ -> Alcotest.fail "expected CurrentPop")
+
+let test_prevalence_bare_unstratified_still_compiles () =
+  (* Positive control: the gate is about STRATIFIED families. A bare prevalence
+     on an unstratified compartment is the ordinary case and must not regress. *)
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { beta : rate  rho : probability  k : positive }
+    transitions { infection : S --> I @ beta * S }
+    observations {
+      cases {
+        columns       { time : time, cases : count }
+        projected     = prevalence(I)
+        emit_schedule = every 7 'days
+        cases ~ neg_binomial(mean = rho * projected, r = k)
+      }
+    }
+    init { S = 100  I = 1 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"prev_bare_flat" src with
+  | Error e -> Alcotest.failf "bare prevalence on unstratified should compile: %s" e
+  | Ok m ->
+    (match (List.hd m.Ir.observations).Ir.projection with
+     | Ir.CurrentPop c -> Alcotest.(check string) "binds I" "I" c
+     | _ -> Alcotest.fail "expected CurrentPop")
+
+let test_prevalence_indexed_stream_still_compiles () =
+  (* Positive control: on an INDEXED stream each cell resolves per-stratum, so
+     there is no silent pooling and the gate must not fire — matching how the
+     incidence gate is scoped. *)
+  let src = stratified_age_seir_with_obs {|
+    observations {
+      prev[a in age] {
+        columns       { time : time, age : dim, prev : count }
+        projected     = prevalence(I[a])
+        emit_schedule = every 7 'days
+        prev ~ neg_binomial(mean = projected, r = k)
+      }
+    }
+  |} in
+  match Compiler.compile ~name:"prev_indexed_stream" src with
+  | Error e -> Alcotest.failf "indexed-stream prevalence should compile: %s" e
+  | Ok _ -> ()
+
 (* The explicit uniform-reporting form the gate directs the modeller to:
    `rho * sum(a in age, incidence(infection[a]))` — here without the rho factor
    for the projection check — compiles and expands to the IDENTICAL
@@ -10057,6 +10164,10 @@ let () =
       Alcotest.test_case "prevalence(E[e1]) picks single stratum"        `Quick test_prevalence_fully_indexed_stratified;
       Alcotest.test_case "prevalence(I) unstratified is unchanged"       `Quick test_prevalence_unstratified;
       Alcotest.test_case "E280: bare incidence(infection) on stratified model rejected" `Quick test_incidence_unindexed_cross_strata_is_rejected;
+      Alcotest.test_case "E503: partial prevalence index caught at compile (gh#478)" `Quick test_prevalence_partial_index_is_rejected_at_compile;
+      Alcotest.test_case "fully-indexed prevalence still compiles (gh#478)" `Quick test_prevalence_full_index_still_compiles;
+      Alcotest.test_case "bare prevalence on unstratified still compiles (gh#478)" `Quick test_prevalence_bare_unstratified_still_compiles;
+      Alcotest.test_case "indexed-stream prevalence still compiles (gh#478)" `Quick test_prevalence_indexed_stream_still_compiles;
       Alcotest.test_case "explicit sum(a in age, incidence(infection[a])) → flow sum" `Quick test_incidence_explicit_sum_compiles_to_flow_sum;
       Alcotest.test_case "incidence(infection[child]) picks one stratum" `Quick test_incidence_positional_indexed_pins_one_stratum;
       Alcotest.test_case "incidence(infection[age=adult]) named index"   `Quick test_incidence_named_indexed_pins_one_stratum;
