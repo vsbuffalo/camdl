@@ -1,27 +1,28 @@
 ---
-status: triaged; 3 of 6 fixed
+status: triaged; all 6 fixed
 date: 2026-07-19
 kind: compiler/spec review
 scope: OCaml compiler against `docs/camdl-language-spec.md`
 reviewer: Codex
 methodology: static audit of parser/AST/expander/validator plus targeted `camdlc check` repros; Rust runtime reviewed only where needed to compare validator coverage
 counts: 4 High / 2 Medium + 4 maintainability notes
-triage: all six re-reproduced against 84c3341e; filed gh#459-465; 3, 4, 6 fixed in PR#477
+triage: all six re-reproduced against 84c3341e; filed gh#459-465; 3/4/6 in PR#477, 5 in PR#479, 2 in PR#485; only 1 (gh#459) remains
 ---
 
 ## Triage (2026-07-24, against `84c3341e`)
 
 Every finding was re-run as a `camdlc check` repro. **All six reproduced; none
-had been fixed.** Findings 3, 4 and 6 are now fixed (PR#477, merged
-`85858629..c9300939`); 1, 2 and 5 remain open.
+had been fixed.** Findings 3, 4 and 6 were fixed in PR#477, finding 5 in PR#479,
+and finding 2 in PR#485. **Only finding 1 (gh#459) remains open**, now labelled
+`blocker` after a silent-misbind repro was added to it.
 
 | # | Issue                                                   | Title                                      | State                |
 | - | ------------------------------------------------------- | ------------------------------------------ | -------------------- |
 | 1 | [gh#459](https://github.com/vsbuffalo/camdl/issues/459) | Named indexing resolved positionally       | open — see caveat §1 |
-| 2 | [gh#460](https://github.com/vsbuffalo/camdl/issues/460) | Bare stratified `transfer` rejected (E264) | open                 |
+| 2 | [gh#460](https://github.com/vsbuffalo/camdl/issues/460) | Bare stratified `transfer` rejected (E264) | **fixed** (PR#485)   |
 | 3 | [gh#461](https://github.com/vsbuffalo/camdl/issues/461) | `set`/`add` action targets unvalidated     | **fixed** (PR#477)   |
 | 4 | [gh#462](https://github.com/vsbuffalo/camdl/issues/462) | Event/reactive `where` guards skip E217    | **fixed** (PR#477)   |
-| 5 | [gh#463](https://github.com/vsbuffalo/camdl/issues/463) | `hyper_erlang` rewrite misses action exprs | open                 |
+| 5 | [gh#463](https://github.com/vsbuffalo/camdl/issues/463) | `hyper_erlang` rewrite misses action exprs | **fixed** (PR#479)   |
 | 6 | [gh#464](https://github.com/vsbuffalo/camdl/issues/464) | `time_unit` accepts non-time units         | **fixed** (PR#477)   |
 
 ### One sub-claim did not survive verification
@@ -181,9 +182,11 @@ coordinates.
 
 ### 2. Bare stratified `transfer(from = S, to = V)` is rejected instead of expanded
 
-> **[TRIAGE 2026-07-24: CONFIRMED — open, gh#460.]** Reproduced verbatim; still
-> `error[E264]: expected a bare compartment name, got a sum of populations
-> (PopSum)`.
+> **[TRIAGE 2026-07-24: CONFIRMED — FIXED in PR#485, gh#460.]** Reproduced
+> verbatim. The fix expands per stratum, pairing by _declared dimensions_;
+> review found and closed three silent-wrong shapes it initially introduced
+> (cross-dimension pairing on shared level names, single-cell families escaping
+> the check, and per-instance fan-out inside an indexed family — E239).
 
 **Location** - `ocaml/lib/compiler/expander.ml:5310-5340`,
 `ocaml/lib/compiler/expander.ml:6110-6120`
