@@ -6024,6 +6024,85 @@ let test_incidence_explicit_sum_compiles_to_flow_sum () =
      | _ -> Alcotest.fail "expected CumulativeFlowSum projection")
   | _ -> Alcotest.fail "expected exactly one observation block"
 
+(* The pooled-column form the E280 hint directs the modeller to must compile on
+   a family stratified over 2+ dimensions, which needs NESTED sums:
+   `sum(a in age, sum(p in patch, incidence(tr[a, p])))`. The explicit-sum arm
+   peeled only ONE `ESum`, so the inner `sum` was not an `EFuncCall` and the
+   whole projection fell through to the generic expression resolver, where
+   `incidence` is not a declared function — E100. Net effect: on a
+   multi-dimensional family, E280 rejected the bare form and every pooled
+   alternative was inexpressible. *)
+let test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult]  patch = [north, south] }
+    stratify(by = age)
+    stratify(by = patch)
+    parameters { beta : rate  rho : probability }
+    transitions {
+      infection[a in age, p in patch] : S[a,p] --> I[a,p] @ beta * S[a,p]
+    }
+    observations {
+      cases {
+        columns   { time : time, cases : count }
+        projected = sum(a in age, sum(p in patch, incidence(infection[a, p])))
+        cases ~ poisson(rate = rho * projected)
+      }
+    }
+    init { S[a in age, p in patch] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"inc_nested_sum" src with
+  | Error e ->
+    Alcotest.failf "nested sum over two dims is the only pooled form E280 can \
+                    direct a 2-D family to; it must compile. Got: %s" e
+  | Ok m ->
+    (match (List.hd m.Ir.observations).Ir.projection with
+     | Ir.CumulativeFlowSum names ->
+       Alcotest.(check (list string))
+         "pools all four (age × patch) flow cells"
+         ["infection_child_north"; "infection_child_south";
+          "infection_adult_north"; "infection_adult_south"] names
+     | _ -> Alcotest.fail "expected CumulativeFlowSum over the 4 cells")
+
+(* A `where` predicate on an explicit aggregation sum prunes the domain — that
+   is what it means everywhere else in the language (`resolve_expr`'s ESum arm
+   filters `dim_values` through `eval_guard` before summing). The projection
+   dispatch matched the guard slot with `_` and then enumerated the dimension's
+   FULL level list, so a modeller who restricted the sum to a subset of strata
+   silently got the total over every stratum — scored against their subset
+   data, with the excess absorbed into the reporting rate. Same syntax, two
+   meanings, no diagnostic. *)
+let test_incidence_sum_honours_where_guard () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate  rho : probability }
+    transitions { infection[a in age] : S[a] --> I[a] @ beta * S[a] }
+    observations {
+      cases {
+        columns   { time : time, cases : count }
+        projected = sum(a in age where a == child, incidence(infection[a]))
+        cases ~ poisson(rate = rho * projected)
+      }
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"inc_where" src with
+  | Error e -> Alcotest.failf "restricted aggregation sum should compile: %s" e
+  | Ok m ->
+    (match (List.hd m.Ir.observations).Ir.projection with
+     | Ir.CumulativeFlow "infection_child" -> ()
+     | Ir.CumulativeFlowSum names ->
+       Alcotest.failf
+         "`where a == child` was ignored — projection pooled %s; a restricted \
+          sum must name only the surviving levels" (String.concat ", " names)
+     | _ -> Alcotest.fail "expected the single surviving flow")
+
 (* Positional-indexed incidence pins a single stratum (not a sum). Guards
    against over-eagerly summing when the user named a stratum. *)
 let test_incidence_positional_indexed_pins_one_stratum () =
@@ -10708,6 +10787,8 @@ let () =
       Alcotest.test_case "indexed-stream prevalence still compiles (gh#478)" `Quick test_prevalence_indexed_stream_still_compiles;
       Alcotest.test_case "explicit sum(a in age, incidence(infection[a])) → flow sum" `Quick test_incidence_explicit_sum_compiles_to_flow_sum;
       Alcotest.test_case "incidence(infection[child]) picks one stratum" `Quick test_incidence_positional_indexed_pins_one_stratum;
+      Alcotest.test_case "nested sum over 2 dims → flow sum (E280 pooled form)" `Quick test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum;
+      Alcotest.test_case "aggregation sum honours its where guard" `Quick test_incidence_sum_honours_where_guard;
       Alcotest.test_case "prevalence(E[child]) on staged+stratified E pools that stratum's stages (gh#478)" `Quick test_prevalence_indexed_cell_on_staged_stratified_compartment;
       Alcotest.test_case "prevalence(I) on hyper_erlang pools branch stages (gh#487)" `Quick test_prevalence_bare_on_hyper_erlang_pools_branch_stages;
       Alcotest.test_case "prevalence(Y1 + Y2) resolves as an expression" `Quick test_prevalence_arithmetic_argument_resolves_as_expression;
