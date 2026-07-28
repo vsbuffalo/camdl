@@ -143,6 +143,57 @@ Rules that make the list usable:
 - Prose framing before the list is fine and often useful. It does not replace
   the list.
 
+### Say "gate" only when you mean the merge bar
+
+"Gate" is reserved for **the thing that stops a change from landing**:
+`make
+test`, CI, the merge criteria. In that sense it has one referent and is
+worth keeping.
+
+Do not use it for anything else. It has been stretched to cover compile-time
+checks, diagnostics, rejection rules, capability dispatch, and proposals'
+proposed behaviour all in the same paragraph, at which point the reader has to
+re-derive which one is meant every time. Say the specific thing instead:
+
+| instead of               | write                                              |
+| ------------------------ | -------------------------------------------------- |
+| "the E280 gate"          | "the E280 check", "E280", "the aggregation rule"   |
+| "gate the projection"    | "reject the projection", "diagnose the projection" |
+| "the gate must not fire" | "E280 must not fire"                               |
+| "gated by capabilities"  | "rejected at dispatch by the capability check"     |
+| "the gate as drafted"    | "the rule as drafted", "the check as drafted"      |
+
+The general habit this is an instance of: when a word is doing several jobs in
+one document, name each job. This applies to prose, commit messages, proposals,
+and code comments alike.
+
+### Design calls: say what you need, and how sure you are
+
+When work is blocked on the maintainer's judgment, end with a **Design calls**
+block — separate from the issue list, because these are questions, not defects.
+Each entry:
+
+1. **The question**, in one sentence, answerable without re-reading the thread.
+2. **The options**, with the concrete consequence of each — not a survey, two or
+   three real candidates.
+3. **My recommendation** — always give one, even when uncertain. "You decide" is
+   not an answer; it pushes the work back without adding anything.
+4. **Confidence**, as one of exactly three labels:
+
+- **Solid** — the evidence is decisive and I would act on it if you did not
+  reply. Say so: "proceeding with X unless you object." Do not manufacture a
+  decision point for something the code already answers.
+- **Leaning** — I have a real preference and a real reason, but the tradeoff is
+  genuine and one sentence from you settles it. State what would flip me.
+- **Need you** — outside my judgment: a scientific call, a product call, a
+  tolerance for breakage, a question about what modellers actually do. Do
+  **not** guess these, and do not bury them in a recommendation dressed up as
+  confident. Say plainly what I cannot determine and why.
+
+Be honest about which label applies. Marking a genuine unknown "solid" to seem
+decisive is worse than the delay it saves; marking a clear call "need you"
+wastes a decision the evidence already made.
+
 ### Required reading before structural proposals
 
 Before drafting a `docs/dev/proposals/` document or making non-trivial changes
