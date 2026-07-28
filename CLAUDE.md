@@ -104,6 +104,45 @@ before continuing:
 - The maintainer welcomes scrutiny over speed: a found bug or a flagged dubious
   design is more valuable than a fast green diff.
 
+### Reporting a review: the issue list goes last
+
+Any time you report the results of a review — a proposal reviewed against the
+code, a PR review, an audit, a subagent fan-out you are relaying — **the last
+thing on screen must be a numbered list of concrete issues.** Not a narrative,
+not a recommendation, not a summary of what you did. The list is what gets acted
+on, so it must be the thing in front of the reader when you stop talking.
+
+Each entry carries, in this order:
+
+1. **A one-line claim** — what is wrong, stated as a fact.
+2. **Severity** — blocker / high / medium / low. A blocker is something that
+   makes the reviewed artifact unimplementable or unsafe as written.
+3. **Where** — `file:line` or the doc section.
+4. **Evidence** — the command and its output, or the input → wrong output. A
+   finding without a reproduction is a _question_, and must be labelled as one.
+5. **Independent or entangled** — does fixing this depend on any other item, or
+   can it land alone? Say which, explicitly. This is the field that determines
+   what can be parallelized or knocked out immediately, and it is the one most
+   often omitted.
+6. **Disposition** — fixed already (with the commit), needs a decision from the
+   maintainer (with the specific question), or filed as `gh#NN`.
+
+Rules that make the list usable:
+
+- **Order by severity, not by discovery order or by file.**
+- **Separate what is verified from what is inferred.** A reviewer's claim you
+  did not re-check is not a finding — either verify it or mark it unverified.
+- **Independent bugs found adjacent to the reviewed work get their own entry and
+  their own issue**, never a footnote inside the reviewed artifact's findings. A
+  bug in a different code path with a different trigger is a different bug even
+  if you found it while looking at this one; say so in as many words, because
+  the reader cannot tell from the narrative.
+- **State plainly what is blocked on the maintainer and what is not.** If some
+  findings are actionable now and others need a design call, split the list so
+  the actionable ones can proceed while the decision is pending.
+- Prose framing before the list is fine and often useful. It does not replace
+  the list.
+
 ### Required reading before structural proposals
 
 Before drafting a `docs/dev/proposals/` document or making non-trivial changes
