@@ -7013,11 +7013,43 @@ let expand_observations ctx =
            Ir.CumulativeFlow (String.concat "_" (n :: List.map (index_item_to_str env) idxs))
          | _ -> Ir.CumulativeFlow "?")
       | ProjDerived (EFuncCall ("prevalence", args)) ->
-        (match List.assoc_opt "" args with
-         | Some (EIdent (n, _))    -> prevalence_projection n []
-         | Some (EIndex (n, idxs, _)) ->
+        (match List.filter_map (fun (k, e) -> if k = "" then Some e else None) args with
+         | [ EIdent (n, _) ]         -> prevalence_projection n []
+         | [ EIndex (n, idxs, _) ]   ->
            prevalence_projection n (List.map (index_item_to_str env) idxs)
-         | _ -> Ir.CurrentPop "?")
+         | [] ->
+           Diagnostics.error ctx.diags ~code:"E250" ~loc:od_loc
+             ~message:(Printf.sprintf
+               "observation '%s': `prevalence(...)` needs a compartment to project"
+               od.oname)
+             ~hint:"give it a compartment (`prevalence(I)`), a cell \
+                    (`prevalence(I[child])`), or an expression over \
+                    compartments (`prevalence(Y1 + Y2)`)"
+             ();
+           Ir.DerivedExpr (Ir.Const 0.0)
+         | positional ->
+           (* Every other argument shape is an ordinary expression over state,
+              and resolving it is the whole answer. Three shapes reach here and
+              all three are legitimate models, so the dispatch must NOT match on
+              shape — matching one leaves the others emitting the sentinel name
+              `"?"`, which surfaces to the user as `E503: unknown compartment
+              referenced: '?'`, naming nothing they wrote:
+
+                · `via erlang` rewrites the argument to `ESum` over the stage
+                  axis (`sum_staged_refs`);
+                · `via hyper_erlang` rewrites it to an `EBinOp` Add-chain over
+                  the branch-stage cells (`sum_hyper_refs`) — a DIFFERENT shape
+                  for the same reason, which is why gh#487 is this same bug;
+                · a user-written arithmetic argument, `prevalence(Y1 + Y2)`.
+
+              Several positional arguments desugar to their sum, as specified in
+              the 2026-04-17 state-snapshot-projections proposal and documented
+              at `docs/camdl-run-spec.md` §14.1. Reading only the first (the old
+              `List.assoc_opt ""`) silently discarded the rest. *)
+           let summed = List.fold_left
+               (fun acc e -> EBinOp (Add, acc, e))
+               (List.hd positional) (List.tl positional) in
+           Ir.DerivedExpr (resolve_expr ctx env summed))
       | ProjDerived (EIdent (name, _) as e) ->
         (* Disambiguate: let-binding, compartment (prevalence), or
            transition (flow)? A let-bound bare identifier (e.g.
