@@ -1,7 +1,13 @@
 # Stratum provenance: telling a subpopulation from an integration stage
 
-Date: 2026-07-27 Status: draft — awaiting decision Fixes: gh#478 (part 1),
-gh#487 Related: gh#459, gh#333
+Date: 2026-07-27 Status: draft — the gate design (§2) is unresolved; see "The
+gate as specified does not hold" Fixes: gh#478 (part 1), gh#487 Related: gh#459,
+gh#333
+
+The dispatch repairs (§3) have landed; everything else here is still draft.
+Landed: `prevalence()` lowers every argument shape, multi-argument
+`prevalence()` sums rather than dropping, E280's hint prints forms that compile,
+the explicit-aggregation sum peels nested sums and honours its `where` guard.
 
 ## The problem
 
@@ -79,6 +85,52 @@ record the parser builds for a user declaration:
 `stratify_decl` is `{ sdim; sonly }` (`ast.ml:280`). Those are the only two
 construction sites in the tree.
 
+## The gate as specified does not hold
+
+The rule in §2 is enforced in three AST arms (§5). Every other projection shape
+reaches `| ProjDerived e -> Ir.DerivedExpr (resolve_expr ctx env e)`, where the
+bare-name-sums rule of spec §5.1 applies with no gate at all. Measured on an
+age-stratified SEIR with an un-indexed stream:
+
+```text
+projected = prevalence(I)               → current_pop_sum [I_child, I_adult]     GATED
+projected = rho * I                     → derived_expr {mul, pop_sum[I_child, I_adult]}   NOT GATED
+projected = rho * sum(a in age, I[a])   → byte-identical to the line above
+```
+
+The third line is the migration this proposal recommends. It produces the same
+IR as the second, which is one character away from the form the gate rejects and
+is itself ungated. A modeller who hits E280, reads "write the sum over cells
+directly," and writes `rho * I` gets the identical pooled model — now with the
+compiler appearing to have checked it.
+
+Only the per-stratum form is IR-distinguishable:
+
+```text
+projected = sum(a in age, rho[a] * I[a]) → derived_expr {reduce: […]}
+```
+
+So the gate as drafted rejects a spelling and accepts its synonym. Two coherent
+designs; this proposal cannot ship until one is chosen.
+
+**A. Lint at the resolved IR.** Accept that the question is "did you mean to
+pool?", and ask it of `Ir.expr` rather than the surface AST: walk the resolved
+projection for a `PopSum` spanning more than one reportable cell of one family.
+That covers `rho * I`, `I / N`, let-bound names, and every future spelling for
+free, because it looks at the value rather than the syntax. Since no spelling
+silences it honestly, it must be a `W1xx`, not an error.
+
+**B. Semantic gate with a distinguishable escape.** Reject any projection whose
+resolved value pools more than one reportable cell — including
+`rho * sum(a in age, I[a])` — and accept only forms the IR can tell apart, i.e.
+`sum(a in age, rho * I[a])` (a `Reduce`). The hint then names a form that
+genuinely states something the bare name did not.
+
+B is the stronger guarantee and matches the proposal's stated thesis; A is
+cheaper, breaks nothing, and is honest about being advisory. B changes what
+`rho * I` means for existing models and needs its own breakage sweep. Either way
+the gate does **not** belong in the three AST arms of §5.
+
 ## Proposal
 
 ### 1. Give the record its provenance
@@ -125,7 +177,40 @@ a wider break than gh#478 alone; see Migration.
 A single-level dimension pools nothing (`{"current_pop": "I_main"}`), so it
 passes — counting cells rather than dimensions gets this right for free.
 
-### 3. Fix the `'?'` fall-through, and reuse E287
+### 3. Fix the `'?'` fall-through, and reuse E287 — LANDED
+
+The dispatch matched on the argument's _shape_, and **three** distinct shapes
+reached the catch-all, not one:
+
+| shape                    | produced by                                |
+| ------------------------ | ------------------------------------------ |
+| `ESum` over a stage axis | `via erlang` (`sum_staged_refs`)           |
+| `EBinOp` Add-chain       | `via hyper_erlang` (`sum_hyper_refs`)      |
+| arbitrary arithmetic     | a user writing `prevalence(Y1[a] + Y2[a])` |
+
+Matching the `ESum` shape alone — which is what the text below prescribed —
+fixes `via erlang` and leaves gh#487 open, because hyper_erlang's lowering
+builds an Add-chain, not a sum. The third shape had a live instance in-tree:
+`docs/dev/proposals/fixtures/garki_post_proposal.camdl` did not compile.
+
+The landed fix is shape-agnostic: anything that is not a single bare or fully
+indexed compartment reference is resolved as an ordinary state expression.
+Multi-argument `prevalence(X1, X2)` sums its arguments as
+`docs/camdl-run-spec.md` §14.1 documents, instead of silently dropping every
+argument after the first.
+
+The E287 half is **not** landed and is still open. One hazard the text below
+does not address: E287's message and hint are built from the _raw_ dimension
+vector, so on a mixed compartment it would print `[age, __onset_stage]` and
+suggest `sum(s in __onset_stage, …)` — naming a synthesized identifier the user
+never wrote, which is exactly what the neighbouring gh#460 code comments say
+must not happen. E287's catalog row also scopes it to "a rate read" and would
+need rewording. Note `test_compiler.ml`'s
+`test_prevalence_partial_index_is_rejected_at_compile` asserts E503 today and
+breaks under this change — a third breaking test the Migration section does not
+list.
+
+Original text follows.
 
 On a compartment that is both user-stratified and staged:
 
@@ -170,15 +255,23 @@ lands wired into two consumers.
 ### 5. Live match arms — the obvious one is dead
 
 `ProjPrevalence` (`ast.ml:302`) is **never constructed**; the parser emits only
-`ProjDerived`. Its match arms at `expander.ml:7006` and `8034` are dead. The
-gate goes in the three live arms:
+`ProjDerived`. Its arm at `expander.ml:7006` is unreachable. (The occurrence at
+`8034` is an or-pattern shared with `ProjIncidence`, which _is_ constructed at
+`expander.ml:6819`, and with `None`; it cannot simply be deleted.)
 
-- `expander.ml:7009-7014` — `ProjDerived (EFuncCall ("prevalence", …))`
-- `expander.ml:7015-7027` — `ProjDerived (EIdent …)`, the `projected = I` form
-- `expander.ml:7028-7047` — `ProjDerived (EIndex …)`
+The arm _names_ below are right and the line numbers are not — as cited,
+`7009-7014` is the **incidence** arm, so an implementer following the numbers
+puts the prevalence gate in the wrong one. Identify the arms by pattern, never
+by line:
+
+- `ProjDerived (EFuncCall ("prevalence", …))`
+- `ProjDerived (EIdent …)` — the `projected = I` form
+- `ProjDerived (EIndex …)`
 
 Putting it in the arm named after the feature yields a gate that never fires,
-with green tests.
+with green tests. But see "The gate as specified does not hold" above: gating
+these three arms is the wrong mechanism regardless of which arms they are,
+because every other shape flows through the `ProjDerived e` catch-all ungated.
 
 ### 6. Readers that must keep the RAW dimension vector
 
@@ -252,8 +345,24 @@ teaching model, and Garki's 5 `gstage` mosquito models — but **none observes
 prevalence on the staged compartment**, so none breaks. A `kind = stages` opt-in
 keyword would buy zero real models today.
 
-Note the incidence half of §2 needs its own sweep for indexed streams with bare
-`incidence(...)` before landing; that number is not yet measured.
+The incidence half of §2 has now been swept, closing decision 8's open item:
+**zero** affected models. Across `camdl`, `camdl-book`, `camdl-garki`,
+`camdl-nigeria-polio`, `camdl-overfit`, `camdl-vignettes` and
+`playpen-camdl-measles`, no committed model has an indexed observation header
+followed by a bare `incidence(...)` / `prevalence(...)` / bare-identifier
+projection. Every indexed stream found indexes its projection too. The only
+bare-`incidence` hits are un-indexed streams (already E280) or pre-alpha models
+that no longer parse.
+
+Two corrections to the numbers above: the camdl repo has 119 `.camdl` files but
+93 compile — 25 of the rest are deliberate error/lint fixtures and one,
+`docs/dev/proposals/fixtures/garki_post_proposal.camdl`, was a live instance of
+the `'?'` bug (now fixed). The operative claim, that no observation stream emits
+`current_pop_sum`, holds: zero hits across all that compile, and zero in any
+committed `*.ir.json`. Hand-rolled staged residence exists in 9 files, not 8 —
+`camdl-garki/models/ctl_bb_erlang.camdl` uses `stratify(by = stage)` and is
+missed by a `gstage` grep. Its projection is a `DerivedExpr` over lets, so the
+conclusion (none breaks) is unaffected.
 
 ## Docs to update
 
@@ -321,10 +430,18 @@ On a mixed compartment, say which axis is which:
 ## Decisions taken
 
 1. **Field on `stratify_decl`, not the IR** — needed during expansion only.
-   Construction sites are `parser.mly:1305` and `expander.ml:1458`.
+   Construction sites are `parser.mly:1305` and `expander.ml:1458`; verified
+   exhaustively, those are the only two in the tree. Note `via hyper_erlang`
+   creates **no** `stratify_decl` at all — its branch stages are flat
+   compartments (`I__fatal__1`, …) — so `stratum_origin` structurally cannot
+   answer "is this a residence axis?" for hyper-staged compartments, and
+   `reportable_dims` returns `[]` for them. §2's cell-counting rule needs to say
+   what it does there; it currently does not.
 2. **Gate on reportable cells pooled (> 1), not on dimensions and not on stream
    indexing.** Fixes the single-level over-fire and the indexed-stream hole in
-   one rule.
+   one rule. Counting cells rather than dimensions is right, and it handles
+   `sonly`-restricted stratification correctly for free. **What is unresolved is
+   where the rule is enforced** — see "The gate as specified does not hold".
 3. **`prevalence()` stays head-position sugar.** Migration drops the wrapper.
    The arity change from the first draft is dropped as unnecessary.
 4. **Mixed compartments gate on the user dimension**; stages pool.
@@ -333,4 +450,30 @@ On a mixed compartment, say which axis is which:
 6. **gh#487 folds in** — same dispatch, same catch-all, one fix.
 7. **Keep E280**, reworded; partial projection index becomes E287.
 8. **The `incidence` gate moves to the same rule**, closing its indexed-stream
-   hole. Requires a sweep for affected models before landing.
+   hole. The sweep is done: zero affected models across seven repos (see
+   Migration).
+
+## Still open
+
+Each of these must be closed before this ships as a spec.
+
+1. **Where the gate is enforced** — lint at the resolved IR, or a semantic gate
+   with an IR-distinguishable escape. The blocking decision.
+2. **What `reportable_dims` means for a `via hyper_erlang` compartment**, which
+   has no stage `stratify_decl` to filter (Decision 1).
+3. **What E287 prints on a mixed compartment**, given its message and hint are
+   built from the raw dimension vector and would name `__onset_stage` (§3).
+4. **Whether `stratum_origin` is the right concept or just the available one.**
+   Reportability is a property of the _axis_ — could a data column carry it? —
+   not of who constructed it. Under Decision 5 a hand-rolled residence chain and
+   a `via erlang` one produce, by the repo's own assertion in
+   `ocaml/golden/seir_age_erlang_via.camdl`, IR equal modulo stage names, yet
+   get different diagnostics. "Zero real models affected" is a sound reason to
+   ship the mechanism; it is not a reason to state "no `kind = stages` keyword"
+   as settled. Either name it a deferral with a tracked follow-up, or decide it.
+
+Two follow-ups this proposal should file rather than fold in: per-stratum
+reporting into a _single pooled column_ has no compiling form (only per-stratum
+_rows_ do), and `quantities {}` pools stratified compartments silently (`max(I)`
+on an age-stratified `I` reduces over the pooled total, which is not the peak of
+any stratum).
