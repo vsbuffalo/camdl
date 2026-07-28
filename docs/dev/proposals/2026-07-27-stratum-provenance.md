@@ -1,479 +1,503 @@
-# Stratum provenance: telling a subpopulation from an integration stage
+# No undischarged implicit marginalization
 
-Date: 2026-07-27 Status: draft — the gate design (§2) is unresolved; see "The
-gate as specified does not hold" Fixes: gh#478 (part 1), gh#487 Related: gh#459,
-gh#333
-
-The dispatch repairs (§3) have landed; everything else here is still draft.
-Landed: `prevalence()` lowers every argument shape, multi-argument
-`prevalence()` sums rather than dropping, E280's hint prints forms that compile,
-the explicit-aggregation sum peels nested sums and honours its `where` guard.
+Date: 2026-07-27 Status: ready to implement Fixes: gh#478 Related: gh#459,
+gh#333, gh#488
 
 ## The problem
 
-`incidence()` and `prevalence()` are siblings: one projects a cumulative flow,
-the other a state snapshot. On a stratified family, `incidence` refuses to guess
-what a bare name means and `prevalence` guesses silently.
+Stratification turns one declared compartment into several cells. `I` under
+`stratify(by = age)` is `I_child` and `I_adult`. Every read of the name `I` must
+then resolve to something, and camdl's answer today depends on which side of the
+model you are on.
 
-Same model, same un-indexed stream, four strata:
+On the **write** side it refuses to guess. A bare stratified name is a hard
+error as an initial condition (`E277`), a transition endpoint (`E272`), or an
+intervention target (`E265`) — name a cell.
 
-```text
-projected = incidence(infection)
-  → error[E280]: observation 'cases' is un-indexed, but `incidence(infection)`
-    would silently sum all 4 strata of 'infection' and apply reporting uniformly
+On the **read** side it silently sums. That is defensible in a rate expression,
+where a bare `I` in a force of infection means the whole infectious population
+by construction and no parameter can absorb a mismatch. It is not defensible in
+an observation projection, where the sum is scored against data:
 
-projected = prevalence(I)
-  → compiles, runs, emits numbers
-    IR: {"current_pop_sum": ["I_child_north", "I_child_south",
-                             "I_adult_north", "I_adult_south"]}
+```camdl
+observations {
+  cases {
+    columns   { time : time, cases : count }
+    projected = prevalence(I)                    # → I_child + I_adult, silently
+    cases ~ poisson(rate = rho * projected)
+  }
+}
 ```
 
-E280 exists for a reason the spec states at
-`docs/camdl-language-spec.md:2616-2617`: the bare form is rejected "precisely so
-this aggregation decision is never made silently." `rho * sum(...)` and
-`sum(rho[p] * ...)` are different models, and pooling picks the first. A
-modeller who writes `prevalence(I)` on an age-stratified model fits pooled
-prevalence and is never told.
+That model asserts a single reporting fraction `rho` across age groups. The
+alternative, `rho_child * I_child + rho_adult * I_adult`, is a different model
+with different estimates and different forecasts. Choosing between them is a
+scientific judgment about the surveillance system, and it is currently made by
+the compiler, invisibly, always in favour of the first.
 
-The other half of gh#478 — a partial index compiling to a dangling `current_pop`
-— is already fixed (PR#480, now `E503` at compile time).
+Indexing the stream — the first thing a modeller tries — lands somewhere worse.
+Measured:
 
-### The hole is bigger than the un-indexed case
-
-Adding `[a in age]` to the stream header — the first thing a user will try when
-the new error appears — lands somewhere worse. Measured:
-
-```text
-obs[a in age] { … projected = prevalence(E) … }
-  → compiles, no diagnostic
-    obs_child  {"current_pop_sum": [E_child_s1 … E_adult_s3]}    # all 6 cells
-    obs_adult  {"current_pop_sum": [E_child_s1 … E_adult_s3]}    # all 6 cells
+```camdl
+prev[a in age] {
+  columns   { time : time, age : dim, prev : count }
+  projected = prevalence(I)                      # note: still bare
+  prev ~ poisson(rate = rho_a[a] * projected)
+}
 ```
 
-Every stratum row is scored against the **pooled total**, with any per-stratum
-`rho[a]` absorbing the mismatch. That is a silent-wrong fit, not merely a silent
-aggregation, and `incidence` has the identical hole on an indexed stream. So the
-gate must not be scoped to un-indexed streams.
-
-## Why the obvious fix is wrong
-
-Extend E280 to `prevalence` and staged-residence models break.
-
-`via erlang(stages = 3, …)` splits a compartment into `E_s1`, `E_s2`, `E_s3` to
-give it a realistic dwell time. Those stages are a **numerical device**, not
-subpopulations — nobody reports "prevalence in latent stage 2." Pooling them is
-the only sensible reading, it is specified in
-`docs/dev/proposals/2026-04-17-state-snapshot-projections.md`, and two tests pin
-it. Verified:
-
 ```text
-onset : E --> I via erlang(stages = 3, mean = 4 'days)
-projected = prevalence(E)   → {"current_pop_sum": ["E_s1","E_s2","E_s3"]}   # must keep working
+✓ no errors, 0 warnings
+prev_child → {"current_pop_sum": ["I_child", "I_adult"]}
+prev_adult → {"current_pop_sum": ["I_child", "I_adult"]}
 ```
 
-And nothing distinguishes the two cases, because `via` lowering builds the same
-record the parser builds for a user declaration:
+Every stratum row is scored against the pooled total, with the per-stratum
+`rho_a[a]` absorbing the mismatch. So the rule cannot be scoped to un-indexed
+streams.
 
-```ocaml
-(* parser.mly:1305 — a user's stratify(...) *)
-{ sdim = !dim; sonly = !only }
+### Why the obvious rule is wrong
 
-(* expander.ml:1458 — synthesized by via lowering *)
-{ sdim = dim_name; sonly = Some [ src ] }
-```
-
-`stratify_decl` is `{ sdim; sonly }` (`ast.ml:280`). Those are the only two
-construction sites in the tree.
-
-## The gate as specified does not hold
-
-The rule in §2 is enforced in three AST arms (§5). Every other projection shape
-reaches `| ProjDerived e -> Ir.DerivedExpr (resolve_expr ctx env e)`, where the
-bare-name-sums rule of spec §5.1 applies with no gate at all. Measured on an
-age-stratified SEIR with an un-indexed stream:
+**Rejecting the spelling does not work.** These three are the same model:
 
 ```text
-projected = prevalence(I)               → current_pop_sum [I_child, I_adult]     GATED
-projected = rho * I                     → derived_expr {mul, pop_sum[I_child, I_adult]}   NOT GATED
+projected = prevalence(I)               → current_pop_sum [I_child, I_adult]
+projected = rho * I                     → derived_expr {mul, pop_sum[I_child, I_adult]}
 projected = rho * sum(a in age, I[a])   → byte-identical to the line above
 ```
 
-The third line is the migration this proposal recommends. It produces the same
-IR as the second, which is one character away from the form the gate rejects and
-is itself ungated. A modeller who hits E280, reads "write the sum over cells
-directly," and writes `rho * I` gets the identical pooled model — now with the
-compiler appearing to have checked it.
+A rule that rejects the first and accepts the others rejects a spelling and
+accepts its synonym.
 
-Only the per-stratum form is IR-distinguishable:
+**Counting cells in the resolved expression does not work either.** It
+over-fires on legitimate models. From a fixture in this repo:
 
-```text
-projected = sum(a in age, rho[a] * I[a]) → derived_expr {reduce: […]}
+```camdl
+slide_positivity[a in age] {
+  projected = prevalence(Y1[a] + Y2[a])   → pop_sum ["Y1_child", "Y2_child"]
+}
 ```
 
-So the gate as drafted rejects a spelling and accepts its synonym. Two coherent
-designs; this proposal cannot ship until one is chosen.
+Two cells, but two _different families_ in one fully-indexed stratum — "total
+parasitaemic," not an aggregation across age. And from a committed golden:
 
-**A. Lint at the resolved IR.** Accept that the question is "did you mean to
-pool?", and ask it of `Ir.expr` rather than the surface AST: walk the resolved
-projection for a `PopSum` spanning more than one reportable cell of one family.
-That covers `rho * I`, `I / N`, let-bound names, and every future spelling for
-free, because it looks at the value rather than the syntax. Since no spelling
-silences it honestly, it must be a `W1xx`, not an error.
+```camdl
+let I_total = I[child] + I[adult]
+projected  = I_total                      → pop_sum ["I_child", "I_adult"]
+```
 
-**B. Semantic gate with a distinguishable escape.** Reject any projection whose
-resolved value pools more than one reportable cell — including
-`rho * sum(a in age, I[a])` — and accept only forms the IR can tell apart, i.e.
-`sum(a in age, rho * I[a])` (a `Reduce`). The hint then names a form that
-genuinely states something the bare name did not.
+Two cells of one family across two strata — but the modeller named both. Both
+resolve to a bare `PopSum` indistinguishable from `prevalence(I)`.
 
-B is the stronger guarantee and matches the proposal's stated thesis; A is
-cheaper, breaks nothing, and is honest about being advisory. B changes what
-`rho * I` means for existing models and needs its own breakage sweep. Either way
-the gate does **not** belong in the three AST arms of §5.
+**And a `let` erases the distinction entirely.** Measured:
 
-## Proposal
+```text
+let I_tot = I                     ; projected = rho * I_tot
+  → {"bin_op": {"mul", "left": {"param":"rho"}, "right": {"binding_ref": "I_tot"}}}
 
-### 1. Give the record its provenance
+let I_sum = sum(a in age, I[a])   ; projected = rho * I_sum
+  → {"bin_op": {"mul", "left": {"param":"rho"}, "right": {"binding_ref": "I_sum"}}}
+```
+
+Identical projection IR. The first must be rejected and the second accepted, and
+neither the surface syntax of the projection nor its resolved expression can
+tell them apart.
+
+The missing information is not _what the expression sums_. It is **whether the
+modeller identified the cells or the axis being aggregated.**
+
+## The rule
+
+User-facing:
+
+> An observation projection may not implicitly expand a compartment family
+> across a user-declared dimension. Index the family, or reduce over the
+> dimension explicitly.
+
+Compiler-facing, and this is the load-bearing form:
+
+> **No undischarged implicit marginalization** reaches an observation boundary.
+
+An _implicit marginalization_ is created at exactly one kind of site: a bare
+family name resolving to more than one cell. It is **not** created by an
+explicit index (`I[a]`, `I[child]`) or by an explicit reduction
+(`sum(a in age, I[a])`). It propagates through arithmetic, conditionals,
+wrappers, and `let` expansion, carrying the family, the axes, and the source
+span where it arose. At the observation boundary any effect still outstanding
+over an `Explicit`-policy axis is `E280`.
+
+Resolution therefore returns the expression _and_ its effect set:
+
+```text
+ResolvedExpr {
+  expr,
+  implicit_marginalizations: [ { family: "I", axes: ["age"], span } ]
+}
+```
+
+Behaviour, every row measured against the current compiler:
+
+| expression                                    | today                                  | under this rule                |
+| --------------------------------------------- | -------------------------------------- | ------------------------------ |
+| `projected = I`                               | `pop_sum[I_child, I_adult]`            | **E280**                       |
+| `projected = prevalence(I)`                   | `current_pop_sum[…]`                   | **E280**                       |
+| `projected = rho * I`                         | `derived_expr{mul, pop_sum[…]}`        | **E280**                       |
+| `projected = I / N`                           | pools inside the quotient              | **E280** if either side pools  |
+| `let x = I ; projected = x`                   | `binding_ref` — indistinguishable      | **E280**, span at the `let`    |
+| `let x = sum(a in age, I[a]) ; projected = x` | `binding_ref` — indistinguishable      | ok                             |
+| `projected = sum(a in age, I[a])`             | `pop_sum[I_child, I_adult]`            | ok                             |
+| `projected = I[child] + I[adult]`             | `pop_sum[I_child, I_adult]`            | ok                             |
+| `projected = sum(a in age, rho_a[a] * I[a])`  | `reduce[…]`                            | ok                             |
+| `projected = prevalence(Y1[a] + Y2[a])`       | `pop_sum[Y1_child, Y2_child]`          | ok — two families, one stratum |
+| `projected = prevalence(E)`, stages only      | `current_pop_sum[E_s1, E_s2, E_s3]`    | ok — stages are transparent    |
+| `projected = sum(a in age, I)`                | `pop_sum[I_c, I_a, I_c, I_a]` ← **2×** | **E280**                       |
+
+That last row is a live silent-wrong the effect formulation catches and a
+syntactic "did you name the axis?" check would not. The binder `a` is never
+used, so the bare `I` expands inside every iteration and the sum double-counts:
+
+```text
+projected = sum(a in age, I)
+  → {"derived_expr": {"pop_sum": ["I_child", "I_adult", "I_child", "I_adult"]}}
+```
+
+It looks like an explicit reduction and silently returns twice the intended
+quantity. Under the effect rule the inner bare `I` creates a marginalization
+that the enclosing `sum` does not discharge — the loop variable never indexed
+the family — so it is rejected.
+
+Duplicates are otherwise legitimate and must survive: `I[child] + I[child]`
+resolves to `pop_sum ["I_child", "I_child"]` and means what it says.
+
+## Axis provenance and marginalization policy
+
+`via erlang(stages = 3, …)` splits a compartment into `E_s1 … E_s3` to give it a
+gamma-shaped dwell time. Those cells are not subpopulations, and pooling them is
+the only reading the expression can have. Two separate pieces of metadata, both
+compiler-internal:
 
 ```ocaml
-type stratum_origin =
-  | UserStratum       (* a `stratify(...)` declaration in the model *)
-  | ResidenceStages   (* synthesized by `via erlang(...)` lowering *)
+type axis_provenance =
+  | UserDeclared      of string   (* dimension name from `dimensions {}` *)
+  | ViaResidenceStage of string   (* transition that lowered it *)
+  | ViaMixtureBranch  of string   (* `via hyper_erlang` branch axis *)
 
-type stratify_decl = { sdim : string; sonly : string list option;
-                       sorigin : stratum_origin }
+type marginalization_policy =
+  | Explicit                     (* pooling must be stated *)
+  | RepresentationTransparent    (* pooling is the meaning *)
 ```
 
-Compiler context only — **not** IR. No schema change, no `ir/VERSION` bump, no
-golden churn. Two predicates, both needed:
+Policy is derived from provenance — `UserDeclared → Explicit`, both `Via…` forms
+→ `RepresentationTransparent` — and provenance is **kept** after deriving it, so
+diagnostics can say which axis is which and a future lowering pass cannot
+silently reclassify an axis.
 
-```ocaml
-(** Is this dimension NAME a synthesized residence axis? For consumers that
-    hold dimension names and no compartment (the gh#460 E237 check). *)
-val is_residence_stage : ctx -> string -> bool
+The justification is a language fact, not an epidemiological one. `via` lowering
+creates several _representation cells_ for **one declared compartment**. A
+modeller who writes `onset : E --> I via erlang(...)` declared one `E`, not
+three public strata, so a bare `E` means the occupancy of the logical `E` — the
+sum of its representation cells. The same argument covers `hyper_erlang`: its
+branches are part of the residence law of one declared source compartment. A
+model that needs branch-specific observable state should declare explicit
+compartments rather than reach into `via`'s internals.
 
-(** The dimensions of compartment [c] that denote real subpopulations. *)
-val reportable_dims : ctx -> string -> string list
+Stating it this way avoids resting the design on a claim about what is
+observable in practice, which is contextual: a risk group absent from one
+dataset is still a real partition, and retrospective data can classify states
+that were not observable prospectively.
+
+**Hand-rolled staging is `Explicit`, deliberately.** A modeller who writes
+
+```camdl
+dimensions { latent_stage = [e1, e2, e3] }
+stratify(by = latent_stage, only = [E])
 ```
 
-### 2. Gate on cells pooled, not on stream indexing
+declared public model structure, so a bare `E` in a projection requires
+`sum(s in latent_stage, E[s])`. `via` staging is an abstraction whose lowering
+is meant to stay hidden; a hand-written dimension is not.
 
-**A projection is rejected (E280) when it would pool more than one _reportable_
-cell.** Residence stages never count. This single rule covers every case:
+**Note on where provenance lives.** `via erlang` synthesizes a `stratify_decl`
+(`expander.ml:1458`), the same record the parser builds at `parser.mly:1305`;
+those are the only two construction sites in the tree. `via hyper_erlang`
+synthesizes **no** `stratify_decl` at all — its branch stages are flat
+compartments (`I__fatal__1`, …). So provenance is recorded per axis at each
+lowering site, not as a field bolted onto `stratify_decl`, or `hyper_erlang`
+cells get no policy and default to `Explicit`, breaking a construct that must
+keep pooling.
 
-| projection                              | reportable cells | outcome                             |
-| --------------------------------------- | ---------------- | ----------------------------------- |
-| `prevalence(I)`, `I` unstratified       | 1                | ok                                  |
-| `prevalence(E)`, stages only            | 1                | ok — stages pool                    |
-| `prevalence(I)`, user-stratified        | n > 1            | **E280**                            |
-| `prevalence(E)`, user dims + stages     | n > 1            | **E280**, naming only the user dims |
-| `prevalence(E[a])` in an indexed stream | 1                | ok — stages pool                    |
-| `prevalence(I)` in an indexed stream    | n > 1            | **E280** (closes the hole above)    |
+### No user-facing annotation
 
-This supersedes "un-indexed streams only." It also means the **`incidence` gate
-must move to the same rule**, since it has the same indexed-stream hole. That is
-a wider break than gh#478 alone; see Migration.
+There is deliberately no `kind = stages` keyword and no `@role(latent)`
+dimension attribute. This is protective, not economical. Every other part of
+this proposal _adds_ checking; a user-writable "this axis needs no explicit
+aggregation" marker is the one piece that _removes_ it, and a mislabelled axis
+would be permanently silent about a real modelling decision — the exact failure
+the rule exists to catch, carrying the compiler's endorsement. Today only the
+compiler can mint `RepresentationTransparent`, from `via` lowering, where it is
+true by construction. Defaulting every user-declared dimension to `Explicit` is
+the safe direction. Revisit only when a concrete model needs it; tracked as a
+follow-up, not a gap.
 
-A single-level dimension pools nothing (`{"current_pop": "I_main"}`), so it
-passes — counting cells rather than dimensions gets this right for free.
+## Scope: one principle, not a table of exceptions
 
-### 3. Fix the `'?'` fall-through, and reuse E287 — LANDED
+The rule reads differently in different places, and that difference has to be
+principled or it is just arbitrary. The principle:
 
-The dispatch matched on the argument's _shape_, and **three** distinct shapes
-reached the catch-all, not one:
+> **Inside the model's own equations, a bare family name means the whole
+> population, by construction. Anywhere a state value crosses out of the
+> dynamics — to data, to a report, or into an initial state — you must name what
+> you are pooling.**
 
-| shape                    | produced by                                |
-| ------------------------ | ------------------------------------------ |
-| `ESum` over a stage axis | `via erlang` (`sum_staged_refs`)           |
-| `EBinOp` Add-chain       | `via hyper_erlang` (`sum_hyper_refs`)      |
-| arbitrary arithmetic     | a user writing `prevalence(Y1[a] + Y2[a])` |
+A bare `I` in a force of infection _is_ the definition of the force of
+infection: transmission is driven by every infectious person, no parameter sits
+between that sum and anything else, and no alternative reading exists. Nothing
+to decide, so nothing to diagnose. The moment the same sum is scored against
+data, printed in a report, or used to seed state, a second reading exists and a
+parameter or a reader can absorb the difference.
 
-Matching the `ESum` shape alone — which is what the text below prescribed —
-fixes `via erlang` and leaves gh#487 open, because hyper_erlang's lowering
-builds an Add-chain, not a sum. The third shape had a live instance in-tree:
-`docs/dev/proposals/fixtures/garki_post_proposal.camdl` did not compile.
+Every context that resolves a state expression, enumerated from the callers of
+`resolve_expr` in `expander.ml`, and where it lands:
 
-The landed fix is shape-agnostic: anything that is not a single bare or fully
-indexed compartment reference is resolved as an ordinary state expression.
-Multi-argument `prevalence(X1, X2)` sums its arguments as
-`docs/camdl-run-spec.md` §14.1 documents, instead of silently dropping every
-argument after the first.
+| context                                         | site                                            | bare user-stratified family                   | omitted `via` axes           |
+| ----------------------------------------------- | ----------------------------------------------- | --------------------------------------------- | ---------------------------- |
+| transition rates                                | `expand_transitions_counted`                    | global sum — **unchanged**                    | summed                       |
+| ODE equations                                   | `expand_ode_equations`                          | global sum — **unchanged**                    | summed                       |
+| `let` bindings feeding the above                | `resolve_ident_name`                            | global sum — **unchanged**                    | summed                       |
+| observation projection                          | `expand_observations`                           | **E280**                                      | summed                       |
+| observation likelihood body                     | `expand_observations`                           | **E280**                                      | summed                       |
+| `quantities {}` body                            | `classify_quantity_body`                        | **E280**                                      | summed                       |
+| initial-condition RHS                           | `expand_init`                                   | **E280**                                      | summed                       |
+| write target (init LHS, endpoint, intervention) | `resolve_action_endpoint`, …                    | already an error — E277 / E272 / E265         | existing staged-target rules |
+| reactive trigger                                | `lower_threshold`                               | cannot read raw state — inherits observations | n/a                          |
+| time functions / forcing / table literals       | `expand_time_function_one`, `flatten_expr_list` | no compartment reads                          | n/a                          |
 
-The E287 half is **not** landed and is still open. One hazard the text below
-does not address: E287's message and hint are built from the _raw_ dimension
-vector, so on a mixed compartment it would print `[age, __onset_stage]` and
-suggest `sum(s in __onset_stage, …)` — naming a synthesized identifier the user
-never wrote, which is exactly what the neighbouring gh#460 code comments say
-must not happen. E287's catalog row also scopes it to "a rate read" and would
-need rewording. Note `test_compiler.ml`'s
-`test_prevalence_partial_index_is_rejected_at_compile` asserts E503 today and
-breaks under this change — a third breaking test the Migration section does not
-list.
+Three of those rows deserve a note.
 
-Original text follows.
+**`quantities {}` is a hard error, not a warning.** A quantity is a number a
+human reads and acts on; `max(I)` on an age-stratified `I` is the peak of the
+pooled total, which is the peak of no stratum. That it does not enter the
+likelihood makes the mistake _visible in output_ rather than _silently biasing a
+fit_, which is a real difference — but it is not a reason for a second rule.
+Writing `sum(a in age, I[a])` is available and blocks nothing. One rule is worth
+more than a severity ladder nobody can remember. Measured breakage: **one**
+committed model, `tests/fixtures/quantities/quantities_showcase.camdl` (two
+`prevalence` quantities over 3 cells each), which migrates with the fixture.
 
-On a compartment that is both user-stratified and staged:
+**Initial-condition right-hand sides read state too**, which is easy to miss
+because they usually read only parameters. Today this compiles:
 
 ```text
-projected = prevalence(E[child])
-  → error[E503]: unknown compartment referenced: '?'
+init { I[child] = I }
+  → {"I_child": {"pop_sum": ["I_child", "I_adult"]}}
 ```
 
-The cause is **not** partial indexing. `sum_staged_refs` (`expander.ml:1243`)
-recurses into `EFuncCall` arguments and is applied to `od.oprojection`
-(`expander.ml:1541-1545`), rewriting the argument into
-`sum(s in __onset_stage, E[child, s])`. It is then an `ESum`, so
-`prevalence_projection`'s dispatch falls to `| _ -> Ir.CurrentPop "?"`.
+a self-referential initial condition defining `I_child` in terms of itself.
+Measured breakage across all committed models: **zero** — no init RHS contains a
+multi-cell `PopSum`.
 
-`via hyper_erlang` reaches the _same_ catch-all by the _same_ mechanism
-(`sum_hyper_refs`, `expander.ml:1283`), which is why gh#487 folds in here rather
-than standing alone — it is one fix, not two.
+**Reactive triggers need no new rule.** `lower_threshold` already requires the
+threshold side to be a constant or a parameter (E272) and the other side to be a
+`sum_observed(...)` call, so a trigger reads observation streams rather than raw
+compartments and inherits the observation semantics automatically.
 
-Two changes: teach the dispatch to consume the rewritten `ESum` shape, and for a
-genuinely partial projection index emit **E287** — the diagnostic the rate path
-already gives for the identical mistake — instead of E503 on `'?'`:
+The write side was already living by this principle — E277, E272 and E265 all
+refuse a bare stratified name — so this proposal is not introducing a new kind
+of rule. It is making reads behave the way writes already do, everywhere the
+value leaves the dynamics.
+
+## Diagnostics
+
+`E280` is retained — same user-facing question, widened domain — and reworded.
+It names the family, the axes, and the expansion, and it prints forms that
+compile:
 
 ```text
-error[E287]: compartment 'I' has dimensions [age, patch] but only 1 of 2
-             were indexed; a partial index has no defined cell
+error[E280]: observation 'cases' implicitly pools compartment family 'I'
+             over model dimension 'age'
+
+  `I` expands here to `I_child + I_adult`.
+
+  = hint: to select this stream's stratum, index the family:
+              projected = I[a]
+          to pool explicitly, reduce over the dimension:
+              projected = sum(a in age, I[a])
+          for a per-stratum reporting rate:
+              projected = sum(a in age, rho[a] * I[a])
+
+  = note: residence-stage cells created by `via` are pooled automatically and
+          are not part of this decision
 ```
 
-### 4. Second consumer, already written
+When the effect originated in a `let`, the primary span points at the bare
+occurrence in the `let` body, with a secondary note naming the observation that
+made it illegal.
 
-gh#460 ships a staged-endpoint check that sniffs the dimension name
-(`expander.ml:6331-6333`):
+The hint suggests the **indexed-variable and `sum` forms only**. It must not
+generate named-index fix-its (`I[age = child]`) until gh#459 lands: named labels
+are currently lowered by source order and can bind the wrong cell when level
+names overlap across dimensions.
 
-```ocaml
-let staged ep =
-  List.exists (fun d -> String.length d > 2 && String.sub d 0 2 = "__") ep.ep_dims
+On a compartment carrying both policies, the message names only the `Explicit`
+axes. A `RepresentationTransparent` axis is never printed as something the user
+could index — that would show them `__onset_stage`, an identifier they never
+wrote, and the suggested fix would be impossible to follow.
+
+### A second, separate diagnostic for indexed streams
+
+Explicit pooling inside an indexed stream stays legal under the rule above:
+
+```camdl
+prev[a in age] {
+  projected = sum(b in age, I[b])          # explicit — allowed
+  prev ~ poisson(rate = rho_a[a] * projected)
+}
 ```
 
-That is the stringly-typed shortcut that produced a silent-wrong in gh#460. It
-becomes `List.exists (is_residence_stage ctx)`; `ctx` is in scope. So the field
-lands wired into two consumers.
-
-### 5. Live match arms — the obvious one is dead
-
-`ProjPrevalence` (`ast.ml:302`) is **never constructed**; the parser emits only
-`ProjDerived`. Its arm at `expander.ml:7006` is unreachable. (The occurrence at
-`8034` is an or-pattern shared with `ProjIncidence`, which _is_ constructed at
-`expander.ml:6819`, and with `None`; it cannot simply be deleted.)
-
-The arm _names_ below are right and the line numbers are not — as cited,
-`7009-7014` is the **incidence** arm, so an implementer following the numbers
-puts the prevalence gate in the wrong one. Identify the arms by pattern, never
-by line:
-
-- `ProjDerived (EFuncCall ("prevalence", …))`
-- `ProjDerived (EIdent …)` — the `projected = I` form
-- `ProjDerived (EIndex …)`
-
-Putting it in the arm named after the feature yields a gate that never fires,
-with green tests. But see "The gate as specified does not hold" above: gating
-these three arms is the wrong mechanism regardless of which arms they are,
-because every other shape flows through the `ProjDerived e` catch-all ungated.
-
-### 6. Readers that must keep the RAW dimension vector
-
-`reportable_dims` is for the gate and the gh#460 predicate. Everything else
-keeps `comp_dims`. Two are load-bearing:
-
-| site                                                 | why raw                                                                                                                                             |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `expander.ml:6247` `resolve_action_endpoint.ep_dims` | filtering stages would let `transfer(to = E)` on a staged `E` pair with an unstaged endpoint — the gh#459-class silent-wrong E237 exists to prevent |
-| `expander.ml:8825` `build_model_structure`           | the IR carries `"compartment_dims": {"E": ["age","__onset_stage"]}`; stripping it churns every staged golden and removes dims Rust needs            |
-
-Others that stay raw: `expand_compartment_name` (2064),
-`check_declaration_names` (2132), the E287 guard (3372), via lowering's `n_pre`
-(1417-1419), the hyper_erlang E248 guard (1578-1580), E214 (1995), W103 (7960),
-and `inspect.ml`.
-
-**Invariant this relies on:** stage axes are always a _suffix_ of a
-compartment's dimension vector, because `lower_via_transitions` runs after
-`collect_declarations` and appends (`expander.ml:1458`). True today,
-load-bearing for cell enumeration order, previously unstated.
-
-## Migration
-
-`prevalence()` is **head-position sugar**, not an expression function —
-verified:
+Every row uses the same pooled latent quantity. That is legitimate when several
+reporting channels observe one pooled process with channel-specific
+ascertainment, and a mistake more often than not. It gets a warning, not an
+error:
 
 ```text
-projected = rho * sum(a in age, prevalence(I[a]))    → error[E100]: undeclared function 'prevalence'
-projected = sum(a in age, rho[a] * prevalence(I[a])) → error[E100]
+warning[W1xx]: observation stream 'prev' is indexed by 'age', but its projection
+               does not depend on index variable 'a'
 ```
 
-So E280's existing hint text, which prints `sum(p in dim, incidence(tr[p]))`
-forms, is **non-compiling** for prevalence. The migration is to drop the
-wrapper, which works everywhere including the mixed case:
+### Partial projection index
 
-```text
-projected = rho * sum(a in age, I[a])   → derived_expr {mul, pop_sum:[I_child,I_adult]}
-projected = sum(a in age, rho[a] * I[a]) → derived_expr {reduce:[…]}
-projected = sum(a in age, E[a])          → derived_expr {pop_sum:[E_child_s1 … E_adult_s3]}
-```
+A genuinely partial index — naming some but not all `Explicit` axes — is `E287`,
+the diagnostic the rate path already gives for the same mistake, rather than
+`E503` on a mangled name. `E287`'s message and hint are built from the raw
+dimension vector today and must be changed to enumerate `Explicit` axes only,
+for the reason above. Its catalog row currently scopes it to "a rate read" and
+needs rewording.
 
-That last line settles a question the first draft got wrong: **the arity change
-is not needed.** `sum(a in age, E[a])` already pools stages implicitly on a
-mixed compartment, so `reportable_dims` does not have to become the arity
-authority for projections, and spec §12.1's "an index never marginalizes" stands
-unamended. The proposal is smaller for it.
+## What must not break
 
-This keeps the spec's own position (§12.1, line 2601): "write the sum directly;
-`prevalence(x)` is kept as sugar only for the single-compartment case."
+Positive controls, each pinned by a test:
 
-**The migrated projection is not IR-identical.** `CurrentPopSum` becomes
-`DerivedExpr`, which gains a `projection_state_grad` entry per cell. Same
-`TemporalKind::Instant`, no inference capability lost, but affected models
-**re-key their `run_id`** and cached fits invalidate. Announce it.
+- `prevalence(E)` on a `via erlang` compartment → pools its stages.
+- `prevalence(I)` on a `via hyper_erlang` compartment → pools its branch stages.
+- `prevalence(E[a])` on a compartment both user-stratified and staged → pools
+  that stratum's stages only.
+- A single-level dimension pools nothing (`{"current_pop": "I_main"}`) and
+  passes — the effect is created only when a family expands to more than one
+  cell.
+- `prevalence(Y1[a] + Y2[a])` — two families, one stratum.
+- Bare `I` in a rate expression — unchanged.
 
-### Measured breakage
+## Migration and measured breakage
 
-- **camdl repo: zero.** All 119 committed `.camdl` compiled; no observation
-  stream emits `current_pop_sum`.
-- **camdl-garki: zero.** All 62 models inspected at source (national-scale ones
-  not compiled). Every stream is indexed and every projection is an explicit
-  indexed expression. Their discipline is exactly what the gate would enforce.
+Committed models, all compiled with `ocaml/_build/default/bin/camdlc.exe`:
+
+- **camdl: one stream.** `ocaml/golden/seir_age_let_projection.camdl` pools
+  `I_child + I_adult` — and passes, because its `let` names both cells. Of 119
+  committed `.camdl`, 94 compile (the rest are error/lint fixtures); exactly
+  three observation streams pool more than one cell, and all three are explicit.
+- **`quantities {}`: one model.**
+  `tests/fixtures/quantities/quantities_showcase.camdl` has two `prevalence`
+  quantities pooling 3 cells each; both migrate to an explicit `sum(...)` with
+  the fixture.
+- **Initial-condition RHS: zero.** No committed model's init RHS contains a
+  multi-cell `PopSum`.
 - **camdl-book: zero.** Eight models use bare `prevalence(I)`; all unstratified.
-- **Two OCaml tests break**, both the hand-rolled staged-residence shape:
-  `test_compiler.ml:5679` `test_prevalence_on_stratified_compartment` and
-  `test_compiler.ml:5726` `test_projected_bare_stratified_compartment`.
-
-Hand-rolled staged residence (`stratify(by = …_stage, only = [X])`) exists in 8
-files plus those 2 tests — `ocaml/golden/seir_erlang*.camdl`, the book's
-teaching model, and Garki's 5 `gstage` mosquito models — but **none observes
-prevalence on the staged compartment**, so none breaks. A `kind = stages` opt-in
-keyword would buy zero real models today.
-
-The incidence half of §2 has now been swept, closing decision 8's open item:
-**zero** affected models. Across `camdl`, `camdl-book`, `camdl-garki`,
-`camdl-nigeria-polio`, `camdl-overfit`, `camdl-vignettes` and
-`playpen-camdl-measles`, no committed model has an indexed observation header
-followed by a bare `incidence(...)` / `prevalence(...)` / bare-identifier
-projection. Every indexed stream found indexes its projection too. The only
-bare-`incidence` hits are un-indexed streams (already E280) or pre-alpha models
-that no longer parse.
-
-Two corrections to the numbers above: the camdl repo has 119 `.camdl` files but
-93 compile — 25 of the rest are deliberate error/lint fixtures and one,
-`docs/dev/proposals/fixtures/garki_post_proposal.camdl`, was a live instance of
-the `'?'` bug (now fixed). The operative claim, that no observation stream emits
-`current_pop_sum`, holds: zero hits across all that compile, and zero in any
-committed `*.ir.json`. Hand-rolled staged residence exists in 9 files, not 8 —
-`camdl-garki/models/ctl_bb_erlang.camdl` uses `stratify(by = stage)` and is
-missed by a `gstage` grep. Its projection is a `DerivedExpr` over lets, so the
-conclusion (none breaks) is unaffected.
-
-## Docs to update
-
-- **spec §25.4 (~line 4979)** documents the removed behaviour verbatim
-  (`prevalence(R)` → `CurrentPopSum(["R_child","R_adult"])`) and is _already_
-  stale for incidence in the same block. The doctest harness skips it, so CI
-  will not catch either.
-- **spec §12.1 (2612-2617)** — the "state the aggregation explicitly" bullets
-  are incidence-only; add the compiling prevalence forms.
-- **spec §9.4.1 (line 2016)** — "a bare `E` or `prevalence(E)` still sums every
-  stage" stays true; add _why_ (stages are not reportable).
-- **`docs/dev/warning-catalog.md:79`** — E280's row is incidence-worded.
-- **`docs/language-changes.md`** — entry required (this is agent-visible via
-  `camdl docs language-changes`).
-- **`camdl-book/guide/getting-started.qmd:705-740`** teaches
-  `projected = prevalence(I) / N0`, which E100s today. Pre-existing bug, worth
-  fixing alongside. The book's spec chapter is auto-synced and needs no edit.
-- No change needed in `user-features.md`, `dsl-cheatsheet.md`, `intro.md`,
-  `agents.md`, `inference.md` — every hit is a `quantities { }` block or prose.
-
-## Diagnostic
-
-Keep **E280** (same rule, same fix; E2xx is nearly exhausted). Reword for
-prevalence and name the actual dimensions instead of the literal `<dim>`
-placeholder the current message prints:
-
-```text
-error[E280]: observation 'cases' is un-indexed, but `prevalence(I)` would pool
-             all 4 cells of 'I' — across age, patch — into one number
-
-  = hint: pooling across age, patch is a modelling decision, so state it.
-          `prevalence(...)` is the bare single-compartment form and is not
-          available inside an expression; write the sum over cells directly:
-            • pooled, one reporting rate:
-                projected = rho * sum(a in age, sum(p in patch, I[a,p]))
-            • per-stratum reporting:
-                projected = sum(a in age, sum(p in patch, rho[a] * I[a,p]))
-          To report each stratum on its own row, index the stream:
-            cases[a in age, p in patch] { … projected = prevalence(I[a,p]) … }
-```
-
-On a mixed compartment, say which axis is which:
-
-```text
-(the 3 `onset` residence stages pool correctly — it is `age`
- that is a modelling decision)
-```
+- **camdl-garki, camdl-nigeria-polio, camdl-overfit, camdl-vignettes,
+  playpen-camdl-measles: zero.** No committed model has an indexed observation
+  header followed by a bare projection; every indexed stream indexes its
+  projection.
+- **Hand-rolled staged residence** exists in 9 files, none of which observes
+  prevalence on the staged compartment, so none breaks.
+- **Two OCaml tests migrate**: `test_compiler.ml:5679`
+  `test_prevalence_on_stratified_compartment` and `:5726`
+  `test_projected_bare_stratified_compartment`, both hand-rolled staging, to
+  `via erlang`. A third, `test_prevalence_partial_index_is_rejected_at_compile`
+  (`:5897`), asserts `E503` and moves to `E287`.
 
 ## Tests
 
-- Bare `prevalence` on a user-stratified family → E280 naming the user dims.
-- Bare `prevalence` on a `via erlang` compartment → still pools. **Positive
-  control, must pass before and after.**
-- Mixed → E280 naming only the user dim.
-- Single-level dimension → **no** error (pools nothing).
-- Indexed stream + bare `prevalence(I)` → E280 (the hole).
-- Indexed stream + `prevalence(I[a])` → ok.
-- `prevalence(E[child])` on mixed → `CurrentPopSum` over that stratum's stages,
-  asserted on the IR.
-- Partial projection index → E287, not E503 `'?'`.
-- `prevalence(E)` on `hyper_erlang` → pools branch stages (gh#487).
-- gh#460's E237 staged branch still fires after dropping the `"__"` sniff.
-- The `sum(a in age, I[a])` migration compiles and yields the same numbers.
+- Every row of the behaviour table above, asserted on the IR or the error code.
+- `let`-aliased pooling → E280 with the span at the `let`.
+- `let`-aliased explicit reduction → compiles.
+- `sum(a in age, I)` → E280, not a silently doubled `PopSum`.
+- `I[child] + I[child]` → `pop_sum` with the duplicate preserved.
+- Each positive control in "What must not break", as a control that passes
+  before and after.
+- Indexed stream whose projection ignores its index → the new warning, and the
+  fit still runs.
+- `quantities {}` pooling → E280; `quantities_showcase` migrated to an explicit
+  sum still compiles and yields the same numbers.
+- `init { I[child] = I }` on a stratified model → E280, not a self-referential
+  initial condition.
+- A bare `I` in a rate expression and in an ODE equation → **no** diagnostic,
+  same IR as today. The scope boundary is itself a test.
+- E287 on a mixed compartment names no `__`-prefixed axis.
 
 ## Decisions taken
 
-1. **Field on `stratify_decl`, not the IR** — needed during expansion only.
-   Construction sites are `parser.mly:1305` and `expander.ml:1458`; verified
-   exhaustively, those are the only two in the tree. Note `via hyper_erlang`
-   creates **no** `stratify_decl` at all — its branch stages are flat
-   compartments (`I__fatal__1`, …) — so `stratum_origin` structurally cannot
-   answer "is this a residence axis?" for hyper-staged compartments, and
-   `reportable_dims` returns `[]` for them. §2's cell-counting rule needs to say
-   what it does there; it currently does not.
-2. **Gate on reportable cells pooled (> 1), not on dimensions and not on stream
-   indexing.** Fixes the single-level over-fire and the indexed-stream hole in
-   one rule. Counting cells rather than dimensions is right, and it handles
-   `sonly`-restricted stratification correctly for free. **What is unresolved is
-   where the rule is enforced** — see "The gate as specified does not hold".
-3. **`prevalence()` stays head-position sugar.** Migration drops the wrapper.
-   The arity change from the first draft is dropped as unnecessary.
-4. **Mixed compartments gate on the user dimension**; stages pool.
-5. **Hand-rolled staged residence breaks**; no `kind = stages` keyword. Zero
-   real models affected; the two tests migrate to `via erlang`.
-6. **gh#487 folds in** — same dispatch, same catch-all, one fix.
-7. **Keep E280**, reworded; partial projection index becomes E287.
-8. **The `incidence` gate moves to the same rule**, closing its indexed-stream
-   hole. The sweep is done: zero affected models across seven repos (see
-   Migration).
+1. **The invariant is "no undischarged implicit marginalization," not a check on
+   spelling.** A syntactic check misses `let`-aliasing; a check on the flattened
+   IR cannot distinguish `let x = I` from `let x = sum(a in age, I[a])`.
+   Resolution carries the effect set until the observation boundary.
+2. **One principle generates the scope table**: inside the model's own equations
+   a bare family is the whole population by construction; anywhere a value
+   crosses out of the dynamics — projection, likelihood, quantity, initial-state
+   RHS — it must name what it pools. Hard error in all four, no change to rate
+   or ODE semantics, no severity ladder. `quantities {}` is an error rather than
+   a warning because a second rule costs more than the one fixture it breaks.
+3. **Provenance and policy are separate, both compiler-internal**;
+   `RepresentationTransparent` is derived from `via` lowering and provenance is
+   retained for diagnostics.
+4. **Provenance is recorded per axis at each lowering site**, not as a field on
+   `stratify_decl`, because `via hyper_erlang` synthesizes no `stratify_decl`.
+5. **The justification for transparency is representational, not
+   epidemiological** — `via` creates cells for one declared compartment.
+6. **No user-facing annotation.** A user-writable silencer defeats the rule;
+   revisit only for a concrete model.
+7. **Hand-rolled staging stays `Explicit`.** Public model structure is public.
+8. **`prevalence(…)` is a projection-expression wrapper**, accepting any state
+   expression, marking "instantaneous state" against `incidence`'s "flow over an
+   interval". Multi-argument forms sum.
+9. **Keep E280, reworded**; add a separate warning for an indexed stream whose
+   projection ignores its index; partial projection index becomes E287.
+10. **Named-index fix-its are withheld** from the hint until gh#459.
 
-## Still open
+## Follow-ups
 
-Each of these must be closed before this ships as a spec.
+Named, tracked, and deliberately not folded in:
 
-1. **Where the gate is enforced** — lint at the resolved IR, or a semantic gate
-   with an IR-distinguishable escape. The blocking decision.
-2. **What `reportable_dims` means for a `via hyper_erlang` compartment**, which
-   has no stage `stratify_decl` to filter (Decision 1).
-3. **What E287 prints on a mixed compartment**, given its message and hint are
-   built from the raw dimension vector and would name `__onset_stage` (§3).
-4. **Whether `stratum_origin` is the right concept or just the available one.**
-   Reportability is a property of the _axis_ — could a data column carry it? —
-   not of who constructed it. Under Decision 5 a hand-rolled residence chain and
-   a `via erlang` one produce, by the repo's own assertion in
-   `ocaml/golden/seir_age_erlang_via.camdl`, IR equal modulo stage names, yet
-   get different diagnostics. "Zero real models affected" is a sound reason to
-   ship the mechanism; it is not a reason to state "no `kind = stages` keyword"
-   as settled. Either name it a deferral with a tracked follow-up, or decide it.
-
-Two follow-ups this proposal should file rather than fold in: per-stratum
-reporting into a _single pooled column_ has no compiling form (only per-stratum
-_rows_ do), and `quantities {}` pools stratified compartments silently (`max(I)`
-on an age-stratified `I` reduces over the pooled total, which is not the peak of
-any stratum).
+- **gh#488 — `sum()` over an undeclared dimension silently yields `0.0`,** which
+  zeroes a force of infection with no diagnostic. Independent of this proposal
+  (rate path, not projections) and more dangerous. `dim_values` returns `[]` for
+  an unknown dimension, which `resolve_expr`'s `ESum` arm cannot distinguish
+  from a guard that excluded every level. The fix is structural: resolving an
+  unknown dimension must fail before enumeration, so "unknown collection" and
+  "known collection, zero survivors" never share a representation. **Fix this
+  first.**
+- **Make `incidence(...)` a proper atom in the projection AST.** It is
+  head-position sugar today, so `sum(a in age, rho[a] * incidence(tr[a]))` is
+  `E100` and per-stratum reporting into a single pooled column is inexpressible
+  — the exact alternative model this proposal exists to make visible. The
+  bespoke head-position handling is also where four separate silent-wrongs lived
+  (discarded arguments, single-level sum peeling, ignored `where`, non-compiling
+  hint). A unified projection-expression AST removes the special case.
+  Immediately behind this work, not blocking it.
+- **Projection evaluation fast path.** A projection that is structurally a sum
+  of state cells should not copy the whole state vector per particle per
+  observation time (`multi_stream_obs.rs:50-60`, called at `:333`). Build a
+  runtime plan at setup — `StreamProjection` is runtime-only with no serde, so
+  the model hash is untouched and no run re-keys. Preserve term order and
+  duplicates (`I + I` counts twice; never collect into a set). Start by checking
+  whether the copy exists only because the evaluator takes ownership — making it
+  borrow may speed every derived projection, with sum-planning as an additional
+  win. Benchmark allocations and wall time on a national-scale model plus a
+  controlled sweep over compartment count, particles and streams. Semantically
+  independent; land separately.
+- **Spec semantic cleanup.** The language spec currently documents both sides of
+  this rule and must carry the context table above. Verified contradictions:
+  §25.4 (line ~4993) documents bare `incidence(infection)` on an age-stratified
+  model expanding to `CumulativeFlowSum(["infection_child","infection_adult"])`,
+  which §12 rejects as E280; and the spatial age-structured example at line 4822
+  uses `projected = incidence(infection)` on a family declared
+  `infection[a in age, p in patch]`, invalid under §12's own rule. The doctest
+  harness skips both blocks, so CI does not catch either.
