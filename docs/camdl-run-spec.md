@@ -2474,11 +2474,15 @@ inference methods (IF2, PGAS, PMMH).
   flow counters over the interval since the last observation. Appropriate for
   daily case notifications, weekly deaths, cumulative reported hospitalizations
   — any **event count over an interval**.
-- **Prevalence** (`prevalence(X)`, IR `CurrentPop`; or `prevalence(X1, X2)` → IR
-  `CurrentPopSum`): integer compartment count(s) read at the observation
-  instant. Appropriate for hospital bed occupancy, ICU census, wastewater
-  concentration snapshots, seroprevalence surveys — any **point-in-time state
-  reading**.
+- **Prevalence** (`prevalence(X)`, IR `CurrentPop`; a bare stratified name → IR
+  `CurrentPopSum` over its cells): integer compartment count(s) read at the
+  observation instant. Appropriate for hospital bed occupancy, ICU census,
+  wastewater concentration snapshots, seroprevalence surveys — any
+  **point-in-time state reading**. Any other argument — several compartments
+  (`prevalence(X1, X2)`), an arithmetic expression (`prevalence(Y1 + Y2)`), or a
+  cell of a `via erlang` / `via hyper_erlang` compartment, whose residence
+  stages the compiler has already expanded into a sum — desugars to the sum of
+  its arguments and lowers as a `DerivedExpr`.
 - **Derived expression** (`projected = <expr>`, IR `DerivedExpr`): arbitrary
   expression over compartment state (e.g. `B1 + B2`, `I / (S + I + R)`),
   evaluated at the observation instant.

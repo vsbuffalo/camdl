@@ -5977,9 +5977,17 @@ let test_prevalence_bare_unstratified_still_compiles () =
      | _ -> Alcotest.fail "expected CurrentPop")
 
 let test_prevalence_indexed_stream_still_compiles () =
-  (* Positive control: on an INDEXED stream each cell resolves per-stratum, so
-     there is no silent pooling and the gate must not fire — matching how the
-     incidence gate is scoped. *)
+  (* Positive control: an INDEXED stream whose projection is ALSO indexed
+     (`prevalence(I[a])`) resolves one cell per row, so nothing is pooled and
+     the gate must not fire.
+
+     Note what this does NOT establish. Indexing the STREAM is not by itself
+     what makes the projection per-stratum — the projection has to be indexed
+     too. A bare `prevalence(I)` (or `incidence(infection)`) under an indexed
+     header still pools every cell and assigns that one pooled total to every
+     row, with no diagnostic, because the gate is scoped to un-indexed streams.
+     That hole is gh#478 / the 2026-07-27 stratum-provenance proposal; it is not
+     fixed here, and this test must not be read as covering it. *)
   let src = stratified_age_seir_with_obs {|
     observations {
       prev[a in age] {
@@ -5994,11 +6002,15 @@ let test_prevalence_indexed_stream_still_compiles () =
   | Error e -> Alcotest.failf "indexed-stream prevalence should compile: %s" e
   | Ok _ -> ()
 
-(* The explicit uniform-reporting form the gate directs the modeller to:
-   `rho * sum(a in age, incidence(infection[a]))` — here without the rho factor
-   for the projection check — compiles and expands to the IDENTICAL
-   CumulativeFlowSum the bare form used to produce. The reporting choice is now
-   stated, not silent. *)
+(* The pooled-column form the gate directs the modeller to. It expands to the
+   IDENTICAL CumulativeFlowSum the bare form used to produce — the reporting
+   choice is now stated, not silent.
+
+   The reporting rate is NOT part of this expression: `incidence(...)` is
+   head-position sugar, so `rho * sum(a in age, incidence(infection[a]))` is
+   E100 (undeclared function). `rho` multiplies `projected` in the likelihood
+   instead. E280's hint used to print the arithmetic-wrapped form; it doesn't
+   compile, and it no longer does. *)
 let test_incidence_explicit_sum_compiles_to_flow_sum () =
   let src = stratified_age_seir_with_obs {|
     observations {

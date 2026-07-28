@@ -2609,13 +2609,41 @@ family resolves to a single expanded transition and fails if none matches
 (there is no `infection_north` — only `infection_north_child`, …). To sum a
 projection across a dimension, write the sum out:
 
-- uniform reporting: `rho * sum(p in patch, incidence(infection[p]))`
-- per-stratum reporting: `sum(p in patch, rho[p] * incidence(infection[p]))`
+`incidence(...)` and `prevalence(...)` are **head-position sugar**: they are
+valid as the whole of a `projected = …` right-hand side, or under `sum(...)`,
+but they are not expression functions and cannot be wrapped in arithmetic
+(`rho * sum(p in patch, incidence(infection[p]))` is `E100`, undeclared
+function). The reporting rate therefore goes in the *likelihood*, not the
+projection:
+
+- one pooled column, one reporting rate:
+
+  ```camdl
+  projected = sum(p in patch, incidence(infection[p]))
+  cases ~ poisson(rate = rho * projected)
+  ```
+
+  A family stratified over several dimensions needs one `sum` per dimension:
+  `sum(a in age, sum(p in patch, incidence(infection[a, p])))`.
+
+- one row per stratum, each with its own reporting rate — index the stream:
+
+  ```camdl
+  cases[p in patch] {
+    columns   { time : time, patch : dim, cases : count }
+    projected = incidence(infection[p])
+    cases ~ poisson(rate = rho[p] * projected)
+  }
+  ```
+
+A `where` predicate on an aggregation sum prunes the domain, exactly as it does
+in a rate expression: `sum(p in patch where p != north, incidence(infection[p]))`
+pools only the surviving levels.
 
 A **bare, un-indexed** `incidence(infection)` over a stratified family on an
 un-indexed observation stream is rejected (`E280`) precisely so this aggregation
-decision is never made silently; the diagnostic prints the two explicit forms
-above. Where you *do* fully index, prefer **named** indexing
+decision is never made silently; the diagnostic prints the explicit forms
+above, naming the family's actual dimensions. Where you *do* fully index, prefer **named** indexing
 (`infection[patch = north, age = child]`) over **positional**
 (`infection[north, child]`): named binding is order-independent and survives a
 later reordering of the dimension declarations, whereas positional binding
