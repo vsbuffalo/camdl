@@ -1,7 +1,17 @@
 # No undischarged implicit marginalization
 
-Date: 2026-07-27 Status: ready to implement Fixes: gh#478 Related: gh#459,
-gh#333, gh#488
+Date: 2026-07-27 Status: **superseded** by
+[`2026-07-31-aggregation-semantics.md`](2026-07-31-aggregation-semantics.md)
+Fixes: gh#478 Related: gh#459, gh#333, gh#488
+
+Superseded on two counts. Its discharge condition — that naming the cells
+satisfies the rule — is unsound: `let I_total = I[child] + I[adult]` on a
+three-level `age` passes while silently dropping `elderly`, so the rule accepts
+an incorrect explicit enumeration and rejects the correct implicit form. And its
+scope is narrower than the defect: the same silent pooling reaches data through
+`incidence`, `quantities` and initial-condition right-hand sides, and the
+underlying cause is that camdl spells one aggregation operation five
+incompatible ways. The successor consolidates those.
 
 ## The problem
 
