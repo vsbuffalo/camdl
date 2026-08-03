@@ -513,6 +513,58 @@ Rust consumer ever reads it semantically, the hash policy must be revisited.
 There is no user-facing annotation. Only the compiler mints lowering metadata,
 from `via` lowering, where it is true by construction.
 
+C5. **Reserve the `__` prefix in the lexer.** The tag in C4 answers "is this a
+generated axis?" — it does not prevent a _collision_, because generated axes are
+registered in the same `dim_registry` as declared ones
+(`expander.ml:1453-1458`). Today the prefix is a convention nothing enforces, so
+this compiles into a self-contradictory diagnostic:
+
+```camdl
+dimensions { __onset_stage = [x1, x2] }
+onset : E --> I via erlang(stages = 3, mean = 4 'days)
+```
+
+```text
+error[E212]: dimension '__onset_stage' is declared more than once in dimensions {}
+```
+
+The modeller declared it once; the compiler declared the other and does not say
+so, and two cascading errors follow.
+
+Rejecting `__`-prefixed identifiers at `lexer.mll:131` makes the collision
+**structurally impossible** — a user cannot write a name that collides — which
+is the same illegal-states-unrepresentable property as C4's tag, obtained at the
+parse boundary. Corpus: 0 identifiers affected.
+
+**Why the prefix rather than a separate namespace.** Splitting generated axes
+into their own table was considered and rejected on measurement. Of the readers
+of `ctx.stratifies`, the majority want the **union** of declared and generated
+axes — `comp_dims` (`:2061`) enumerates cells and needs every axis, as do
+`n_pre` (`:1419`), `src_is_stratified` (`:1580`) and the E214 check (`:1995`). A
+split would force those sites to concatenate two tables, making the common case
+worse to serve the rare one. Only `build_model_structure` (`:8916`) and the
+diagnostics genuinely need the distinction, and the C4 tag gives them that
+without touching the others. So the reservation is the permanent answer, not a
+stepping stone toward a split.
+
+C6. **Generated axis names are never user-visible.** They currently are:
+`model_structure.dimensions` carries them into the IR, and therefore to the Rust
+runtime, the viewer, `render` and `inspect` —
+
+```text
+model_structure.dimensions = [{"name": "age", "values": ["child","adult"]},
+                              {"name": "__recovery_stage", "values": ["s1","s2","s3"]}]
+```
+
+Cell names are built from the _levels_ (`E_s1`), never from the dimension name,
+so nothing downstream needs it. With C4's tag, `build_model_structure` labels or
+omits generated entries rather than emitting them indistinguishably.
+
+Stating this as an invariant makes the existing leaks bugs against a rule rather
+than three unrelated diagnostics to remember: `E287`'s hint suggesting
+`sum(s in __onset_stage, …)`, `E237`'s misdiagnosis of a user dimension named
+`__risk`, and `E212` above.
+
 ## 9. Increment D — `prevalence` as a checked proportion
 
 D1. New form: `prevalence(of = <expr>, among = <expr>, across = <dims>)`, with
@@ -701,10 +753,6 @@ stage axis was also collapsed.
 ## 16. Follow-ups
 
 - **Increment F**, above.
-- **`__` namespace reservation.** The lexer permits `_` in identifiers
-  (`lexer.mll:135`), so reservation needs enforcement plus a migration
-  diagnostic. Corpus: 0 identifiers affected. C4 already removes the compiler's
-  own dependence on the convention.
 - **The cumulative-flow primitive.** Do not reserve a name now. The existing
   `total`/`sum` reservation protects a feature its own hint calls
   cadence-dependent; `integral(...)` already accumulates a stock over continuous
