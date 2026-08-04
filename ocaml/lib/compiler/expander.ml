@@ -6981,6 +6981,31 @@ let expand_observations ctx =
            ESum and resolve through `ProjDerived`, also never here. So this
            fires precisely on the silent case.) *)
         if od.oindices = [] then begin
+          (* Build the suggested forms from the transition's OWN binders, so the
+             hint names the real dimensions rather than a `<dim>` placeholder.
+             `incidence(...)` is head-position sugar, not an expression function
+             (`rho * sum(a in age, incidence(tr[a]))` is E100 "undeclared
+             function"), so the reporting rate goes in the LIKELIHOOD, not in
+             the projection — the hint must show forms that actually compile. *)
+          let binders = match List.find_opt (fun tr -> tr.trname = base)
+                                ctx.transitions with
+            | Some tr -> List.filter_map
+                           (function IBind (v, d) -> Some (v, d) | _ -> None)
+                           tr.trindices
+            | None -> [] in
+          let binders = if binders = [] then [("p", "<dim>")] else binders in
+          let idx = String.concat ", " (List.map fst binders) in
+          (* Nested sums, outermost first: sum(a in age, sum(p in patch, …)). *)
+          let summed =
+            List.fold_right
+              (fun (v, d) inner -> Printf.sprintf "sum(%s in %s, %s)" v d inner)
+              binders
+              (Printf.sprintf "incidence(%s[%s])" base idx) in
+          let stream_hdr = String.concat ", "
+              (List.map (fun (v, d) -> Printf.sprintf "%s in %s" v d) binders) in
+          let dim_cols = String.concat ""
+              (List.map (fun (_, d) -> Printf.sprintf "%s : dim, " d) binders) in
+          let rate_idx = String.concat ", " (List.map fst binders) in
           Diagnostics.error ctx.diags
             ~code:"E280"
             ~loc:od_loc
@@ -6989,13 +7014,70 @@ let expand_observations ctx =
                sum all %d strata of '%s' and apply reporting uniformly"
               od.oname base (List.length many) base)
             ~hint:(Printf.sprintf
-              "state the aggregation explicitly:\n\
-              \  • uniform reporting:   <col> ~ ...( rho * sum(p in <dim>, incidence(%s[p])) )\n\
-              \  • per-stratum reporting: <col> ~ ...( sum(p in <dim>, rho[p] * incidence(%s[p])) )"
-              base base)
+              "pooling across %s is a modelling decision, so state it. Either:\n\
+              \  • one pooled column, one reporting rate — sum the per-stratum \
+                 flows, then apply `rho` in the likelihood:\n\
+              \      projected = %s\n\
+              \      %s ~ ...(mean = rho * projected)\n\
+              \  • one row per stratum, its own reporting rate — index the stream:\n\
+              \      %s[%s] {\n\
+              \        columns   { time : time, %s%s : count }\n\
+              \        projected = incidence(%s[%s])\n\
+              \        %s ~ ...(mean = rho[%s] * projected)\n\
+              \      }"
+              (String.concat ", " (List.map snd binders))
+              summed od.oname
+              od.oname stream_hdr
+              dim_cols od.oname
+              base idx
+              od.oname rate_idx)
             ()
         end;
         Ir.CumulativeFlowSum many
+    in
+    (* EXPLICIT cross-strata incidence aggregation (§5.2):
+       `sum(a in dim, incidence(tr[a]))` is the pooled-column form the
+       aggregation gate (E280) directs the modeller to. It lowers to a
+       CumulativeFlowSum over the per-level transitions — the SAME value the
+       (rejected) bare `incidence(tr)` produced, but stated explicitly.
+
+       Peel ALL the `sum(...)` wrappers, not one: a family stratified over k
+       dimensions needs k NESTED sums, and peeling a single level left the inner
+       `sum` sitting where an `EFuncCall` was expected, so the whole projection
+       fell through to the generic expression resolver — where `incidence` is
+       head-position sugar rather than a declared function, giving E100. On a
+       multi-dimensional family that made E280's own escape hatch inexpressible.
+
+       `where` guards prune the domain exactly as `resolve_expr`'s ESum arm does
+       (dim_values filtered through eval_guard). The old single-level match bound
+       the guard slot to `_` and then enumerated every level, so a restricted sum
+       silently pooled the strata the modeller had excluded.
+
+       Returns None for anything that is not an incidence aggregation, which
+       falls through to the generic DerivedExpr resolver unchanged. *)
+    let explicit_incidence_sum top =
+      let rec go e local_env =
+        match e with
+        | ESum (v, d, guard_opt, body) ->
+          let vals = dim_values ctx d in
+          let vals = match guard_opt with
+            | None   -> vals
+            | Some g -> List.filter
+                          (fun vv -> eval_guard ctx ((v, vv) :: local_env) g) vals in
+          List.fold_right (fun vv acc ->
+            match acc, go body ((v, vv) :: local_env) with
+            | Some rest, Some fs -> Some (fs @ rest)
+            | _ -> None) vals (Some [])
+        | EFuncCall ("incidence", iargs) ->
+          (match List.filter_map
+                   (fun (k, e) -> if k = "" then Some e else None) iargs with
+           | [ EIndex (tr, idxs, _) ] ->
+             Some [ String.concat "_"
+                      (tr :: List.map (index_item_to_str local_env) idxs) ]
+           | _ -> None)
+        | _ -> None
+      in
+      match top with ESum _ -> go top env | _ -> None
     in
     let projection = match proj_v with
       | ProjIncidence (name, idxs) ->
@@ -7013,11 +7095,43 @@ let expand_observations ctx =
            Ir.CumulativeFlow (String.concat "_" (n :: List.map (index_item_to_str env) idxs))
          | _ -> Ir.CumulativeFlow "?")
       | ProjDerived (EFuncCall ("prevalence", args)) ->
-        (match List.assoc_opt "" args with
-         | Some (EIdent (n, _))    -> prevalence_projection n []
-         | Some (EIndex (n, idxs, _)) ->
+        (match List.filter_map (fun (k, e) -> if k = "" then Some e else None) args with
+         | [ EIdent (n, _) ]         -> prevalence_projection n []
+         | [ EIndex (n, idxs, _) ]   ->
            prevalence_projection n (List.map (index_item_to_str env) idxs)
-         | _ -> Ir.CurrentPop "?")
+         | [] ->
+           Diagnostics.error ctx.diags ~code:"E250" ~loc:od_loc
+             ~message:(Printf.sprintf
+               "observation '%s': `prevalence(...)` needs a compartment to project"
+               od.oname)
+             ~hint:"give it a compartment (`prevalence(I)`), a cell \
+                    (`prevalence(I[child])`), or an expression over \
+                    compartments (`prevalence(Y1 + Y2)`)"
+             ();
+           Ir.DerivedExpr (Ir.Const 0.0)
+         | positional ->
+           (* Every other argument shape is an ordinary expression over state,
+              and resolving it is the whole answer. Three shapes reach here and
+              all three are legitimate models, so the dispatch must NOT match on
+              shape — matching one leaves the others emitting the sentinel name
+              `"?"`, which surfaces to the user as `E503: unknown compartment
+              referenced: '?'`, naming nothing they wrote:
+
+                · `via erlang` rewrites the argument to `ESum` over the stage
+                  axis (`sum_staged_refs`);
+                · `via hyper_erlang` rewrites it to an `EBinOp` Add-chain over
+                  the branch-stage cells (`sum_hyper_refs`) — a DIFFERENT shape
+                  for the same reason, which is why gh#487 is this same bug;
+                · a user-written arithmetic argument, `prevalence(Y1 + Y2)`.
+
+              Several positional arguments desugar to their sum, as specified in
+              the 2026-04-17 state-snapshot-projections proposal and documented
+              at `docs/camdl-run-spec.md` §14.1. Reading only the first (the old
+              `List.assoc_opt ""`) silently discarded the rest. *)
+           let summed = List.fold_left
+               (fun acc e -> EBinOp (Add, acc, e))
+               (List.hd positional) (List.tl positional) in
+           Ir.DerivedExpr (resolve_expr ctx env summed))
       | ProjDerived (EIdent (name, _) as e) ->
         (* Disambiguate: let-binding, compartment (prevalence), or
            transition (flow)? A let-bound bare identifier (e.g.
@@ -7052,37 +7166,14 @@ let expand_observations ctx =
           prevalence_projection name idx_vals
         else
           Ir.CumulativeFlow concrete
-      (* EXPLICIT cross-strata incidence aggregation (§5.2):
-         `sum(a in dim, incidence(tr[a]))` is the uniform-reporting form the
-         aggregation gate (E280) directs the modeller to. It lowers to a
-         CumulativeFlowSum over the per-level transitions — the SAME value the
-         (now-rejected) bare `incidence(tr)` produced, but stated explicitly.
-         The loop variable indexes the transition; each level instantiates one
-         concrete flow. (A `sum` whose body is anything else falls through to
-         the generic DerivedExpr arm below.) *)
-      | ProjDerived (ESum (loop_var, dim, _, EFuncCall ("incidence", iargs)))
-        when (match List.assoc_opt "" iargs with
-              | Some (EIndex (_, _, _)) -> true | _ -> false) ->
-        let inner = match List.assoc_opt "" iargs with
-          | Some (EIndex (tr, idxs, _)) -> Some (tr, idxs) | _ -> None in
-        (match inner with
-         | Some (tr, idxs) ->
-           let levels = match List.assoc_opt dim ctx.dim_registry with
-             | Some ls -> ls | None -> [] in
-           (* For each level, bind loop_var → level in a local env and resolve
-              the transition's concrete name. *)
-           let flows = List.map (fun lvl ->
-             let local_env = (loop_var, lvl) :: env in
-             let idx_vals = List.map (index_item_to_str local_env) idxs in
-             String.concat "_" (tr :: idx_vals)
-           ) levels in
-           (match flows with
-            | []       -> Ir.CumulativeFlow tr
-            | [single] -> Ir.CumulativeFlow single
-            | many     -> Ir.CumulativeFlowSum many)
-         | None -> Ir.DerivedExpr (resolve_expr ctx env (ESum (loop_var, dim, None, EConst 0.0))))
       | ProjDerived e ->
-        Ir.DerivedExpr (resolve_expr ctx env e)
+        (match explicit_incidence_sum e with
+         (* A `where` that excludes every level sums nothing, matching what
+            `resolve_expr` gives for an empty restricted sum. *)
+         | Some []       -> Ir.DerivedExpr (Ir.Const 0.0)
+         | Some [single] -> Ir.CumulativeFlow single
+         | Some many     -> Ir.CumulativeFlowSum many
+         | None          -> Ir.DerivedExpr (resolve_expr ctx env e))
     in
     (* Likelihood kwarg resolution with strict diagnostics. Unlike the
        silent 0.0 default of old, we emit a real error for:

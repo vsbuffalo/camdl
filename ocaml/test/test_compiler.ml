@@ -5977,9 +5977,17 @@ let test_prevalence_bare_unstratified_still_compiles () =
      | _ -> Alcotest.fail "expected CurrentPop")
 
 let test_prevalence_indexed_stream_still_compiles () =
-  (* Positive control: on an INDEXED stream each cell resolves per-stratum, so
-     there is no silent pooling and the gate must not fire — matching how the
-     incidence gate is scoped. *)
+  (* Positive control: an INDEXED stream whose projection is ALSO indexed
+     (`prevalence(I[a])`) resolves one cell per row, so nothing is pooled and
+     the gate must not fire.
+
+     Note what this does NOT establish. Indexing the STREAM is not by itself
+     what makes the projection per-stratum — the projection has to be indexed
+     too. A bare `prevalence(I)` (or `incidence(infection)`) under an indexed
+     header still pools every cell and assigns that one pooled total to every
+     row, with no diagnostic, because the gate is scoped to un-indexed streams.
+     That hole is gh#478 / the 2026-07-27 stratum-provenance proposal; it is not
+     fixed here, and this test must not be read as covering it. *)
   let src = stratified_age_seir_with_obs {|
     observations {
       prev[a in age] {
@@ -5994,11 +6002,15 @@ let test_prevalence_indexed_stream_still_compiles () =
   | Error e -> Alcotest.failf "indexed-stream prevalence should compile: %s" e
   | Ok _ -> ()
 
-(* The explicit uniform-reporting form the gate directs the modeller to:
-   `rho * sum(a in age, incidence(infection[a]))` — here without the rho factor
-   for the projection check — compiles and expands to the IDENTICAL
-   CumulativeFlowSum the bare form used to produce. The reporting choice is now
-   stated, not silent. *)
+(* The pooled-column form the gate directs the modeller to. It expands to the
+   IDENTICAL CumulativeFlowSum the bare form used to produce — the reporting
+   choice is now stated, not silent.
+
+   The reporting rate is NOT part of this expression: `incidence(...)` is
+   head-position sugar, so `rho * sum(a in age, incidence(infection[a]))` is
+   E100 (undeclared function). `rho` multiplies `projected` in the likelihood
+   instead. E280's hint used to print the arithmetic-wrapped form; it doesn't
+   compile, and it no longer does. *)
 let test_incidence_explicit_sum_compiles_to_flow_sum () =
   let src = stratified_age_seir_with_obs {|
     observations {
@@ -6024,6 +6036,85 @@ let test_incidence_explicit_sum_compiles_to_flow_sum () =
      | _ -> Alcotest.fail "expected CumulativeFlowSum projection")
   | _ -> Alcotest.fail "expected exactly one observation block"
 
+(* The pooled-column form the E280 hint directs the modeller to must compile on
+   a family stratified over 2+ dimensions, which needs NESTED sums:
+   `sum(a in age, sum(p in patch, incidence(tr[a, p])))`. The explicit-sum arm
+   peeled only ONE `ESum`, so the inner `sum` was not an `EFuncCall` and the
+   whole projection fell through to the generic expression resolver, where
+   `incidence` is not a declared function — E100. Net effect: on a
+   multi-dimensional family, E280 rejected the bare form and every pooled
+   alternative was inexpressible. *)
+let test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult]  patch = [north, south] }
+    stratify(by = age)
+    stratify(by = patch)
+    parameters { beta : rate  rho : probability }
+    transitions {
+      infection[a in age, p in patch] : S[a,p] --> I[a,p] @ beta * S[a,p]
+    }
+    observations {
+      cases {
+        columns   { time : time, cases : count }
+        projected = sum(a in age, sum(p in patch, incidence(infection[a, p])))
+        cases ~ poisson(rate = rho * projected)
+      }
+    }
+    init { S[a in age, p in patch] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"inc_nested_sum" src with
+  | Error e ->
+    Alcotest.failf "nested sum over two dims is the only pooled form E280 can \
+                    direct a 2-D family to; it must compile. Got: %s" e
+  | Ok m ->
+    (match (List.hd m.Ir.observations).Ir.projection with
+     | Ir.CumulativeFlowSum names ->
+       Alcotest.(check (list string))
+         "pools all four (age × patch) flow cells"
+         ["infection_child_north"; "infection_child_south";
+          "infection_adult_north"; "infection_adult_south"] names
+     | _ -> Alcotest.fail "expected CumulativeFlowSum over the 4 cells")
+
+(* A `where` predicate on an explicit aggregation sum prunes the domain — that
+   is what it means everywhere else in the language (`resolve_expr`'s ESum arm
+   filters `dim_values` through `eval_guard` before summing). The projection
+   dispatch matched the guard slot with `_` and then enumerated the dimension's
+   FULL level list, so a modeller who restricted the sum to a subset of strata
+   silently got the total over every stratum — scored against their subset
+   data, with the excess absorbed into the reporting rate. Same syntax, two
+   meanings, no diagnostic. *)
+let test_incidence_sum_honours_where_guard () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate  rho : probability }
+    transitions { infection[a in age] : S[a] --> I[a] @ beta * S[a] }
+    observations {
+      cases {
+        columns   { time : time, cases : count }
+        projected = sum(a in age where a == child, incidence(infection[a]))
+        cases ~ poisson(rate = rho * projected)
+      }
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"inc_where" src with
+  | Error e -> Alcotest.failf "restricted aggregation sum should compile: %s" e
+  | Ok m ->
+    (match (List.hd m.Ir.observations).Ir.projection with
+     | Ir.CumulativeFlow "infection_child" -> ()
+     | Ir.CumulativeFlowSum names ->
+       Alcotest.failf
+         "`where a == child` was ignored — projection pooled %s; a restricted \
+          sum must name only the surviving levels" (String.concat ", " names)
+     | _ -> Alcotest.fail "expected the single surviving flow")
+
 (* Positional-indexed incidence pins a single stratum (not a sum). Guards
    against over-eagerly summing when the user named a stratum. *)
 let test_incidence_positional_indexed_pins_one_stratum () =
@@ -6045,6 +6136,191 @@ let test_incidence_positional_indexed_pins_one_stratum () =
   | Ir.CumulativeFlow other ->
     Alcotest.failf "expected CumulativeFlow infection_child, got CumulativeFlow %s" other
   | _ -> Alcotest.fail "expected CumulativeFlow projection"
+
+(* ── Projection dispatch: every argument shape must lower, or diagnose ──────
+   `prevalence(...)` / `incidence(...)` dispatch on the SHAPE of their argument
+   (`EIdent` / `EIndex`); every other shape fell to a catch-all that emitted the
+   sentinel name `"?"`, which then failed the reference check as
+   `E503: unknown compartment referenced: '?'` — a diagnostic that names nothing
+   the user wrote. Three distinct shapes reach it, and all three are legitimate
+   models:
+
+     · `via erlang` rewrites the argument to `ESum` (sum_staged_refs)
+     · `via hyper_erlang` rewrites it to an `EBinOp` Add-chain (sum_hyper_refs)
+     · a user-written arithmetic argument, e.g. `prevalence(Y1[a] + Y2[a])`
+
+   The fix is shape-agnostic: resolve the argument as an ordinary expression.  *)
+
+let staged_and_stratified_seir obs_block =
+  (* `E` is BOTH user-stratified (age) and staged (`via erlang`), so its
+     dimension vector is [age, __onset_stage] — the mixed case. *)
+  {|
+    time_unit = 'days
+    compartments { S, E, I, R }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    let N_local[a in age] = S[a] + E[a] + I[a] + R[a]
+    parameters { beta : rate  sigma : rate  gamma : rate
+                 rho : probability  k : positive }
+    transitions {
+      infection[a in age] : S[a] --> E[a] @ beta * S[a] * I[a] / N_local[a]
+      onset[a in age]     : E[a] --> I[a] via erlang(stages = 3, rate = sigma)
+      recovery[a in age]  : I[a] --> R[a] @ gamma * I[a]
+    }
+    init { S[child] = 4990  S[adult] = 5000  I[child] = 10 }
+    simulate { from = 0 'days  to = 50 'days }
+  |} ^ obs_block
+
+(* gh#478: `prevalence(E[child])` on a compartment that is both user-stratified
+   AND staged. This is NOT a partial index — `[child]` names every REPORTABLE
+   dimension; the staging pass has rewritten the argument to
+   `sum(s in __onset_stage, E[child, s])`, an `ESum`. It must lower to the sum
+   over that stratum's three stages. *)
+let test_prevalence_indexed_cell_on_staged_stratified_compartment () =
+  let src = staged_and_stratified_seir {|
+    observations {
+      child_prev {
+        columns       { time : time, child_prev : count }
+        projected     = prevalence(E[child])
+        emit_schedule = every 7 'days
+        child_prev ~ neg_binomial(mean = rho * projected, r = k)
+      }
+    }
+  |} in
+  match Compiler.compile ~name:"prev_staged_cell" src with
+  | Error e ->
+    Alcotest.failf "prevalence(E[child]) on a staged+stratified E should \
+                    compile (stages pool); got: %s" e
+  | Ok m ->
+    let names = match (List.hd m.Ir.observations).Ir.projection with
+      | Ir.CurrentPopSum ns -> ns
+      | Ir.CurrentPop n -> [n]
+      | Ir.DerivedExpr (Ir.PopSum ns) -> ns
+      | _ -> Alcotest.fail "expected a pooled state projection over the stages"
+    in
+    Alcotest.(check (list string))
+      "pools exactly the child stratum's three onset stages"
+      ["E_child_s1"; "E_child_s2"; "E_child_s3"] names
+
+(* gh#487: the same catch-all, reached by `via hyper_erlang`, whose lowering
+   builds an `EBinOp` Add-chain rather than an `ESum`. A fix that pattern-matches
+   the `ESum` shape leaves this one broken — hence the shape-agnostic fix. *)
+let test_prevalence_bare_on_hyper_erlang_pools_branch_stages () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, E, I, R, D }
+    parameters { beta : rate  sigma : rate  cfr : probability
+                 rho : probability  k : positive }
+    transitions {
+      infection : S --> E @ beta * S * I / (S + E + I + R)
+      onset     : E --> I @ sigma * E
+      outcome   : I via hyper_erlang(
+        branch(label = fatal,   weight = cfr, stages = 3, mean =  8 'days, to = D),
+        branch(label = recover,               stages = 3, mean = 12 'days, to = R)
+      )
+    }
+    observations {
+      prev {
+        columns       { time : time, prev : count }
+        projected     = prevalence(I)
+        emit_schedule = every 7 'days
+        prev ~ neg_binomial(mean = rho * projected, r = k)
+      }
+    }
+    init { S = 990  E = 0  I = 10 }
+    simulate { from = 0 'days  to = 50 'days }
+  |} in
+  match Compiler.compile ~name:"prev_hyper" src with
+  | Error e ->
+    Alcotest.failf "gh#487: bare prevalence on a hyper_erlang-staged \
+                    compartment must pool its branch stages, not E503 on '?'; \
+                    got: %s" e
+  | Ok m ->
+    (* Whatever the IR shape, the diagnostic sentinel must be gone and every
+       branch-stage cell must appear. *)
+    let json = Yojson.Safe.to_string
+        (Serde.projection_to_json (List.hd m.Ir.observations).Ir.projection) in
+    if contains_substring ~needle:"?" json then
+      Alcotest.failf "projection still carries the '?' sentinel: %s" json;
+    List.iter (fun cell ->
+        if not (contains_substring ~needle:cell json) then
+          Alcotest.failf "expected branch-stage cell %s in projection: %s" cell json)
+      ["I__fatal__1"; "I__fatal__3"; "I__recover__1"; "I__recover__3"]
+
+(* An arithmetic argument is the third shape reaching the catch-all. This is the
+   form the committed fixture `docs/dev/proposals/fixtures/garki_post_proposal.camdl`
+   uses, and it fails to compile today. *)
+let test_prevalence_arithmetic_argument_resolves_as_expression () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, Y1, Y2, R }
+    parameters { beta : rate  r1 : rate  r2 : rate
+                 rho : probability  k : positive }
+    transitions {
+      infection : S  --> Y1 @ beta * S * Y1 / 1000.0
+      prog      : Y1 --> Y2 @ r1 * Y1
+      clear     : Y2 --> R  @ r2 * Y2
+    }
+    observations {
+      prev {
+        columns       { time : time, prev : count }
+        projected     = prevalence(Y1 + Y2)
+        emit_schedule = every 7 'days
+        prev ~ neg_binomial(mean = rho * projected, r = k)
+      }
+    }
+    init { S = 990  Y1 = 10 }
+    simulate { from = 0 'days  to = 50 'days }
+  |} in
+  match Compiler.compile ~name:"prev_arith" src with
+  | Error e ->
+    Alcotest.failf "prevalence(Y1 + Y2) must resolve as an expression; got: %s" e
+  | Ok m ->
+    let json = Yojson.Safe.to_string
+        (Serde.projection_to_json (List.hd m.Ir.observations).Ir.projection) in
+    if contains_substring ~needle:"?" json then
+      Alcotest.failf "projection still carries the '?' sentinel: %s" json;
+    List.iter (fun cell ->
+        if not (contains_substring ~needle:cell json) then
+          Alcotest.failf "expected %s in projection: %s" cell json)
+      ["Y1"; "Y2"]
+
+(* The multi-argument form is DOCUMENTED (`docs/camdl-run-spec.md` §14.1) and
+   was specified to desugar to the sum of its arguments, but the dispatch read
+   only the FIRST positional argument via `List.assoc_opt ""` and silently
+   discarded the rest — a documented syntax that fits against the wrong
+   quantity, with the dropped compartment absorbed into rho. *)
+let test_prevalence_multi_arg_sums_all_arguments () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, Y1, Y2, R }
+    parameters { beta : rate  r1 : rate  r2 : rate
+                 rho : probability  k : positive }
+    transitions {
+      infection : S  --> Y1 @ beta * S * Y1 / 1000.0
+      prog      : Y1 --> Y2 @ r1 * Y1
+      clear     : Y2 --> R  @ r2 * Y2
+    }
+    observations {
+      prev {
+        columns       { time : time, prev : count }
+        projected     = prevalence(Y1, Y2)
+        emit_schedule = every 7 'days
+        prev ~ neg_binomial(mean = rho * projected, r = k)
+      }
+    }
+    init { S = 990  Y1 = 10 }
+    simulate { from = 0 'days  to = 50 'days }
+  |} in
+  match Compiler.compile ~name:"prev_multi" src with
+  | Error e -> Alcotest.failf "prevalence(Y1, Y2) should compile: %s" e
+  | Ok m ->
+    let json = Yojson.Safe.to_string
+        (Serde.projection_to_json (List.hd m.Ir.observations).Ir.projection) in
+    if not (contains_substring ~needle:"Y2" json) then
+      Alcotest.failf
+        "prevalence(Y1, Y2) silently dropped Y2 — the second argument must be \
+         summed, not discarded: %s" json
 
 (* Named-indexed incidence pins the named dimension, order-independent. *)
 let test_incidence_named_indexed_pins_one_stratum () =
@@ -10523,6 +10799,12 @@ let () =
       Alcotest.test_case "indexed-stream prevalence still compiles (gh#478)" `Quick test_prevalence_indexed_stream_still_compiles;
       Alcotest.test_case "explicit sum(a in age, incidence(infection[a])) → flow sum" `Quick test_incidence_explicit_sum_compiles_to_flow_sum;
       Alcotest.test_case "incidence(infection[child]) picks one stratum" `Quick test_incidence_positional_indexed_pins_one_stratum;
+      Alcotest.test_case "nested sum over 2 dims → flow sum (E280 pooled form)" `Quick test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum;
+      Alcotest.test_case "aggregation sum honours its where guard" `Quick test_incidence_sum_honours_where_guard;
+      Alcotest.test_case "prevalence(E[child]) on staged+stratified E pools that stratum's stages (gh#478)" `Quick test_prevalence_indexed_cell_on_staged_stratified_compartment;
+      Alcotest.test_case "prevalence(I) on hyper_erlang pools branch stages (gh#487)" `Quick test_prevalence_bare_on_hyper_erlang_pools_branch_stages;
+      Alcotest.test_case "prevalence(Y1 + Y2) resolves as an expression" `Quick test_prevalence_arithmetic_argument_resolves_as_expression;
+      Alcotest.test_case "prevalence(Y1, Y2) sums both args, drops none" `Quick test_prevalence_multi_arg_sums_all_arguments;
       Alcotest.test_case "incidence(infection[age=adult]) named index"   `Quick test_incidence_named_indexed_pins_one_stratum;
       Alcotest.test_case "incidence(infection) unstratified unchanged"   `Quick test_incidence_unstratified;
       Alcotest.test_case "let-bound projected inlines (not E507)"        `Quick test_let_bound_projection_inlines;

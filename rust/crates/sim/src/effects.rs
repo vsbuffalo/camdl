@@ -960,6 +960,37 @@ mod tests {
     }
 
     #[test]
+    fn multi_action_intervention_applies_every_action() {
+        // gh#460: a bare stratified `transfer` lowers to ONE intervention carrying
+        // one FractionTransfer per cell. Every committed golden and every other
+        // test in this module has a single-action intervention, so nothing
+        // exercised the loop that applies the rest — a regression that dropped
+        // all but the first action would produce a plausible, silently wrong
+        // trajectory. Two disjoint transfers out of one intervention:
+        //   S(100) --0.25--> I   and   W(50.0) --0.40--> (real arena)
+        // are independent, so the deltas must both appear.
+        let m = model_with(vec![
+            Action::FractionTransfer(FractionTransfer {
+                src: "S".into(), dst: "I".into(), fraction: Expr::const_(0.25),
+            }),
+            Action::Add(AddAction {
+                compartment: "I".into(), count: Expr::const_(7.0),
+            }),
+        ]);
+        let d = resolve(&m);
+        // 0.25 * 100 = 25 out of S into I, then +7 more into I.
+        assert_eq!(
+            d.int,
+            vec![
+                IntDelta { idx: 0, delta: -25 },
+                IntDelta { idx: 1, delta: 25 },
+                IntDelta { idx: 1, delta: 7 },
+            ],
+            "every action in a multi-action intervention must contribute a delta"
+        );
+    }
+
+    #[test]
     fn absolute_transfer_int_rounds_then_clamps_to_src() {
         // round(250.6)=251, clamped to src S=100.
         let m = model_with(vec![Action::AbsoluteTransfer(AbsoluteTransfer {
