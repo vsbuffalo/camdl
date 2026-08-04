@@ -184,7 +184,7 @@ let rec classify env (e : expr) : tclass =
   | EUnOp (Neg, a) -> classify env a
   | EUnOp _        -> TOther
   | ECond (_, a, b) -> lub_dur (classify env a) (classify env b)
-  | ESum (_, _, _, body) -> classify env body
+  | ESum (_, _, _, body, _) -> classify env body
   | EList _ | ERange _ -> TOther
   | EObsAccess _ -> TOther
   | ERunMember _ -> TOther   (* a contrast operand — not a time/duration *)
@@ -226,7 +226,7 @@ and walk_subexprs env ~on_hit (e : expr) : unit =
     walk_rule1 env ~on_hit p;
     walk_rule1 env ~on_hit a;
     walk_rule1 env ~on_hit b
-  | ESum (_, _, _, body) -> walk_rule1 env ~on_hit body
+  | ESum (_, _, _, body, _) -> walk_rule1 env ~on_hit body
   | EFuncCall (_, args) ->
     List.iter (fun (_, e) -> walk_rule1 env ~on_hit e) args
   | EList items -> List.iter (walk_rule1 env ~on_hit) items

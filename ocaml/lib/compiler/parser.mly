@@ -1352,9 +1352,11 @@ atom_expr:
       (* function call with optional keyword args *)
       { EFuncCall (name, args) }
   | SUM LPAREN v = IDENT IN d = IDENT COMMA body = expr RPAREN
-      { ESum (v, d, None, body) }
+      { ESum (v, d, None, body,
+              Parser_errors.ast_loc_of ~sp:$startpos(v) ~ep:$endpos(d)) }
   | SUM LPAREN v = IDENT IN d = IDENT WHERE g = guard_expr COMMA body = expr RPAREN
-      { ESum (v, d, Some g, body) }
+      { ESum (v, d, Some g, body,
+              Parser_errors.ast_loc_of ~sp:$startpos(v) ~ep:$endpos(g)) }
   | name = IDENT LBRACKET items = separated_list(COMMA, index_item) RBRACKET
       { EIndex (name, items, Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   | name = IDENT

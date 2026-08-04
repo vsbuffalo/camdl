@@ -768,7 +768,7 @@ let collect_let_refs_ast ctx ast_rate =
        | Some lb -> add lb | None -> ())
     | EBinOp (_, l, r) -> walk l; walk r
     | EUnOp (_, e) -> walk e
-    | ESum (_, _, _, body) -> walk body
+    | ESum (_, _, _, body, _) -> walk body
     | ECond (p, t, el) -> walk p; walk t; walk el
     | EFuncCall (_, args) -> List.iter (fun (_, e) -> walk e) args
     | EList es -> List.iter walk es
@@ -1017,7 +1017,7 @@ let run_let ppf ctx name =
         | EIndex (n, _, _) when n = lb.lname -> true
         | EBinOp (_, l, r) -> expr_refs_name l || expr_refs_name r
         | EUnOp (_, e) -> expr_refs_name e
-        | ESum (_, _, _, body) -> expr_refs_name body
+        | ESum (_, _, _, body, _) -> expr_refs_name body
         | ECond (p, t, el) ->
           expr_refs_name p || expr_refs_name t || expr_refs_name el
         | EFuncCall (_, args) ->
