@@ -10394,8 +10394,125 @@ let test_a1_mistyped_level_still_level_error () =
   compile_expect_error_code ~code:"E263"
     ~contains:"'chidl' is not a level of dimension 'age'" mistyped_level_src
 
+(* ── C2: flat multi-binder `sum` is sugar for the nested form ────────────────
+   `sum(a in age, p in patch, e)` must produce exactly what
+   `sum(a in age, sum(p in patch, e))` produces — same IR, byte for byte. The
+   claim is checked on serialized IR rather than by eyeballing a rate, because
+   the two spellings differ only in parse and any divergence would be a silent
+   one (a reassociated fold order, a dropped guard, a binder resolved in the
+   wrong env).
+
+   GUARDS ARE THE CASE THAT MATTERS. Only 2 of the ~300 `sum`s in the corpus
+   carry a `where`, so an unguarded-only suite would pass while the sugar claim
+   was false for every guarded flat sum. Each arity below therefore comes in a
+   guarded variant, including one whose INNER guard references the OUTER binder
+   (`q != p`) — the case that only works if the flat form nests its binders in
+   source order and resolves each guard with the enclosing binder in scope. *)
+let sum_model ~body =
+  Printf.sprintf
+    "time_unit = 'days\n\
+     compartments { S, I, R }\n\
+     dimensions { age = [child, adult]  patch = [north, south] }\n\
+     stratify(by = age)\n\
+     stratify(by = patch)\n\
+     parameters { beta : rate in [0,2]  gamma : rate in [0,1] }\n\
+     tables { C : age × age = [[12.0,4.0],[4.0,8.0]]\n\
+              dist : patch × patch = [[0.0,10.0],[10.0,0.0]] }\n\
+     let N[a in age, p in patch] = S[a,p] + I[a,p] + R[a,p]\n\
+     let TOT = S + I + R\n\
+     transitions {\n\
+     infection[a in age, p in patch] : S[a,p] --> I[a,p] @ beta * S[a,p] * (%s)\n\
+     recovery[a in age, p in patch] : I[a,p] --> R[a,p] @ gamma * I[a,p]\n\
+     }\n\
+     init { S[child,north]=99 I[child,north]=1 S[adult,north]=100\n\
+            S[child,south]=100 S[adult,south]=100 }\n\
+     simulate { from = 0 'days to = 10 'days }\n"
+    body
+
+(* One fixed model name for every spelling: `Ir.name` is derived from it, so
+   two names would show up as a diff and mask (or fake) a real one. *)
+let ir_json_of src =
+  match Compiler.compile ~name:"sum_sugar" src with
+  | Ok m -> Yojson.Safe.to_string (Serde.model_to_json m)
+  | Error e -> Alcotest.failf "model should compile: %s\n--- source ---\n%s" e src
+
+(* (label, flat spelling, nested spelling) *)
+let flat_vs_nested_cases = [
+  "two binders, unguarded",
+  "sum(b in age, q in patch, C[a,b] * I[b,q] / N[b,q])",
+  "sum(b in age, sum(q in patch, C[a,b] * I[b,q] / N[b,q]))";
+
+  "two binders, guard on the FIRST",
+  "sum(b in age where b != a, q in patch, C[a,b] * I[b,q] / N[b,q])",
+  "sum(b in age where b != a, sum(q in patch, C[a,b] * I[b,q] / N[b,q]))";
+
+  "two binders, guard on the SECOND referencing the outer binder",
+  "sum(b in age, q in patch where q != p, C[a,b] * I[b,q] / N[b,q])",
+  "sum(b in age, sum(q in patch where q != p, C[a,b] * I[b,q] / N[b,q]))";
+
+  "two binders, a guard on EACH",
+  "sum(b in age where b != a, q in patch where dist[p,q] < 50, \
+   C[a,b] * I[b,q] / N[b,q])",
+  "sum(b in age where b != a, sum(q in patch where dist[p,q] < 50, \
+   C[a,b] * I[b,q] / N[b,q]))";
+]
+
+let test_c2_flat_equals_nested () =
+  List.iter (fun (label, flat, nested) ->
+    let a = ir_json_of (sum_model ~body:flat) in
+    let b = ir_json_of (sum_model ~body:nested) in
+    if a <> b then
+      Alcotest.failf
+        "flat and nested lowering differ for %s\n  flat:   %s\n  nested: %s"
+        label flat nested
+  ) flat_vs_nested_cases
+
+(* Non-vacuity: the comparison must be able to FAIL. Two sums that genuinely
+   differ (a guard present vs absent) must not compare equal, or the four
+   assertions above would pass for the wrong reason. *)
+let test_c2_identity_check_is_not_vacuous () =
+  let guarded   = ir_json_of
+    (sum_model ~body:"sum(b in age, q in patch where q != p, I[b,q] / N[b,q])") in
+  let unguarded = ir_json_of
+    (sum_model ~body:"sum(b in age, q in patch, I[b,q] / N[b,q])") in
+  Alcotest.(check bool) "a dropped guard would be visible in the IR"
+    true (guarded <> unguarded)
+
+(* §5.4: the no-binder form needs no separate production — it is the
+   one-element list whose single element is the body, so it evaluates to the
+   body, and a bare family name already means the total across all strata. *)
+let test_c2_sum_of_family_equals_bare_name () =
+  let summed = ir_json_of (sum_model ~body:"sum(I) / TOT") in
+  let bare   = ir_json_of (sum_model ~body:"I / TOT") in
+  Alcotest.(check bool) "sum(family) is the bare family name" true (summed = bare);
+  (* §5.4: `sum(S + I)` is the total of S plus the total of I — redundant, not
+     wrong, and the earlier draft that made it an error was mistaken. *)
+  let summed_add = ir_json_of (sum_model ~body:"sum(S + I) / TOT") in
+  let bare_add   = ir_json_of (sum_model ~body:"(S + I) / TOT") in
+  Alcotest.(check bool) "sum(S + I) is (S + I)" true (summed_add = bare_add)
+
+let test_c2_sum_without_body_is_named_error () =
+  compile_expect_error_code ~code:"E114" ~contains:"needs a body"
+    (sum_model ~body:"sum(b in age, q in patch)")
+
+let test_c2_sum_body_before_binder_is_named_error () =
+  compile_expect_error_code ~code:"E114" ~contains:"binders first"
+    (sum_model ~body:"sum(I[a,p], q in patch)")
+
 let () =
   Alcotest.run "compiler" [
+    "flat_multi_binder_sum_c2", [
+      Alcotest.test_case "flat lowering is byte-identical to nested (incl. guards)"
+        `Quick test_c2_flat_equals_nested;
+      Alcotest.test_case "the identity check can fail (negative control)"
+        `Quick test_c2_identity_check_is_not_vacuous;
+      Alcotest.test_case "sum(family) equals the bare family name"
+        `Quick test_c2_sum_of_family_equals_bare_name;
+      Alcotest.test_case "E114 sum with binders but no body"
+        `Quick test_c2_sum_without_body_is_named_error;
+      Alcotest.test_case "E114 sum with the body before a binder"
+        `Quick test_c2_sum_body_before_binder_is_named_error;
+    ];
     "unknown_dimension_a1", [
       Alcotest.test_case "E263 names an undeclared dimension as undeclared"
         `Quick test_a1_undeclared_dim_named_as_undeclared;
