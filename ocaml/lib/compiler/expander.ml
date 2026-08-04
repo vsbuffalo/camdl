@@ -4,6 +4,25 @@ open Ast
 
 (* ── Context ─────────────────────────────────────────────────────────────── *)
 
+(* Per-source-site tally of restricted reductions whose `where` predicate
+   selected no levels (aggregation-semantics proposal §6, A3).
+
+   A reduction is resolved once per enclosing index combination, and emptiness
+   is a property of the instantiation, not of the site: an isolated patch
+   legitimately couples to nobody, so `sum(q in patch where dist[p,q] < 50, …)`
+   is empty for that one `p` and non-empty for every other. That is why the
+   diagnostic is a warning rather than an error, and why it is counted here and
+   emitted once — a per-instantiation diagnostic would print one line per
+   stratum for a single mistake. Keyed by the binder's source loc; drained by
+   [flush_empty_reductions] at the end of expansion. *)
+type empty_reduction = {
+  er_var           : string;                          (* the binder, `q` *)
+  er_dim           : string;                          (* the reduced axis, `patch` *)
+  mutable er_total : int;                             (* instantiations resolved *)
+  mutable er_empty : int;                             (* …of which selected nothing *)
+  mutable er_first : (string * string) list option;   (* env of the first empty one *)
+}
+
 type context = {
   mutable time_unit       : unit_lit;
   mutable description     : string option;
@@ -80,6 +99,9 @@ type context = {
      the same way [dim_registry] holds resolved dimensions. External
      (`--table`) tables are absent here (no compile-time values). *)
   mutable table_index    : (string, Ir.expr array * string list) Hashtbl.t;
+  (* A3: restricted reductions tallied per source site, most-recent site first.
+     Accumulated during [resolve_expr], drained by [flush_empty_reductions]. *)
+  mutable empty_reductions : (loc * empty_reduction) list;
 }
 
 (* Stratification-name predicates. Expanded names are [base] itself or a leaf
@@ -140,6 +162,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   suppress_hoist       = false;
   obs_aux_cols         = [];
   table_index          = Hashtbl.create 16;
+  empty_reductions     = [];
 }
 
 (* ── Model summary ────────────────────────────────────────────────────────── *)
@@ -1257,11 +1280,11 @@ let rec sum_staged_refs ~src ~n_pre ~dim_name ~sum_var (e : expr) : expr =
     let staged =
       EIndex (n, items' @ [ IPosn (EIdent (sum_var, dummy_loc)) ], l)
     in
-    ESum (sum_var, dim_name, None, staged)
+    ESum (sum_var, dim_name, None, staged, l)
   | EIndex (n, items, l) -> EIndex (n, List.map recur_item items, l)
   | EBinOp (op, l, r) -> EBinOp (op, recur l, recur r)
   | EUnOp (op, e)     -> EUnOp (op, recur e)
-  | ESum (v, d, g, b) -> ESum (v, d, g, recur b)
+  | ESum (v, d, g, b, l) -> ESum (v, d, g, recur b, l)
   | ECond (p, t, f)   -> ECond (recur p, recur t, recur f)
   | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, e) -> (k, recur e)) args)
   | EList es          -> EList (List.map recur es)
@@ -1294,7 +1317,7 @@ let rec sum_hyper_refs ~src ~(cells : string list) (e : expr) : expr =
   | EIndex (n, items, l) -> EIndex (n, List.map recur_item items, l)
   | EBinOp (op, l, r) -> EBinOp (op, recur l, recur r)
   | EUnOp (op, e)     -> EUnOp (op, recur e)
-  | ESum (v, d, g, b) -> ESum (v, d, g, recur b)
+  | ESum (v, d, g, b, l) -> ESum (v, d, g, recur b, l)
   | ECond (p, t, f)   -> ECond (recur p, recur t, recur f)
   | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, e) -> (k, recur e)) args)
   | EList es          -> EList (List.map recur es)
@@ -2997,7 +3020,7 @@ let body_refs_param_or_let ctx (e : expr) : bool =
       || List.exists (function IPosn e | INamed (_, e) -> go e) items
     | EBinOp (_, l, r) -> go l || go r
     | EUnOp (_, e)     -> go e
-    | ESum (_, _, _, b) -> go b
+    | ESum (_, _, _, b, _) -> go b
     | ECond (p, t, f)  -> go p || go t || go f
     | EFuncCall (_, args) -> List.exists (fun (_, e) -> go e) args
     | EList es            -> List.exists go es
@@ -3026,7 +3049,7 @@ let free_index_var_clean (lb : let_binding) : bool =
         | IPosn e | INamed (_, e) -> ok bound e) items
     | EBinOp (_, l, r) -> ok bound l && ok bound r
     | EUnOp (_, e)     -> ok bound e
-    | ESum (v, _, _, b) -> ok (v :: bound) b
+    | ESum (v, _, _, b, _) -> ok (v :: bound) b
     | ECond (p, t, f)  -> ok bound p && ok bound t && ok bound f
     | EFuncCall (_, args) -> List.for_all (fun (_, e) -> ok bound e) args
     | EList es            -> List.for_all (ok bound) es
@@ -3164,6 +3187,29 @@ let rec eval_guard ctx env = function
         | None      -> false))   (* error already emitted; drop the term *)
   | GAnd (g1, g2) -> eval_guard ctx env g1 && eval_guard ctx env g2
   | GOr  (g1, g2) -> eval_guard ctx env g1 || eval_guard ctx env g2
+
+(* Record one instantiation of a restricted reduction (A3). [empty] says whether
+   the guard kept any level at this instantiation; [env] is the enclosing index
+   binding, carried so the warning can name the first affected one. Called only
+   where the PRE-guard domain was non-empty: an unregistered or level-less
+   dimension is a different mistake with a different owner (gh#488), and folding
+   the two into one counter is what made "unknown collection" and "known
+   collection, zero survivors" share a representation in the first place. *)
+let note_restricted_reduction ctx ~loc ~var ~dim ~empty env =
+  let er =
+    match List.assoc_opt loc ctx.empty_reductions with
+    | Some er -> er
+    | None ->
+      let er = { er_var = var; er_dim = dim;
+                 er_total = 0; er_empty = 0; er_first = None } in
+      ctx.empty_reductions <- (loc, er) :: ctx.empty_reductions;
+      er
+  in
+  er.er_total <- er.er_total + 1;
+  if empty then begin
+    er.er_empty <- er.er_empty + 1;
+    if er.er_first = None then er.er_first <- Some env
+  end
 
 (* v1 generated-quantity temporal-reduction names (proposal 2026-06-25). These
    are NOT lexer keywords — they lex as IDENT and dispatch by name in the
@@ -3407,14 +3453,23 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     Ir.Cond { pred  = resolve_expr ctx env p;
                then_ = resolve_expr ctx env a;
                else_ = resolve_expr ctx env b }
-  | ESum (v, d, guard_opt, body) ->
+  | ESum (v, d, guard_opt, body, sum_loc) ->
     let vals = dim_values ctx d in
     (* Restricted sum: a `where` predicate prunes the domain to the levels that
        satisfy it, evaluated at compile time (the sum var bound to each
        candidate). Survivors-only → O(P·k) by construction (gh#185). *)
     let vals = match guard_opt with
       | None   -> vals
-      | Some g -> List.filter (fun vv -> eval_guard ctx ((v, vv) :: env) g) vals
+      | Some g ->
+        let kept = List.filter (fun vv -> eval_guard ctx ((v, vv) :: env) g) vals in
+        (* A3: a predicate that keeps nothing leaves `Const 0.0`, which the
+           enclosing arithmetic then folds away with no trace in the IR. Tally
+           the instantiation; [flush_empty_reductions] emits one aggregated
+           W202 per source site at the end of expansion. *)
+        if vals <> [] then
+          note_restricted_reduction ctx ~loc:sum_loc ~var:v ~dim:d
+            ~empty:(kept = []) env;
+        kept
     in
     if vals = [] then Ir.Const 0.0
     else
@@ -6872,7 +6927,7 @@ let expand_observations ctx =
           | EUnOp (_, e) -> names_of e
           | ECond (p, a, b) -> names_of p @ names_of a @ names_of b
           | EFuncCall (_, args) -> List.concat_map (fun (_, e) -> names_of e) args
-          | ESum (_, _, _, e) -> names_of e
+          | ESum (_, _, _, e, _) -> names_of e
           | EList es -> List.concat_map names_of es
           | ERange (a, b) -> names_of a @ names_of b
           | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> []
@@ -7058,7 +7113,7 @@ let expand_observations ctx =
     let explicit_incidence_sum top =
       let rec go e local_env =
         match e with
-        | ESum (v, d, guard_opt, body) ->
+        | ESum (v, d, guard_opt, body, _) ->
           let vals = dim_values ctx d in
           let vals = match guard_opt with
             | None   -> vals
@@ -7415,7 +7470,7 @@ let classify_quantity_body ctx env
     | EFuncCall (_, args) -> List.find_map (fun (_, e) -> find_dt e) args
     | EIndex (_, items, _) ->
       List.find_map (function IPosn e | INamed (_, e) -> find_dt e) items
-    | ESum (_, _, _, e) -> find_dt e
+    | ESum (_, _, _, e, _) -> find_dt e
     | EList es -> List.find_map find_dt es
     | ERange (a, b) -> (match find_dt a with Some l -> Some l | None -> find_dt b)
     | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> None
@@ -7442,7 +7497,7 @@ let classify_quantity_body ctx env
     | EUnOp (_, x) -> refs_quantity x
     | ECond (p, a, b) -> refs_quantity p || refs_quantity a || refs_quantity b
     | EFuncCall (_, args) -> List.exists (fun (_, e) -> refs_quantity e) args
-    | ESum (_, _, _, e) -> refs_quantity e
+    | ESum (_, _, _, e, _) -> refs_quantity e
     | EList es -> List.exists refs_quantity es
     | ERange (a, b) -> refs_quantity a || refs_quantity b
     | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> false
@@ -7460,7 +7515,7 @@ let classify_quantity_body ctx env
     | ECond (p, a, b) ->
       contains_obs_access p || contains_obs_access a || contains_obs_access b
     | EFuncCall (_, args) -> List.exists (fun (_, e) -> contains_obs_access e) args
-    | ESum (_, _, _, e) -> contains_obs_access e
+    | ESum (_, _, _, e, _) -> contains_obs_access e
     | EList es -> List.exists contains_obs_access es
     | ERange (a, b) -> contains_obs_access a || contains_obs_access b
     | EConst _ | EUnit _ | EIdent _ | ERunMember _ -> false
@@ -7683,7 +7738,7 @@ let classify_quantity_body ctx env
       (match find_run_member p with Some r -> Some r
        | None -> (match find_run_member a with Some r -> Some r | None -> find_run_member b))
     | EFuncCall (_, args) -> List.find_map (fun (_, e) -> find_run_member e) args
-    | ESum (_, _, _, e) -> find_run_member e
+    | ESum (_, _, _, e, _) -> find_run_member e
     | EList es -> List.find_map find_run_member es
     | ERange (a, b) ->
       (match find_run_member a with Some r -> Some r | None -> find_run_member b)
@@ -7946,7 +8001,7 @@ let rec collect_param_refs known_params acc = function
     let a = collect_param_refs known_params acc l in
     collect_param_refs known_params a r
   | EUnOp (_, e) -> collect_param_refs known_params acc e
-  | ESum (_, _, _, body) -> collect_param_refs known_params acc body
+  | ESum (_, _, _, body, _) -> collect_param_refs known_params acc body
   | ECond (p, t, e) ->
     let a = collect_param_refs known_params acc p in
     let a = collect_param_refs known_params a t in
@@ -8043,6 +8098,37 @@ let check_origin ctx =
                 01..12 and a day valid for that month (leap-aware)"
          ())
 
+(** Drain the A3 tally: one W202 per source site whose `where` predicate
+    selected no levels at some instantiation. Runs after every [resolve_expr]
+    call in the phase, so the counts are final — a site that is empty for 37 of
+    400 instantiations reports both numbers, and a site that is never empty
+    reports nothing. *)
+let flush_empty_reductions ctx =
+  List.iter (fun (l, er) ->
+    if er.er_empty > 0 then begin
+      let first_binding = match er.er_first with
+        | Some ((_ :: _) as env) ->
+          (* [env] is innermost-first; render outermost-first, as written. *)
+          Some (String.concat ", "
+                  (List.rev_map (fun (k, lvl) -> Printf.sprintf "%s = %s" k lvl) env))
+        | _ -> None      (* an unindexed site: one instantiation, nothing to name *)
+      in
+      Diagnostics.warning ctx.diags
+        ~code:"W202" ~loc:(diag_loc_of_ast_ctx ctx l)
+        ~message:(Printf.sprintf
+          "reduction guard selected no levels of '%s' for %d of %d instantiation%s"
+          er.er_dim er.er_empty er.er_total
+          (if er.er_total = 1 then "" else "s"))
+        ?detail:(Option.map (fun b -> "first affected binding: " ^ b) first_binding)
+        ~hint:(Printf.sprintf
+          "`sum(%s in %s where …, …)` contributes 0 there, so the enclosing term \
+           drops out of the rate entirely; check the predicate, or restrict the \
+           outer index to the strata it applies to"
+          er.er_var er.er_dim)
+        ()
+    end
+  ) (List.rev ctx.empty_reductions)
+
 (** Emit W103 for any let binding whose name also appears as a stratum value. *)
 let check_shadowing ctx =
   let all_strat_vals = List.concat_map (fun sd ->
@@ -8091,7 +8177,7 @@ let check_no_shadowing ctx =
       List.iter (function IPosn e | INamed (_, e) -> walk decl bound e) items
     | EBinOp (_, l, r) -> walk decl bound l; walk decl bound r
     | EUnOp (_, e) -> walk decl bound e
-    | ESum (v, _, _, b) ->
+    | ESum (v, _, _, b, _) ->
       if List.mem v bound then report decl v;
       walk decl (v :: bound) b
     | ECond (p, t, f) -> walk decl bound p; walk decl bound t; walk decl bound f
@@ -8169,7 +8255,7 @@ let check_quadratic_coupling ctx =
       n = v || List.exists (function IPosn e | INamed (_, e) -> mentions v e) items
     | EBinOp (_, l, r) -> mentions v l || mentions v r
     | EUnOp (_, e) -> mentions v e
-    | ESum (sv, _, g, b) ->
+    | ESum (sv, _, g, b, _) ->
       if sv = v then false   (* inner sum rebinds v (E283 forbids); stop *)
       else (match g with Some g -> guard_mentions v g | None -> false) || mentions v b
     | ECond (p, t, f) -> mentions v p || mentions v t || mentions v f
@@ -9492,6 +9578,9 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
   (* gh#204: reject reactive triggers that read an undeclared observation stream
      (post-pass: both interventions and observations are now expanded). *)
   validate_reactive_streams ctx model;
+  (* A3: every resolve_expr in this phase has now run, so the per-site
+     restricted-reduction counts are final. Drain them into one W202 per site. *)
+  flush_empty_reductions ctx;
   let summary = {
     base_compartment_count     = List.length ctx.comp_decls;
     expanded_compartment_count = List.length expanded_comps;

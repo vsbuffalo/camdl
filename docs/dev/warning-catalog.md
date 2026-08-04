@@ -151,6 +151,7 @@ documented at each emit site in `ocaml/lib/compiler/`.)
 | W105 | Warning  | model-file | per-(p,q) coupling antipattern (O(P²) transitions); use a summed rate `sum(q in dim where …)`               |
 | W200 | Warning  | IR         | suspicious IR shape                                                                                         |
 | W201 | Warning  | IR         | suspicious IR shape                                                                                         |
+| W202 | Warning  | IR         | a restricted reduction's `where` predicate selected no levels at some instantiation (aggregated per site)   |
 | W301 | Warning  | covariate  | periodic range not aligned to step size                                                                     |
 | W310 | Warning  | covariate  | covariate / interpolation issue                                                                             |
 | W311 | Warning  | covariate  | covariate / interpolation issue                                                                             |
@@ -225,6 +226,34 @@ won't resolve and E200 fires).
 (`read("data/contact.tsv")`), so the model runs on any machine. Pack-time
 counterpart: `docs/dev/proposals/2026-06-09-mre-bundle.md` surfaces the same
 smell at bundle time; W104 is the upstream fix that helps every author.
+
+### W202 — restricted reduction whose predicate selected no levels
+
+**Fires when:** a `sum(v in d where P, body)` has a non-empty domain `d` but `P`
+keeps none of its levels at some instantiation. The reduction resolves to
+`Const 0.0`, and `normalize_expr` then folds the enclosing term away entirely —
+a coupling term that vanishes from one stratum's rate with nothing in the IR to
+show it was ever written.
+
+**Why a warning, not an error:** emptiness is per-instantiation, not per site. A
+radius-limited coupling sum
+(`sum(q in patch where dist[p,q] < 50 and q != p, …)`) is legitimately empty for
+an isolated patch and non-empty for every other, so the construct is not itself
+a mistake.
+
+**Why aggregated:** the site is resolved once per enclosing index combination.
+Diagnosing each empty instantiation separately would print one line per stratum
+for one source line, so the emitter tallies per source site
+(`Expander.note_restricted_reduction`) and drains once at the end of expansion
+(`Expander.flush_empty_reductions`), reporting `N of M instantiations` plus the
+first affected binding.
+
+**Not this warning:** a reduction over an _undeclared_ dimension, or one whose
+dimension has no registered levels. There the domain is empty before the
+predicate runs — a different mistake, tracked as gh#488.
+
+**Fix / silence:** widen the predicate, or restrict the outer index to the
+strata the reduction applies to.
 
 ### W324 / W325 — bare numeric in an absolute-time position under a date origin
 

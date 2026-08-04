@@ -10267,8 +10267,96 @@ let test_doc_nonparam_reaches_ir () =
   Alcotest.(check bool) "quantity doc in the dictionary" true
     (List.mem_assoc "peak_prev" m.doc_index.di_quantities)
 
+(* ── A3: statically empty restricted reduction → aggregated W202 ─────────────
+   A `where` guard that selects no levels for some outer index leaves the
+   reduction as `Const 0.0`, and the enclosing term folds away entirely. On the
+   model below `island` is 1000 units from both mainland patches, so its
+   coupling sum is empty and `infection_island` loses the coupling term — with
+   no diagnostic (aggregation-semantics proposal §6 A3; the silence is
+   shape-dependent, §4.4).
+
+   The warning is aggregated PER SOURCE SITE: one `sum(...)` in the source
+   produces exactly one W202 carrying "N of M instantiations", never one
+   warning per unrolled stratum. *)
+let empty_guard_src =
+  "time_unit = 'days\n\
+   compartments { S, I, R }\n\
+   dimensions { patch = [north, south, island] }\n\
+   stratify(by = patch)\n\
+   parameters { beta : rate in [0,2]  gamma : rate in [0,1]  rho : probability in [0,1] }\n\
+   tables { dist : patch × patch = [[0.0,10.0,1000.0],[10.0,0.0,1000.0],[1000.0,1000.0,0.0]] }\n\
+   let N[p in patch] = S[p] + I[p] + R[p]\n\
+   transitions {\n\
+   infection[p in patch] : S[p] --> I[p] @ beta * S[p] * (I[p]/N[p] + rho * sum(q in patch where dist[p,q] < 50 and q != p, I[q]/N[q]))\n\
+   recovery[p in patch] : I[p] --> R[p] @ gamma * I[p]\n\
+   }\n\
+   init { S[north]=990 I[north]=10 S[south]=1000 S[island]=1000 }\n\
+   simulate { from = 0 'days to = 50 'days }\n"
+
+(* Same model with `island` inside the coupling radius: every instantiation has
+   a non-empty domain, so W202 must stay silent (negative control). *)
+let nonempty_guard_src =
+  "time_unit = 'days\n\
+   compartments { S, I, R }\n\
+   dimensions { patch = [north, south, island] }\n\
+   stratify(by = patch)\n\
+   parameters { beta : rate in [0,2]  gamma : rate in [0,1]  rho : probability in [0,1] }\n\
+   tables { dist : patch × patch = [[0.0,10.0,10.0],[10.0,0.0,10.0],[10.0,10.0,0.0]] }\n\
+   let N[p in patch] = S[p] + I[p] + R[p]\n\
+   transitions {\n\
+   infection[p in patch] : S[p] --> I[p] @ beta * S[p] * (I[p]/N[p] + rho * sum(q in patch where dist[p,q] < 50 and q != p, I[q]/N[q]))\n\
+   recovery[p in patch] : I[p] --> R[p] @ gamma * I[p]\n\
+   }\n\
+   init { S[north]=990 I[north]=10 S[south]=1000 S[island]=1000 }\n\
+   simulate { from = 0 'days to = 50 'days }\n"
+
+let diags_of_src ~name src =
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile_detail_result ~name src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Error e -> Alcotest.failf "model should compile (W202 is a warning): %s" e
+  | Ok d -> d.ctx.diags.diags
+
+let w202_diags src =
+  List.filter (fun (dg : Diagnostics.diagnostic) -> dg.code = "W202")
+    (diags_of_src ~name:"w202" src)
+
+let test_w202_empty_guard_warns () =
+  let ds = w202_diags empty_guard_src in
+  Alcotest.(check int) "exactly one aggregated W202 for the one source site"
+    1 (List.length ds);
+  let d = List.hd ds in
+  Alcotest.(check bool) "severity is Warning" true (d.severity = Diagnostics.Warning);
+  Alcotest.(check bool)
+    (Printf.sprintf "message counts affected instantiations, got: %s" d.message)
+    true (contains_substring ~needle:"1 of 3" d.message);
+  let note = Option.value ~default:"" d.detail in
+  Alcotest.(check bool)
+    (Printf.sprintf "note names the first affected binding, got: %s" note)
+    true (contains_substring ~needle:"p = island" note)
+
+let test_w202_empty_guard_has_loc () =
+  let d = List.hd (w202_diags empty_guard_src) in
+  (* The warning must point at the `sum(...)` binder, which is only possible
+     once `ESum` carries a source location. *)
+  Alcotest.(check int) "W202 is located on the `infection` rate line" 9 d.loc.line;
+  Alcotest.(check bool) "W202 carries a non-empty source file" true (d.loc.file <> "")
+
+let test_w202_silent_when_every_domain_nonempty () =
+  Alcotest.(check int) "no W202 when every instantiation selects levels"
+    0 (List.length (w202_diags nonempty_guard_src))
+
 let () =
   Alcotest.run "compiler" [
+    "empty_restricted_reduction_a3", [
+      Alcotest.test_case "W202 aggregates one warning per source site"
+        `Quick test_w202_empty_guard_warns;
+      Alcotest.test_case "W202 is located at the `sum` binder"
+        `Quick test_w202_empty_guard_has_loc;
+      Alcotest.test_case "W202 silent when no guard is statically empty"
+        `Quick test_w202_silent_when_every_domain_nonempty;
+    ];
     "declaration_doc_comments", [
       Alcotest.test_case "documented model compiles"                  `Quick test_doc_comment_compiles;
       Alcotest.test_case "parameter docs reach the IR (@symbol/@ref)" `Quick test_doc_param_reaches_ir;

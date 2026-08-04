@@ -103,7 +103,7 @@ let rec tex ?(prec = 0) (e : expr) : string =
   | EUnit (f, _) -> fmt_num f (* a rate literal like 0.5 'per_day — show the number *)
   | EIdent (n, _) -> sym n
   | EIndex (n, items, _) -> comp_sym n (index_tex items)
-  | ESum (v, _dim, _guard, body) -> Printf.sprintf "\\sum_{%s} %s" v (tex ~prec:7 body)
+  | ESum (v, _dim, _guard, body, _) -> Printf.sprintf "\\sum_{%s} %s" v (tex ~prec:7 body)
   | EBinOp ((Mul | Div), _, _) ->
     let num, den = flatten_product e in
     let render fs = String.concat "\\," (List.map (tex ~prec:7) fs) in
@@ -154,7 +154,7 @@ let rec subst (v : string) (level : string) (e : expr) : expr =
   | EIndex (n, items, loc) -> EIndex (n, List.map (subst_item v level) items, loc)
   | EBinOp (op, l, r) -> EBinOp (op, subst v level l, subst v level r)
   | EUnOp (op, a) -> EUnOp (op, subst v level a)
-  | ESum (sv, dim, g, body) -> if sv = v then e else ESum (sv, dim, g, subst v level body)
+  | ESum (sv, dim, g, body, l) -> if sv = v then e else ESum (sv, dim, g, subst v level body, l)
   | ECond (p, a, b) -> ECond (subst v level p, subst v level a, subst v level b)
   | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, e) -> (k, subst v level e)) args)
   | EList es -> EList (List.map (subst v level) es)
@@ -514,7 +514,7 @@ let sum_dims_in (e : expr) : string list =
   let acc = ref [] in
   let add d = if not (List.mem d !acc) then acc := !acc @ [ d ] in
   let rec go = function
-    | ESum (_, dim, _, body) -> add dim; go body
+    | ESum (_, dim, _, body, _) -> add dim; go body
     | EBinOp (_, l, r) -> go l; go r
     | EUnOp (_, a) -> go a
     | ECond (p, a, b) -> go p; go a; go b
@@ -556,7 +556,7 @@ let rate_couplings (pools : (string, string list) Hashtbl.t)
   in
   let rec go visited (e : expr) =
     match e with
-    | ESum (_, _, _, _) -> add "sum" (sum_dims_in e) (* inline aggregate; sum_dims_in already descends *)
+    | ESum _ -> add "sum" (sum_dims_in e) (* inline aggregate; sum_dims_in already descends *)
     | EIdent (n, _) ->
       if Hashtbl.mem pools n then add n (Hashtbl.find pools n)
       else if Hashtbl.mem lets n && not (List.mem n visited) then

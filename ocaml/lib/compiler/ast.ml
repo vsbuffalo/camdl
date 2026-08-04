@@ -74,7 +74,11 @@ and expr =
   | EIndex  of string * index_item list * loc (* S[child] + source loc *)
   | EBinOp  of bin_op * expr * expr
   | EUnOp   of un_op * expr
-  | ESum    of string * string * guard option * expr  (* sum(i in dim [where P], body) *)
+  (* sum(i in dim [where P], body) + the source loc of the binder `i in dim
+     [where P]`. The loc is per-binder, not per-`sum(...)`: the flat form
+     `sum(a in age, p in patch, body)` lowers to nested ESum nodes, and a
+     diagnostic about one binder's domain must point at that binder. *)
+  | ESum    of string * string * guard option * expr * loc
   | ECond   of expr * expr * expr            (* if p then a else b *)
   | EFuncCall of string * (string * expr) list  (* fname(kw=v,...) *)
   | EList   of expr list                     (* [1.0, 2.0] or [[...],[...]] *)
