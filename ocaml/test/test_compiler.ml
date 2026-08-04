@@ -10347,8 +10347,61 @@ let test_w202_silent_when_every_domain_nonempty () =
   Alcotest.(check int) "no W202 when every instantiation selects levels"
     0 (List.length (w202_diags nonempty_guard_src))
 
+(* ── A1: an undeclared dimension is named as undeclared ─────────────────────
+   `dim_values` used to answer "no such dimension" and "a dimension with no
+   levels" with the same empty list, so a typoed axis surfaced as a claim about
+   a level: `C : age × aeg` indexed `C[a, child]` reported "'child' is not a
+   level of dimension 'aeg'" — true, but it points at the index rather than at
+   the undeclared axis that is the actual mistake. With the lookup returning
+   `option` the site can tell the two apart and say which one happened. *)
+let undeclared_table_dim_src =
+  "time_unit = 'days\n\
+   compartments { S, I, R }\n\
+   dimensions { age = [child, adult] }\n\
+   stratify(by = age)\n\
+   parameters { beta : rate in [0,2]  gamma : rate in [0,1] }\n\
+   tables { C : age × aeg = [[1.0,2.0],[3.0,4.0]] }\n\
+   let N[a in age] = S[a] + I[a] + R[a]\n\
+   transitions {\n\
+   infection[a in age] : S[a] --> I[a] @ beta * C[a, child] * S[a] * I[a] / N[a]\n\
+   recovery[a in age] : I[a] --> R[a] @ gamma * I[a]\n\
+   }\n\
+   init { S[child]=99 I[child]=1 S[adult]=100 }\n\
+   simulate { from = 0 'days to = 10 'days }\n"
+
+let test_a1_undeclared_dim_named_as_undeclared () =
+  compile_expect_error_code ~code:"E263"
+    ~contains:"'aeg' is not a declared dimension" undeclared_table_dim_src
+
+(* A declared dimension with a genuine level typo must keep the level-oriented
+   message — the two cases must not be collapsed in the other direction. *)
+let mistyped_level_src =
+  "time_unit = 'days\n\
+   compartments { S, I, R }\n\
+   dimensions { age = [child, adult] }\n\
+   stratify(by = age)\n\
+   parameters { beta : rate in [0,2]  gamma : rate in [0,1] }\n\
+   tables { C : age × age = [[1.0,2.0],[3.0,4.0]] }\n\
+   let N[a in age] = S[a] + I[a] + R[a]\n\
+   transitions {\n\
+   infection[a in age] : S[a] --> I[a] @ beta * C[a, chidl] * S[a] * I[a] / N[a]\n\
+   recovery[a in age] : I[a] --> R[a] @ gamma * I[a]\n\
+   }\n\
+   init { S[child]=99 I[child]=1 S[adult]=100 }\n\
+   simulate { from = 0 'days to = 10 'days }\n"
+
+let test_a1_mistyped_level_still_level_error () =
+  compile_expect_error_code ~code:"E263"
+    ~contains:"'chidl' is not a level of dimension 'age'" mistyped_level_src
+
 let () =
   Alcotest.run "compiler" [
+    "unknown_dimension_a1", [
+      Alcotest.test_case "E263 names an undeclared dimension as undeclared"
+        `Quick test_a1_undeclared_dim_named_as_undeclared;
+      Alcotest.test_case "E263 keeps the level message for a real level typo"
+        `Quick test_a1_mistyped_level_still_level_error;
+    ];
     "empty_restricted_reduction_a3", [
       Alcotest.test_case "W202 aggregates one warning per source site"
         `Quick test_w202_empty_guard_warns;

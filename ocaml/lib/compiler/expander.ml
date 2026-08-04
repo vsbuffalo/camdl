@@ -165,6 +165,41 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   empty_reductions     = [];
 }
 
+(* ── Dimension registry accessor ─────────────────────────────────────────── *)
+
+(** Ordered levels of a declared dimension, or [None] when [dim] is not in the
+    registry at all.
+
+    The [option] is load-bearing (A1 of the aggregation-semantics proposal).
+    This used to answer [[]] for both "no such dimension" and "a declared
+    dimension with no levels", which is how a typoed axis became a silent zero:
+    resolution succeeded on an empty collection and every caller's `if vs = []`
+    branch treated the two identically. Callers now decide per site, and the
+    decision is written down at the site rather than assumed.
+
+    [option] rather than [result]: the failure has one shape, the caller already
+    knows the name it asked for, and a string payload would tempt callers to
+    print it directly instead of going through Diagnostics with a code and a
+    span. It also matches the file's idiom — every sibling lookup is an `_opt`.
+
+    THIS IS THE ONLY LOOKUP INTO [ctx.dim_registry] that reads levels. Reaching
+    into the registry by hand re-creates the collapse above at a place the type
+    checker cannot see, so the invariant is pinned by a source scan —
+    `test_diagnostics.ml`'s "dim_registry is read through one accessor".
+    (`List.mem_assoc` guards — the E212 redeclaration check and the E214
+    stratify check — are membership tests with no default to hide, and stay.)
+
+    Defined here, ahead of every consumer, so no consumer has to reach past it
+    into the registry for ordering reasons. *)
+let dim_values ctx dim : string list option =
+  List.assoc_opt dim ctx.dim_registry
+
+(** [dim_values] with the disposition every enumerating caller wants: an
+    undeclared dimension contributes no levels. Callers that must DIAGNOSE the
+    undeclared case pattern-match [dim_values] directly instead. *)
+let dim_levels_or_empty ctx dim : string list =
+  Option.value ~default:[] (dim_values ctx dim)
+
 (* ── Model summary ────────────────────────────────────────────────────────── *)
 
 type model_summary = {
@@ -490,11 +525,10 @@ let load_table_data ctx path ~dims ~n_values ~default_val ~cell_kind =
     let dname = match de with
       | TDim d | TDimUnit (d, _) -> d
     in
-    let levels = match List.assoc_opt dname ctx.dim_registry with
-      | Some vs -> vs
-      | None    -> []
-    in
-    (dname, levels)
+    (* An undeclared axis contributes no levels, so the table gets zero cells
+       and the cell-count check below reports the shape mismatch. The axis name
+       itself is diagnosed where it is USED — E263 from [dim_value_index]. *)
+    (dname, dim_levels_or_empty ctx dname)
   ) dims in
   let dim_sizes = List.map (fun (_, lvs) -> List.length lvs) dim_info in
   let total = List.fold_left ( * ) 1 dim_sizes in
@@ -2068,11 +2102,6 @@ let unit_lit_to_dim = function
 
 (* ── Stratification helpers ──────────────────────────────────────────────── *)
 
-let dim_values ctx dim =
-  match List.assoc_opt dim ctx.dim_registry with
-  | Some vs -> vs
-  | None    -> []
-
 let strat_applies_to _ctx cname sd =
   match sd.sonly with
   | None      -> true
@@ -2087,7 +2116,10 @@ let expand_compartment_name ctx cname =
   let dims = comp_dims ctx cname in
   if dims = [] then [cname]
   else begin
-    let all_vals = List.map (fun d -> (d, dim_values ctx d)) dims in
+    (* [dims] are stratify dimensions; an undeclared one is already E214 from
+       [resolve_dimensions], so contributing no levels here only shrinks the
+       cell list of a model that is already failing. *)
+    let all_vals = List.map (fun d -> (d, dim_levels_or_empty ctx d)) dims in
     let rec cart = function
       | [] -> [[]]
       | (_, vs) :: rest ->
@@ -2104,12 +2136,14 @@ let all_expanded_compartments ctx =
     cartesian product of its declared dims' levels, in row-major order —
     the same name-mangling `resolve_ident_name` / `build_lookup_tables`
     produce for indexed parameters and forcings. A dim with no registered
-    levels contributes nothing (the dim error is reported elsewhere). *)
+    levels contributes nothing: for an indexed parameter that case is E330
+    ([expand_parameters]), and for a forcing it surfaces as the E100 on the
+    unexpanded name. Neither is silent, so this expander stays a pure
+    name-producer and does not diagnose. *)
 let expand_indexed_decl_names ctx base dims =
   if dims = [] then [base]
   else
-    let level_lists = List.map (fun d ->
-      match List.assoc_opt d ctx.dim_registry with Some vs -> vs | None -> []) dims in
+    let level_lists = List.map (dim_levels_or_empty ctx) dims in
     if List.exists (fun l -> l = []) level_lists then []
     else
       let rec cart = function
@@ -2311,14 +2345,19 @@ let scale_table_values ctx ~table_name ~unit values =
       other
   ) values
 
-let table_dims ctx tname =
+(** Declared dimension names of table [tname], or [None] when no table declares
+    that name. Same reason as [dim_values] for the [option] (A1): [[]] used to
+    mean both "not a table" and "a table with no dimensions" — and the latter is
+    a real declaration (`tables { pop = read("pop.tsv") }`), so the two must not
+    share a representation at the call sites that dispatch on it. *)
+let table_dims ctx tname : string list option =
   match List.find_opt (fun td -> List.mem tname td.tnames) ctx.table_decls with
-  | Some td -> List.map dim_name_of_entry td.tdims
-  | None    -> []
+  | Some td -> Some (List.map dim_name_of_entry td.tdims)
+  | None    -> None
 
 (** Return the 0-based index of `value_name` within dimension
     `dim_name`'s ordered level list, as a float. Emits E263 + returns
-    0 when the value isn't a level.
+    0 when the lookup fails.
 
     Previously returned 0 silently on a miss (C2 in the 2026-04-19
     review), so `C_age[typo]` quietly resolved to `C_age[0]` — a
@@ -2328,27 +2367,48 @@ let table_dims ctx tname =
     traversal can continue and surface any additional errors in a
     single pass; the diagnostic blocks compilation at exit.
 
+    Two failures, two messages (A1). An UNDECLARED axis
+    (`tables { C : age × aeg = … }`, then `C[a, child]`) used to be reported as
+    `'child' is not a level of dimension 'aeg'` with `valid levels: (none)` —
+    true, but it points at the index the user wrote correctly instead of at the
+    axis that does not exist. Naming the undeclared dimension is possible only
+    because [dim_values] distinguishes it from a declared-but-empty one.
+
     Levenshtein-distance "did you mean" hinting is possible but not
     implemented here — the levels list is small enough to eyeball. *)
-let dim_value_index ctx dim_name value_name =
-  let values = dim_values ctx dim_name in
-  let rec find i = function
-    | []                         -> None
-    | v :: _ when v = value_name -> Some i
-    | _ :: rest                  -> find (i + 1) rest
-  in
-  match find 0 values with
-  | Some i -> float_of_int i
+let dim_value_index ctx ~loc dim_name value_name =
+  match dim_values ctx dim_name with
   | None ->
     Diagnostics.error ctx.diags
-      ~code:"E263"
-      ~loc:Diagnostics.no_loc
+      ~code:"E263" ~loc
       ~message:(Printf.sprintf
-        "'%s' is not a level of dimension '%s'" value_name dim_name)
-      ~hint:(Printf.sprintf "valid levels: %s"
-        (if values = [] then "(none)" else String.concat ", " values))
+        "'%s' is not a declared dimension" dim_name)
+      ~hint:(Printf.sprintf
+        "declare it in `dimensions { %s = [...] }`, or correct the name — \
+         declared dimensions: %s"
+        dim_name
+        (match List.map fst ctx.dim_registry with
+         | [] -> "(none)"
+         | ds -> String.concat ", " ds))
       ();
     0.0
+  | Some values ->
+    let rec find i = function
+      | []                         -> None
+      | v :: _ when v = value_name -> Some i
+      | _ :: rest                  -> find (i + 1) rest
+    in
+    (match find 0 values with
+     | Some i -> float_of_int i
+     | None ->
+       Diagnostics.error ctx.diags
+         ~code:"E263" ~loc
+         ~message:(Printf.sprintf
+           "'%s' is not a level of dimension '%s'" value_name dim_name)
+         ~hint:(Printf.sprintf "valid levels: %s"
+           (if values = [] then "(none)" else String.concat ", " values))
+         ();
+       0.0)
 
 (* ── Normalize expr ──────────────────────────────────────────────────────── *)
 
@@ -2446,7 +2506,7 @@ let rec flatten_ast_list = function
 (** Compute the row-major flat index for a shaped let lookup.
     shape is the list of dimension names; items are the index arguments;
     env maps loop variable names to concrete level strings. *)
-let shape_index ctx shape items env =
+let shape_index ctx ~loc shape items env =
   let n = List.length shape in
   (* M20 in 2026-04-19 review: previously this called List.nth items i
      blindly — when `items` had fewer elements than `shape` (an under-
@@ -2473,8 +2533,11 @@ let shape_index ctx shape items env =
   let pairs = List.mapi (fun i dim ->
     let item     = List.nth items i in
     let val_name = index_item_to_str env item in
-    let idx      = int_of_float (dim_value_index ctx dim val_name) in
-    let size     = List.length (dim_values ctx dim) in
+    let idx      = int_of_float (dim_value_index ctx ~loc dim val_name) in
+    (* Stride only. An undeclared/level-less [dim] gives 0, which makes the
+       offset meaningless — but [dim_value_index] on the SAME expression has
+       already emitted E263 naming it, and the compile aborts at phase end. *)
+    let size     = List.length (dim_levels_or_empty ctx dim) in
     (idx, size)
   ) shape in
   (* Row-major: stride for dim i = product of sizes of dims i+1 ... n-1 *)
@@ -3131,8 +3194,10 @@ let eval_tab_cell ctx env tname idxs : float option =
         "the where-predicate indexes table '%s' with %d indices, but it has %d \
          dimensions." tname (List.length idxs) (List.length dims))
     else begin
-      let levels_of dim = match List.assoc_opt dim ctx.dim_registry with
-        | Some l -> l | None -> [] in
+      (* An undeclared axis has no levels, so `List.find_index` below returns
+         None for every index and the predicate is rejected as undecidable with
+         E284 naming the table — the diagnostic the user needs here. *)
+      let levels_of = dim_levels_or_empty ctx in
       let positions = List.map2 (fun var dim ->
         let lvl = match List.assoc_opt var env with Some l -> l | None -> var in
         List.find_index (fun v -> v = lvl) (levels_of dim)
@@ -3291,7 +3356,11 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
        For a table of dims [d1; d2; ...] with sizes [n1; n2; ...], the
        linear index is: i1*n2*n3*... + i2*n3*... + ... + iN.
        The IR and Rust runtime always expect exactly one index. *)
-    let tdims = table_dims ctx base_name in
+    (* `Some []` — a table declared with no dimensions (`tables { pop =
+       read("pop.tsv") }`) — is NOT a table lookup here: it has no index axes,
+       so it falls through to the name-resolution path exactly as before A1
+       made it distinguishable from `None` ("no such table"). *)
+    let tdims = Option.value ~default:[] (table_dims ctx base_name) in
     if tdims <> [] && List.length items <> List.length tdims then begin
       (* gh#112: table-lookup arity guard. The stride math below maps over
          the user's `items`, NOT the declared `tdims` — so an under-indexed
@@ -3317,8 +3386,8 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       let per_dim = List.mapi (fun i item ->
         let dim      = List.nth tdims i in
         let val_name = index_item_to_str env item in
-        (int_of_float (dim_value_index ctx dim val_name),
-         List.length (dim_values ctx dim))
+        (int_of_float (dim_value_index ctx ~loc:idx_loc dim val_name),
+         List.length (dim_levels_or_empty ctx dim))
       ) items in
       (* stride for dimension i = product of sizes of all later dimensions *)
       let n = List.length per_dim in
@@ -3364,7 +3433,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     | Some lb when lb.lshape <> None ->
       let shape = Option.get lb.lshape in
       let flat  = flatten_ast_list lb.lbody in
-      let idx   = shape_index ctx shape items env in
+      let idx   = shape_index ctx ~loc:idx_loc shape items env in
       if idx >= 0 && idx < List.length flat then
         normalize_expr (resolve_expr ctx env (List.nth flat idx))
       else begin
@@ -3454,7 +3523,14 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
                then_ = resolve_expr ctx env a;
                else_ = resolve_expr ctx env b }
   | ESum (v, d, guard_opt, body, sum_loc) ->
-    let vals = dim_values ctx d in
+    (* DEVIATION, stated: an undeclared reduction axis still resolves to an
+       empty domain (hence `Const 0.0`) with no diagnostic. Diagnosing it is
+       Increment A2 of the aggregation-semantics proposal — gh#488 — which owns
+       the error code, its wording, and the A2-replaces-E263 rule at the two
+       stride sites. A1 makes the case REPRESENTABLE here; it does not decide
+       it. This is the one site in the file where `None` is not covered by a
+       named upstream check. *)
+    let vals = dim_levels_or_empty ctx d in
     (* Restricted sum: a `where` predicate prunes the domain to the levels that
        satisfy it, evaluated at compile time (the sum var bound to each
        candidate). Survivors-only → O(P·k) by construction (gh#185). *)
@@ -4026,11 +4102,16 @@ let cartesian_product ibs ctx =
   let axes = List.filter_map (fun ib ->
     match ib with
     | IBind (v, d) ->
-      let vals = dim_values ctx d in
+      (* An undeclared index axis drops out of the product, so the declaration
+         expands as if it were unindexed and its body's `[a]` references fail
+         to resolve (E100 on the unexpanded name). That diagnostic names an
+         identifier the user never wrote; improving it is A6 of the
+         aggregation-semantics proposal, not A1. *)
+      let vals = dim_levels_or_empty ctx d in
       if vals = [] then None
       else Some (List.map (fun vv -> [(v, vv)]) vals)
     | IConsec (v, vn, d) ->
-      let vals = dim_values ctx d in
+      let vals = dim_levels_or_empty ctx d in
       let n = List.length vals in
       if n < 2 then None
       else begin
@@ -4962,8 +5043,13 @@ let expand_parameters ctx =
           ~hint:"each index axis must be a distinct dimension"
           ();
       let bad_dim = ref false in
+      (* The one site that ALREADY distinguished the three cases by hand, and
+         diagnoses each correctly (E330). A1 changes nothing here except the
+         spelling of the lookup — routing it through the accessor is what makes
+         "every levels lookup goes through [dim_values]" a checkable invariant
+         rather than a claim with an exception. *)
       List.iter (fun d ->
-        match List.assoc_opt d ctx.dim_registry with
+        match dim_values ctx d with
         | None ->
           bad_dim := true;
           Diagnostics.error ctx.diags
@@ -5087,7 +5173,7 @@ let table_source_of_expr ?table_name ctx (dim_entries : table_dim_entry list) e 
        would silently carry unused data. Only checked when every declared dim
        has known levels (a dim error is reported elsewhere). *)
     let dim_sizes = List.map (fun de ->
-      List.length (dim_values ctx (dim_name_of_entry de))) dim_entries in
+      List.length (dim_levels_or_empty ctx (dim_name_of_entry de))) dim_entries in
     let expected = List.fold_left ( * ) 1 dim_sizes in
     (if dim_entries <> [] && not (List.exists (fun s -> s = 0) dim_sizes)
         && List.length vals <> expected then
@@ -5723,11 +5809,21 @@ let expand_time_function_one ctx fname (env : (string * string) list)
     let err ?hint msg =
       Diagnostics.error ctx.diags ~code:"E229" ~loc:Diagnostics.no_loc ~message:msg ?hint () in
     let time_dim = get_model_name "time_dim" "" in
-    let tdims    = table_dims ctx tbl in
+    let tdims_opt = table_dims ctx tbl in
+    let tdims    = Option.value ~default:[] tdims_opt in
     let stratum  = List.filter_map (function IBind (v, d) -> Some (v, d) | _ -> None) findices in
-    if tdims = [] then
+    (* A1 splits what `[]` used to conflate: no such table, versus a table with
+       no axes to slice. The second is a real declaration (`tables { pop =
+       read("pop.tsv") }`) and deserves its own sentence. *)
+    if tdims_opt = None then
       (err ~hint:(Printf.sprintf "declare it as `tables { %s : dim \xc3\x97 time = read(...) }`" tbl)
          (Printf.sprintf "forcing '%s': `table = %s` is not a table" fname tbl); [])
+    else if tdims = [] then
+      (err ~hint:(Printf.sprintf
+         "give it a time axis, e.g. `tables { %s : week = read(...) }`" tbl)
+         (Printf.sprintf
+            "forcing '%s': table '%s' has no dimensions, so there is nothing \
+             to slice by `time_dim`" fname tbl); [])
     else if time_dim = "" then
       (err ~hint:"name the table dimension that is the time axis, e.g. `time_dim = week`"
          (Printf.sprintf "forcing '%s': a table-backed forcing needs `time_dim = <dimension>`" fname);
@@ -5763,14 +5859,21 @@ let expand_time_function_one ctx fname (env : (string * string) list)
            "forcing '%s': table '%s' has no compile-time values to slice \
             (an external `--table` cannot be sliced)" fname tbl); [])
       else begin
-        let sizes = List.map (fun d -> List.length (dim_values ctx d)) tdims in
+        let sizes = List.map (fun d -> List.length (dim_levels_or_empty ctx d)) tdims in
         let stratum_pos d =
           match List.find_opt (fun (_, dd) -> dd = d) stratum with
           | Some (v, _) ->
             let lvl = match List.assoc_opt v env with Some l -> l | None -> v in
-            int_of_float (dim_value_index ctx d lvl)
+            int_of_float (dim_value_index ctx ~loc:Diagnostics.no_loc d lvl)
           | None -> 0
         in
+        (* One knot per level of [time_dim]. An UNDECLARED time_dim yields no
+           levels, so the forcing gets zero knots and the Rust knot-builder
+           rejects it at load (`compiled_model.rs`) instead of the compiler
+           rejecting it here. That is a real gap, and it is a different defect
+           from A1 — the aggregation-semantics proposal §16 lists it as an
+           independent finding that gets its own issue rather than riding along
+           on this change. *)
         let pairs = List.mapi (fun j lvl ->
           let positions = List.map (fun d -> if d = time_dim then j else stratum_pos d) tdims in
           let off = row_major_offset positions sizes in
@@ -5785,7 +5888,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
               0.0
           in
           (t, cell)
-        ) (dim_values ctx time_dim) in
+        ) (dim_levels_or_empty ctx time_dim) in
         List.stable_sort (fun (a, _) (b, _) -> Float.compare a b) pairs
       end
     end
@@ -7114,7 +7217,8 @@ let expand_observations ctx =
       let rec go e local_env =
         match e with
         | ESum (v, d, guard_opt, body, _) ->
-          let vals = dim_values ctx d in
+          (* Same as resolve_expr's ESum arm: gh#488 / A2 owns the diagnostic. *)
+          let vals = dim_levels_or_empty ctx d in
           let vals = match guard_opt with
             | None   -> vals
             | Some g -> List.filter
@@ -8132,7 +8236,9 @@ let flush_empty_reductions ctx =
 (** Emit W103 for any let binding whose name also appears as a stratum value. *)
 let check_shadowing ctx =
   let all_strat_vals = List.concat_map (fun sd ->
-    let vs = match List.assoc_opt sd.sdim ctx.dim_registry with Some vs -> vs | None -> [] in
+    (* An undeclared stratify dimension is E214 from [resolve_dimensions]; it
+       simply contributes no stratum values to shadow. *)
+    let vs = dim_levels_or_empty ctx sd.sdim in
     List.map (fun v -> (v, sd.sdim)) vs
   ) ctx.stratifies in
   List.iter (fun lb ->
@@ -8995,10 +9101,30 @@ let find_base_compname ctx expanded_name =
   |> Option.map (fun cd -> cd.cname)
 
 let build_model_structure ctx expanded_trs =
+  (* NOT a `[]` default and NOT a silent drop (A1). `model_structure` is what
+     `lineage/deme.rs` reconstructs expanded cell names from: a missing
+     dimension hits its defensive `None => break` and leaves every cell of the
+     affected family at `DemeId(0)` — silently mis-attributed in the
+     `#[lineage]` line list. Both fields are also hashed into run identity, so
+     dropping one re-keys the model's cached fits. So refuse to build a
+     structure we know is wrong.
+
+     The message is byte-identical to [resolve_dimensions]' E214, which fires
+     from the declaration for the same defect: the two collapse to one
+     diagnostic under `Diagnostics`' sort_uniq, so the user sees one error for
+     one mistake — and this site still errors on its own if that check ever
+     stops covering it. *)
   let dimensions = List.filter_map (fun sd ->
-    match List.assoc_opt sd.sdim ctx.dim_registry with
+    match dim_values ctx sd.sdim with
     | Some vs -> Some { Ir.dim_name = sd.sdim; Ir.dim_values = vs }
-    | None    -> None
+    | None    ->
+      Diagnostics.error ctx.diags
+        ~code:"E214" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "stratify(by = '%s') has no levels: declare it in dimensions { %s = [...] }"
+          sd.sdim sd.sdim)
+        ();
+      None
   ) ctx.stratifies in
   let base_compartments = List.map (fun cd -> cd.cname) ctx.comp_decls in
   let compartment_dims = List.map (fun cd ->
