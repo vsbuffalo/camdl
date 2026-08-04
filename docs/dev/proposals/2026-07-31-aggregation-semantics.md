@@ -16,12 +16,12 @@ silent-wrong bugs in one dispatch function.
 This proposal derives a small set of primitives from the operations real disease
 models need, then specifies them:
 
-| primitive                                   | job                                  |
-| ------------------------------------------- | ------------------------------------ |
-| a bare compartment reference                | a stock, as an absolute count        |
-| `prevalence(of = …, among = …, across = …)` | a stock, as a checked proportion     |
-| `incidence(tr)`                             | a flow accumulated over the interval |
-| `sum(…)`                                    | all collapsing, in three forms       |
+| primitive                       | job                                  |
+| ------------------------------- | ------------------------------------ |
+| a bare compartment reference    | a stock, as an absolute count        |
+| `prevalence(of = …, among = …)` | a stock, as a checked proportion     |
+| `incidence(tr)`                 | a flow accumulated over the interval |
+| `sum(…)`                        | all collapsing                       |
 
 **A bare family name continues to mean the total across all strata**, everywhere
 in model dynamics. That is an intentional design decision, it is what makes
@@ -281,74 +281,79 @@ projected = I_hosp[a]          # ICU beds occupied in age band a
 projected = I_hosp             # ...across all bands
 ```
 
-### 5.2 `prevalence(of = …, among = …, across = …)` — a checked proportion
+### 5.2 `prevalence(of = …, among = …)` — safe sugar for a proportion
+
+`prevalence(of = X, among = Y)` **is** `X / Y` — same value, same IR — plus two
+checks that plain division cannot carry. It adds no arithmetic of its own and
+does no collapsing of its own. Division stays legal everywhere; you simply do
+not get the checks.
 
 ```camdl
 # fully indexed
 projected = prevalence(of = R[a] + V[a], among = N_local[a])
 
-# pooled over one axis of two; `patch` pinned by the stream index
-prev[p in patch] {
-  projected = prevalence(of = Y1[p] + Y2[p], among = N[p], across = age)
-}
+# pooled over age — `sum` does the collapsing, on each side
+projected = prevalence(of    = sum(a in age, Y1[a] + Y2[a]),
+                       among = sum(a in age, N[a]))
 
-# pooled over everything
-projected = prevalence(of = Y1 + Y2, among = N, across = [age, patch])
+# pooled over two axes
+projected = prevalence(of    = sum(a in age, p in patch, Y1[a,p] + Y2[a,p]),
+                       among = sum(a in age, p in patch, N[a,p]))
 
 # density-weighted detection (§2.1) — weights go in the numerator
 projected = prevalence(of = 0.4 * Y1[a] + 0.9 * Y2[a], among = N_local[a])
 ```
 
-**What `across` means.** It is a reduction, not an annotation. For each named
-dimension the compiler allocates a fresh binder, inserts it at that dimension's
-declared position in every family reference in `of` and `among` that carries the
-dimension and does not already index it, and wraps each side in
-`sum(v in d, …)`. Consequently the index items a reference _does_ carry bind to
-the axes **not** named in `across`, in declaration order — `Y1[p]` means `patch`
-under `across = age` and `age` without it. Prefer named indexing
-(`Y1[patch = p]`, C3) on families with more than one candidate axis. A family in
-`of` or `among` that lacks a named dimension entirely is an error, not a
-broadcast.
+**There is no collapsing argument.** An earlier draft carried an
+`across = <dims>` keyword that wrapped each side in `sum(v in d, …)`. That
+construction multiplies by `|d|` every additive term not carrying `d` — a scalar
+`let`, a parameter, a constant, or an already-pinned reference. Measured:
 
-The insertion generalizes `sum_staged_refs` (`expander.ml:1243`) from one named
-source appended at the end to any family inserted at position.
+```text
+sum(v in age, N_h)       →  reduce [N_h, N_h]                 # denominator doubled
+sum(v in age, I[child])  →  pop_sum ["I_child", "I_child"]    # numerator doubled
+```
 
-**Three checks.**
+On a garki-shaped model with a scalar denominator that reports exactly half the
+true prevalence — the error class §2.7 says the operator exists to prevent.
+`sum` expresses everything `across` did, so the keyword is dropped rather than
+repaired.
 
-1. **Axis completeness.** Every population stratum of every family referenced in
-   `of` and `among` is either indexed or named in `across`. Residence structure
-   is never counted and never nameable (§3).
+**Two checks.**
+
+1. **Subset.** `cells(e)` is the set of `Ir.Pop` names reachable in
+   `resolve_expr`'s output for `e`, with `BindingRef` resolved through the
+   hoisted-binding table (`register_hoisted_binding`, `expander.ml:3060`), and
+   with a `visiting` set — the compiler has no `let`-cycle guard, so a
+   self-referential `let` reached from a use site hangs it (§16). Requires
+   `cells(of) ⊆ cells(among)`.
+
+   **The limits, stated.** This rejects a numerator outside its denominator
+   (`of = I[child]`, `among = S[child] + R[child]`) and a pinned-level mismatch
+   (`of = I[child]`, `among = N_local[adult]`). It is **vacuous** when `among`
+   has no cells — a parameter, a constant, or a table lookup, all of which are
+   legitimate denominators (§2.5's "population surveyed" is often a table). It
+   is **defeated** when the denominator is written as an explicit cell
+   enumeration rather than an indexed family, because that spelling erases the
+   axis (§13); `docs/dev/proposals/fixtures/garki_post_proposal.camdl:46,78` is
+   exactly that case and passes while being wrong.
+
+   The check is set-based, so it does not establish that the result lies in
+   `[0,1]`: `of = I[child] + I[child]` passes and yields a ratio up to 2. The
+   name is "safe sugar", not "proven proportion".
+
+2. **Matched collapse.** Compare the multiset of dimensions each side collapses
+   — the binder dimensions of every `sum` on the spine of `of` against those of
+   `among`. A mismatch is an error. This catches §2.7's second motivating case:
 
    ```text
-   error[E2xx]: 'Y1' has population strata [age, patch]; 'patch' is indexed but 'age' is not
-     = hint: collapse it with `across = age`, or index it
+   error[E2xx]: numerator collapses [age]; denominator collapses [age, patch]
+     = hint: both sides of a proportion must pool the same dimensions
    ```
 
-   Because `across` accounts for the omitted axis, `Y1[p]` in that position is a
-   **complete** reference, so the partial-index footgun cannot occur here.
-
-2. **Subset.** `cells(e)` is the set of `Ir.Pop` names reachable in
-   `resolve_expr`'s output for `e`, with `BindingRef` resolved through the
-   hoisted-binding table (`register_hoisted_binding`, `expander.ml:3060`).
-   Requires `cells(of) ⊆ cells(among)`.
-
-   **State the limits honestly.** This rejects a numerator outside its
-   denominator (`of = I[child]`, `among = S[child] + R[child]`) and a
-   pinned-level mismatch (`of = I[child]`, `among = N_local[adult]`). It is
-   **vacuous** when `among` is a parameter or a constant — those have no cells —
-   and it is **defeated** when the denominator is written as an explicit cell
-   enumeration rather than an indexed family, because that spelling erases the
-   axis (§13). `docs/dev/proposals/fixtures/garki_post_proposal.camdl:46,78` is
-   exactly that case: a per-age numerator over a hand-enumerated all-ages
-   denominator, which passes all three checks while being wrong. Writing the
-   denominator as an indexed family (`let N[a in age] = …`) is what makes the
-   axis visible to check 1.
-
-3. **Matched collapse.** `across` applies to both sides by construction, so a
-   mismatch is **unrepresentable** rather than detected. The equivalent explicit
-   form is _checkable_ by comparing binder-dim multisets, but a check can be
-   evaded and a construction cannot; that, not checkability, is why `across`
-   exists.
+   This is a check rather than a construction, so it can be evaded by writing
+   the division directly — which is the honest position, since the construction
+   that would have made it unavoidable was itself wrong.
 
 **`prevalence` stays head-position for now.** Unlike `incidence` (§5.3), the
 nested form has a working escape hatch — plain division, which stays legal and
@@ -367,12 +372,16 @@ composable `incidence` buys _a model that is otherwise impossible_. Different
 strength of case, so different answer. Revisit when a concrete model needs it;
 tracked in §16.
 
-**Unknown dimension in `across` is a hard error** (A2 is scoped to reductions;
-`across` is a new dimension-consuming construct and `dim_values` returns `[]` on
-a miss).
+**A flow may not appear in `of` or `among`.** Once `incidence` is an ordinary
+expression (§7), `prevalence(of = incidence(tr), among = N)` parses, and it has
+no IR representation: B1's whole design keeps flow reads out of `Expr`, and the
+enclosing `DerivedExpr` would be classified `Instant` — the wrong temporal kind
+for a quantity that must accumulate and reset. Reject with a named diagnostic
+pointing at the pooled-column form. Incidence-per-capita is a conventional
+reporting quantity (§2.1, §2.3), so this will be written on day one.
 
-`prevalence` gains no other collapsing behaviour — weighted sums, subsets by
-predicate and every other reduction stay with `sum`.
+`prevalence` gains no collapsing behaviour — weighted sums, subsets by predicate
+and every other reduction stay with `sum`.
 
 ### 5.3 `incidence(tr)` — a flow over the interval
 
@@ -397,19 +406,26 @@ sum(a in age where a == under5, I[a])     # restricted
 sum(b in age, C_age[a,b] * I[b])          # weighted — the binder form is required here
 ```
 
-`sum(name)` takes a **family reference**, not an arbitrary expression, over four
-declaration classes: compartments, indexed parameters, numeric tables, indexed
-`let` bindings. Anything else is a located error:
+**The no-binder form needs no separate production and no new semantics.** Under
+the uniform rule (C2) `sum(I)` is a one-element list whose single element is the
+body, so it evaluates to the body — and a bare compartment name already means
+the total across all strata (§5.5). The right answer falls out:
 
-```text
-error[E2xx]: `sum(...)` takes the name of a stratified family, not an expression
-  = hint: reduce each family — `sum(S) + sum(I)` — or reduce over an axis
-          explicitly with `sum(a in age, S[a] + I[a])`
+```camdl
+sum(I)        # → the total of I, exactly as bare `I` means today
+sum(S + I)    # → total of S plus total of I; redundant, not wrong
+sum(rho_a)    # → E100, as a bare indexed parameter is today
 ```
 
-Without family-valued expressions (§15) there is no principled meaning for
-`sum(S + I)`; a production accepting arbitrary `expr` would parse more than the
-semantics can define.
+So `sum(family)` is documentation for compartments — an explicit way to say "I
+mean the total here" — and for indexed parameters, tables and shaped `let`s the
+binder form is the spelling: `sum(a in age, rho_a[a])`.
+
+An earlier draft made `sum(family)` a dedicated production over four declaration
+classes and required `sum(S + I)` to be an error. Both were wrong. The dedicated
+production conflicts with the uniform rule (measured: two arbitrarily-resolved
+shift/reduce conflicts at `SUM LPAREN IDENT . RPAREN`), and `sum(S + I)` has a
+perfectly good meaning under bare-name semantics.
 
 ### 5.5 Bare names are unchanged
 
@@ -452,6 +468,18 @@ contributes nothing (the dim error is reported elsewhere)" — the
 safe-by-accident assertion A1 exists to eliminate. **All 25 sites must route
 through the new accessor**; a signature change alone leaves 10 identical hazards
 behind.
+
+A 26th lookup at `expander.ml:4911` already diagnoses correctly (`E330`) and is
+**deliberately excluded** — noted so an implementer who greps 26 hits knows
+which one to leave.
+
+**Disposition is per-site, and one is not a `[]` default.** `expander.ml:8913`
+is a `List.filter_map` whose `None` arm _drops_ the dimension from
+`model_structure.dimensions` — the field `deme.rs` reads (C6). It must become an
+error, not an empty list. Every other site emits a located diagnostic at the
+point of use. Where A2's new error would fire alongside an existing E263
+(`:2454`, `:3275`), A2 **replaces** it rather than adding a second diagnostic
+for one mistake.
 
 **No `Option.get`, no `_exn` variant**, including where an upstream check makes
 failure currently unreachable. Three sites use the result as an array stride
@@ -536,24 +564,35 @@ expression at all — `project_stream_from_acc` short-circuits
 **Reading `flow_accumulators` at scoring time is prohibited.** It is
 blanket-zeroed at every union observation index, so it is correct only on
 homogeneous cadence and silently wrong otherwise — pinned by
-`sim/tests/per_stream_reset.rs:240`, which asserts 20 where the correct 30-day
-AFP bin is 300. `tests/fixtures/polio_afp_es_2patch.camdl` is a live
-multi-cadence model of exactly that shape.
+`sim/tests/per_stream_reset.rs:266`, a mutation guard asserting 20 where the
+correct 30-day AFP bin is 300. `tests/fixtures/polio_afp_es_2patch.camdl` is a
+live multi-cadence model of exactly that shape.
 
 The reset stays keyed on the **stream**, never the reference: a reference
 appearing twice contributes twice and resets once.
 
-**B3. Weight restrictions.** Each weight must be **flow-free** and
-**time-independent**. A flow read inside a weight, or a `Cond`/`TimeFunc`/`t`,
-is a located error — `w(t)·ΣΔN ≠ ∫w dN`, and the projection is evaluated once at
-the observation instant.
+**B3. Weight restrictions.** Each weight must be **constant over the observation
+interval**. Concretely it must be free of flow reads, of `t`/`TimeFunc`/`Cond`,
+**and of `Pop`** — a state read is the case a syntactic "time-independent" rule
+misses, and it breaks the same identity: the projection is evaluated once at the
+observation instant, so `w(x(t_obs))·ΣΔN ≠ ∫ w(x(s)) dN(s)` exactly as
+`w(t)·ΣΔN ≠ ∫w dN`. A weight reached through a hoisted `let` must be resolved
+through `ctx.hoisted_tbl` before the walk, or `BindingRef` hides the violation.
+
+Without the `Pop` clause the B3/B4 boundary is syntactic and one algebraic step
+crosses it: B4 defers `Σ rho_a·inc_a / N`, but `Σ (rho_a/N)·inc_a` is the same
+quantity with the division moved inside the weight, and a flow-free, `t`-free
+rule admits it. The `Pop` clause also preserves B1's decisive argument —
+`∂proj/∂flow_i = w_i` is structurally free only when the weight is state-free.
 
 **B4. Deferred with named diagnostics, not silently rejected**: `incidence`
 under `Cond`, under a nonlinear function, and mixed with instant state in one
 expression (`Σ rho_a·inc_a / N`). The mixed case matters — it would otherwise
-pass `gradient_capability.rs:442-456` (which refuses only on an empty
-`projection_state_grad`) and silently drop the flow term from the ODE-NUTS
-gradient.
+pass `gradient_capability.rs:442-456`, which gates on
+`matches!(om.projection, Projection::DerivedExpr(_))` and therefore does not
+examine a new `WeightedFlowSum` variant at all. **Extend that gate to the new
+variant** as part of B, or a state-dependent weight silently drops its term from
+the ODE-NUTS gradient.
 
 **B5. Delete `explicit_incidence_sum`** (`expander.ml:7058-7080`) rather than
 extend it. It is the syntactic walker that accumulated the four silent-wrongs in
@@ -571,7 +610,13 @@ defect.
 | `paralysis_frac * incidence(infection)`           | none          | Interval | projection | n/a                                 | before; still E280 on a stratified family | `weighted_flow_sum` (1 term)      |
 | `if season then incidence(a) else incidence(b)`   | —             | —        | —          | —                                   | —                                         | **deferred (B4)**                 |
 
-**B7. `inc_<stream>` stays the raw flow sum.** `incidence_streams()`
+**B7. The `ir/VERSION` bump re-keys every cached run, for every model.**
+`ir_version` is a hashed field of `ModelDigest` (`runid/src/inputs.rs:174-182`),
+so 0.30 → 0.31 invalidates every stored fit and simulate — not only models using
+`incidence`. Unavoidable if B ships; it belongs in the release notes, not only
+here.
+
+**B8. `inc_<stream>` stays the raw flow sum.** `incidence_streams()`
 (`multi_stream_obs.rs:1026`) builds it as the unweighted `Σ flows[i]`. Under a
 weighted projection it diverges from `projected`, which is correct — a modeller
 wants true incidence in the trajectory and reported counts in the predictive —
@@ -580,19 +625,11 @@ projection" and must be restated.
 
 ## 8. Increment C — `sum` forms and dimension identity
 
-**C1. `sum(family)`** over the four declaration classes (§5.4). Verified: adding
-`SUM LPAREN IDENT RPAREN` produces a conflict set identical to baseline.
-
-Indexed `let`s need a dimension accessor built — compartments have `comp_dims`
-(`expander.ml:2057`), tables have `table_dims` (`:2291`), indexed parameters
-have `indexed_param_dims` (`:3185`), indexed `let`s have none and must be
-reconstructed from `lb.lindices` / `lb.lshape`. The `IConsec` (adjacent-pair)
-and `IComp` (compartment-indexed) forms have no dimension and are rejected.
-
-Resolve the `quantities {}` reservation first: `expander.ml:7714-7718` rejects
-`EFuncCall (("total"|"sum"), _)`. That arm is unreachable today because `sum` is
-a lexer keyword; desugaring makes it reachable and it would fire with "summing a
-stock over snapshots is cadence-dependent," the wrong message.
+**C1 is subsumed by C2.** There is no separate `sum(family)` production; the
+no-binder form falls out of the uniform rule (§5.4). Nothing is added to the
+grammar beyond C2, no new AST node is needed, and the `quantities {}`
+reservation at `expander.ml:7714-7718` stays unreachable because `sum` remains a
+lexer keyword rather than becoming an `EFuncCall`.
 
 **C2. Flat multi-binder — replace the existing productions, do not add alongside
 them.**
@@ -654,9 +691,42 @@ Declared metadata is authoritative; generated names derive from it, never the
 reverse. This retires the `__` sniff (`expander.ml:6332`) and with it the `E237`
 misdiagnosis of a user dimension named `__risk`.
 
-**C5. Reserve the `__` prefix in the lexer.** The C4 tag answers "is this
-generated?" but does not prevent a _collision_, because generated axes are
-registered in the same `dim_registry` (`expander.ml:1453-1458`). Today:
+**`lowering` is compiler-internal.** It does not reach the IR; C6's
+per-dimension flag is the IR-visible part, and it is derived from `lowering`. So
+C4 alone needs no schema change, no `ir/VERSION` bump and no golden
+regeneration.
+
+**C4a. Apply the `via` rewrite to every container that reads state.**
+`sum_staged_refs` / `sum_hyper_refs` are applied to five containers today —
+`ctx.transitions`, `ctx.let_bindings`, `ctx.init_entries`, `ctx.balance_decl`,
+`ctx.obs_decls` (`expander.ml:1526-1561`, `:1809-1822`). `ctx.quantity_decls`,
+`ctx.interv_decls`, `ctx.event_decls` and `ctx.reactive_decls` are absent, so
+§3's rule is false there. Measured — identical syntax, opposite outcome by
+container:
+
+```camdl
+# I is [age, __recov_stage]
+observations { … projected = I[child] … }   → pop_sum ["I_child_s1","I_child_s2","I_child_s3"]
+quantities   { peak = max(I[child]) }       → error[E287]: … only 1 of 2 were indexed
+interventions { isolate : transfer(from = I[child], …) }  → error[E287]
+```
+
+and on a `hyper_erlang` compartment, `quantities { peak = max(I) }` gives
+`error[E100]: undeclared name 'I'` for a compartment declared in
+`compartments { S, I, R }`.
+
+This is a prerequisite for C5, not an independent nicety: the only
+dimension-safe workaround today is `sum(s in __recov_stage, I[child, s])`, which
+compiles now and which C5 deletes. Without C4a the sole surviving spelling is
+the explicit enumeration `I_child_s1 + I_child_s2 + I_child_s3`, which §13 names
+as the form that silently drops a stage when `stages` changes. C5's corpus
+measurement does not establish safety here, because no committed model reports a
+quantity on one stratum of a staged compartment.
+
+**C5. Reserve the `__` prefix in the lexer.** Ships **after C4a**. The C4 tag
+answers "is this generated?" but does not prevent a _collision_, because
+generated axes are registered in the same `dim_registry`
+(`expander.ml:1453-1458`). Today:
 
 ```camdl
 dimensions { __onset_stage = [x1, x2] }
@@ -693,40 +763,43 @@ at `DemeId(0)`, silently mis-attributed in the `#[lineage]` line list. Both
 fields are also hashed into run identity (`runid/ir_hash.rs:1092-1094`), so
 omission re-keys every `via` model's cached fits.
 
-So: add an inert `generated : bool` to `Dimension` and to the `compartment_dims`
-payload, leave `hash_into` untouched so the change is hash-neutral, and filter
-at the presentation layer (`inspect`, diagnostics).
+So: add an inert `generated : bool` to `Dimension` only, leave `hash_into`
+(`ir_hash.rs:1086-1091`, which writes `name` then `values` explicitly and is
+hand-written rather than derived) untouched so the change is hash-neutral, and
+filter at the presentation layer (`inspect`, diagnostics).
+
+Do **not** change the `compartment_dims` payload. It is hashed by
+`h.write_str_map(self.compartment_dims.iter())`, which requires `Vec<String>` —
+changing the payload type forces a `hash_into` change and a re-key. The flag is
+a property of the dimension and is already reachable by name lookup in
+`dimensions`.
 
 Generated **compartment** names (`I__fatal__1`) are intentionally visible — they
 are trajectory columns and scenario-referenceable transition names. The
 invariant is scoped to generated **dimension** names.
 
-## 9. Increment D — `prevalence` as a checked proportion
+## 9. Increment D — `prevalence` as safe sugar
 
-D1. New form `prevalence(of = <expr>, among = <expr>, across = <dims>)`, with
-`across` optional and taking a dimension name or a bracketed list.
+D1. New form `prevalence(of = <expr>, among = <expr>)`. Both are ordinary
+keyword arguments, so **no new keywords and no new grammar production** are
+needed — `prevalence` stays an `EFuncCall` handled where it already is
+(`expander.ml:7097`), and `kw_arg_name` (`parser.mly:1406`) already accepts any
+identifier. This matters: keyword-ising `prevalence` would break
+`tests/fixtures/quantities/quantities_showcase.camdl:53`, which uses it as a
+quantity name.
 
-**`across` needs a dedicated grammar production**, as `sum(v in d, …)` has
-(`parser.mly:1354`), not a generic keyword-argument slot: dimension names are
-`E100` in expression position, `E278` does not cover dimension-vs-compartment
-collisions (`dimensions { I = … }` alongside `compartments { S, I, R }` compiles
-clean today), and generic expression walkers including `sum_hyper_refs`
-(`:1287`) traverse kwarg values.
+D2. Subset check (§5.2 check 1), with a `visiting` set on the `let` walk.
 
-D2. Axis-completeness check (§5.2), counting **population strata only**.
-**Depends on C4 and C5** — without them the implementation is the `__` sniff and
-inherits the `E237` misdiagnosis.
+D3. Matched-collapse check (§5.2 check 2): compare the multiset of binder
+dimensions on the spine of each side.
 
-D3. Subset check, with the limits stated in §5.2.
+D4. Reject a flow read in `of` or `among` with a named diagnostic (§5.2).
 
-D4. Matched collapse via `across`.
+D5. Diagnostics aggregate per source site, not per unrolled stream cell (one
+`projected =` line currently produces one error per stream leaf). Share the
+mechanism with A3 rather than growing a second one — same key, same flush point.
 
-D5. Unknown dimension in `across` → hard error.
-
-D6. Diagnostics aggregate per source site, not per unrolled stream cell (one
-`projected =` line currently produces one error per stream leaf).
-
-D7. **Removals.** The single-argument form `prevalence(X)` and the
+D6. **Removals.** The single-argument form `prevalence(X)` and the
 multi-positional form `prevalence(X1, X2)` both go. The `→ X` migration is
 IR-identical (verified on `all_lifecycle.camdl` and `ross_macdonald.camdl`), so
 no golden regenerates:
@@ -737,7 +810,7 @@ error[E2xx]: `prevalence(X)` is the same value as `X`
           for a proportion write `prevalence(of = Y1[a] + Y2[a], among = N_local[a])`
 ```
 
-D8. **The proportion form changes the projection's dimension**, so every
+D7. **The proportion form changes the projection's dimension**, so every
 downstream likelihood kwarg must be rechecked — a count into `poisson(rate = …)`
 becomes a proportion, which is `E304`. Migration must move such streams to a
 probability slot or keep the count form.
@@ -780,15 +853,21 @@ E-warn(stream S):
         with d in axes(f) and cells(f) > 1:                           # (b)
       p    := position of d in axes(f)     # by name if INamed
       item := (idx == [] ? BARE : idx[p])
-      if   item is BARE                     -> WARN
-      elif item is identifier w:
-             w == v                         -> selects the cell; no warning  # (c) false
-             w bound by an enclosing sum(w in d, …) in P -> WARN             # (c) true
+      if   item is BARE                     -> WARN                        # (c)
+      else                                  -> no warning
 ```
 
-Conjunct (c) is evaluated at the index position of the stream's axis inside the
-projection — **never over the stream body**. The weak reading goes silent on the
-motivating case, because the binder is used in the likelihood:
+Conjunct (c) is **only** the bare case, and it is evaluated at the index
+position of the stream's axis inside the projection — never over the stream
+body. An earlier draft also warned when the item was a _different_ binder bound
+by an enclosing `sum`; that fired on
+`sum(b in age, I[b]) / sum(b in age, N_local[b])` — the very form Increment E
+blesses — and could not be silenced, because reusing the stream's own binder
+name is `E283`. The only quiet spelling left was §13's dimension-unsafe
+enumeration, so the warning pointed the wrong way.
+
+Evaluating (c) over the stream body rather than the index position goes silent
+on the motivating case, because the binder is used in the likelihood:
 
 ```camdl
 prev[a in age] {
@@ -801,6 +880,12 @@ prev[a in age] {
 Ship that model as a positive-control test. Corpus with the correct predicate:
 **0 hits across 89 indexed streams**, cross-checked by an independent IR-only
 method.
+
+**The warning does not preview the migration.** Conjunct (a) requires an indexed
+stream, and both of §12's Increment-E hits
+(`camdl-book/vignettes/garki/garki.camdl:175`) are in an **un-indexed** one. So
+the 0-hit figure says nothing about the models Increment E will break; the
+un-indexed case is E's own job, and E280 already covers it for `incidence`.
 
 ## 11. Increment F — deferred
 
@@ -865,12 +950,13 @@ numbers of axes and nothing says so.
    (§3); the rule is that residence structure may be omitted from an index and a
    population stratum may not.
 4. A stock as an absolute count needs no operator.
-5. `prevalence` is a **proportion** with an explicit denominator, carrying an
-   axis-completeness check, a subset check with stated limits, and a
-   matched-collapse construction. Its single- and multi-argument forms are
-   removed as redundant.
-6. `across` is a reduction that inserts binders by position; every population
-   stratum must be indexed or named.
+5. `prevalence` is **safe sugar for a division** — `of / among`, same value and
+   same IR, plus a subset check with stated limits and a matched-collapse check.
+   Its single- and multi-argument forms are removed as redundant.
+6. **There is no collapsing argument.** An `across = <dims>` keyword was
+   specified and dropped: wrapping each side in `sum(v in d, …)` multiplies by
+   `|d|` every additive term not carrying `d`, which is the error class the
+   operator exists to prevent. `sum` expresses everything it did.
 7. **`prevalence` stays head-position** — plain division is a working escape
    hatch, so composability would buy checking on an expressible form rather than
    expressiveness.
@@ -878,10 +964,13 @@ numbers of axes and nothing says so.
    case is otherwise inexpressible.
 9. `incidence` lowers to a new `Projection` variant, not a new `Expr`
    constructor; the accumulator becomes per-reference.
-10. `sum` is the single collapsing verb, in three forms; the whole-family form
-    takes a family reference over four declaration classes.
+10. `sum` is the single collapsing verb. The no-binder form needs no separate
+    production: `sum(I)` is a one-element list whose element is the body, and a
+    bare compartment name already means the total.
 11. Flat multi-binder **replaces** the existing productions rather than being
-    added alongside; verified conflict-neutral.
+    added alongside; verified conflict-neutral. Adding a dedicated `sum(family)`
+    production on top of it is not — measured, two arbitrarily-resolved
+    conflicts.
 12. Dimension lookup returns `option`; all 25 sites route through it; no `_exn`
     escape.
 13. Unknown dimension is an error; an empty guard is a warned zero, aggregated
@@ -894,13 +983,24 @@ numbers of axes and nothing says so.
     names stay visible.
 17. `__` is reserved at the lexer, with the file-sourced-level asymmetry closed.
 18. Composability (`incidence`) precedes the observation-boundary rule.
+19. Reduction weights must be constant over the interval — free of flows, of
+    time, **and of state**.
+20. The `via` rewrite extends to `quantities`, `interventions`, `events` and
+    `reactive_interventions` (C4a), and C5 ships after it.
+21. The interim warning fires only on a **bare** reference, and does not preview
+    the un-indexed migration.
 
 ## 15. Tests
 
 - Every §4 behaviour, as a red test before its fix.
-- `prevalence`: subset violation, matched-collapse violation, axis
-  incompleteness naming the missing stratum; the fully-indexed and `across`
-  forms produce the ratio the equivalent division produces.
+- `prevalence`: subset violation; matched-collapse violation (`of` collapsing
+  `[age]` against `among` collapsing `[age, patch]`); a flow in `of` rejected;
+  `prevalence(of = X, among = Y)` byte-identical to `X / Y`.
+- `sum(v in d, e)` where `e` does not carry `d` — the dropped-`across` hazard —
+  as a documented non-goal, not a silent multiply.
+- The same expression compiles identically in `observations`, `quantities`,
+  `interventions` and `events` on a `via`-staged compartment (C4a).
+- A state-dependent reduction weight is rejected (B3).
 - Each `incidence` form in §7 B6, plus the B3 weight restrictions and the B4
   deferrals as located errors.
 - Unit-weight `incidence` forms lower unchanged — all 18 `cumulative_flow`
@@ -969,4 +1069,4 @@ issue rather than riding along here.
 5. **A partial index in projection head position gives `E503` naming a
    compartment the user never wrote**, where the rate path gives `E287`
    (`expander.ml:7150-7166` vs `:3378`). The bad diagnostic is currently pinned
-   by `ocaml/test/test_compiler.ml:5920`.
+   by `ocaml/test/test_compiler.ml:5921`.
