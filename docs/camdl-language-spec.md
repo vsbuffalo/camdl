@@ -896,8 +896,9 @@ routing decisions — which is exactly the point of partial stratification.
 Index variables are bound by transition indices or `sum`:
 
 ```
-[i in age]              # binds i to iterate over age values
-sum(j in age, expr)     # binds j, sums expr over age values
+[i in age]                     # binds i to iterate over age values
+sum(j in age, expr)            # binds j, sums expr over age values
+sum(j in age, k in patch, e)   # binds several axes in one sum (§8.2)
 ```
 
 The `in dim` clause makes the dimension explicit. The compiler tracks which
@@ -1448,6 +1449,34 @@ It is a function from age-index to value. `f[child]` evaluates `expr` with
 and adds the results, producing a scalar.
 
 They compose: `sum(i in age, f[i]) = f[child] + f[adult]`.
+
+A `sum` takes its binders first and its body last, and may bind **several axes
+in one `sum`**. The flat form is sugar for the nested one — same value, same
+IR:
+
+```camdl
+sum(a in age, p in patch, N[a, p])          # flat
+sum(a in age, sum(p in patch, N[a, p]))     # the same reduction, nested
+```
+
+Each binder may carry its own `where` predicate (§8.2.1), and a later binder's
+predicate may reference an earlier binder, exactly as in the nested form:
+
+```camdl
+sum(b in age where b != a, q in patch where dist[p,q] < 50, C[a,b] * I[b,q])
+```
+
+With no binder at all, `sum(e)` is just `e`. Since a bare family name already
+means the total across all strata (§5.1), `sum(I)` is an explicit way to write
+that total:
+
+```camdl
+sum(I)        # the total of I — exactly what bare `I` means
+sum(S + I)    # total of S plus total of I; redundant, not wrong
+```
+
+For an indexed parameter, table or shaped `let`, the binder form is the
+spelling — `sum(a in age, rho_a[a])`, not `sum(rho_a)`.
 
 ```camdl
 # Define per-stratum totals
