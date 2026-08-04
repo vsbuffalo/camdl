@@ -17,10 +17,13 @@ let make_split ctx =
     ) ctx.Expander.stratifies in
     (cd.cname, dims)
   ) ctx.Expander.comp_decls in
+  (* `inspect` renders a model that already compiled, so an undeclared
+     stratify dimension cannot reach here — E214 would have blocked it. These
+     five sites therefore render nothing for `None` rather than diagnose; the
+     lookups route through [Expander.dim_values] so the accessor invariant
+     (A1) holds file-wide. *)
   let dim_vals = List.filter_map (fun sd ->
-    match List.assoc_opt sd.sdim ctx.Expander.dim_registry with
-    | Some vs -> Some (sd.sdim, vs)
-    | None    -> None
+    Option.map (fun vs -> (sd.sdim, vs)) (Expander.dim_values ctx sd.sdim)
   ) ctx.Expander.stratifies in
   Pp_expr.make_split_map base_dims dim_vals
 
@@ -173,9 +176,8 @@ let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
      num sum.base_compartment_count;
      (* Show dimension breakdown *)
      let dims = List.filter_map (fun sd ->
-       match List.assoc_opt sd.sdim ctx.Expander.dim_registry with
-       | Some vs -> Some (Printf.sprintf "%d %s" (List.length vs) sd.sdim)
-       | None    -> None
+       Option.map (fun vs -> Printf.sprintf "%d %s" (List.length vs) sd.sdim)
+         (Expander.dim_values ctx sd.sdim)
      ) ctx.Expander.stratifies in
      if dims <> [] then (
        Fmt.pf ppf " base";
@@ -289,8 +291,7 @@ let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
       if i > 0 then Fmt.pf ppf ", ";
       Term_style.dimension Fmt.string ppf sd.sdim;
       Fmt.pf ppf " = [";
-      let vs = match List.assoc_opt sd.sdim ctx.Expander.dim_registry with
-        | Some vs -> vs | None -> [] in
+      let vs = Option.value ~default:[] (Expander.dim_values ctx sd.sdim) in
       List.iteri (fun j v ->
         if j > 0 then Fmt.pf ppf ", ";
         Fmt.pf ppf "%s" v
@@ -585,8 +586,8 @@ let run_compartments ppf (model : Ir.model) ctx =
   Term_style.bold Fmt.string ppf (fmt_number n_exp);
   Fmt.pf ppf " expanded compartments (%d base" n_base;
   List.iter (fun sd ->
-    let n = match List.assoc_opt sd.sdim ctx.Expander.dim_registry with
-      | Some vs -> List.length vs | None -> 0 in
+    let n = List.length
+      (Option.value ~default:[] (Expander.dim_values ctx sd.sdim)) in
     Fmt.pf ppf " \xc3\x97 %d " n;
     Term_style.dimension Fmt.string ppf sd.sdim
   ) ctx.Expander.stratifies;
@@ -888,10 +889,10 @@ let run_transition_count ppf (model : Ir.model) ctx (pattern : string option) ~a
     List.iter (fun ib ->
       let (var, dim, count) = match ib with
         | IBind (v, d) ->
-          let vals = Expander.dim_values ctx d in
+          let vals = Option.value ~default:[] (Expander.dim_values ctx d) in
           (v, d, List.length vals)
         | IConsec (v, _, d) ->
-          let vals = Expander.dim_values ctx d in
+          let vals = Option.value ~default:[] (Expander.dim_values ctx d) in
           (v, d, max 0 (List.length vals - 1))
         | IComp v ->
           let comps = List.filter (fun cd -> cd.ckind = Integer) ctx.Expander.comp_decls in
@@ -1167,9 +1168,7 @@ let run_tables ppf (model : Ir.model) ctx (pattern : string option) =
       | None    -> []
     in
     let dim_levels = List.map (fun d ->
-      match List.assoc_opt d ctx.Expander.dim_registry with
-      | Some vs -> vs | None -> []
-    ) tdim_names in
+      Option.value ~default:[] (Expander.dim_values ctx d)) tdim_names in
     (* ── Header ── *)
     Term_style.bold (Term_style.table Fmt.string) ppf t.name;
     (if tdim_names <> [] then (

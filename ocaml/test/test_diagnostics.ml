@@ -582,10 +582,64 @@ let test_corpus_check_compile_parity () =
       "check ↔ compile error-code divergence on %d fixture(s):\n    %s"
       (List.length divergences) (String.concat "\n    " divergences)
 
+(* ── Piece 6: one lookup site for `dim_registry` (A1) ────────────────────────
+
+   `Expander.dim_values` is the single accessor for a dimension's levels, and
+   it returns `option` so "no such dimension" cannot masquerade as "a dimension
+   with no levels". A hand-inlined `List.assoc_opt <d> ctx.dim_registry` with a
+   `[]` fallback re-creates exactly the collapse the accessor exists to remove,
+   and the type checker cannot see it — ten such sites existed before A1
+   (aggregation-semantics proposal §6). So the invariant is pinned by a source
+   scan instead: every value lookup into `dim_registry` goes through the one
+   accessor.
+
+   `List.mem_assoc … ctx.dim_registry` is deliberately NOT counted: it is a
+   membership test (the E212 redeclaration guard and the E214 stratify check),
+   not a levels lookup, and it has no silent default to hide. *)
+let dim_registry_lookup_lines () : (string * int * string) list =
+  let files =
+    List.filter (fun p ->
+      List.mem (Filename.basename p) ["expander.ml"; "inspect.ml"])
+      (source_files_under (root_path "ocaml/lib/compiler"))
+  in
+  List.concat_map (fun path ->
+    let has needle line = List.exists (fun i ->
+      i + String.length needle <= String.length line
+      && String.sub line i (String.length needle) = needle)
+      (List.init (max 0 (String.length line - String.length needle + 1))
+         (fun i -> i))
+    in
+    String.split_on_char '\n' (read_file path)
+    |> List.mapi (fun i l -> (i + 1, l))
+    |> List.filter_map (fun (n, l) ->
+         if has "dim_registry" l && has "assoc_opt" l
+         then Some (Filename.basename path, n, String.trim l) else None)
+  ) files
+
+let test_dim_registry_single_lookup_site () =
+  let sites = dim_registry_lookup_lines () in
+  (* Non-vacuity: the scan must find the accessor itself, or it is not
+     looking at the right sources. *)
+  Alcotest.(check bool) "the scan reaches expander.ml" true
+    (List.exists (fun (f, _, _) -> f = "expander.ml") sites);
+  match sites with
+  | [(_, _, _)] -> ()
+  | _ ->
+    Alcotest.failf
+      "expected exactly ONE `assoc_opt … dim_registry` lookup (inside \
+       Expander.dim_values); found %d — route the others through the accessor:\n  %s"
+      (List.length sites)
+      (String.concat "\n  "
+         (List.map (fun (f, n, l) -> Printf.sprintf "%s:%d  %s" f n l) sites))
+
 (* ── Driver ──────────────────────────────────────────────────────────────── *)
 
 let () =
   Alcotest.run "diagnostics" [
+    "dim_registry_accessor_a1", [
+      Alcotest.test_case "dim_registry is read through one accessor"
+        `Quick test_dim_registry_single_lookup_site;
+    ];
     "fixtures", fixture_cases ();
     "corpus", [
       Alcotest.test_case "model corpus is diagnostic-clean" `Quick test_corpus_clean;
