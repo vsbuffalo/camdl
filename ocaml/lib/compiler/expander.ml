@@ -3523,14 +3523,45 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
                then_ = resolve_expr ctx env a;
                else_ = resolve_expr ctx env b }
   | ESum (v, d, guard_opt, body, sum_loc) ->
-    (* DEVIATION, stated: an undeclared reduction axis still resolves to an
-       empty domain (hence `Const 0.0`) with no diagnostic. Diagnosing it is
-       Increment A2 of the aggregation-semantics proposal — gh#488 — which owns
-       the error code, its wording, and the A2-replaces-E263 rule at the two
-       stride sites. A1 makes the case REPRESENTABLE here; it does not decide
-       it. This is the one site in the file where `None` is not covered by a
-       named upstream check. *)
-    let vals = dim_levels_or_empty ctx d in
+    (* A2 (gh#488): resolve the axis BEFORE enumerating, so "no such dimension"
+       and "this dimension exists, the guard selected nothing" never share a
+       representation. Both used to answer `[]`, and an empty reduction is
+       legitimately `Const 0.0` — so a typoed axis deleted the whole term, and
+       in a force of infection that silently removes transmission while the
+       model still runs and produces a plausible flat epidemic.
+
+       The silence was expression-shape-dependent, which is worse than uniform
+       silence: `… * sum(b in aeg, I[b]) / 100.0` compiled clean, while
+       dividing by a population made the folded zero trip E300 by accident.
+       Neither named the undeclared dimension, so the accidental catch was not
+       something a modeller could rely on.
+
+       E263 — the code A1 gave the sentence below in INDEX position — because
+       the root cause is the same (an axis name that is not declared) and the
+       span plus the wording carry which position it was written in. A second
+       code for one mistake is what "prefer the error closest to the actual
+       mistake" argues against, and E260–E276 has no free number adjacent to
+       the `sum` family in any case.
+
+       Returning here without resolving [body] is what makes A2 REPLACE the
+       downstream E263 rather than add a second diagnostic: a stride site
+       inside the body (`C[a,b]`) would otherwise raise its own E263 at a
+       different token for the same typo. *)
+    (match dim_values ctx d with
+     | None ->
+       Diagnostics.error ctx.diags
+         ~code:"E263" ~loc:(diag_loc_of_ast_ctx ctx sum_loc)
+         ~message:(Printf.sprintf "'%s' is not a declared dimension" d)
+         ~hint:(Printf.sprintf
+           "declare it in `dimensions { %s = [...] }`, or correct the name — \
+            declared dimensions: %s"
+           d
+           (match List.map fst ctx.dim_registry with
+            | [] -> "(none)"
+            | ds -> String.concat ", " ds))
+         ();
+       Ir.Const 0.0
+     | Some vals ->
     (* Restricted sum: a `where` predicate prunes the domain to the levels that
        satisfy it, evaluated at compile time (the sum var bound to each
        candidate). Survivors-only → O(P·k) by construction (gh#185). *)
@@ -3541,7 +3572,9 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
         (* A3: a predicate that keeps nothing leaves `Const 0.0`, which the
            enclosing arithmetic then folds away with no trace in the IR. Tally
            the instantiation; [flush_empty_reductions] emits one aggregated
-           W202 per source site at the end of expansion. *)
+           W202 per source site at the end of expansion. A declared dimension
+           with no levels reaches here as `Some []` and is NOT tallied — the
+           guard never ran, so it is not guard-induced emptiness. *)
         if vals <> [] then
           note_restricted_reduction ctx ~loc:sum_loc ~var:v ~dim:d
             ~empty:(kept = []) env;
@@ -3568,7 +3601,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       in
       (match normalize_expr add_chain with
        | Ir.PopSum _ as collapsed -> collapsed
-       | _ -> Ir.Reduce terms)
+       | _ -> Ir.Reduce terms))
   | EFuncCall ("date", args) ->
     let date_str = match args with
       | [("", EIdent (s, _))] -> s
@@ -7216,9 +7249,42 @@ let expand_observations ctx =
     let explicit_incidence_sum top =
       let rec go e local_env =
         match e with
-        | ESum (v, d, guard_opt, body, _) ->
-          (* Same as resolve_expr's ESum arm: gh#488 / A2 owns the diagnostic. *)
-          let vals = dim_levels_or_empty ctx d in
+        | ESum (v, d, guard_opt, body, sum_loc) ->
+          (* A2 (gh#488), second site. This walk resolves `sum(...)` itself and
+             never calls [resolve_expr], so the check there does not cover it —
+             and an undeclared axis here is the most damaging form of the bug.
+             It yields `Some []`, which the caller lowers to
+             `DerivedExpr (Const 0.0)`: a projection that is a literal zero,
+             indistinguishable in the IR from a legitimate empty restricted
+             sum, so a fit scores every observation against an expected count
+             of zero.
+
+                 sum(b in age, incidence(infection[b]))
+                   → cumulative_flow_sum ["infection_child"; "infection_adult"]
+                 sum(b in aeg, incidence(infection[b]))
+                   → derived_expr {const 0.0}
+
+             Same code, message, hint and span as the [resolve_expr] arm, so if
+             both ever fire for one typo they collapse under `Diagnostics`'
+             sort_uniq. Resolution continues (returning the empty domain) so a
+             single pass still surfaces any other errors; the diagnostic blocks
+             compilation at exit. *)
+          let vals = match dim_values ctx d with
+            | Some vs -> vs
+            | None ->
+              Diagnostics.error ctx.diags
+                ~code:"E263" ~loc:(diag_loc_of_ast_ctx ctx sum_loc)
+                ~message:(Printf.sprintf "'%s' is not a declared dimension" d)
+                ~hint:(Printf.sprintf
+                  "declare it in `dimensions { %s = [...] }`, or correct the \
+                   name — declared dimensions: %s"
+                  d
+                  (match List.map fst ctx.dim_registry with
+                   | [] -> "(none)"
+                   | ds -> String.concat ", " ds))
+                ();
+              []
+          in
           let vals = match guard_opt with
             | None   -> vals
             | Some g -> List.filter
