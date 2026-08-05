@@ -246,6 +246,17 @@ fn default_dt() -> f64 { 1.0 }
 fn default_output_dir() -> String { crate::run_paths::DEFAULT_OUTPUT_ROOT.to_string() }
 fn default_parallel() -> usize { 1 }
 
+/// Is `exp.config.model` a `.camdl` SOURCE path, rather than a compiled
+/// `.ir.json`? `resolve_ir_path` accepts either, so anything downstream that
+/// needs source specifically has to ask (gh#496 — the render archive shells
+/// out to `camdlc render`, which does not read IR).
+///
+/// Deliberately the same test `resolve_ir_path` applies (`ends_with`, not an
+/// extension parse), so the two cannot disagree about what a model path is.
+fn model_is_camdl_source(model_path: &str) -> bool {
+    model_path.ends_with(".camdl")
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct SeedsSection {
@@ -595,29 +606,46 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         eprintln!("warning: could not write model.ir.json: {}", e);
     });
 
-    // Archive the model's display render beside the IR so a viewer (camdl-watch)
-    // can show the model's math without recompiling. Best-effort — a render
-    // failure (e.g. the model was given as compiled IR, not source) warns and
-    // skips, never aborts the run.
-    match crate::util::render_model_json(std::path::Path::new(&model_path)) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(format!("{}/model.render.json", output_dir), &json) {
-                eprintln!("warning: could not write model.render.json: {}", e);
+    // Archive the model's display render and its structured flow graph beside
+    // the IR so a viewer (camdl-watch) can show the model's math and draw its
+    // compartmental diagram without recompiling. Best-effort — a render failure
+    // warns and skips, never aborts the run.
+    //
+    // gh#496: "the model was given as compiled IR" is NOT one of those
+    // failures. `camdlc render` takes `.camdl` source, `resolve_ir_path`
+    // accepts source or a compiled `.ir.json`, so `exp.config.model` may be
+    // either — and shelling out at an `.ir.json` reported camdlc's words for an
+    // expected, benign condition:
+    //
+    //   warning: could not render model for archive: camdlc render failed:
+    //   camdlc render: parse error in .../sir_basic.ir.json
+    //
+    // which reads as "your IR file is malformed." Decide it here instead, and
+    // say what actually happened. (`fit/mod.rs` uses `config.model.camdl`,
+    // which is source by construction, so it is unaffected.)
+    if model_is_camdl_source(&model_path) {
+        match crate::util::render_model_json(std::path::Path::new(&model_path)) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(format!("{}/model.render.json", output_dir), &json) {
+                    eprintln!("warning: could not write model.render.json: {}", e);
+                }
             }
+            Err(e) => eprintln!("warning: could not render model for archive: {}", e),
         }
-        Err(e) => eprintln!("warning: could not render model for archive: {}", e),
-    }
 
-    // Archive the structured flow graph (`model.graph.json`) beside the display
-    // render so a viewer can draw the compartmental flow diagram. Same
-    // best-effort, identity-neutral treatment as model.render.json above.
-    match crate::util::render_model_graph_json(std::path::Path::new(&model_path)) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(format!("{}/model.graph.json", output_dir), &json) {
-                eprintln!("warning: could not write model.graph.json: {}", e);
+        match crate::util::render_model_graph_json(std::path::Path::new(&model_path)) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(format!("{}/model.graph.json", output_dir), &json) {
+                    eprintln!("warning: could not write model.graph.json: {}", e);
+                }
             }
+            Err(e) => eprintln!("warning: could not render model graph for archive: {}", e),
         }
-        Err(e) => eprintln!("warning: could not render model graph for archive: {}", e),
+    } else {
+        eprintln!(
+            "note: model given as compiled IR; skipping model.render.json / \
+             model.graph.json (pass the .camdl source to archive the display render)"
+        );
     }
 
     // Copy any boundary GeoJSON into the output tree as a sibling artifact
@@ -2023,6 +2051,35 @@ mod tests {
 
     /// gh#241 G3: `deny_unknown_fields` — a typo'd batch.toml key must ERROR,
     /// not silently drop (and so neither apply nor reach the CAS hash).
+    /// gh#496: the render archive shells out to `camdlc render`, which accepts
+    /// `.camdl` SOURCE only — while `resolve_ir_path` accepts source or a
+    /// compiled `.ir.json`, so `exp.config.model` may be either. Running it at
+    /// an `.ir.json` fails, and the failure surfaced in run logs as
+    ///
+    ///   warning: could not render model for archive: camdlc render failed:
+    ///   camdlc render: parse error in .../sir_basic.ir.json
+    ///
+    /// which reads as "your IR file is malformed" for an expected, benign
+    /// condition. Verified against the real binary:
+    ///
+    ///   $ camdlc render ocaml/golden/sir_basic.ir.json
+    ///   camdlc render: parse error in ocaml/golden/sir_basic.ir.json
+    ///   $ echo $?
+    ///   1
+    ///
+    /// The predicate must use the same test `resolve_ir_path` applies, or the
+    /// two disagree about what a "model path" is.
+    #[test]
+    fn ir_model_path_is_not_camdl_source() {
+        assert!(model_is_camdl_source("sir.camdl"));
+        assert!(model_is_camdl_source("models/nested/sir.camdl"));
+
+        assert!(!model_is_camdl_source("ocaml/golden/sir_basic.ir.json"));
+        assert!(!model_is_camdl_source("sir.ir.json"));
+        // A directory named like the extension is not a source file.
+        assert!(!model_is_camdl_source("some.camdl/model.ir.json"));
+    }
+
     #[test]
     fn experiment_toml_rejects_unknown_keys() {
         let ok = "[config]\nmodel = \"m.camdl\"\n";
