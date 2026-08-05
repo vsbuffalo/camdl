@@ -13,6 +13,63 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-05 — a declaration's index binder must name a declared dimension
+
+**What.** `infection[a in aeg]` where `aeg` is not in `dimensions { }` is
+rejected with `E263`. This covers every construct that carries an index binder —
+transitions, `let`s, init entries, observations, interventions, events,
+forcings, reactive interventions, quantities.
+
+This is a **narrowing**, and the reason it matters is the quiet case. An
+undeclared axis used to DROP OUT of the expansion product, so the declaration
+expanded as if it had no index at all. What you saw depended on whether the body
+mentioned the binder.
+
+If it did, you got two errors naming identifiers you never wrote:
+
+```camdl
+dimensions { age = [child, adult] }
+infection[a in aeg] : S[a] --> I[a] @ beta * S[a] * I[a]
+```
+
+```
+error[E100]: undeclared name 'I_a'
+error[E100]: undeclared name 'S_a'
+```
+
+`I_a` is the internal mangled name — `a` was never bound, so `I[a]` mangled the
+binder itself into the compartment name. Neither error named the typo.
+
+If the body did **not** mention the binder, there was no diagnostic at all:
+
+```camdl
+infection[a in aeg] : S --> I @ beta * S      # compiles clean
+```
+
+```
+$ camdlc a6.camdl | jq '.model.transitions[].name'
+"infection"                        # not infection_child, infection_adult
+```
+
+One unstratified transition where the author asked for a family — a stratified
+model quietly running an unstratified one.
+
+_Migration._ Correct the axis name, or declare it. The diagnostic names the
+declared dimensions:
+
+```
+error[E263]: 'aeg' is not a declared dimension
+  = hint: the index binder `… in aeg` needs a dimension; declare it in
+          `dimensions { aeg = [...] }`, or correct the name —
+          declared dimensions: age
+```
+
+**What is unchanged.** A _declared_ dimension that happens to have no levels is
+a different condition and still drops out of the product; the check keys on "not
+declared," never on "no levels."
+
+Increment A6 of `docs/dev/proposals/2026-07-31-aggregation-semantics.md`.
+
 ## 2026-08-05 — a reduction binder may not reuse a declared name
 
 **What.** `sum(x in dim, …)` where `x` is also a declared parameter,
