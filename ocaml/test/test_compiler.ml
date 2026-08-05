@@ -22,6 +22,36 @@ let compile_expect_ok src =
   | Ok m -> m
   | Error e -> Alcotest.failf "compile failed: %s" e
 
+(** The source line of the first diagnostic carrying [code] in a
+    --json-errors payload.
+
+    Reads the line out of THAT diagnostic rather than searching the whole
+    payload for `"line":N`: a located-diagnostic assertion is only meaningful
+    if it cannot be satisfied by some other error that happens to sit on the
+    same line, which is exactly the situation when a fix REPLACES a
+    differently-coded diagnostic at a nearby span. Diagnostic JSON is
+    `…"code":"E2xx","message":…,"loc":{"file":…,"line":N…`, so the first
+    `"line":` after the code belongs to it. *)
+let line_of_code ~code payload =
+  let n = String.length payload in
+  let rec find_from i needle =
+    let ln = String.length needle in
+    if i + ln > n then None
+    else if String.sub payload i ln = needle then Some i
+    else find_from (i + 1) needle
+  in
+  match find_from 0 (Printf.sprintf "\"code\":\"%s\"" code) with
+  | None -> None
+  | Some i ->
+    (match find_from i "\"line\":" with
+     | None -> None
+     | Some j ->
+       let k = j + String.length "\"line\":" in
+       let rec digits e = if e < n && payload.[e] >= '0' && payload.[e] <= '9'
+         then digits (e + 1) else e in
+       let e = digits k in
+       if e = k then None else Some (int_of_string (String.sub payload k (e - k))))
+
 (** Compile with JSON-diagnostics mode so the Error variant carries the
     structured error payload (codes + messages) rather than the generic
     "compilation failed" string. Then assert the given error code and a
@@ -5894,10 +5924,20 @@ let test_incidence_unindexed_cross_strata_is_rejected () =
    stratum; and a partial index produced a dangling `current_pop` that only the
    Rust runtime caught.                                                      ── *)
 
-let test_prevalence_partial_index_is_rejected_at_compile () =
-  (* `I` here is 1-D, so build a 2-D case: a partial index names no cell.
-     Must be caught by camdlc, not left for the runtime. *)
-  let src = {|
+(* gh#494 sharpens this case. gh#478 established that camdlc, not the runtime,
+   must reject it; WHICH diagnostic it gave was not examined, and it was the
+   wrong one. `prevalence(I[child])` on a 2-D `I` reported
+
+     error[E503]: unknown compartment referenced: 'I_child'
+      ┌─ …:10:15          ← `observations {`, not the `I[child]` on line 13
+       = hint: check stratification / spelling against the compartments block
+
+   naming the internal mangled partial name. The user wrote `I[child]` against
+   `compartments { S, I }`; there is no `I_child` to spell-check, and the caret
+   pointed at the enclosing block. The rate path, given the identical mistake,
+   already produced E287 with the real identity and a precise span — the two
+   paths now share one check. *)
+let prevalence_partial_index_src = {|
     time_unit = 'days
     dimensions { age = [child, adult]  patch = [north, south] }
     compartments { S, I }
@@ -5917,8 +5957,42 @@ let test_prevalence_partial_index_is_rejected_at_compile () =
     }
     init { S[a in age, p in patch] = 100 }
     simulate { from = 0 'days to = 10 'days }
-  |} in
-  compile_expect_error_code ~code:"E503" ~contains:"I_child" src
+  |}
+
+let test_prevalence_partial_index_is_rejected_at_compile () =
+  (* `I` here is 1-D in the surrounding fixtures, so this builds a 2-D case: a
+     partial index names no cell. Must be caught by camdlc, not left for the
+     runtime — and must name what the user wrote. *)
+  compile_expect_error_code ~code:"E287"
+    ~contains:"compartment 'I' has dimensions [age, patch]"
+    prevalence_partial_index_src
+
+(* The mangled name must be gone, not merely accompanied by a better error. *)
+let test_gh494_projection_error_does_not_name_a_mangled_compartment () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh494" prevalence_partial_index_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E287 but compile succeeded"
+  | Error e ->
+    Alcotest.(check bool)
+      (Printf.sprintf "no diagnostic names 'I_child', got: %s" e)
+      false (contains_substring ~needle:"I_child" e)
+
+(* And the caret lands on the `I[child]` index (line 14 of the source above),
+   not on the `observations {` header (line 11) that the Validate-phase
+   fallback used — Validate keys a reference error to its enclosing construct,
+   because the name it reports does not exist anywhere with a loc. *)
+let test_gh494_projection_error_is_located_at_the_index () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh494_loc" prevalence_partial_index_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E287 but compile succeeded"
+  | Error e ->
+    Alcotest.(check (option int))
+      (Printf.sprintf "E287 is located at the projection head, got: %s" e)
+      (Some 14) (line_of_code ~code:"E287" e)
 
 let test_prevalence_full_index_still_compiles () =
   (* Positive control: a fully-indexed cell is the supported form. *)
@@ -9854,31 +9928,9 @@ let test_gh495_level_name_is_not_reported_as_undeclared () =
 (* The binder is where the mistake is, so that is where the caret goes. The
    `sum(gamma in age, …)` binder is on line 9 of the source above.
 
-   Asserted on the E283 payload SPECIFICALLY, not on the whole error text: the
-   E100s this replaces are on line 9 as well, so a bare `"line":9` substring
-   check would have passed before the fix. *)
-let line_of_code ~code payload =
-  (* Diagnostic JSON is `…"code":"E2xx","message":…,"loc":{"file":…,"line":N…`,
-     so the first `"line":` after the code is that diagnostic's own. *)
-  let n = String.length payload in
-  let rec find_from i needle =
-    let ln = String.length needle in
-    if i + ln > n then None
-    else if String.sub payload i ln = needle then Some i
-    else find_from (i + 1) needle
-  in
-  match find_from 0 (Printf.sprintf "\"code\":\"%s\"" code) with
-  | None -> None
-  | Some i ->
-    (match find_from i "\"line\":" with
-     | None -> None
-     | Some j ->
-       let k = j + String.length "\"line\":" in
-       let rec digits e = if e < n && payload.[e] >= '0' && payload.[e] <= '9'
-         then digits (e + 1) else e in
-       let e = digits k in
-       if e = k then None else Some (int_of_string (String.sub payload k (e - k))))
-
+   Asserted on the E283 payload SPECIFICALLY (via [line_of_code]), not on the
+   whole error text: the E100s this replaces are on line 9 as well, so a bare
+   `"line":9` substring check would have passed before the fix. *)
 let test_gh495_e283_is_located_at_the_binder () =
   Diagnostics.json_errors_mode := true;
   let result = Compiler.compile ~name:"gh495_loc" sum_binder_shadows_param_src in
@@ -11676,7 +11728,9 @@ let () =
       Alcotest.test_case "prevalence(E[e1]) picks single stratum"        `Quick test_prevalence_fully_indexed_stratified;
       Alcotest.test_case "prevalence(I) unstratified is unchanged"       `Quick test_prevalence_unstratified;
       Alcotest.test_case "E280: bare incidence(infection) on stratified model rejected" `Quick test_incidence_unindexed_cross_strata_is_rejected;
-      Alcotest.test_case "E503: partial prevalence index caught at compile (gh#478)" `Quick test_prevalence_partial_index_is_rejected_at_compile;
+      Alcotest.test_case "E287: partial prevalence index caught at compile (gh#478/#494)" `Quick test_prevalence_partial_index_is_rejected_at_compile;
+      Alcotest.test_case "the projection error names no mangled compartment (gh#494)" `Quick test_gh494_projection_error_does_not_name_a_mangled_compartment;
+      Alcotest.test_case "the projection error is located at the index (gh#494)" `Quick test_gh494_projection_error_is_located_at_the_index;
       Alcotest.test_case "fully-indexed prevalence still compiles (gh#478)" `Quick test_prevalence_full_index_still_compiles;
       Alcotest.test_case "bare prevalence on unstratified still compiles (gh#478)" `Quick test_prevalence_bare_unstratified_still_compiles;
       Alcotest.test_case "indexed-stream prevalence still compiles (gh#478)" `Quick test_prevalence_indexed_stream_still_compiles;
