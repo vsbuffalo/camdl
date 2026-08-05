@@ -51,6 +51,23 @@ let line_of_code ~code payload =
          then digits (e + 1) else e in
        let e = digits k in
        if e = k then None else Some (int_of_string (String.sub payload k (e - k))))
+exception Compile_timed_out
+
+(** Compile under a wall-clock cap, returning [None] if it did not finish.
+
+    gh#492: a self-recursive `let` spun forever with zero bytes on stdout and
+    stderr, so a plain assertion would have wedged the runner instead of
+    failing it. Termination is the claim, so the test has to be able to
+    observe non-termination. SIGALRM interrupts at the next allocation point,
+    which unbounded `resolve_expr` recursion reaches immediately. *)
+let compile_bounded ?(seconds = 10) ~name src =
+  let prev = Sys.signal Sys.sigalrm
+      (Sys.Signal_handle (fun _ -> raise Compile_timed_out)) in
+  let restore () = ignore (Unix.alarm 0); Sys.set_signal Sys.sigalrm prev in
+  match ignore (Unix.alarm seconds); Compiler.compile ~name src with
+  | r                  -> restore (); Some r
+  | exception Compile_timed_out -> restore (); None
+  | exception e        -> restore (); raise e
 
 (** Compile with JSON-diagnostics mode so the Error variant carries the
     structured error payload (codes + messages) rather than the generic
@@ -11252,6 +11269,118 @@ let test_c2_sum_body_before_binder_is_named_error () =
   compile_expect_error_code ~code:"E114" ~contains:"binders first"
     (sum_model ~body:"sum(I[a,p], q in patch)")
 
+(* ── gh#492: a `let` defined in terms of itself ─────────────────────────────
+   `resolve_ident_name` inlines a `let` body by name lookup, and the EIndex arm
+   does the same for the indexed form. Neither carried a visiting set, so
+   `let a = a + 1.0` recursed without bound: `camdlc` spun until killed, with
+   ZERO bytes on stdout AND stderr. Under a CPU cap:
+
+     $ ( ulimit -t 10; camdlc check d4_recursive_let.camdl > out 2> err )
+     exit=152                    # 128 + 24 = SIGXCPU
+     $ wc -c out err
+     0 out
+     0 err
+
+   No diagnostic, no partial output, no indication of what went wrong — a user
+   hits this as "camdlc hung", which is the worst failure shape available for a
+   one-token typo.
+
+   Every case here is compiled under an alarm, because the claim is that the
+   compiler TERMINATES. Asserting only the message would let a regression wedge
+   the test runner rather than fail it. *)
+let expect_bounded_error ~code ~contains ~name src =
+  match compile_bounded ~name src with
+  | None -> Alcotest.failf "compile did not terminate (gh#492 regression): %s" name
+  | Some (Ok _) -> Alcotest.failf "expected %s but compile succeeded" code
+  | Some (Error e) ->
+    if not (contains_substring ~needle:code e) then
+      Alcotest.failf "expected error code %s, got: %s" code e;
+    if not (contains_substring ~needle:contains e) then
+      Alcotest.failf "expected error to contain %S, got: %s" contains e
+
+let recursive_let_model ~lets ~rate = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { beta : rate in [0,2] }
+    %s
+    transitions {
+      infection : S --> I @ beta * S * (%s)
+    }
+    init { S = 99 I = 1 }
+    simulate { from = 0 'days to = 10 'days }
+  |} lets rate
+
+let test_gh492_self_recursive_let_terminates_with_a_diagnostic () =
+  Diagnostics.json_errors_mode := true;
+  let r = expect_bounded_error ~code:"E201" ~contains:"'a' is defined in terms of itself"
+    ~name:"gh492_self" (recursive_let_model ~lets:"let a = a + 1.0" ~rate:"a") in
+  Diagnostics.json_errors_mode := false;
+  r
+
+(* The mutual case is the one that makes the cycle worth naming: reporting only
+   the entry point would leave the reader to find the other half themselves. *)
+let test_gh492_mutual_recursion_names_the_full_cycle () =
+  Diagnostics.json_errors_mode := true;
+  let r = expect_bounded_error ~code:"E201" ~contains:"a -> b -> a"
+    ~name:"gh492_mutual"
+    (recursive_let_model ~lets:"let a = b + 1.0\n    let b = a + 1.0" ~rate:"a") in
+  Diagnostics.json_errors_mode := false;
+  r
+
+(* The INDEXED inline path is a separate site (`resolve_expr`'s EIndex arm, not
+   `resolve_ident_name`), so it needs its own case or half the bug survives. *)
+let test_gh492_indexed_self_recursive_let_terminates () =
+  Diagnostics.json_errors_mode := true;
+  let r = expect_bounded_error ~code:"E201" ~contains:"'N' is defined in terms of itself"
+    ~name:"gh492_indexed" {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { patch = [north, south] }
+    stratify(by = patch)
+    parameters { beta : rate in [0,2] }
+    let N[p in patch] = N[p] + 1.0
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ beta * S[p] * N[p]
+    }
+    init { S[north] = 99  I[north] = 1  S[south] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  Diagnostics.json_errors_mode := false;
+  r
+
+(* Negative control: a legitimate `let` CHAIN is a DAG, not a cycle, and must
+   still inline. Without this a check that rejected any let-to-let reference
+   would satisfy every case above. *)
+let test_gh492_let_chain_still_compiles () =
+  match compile_bounded ~name:"gh492_dag"
+          (recursive_let_model
+             ~lets:"let x = 2.0\n    let y = x + 1.0\n    let z = y + x" ~rate:"z") with
+  | None -> Alcotest.fail "a legitimate let chain did not terminate"
+  | Some (Error e) -> Alcotest.failf "a legitimate let chain should compile: %s" e
+  | Some (Ok _) -> ()
+
+(* A let that references itself only through an INDEX position (`C[a]` where the
+   index names the let) is not a body cycle; pinned so the walk does not
+   over-reach into index items and reject a legal model. *)
+let test_gh492_self_reference_in_index_position_is_not_a_cycle () =
+  match compile_bounded ~name:"gh492_idx_pos" {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate in [0,2] }
+    tables { C : age × age = [[1.0,2.0],[3.0,4.0]] }
+    let N[a in age] = S[a] + I[a]
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * C[a, child] / N[a]
+    }
+    init { S[child]=99 I[child]=1 S[adult]=100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} with
+  | None -> Alcotest.fail "compile did not terminate"
+  | Some (Error e) -> Alcotest.failf "should compile: %s" e
+  | Some (Ok _) -> ()
+
 let () =
   Alcotest.run "compiler" [
     "flat_multi_binder_sum_c2", [
@@ -11338,6 +11467,18 @@ let () =
         `Quick test_where_boundary_excludes_equal;
       Alcotest.test_case "fitted kernel: gradient flows through the where-Reduce to G/rho"
         `Quick test_where_fitted_kernel_gradient;
+    ];
+    "recursive_let_gh492", [
+      Alcotest.test_case "a self-recursive let terminates with E201"
+        `Quick test_gh492_self_recursive_let_terminates_with_a_diagnostic;
+      Alcotest.test_case "mutual recursion names the full cycle"
+        `Quick test_gh492_mutual_recursion_names_the_full_cycle;
+      Alcotest.test_case "the indexed inline path terminates too"
+        `Quick test_gh492_indexed_self_recursive_let_terminates;
+      Alcotest.test_case "a legitimate let chain still compiles"
+        `Quick test_gh492_let_chain_still_compiles;
+      Alcotest.test_case "a self-reference in index position is not a cycle"
+        `Quick test_gh492_self_reference_in_index_position_is_not_a_cycle;
     ];
     "index_shadowing", [
       Alcotest.test_case "E281 sum var shadows transition index"

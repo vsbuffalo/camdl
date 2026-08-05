@@ -12,10 +12,13 @@
  (libraries compiler ir alcotest)
  (deps (source_tree doctest_fixtures)))
 
+; `unix` is for the alarm-bounded compile in the gh#492 cases (a `let` cycle
+; used to spin forever). A test for a hang has to be able to FAIL rather than
+; wedge the runner, so those cases run the compile under SIGALRM.
 (test
  (name test_compiler)
  (modules test_compiler)
- (libraries compiler ir alcotest)
+ (libraries compiler ir alcotest unix)
  (deps (source_tree ../golden)))
 
 ; Generated-quantities frontend (proposal 2026-06-25): DSL `quantities {}` →
