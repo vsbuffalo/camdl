@@ -3482,6 +3482,45 @@ let partial_index_hint ctx env ~base ~items ~dropped : string =
      explicitly with `%s`"
     all_form (if List.length dropped = 1 then "" else "s") sum_form
 
+(** E287: a compartment stratified over 2+ dimensions referenced with SOME but
+    not all of them indexed has no defined cell. Returns [true] when it
+    emitted, so the caller can substitute a placeholder and keep collecting
+    diagnostics this pass.
+
+    Omitting ALL dimensions (the bare name `E`) is a different thing — it sums
+    over them — and never reaches here.
+
+    Shared by the two paths that read a compartment cell (gh#494). The rate
+    path always had this check; the observation-projection head did not, and
+    let the mangled partial name (`I_child`) fall through to the post-expansion
+    unknown-compartment lookup:
+
+      error[E503]: unknown compartment referenced: 'I_child'
+        = hint: check stratification / spelling against the compartments block
+
+    naming an identifier the user never wrote, against `compartments { S, I }`,
+    with the caret on the `observations {` header (Validate keys reference
+    errors to their enclosing construct, since the name it reports does not
+    exist anywhere with a loc). One mistake had a good diagnostic on one path
+    and a misleading one on the other; now there is one check. *)
+let partial_index_error ctx env ~loc ~base ~items : bool =
+  let comp_dim_list = comp_dims ctx base in
+  let n_dims  = List.length comp_dim_list in
+  let n_items = List.length items in
+  if Hashtbl.mem ctx.comp_tbl base && n_items > 0 && n_items < n_dims then begin
+    (* the dropped dimensions are the suffix beyond what the user indexed *)
+    let dropped = List.filteri (fun i _ -> i >= n_items) comp_dim_list in
+    Diagnostics.error ctx.diags
+      ~code:"E287" ~loc
+      ~message:(Printf.sprintf
+        "compartment '%s' has dimensions [%s] but only %d of %d were indexed; \
+         a partial index has no defined cell"
+        base (String.concat ", " comp_dim_list) n_items n_dims)
+      ~hint:(partial_index_hint ctx env ~base ~items ~dropped)
+      ();
+    true
+  end else false
+
 let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
   match e with
   | EConst f     -> Ir.Const f
@@ -3638,33 +3677,13 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
          let concrete = String.concat "_" (base_name :: idx_vals) in
          resolve_ident_name ctx concrete ~loc:Diagnostics.no_loc)
     else
-    (* 4. Compartment with indices → concatenate to concrete name.
-       Partial index guard (E287): a compartment stratified over 2+ dimensions
-       referenced with *some but not all* dimensions dropped (e.g. `E[a]` when
-       `E` has `[age, latent_stage]`) has no well-defined cell. Omitting *all*
-       dimensions (the bare name `E`) sums over them — that path is handled in
-       `resolve_ident_name` and never reaches here. But a partial index used to
-       fall through to name-mangling (`E_adult`), then E100'd against a synthetic
-       compartment the user never wrote — no source loc, a name they can't act
-       on. Reject it here with a located diagnostic that names the real
-       compartment, its dimensions, and the explicit-marginalization fix. *)
-    let comp_dim_list = comp_dims ctx base_name in
-    let n_dims  = List.length comp_dim_list in
-    let n_items = List.length items in
-    if Hashtbl.mem ctx.comp_tbl base_name && n_items > 0 && n_items < n_dims then begin
-      let dims_str = String.concat ", " comp_dim_list in
-      (* the dropped dimensions are the suffix beyond what the user indexed *)
-      let dropped = List.filteri (fun i _ -> i >= n_items) comp_dim_list in
-      Diagnostics.error ctx.diags
-        ~code:"E287" ~loc:idx_loc
-        ~message:(Printf.sprintf
-          "compartment '%s' has dimensions [%s] but only %d of %d were indexed; \
-           a partial index has no defined cell"
-          base_name dims_str n_items n_dims)
-        ~hint:(partial_index_hint ctx env ~base:base_name ~items ~dropped)
-        ();
+    (* 4. Compartment with indices → concatenate to concrete name, unless the
+       index is partial: `E[a]` when `E` has `[age, latent_stage]` names no
+       cell. Without the guard it fell through to name-mangling (`E_adult`)
+       and was then E100'd against a synthetic compartment the user never
+       wrote. [partial_index_error] is shared with the projection head. *)
+    if partial_index_error ctx env ~loc:idx_loc ~base:base_name ~items then
       Ir.Const 0.0  (* placeholder — keep collecting diagnostics this pass *)
-    end
     else
     let idx_vals = List.map (index_item_to_str env) items in
     let concrete = String.concat "_" (base_name :: idx_vals) in
@@ -7327,7 +7346,18 @@ let expand_observations ctx =
        same bare name in a rate expression expands to PopSum (see
        `resolve_ident_name`, §5.1 of the language spec). Emit CurrentPopSum
        when the base name is a declared compartment with >1 expansions. *)
-    let prevalence_projection base idx_vals =
+    let prevalence_projection ?(items = []) ?(loc = od_loc) base idx_vals =
+      (* gh#494: a PARTIAL index names no cell, and until this check the
+         mangled name (`I_child`) fell through to the post-expansion
+         unknown-compartment lookup, surfacing as `E503: unknown compartment
+         referenced: 'I_child'` — an identifier the user never wrote, with the
+         caret on the `observations {` header. The rate path already rejected
+         the identical mistake with E287 at the index; both now share one
+         check. `items` is empty on the bare-name arms, where a partial index
+         is not representable. *)
+      if partial_index_error ctx env ~loc ~base ~items then
+        Ir.DerivedExpr (Ir.Const 0.0)
+      else
       let concrete = if idx_vals = [] then base
         else String.concat "_" (base :: idx_vals) in
       if Hashtbl.mem ctx.expanded_comp_tbl concrete then
@@ -7503,7 +7533,9 @@ let expand_observations ctx =
         Ir.CumulativeFlow concrete
       | ProjPrevalence (name, idxs) ->
         let idx_vals = List.map (index_item_to_str env) idxs in
-        prevalence_projection name idx_vals
+        (* `ProjPrevalence` carries no loc of its own, so a partial index here
+           falls back to the observation declaration's. *)
+        prevalence_projection ~items:idxs name idx_vals
       | ProjDerived (EFuncCall ("incidence", args)) ->
         (match List.assoc_opt "" args with
          | Some (EIdent (n, _))    -> incidence_projection n
@@ -7513,8 +7545,9 @@ let expand_observations ctx =
       | ProjDerived (EFuncCall ("prevalence", args)) ->
         (match List.filter_map (fun (k, e) -> if k = "" then Some e else None) args with
          | [ EIdent (n, _) ]         -> prevalence_projection n []
-         | [ EIndex (n, idxs, _) ]   ->
-           prevalence_projection n (List.map (index_item_to_str env) idxs)
+         | [ EIndex (n, idxs, l) ]   ->
+           prevalence_projection ~items:idxs ~loc:(diag_loc_of_ast_ctx ctx l)
+             n (List.map (index_item_to_str env) idxs)
          | [] ->
            Diagnostics.error ctx.diags ~code:"E250" ~loc:od_loc
              ~message:(Printf.sprintf
@@ -7563,7 +7596,7 @@ let expand_observations ctx =
           prevalence_projection name []
         else
           Ir.CumulativeFlow name
-      | ProjDerived (EIndex (name, idxs, _) as e) ->
+      | ProjDerived (EIndex (name, idxs, idx_l) as e) ->
         let idx_vals = List.map (index_item_to_str env) idxs in
         let concrete = String.concat "_" (name :: idx_vals) in
         (* An indexed let-family reference (e.g. `projected = m[v]` with
@@ -7579,7 +7612,8 @@ let expand_observations ctx =
         else if Hashtbl.mem ctx.expanded_comp_tbl concrete then
           Ir.CurrentPop concrete
         else if Hashtbl.mem ctx.comp_tbl name then
-          prevalence_projection name idx_vals
+          prevalence_projection ~items:idxs
+            ~loc:(diag_loc_of_ast_ctx ctx idx_l) name idx_vals
         else
           Ir.CumulativeFlow concrete
       | ProjDerived e ->
