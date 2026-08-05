@@ -69,6 +69,14 @@ type context = {
   (* ISO date string for date() → float conversion *)
   (* O(1) lookup tables — populated by build_lookup_tables after resolve_dimensions *)
   mutable let_tbl         : (string, let_binding) Hashtbl.t;
+  mutable cyclic_lets     : (string, unit) Hashtbl.t;
+  (* gh#492: `let` names that lie on a definition cycle, found by
+     [check_let_cycles] before any expression is resolved. Both inlining sites
+     (`resolve_ident_name` for a bare reference, `resolve_expr`'s EIndex arm
+     for an indexed one) substitute a placeholder for these instead of
+     inlining the body, which is what stops the unbounded recursion. The
+     diagnostic is already emitted by then, so the placeholder is never
+     silent. *)
   mutable comp_tbl        : (string, compartment_decl) Hashtbl.t;
   mutable scalar_param_tbl: (string, unit) Hashtbl.t;
   mutable expanded_param_tbl : (string, unit) Hashtbl.t;
@@ -159,6 +167,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   reported_undeclared_dims = Hashtbl.create 8;
   origin               = None;
   let_tbl              = Hashtbl.create 16;
+  cyclic_lets          = Hashtbl.create 4;
   comp_tbl             = Hashtbl.create 16;
   scalar_param_tbl     = Hashtbl.create 16;
   expanded_param_tbl   = Hashtbl.create 16;
@@ -3602,7 +3611,12 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       ) (0, 0) per_dim |> fst in
       Ir.TableLookup (base_name, [Ir.Const (float_of_int linear)])
     else
-    (* 2. Indexed let binding? → inline body with index vars substituted *)
+    (* 2. Indexed let binding? → inline body with index vars substituted.
+       A `let` on a definition cycle is NOT inlined: descending would recurse
+       without bound (gh#492). [check_let_cycles] has already emitted E201
+       naming the cycle, so the placeholder is never silent. *)
+    if Hashtbl.mem ctx.cyclic_lets base_name then Ir.Const 0.0
+    else
     match Hashtbl.find_opt ctx.let_tbl base_name with
     | Some lb when lb.lindices <> [] ->
       if not (check_index_arity ctx ~loc:idx_loc ~kind:"let binding" ~name:base_name
@@ -4219,7 +4233,10 @@ and resolve_ident_name ctx name ~loc =
     Ir.Param name
   else if is_expanded_indexed_param_name ctx name then
     Ir.Param name
-  (* 3. Let binding? Inline it — unless it's a typed const (emitted as Param). *)
+  (* 3. Let binding? Inline it — unless it's a typed const (emitted as Param),
+     or it lies on a definition cycle, where inlining would recurse without
+     bound (gh#492; E201 already emitted by [check_let_cycles]). *)
+  else if Hashtbl.mem ctx.cyclic_lets name then Ir.Const 0.0
   else match Hashtbl.find_opt ctx.let_tbl name with
   | Some lb ->
     if lb.lkind <> None && is_const_expr lb.lbody then
@@ -8458,6 +8475,94 @@ let rec collect_param_refs known_params acc = function
   | EObsAccess _ -> acc
   | ERunMember _ -> acc
 
+(** E201 (gh#492): a `let` defined in terms of itself, directly or through
+    another binding.
+
+    A `let` is INLINED at its use site — `resolve_ident_name` for a bare
+    reference, `resolve_expr`'s EIndex arm for an indexed one — by looking the
+    name up and resolving the body. Neither carried a visiting set, so
+    `let a = a + 1.0` recursed without bound: `camdlc` spun until killed with
+    ZERO bytes on stdout and stderr. No diagnostic, no partial output; a user
+    hits it as "camdlc hung".
+
+    Detected up front rather than by threading a visiting set through
+    resolution, for two reasons. The full cycle is only nameable from the
+    graph — a visiting set knows it re-entered `a` but not that it went
+    `a → b → a`, and for the mutual case the other half is exactly what the
+    reader needs. And a pre-pass makes the guard total: every `let` is on the
+    graph, so no resolution path can reach an un-checked cycle and recurse.
+
+    Nodes ON a cycle are recorded in [ctx.cyclic_lets]; the two inlining sites
+    substitute a placeholder for those instead of descending. A `let` that
+    merely REFERENCES a cyclic one is not itself cyclic — it inlines the
+    placeholder and terminates.
+
+    Only the body's own name references are edges. Index items (`C[a, child]`)
+    are index tokens resolved by [index_item_to_str], never inlined, so a name
+    appearing there is not a definition-cycle edge.
+
+    Roots are walked in DECLARATION order, not `Hashtbl.iter` order, so the
+    reported cycle starts at the binding the user wrote first and the message
+    is deterministic. *)
+let check_let_cycles ctx =
+  let is_let n = Hashtbl.mem ctx.let_tbl n in
+  let rec refs acc (e : expr) = match e with
+    | EConst _ | EUnit _   -> acc
+    | EIdent (n, _)        -> if is_let n then n :: acc else acc
+    | EIndex (n, _, _)     -> if is_let n then n :: acc else acc
+    | EBinOp (_, l, r)     -> refs (refs acc l) r
+    | EUnOp (_, e)         -> refs acc e
+    | ESum (_, _, _, b, _) -> refs acc b
+    | ECond (p, t, f)      -> refs (refs (refs acc p) t) f
+    | EFuncCall (_, args)  -> List.fold_left (fun a (_, e) -> refs a e) acc args
+    | EList es             -> List.fold_left refs acc es
+    | ERange (lo, hi)      -> refs (refs acc lo) hi
+    | EObsAccess _ | ERunMember _ -> acc
+  in
+  let adj = Hashtbl.create 16 in
+  List.iter (fun (lb : let_binding) ->
+    Hashtbl.replace adj lb.lname (List.sort_uniq compare (refs [] lb.lbody))
+  ) ctx.let_bindings;
+  let visited  = Hashtbl.create 16 in
+  let on_stack = Hashtbl.create 16 in
+  let rec dfs node path =
+    if Hashtbl.mem on_stack node then begin
+      (* [path] is innermost-first; the cycle is its prefix back to [node],
+         reversed into source order, closed by [node] again. *)
+      let rec prefix acc = function
+        | []                   -> List.rev acc
+        | n :: _ when n = node -> List.rev (n :: acc)
+        | n :: rest            -> prefix (n :: acc) rest
+      in
+      let cycle = List.rev (prefix [] path) in
+      List.iter (fun n -> Hashtbl.replace ctx.cyclic_lets n ()) cycle;
+      let rendered = String.concat " -> " (cycle @ [node]) in
+      let message =
+        if List.length cycle <= 1 then
+          Printf.sprintf "let binding '%s' is defined in terms of itself" node
+        else
+          Printf.sprintf
+            "let bindings form a definition cycle: %s" rendered
+      in
+      Diagnostics.error ctx.diags
+        ~code:"E201" ~loc:Diagnostics.no_loc
+        ~message
+        ~detail:(Printf.sprintf "cycle: %s" rendered)
+        ~hint:"a `let` is inlined at its use site, so it may not reference \
+               itself — directly or through another binding. Break the cycle, \
+               or make the recurrence explicit as a compartment with an ODE."
+        ()
+    end
+    else if not (Hashtbl.mem visited node) then begin
+      Hashtbl.add on_stack node ();
+      List.iter (fun n -> dfs n (node :: path))
+        (Option.value ~default:[] (Hashtbl.find_opt adj node));
+      Hashtbl.remove on_stack node;
+      Hashtbl.add visited node ()
+    end
+  in
+  List.iter (fun (lb : let_binding) -> dfs lb.lname []) ctx.let_bindings
+
 (** Check hierarchical prior reference graph for self-references and
     cycles. Wave 2 / malaria #3 Gate 2 — risks C1, C2. Legitimate deep
     chains (risk C3) pass cleanly. *)
@@ -9962,6 +10067,11 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
   check_declaration_names ctx;
   (* Build O(1) lookup tables for resolve_expr *)
   build_lookup_tables ctx;
+  (* gh#492: E201 for a `let` defined in terms of itself. Must run before ANY
+     expression is resolved — a cyclic `let` inlined at a use site recurses
+     without bound, and the compiler hangs with no output at all. Needs
+     `let_tbl`, so it sits directly after [build_lookup_tables]. *)
+  check_let_cycles ctx;
   (* W103 shadowing check: let bindings vs stratum values *)
   check_shadowing ctx;
   (* E283: a sum/binder var must not shadow an enclosing index/bound var *)
