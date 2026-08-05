@@ -7,42 +7,45 @@ description: Draft user-facing release notes for a camdl version from the Conven
 
 Produce **user-facing** release notes for a version — not a commit dump. The
 commit history is the input; the output reads like something a user tracking the
-project wants to read. Follow `VERSIONING.md` for what the version covers and the
-SemVer policy.
+project wants to read. Follow `VERSIONING.md` for what the version covers and
+the SemVer policy.
 
 ## Inputs
 
-- A target version (e.g. `0.4.0`) and/or a commit range. If not given, default the
-  range to `git describe --tags --abbrev=0`..`HEAD` (last tag → HEAD); if there is
-  no tag yet, use the full history on the branch.
+- A target version (e.g. `0.4.0`) and/or a commit range. If not given, default
+  the range to `git describe --tags --abbrev=0`..`HEAD` (last tag → HEAD); if
+  there is no tag yet, use the full history on the branch.
 - `$ARGUMENTS` may carry the version and/or an explicit range (`v0.3.0..HEAD`).
 
 ## Procedure
 
-1. **Resolve the range.** `git log --oneline <range>` to see the commits. Confirm
-   the range with the user if ambiguous.
+1. **Resolve the range.** `git log --oneline <range>` to see the commits.
+   Confirm the range with the user if ambiguous.
 
-2. **Deterministic spine.** If `git-cliff` is installed (`command -v git-cliff`),
-   run `git-cliff <range>` to get the grouped Conventional-Commit changelog — this
-   is the completeness guarantee (nothing dropped). If it is not installed, derive
-   the same grouping yourself from `git log <range>` by parsing the
-   `type(scope): subject` prefixes. Do **not** skip a commit just because it is
-   `chore`/`ci`/`refactor`; decide per item whether it is user-visible.
+2. **Deterministic spine.** If `git-cliff` is installed
+   (`command -v git-cliff`), run `git-cliff <range>` to get the grouped
+   Conventional-Commit changelog — this is the completeness guarantee (nothing
+   dropped). If it is not installed, derive the same grouping yourself from
+   `git log <range>` by parsing the `type(scope): subject` prefixes. Do **not**
+   skip a commit just because it is `chore`/`ci`/`refactor`; decide per item
+   whether it is user-visible.
 
 3. **Compute the SemVer bump** from the commit types over the range (per
-   `VERSIONING.md`): any `!`/`BREAKING CHANGE:` → MINOR while 0.x (MAJOR at ≥1.0);
-   any `feat` → MINOR; otherwise PATCH. State the recommended bump and why.
+   `VERSIONING.md`): any `!`/`BREAKING CHANGE:` → MINOR while 0.x (MAJOR at
+   ≥1.0); any `feat` → MINOR; otherwise PATCH. State the recommended bump and
+   why.
 
 4. **Read for context, not just titles.** Scan `docs/dev/notes/`,
-   `docs/dev/incidents/`, and `docs/dev/proposals/` whose dates fall in the range —
-   they carry the *why it matters* that commit subjects omit (e.g. a dimcheck fix's
-   user impact, a found-bug's blast radius). Also check whether `ir/VERSION` changed
-   in the range — an IR-schema bump is a compatibility event users must know about.
+   `docs/dev/incidents/`, and `docs/dev/proposals/` whose dates fall in the
+   range — they carry the _why it matters_ that commit subjects omit (e.g. a
+   dimcheck fix's user impact, a found-bug's blast radius). Also check whether
+   `ir/VERSION` changed in the range — an IR-schema bump is a compatibility
+   event users must know about.
 
-5. **Translate commit-speak → user-speak.** "fix(dimcheck): projected carries its
-   projection's dimension" → "Fixed: prevalence-as-proportion observation models
-   now type-check (previously rejected with a spurious dimension error)." Lead with
-   the effect on the user, not the implementation.
+5. **Translate commit-speak → user-speak.** "fix(dimcheck): projected carries
+   its projection's dimension" → "Fixed: prevalence-as-proportion observation
+   models now type-check (previously rejected with a spurious dimension error)."
+   Lead with the effect on the user, not the implementation.
 
 ## Output shape
 
@@ -66,9 +69,10 @@ Write to `RELEASE_NOTES-<version>.md` (or stdout if asked), in this order:
 ```
 
 Rules:
+
 - Group by **user-relevant area**, not by commit type.
-- Every breaking change gets a concrete migration line ("rename `--focal X --grid …`
-  to `--sweep "X=lin(…)"`").
+- Every breaking change gets a concrete migration line ("rename
+  `--focal X --grid …` to `--sweep "X=lin(…)"`").
 - Cite the surface, not the SHA, in the body; a trailing "Full changelog:
   `<range>`" line is enough provenance.
 - Keep "Internal/docs/CI" short — one bullet per cluster, not per commit.
@@ -77,5 +81,5 @@ Rules:
 ## After drafting
 
 Show the draft and the recommended version bump. The maintainer is the editor —
-do not tag or publish. If asked to finalize, the tag + `CHANGELOG.md` update follow
-the flow in `VERSIONING.md`.
+do not tag or publish. If asked to finalize, the tag + `CHANGELOG.md` update
+follow the flow in `VERSIONING.md`.
