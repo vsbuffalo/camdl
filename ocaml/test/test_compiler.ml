@@ -10832,6 +10832,155 @@ let test_gh491_undeclared_time_dim_is_rejected_at_compile_time () =
    and inline dimension levels are identifiers — the numeric case only reaches
    the registry through `read(..., column = ...)`. *)
 
+(* ── gh#493: E287's hint must suggest something that compiles ────────────────
+   The E287 MESSAGE (a partial index has no defined cell) is correct and well
+   located. The hint was wrong three ways, on a 3-axis compartment indexed once:
+
+     = hint: index all dimensions (e.g. `I[age, patch, risk]`), or marginalize
+             a dimension explicitly with `sum(s in age, I[age, s])`
+
+   1. `I[age, patch, risk]` puts DIMENSION NAMES where levels or bound index
+      variables belong. Written literally it gives
+      `E263: 'age' is not a level of dimension 'age'`.
+   2. `sum(s in age, …)` marginalizes `age` — the one axis the user DID index.
+      The dropped axes are `patch` and `risk`.
+   3. `I[age, s]` gives 2 indices for a 3-axis compartment, so even after
+      fixing (1) the suggested body re-triggers E287.
+
+   A hint whose suggestions do not compile is worse than no hint, so the test
+   does not assert on wording: it EXTRACTS both backticked forms from the
+   emitted hint, splices each into the rate, and requires the result to
+   compile. That is the property; the wording is free to change. *)
+let e287_model ~body = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult]  patch = [north, south]  risk = [lo, hi] }
+    stratify(by = age)
+    stratify(by = patch)
+    stratify(by = risk)
+    parameters { beta : rate in [0,2] }
+    transitions {
+      infection[a in age, p in patch, r in risk] : S[a,p,r] --> I[a,p,r] @ beta * S[a,p,r] * (%s)
+    }
+    init { S[child,north,lo]=99 I[child,north,lo]=1 }
+    simulate { from = 0 'days to = 10 'days }
+  |} body
+
+(* Pull the `hint` of the first diagnostic carrying [code] out of the
+   --json-errors payload. *)
+let hint_of_code ~code payload =
+  match Yojson.Safe.from_string payload with
+  | `List ds ->
+    List.find_map (fun d ->
+      match d with
+      | `Assoc fields ->
+        (match List.assoc_opt "code" fields, List.assoc_opt "hint" fields with
+         | Some (`String c), Some (`String h) when c = code -> Some h
+         | _ -> None)
+      | _ -> None) ds
+  | _ -> None
+
+(* Every `…`-delimited span in [s], in order. *)
+let backticked s =
+  let n = String.length s in
+  let rec go i acc =
+    if i >= n then List.rev acc
+    else if s.[i] <> '`' then go (i + 1) acc
+    else
+      match String.index_from_opt s (i + 1) '`' with
+      | None   -> List.rev acc
+      | Some j -> go (j + 1) (String.sub s (i + 1) (j - i - 1) :: acc)
+  in go 0 []
+
+let e287_hint_forms () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh493" (e287_model ~body:"I[a]") in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E287 but compile succeeded"
+  | Error e ->
+    (match hint_of_code ~code:"E287" e with
+     | None   -> Alcotest.failf "no E287 hint in payload: %s" e
+     | Some h -> (h, backticked h))
+
+let test_gh493_e287_hint_suggestions_compile () =
+  let (h, forms) = e287_hint_forms () in
+  if List.length forms < 2 then
+    Alcotest.failf "expected two suggested forms in the hint, got %d: %s"
+      (List.length forms) h;
+  List.iteri (fun i form ->
+    match Compiler.compile ~name:"gh493_form" (e287_model ~body:form) with
+    | Ok _    -> ()
+    | Error err ->
+      Alcotest.failf "suggested form %d (`%s`) does not compile: %s" i form err)
+    (List.filteri (fun i _ -> i < 2) forms)
+
+(* Defect 2 specifically: the marginalize suggestion must bind a DROPPED axis.
+   Binding `age` is not merely unhelpful — it re-drops the axis the user got
+   right, so the suggestion is wrong even where it compiles. *)
+let test_gh493_marginalize_names_a_dropped_axis () =
+  let (h, forms) = e287_hint_forms () in
+  let sum_form = List.find_opt (fun f -> contains_substring ~needle:"sum(" f) forms in
+  match sum_form with
+  | None -> Alcotest.failf "no `sum(...)` suggestion in the hint: %s" h
+  | Some f ->
+    Alcotest.(check bool)
+      (Printf.sprintf "marginalizes a dropped axis, not `age`: %s" f)
+      true (contains_substring ~needle:"in patch" f
+            || contains_substring ~needle:"in risk" f);
+    Alcotest.(check bool)
+      (Printf.sprintf "does not marginalize the indexed axis `age`: %s" f)
+      false (contains_substring ~needle:"in age" f)
+
+(* Defect 1: a dimension NAME must not appear where a level or a bound index
+   variable belongs. `I[age, patch, risk]` is the exact string the old hint
+   emitted. *)
+let test_gh493_hint_does_not_put_dim_names_in_level_slots () =
+  let (h, _) = e287_hint_forms () in
+  Alcotest.(check bool)
+    (Printf.sprintf "hint does not suggest `I[age, patch, risk]`: %s" h)
+    false (contains_substring ~needle:"I[age, patch, risk]" h)
+
+(* The enclosing transition already binds `p in patch` and `r in risk`, so the
+   index-all form the user actually wants is `I[a, p, r]` — the hint fills the
+   missing axes from the binders in scope rather than from `<placeholder>`s. *)
+let test_gh493_hint_reuses_enclosing_binders () =
+  let (h, _) = e287_hint_forms () in
+  Alcotest.(check bool)
+    (Printf.sprintf "hint offers `I[a, p, r]`: %s" h)
+    true (contains_substring ~needle:"I[a, p, r]" h)
+
+(* With no binder in scope for the dropped axes there is nothing to reuse, so
+   the hint must fall back to a named placeholder rather than to a wrong
+   guess. `let` at top level has no enclosing index. *)
+let test_gh493_hint_falls_back_to_placeholders () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult]  patch = [north, south] }
+    stratify(by = age)
+    stratify(by = patch)
+    parameters { beta : rate in [0,2] }
+    let partial = I[child]
+    transitions {
+      infection[a in age, p in patch] : S[a,p] --> I[a,p] @ beta * S[a,p] * partial
+    }
+    init { S[child,north]=99 I[child,north]=1 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh493_ph" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E287 but compile succeeded"
+  | Error e ->
+    (match hint_of_code ~code:"E287" e with
+     | None -> Alcotest.failf "no E287 hint in payload: %s" e
+     | Some h ->
+       Alcotest.(check bool)
+         (Printf.sprintf "hint names the missing axis as a placeholder: %s" h)
+         true (contains_substring ~needle:"<patch>" h))
+
 (* ── C2: flat multi-binder `sum` is sugar for the nested form ────────────────
    `sum(a in age, p in patch, e)` must produce exactly what
    `sum(a in age, sum(p in patch, e))` produces — same IR, byte for byte. The
@@ -10968,6 +11117,18 @@ let () =
         `Quick test_gh490_declared_table_dims_still_compile;
       Alcotest.test_case "gh#491 undeclared time_dim errors at compile time"
         `Quick test_gh491_undeclared_time_dim_is_rejected_at_compile_time;
+    ];
+    "partial_index_hint_gh493", [
+      Alcotest.test_case "both suggested forms compile"
+        `Quick test_gh493_e287_hint_suggestions_compile;
+      Alcotest.test_case "marginalize names a DROPPED axis, not the indexed one"
+        `Quick test_gh493_marginalize_names_a_dropped_axis;
+      Alcotest.test_case "no dimension names in level slots"
+        `Quick test_gh493_hint_does_not_put_dim_names_in_level_slots;
+      Alcotest.test_case "missing axes reuse the binders in scope"
+        `Quick test_gh493_hint_reuses_enclosing_binders;
+      Alcotest.test_case "no binder in scope falls back to a placeholder"
+        `Quick test_gh493_hint_falls_back_to_placeholders;
     ];
     "empty_restricted_reduction_a3", [
       Alcotest.test_case "W202 aggregates one warning per source site"
