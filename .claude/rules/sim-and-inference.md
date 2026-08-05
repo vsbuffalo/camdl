@@ -1,7 +1,8 @@
 ---
 paths:
-  - "rust/crates/sim/src/inference/**"
-description: Inference stack — required reading, the dense backend × method matrix, capability dispatch, RNG coupling
+  - "rust/crates/sim/**"
+  - "rust/crates/cli/src/fit/**"
+description: Simulation backends, capabilities, and inference — required reading, the dense backend × method matrix, capability dispatch, RNG coupling
 ---
 
 # Inference
@@ -57,7 +58,9 @@ another test covered it — it did not.
   `CompiledModel::required_capabilities()` vs each backend's
   `Simulate::capabilities()`), which hard-errors at dispatch with a message
   naming the limitation — and the error tells the user. Never drop the
-  combination from a test or skip it silently.
+  combination from a test or skip it silently. The capability system exists — if
+  you think it does not, look harder or ask, rather than inventing a silent
+  exclusion.
 - **Tests follow the matrix.** A property that must hold across cells is tested
   for each cell it applies to. A "covered by test X" claim must name X, and X
   must actually exercise that property for that cell — verify it, don't assert

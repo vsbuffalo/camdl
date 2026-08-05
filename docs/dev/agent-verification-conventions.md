@@ -104,38 +104,10 @@ The general habit this is an instance of: when a word is doing several jobs in
 one document, name each job. This applies to prose, commit messages, proposals,
 and code comments alike.
 
-## A shipped proposal has no open questions
+## Proposals
 
-A proposal in `docs/dev/proposals/` is the spec an implementer follows — by the
-time it ships (is committed as the decision record and implemented against),
-every design question it raises must be **resolved**: make the call and record
-it inline.
-
-An `## Open questions` section with undecided items is the tell that the
-proposal is still a draft, not a spec — it punts the design onto the
-implementer, who then either guesses (a silent-wrong risk) or stalls. So decide
-each open question before shipping, or convert any that genuinely can't be
-settled yet into a named follow-up (a `gh#NN` issue or a separate RFC) with the
-reason — never leave a bare list of undecided questions in a proposal you are
-treating as done.
-
-Drafting with open questions is fine; _shipping_ with them is not.
-
-## Required reading before structural proposals
-
-Before drafting a `docs/dev/proposals/` document or making non-trivial changes
-to load-bearing surfaces, read the normative docs for that area first. Working
-from a mental model of the language rather than from the spec has, in practice,
-produced proposals that reinvent existing surface badly — once is bad luck,
-twice is a pattern, and the pattern is fixed by reading first, not by trying
-harder to remember.
-
-The per-area reading lists now live in the path-scoped rules under
-`.claude/rules/`, which load automatically when you open a matching file:
-`dsl-surface.md`, `ir-schema.md`, `inference.md`, `run-identity.md`,
-`calendar-time.md`.
-
-When a proposal is the _first_ thing you'd read about a topic, that proposal
-needs to either be self-contained (cites all the existing surface relevant to
-its claims) or explicitly state what background the reader is assumed to bring.
-The "read the spec first" rule is for the author, not just the reviewer.
+The rules for writing one — read the area's normative docs first, be
+self-contained, ship with no open questions — are in
+`.claude/rules/proposals.md`, which loads automatically when you open anything
+under `docs/dev/proposals/`. That is the moment they apply, so they are not
+repeated here.

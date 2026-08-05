@@ -34,6 +34,9 @@ No recursion, no lexical binding — propensities evaluate in bounded time.
 - `BindingRef` references a hoisted model-level binding (a shared subexpression
   resolved by slot).
 
+The same properties that make dimension-checking tractable make source-to-source
+autodiff a compact pattern match in `ocaml/lib/ir/autodiff.ml`.
+
 ## Changing the IR schema
 
 Both language implementations must change atomically.
@@ -43,7 +46,8 @@ Both language implementations must change atomically.
 3. Update Rust types in `rust/crates/ir/src/`
 4. `make test-fast` — fix type errors (then full `make test` before the commit)
 5. `make update-golden` — regenerate all golden files, then re-capture any gate
-   baseline the changed fixtures feed with `CAMDL_CAPTURE_BASELINE=1`
+   baseline the changed fixtures feed with `CAMDL_CAPTURE_BASELINE=1`. There is
+   no `make update-expected` target — do not invoke one.
 6. Commit schema + both language changes + updated golden files in one atomic
    commit
 

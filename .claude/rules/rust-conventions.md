@@ -1,10 +1,35 @@
 ---
 paths:
   - "rust/**/*.rs"
-description: Rust code conventions — dead code, existing seams, wiring primitives, named tolerances, parse-at-the-boundary
+description: Rust code conventions — crate layout, dead code, existing seams, wiring primitives, named tolerances, parse-at-the-boundary
 ---
 
+<!-- This glob matches nearly all Rust work, so treat this file as close to
+     always-on for a Rust session. Keep it tight; anything narrower belongs in
+     sim-and-inference.md, ir-schema.md, or run-identity.md. -->
+
 # Rust conventions
+
+## Crate layout
+
+Intra-workspace dependencies, read from the `Cargo.toml` files:
+
+```
+cli  → io, ir, runid, sim
+io   → ir, sim
+sim  → ir, numerics
+runid → ir
+ir, numerics  → (leaves)
+```
+
+`ir` is pure types + serde, no simulation logic. `sim` holds the backends
+(Gillespie, ODE, chain-binomial) and the propensity evaluator, and defines the
+`Model` trait. `cli` is arg parsing + orchestration.
+
+There is **no `observe` crate.** Projection and likelihood scoring live in `sim`
+and `cli`. CLAUDE.md carried `cli → io → observe → sim → ir` for a long time; it
+named a crate that does not exist and omitted `numerics` and `runid`. Check
+`ls rust/crates` before repeating a dependency claim.
 
 ## Delete dead code on sight
 
