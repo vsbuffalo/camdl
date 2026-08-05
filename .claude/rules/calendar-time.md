@@ -23,4 +23,10 @@ work):
 ## Cross-language constants
 
 `caltime.rs::rata_die` is the pattern: single source of truth, mirror only with
-an equivalence test.
+an equivalence test. Never two independent copies of a constant.
+
+## Non-affine operations get named functions
+
+`add_calendar_months(d, 1)`, not `d + 1.month` — adding a month is not a fixed
+offset, so a polymorphic operator hides the arithmetic the reader needs to see.
+See `.claude/rules/dsl-surface.md`.

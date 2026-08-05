@@ -3,6 +3,8 @@ paths:
   - "ocaml/lib/compiler/**"
   - "docs/camdl-language-spec.md"
   - "docs/dsl-cheatsheet.md"
+  - "docs/user-features.md"
+  - "docs/language-changes.md"
 description: DSL surface rules — required reading, no-loose-semantics, error quality, breaking-change signposting
 ---
 
@@ -89,7 +91,7 @@ change the DSL surface in a breaking way — rename or remove a keyword, require
 new syntax, tighten a semantic rule — the compiler must reject the old form with
 a diagnostic that **names the replacement (old → new)**, not a bare `E001`
 syntax error. A model written against last month's grammar should fail with a
-migration, not a mystery.
+migration, not a mystery. The diagnostic is the migration tool.
 
 And every breaking language change gets an entry — newest first, with the old →
 new migration — in [`docs/language-changes.md`](../../docs/language-changes.md),

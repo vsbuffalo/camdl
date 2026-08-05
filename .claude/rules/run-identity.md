@@ -24,4 +24,7 @@ field, a new identity level, an output-affecting CLI flag.
 A field that **changes stored bytes is identity** — it must re-key. A
 **re-encoding of the same values is presentation** — strip it.
 
-Re-keys are deliberate and version-bumped, never collateral.
+Re-keys are deliberate and version-bumped, never collateral. A silent re-key
+invalidates the cache and breaks the reproducibility claim the store exists to
+make; a missed re-key silently serves a stale result for different inputs, which
+is worse.
