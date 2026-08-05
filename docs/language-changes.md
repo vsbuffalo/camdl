@@ -13,6 +13,54 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-05 — a reduction binder may not reuse a declared name
+
+**What.** `sum(x in dim, …)` where `x` is also a declared parameter,
+compartment, `let` binding, forcing, or table is rejected with `E283`, located
+at the binder.
+
+This is a **narrowing**, though the old behaviour was already an error — just
+the wrong one, pointing somewhere else. `E283` owned binder shadowing but its
+scope was the four _binding_ sources (a nested binder, the transition binder, a
+stream index, an enclosing shaped-`let` index). A binder colliding with a
+declared global fell outside it, and what you got instead was a claim about a
+dimension level:
+
+```camdl
+parameters { beta : rate  gamma : rate }
+@ beta * S[a] * sum(gamma in age, gamma * I[gamma]) / N[a]
+```
+
+```
+error[E100]: undeclared name 'adult'
+```
+
+`adult` is declared — it is a level of `age`, right there in `dimensions {}`.
+The binder substitutes each level in for `gamma`, so the body becomes
+`adult * I_adult`, and the substituted identifier resolved against nothing. The
+hint ("add a declaration in compartments/parameters/…") pointed at a fix that is
+not one: declaring a compartment named `adult` does not help.
+
+_Migration._ Rename the binder:
+
+```camdl
+@ beta * S[a] * sum(b in age, gamma * I[b]) / N[a]
+```
+
+```
+error[E283]: reduction binder 'gamma' shadows the declared parameter 'gamma'
+  8│ … * sum(gamma in age, gamma * I[gamma]) / N[a]
+   │       ~~~~~~~~~~~^
+  = hint: rename the binder — it may not reuse the name of a parameter,
+          compartment, `let` binding, forcing, or table.
+```
+
+**What is unchanged.** A binder named after a dimension **level**
+(`sum(child in age, …)`) is still legal — it does not produce this failure, and
+`W103` already covers the `let`-versus-level case as a warning.
+
+gh#495.
+
 ## 2026-08-05 — a table declared over an undeclared dimension is now an error
 
 **What.** Every axis in a `tables { }` declaration must name a dimension

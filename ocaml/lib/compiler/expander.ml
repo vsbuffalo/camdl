@@ -2531,6 +2531,23 @@ let is_indexed_param ctx name =
 let is_expanded_indexed_param_name ctx name =
   Hashtbl.mem ctx.expanded_param_tbl name
 
+(** The kind of declaration [name] refers to, as a noun for a diagnostic, or
+    [None] when nothing declares it. Consults the base-name namespaces only —
+    an expanded cell name (`S_child`) is not what a user writes as a binder.
+
+    Used by E283 (gh#495: a binder may not reuse a declared name) and by the
+    E287 hint, which must not suggest a binder that would trip that rule.
+    Order follows E278's namespace list; a name can only be in one of them,
+    since E278 rejects cross-namespace duplicates outright. *)
+let declared_global_kind ctx name : string option =
+  if Hashtbl.mem ctx.comp_tbl name then Some "compartment"
+  else if Hashtbl.mem ctx.scalar_param_tbl name || is_indexed_param ctx name
+  then Some "parameter"
+  else if Hashtbl.mem ctx.let_tbl name then Some "let binding"
+  else if Hashtbl.mem ctx.func_tbl name then Some "forcing"
+  else if table_dims ctx name <> None then Some "table"
+  else None
+
 (** Resolve an index token in index position (inside [...]):
     1. Check substitution env  → stratum value via env binding
     2. Check if it is directly a member of any dimension → use as-is
@@ -3621,6 +3638,39 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
            (match List.map fst ctx.dim_registry with
             | [] -> "(none)"
             | ds -> String.concat ", " ds))
+         ();
+       Ir.Const 0.0
+     | Some _ when declared_global_kind ctx v <> None ->
+       (* gh#495: the binder reuses a DECLARED name. E283 owns binder shadowing
+          but covered only the four BINDING sources (nested binder, transition
+          binder, stream index, enclosing shaped-`let` index); a parameter,
+          compartment, `let`, forcing, or table of the same name fell outside
+          it. The failure was not a quiet rebind but a claim about a level:
+
+            parameters { gamma : rate }
+            … sum(gamma in age, gamma * I[gamma]) …
+
+          binds each level in for `gamma`, so the body becomes `adult * I_adult`
+          — and `adult`, a level of `age` declared right there in
+          `dimensions {}`, surfaced as `E100: undeclared name 'adult'` with a
+          hint suggesting the user declare a compartment called `adult`.
+
+          Reported HERE rather than in [check_no_shadowing] for the same reason
+          A2 reports the undeclared axis here: returning without resolving the
+          body REPLACES the downstream E100s instead of adding a third
+          diagnostic for one mistake. Doing it in the pre-expansion pass would
+          leave the body to resolve anyway. *)
+       let kind = Option.get (declared_global_kind ctx v) in
+       Diagnostics.error ctx.diags
+         ~code:"E283" ~loc:(diag_loc_of_ast_ctx ctx sum_loc)
+         ~message:(Printf.sprintf
+           "reduction binder '%s' shadows the declared %s '%s'" v kind v)
+         ~hint:(Printf.sprintf
+           "rename the binder — it may not reuse the name of a parameter, \
+            compartment, `let` binding, forcing, or table. Inside the body '%s' \
+            is the loop variable, so each level of '%s' is substituted in the \
+            %s's place."
+           v d kind)
          ();
        Ir.Const 0.0
      | Some vals ->
@@ -8391,12 +8441,19 @@ let check_shadowing ctx =
     is a silent-wrong result, so it is a hard error. Checked across every
     index-binding construct that carries a user expression: transitions, lets,
     init, observations, interventions, events, and forcing args. (ODE equations
-    and the balance expr have no index binder, so they are exempt.) *)
+    and the balance expr have no index binder, so they are exempt.)
+
+    The sibling face — a binder that reuses a DECLARED GLOBAL name (gh#495) —
+    is reported by `resolve_expr`'s ESum arm instead, not here: it has to
+    replace the body's downstream E100s rather than add a third diagnostic for
+    one mistake, and only the resolution site can decline to resolve the body.
+
+    The loc is the `sum` binder's own, which `ESum` has carried since A3. *)
 let check_no_shadowing ctx =
-  let report decl v =
+  let report ~loc decl v =
     Diagnostics.error ctx.diags
       ~code:"E283"
-      ~loc:Diagnostics.no_loc
+      ~loc:(diag_loc_of_ast_ctx ctx loc)
       ~message:(Printf.sprintf
         "%s: sum variable '%s' shadows an enclosing binding of '%s'. \
          First-match-wins resolution would silently rebind it (turning a \
@@ -8411,8 +8468,8 @@ let check_no_shadowing ctx =
       List.iter (function IPosn e | INamed (_, e) -> walk decl bound e) items
     | EBinOp (_, l, r) -> walk decl bound l; walk decl bound r
     | EUnOp (_, e) -> walk decl bound e
-    | ESum (v, _, _, b, _) ->
-      if List.mem v bound then report decl v;
+    | ESum (v, _, _, b, sum_loc) ->
+      if List.mem v bound then report ~loc:sum_loc decl v;
       walk decl (v :: bound) b
     | ECond (p, t, f) -> walk decl bound p; walk decl bound t; walk decl bound f
     | EFuncCall (_, args) -> List.iter (fun (_, e) -> walk decl bound e) args
