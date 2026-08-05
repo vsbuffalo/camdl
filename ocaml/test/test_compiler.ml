@@ -6086,6 +6086,181 @@ let test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum () =
    silently got the total over every stratum — scored against their subset
    data, with the excess absorbed into the reporting rate. Same syntax, two
    meanings, no diagnostic. *)
+(* gh#488: an unknown dimension in a reduction silently evaluates to 0.0.
+   `dim_values` returns [] for a name that is not in the registry, which
+   `resolve_expr`'s ESum arm cannot distinguish from a `where` guard that
+   excluded every level — and an empty sum is legitimately zero. So a typo in a
+   dimension name deletes the whole term.
+
+   In a force of infection that removes transmission entirely: the model
+   compiles, runs, and produces a flat epidemic that looks like a real result.
+
+   The silence is expression-shape-dependent, which is worse than uniform
+   silence — dividing by a population makes the folded zero trip E300 by
+   accident, while dividing by a literal is completely silent. Neither names the
+   undeclared dimension, so a modeller cannot rely on the accidental catch.
+
+   The code is E263, the one A1 gave the sentence "'X' is not a declared
+   dimension" in index position. Same root cause, different syntactic position:
+   the span and the wording carry which one, and a second code for one mistake
+   is what "prefer the error closest to the actual mistake" argues against.
+   E260–E276 has no free number adjacent to the `sum` family either. *)
+let unknown_reduction_dim_src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate }
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * sum(b in aeg, I[b]) / 100.0
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |}
+
+let test_unknown_dimension_in_sum_is_rejected () =
+  compile_expect_error_code ~code:"E263"
+    ~contains:"'aeg' is not a declared dimension" unknown_reduction_dim_src
+
+(* The diagnostic must point at the BINDER, which is only possible because A3
+   put a per-binder `loc` on `ESum`. Asserting the line pins that the fix reads
+   that loc rather than falling back to `no_loc` — an unlocated error here would
+   still satisfy the message assertion above. *)
+let test_unknown_dimension_in_sum_is_located () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh488_loc" unknown_reduction_dim_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E263 but compile succeeded"
+  | Error e ->
+    (* The `sum(b in aeg, …)` binder is on line 8 of the source above. *)
+    Alcotest.(check bool)
+      (Printf.sprintf "E263 is located on the binder's line, got: %s" e)
+      true (contains_substring ~needle:"\"line\":8" e)
+
+(* A2 REPLACES the downstream E263 rather than adding a second diagnostic for
+   one mistake: resolution stops at the binder, so the body is never resolved
+   and the stride-site E263 that `C[a,b]` would otherwise raise never fires.
+   Without that, one typo yields two errors pointing at different tokens. *)
+let test_unknown_reduction_dim_reports_once () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate }
+    tables { C : age × age = [[1.0,2.0],[3.0,4.0]] }
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * sum(b in aeg, C[a,b] * I[b]) / 100.0
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh488_once" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E263 but compile succeeded"
+  | Error e ->
+    (* One `"code":"E263"` payload per emitted diagnostic. *)
+    let rec count_codes from acc =
+      let needle = "\"code\":\"E263\"" in
+      let n = String.length needle in
+      if from + n > String.length e then acc
+      else if String.sub e from n = needle then count_codes (from + n) (acc + 1)
+      else count_codes (from + 1) acc
+    in
+    Alcotest.(check int)
+      (Printf.sprintf "exactly one E263 for one typo, got: %s" e)
+      1 (count_codes 0 0)
+
+(* The observation-projection path resolves `sum(...)` in its own walk
+   (`explicit_incidence_sum`), not through `resolve_expr`, so it needs the same
+   check or gh#488 survives in the position where it does the most damage.
+   An undeclared axis there yielded `projection = DerivedExpr (Const 0.0)` —
+   indistinguishable in the IR from a legitimate empty restricted sum — so
+   every observation is scored against an expected count of zero:
+
+     sum(b in age, incidence(infection[b]))   → cumulative_flow_sum [child; adult]
+     sum(b in aeg, incidence(infection[b]))   → derived_expr {const 0.0}
+
+   with no diagnostic on either. *)
+let test_unknown_dimension_in_projection_sum_is_rejected () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate  rho : probability  k : positive }
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a]
+    }
+    observations {
+      cases {
+        columns       { time : time, cases : count }
+        projected     = sum(b in aeg, incidence(infection[b]))
+        emit_schedule = every 7 'days
+        cases ~ neg_binomial(mean = rho * projected, r = k)
+      }
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E263"
+    ~contains:"'aeg' is not a declared dimension" src
+
+(* Positive control: the same projection over the DECLARED axis must still
+   compile, and must still lower to the flow sum rather than to a zero. *)
+let test_declared_dimension_in_projection_sum_compiles () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate  rho : probability  k : positive }
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a]
+    }
+    observations {
+      cases {
+        columns       { time : time, cases : count }
+        projected     = sum(b in age, incidence(infection[b]))
+        emit_schedule = every 7 'days
+        cases ~ neg_binomial(mean = rho * projected, r = k)
+      }
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"proj_ok" src with
+  | Error e -> Alcotest.failf "a declared reduction axis must stay legal: %s" e
+  | Ok m ->
+    let j = Yojson.Safe.to_string (Serde.model_to_json m) in
+    Alcotest.(check bool)
+      "projection is the flow sum, not a folded zero"
+      true (contains_substring ~needle:"cumulative_flow_sum" j)
+
+(* The empty-domain case that IS legitimate must keep compiling: a `where`
+   guard may exclude every level, and an empty sum is zero. Only an unknown
+   dimension is an error. *)
+let test_empty_guard_domain_still_compiles () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate }
+    transitions {
+      infection[a in age] : S[a] --> I[a]
+        @ beta * S[a] * (1.0 + sum(b in age where b == a, 0.0))
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"empty_guard" src with
+  | Error e -> Alcotest.failf "a guard that prunes the domain must stay legal: %s" e
+  | Ok _ -> ()
+
 let test_incidence_sum_honours_where_guard () =
   let src = {|
     time_unit = 'days
@@ -11059,6 +11234,12 @@ let () =
       Alcotest.test_case "incidence(infection[child]) picks one stratum" `Quick test_incidence_positional_indexed_pins_one_stratum;
       Alcotest.test_case "nested sum over 2 dims → flow sum (E280 pooled form)" `Quick test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum;
       Alcotest.test_case "aggregation sum honours its where guard" `Quick test_incidence_sum_honours_where_guard;
+      Alcotest.test_case "E263: unknown dimension in a reduction (gh#488)" `Quick test_unknown_dimension_in_sum_is_rejected;
+      Alcotest.test_case "E263 on a reduction is located at the binder" `Quick test_unknown_dimension_in_sum_is_located;
+      Alcotest.test_case "one typo, one E263 (A2 replaces the stride-site one)" `Quick test_unknown_reduction_dim_reports_once;
+      Alcotest.test_case "E263: unknown dimension in a PROJECTION sum (gh#488)" `Quick test_unknown_dimension_in_projection_sum_is_rejected;
+      Alcotest.test_case "declared axis in a projection sum still lowers to the flow sum" `Quick test_declared_dimension_in_projection_sum_compiles;
+      Alcotest.test_case "a where guard that empties the domain still compiles" `Quick test_empty_guard_domain_still_compiles;
       Alcotest.test_case "prevalence(E[child]) on staged+stratified E pools that stratum's stages (gh#478)" `Quick test_prevalence_indexed_cell_on_staged_stratified_compartment;
       Alcotest.test_case "prevalence(I) on hyper_erlang pools branch stages (gh#487)" `Quick test_prevalence_bare_on_hyper_erlang_pools_branch_stages;
       Alcotest.test_case "prevalence(Y1 + Y2) resolves as an expression" `Quick test_prevalence_arithmetic_argument_resolves_as_expression;

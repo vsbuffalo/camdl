@@ -13,6 +13,47 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-04 — `sum(...)` over an undeclared dimension is now an error
+
+**What.** A reduction whose axis is not declared in `dimensions { }` is rejected
+with `E263`. It used to compile silently and evaluate to `0.0`, because an
+unknown axis and a `where` guard that selected no levels both resolved to an
+empty domain — and an empty reduction is legitimately zero.
+
+This is a **narrowing**: a model with a typoed axis compiled before and does not
+now. That is the point. In a force of infection the folded zero removed
+transmission entirely and the model still ran, producing a flat epidemic that
+looks like a result:
+
+```camdl
+dimensions { age = [child, adult] }
+@ beta * S[a] * sum(b in aeg, I[b]) / 100.0   # `aeg` is a typo for `age`
+```
+
+was `beta * S_child * 0.0 / 100.0`. In an observation projection it was worse —
+`projected = sum(b in aeg, incidence(infection[b]))` lowered to a literal
+`const 0.0`, so a fit scored every observation against an expected count of
+zero.
+
+_Migration._ Correct the axis name, or declare it. The diagnostic names the
+declared dimensions:
+
+```
+error[E263]: 'aeg' is not a declared dimension
+  7│ … @ beta * S[a] * sum(b in aeg, I[b]) / 100.0
+   │                       ~~~~~~~^
+  = hint: declare it in `dimensions { aeg = [...] }`, or correct the name —
+          declared dimensions: age
+```
+
+**What is unchanged.** An empty domain that comes from a `where` guard is still
+legal and still zero — an isolated patch with no in-radius neighbour contributes
+nothing. That case now warns (`W202`) rather than erroring, and only when the
+guard is what emptied it. A declared dimension with no levels is likewise not
+this error.
+
+gh#488.
+
 ## 2026-07-27 — bare stratified `transfer(from = S, to = V)` expands per stratum
 
 **What.** A `transfer` endpoint may now name a bare stratified compartment. The
