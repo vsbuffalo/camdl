@@ -16,8 +16,9 @@ description: The IR contract between OCaml and Rust — required reading, the at
 
 The IR is a **fully-expanded** declarative model — no stratification shorthand
 survives serialization. The OCaml compiler performs stratification expansion;
-what reaches Rust is a flat list of compartments, transitions (with stoichiometry
-+ rate expression), observation models, parameters, and initial conditions.
+what reaches Rust is a flat list of compartments, transitions (each carrying
+stoichiometry and a rate expression), observation models, parameters, and
+initial conditions.
 
 The expression language (`expr`) is a pure, total, first-order AST over
 `Const | Param | Pop | PopSum | Time | Dt | BinOp | UnOp | Cond | TimeFunc | TableLookup | Projected | UncheckedDim | Reduce | BindingRef`.
@@ -47,8 +48,8 @@ Both language implementations must change atomically.
    commit
 
 An `ir/VERSION` bump or an edit to `ocaml/lib/ir/` or `rust/crates/ir/src/`
-breaks every golden. Flag it and confirm before proceeding — see the
-human-loop rule in `CLAUDE.md` and the `golden-update` skill.
+breaks every golden. Flag it and confirm before proceeding — see the human-loop
+rule in `CLAUDE.md` and the `golden-update` skill.
 
 ## Cross-language constants
 

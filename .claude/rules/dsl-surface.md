@@ -67,14 +67,14 @@ it.
 The DSL's value to agents comes from the _same_ property that makes it value to
 humans: that a sharp non-software-engineer epidemiologist (a health-ministry
 modeler in an under-resourced setting, the recurring target user) can read a
-model and have a chance of being right about what it does. Agents do well on this
-DSL because it is human-readable, not in spite of it.
+model and have a chance of being right about what it does. Agents do well on
+this DSL because it is human-readable, not in spite of it.
 
 When a syntax choice is in tension between "what an agent would tolerate" and
-"what a model author would understand at a glance," the model author's gut is the
-tiebreaker — that is the choice that serves both audiences, because it is the one
-that doesn't ask either of them to carry hidden calendar arithmetic, ambiguous
-units, or implicit conventions in their head.
+"what a model author would understand at a glance," the model author's gut is
+the tiebreaker — that is the choice that serves both audiences, because it is
+the one that doesn't ask either of them to carry hidden calendar arithmetic,
+ambiguous units, or implicit conventions in their head.
 
 Concretely: prefer explicitly named functions over polymorphic operators where
 the semantics differ (`add_calendar_months(d, 1)` beats `d + 1.month` when the
@@ -87,14 +87,13 @@ keep the surface small enough that the entire grammar fits in a head.
 Backwards compatibility is a non-goal, but a _silent_ break is a bug. When you
 change the DSL surface in a breaking way — rename or remove a keyword, require
 new syntax, tighten a semantic rule — the compiler must reject the old form with
-a diagnostic that **names the replacement (old → new)**, not a bare `E001` syntax
-error. A model written against last month's grammar should fail with a migration,
-not a mystery.
+a diagnostic that **names the replacement (old → new)**, not a bare `E001`
+syntax error. A model written against last month's grammar should fail with a
+migration, not a mystery.
 
 And every breaking language change gets an entry — newest first, with the old →
 new migration — in [`docs/language-changes.md`](../../docs/language-changes.md),
 which is embedded into `camdl docs language-changes` so an agent on any binary
-can see what changed. The diagnostic should point there
-(`… see \`camdl docs language-changes\``) until the targeted hint exists.
-Backfilling old changes into that log is welcome; not adding new ones is a
-regression.
+can see what changed. The diagnostic should point there (`… see \`camdl docs
+language-changes\``) until the targeted hint exists. Backfilling old changes
+into that log is welcome; not adding new ones is a regression.
