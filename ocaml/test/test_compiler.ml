@@ -9799,6 +9799,130 @@ let test_sum_var_shadows_transition_index_rejected () =
   in
   compile_expect_error_code ~code:"E283" ~contains:"shadow" src
 
+(* ── gh#495: a binder shadowing a declared GLOBAL ───────────────────────────
+   E283's scope was the four *binding* sources (nested binder, transition
+   binder, stream index, enclosing shaped-`let` index). A binder that reuses a
+   declared parameter / compartment / `let` / table / forcing name fell outside
+   it, and the result was not a shadowing error but a claim about a level:
+
+     sum(gamma in age, gamma * I[gamma])     with `gamma : rate` declared
+     → E100: undeclared name 'adult'
+
+   `adult` IS declared — it is a level of `age`, right there in `dimensions {}`.
+   The binder substituted the level in for `gamma`, the substituted identifier
+   resolved against nothing, and the error blamed a name the user did write but
+   in a role they never intended. Its hint ("add a declaration in
+   compartments/parameters/…") is actively wrong: declaring a compartment named
+   `adult` is not the fix.
+
+   The mistake is at the binder, so that is where it is reported. *)
+let sum_binder_shadows_param_src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate in [0,2]  gamma : rate in [0,1] }
+    let N[a in age] = S[a] + I[a]
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * sum(gamma in age, gamma * I[gamma]) / N[a]
+    }
+    init { S[child]=99 I[child]=1 S[adult]=100 }
+    simulate { from = 0 'days to = 10 'days }
+  |}
+
+let test_gh495_binder_shadowing_a_parameter_is_e283 () =
+  compile_expect_error_code ~code:"E283"
+    ~contains:"shadows the declared parameter 'gamma'"
+    sum_binder_shadows_param_src
+
+(* The level name must NOT appear as an undeclared identifier. Without this the
+   test above would pass while E100 still fired alongside — the symptom the
+   issue is actually about is the misleading second diagnostic, not the absence
+   of the first. *)
+let test_gh495_level_name_is_not_reported_as_undeclared () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh495" sum_binder_shadows_param_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E283 but compile succeeded"
+  | Error e ->
+    Alcotest.(check bool)
+      (Printf.sprintf "no E100 blaming a dimension level, got: %s" e)
+      false (contains_substring ~needle:"undeclared name 'adult'" e
+             || contains_substring ~needle:"undeclared name 'child'" e)
+
+(* The binder is where the mistake is, so that is where the caret goes. The
+   `sum(gamma in age, …)` binder is on line 9 of the source above.
+
+   Asserted on the E283 payload SPECIFICALLY, not on the whole error text: the
+   E100s this replaces are on line 9 as well, so a bare `"line":9` substring
+   check would have passed before the fix. *)
+let line_of_code ~code payload =
+  (* Diagnostic JSON is `…"code":"E2xx","message":…,"loc":{"file":…,"line":N…`,
+     so the first `"line":` after the code is that diagnostic's own. *)
+  let n = String.length payload in
+  let rec find_from i needle =
+    let ln = String.length needle in
+    if i + ln > n then None
+    else if String.sub payload i ln = needle then Some i
+    else find_from (i + 1) needle
+  in
+  match find_from 0 (Printf.sprintf "\"code\":\"%s\"" code) with
+  | None -> None
+  | Some i ->
+    (match find_from i "\"line\":" with
+     | None -> None
+     | Some j ->
+       let k = j + String.length "\"line\":" in
+       let rec digits e = if e < n && payload.[e] >= '0' && payload.[e] <= '9'
+         then digits (e + 1) else e in
+       let e = digits k in
+       if e = k then None else Some (int_of_string (String.sub payload k (e - k))))
+
+let test_gh495_e283_is_located_at_the_binder () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh495_loc" sum_binder_shadows_param_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E283 but compile succeeded"
+  | Error e ->
+    Alcotest.(check (option int))
+      (Printf.sprintf "E283 is located on the binder's line, got: %s" e)
+      (Some 9) (line_of_code ~code:"E283" e)
+
+(* Compartments and `let`s are the other two names the hint names, so both are
+   pinned; a check that only consulted the parameter table would pass the case
+   above and miss these. *)
+let shadow_model ~binder = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate in [0,2] }
+    let N[a in age] = S[a] + I[a]
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * sum(%s in age, I[%s]) / N[a]
+    }
+    init { S[child]=99 I[child]=1 S[adult]=100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} binder binder
+
+let test_gh495_binder_shadowing_a_compartment_is_e283 () =
+  compile_expect_error_code ~code:"E283"
+    ~contains:"shadows the declared compartment 'I'" (shadow_model ~binder:"I")
+
+let test_gh495_binder_shadowing_a_let_is_e283 () =
+  compile_expect_error_code ~code:"E283"
+    ~contains:"shadows the declared let binding 'N'" (shadow_model ~binder:"N")
+
+(* Negative control: a binder that collides with nothing must still compile,
+   including one named after a dimension LEVEL. W103 already covers the
+   let-vs-level case as a warning, and a binder named `child` does not produce
+   the mangled-name symptom — narrowing that far is out of scope here, so it
+   must stay legal. *)
+let test_gh495_binder_named_after_a_level_still_compiles () =
+  ignore (compile_expect_ok (shadow_model ~binder:"child"))
+
 let test_sum_var_distinct_from_index_ok () =
   (* The normal pattern — sum var distinct from the transition index — compiles. *)
   let src =
@@ -10895,6 +11019,20 @@ let () =
         `Quick test_event_sum_shadow_rejected;
       Alcotest.test_case "distinct sum var still compiles"
         `Quick test_sum_var_distinct_from_index_ok;
+    ];
+    "binder_shadows_global_gh495", [
+      Alcotest.test_case "binder over a declared parameter is E283"
+        `Quick test_gh495_binder_shadowing_a_parameter_is_e283;
+      Alcotest.test_case "the level name is not reported as undeclared"
+        `Quick test_gh495_level_name_is_not_reported_as_undeclared;
+      Alcotest.test_case "E283 is located at the binder"
+        `Quick test_gh495_e283_is_located_at_the_binder;
+      Alcotest.test_case "binder over a declared compartment is E283"
+        `Quick test_gh495_binder_shadowing_a_compartment_is_e283;
+      Alcotest.test_case "binder over a declared let is E283"
+        `Quick test_gh495_binder_shadowing_a_let_is_e283;
+      Alcotest.test_case "a binder named after a level still compiles"
+        `Quick test_gh495_binder_named_after_a_level_still_compiles;
     ];
     "table_lookup_arity", [
       Alcotest.test_case "E202 under-indexed C_age[a] (rank 2)" `Quick test_table_lookup_under_indexed_e202;
