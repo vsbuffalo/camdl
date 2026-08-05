@@ -13,6 +13,55 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-05 — a table declared over an undeclared dimension is now an error
+
+**What.** Every axis in a `tables { }` declaration must name a dimension
+declared in `dimensions { }`. An undeclared axis is rejected with `E263`,
+located on the axis list.
+
+This is a **narrowing**, and a sibling of the `sum(...)` change below: the same
+"an unknown axis has no levels" collapse, one declaration site further up. It
+used to be caught only at a _use_ — indexing the table with a level in the bad
+axis — so a table never indexed on that axis compiled clean:
+
+```camdl
+dimensions { age = [child, adult] }
+tables { C : age × aeg = [[1.0,2.0],[3.0,4.0]] }   # `aeg` is a typo for `age`
+```
+
+Two things rode on the silence. The inline cell-count check (`E202`) skips any
+table with a zero-size axis, so `C` above was never checked against its declared
+shape either. And a forcing whose `time_dim` is the phantom axis lowered to an
+interpolation with **zero knots** — which evaluates to 0 at every time:
+
+```camdl
+tables  { temp_data : patch × week = [[1.0,2.0,3.0],[4.0,5.0,6.0]] }
+forcing { temperature[p in patch] : interpolated 'ratio {
+            table = temp_data  time_dim = week  method = linear } }
+```
+
+compiled to `{"times": [], "values": []}`. The Rust loader did reject that, but
+late and with no source location.
+
+_Migration._ Correct the axis name, or declare it. The diagnostic names the
+declared dimensions:
+
+```
+error[E263]: 'aeg' is not a declared dimension
+  6│ tables { C : age × aeg = [[1.0,2.0],[3.0,4.0]] }
+   │              ~~~~~~~~~^
+  = hint: declare it in `dimensions { aeg = [...] }`, or correct the name —
+          declared dimensions: age
+```
+
+**What is unchanged.** A declared dimension with no levels is not this error,
+and an axis that is declared but does not match the table's shape keeps its own
+diagnostics (`E202` for the cell count, `E229` for a forcing's `time_dim`). One
+undeclared name now produces one `E263` even when several sites can see it; the
+declaration is the one you get.
+
+gh#490, gh#491.
+
 ## 2026-08-04 — `sum(...)` over an undeclared dimension is now an error
 
 **What.** A reduction whose axis is not declared in `dimensions { }` is rejected

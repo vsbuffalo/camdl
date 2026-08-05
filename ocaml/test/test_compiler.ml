@@ -10569,6 +10569,145 @@ let test_a1_mistyped_level_still_level_error () =
   compile_expect_error_code ~code:"E263"
     ~contains:"'chidl' is not a level of dimension 'age'" mistyped_level_src
 
+(* ── gh#490: the undeclared axis is diagnosed at the DECLARATION ─────────────
+   A1 (above) catches an undeclared table axis only through a use site that
+   reaches [dim_value_index] — an index that names a level in the bad axis. A
+   table declared over a nonexistent axis and never indexed on it compiled
+   clean. The declaration is where the mistake is fully determined and where
+   the span is exact, so the check belongs there and every downstream partial
+   catch becomes redundant.
+
+   The model below is the A1 model with the `C[a, child]` use removed: nothing
+   ever indexes `C`, so before gh#490 this was `✓ no errors, 0 warnings`. *)
+let unindexed_undeclared_table_dim_src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate in [0,2] }
+    tables { C : age × aeg = [[1.0,2.0],[3.0,4.0]] }
+    let N[a in age] = S[a] + I[a]
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * I[a] / N[a]
+    }
+    init { S[child]=99 I[child]=1 S[adult]=100 }
+    simulate { from = 0 'days to = 10 'days }
+  |}
+
+let test_gh490_unindexed_undeclared_table_dim_is_rejected () =
+  compile_expect_error_code ~code:"E263"
+    ~contains:"'aeg' is not a declared dimension"
+    unindexed_undeclared_table_dim_src
+
+(* The span must be the table declaration, not `no_loc`. Every other table
+   diagnostic (E202/E215/E216/E222) is unlocated, so asserting the line pins
+   that this one carries `tloc` rather than inheriting that habit. The
+   `tables { C : age × aeg … }` line is line 7 of the source above. *)
+let test_gh490_error_is_located_at_the_table_declaration () =
+  Diagnostics.json_errors_mode := true;
+  let result =
+    Compiler.compile ~name:"gh490_loc" unindexed_undeclared_table_dim_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E263 but compile succeeded"
+  | Error e ->
+    Alcotest.(check bool)
+      (Printf.sprintf "E263 is located on the table declaration line, got: %s" e)
+      true (contains_substring ~needle:"\"line\":7" e)
+
+(* One mistake, one diagnostic — the rule `test_unknown_reduction_dim_reports_once`
+   pins for the reduction path. With the declaration check added, the A1 model
+   (which DOES index `C[a, child]`) would otherwise report the same sentence
+   twice: once at the declaration and once at the index. The index-site report
+   is the redundant one, so an undeclared dimension name is reported once. *)
+let test_gh490_undeclared_table_dim_reports_once () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh490_once" undeclared_table_dim_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E263 but compile succeeded"
+  | Error e ->
+    let rec count_codes from acc =
+      let needle = "\"code\":\"E263\"" in
+      let n = String.length needle in
+      if from + n > String.length e then acc
+      else if String.sub e from n = needle then count_codes (from + n) (acc + 1)
+      else count_codes (from + 1) acc
+    in
+    Alcotest.(check int)
+      (Printf.sprintf "exactly one E263 for one undeclared axis, got: %s" e)
+      1 (count_codes 0 0)
+
+(* Negative control: the check must not fire on a well-formed table, including
+   the unit-annotated and multi-name `read()` forms whose dim entries take the
+   other constructor. Without this a check that errored unconditionally would
+   satisfy every assertion above. *)
+let test_gh490_declared_table_dims_still_compile () =
+  ignore (compile_expect_ok {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult]  patch = [north, south] }
+    stratify(by = age)
+    stratify(by = patch)
+    parameters { beta : rate in [0,2] }
+    tables { C : age × age = [[1.0,2.0],[3.0,4.0]]
+             dur : patch 'days = [3.0, 5.0] }
+    transitions {
+      infection[a in age, p in patch] : S[a,p] --> I[a,p]
+        @ beta * S[a,p] * C[a, child] / dur[p]
+    }
+    init { S[a in age, p in patch] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |})
+
+(* ── gh#491: a forcing over an undeclared time_dim ──────────────────────────
+   `table_backed_knots` builds one knot per level of `time_dim` via
+   [dim_levels_or_empty]. An axis absent from the registry has no levels, so
+   the fold yielded ZERO knots and the model compiled clean — an
+   `Interpolated { times: [], values: [] }` that the Rust loader rejects
+   (`compiled_model.rs`, `interpolated_empty_knots_rejected`, gh#308) with an
+   unlocated runtime error. The E229 family does fire when the axis is
+   declared but mismatched; the hole was specific to the axis being absent
+   entirely, because then the table's dim list and the `time_dim` agree with
+   each other and both resolve to nothing.
+
+   Subsumed by gh#490 — the table carrying the phantom axis is now rejected at
+   its declaration — but pinned separately because the deferred-to-runtime
+   shape is the part worth keeping a test on. *)
+let undeclared_time_dim_forcing_src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { patch = [north, south] }
+    stratify(by = patch)
+    parameters { gamma : rate in [0,1] }
+    tables { temp_data : patch × week = [[1.0,2.0,3.0],[4.0,5.0,6.0]] }
+    forcing {
+      temperature[p in patch] : interpolated 'ratio {
+        table    = temp_data
+        time_dim = week
+        method   = linear
+      }
+    }
+    transitions {
+      recovery[p in patch] : I[p] --> S[p] @ gamma * I[p] * temperature[p]
+    }
+    init { S[north]=99 I[north]=1 S[south]=100 }
+    simulate { from = 0 'days to = 10 'days }
+  |}
+
+let test_gh491_undeclared_time_dim_is_rejected_at_compile_time () =
+  compile_expect_error_code ~code:"E263"
+    ~contains:"'week' is not a declared dimension"
+    undeclared_time_dim_forcing_src
+
+(* The matching negative control is `test_gh345_table_backed_forcing` above: a
+   DECLARED `time_dim` must still lower to a real knot series (it asserts the
+   times and per-stratum values), so a fix that rejected table-backed forcings
+   wholesale would fail there rather than pass silently here. It is not
+   duplicated with inline levels because a `time_dim` level must be numeric,
+   and inline dimension levels are identifiers — the numeric case only reaches
+   the registry through `read(..., column = ...)`. *)
+
 (* ── C2: flat multi-binder `sum` is sugar for the nested form ────────────────
    `sum(a in age, p in patch, e)` must produce exactly what
    `sum(a in age, sum(p in patch, e))` produces — same IR, byte for byte. The
@@ -10693,6 +10832,18 @@ let () =
         `Quick test_a1_undeclared_dim_named_as_undeclared;
       Alcotest.test_case "E263 keeps the level message for a real level typo"
         `Quick test_a1_mistyped_level_still_level_error;
+    ];
+    "undeclared_table_dim_gh490", [
+      Alcotest.test_case "a never-indexed undeclared table axis is E263"
+        `Quick test_gh490_unindexed_undeclared_table_dim_is_rejected;
+      Alcotest.test_case "E263 is located at the table declaration"
+        `Quick test_gh490_error_is_located_at_the_table_declaration;
+      Alcotest.test_case "one undeclared axis, one E263"
+        `Quick test_gh490_undeclared_table_dim_reports_once;
+      Alcotest.test_case "declared table axes still compile (negative control)"
+        `Quick test_gh490_declared_table_dims_still_compile;
+      Alcotest.test_case "gh#491 undeclared time_dim errors at compile time"
+        `Quick test_gh491_undeclared_time_dim_is_rejected_at_compile_time;
     ];
     "empty_restricted_reduction_a3", [
       Alcotest.test_case "W202 aggregates one warning per source site"
