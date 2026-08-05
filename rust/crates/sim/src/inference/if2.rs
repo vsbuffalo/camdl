@@ -8,6 +8,27 @@
 //! perturbation scale σ → 0 and the particle swarm concentrates
 //! around the MLE.
 //!
+//! Ionides et al. (2015) Algorithm 1 is the normative reference for what
+//! one iteration does, in what order:
+//!
+//! ```text
+//!   Θ^F_{0,j} ~ h_0(θ | Θ^{m-1}_j; σ_m)                      [t=0 perturbation]
+//!   X^F_{0,j} ~ f_{X_0}(x_0; Θ^F_{0,j})
+//!   for n in 1..N:
+//!     Θ^P_{n,j} ~ h_n(θ | Θ^F_{n-1,j}; σ_m)                  [perturb]
+//!     X^P_{n,j} ~ f_{X_n|X_{n-1}}(· | X^F_{n-1,j}; Θ^P_{n,j})[propagate]
+//!     w_{n,j}   = f_{Y_n|X_n}(y*_n | X^P_{n,j}; Θ^P_{n,j})   [weight]
+//!     resample (Θ, X) jointly
+//! ```
+//!
+//! Two properties of that order are load-bearing and were each once
+//! wrong. The perturbation precedes the process step, so one Θ^P_n drives
+//! both the simulation and the measurement density (gh#365). And x₀ is
+//! drawn per particle from *that particle's* t=0-perturbed θ, not once
+//! from the swarm mean — without it a parameter reaching the model only
+//! through `initial_conditions` gets no initial-state spread, so the
+//! weights never select on it (gh#364).
+//!
 //! Key property: IF2 finds the MLE without computing the transition
 //! density — it only needs the simulator (process model) and the
 //! observation log-likelihood (dmeasure). This makes it compatible
@@ -106,7 +127,13 @@ pub struct IF2Config {
     /// observation (pinning x₀ given y₁) but don't accumulate that
     /// step's log-sum-exp into the returned log-likelihood. Requires
     /// per-particle spread at t=0, typically from an `ivp` estimated
-    /// parameter. See docs/dev/proposals/2026-04-18-ic-free-inference.md.
+    /// parameter: the t=0 perturbation moves each particle's θ and each
+    /// particle then draws its own x₀ from that θ (gh#364), so the
+    /// first reweight has something to discriminate between. Without
+    /// such a parameter the first reweight is a no-op and ic-free
+    /// degenerates to silently dropping y₁ — the fit-config layer
+    /// rejects that case.
+    /// See docs/dev/proposals/2026-04-18-ic-free-inference.md.
     pub skip_first_obs_from_loglik: bool,
 
     /// gh#241. Deterministic per-call compute budget (max cumulative
@@ -358,17 +385,6 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
 
     for iter in 0..config.n_iterations {
 
-        // Re-initialize particles from model's initial state
-        let init_state = process.initial_state(&current_params)?;
-        for s in &mut states {
-            s.counts.copy_from_slice(&init_state.counts);
-            s.reset_flows();
-            // Per-ITERATION re-seed (NOT a per-observation reset): zero BOTH the
-            // per-transition tally and the per-stream `acc` bins blanket, so no
-            // stale incidence carries across IF2 iterations (Phase 2a).
-            for a in &mut s.acc { *a = 0; }
-        }
-
         // Re-initialize per-particle parameter vectors from current estimate
         for pp in &mut particle_params {
             pp.copy_from_slice(&current_params);
@@ -427,6 +443,41 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             global_step += 1;
         }
 
+        // X^F_{0,j} ~ f_{X_0}(·; Θ^F_{0,j}) — Ionides et al. (2015) Algorithm 1.
+        // Runs AFTER the t=0 perturbation, once per particle, from THAT
+        // particle's own θ. A parameter reaching the model only through
+        // `initial_conditions` (a pure-IC `ivp` param — `S0`, `E0`, `I0`, or a
+        // simplex composition) has no other channel: it is absent from every
+        // rate and from the observation model, so unless it moves x₀ the
+        // weights are independent of it, the resampling is a blind subsample,
+        // and its filter mean drifts without ever being selected. Evaluating
+        // `initial_state` once from the swarm mean and copying it to every
+        // particle did exactly that (gh#364) — and silently, since
+        // `ic_free = true` validates that an `ivp` param exists precisely to
+        // guarantee the t=0 spread this now delivers.
+        //
+        // Seam: `ProcessModel::initial_state` is the existing producer of x₀
+        // and was already the one being called; the fix is to route each
+        // particle through it rather than the swarm mean. PGAS's per-particle
+        // `Binomial(N₀, θ)` draw (`pgas.rs::csmc_as`) is deliberately NOT
+        // reused: it exists because PGAS needs a tractable initial-state
+        // *density* p(x₀|θ) for the complete-data likelihood, it is built from
+        // `IVPMapping`s that finite-difference a `&CompiledModel` (which
+        // `ProcessModel` only optionally exposes), and it would add Monte-Carlo
+        // variance that Algorithm 1 does not ask for. IF2 needs a draw, not a
+        // density, and camdl's f_{X_0} is the deterministic `initial_state`.
+        // pomp agrees: `mif2_pfilter` calls `rinit(object, params=tparams)` on
+        // the per-particle perturbed parameter matrix.
+        for (s, pp) in states.iter_mut().zip(particle_params.iter()) {
+            let init_state = process.initial_state(pp)?;
+            s.counts.copy_from_slice(&init_state.counts);
+            s.reset_flows();
+            // Per-ITERATION re-seed (NOT a per-observation reset): zero BOTH the
+            // per-transition tally and the per-stream `acc` bins blanket, so no
+            // stale incidence carries across IF2 iterations (Phase 2a).
+            for a in &mut s.acc { *a = 0; }
+        }
+
         let mut log_weights = vec![0.0_f64; n];
         let mut total_loglik = 0.0;
         // IM4 in 2026-04-19 inference review: count observations whose
@@ -445,6 +496,44 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         let mut iters: u64 = 0;
 
         for obs_idx in 0..n_obs {
+            // PERTURB — Ionides et al. (2015) Algorithm 1, first line of the
+            // inner loop. This runs BEFORE the process step so the SAME
+            // Θ^P_n drives the simulation of X_n AND the measurement density
+            // g(y_n | X_n; Θ^P_n) below (gh#365). Propagating at Θ^F_{n-1}
+            // and scoring at Θ^P_n decouples the two: for a parameter living
+            // in both the process and the observation model that is a genuine
+            // error, not a phase offset that vanishes as σ → 0.
+            //
+            // pomp does the same — `pomp:::mif2_pfilter` (R/mif2.R, pomp
+            // 6.4.0.2): `randwalk_perturbation` → `rprocess` → `dmeasure`,
+            // all three on one `tparams`.
+            //
+            // IVP params and simplex members are skipped — IVP perturbed at
+            // t=0 only (pomp's `ivp()` in `rw.sd`), simplex members perturbed
+            // jointly at t=0 only (they're always IVP).
+            //
+            // `cooling_now` is also read by the per-parameter diagnostics
+            // after the weighting; the `global_step` accounting is unchanged
+            // (one t=0 step plus one per observation), so the SD applied at
+            // observation k is still `per_step_cooling^(k+1)`.
+            let cooling_now = per_step_cooling.powf(global_step as f64);
+            for i in 0..n {
+                for (pi, spec) in if2_params.iter().enumerate() {
+                    if spec.ivp || simplex_member_indices.contains(&spec.index) { continue; }
+                    let current = particle_params[i][spec.index];
+                    let sd = spec.transformed_sd(spec.rw_sd, current) * cooling_now;
+                    let z = spec.to_transformed(current);
+                    let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
+                    particle_params[i][spec.index] = new_val;
+                    if let Transform::Log { lo, hi } = &spec.transform {
+                        if (new_val - lo).abs() < 1e-10 || (new_val - hi).abs() < 1e-10 {
+                            clamp_counts[pi] += 1;
+                        }
+                    }
+                }
+            }
+            global_step += 1;
+
             // Propagate — batched parallel dispatch per observation interval.
             let obs_time = obs_model.obs_time(obs_idx);
             let t_start = t;
@@ -502,29 +591,8 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 obs_model.fold_into_acc(&s.flow_accumulators, &mut s.acc);
             }
 
-            // Perturb parameters at observation time (per-step cooling).
-            // IVP params and simplex members are skipped — IVP perturbed at t=0 only,
-            // simplex members perturbed jointly at t=0 only (they're always IVP).
-            let cooling_now = per_step_cooling.powf(global_step as f64);
-            for i in 0..n {
-                for (pi, spec) in if2_params.iter().enumerate() {
-                    if spec.ivp || simplex_member_indices.contains(&spec.index) { continue; }
-                    let current = particle_params[i][spec.index];
-                    let sd = spec.transformed_sd(spec.rw_sd, current) * cooling_now;
-                    let z = spec.to_transformed(current);
-                    let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
-                    particle_params[i][spec.index] = new_val;
-                    if let Transform::Log { lo, hi } = &spec.transform {
-                        if (new_val - lo).abs() < 1e-10 || (new_val - hi).abs() < 1e-10 {
-                            clamp_counts[pi] += 1;
-                        }
-                    }
-                }
-            }
-
-            global_step += 1;
-
-            // Weight by observation likelihood
+            // Weight by observation likelihood — at the SAME θ that drove the
+            // step above (gh#365).
             for i in 0..n {
                 log_weights[i] = obs_model.log_likelihood(&states[i], obs_idx, &particle_params[i]);
             }

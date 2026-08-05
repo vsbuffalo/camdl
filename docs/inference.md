@@ -523,19 +523,27 @@ the cloud converges to a point — the MLE.
 The structure is identical to the particle filter, with two additions:
 
 ```
-1. PROPAGATE: same as PF, but each particle uses its OWN params
-   particle_i simulates with particle_params[i], not shared θ
-
-2. PERTURB: jitter each particle's parameters (NEW in IF2)
+1. PERTURB: jitter each particle's parameters (NEW in IF2)
    For each particle i, for each estimated parameter:
      θ_i += Normal(0, rw_sd × cooling) on the transformed scale
    IVP parameters (initial conditions) are only perturbed at t=0.
 
-3. WEIGHT: same as PF — score against data
+2. PROPAGATE: same as PF, but each particle uses its OWN params
+   particle_i simulates with particle_params[i], not shared θ
+
+3. WEIGHT: same as PF — score against data, at the SAME θ that
+   just drove the propagation
 4. RESAMPLE: states AND parameters are copied together (NEW in IF2)
    Good (state, θ) pairs survive. Bad pairs die.
 5. RESET: same as PF
 ```
+
+Perturbing before the propagation is not cosmetic. It is what makes one
+perturbed θ drive both the simulation of the latent state and the measurement
+density that scores it — the coupling in Algorithm 1 of Ionides et al. (2015)
+and in pomp's `mif2`. Scoring at a θ the state was not simulated from breaks
+that coupling for any parameter appearing in both the process and the
+observation model.
 
 ### The cooling schedule
 
@@ -667,8 +675,22 @@ are model-declared parameters: list them under `[estimate]` in the `fit.toml`
 like any other parameter, and the fit estimates them. The filter jitters their
 initial values once when particles initialize, then holds them fixed as it runs
 forward — whereas a parameter like R₀ is perturbed at every observation time.
-PGAS draws stochastic initial states from these parameters (e.g.
-$S_0 \sim \text{Binomial}(N_0, s_0)$); see "IVP parameters (s0, e0)" below.
+
+Under IF2 that single t=0 jitter is the _only_ channel through which the data
+can inform an initial-condition parameter, so each particle then builds its own
+initial compartment counts from its own jittered value: particle $j$ starts at
+$x_0^{(j)} = \text{init}(\theta^{(j)})$, not at the swarm mean's initial state.
+That is what puts spread in the swarm at $t = 0$, and it is why the first
+reweight can discriminate between particles — the precondition `ic_free = true`
+relies on. A parameter that appears in `initial_conditions` and in no rate and
+in no observation model reaches the likelihood through this path and no other.
+
+PGAS instead draws a genuinely stochastic initial state
+($S_0 \sim \text{Binomial}(N_0, s_0)$) because its Gibbs step needs a tractable
+initial-state _density_ $p(x_0 \mid \theta)$ in the complete-data likelihood;
+see "IVP parameters (s0, e0)" below. IF2 needs only a draw, so it uses the
+model's own (deterministic) initial-condition expressions evaluated at each
+particle's parameters.
 
 ---
 
