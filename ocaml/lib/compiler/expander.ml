@@ -3397,6 +3397,91 @@ let check_index_arity ctx ~loc ~kind ~name ~declared ~provided : bool =
     false
   end
 
+(** The index token the user WROTE, before env substitution. [None] for an
+    index item that is not a plain identifier.
+
+    Diagnostics are de-duplicated on (file, line, code, message) with the hint
+    outside that key, so a hint built from the per-instantiation substitution
+    would vary across the 8 instantiations of `infection[a in age, p in patch,
+    r in risk]` and `sort_uniq` would keep an arbitrary one. What the user
+    wrote is instantiation-invariant. *)
+let index_item_source_str item : string option =
+  match item with
+  | IPosn (EIdent (s, _)) | INamed (_, EIdent (s, _)) -> Some s
+  | IPosn _ | INamed (_, _) -> None
+
+(** The binder in [env] that ranges over dimension [d], if it can be named
+    unambiguously. [env] maps binder → the level it is bound to at this
+    instantiation, so the dimension is recovered by asking which axis owns that
+    level — sound only when the level belongs to exactly one declared
+    dimension, and when exactly one binder is bound into [d]. Both guards
+    matter: `age = [low, high]` and `risk = [low, high]` would otherwise let a
+    binder be attributed to the wrong axis, and a hint that names the wrong
+    binder is the defect gh#493 is about. *)
+let binder_over_dim ctx env d : string option =
+  let levels = dim_levels_or_empty ctx d in
+  let owns_uniquely lvl =
+    1 = List.length (List.filter (fun (_, ls) -> List.mem lvl ls) ctx.dim_registry)
+  in
+  match List.filter (fun (_, v) -> List.mem v levels && owns_uniquely v) env with
+  | [(binder, _)] -> Some binder
+  | _             -> None
+
+(** E287's hint (gh#493). Both suggested forms must COMPILE — a hint whose
+    suggestion re-triggers the error it is fixing is worse than no hint.
+
+    The old text failed that three ways on `I[a]` where `I : [age, patch,
+    risk]`: it suggested `I[age, patch, risk]` (dimension NAMES where levels or
+    bound index variables belong — `E263: 'age' is not a level of dimension
+    'age'`), it marginalized `age` (the one axis the user DID index, not one of
+    the dropped ones), and its `I[age, s]` gave 2 indices for a 3-axis
+    compartment, re-triggering E287.
+
+    Two forms are offered:
+
+    - **index all** — the user's own tokens for the axes they indexed, and for
+      each dropped axis the binder already in scope for it, falling back to
+      `<dim>` when there is none. Inside
+      `infection[a in age, p in patch, r in risk]` this is `I[a, p, r]`, which
+      is almost always the intended fix.
+    - **marginalize** — one flat `sum` binding EVERY dropped axis (the flat
+      multi-binder form is sugar for the nested one, C2), because binding only
+      the first would leave the rest unindexed and re-trigger E287.
+
+    Marginalize binders avoid every name in scope and every declared global, so
+    the suggestion cannot itself trip E283. *)
+let partial_index_hint ctx env ~base ~items ~dropped : string =
+  let written = List.map (fun it ->
+    match index_item_source_str it with
+    | Some s -> s
+    | None   -> "…") items in
+  let fill d = match binder_over_dim ctx env d with
+    | Some b -> b
+    | None   -> "<" ^ d ^ ">" in
+  let all_form =
+    Printf.sprintf "%s[%s]" base
+      (String.concat ", " (written @ List.map fill dropped)) in
+  (* Fresh binder per dropped axis: the dim's initial, then initial+digit. *)
+  let taken = ref (written @ List.map fst env) in
+  let fresh d =
+    let stem = String.make 1 (Char.lowercase_ascii d.[0]) in
+    let rec pick cand n =
+      if List.mem cand !taken || declared_global_kind ctx cand <> None
+      then pick (Printf.sprintf "%s%d" stem n) (n + 1)
+      else (taken := cand :: !taken; cand)
+    in pick stem 1 in
+  let binders = List.map (fun d -> (fresh d, d)) dropped in
+  let sum_form =
+    Printf.sprintf "sum(%s, %s[%s])"
+      (String.concat ", "
+         (List.map (fun (v, d) -> Printf.sprintf "%s in %s" v d) binders))
+      base
+      (String.concat ", " (written @ List.map fst binders)) in
+  Printf.sprintf
+    "index every dimension — `%s` — or marginalize the dropped one%s \
+     explicitly with `%s`"
+    all_form (if List.length dropped = 1 then "" else "s") sum_form
+
 let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
   match e with
   | EConst f     -> Ir.Const f
@@ -3570,19 +3655,13 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       let dims_str = String.concat ", " comp_dim_list in
       (* the dropped dimensions are the suffix beyond what the user indexed *)
       let dropped = List.filteri (fun i _ -> i >= n_items) comp_dim_list in
-      let one_dropped = match dropped with [d] -> d | _ -> List.hd comp_dim_list in
       Diagnostics.error ctx.diags
         ~code:"E287" ~loc:idx_loc
         ~message:(Printf.sprintf
           "compartment '%s' has dimensions [%s] but only %d of %d were indexed; \
            a partial index has no defined cell"
           base_name dims_str n_items n_dims)
-        ~hint:(Printf.sprintf
-          "index all dimensions (e.g. `%s[%s]`), or marginalize a dimension \
-           explicitly with `sum(s in %s, %s[%s, s])`"
-          base_name dims_str
-          one_dropped base_name
-          (String.concat ", " (List.filteri (fun i _ -> i < n_items) comp_dim_list)))
+        ~hint:(partial_index_hint ctx env ~base:base_name ~items ~dropped)
         ();
       Ir.Const 0.0  (* placeholder — keep collecting diagnostics this pass *)
     end
