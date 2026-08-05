@@ -637,7 +637,8 @@ exponential time.
 2. Update OCaml types in `ocaml/lib/ir/` (ir.ml, serialize.ml, deserialize.ml)
 3. Update Rust types in `rust/crates/ir/src/`
 4. `make test-fast` — fix type errors (then full `make test` before the commit)
-5. `make update-golden && make update-expected` — regenerate all golden files
+5. `make update-golden` — regenerate all golden files, then re-capture any gate
+   baseline the changed fixtures feed with `CAMDL_CAPTURE_BASELINE=1`
 6. Commit schema + both language changes + updated golden files in one atomic
    commit
 
