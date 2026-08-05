@@ -16,32 +16,35 @@ Reference surfaces:
   `blocker`/`upstream-audit`). One `kind/`, ≥1 `area/` per issue.
 - `docs/dev/issue-triage-tiers.md` — the S/M/L + dup/stale/s-class reduction
   discipline.
-- `docs/dev/dashboard/build.py` — the live dashboard (kind×area heat map, blocker
-  path, external cohort, momentum trend).
+- `docs/dev/dashboard/build.py` — the live dashboard (kind×area heat map,
+  blocker path, external cohort, momentum trend).
 
 ## Procedure
 
 1. **Rebase on current main — fetch FIRST.** The maintainer pushes often, so a
-   local `origin/main` ref goes stale fast; always `git fetch origin` immediately
-   before rebasing, then rebase the working branch (verify ff-ready). Mine the
-   new-commit delta since last triage for closures:
+   local `origin/main` ref goes stale fast; always `git fetch origin`
+   immediately before rebasing, then rebase the working branch (verify
+   ff-ready). Mine the new-commit delta since last triage for closures:
    `git log <prev>..origin/main`, grep `gh#NN`.
 
 2. **Classify the unclassified.** Find open issues missing a `kind/` or `area/`
-   label; read each (never label from the title alone); apply exactly one `kind/`
-   + at least one `area/` (`gh issue edit N --add-label …`).
+   label; read each (never label from the title alone); apply exactly one
+   `kind/`
+   - at least one `area/` (`gh issue edit N --add-label …`).
 
-3. **Audit for stale/fixed — conservatively, against CODE.** For issues plausibly
-   addressed by landed work, verify against current main with a concrete mechanism
-   (commit SHA / file:line / passing test) — NEVER trust a commit message.
-   Subagents are good here (one per issue or small cluster, read-only). Default is
-   KEEP; CLOSE only when the full ask is met with evidence; a **blocker** CLOSEs
-   only with a fix *and* a pinning test. Distinguish "the forward thing changed"
-   from "the inference thing changed" — different claims (e.g. real-flow ODE
-   forward sim ≠ real-compartment inference).
+3. **Audit for stale/fixed — conservatively, against CODE.** For issues
+   plausibly addressed by landed work, verify against current main with a
+   concrete mechanism (commit SHA / file:line / passing test) — NEVER trust a
+   commit message. Subagents are good here (one per issue or small cluster,
+   read-only). Default is KEEP; CLOSE only when the full ask is met with
+   evidence; a **blocker** CLOSEs only with a fix _and_ a pinning test.
+   Distinguish "the forward thing changed" from "the inference thing changed" —
+   different claims (e.g. real-flow ODE forward sim ≠ real-compartment
+   inference).
 
-4. **Present close candidates — do NOT close.** Print a NUMBERED list, each with a
-   2-3 sentence draft close comment citing the evidence. On the maintainer's nod:
+4. **Present close candidates — do NOT close.** Print a NUMBERED list, each with
+   a 2-3 sentence draft close comment citing the evidence. On the maintainer's
+   nod:
    `gh issue comment N --body-file f.md && gh issue close N --reason completed`.
    External-reporter closes especially warrant their eyes.
 
@@ -66,8 +69,8 @@ Reference surfaces:
   issues; a `#NN` = re-audit just that issue.
 - Full backlog pull:
   `gh issue list --state open --limit 500 --json number,title,labels,author`.
-- Merge gate for any code fix this triage produces: full `make test` (includes the
-  cross-language integration phase, which catches CAS-path regressions scoped
-  `cargo test` misses), then ff-merge.
-- This is read-mostly: it labels and reports. The only writes are label edits and
-  maintainer-approved closes — it changes no code on its own.
+- Merge gate for any code fix this triage produces: full `make test` (includes
+  the cross-language integration phase, which catches CAS-path regressions
+  scoped `cargo test` misses), then ff-merge.
+- This is read-mostly: it labels and reports. The only writes are label edits
+  and maintainer-approved closes — it changes no code on its own.
