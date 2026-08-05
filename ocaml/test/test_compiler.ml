@@ -6248,6 +6248,120 @@ let test_unknown_reduction_dim_reports_once () =
       (Printf.sprintf "exactly one E263 for one typo, got: %s" e)
       1 (count_codes 0 0)
 
+(* ── Increment A6: a DECLARATION binder over an undeclared dimension ────────
+   gh#488 covered the `sum` binder. The same typo in a declaration's index
+   binder — `infection[a in aeg]` — was the remaining hole, and the symptom
+   was the mangled name again:
+
+     error[E100]: undeclared name 'I_a'
+      7│   infection[a in aeg] : S[a] --> I[a] @ beta * S[a] * I[a]
+       │                                                       ~~~^
+     error[E100]: undeclared name 'S_a'
+
+   `cartesian_product` drops an axis with no levels, so the declaration
+   expanded as if it were UNINDEXED, `a` was never bound, and `S[a]` mangled
+   to the literal `S_a` — an identifier the user never wrote, and one they
+   cannot act on. Two errors, neither naming the typo.
+
+   The check goes at `cartesian_product`, the one place that sees every index
+   binder of every construct that carries one, and it returns NO
+   instantiations so the body is never resolved — which is what makes the
+   E263 REPLACE the E100s rather than join them. *)
+let undeclared_binder_dim_src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate in [0,2] }
+    transitions {
+      infection[a in aeg] : S[a] --> I[a] @ beta * S[a] * I[a]
+    }
+    init { S[child]=99 I[child]=1 S[adult]=100 }
+    simulate { from = 0 'days to = 10 'days }
+  |}
+
+let test_a6_undeclared_binder_dim_is_rejected () =
+  compile_expect_error_code ~code:"E263"
+    ~contains:"'aeg' is not a declared dimension" undeclared_binder_dim_src
+
+(* The mangled names must be gone, not merely accompanied by a better error —
+   they are the whole complaint. *)
+let test_a6_no_mangled_name_survives () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"a6" undeclared_binder_dim_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E263 but compile succeeded"
+  | Error e ->
+    Alcotest.(check bool)
+      (Printf.sprintf "no diagnostic names 'S_a' or 'I_a', got: %s" e)
+      false (contains_substring ~needle:"S_a" e
+             || contains_substring ~needle:"I_a" e)
+
+(* The worse face of the same hole, and the reason this is a narrowing rather
+   than a message fix. When the body never MENTIONS the binder, dropping the
+   axis produced no E100 at all: the model compiled clean and expanded to ONE
+   transition where the author asked for a family.
+
+     $ camdlc check a6_silent.camdl
+       ✓ no errors, 0 warnings
+     $ camdlc a6_silent.camdl | jq '.model.transitions[].name'
+       "infection"                       ← not infection_child, infection_adult
+
+   A stratified model quietly running one unstratified transition is exactly
+   the plausible-looking wrong answer the project treats as the worst outcome.
+   No diagnostic anywhere. *)
+let test_a6_silently_unstratified_family_is_rejected () =
+  compile_expect_error_code ~code:"E263"
+    ~contains:"'aeg' is not a declared dimension" {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    parameters { beta : rate in [0,2] }
+    transitions {
+      infection[a in aeg] : S --> I @ beta * S
+    }
+    init { S = 99 I = 1 }
+    simulate { from = 0 'days to = 10 'days }
+  |}
+
+(* The seam is shared, so a construct other than `transitions` must be covered
+   by the same check — `init` here. A transition-only fix would pass the two
+   cases above and leave every other binder site as it was. *)
+let test_a6_covers_other_index_binders () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate in [0,2] }
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * I[a]
+    }
+    init { S[a in aeg] = 100  I[child] = 1 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  compile_expect_error_code ~code:"E263"
+    ~contains:"'aeg' is not a declared dimension" src
+
+(* Negative control: the ordinary declared-axis case must still expand. The
+   check keys on "not declared" (`dim_values … = None`), never on "no levels" —
+   a DECLARED axis that happens to have none is a different condition and keeps
+   its old behaviour of dropping out of the product. *)
+let test_a6_declared_dimension_still_compiles () =
+  ignore (compile_expect_ok {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate in [0,2] }
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * I[a]
+    }
+    init { S[a in age] = 100  I[child] = 1 }
+    simulate { from = 0 'days to = 10 'days }
+  |})
+
 (* The observation-projection path resolves `sum(...)` in its own walk
    (`explicit_incidence_sum`), not through `resolve_expr`, so it needs the same
    check or gh#488 survives in the position where it does the most damage.
@@ -11741,6 +11855,11 @@ let () =
       Alcotest.test_case "E263: unknown dimension in a reduction (gh#488)" `Quick test_unknown_dimension_in_sum_is_rejected;
       Alcotest.test_case "E263 on a reduction is located at the binder" `Quick test_unknown_dimension_in_sum_is_located;
       Alcotest.test_case "one typo, one E263 (A2 replaces the stride-site one)" `Quick test_unknown_reduction_dim_reports_once;
+      Alcotest.test_case "A6: E263 for a DECLARATION binder's undeclared axis" `Quick test_a6_undeclared_binder_dim_is_rejected;
+      Alcotest.test_case "A6: no mangled `S_a` / `I_a` survives" `Quick test_a6_no_mangled_name_survives;
+      Alcotest.test_case "A6: the silently-unstratified family is rejected" `Quick test_a6_silently_unstratified_family_is_rejected;
+      Alcotest.test_case "A6: the check covers non-transition binders too" `Quick test_a6_covers_other_index_binders;
+      Alcotest.test_case "A6: a declared axis still expands (negative control)" `Quick test_a6_declared_dimension_still_compiles;
       Alcotest.test_case "E263: unknown dimension in a PROJECTION sum (gh#488)" `Quick test_unknown_dimension_in_projection_sum_is_rejected;
       Alcotest.test_case "declared axis in a projection sum still lowers to the flow sum" `Quick test_declared_dimension_in_projection_sum_compiles;
       Alcotest.test_case "a where guard that empties the domain still compiles" `Quick test_empty_guard_domain_still_compiles;

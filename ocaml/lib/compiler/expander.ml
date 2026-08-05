@@ -4341,15 +4341,56 @@ let infer_origin_kind src_opt dst_opt rate =
 
 (* ── Cartesian product of index bindings ─────────────────────────────────── *)
 
-let cartesian_product ibs ctx =
+(** Increment A6: a declaration's index binder over an axis that is not a
+    declared dimension. [cartesian_product] used to drop such an axis, so the
+    declaration expanded as if it were UNINDEXED, the binder was never bound,
+    and the body's `S[a]` mangled to the literal `S_a`:
+
+      infection[a in aeg] : S[a] --> I[a] @ beta * S[a] * I[a]
+      → error[E100]: undeclared name 'I_a'
+        error[E100]: undeclared name 'S_a'
+
+    Two diagnostics, neither naming the typo, both naming identifiers the user
+    never wrote and cannot act on.
+
+    Checked here because [cartesian_product] is the ONE place that sees every
+    index binder of every construct that carries one — transitions, `let`s,
+    init entries, observations, interventions, events, forcings, reactive
+    interventions, quantities. Returning NO instantiations is what makes this
+    REPLACE the E100s rather than join them: the body is never resolved, so
+    nothing mangles. Same shape as A2 (gh#488) for the `sum` binder.
+
+    Keys on "not declared" ([dim_values … = None]), never on "no levels": a
+    DECLARED axis that happens to have none keeps its old behaviour of dropping
+    out of the product. *)
+let undeclared_binder_dims ctx ibs =
+  List.filter_map (fun ib ->
+    match ib with
+    | IBind (_, d) | IConsec (_, _, d) ->
+      if dim_values ctx d = None then Some d else None
+    | IComp _ -> None) ibs
+
+let cartesian_product ?(loc = Diagnostics.no_loc) ibs ctx =
+  match undeclared_binder_dims ctx ibs with
+  | (_ :: _) as bad ->
+    List.iter (fun d ->
+      Diagnostics.error ctx.diags
+        ~code:"E263" ~loc
+        ~message:(Printf.sprintf "'%s' is not a declared dimension" d)
+        ~hint:(Printf.sprintf
+          "the index binder `… in %s` needs a dimension; declare it in \
+           `dimensions { %s = [...] }`, or correct the name — declared \
+           dimensions: %s"
+          d d
+          (match List.map fst ctx.dim_registry with
+           | [] -> "(none)"
+           | ds -> String.concat ", " ds))
+        ()) bad;
+    []   (* no instantiations: the body is never resolved, so nothing mangles *)
+  | [] ->
   let axes = List.filter_map (fun ib ->
     match ib with
     | IBind (v, d) ->
-      (* An undeclared index axis drops out of the product, so the declaration
-         expands as if it were unindexed and its body's `[a]` references fail
-         to resolve (E100 on the unexpanded name). That diagnostic names an
-         identifier the user never wrote; improving it is A6 of the
-         aggregation-semantics proposal, not A1. *)
       let vals = dim_levels_or_empty ctx d in
       if vals = [] then None
       else Some (List.map (fun vv -> [(v, vv)]) vals)
@@ -4433,7 +4474,8 @@ let expand_transition_name ctx tname : string list option =
   match List.find_opt (fun tr -> tr.trname = tname) ctx.transitions with
   | None -> None
   | Some tr ->
-    let combos = cartesian_product tr.trindices ctx in
+    let combos =
+      cartesian_product ~loc:(diag_loc_of_ast_ctx ctx tr.trloc) tr.trindices ctx in
     let names =
       List.concat_map (fun env ->
         let pass_guard = match tr.trguard with
@@ -4613,7 +4655,8 @@ let resolve_lineage (ctx : context) (tr : Ast.transition_decl)
 let expand_transitions_counted ctx =
   let filtered = ref 0 in
   let expanded = List.concat_map (fun tr ->
-    let combos = cartesian_product tr.trindices ctx in
+    let combos =
+      cartesian_product ~loc:(diag_loc_of_ast_ctx ctx tr.trloc) tr.trindices ctx in
     let tr_filtered = ref 0 in
     let results = List.map (fun env ->
       let pass_guard = match tr.trguard with
@@ -5633,7 +5676,8 @@ let expand_init ctx =
       add_entry concrete_name resolved
     end else begin
       (* Loop binding form *)
-      let combos = cartesian_product ie.ibindings ctx in
+      let combos =
+        cartesian_product ~loc:(diag_loc_of_ast_ctx ctx ie.iloc) ie.ibindings ctx in
       List.iter (fun env ->
         let parts = name_parts_from_bindings ie.ibindings env in
         let concrete_name =
@@ -6552,6 +6596,8 @@ let expand_time_functions ctx : Ir.time_function list * (string * float) list =
       if fd.findices = [] then
         [expand_time_function_one ctx fd.fname [] fd.findices fd.fkind fd.funit fd.fargs]
       else begin
+        (* `func_decl` carries no loc, so an undeclared forcing-index axis
+           reports unlocated. The message still names the axis. *)
         let combos = cartesian_product fd.findices ctx in
         List.map (fun env ->
           let parts = name_parts_from_bindings fd.findices env in
@@ -6848,7 +6894,8 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
       []
     end else begin
     let base_name = if iv.ivindices = [] then None else Some iv.ivname in
-    let combos = cartesian_product iv.ivindices ctx in
+    let combos =
+      cartesian_product ~loc:(diag_loc_of_ast_ctx ctx iv.ivloc) iv.ivindices ctx in
     List.filter_map (fun env ->
       let pass_guard = match iv.ivguard with
         | None   -> true
@@ -7090,7 +7137,7 @@ let expand_reactive ctx decls =
   List.concat_map (fun (rx : reactive_decl) ->
     let rx_loc = diag_loc_of_ast_ctx ctx rx.rxloc in
     let base_name = if rx.rxindices = [] then None else Some rx.rxname in
-    let combos = cartesian_product rx.rxindices ctx in
+    let combos = cartesian_product ~loc:rx_loc rx.rxindices ctx in
     List.filter_map (fun env ->
       let pass_guard = match rx.rxguard with
         | None   -> true
@@ -7321,7 +7368,7 @@ let expand_observations ctx =
         ) dim_cols
       end
     in
-    let combos = cartesian_product od.oindices ctx in
+    let combos = cartesian_product ~loc:od_loc od.oindices ctx in
     (* If no indices, combos = [[]] — one iteration with empty env *)
     List.filter_map (fun env ->
     let t_start = match ctx.simulate with
@@ -8266,7 +8313,7 @@ let expand_quantities ctx =
       []
     | None ->
       Hashtbl.add seen name ();
-      let combos = cartesian_product qd.qd_indices ctx in
+      let combos = cartesian_product ~loc:qd_loc qd.qd_indices ctx in
       (* Classify each cell; defer registering into [declared] until the whole
          declaration is done (sibling cells are not prior to one another). *)
       let cells = List.filter_map (fun env ->
@@ -9195,7 +9242,8 @@ let expand_scenarios ctx : Ir.preset list =
     let t = Hashtbl.create (List.length ctx.interv_decls) in
     List.iter (fun (iv : intervention_decl) ->
       Hashtbl.replace t iv.ivname ();
-      let combos = cartesian_product iv.ivindices ctx in
+      let combos =
+      cartesian_product ~loc:(diag_loc_of_ast_ctx ctx iv.ivloc) iv.ivindices ctx in
       List.iter (fun env ->
         let pass_guard = match iv.ivguard with
           | None   -> true
