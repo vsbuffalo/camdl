@@ -289,6 +289,81 @@ fn ir_per_eval_bindings_changes_hash() {
     );
 }
 
+// ── gh#442: the presentation strip, and why moving it did not re-key sim/fit ──
+
+/// gh#442 moved the presentation strip from the caller
+/// (`cli::resolve::model_digest`, which did `from_model(&normalize(m))`) into
+/// `ModelDigest::from_model` itself (which now does `from_model(m)` =
+/// `content_hash(normalize(m))`). The two agree **iff** the normalizer is
+/// idempotent — and it is, because it assigns a constant rather than
+/// transforming.
+///
+/// That is the whole no-collateral-re-key argument, made executable: the RHS
+/// below (`from_model(&normalize(m))`) is *literally the pre-gh#442 sim/fit code
+/// path*, so equality proves those two kinds' bytes did not move. If someone
+/// later makes normalization non-idempotent (e.g. appends instead of assigns),
+/// the double-normalize the sim/fit callers used to perform would silently
+/// re-key them — this test is the tripwire.
+#[test]
+fn normalization_is_idempotent_and_sim_fit_bytes_unchanged() {
+    use crate::inputs::{normalize_for_hash, EngineVersion, ModelDigest};
+
+    // The fixture carries non-default presentation fields (`format = "tsv"`,
+    // `time_semantics = "continuous"`), so this is not vacuous.
+    let m = representative_model();
+    assert!(!m.output.format.is_empty() && !m.simulation.time_semantics.is_empty());
+
+    let digest = |model: &Model| {
+        ModelDigest::from_model(model, "0.7".into(), EngineVersion("0.3.0".into())).content_hash()
+    };
+    assert_eq!(
+        digest(&normalize_for_hash(&m)),
+        digest(&m),
+        "pre-gh#442 (caller normalizes, then from_model) and post-gh#442 (from_model \
+         normalizes) must produce IDENTICAL bytes — else gh#442 collaterally re-keyed \
+         sim and fit, which it is NOT sanctioned to do"
+    );
+
+    // The property that makes the above true, asserted directly.
+    assert_eq!(
+        normalize_for_hash(&normalize_for_hash(&m)).content_hash(),
+        normalize_for_hash(&m).content_hash(),
+        "normalize_for_hash must be idempotent"
+    );
+
+    // Non-vacuous: the strip actually does something on this fixture.
+    assert_ne!(
+        normalize_for_hash(&m).content_hash(),
+        m.content_hash(),
+        "the fixture must carry presentation fields the strip removes, else the \
+         idempotence assertions above prove nothing"
+    );
+}
+
+/// gh#442: the two presentation fields are inert in the model digest, and each
+/// one on its own — a half-fix (one field stripped, the other not) must fail.
+#[test]
+fn presentation_fields_are_inert_in_the_model_digest() {
+    use crate::inputs::{EngineVersion, ModelDigest};
+    let digest = |model: &Model| {
+        ModelDigest::from_model(model, "0.7".into(), EngineVersion("0.3.0".into())).content_hash()
+    };
+    let base = digest(&representative_model());
+
+    let mut fmt = representative_model();
+    fmt.output.format = "parquet".into();
+    assert_eq!(base, digest(&fmt), "output.format must be inert in the model digest");
+
+    let mut ts = representative_model();
+    ts.simulation.time_semantics = "calendar".into();
+    assert_eq!(base, digest(&ts), "simulation.time_semantics must be inert");
+
+    // Negative control: a structural edit is NOT inert.
+    let mut renamed = representative_model();
+    renamed.name = "different".into();
+    assert_ne!(base, digest(&renamed), "a model rename must move the model digest");
+}
+
 /// Model identity is gradient-independent (proposal
 /// 2026-07-16-gradient-maps-out-of-run-identity.md): `rate_state_grad`
 /// (∂rate/∂compartment, `J_x`, gh#275) is compiler-derived autodiff of `rate`, so

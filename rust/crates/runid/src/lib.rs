@@ -42,8 +42,11 @@
 //!   semantic input, or an output subset that changes the leaf's bytes) belongs
 //!   in identity: a content-addressed leaf cannot share a `run_id` with one
 //!   whose bytes differ. A pure *re-encoding* of the same values (format, time
-//!   rendering) is presentation — strip it in `resolve::normalize_for_hash` so
-//!   it stays inert (see `output.format`).
+//!   rendering) is presentation — strip it in `inputs::normalize_for_hash`,
+//!   which [`inputs::model_ir_hash`] (and therefore
+//!   [`inputs::ModelDigest::from_model`]) applies on **every** identity path,
+//!   so a new artifact kind cannot silently opt out (gh#442; see
+//!   `output.format`). Never re-implement the strip at a call site.
 //! - **Expect turnover.** Adding a field to a `RunInput` struct re-keys *every*
 //!   existing leaf of that kind, even at its default value (the field always
 //!   contributes bytes). That is intentional, versioned turnover — not a bug to

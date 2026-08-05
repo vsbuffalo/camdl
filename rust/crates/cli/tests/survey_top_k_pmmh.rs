@@ -52,19 +52,14 @@ fn tempdir(tag: &str) -> Tmp {
     Tmp(base)
 }
 
-/// Replicate `crate::resolve::model_identity_from_ir` for the integration test:
-/// the structural `runid` model content hash (presentation-normalized),
-/// hex-encoded. Kept inline because the test binary can't reach the cli crate's
-/// private modules; it uses the same `ir` + `runid` crates the production helper
-/// does, so the forged survey `run.json` carries an identity the fit accepts.
+/// `crate::resolve::model_identity_from_ir` for the integration test — the test
+/// binary can't reach the cli crate's private modules, but it calls the SAME
+/// `runid::inputs::model_ir_hash` the production helper does (gh#442), not a
+/// hand-rolled copy of the presentation strip, so the forged survey `run.json`
+/// carries an identity the fit accepts by construction.
 fn model_identity_for_test(ir_json: &str) -> String {
-    use runid::ContentAddressed;
-    let mut model: ir::Model =
-        ir::from_str(ir_json).expect("model_identity_for_test: invalid IR");
-    // Mirror `resolve::normalize_for_hash` — strip presentation-only fields.
-    model.output.format = String::new();
-    model.simulation.time_semantics = String::new();
-    model.content_hash().to_hex()
+    let model: ir::Model = ir::from_str(ir_json).expect("model_identity_for_test: invalid IR");
+    runid::inputs::model_ir_hash(&model).to_hex()
 }
 
 fn sha256_hex_of_file(path: &Path) -> String {
