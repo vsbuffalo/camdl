@@ -570,11 +570,14 @@ table_decl_sep:
 
 table_decl:
   | names = separated_nonempty_list(COMMA, IDENT) COLON dims = table_dims_nonempty COLON kind = param_kind EQ v = expr
-      { { tnames = names; tdims = dims; tcell_kind = Some kind; tvalue = v } }
+      { { tnames = names; tdims = dims; tcell_kind = Some kind; tvalue = v;
+          tloc = Parser_errors.ast_loc_of ~sp:$startpos(dims) ~ep:$endpos(dims) } }
   | names = separated_nonempty_list(COMMA, IDENT) COLON dims = table_dims_nonempty EQ v = expr
-      { { tnames = names; tdims = dims; tcell_kind = None; tvalue = v } }
+      { { tnames = names; tdims = dims; tcell_kind = None; tvalue = v;
+          tloc = Parser_errors.ast_loc_of ~sp:$startpos(dims) ~ep:$endpos(dims) } }
   | name = IDENT EQ v = expr
-      { { tnames = [name]; tdims = []; tcell_kind = None; tvalue = v } }
+      { { tnames = [name]; tdims = []; tcell_kind = None; tvalue = v;
+          tloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos(name) } }
 
 (* Dimension-product separator. The canonical form is the Unicode `×` (CROSS);
    the ASCII `*` (STAR) is accepted as a hand-typeable alias so a model can be

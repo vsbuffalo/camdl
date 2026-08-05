@@ -154,6 +154,11 @@ type table_decl = {
   tdims      : table_dim_entry list;
   tcell_kind : param_type option;     (* optional cell-type annotation: rate, probability, ... (gh#32) *)
   tvalue     : expr;
+  (* Span of the declared axis list (`age × aeg`), or of the name for the
+     dimensionless form. gh#490: an undeclared axis is diagnosed here, at the
+     declaration, and the caret has to land on the axes rather than on the
+     whole declaration — an inline table's value runs to many lines. *)
+  tloc       : loc;
 }
 
 (** A stoichiometry reference: compartment name + optional indices *)

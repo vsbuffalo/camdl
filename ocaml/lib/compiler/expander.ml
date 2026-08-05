@@ -58,6 +58,13 @@ type context = {
   mutable dim_decls       : dimensions_entry list;
   mutable dim_registry    : (string * string list) list;
   (* dim name → ordered levels; populated by resolve_dimensions pass *)
+  mutable reported_undeclared_dims : (string, unit) Hashtbl.t;
+  (* gh#490: dimension names already reported by the "'X' is not a declared
+     dimension" face of E263. One undeclared name is ONE mistake, so it gets
+     one diagnostic — at the table declaration, which [check_table_dimensions]
+     reaches first — and the downstream index-site report in [dim_value_index]
+     stands down. Without this the A1 model (a table over a phantom axis that
+     is also indexed) reports the same sentence twice against two spans. *)
   mutable origin          : string option;
   (* ISO date string for date() → float conversion *)
   (* O(1) lookup tables — populated by build_lookup_tables after resolve_dimensions *)
@@ -149,6 +156,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   expanded_comp_cache  = [];
   dim_decls            = [];
   dim_registry         = [];
+  reported_undeclared_dims = Hashtbl.create 8;
   origin               = None;
   let_tbl              = Hashtbl.create 16;
   comp_tbl             = Hashtbl.create 16;
@@ -199,6 +207,34 @@ let dim_values ctx dim : string list option =
     undeclared case pattern-match [dim_values] directly instead. *)
 let dim_levels_or_empty ctx dim : string list =
   Option.value ~default:[] (dim_values ctx dim)
+
+(** Emit the "'X' is not a declared dimension" face of E263, ONCE per distinct
+    name (gh#490). One undeclared axis is one mistake; it can be seen from
+    several places (the table that declares it, every index into that table,
+    a forcing's `time_dim`), and reporting each would give one typo a
+    diagnostic per use site. The first site to see it wins — pass ordering
+    puts [check_table_dimensions] ahead of expression resolution, so the
+    declaration's span is the one the user gets.
+
+    Returns whether it emitted, so a caller that wants to change its own
+    recovery based on "already reported" can ask without a second lookup. *)
+let report_undeclared_dim ctx ~loc dim : bool =
+  if Hashtbl.mem ctx.reported_undeclared_dims dim then false
+  else begin
+    Hashtbl.replace ctx.reported_undeclared_dims dim ();
+    Diagnostics.error ctx.diags
+      ~code:"E263" ~loc
+      ~message:(Printf.sprintf "'%s' is not a declared dimension" dim)
+      ~hint:(Printf.sprintf
+        "declare it in `dimensions { %s = [...] }`, or correct the name — \
+         declared dimensions: %s"
+        dim
+        (match List.map fst ctx.dim_registry with
+         | [] -> "(none)"
+         | ds -> String.concat ", " ds))
+      ();
+    true
+  end
 
 (* ── Model summary ────────────────────────────────────────────────────────── *)
 
@@ -2297,6 +2333,37 @@ let build_lookup_tables ctx =
 let dim_name_of_entry = function
   | TDim d | TDimUnit (d, _) -> d
 
+(** gh#490: every axis a table declares must be a declared dimension.
+
+    Before this, an undeclared axis was caught only downstream, at a USE site,
+    and only for some uses — [dim_value_index] reports it when the table is
+    indexed with a level in the bad axis, but a table never indexed on that
+    axis compiled clean. Two consequences fell out of the silence:
+
+    - [table_source_of_expr]'s E202 cell-count check skips any table with a
+      zero-size dim, so the value list was never checked against the (wrong)
+      shape either.
+    - A forcing whose `time_dim` is the phantom axis lowered to an
+      `Interpolated` with ZERO knots (gh#491), since [table_backed_knots]
+      builds one knot per level. That interpolates to 0 everywhere, and only
+      the Rust loader rejected it — loudly, but late and with no source span.
+
+    The declaration is where the mistake is fully determined and where the
+    span is exact, so it is diagnosed here and every downstream partial catch
+    becomes redundant (see [report_undeclared_dim] for the dedupe).
+
+    Runs after [resolve_dimensions] — it reads the registry the pass builds —
+    and before any table is resolved. *)
+let check_table_dimensions ctx =
+  List.iter (fun td ->
+    let loc = diag_loc_of_ast_ctx ctx td.tloc in
+    List.iter (fun de ->
+      let dim = dim_name_of_entry de in
+      if dim_values ctx dim = None then
+        ignore (report_undeclared_dim ctx ~loc dim : bool)
+    ) td.tdims
+  ) ctx.table_decls
+
 (** Extract the unit literal from a table's dim list, if any.
     Spec §6.1 permits at most one unit annotation per table (the annotation
     is logically on the value, not on a particular dim); parser grammar
@@ -2374,23 +2441,18 @@ let table_dims ctx tname : string list option =
     axis that does not exist. Naming the undeclared dimension is possible only
     because [dim_values] distinguishes it from a declared-but-empty one.
 
+    Since gh#490 the undeclared face routes through [report_undeclared_dim], so
+    an axis already named at its table declaration is not re-reported here: the
+    declaration is the better span, and one typo earns one diagnostic. The arm
+    still fires on its own for an undeclared dim no table declares — a shaped
+    `let`'s index dims reach this function too.
+
     Levenshtein-distance "did you mean" hinting is possible but not
     implemented here — the levels list is small enough to eyeball. *)
 let dim_value_index ctx ~loc dim_name value_name =
   match dim_values ctx dim_name with
   | None ->
-    Diagnostics.error ctx.diags
-      ~code:"E263" ~loc
-      ~message:(Printf.sprintf
-        "'%s' is not a declared dimension" dim_name)
-      ~hint:(Printf.sprintf
-        "declare it in `dimensions { %s = [...] }`, or correct the name — \
-         declared dimensions: %s"
-        dim_name
-        (match List.map fst ctx.dim_registry with
-         | [] -> "(none)"
-         | ds -> String.concat ", " ds))
-      ();
+    ignore (report_undeclared_dim ctx ~loc dim_name : bool);
     0.0
   | Some values ->
     let rec find i = function
@@ -9669,6 +9731,11 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
   check_origin ctx;
   (* Pass 1: resolve dimensions {} block, build dim_registry *)
   resolve_dimensions ctx;
+  (* gh#490: E263 for a table axis that is not a declared dimension. Runs
+     here — right after the registry exists, ahead of every use site — so the
+     diagnostic lands on the declaration and [report_undeclared_dim] can stand
+     the downstream index-site report down. *)
+  check_table_dimensions ctx;
   (* gh#117: reject duplicate-within-namespace and cross-namespace
      declaration names (both base AND fully-expanded/stratified names),
      naming both declarations. Runs after resolve_dimensions (so expanded
