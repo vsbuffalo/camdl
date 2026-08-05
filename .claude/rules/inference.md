@@ -69,7 +69,8 @@ The `Capabilities` bitflags (`rust/crates/sim/src/lib.rs`) are **one of three**
 compatibility axes — model-feature × backend.
 `CompiledModel::required_capabilities()` derives a model's needs from the IR (a
 DSL primitive: `overdispersed(...)`, `balance {}`, a real compartment, `dt` in a
-rate); each backend declares what it provides; mismatch → hard error at dispatch.
+rate); each backend declares what it provides; mismatch → hard error at
+dispatch.
 
 - `OVERDISPERSION`: `overdispersed(rate, σ²)` transitions require chain-binomial
   (NegBinomial draws). Gillespie and ODE reject these models with a hard error.
