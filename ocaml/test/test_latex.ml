@@ -206,6 +206,41 @@ let test_greek_fallback () =
   has_not ~doc:"no β override" "β" out;
   has_not ~doc:"no γ override" "γ" out
 
+(* gh#527. A `let` is the site where the auto-heuristic guesses worst: the name
+   is chosen for code (`Ntot`), while the paper writes it \Pi. `@symbol` was
+   harvested off compartments and parameters ONLY, so on a `let` it parsed, was
+   stored on `ldoc`, and was read nowhere — while the language spec and
+   docs/language-changes.md both said it worked. *)
+let let_symbol = {|
+time_unit = 'days
+compartments { S, I, R }
+#' total population — the force-of-infection denominator
+#' @symbol \Pi
+let Ntot = S + I + R
+parameters {
+  beta  : rate in [0.001, 2.0]
+  gamma : rate in [0.01, 1.0]
+}
+transitions {
+  infection : S --> I @ beta * S * I / Ntot
+  recovery  : I --> R @ gamma * I
+}
+init { S = 1000  I = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+let test_symbol_override_on_let () =
+  let out = render let_symbol in
+  has ~doc:"the let's @symbol on its definition LHS" "\\Pi" out;
+  (* The heuristic's own guess for `Ntot` (capital-then-lowercase -> N_{tot})
+     must be GONE, not merely accompanied. Without this the test passes with
+     the override still ignored, since \Pi would appear nowhere but the assert
+     above would have nothing to distinguish. The symbol also has to reach the
+     USE site inside the FOI, not just the definition's left-hand side —
+     every emission path routes through `comp_sym`, so one absent-check covers
+     both. *)
+  has_not ~doc:"heuristic split of the let name, anywhere" "N_{tot}" out
+
 (* Indexed refs render one merged subscript S_{r,a}, never S_{r}_{a}. *)
 let test_indexed_subscripts () =
   let out = render sir_stratified in
@@ -333,6 +368,8 @@ let () =
       ( "symbols",
         [ Alcotest.test_case "@symbol override + \\frac flattening" `Quick
             test_symbol_override_and_frac;
+          Alcotest.test_case "@symbol on a let (gh#527)" `Quick
+            test_symbol_override_on_let;
           Alcotest.test_case "greek fallback (negative control)" `Quick
             test_greek_fallback ] );
       ( "structure",
