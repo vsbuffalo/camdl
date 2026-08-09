@@ -11,7 +11,8 @@ For the workflow these configs drive, see `camdl docs workflow`.
 ## A complete example
 
 ```toml
-output_dir = "results"            # where runs are stored (optional)
+output_dir = "results"            # where runs are stored (optional; relative
+                                  # to this file — see "How paths resolve")
 
 [model]
 camdl = "model.camdl"
@@ -85,6 +86,42 @@ upstream one with `init_mle = "<stage-name>"`.
 the file is a typo, not a setting. (The forward backend for synthetic-data
 generation is `[synthetic].backend`, not a `[config]` setting — gh#241; the fit
 stages declare their own `backend`.)
+
+## How paths resolve
+
+**Every path written in the `fit.toml` is relative to the `fit.toml` itself** —
+`[model].camdl`, `[data].file`, each `[data.observations]` and `[data.holdout]`
+stream, and `output_dir`. Absolute paths pass through unchanged (and draw a
+portability warning, since they pin the config to one machine's layout).
+
+The rule is the one Cargo and `pyproject.toml` use: a path written **in a file**
+anchors at that file, so the config is relocatable as a unit and runs the same
+from any working directory. What does _not_ come from the file — the `results/`
+default when no `output_dir` is declared, and `CAMDL_OUTPUT_DIR` — anchors at
+the working directory instead, since that is the frame you typed it in.
+
+Concretely, for this layout:
+
+```
+<repo>/camdl/fit.toml
+<repo>/camdl/bvd_province.camdl
+<repo>/data/build/camdl/cases.tsv
+```
+
+every path takes the same base, whichever directory you run from:
+
+```toml
+output_dir = "../results" # <repo>/results
+
+[model]
+camdl = "bvd_province.camdl" # <repo>/camdl/bvd_province.camdl
+
+[data.observations]
+cases = "../data/build/camdl/cases.tsv" # <repo>/data/build/camdl/cases.tsv
+```
+
+`fit run` prints the resolved output location as an **absolute** path at start,
+so you can confirm where the run tree is going before it is written.
 
 ## Where a chain starts
 

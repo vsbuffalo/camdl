@@ -293,14 +293,19 @@ fn read_mle_param(mle_toml: &str, key: &str) -> Option<f64> {
             nightly CI), not in the default `make test` gate"]
 fn synthetic_fit_recovers_params() {
     let bin = skip_if_missing_binary();
-    // Absolute toml path: model + data paths inside the toml resolve against the
-    // toml's own directory (gh#22), so they bind correctly regardless of CWD.
-    // `output_dir` is NOT rebased — it lands relative to CWD — so we run from a
-    // tempdir to keep `results/` out of the committed source tree.
+    // Absolute toml path: every path inside the toml resolves against the
+    // toml's own directory (gh#22, and `output_dir` too as of gh#507), so they
+    // bind correctly regardless of CWD. The fixture therefore declares NO
+    // `output_dir` — one would put the run tree inside the committed fixture
+    // directory — and the destination is pinned here with CAMDL_OUTPUT_DIR,
+    // the layer that applies when no `output_dir` is declared. Pinning it
+    // explicitly also keeps the test from inheriting a developer's ambient
+    // CAMDL_OUTPUT_DIR.
     let fit_toml = fixture("polio_afp_es/fit.toml");
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(&bin)
         .current_dir(tmp.path())
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         // Compile the model with the dune-built camdlc (a stale PATH camdlc
         // predates the stratified-observation header), mirroring compile_model.

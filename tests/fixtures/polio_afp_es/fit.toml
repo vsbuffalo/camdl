@@ -17,7 +17,10 @@
 # rejects. Per-source synthetic emission is a follow-up; until then the recovery
 # fixture uses the committed `gen_data.sh` files.)
 
-output_dir = "results"
+# No `output_dir`: as of gh#507 a path written in a fit.toml anchors at the
+# fit.toml, so declaring one here would write the run tree into this committed
+# fixture directory. The consuming test pins the destination with
+# CAMDL_OUTPUT_DIR instead, which is the layer below a declared `output_dir`.
 
 [model]
 camdl = "../polio_afp_es_2patch.camdl"

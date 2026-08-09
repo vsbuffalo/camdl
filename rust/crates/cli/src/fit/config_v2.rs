@@ -2208,6 +2208,22 @@ impl FitConfigV2 {
         let toml_path = std::path::Path::new(path);
         config.model.camdl = crate::util::resolve_relative_to_toml(
             toml_path, &config.model.camdl);
+        // gh#507: `output_dir` anchors here too. It is the one path written in
+        // the fit.toml that used to resolve against the process CWD instead,
+        // so a single `../` could not be correct for both the inputs and the
+        // output — `output_dir = "../data/runs"` in a fit.toml one level down
+        // wrote the whole run tree to a SIBLING OF THE REPOSITORY, silently,
+        // with the fit reporting success and the announced path (echoed
+        // as-written) consistent with either reading.
+        //
+        // The rule this restores: a path written IN a file anchors at that
+        // file; a path typed on the command line (`--output-dir`) anchors at
+        // the CWD, and so does the `results/` default when no `output_dir` is
+        // declared at all. Both of those are typed where the CWD is the
+        // obvious frame.
+        if let Some(dir) = &mut config.output_dir {
+            *dir = crate::util::resolve_relative_to_toml(toml_path, dir);
+        }
         if let Some(data) = &mut config.data {
             if let Some(file) = &mut data.file {
                 *file = crate::util::resolve_relative_to_toml(toml_path, file);
@@ -2932,6 +2948,94 @@ cooling = 0.7
         assert!(warnings.iter().any(|w|
             w.contains("output_dir") && w.contains("/abs/out")));
         assert!(warnings.iter().all(|w| w.contains("non-portable")));
+    }
+
+    /// gh#507: every path WRITTEN IN the fit.toml anchors at the fit.toml,
+    /// `output_dir` included. Before this, `[model] camdl` and the data
+    /// streams anchored at the toml while `output_dir` anchored at the
+    /// process CWD, so one `../` could not be correct for both — a config
+    /// with `camdl = "m.camdl"` and `output_dir = "../data/runs"` wrote its
+    /// entire run tree to a sibling of the repository, silently, with the
+    /// fit reporting success.
+    #[test]
+    fn load_anchors_output_dir_at_the_toml_like_every_other_path() {
+        let dir = std::env::temp_dir().join("camdl_gh507_anchor");
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml_path = dir.join("fit.toml");
+        std::fs::write(&toml_path, r#"
+output_dir = "../runs"
+
+[model]
+camdl = "sir.camdl"
+
+[data.observations]
+weekly_cases = "../data/cases.tsv"
+
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+
+[fixed]
+N0 = 1000000
+
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 100
+iterations = 10
+cooling = 0.7
+"#).unwrap();
+
+        let cfg = FitConfigV2::load(toml_path.to_str().unwrap()).unwrap();
+        let anchor = dir.to_string_lossy();
+
+        // The two that already anchored correctly — the control, so this
+        // test cannot pass by everything being left alone.
+        assert!(cfg.model.camdl.starts_with(&*anchor),
+            "[model] camdl must anchor at the toml: {}", cfg.model.camdl);
+        let obs = &cfg.data.as_ref().unwrap().observations["weekly_cases"];
+        assert!(obs.starts_with(&*anchor),
+            "[data.observations] must anchor at the toml: {obs}");
+
+        // The one that did not.
+        let out = cfg.output_dir.as_deref().unwrap();
+        assert!(out.starts_with(&*anchor),
+            "output_dir must anchor at the toml, not the CWD: {out}");
+        assert!(std::path::Path::new(out).is_absolute(),
+            "a resolved output_dir is absolute, so nothing downstream can \
+             re-anchor it at the CWD: {out}");
+    }
+
+    /// An absolute `output_dir` is the user saying exactly where they want
+    /// it; anchoring must not touch it (it already warns, via gh#307).
+    #[test]
+    fn load_passes_an_absolute_output_dir_through_unchanged() {
+        let dir = std::env::temp_dir().join("camdl_gh507_abs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml_path = dir.join("fit.toml");
+        std::fs::write(&toml_path, r#"
+output_dir = "/tmp/camdl_gh507_explicit"
+
+[model]
+camdl = "sir.camdl"
+
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+
+[fixed]
+N0 = 1000000
+
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 100
+iterations = 10
+cooling = 0.7
+"#).unwrap();
+
+        let cfg = FitConfigV2::load(toml_path.to_str().unwrap()).unwrap();
+        assert_eq!(cfg.output_dir.as_deref(), Some("/tmp/camdl_gh507_explicit"));
     }
 
     #[test]

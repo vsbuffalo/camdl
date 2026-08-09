@@ -501,7 +501,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let resolved = config.fixed.resolve().unwrap_or_default();
         resolved.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
     });
-    eprintln!("  output:   {}", announced_fit_dir.display());
+    // gh#507: absolute, not as-written. A relative string here is consistent
+    // with either base (the CWD or the fit.toml's directory), so it cannot
+    // tell you which one you got — which is exactly how a run tree ended up
+    // outside its repository unnoticed.
+    eprintln!("  output:   {}",
+        crate::run_paths::display_absolute(&announced_fit_dir).display());
 
     // IC-free inference diagnostic: when ic_free = true, make it
     // visible on the startup block so the user can confirm the PF is
