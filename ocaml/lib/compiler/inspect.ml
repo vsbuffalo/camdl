@@ -963,6 +963,11 @@ let run_let ppf ctx name =
       ) dim_names;
       Term_style.dim_style Fmt.string ppf " \xe2\x86\x92 scalar"
     );
+    (* gh#508: the `#'` prose, rendered like the compartment / parameter /
+       transition listings. This is where a derived quantity says what it
+       means — the expression can show `S + E + I` but not whether that is
+       the total population or the force-of-infection denominator. *)
+    (match lb.ldoc with Some d -> render_doc ppf d | None -> ());
     Fmt.pf ppf "@\n@\n";
     (* Expansions *)
     let combos = Expander.cartesian_product lb.lindices ctx in

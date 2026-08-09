@@ -13,6 +13,37 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-09 — `#'` doc comments attach to `let` bindings
+
+**What.** A `#'` doc comment above a top-level `let` is now accepted; it was a
+bare `E001` syntax error.
+
+```camdl
+#' total population per patch — the FOI denominator
+#' @symbol N
+let N[p in patch] = S[p] + E[p] + I[p] + C[p]
+```
+
+This is a **widening** — nothing that compiled before stops compiling. The
+migration only runs the other way: a model using the new form is rejected by an
+older binary, with `E001` pointing at the `#'` line.
+
+Both `let` forms take one (the plain binding and the `: rate`-annotated form),
+`@symbol` and `@ref` work as they do elsewhere, and the prose surfaces in
+`camdlc inspect --let <name>`.
+
+**Why here.** A derived quantity is where a modelling assumption hides.
+`let N = S + I + R` shows its arithmetic but not whether it is the total
+population or the force-of-infection denominator, and those are different
+models. `let` was the last declaration site with nowhere structured to say so.
+
+**Not changed.** `#'` still attaches to a _declaration_, never to a block
+keyword — `#'` above `compartments {` remains `E001`, while `#'` above a
+compartment member inside the block has always worked. See the spec's "Doc
+comments" under §1.1 for the full list of sites.
+
+---
+
 ## 2026-08-05 — a declaration's index binder must name a declared dimension
 
 **What.** `infection[a in aeg]` where `aeg` is not in `dimensions { }` is

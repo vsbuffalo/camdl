@@ -244,11 +244,16 @@ documenting at least its parameters.** They carry the largest information
 deficit (an `S`/`I`/`R` usually explains itself; `beta`, `rho`, `k` do not) and
 are the easiest to forget. Annotation is a graded style: **parameters always** →
 then the non-obvious **compartments** (an environmental reservoir `W`, distinct
-latent stages) → broader declarations by request (parameters and compartments
-are what `#'` attaches to today). The `#'` says what a parameter _means_; its
-_value_ still belongs in a `--params` TOML, never the model — `#'` is the right
-home for the intent that otherwise leaks into a `# FIXED = 0.3` comment (which
-does nothing, drifts from the real value, and is exactly what `#'` replaces).
+latent stages) → then any **`let`** whose meaning is not evident from its
+arithmetic (`let N = S + I + R` — total population, or the force-of-infection
+denominator?) → broader declarations by request. `#'` attaches to a
+_declaration_, so inside a block it goes above the member, not above the `{`;
+the sites that take one are compartments, parameters, dimension entries,
+transitions, observation streams, quantities, and `let`. The `#'` says what a
+parameter _means_; its _value_ still belongs in a `--params` TOML, never the
+model — `#'` is the right home for the intent that otherwise leaks into a
+`# FIXED = 0.3` comment (which does nothing, drifts from the real value, and is
+exactly what `#'` replaces).
 
 **Backend choice for fits.** Use `chain_binomial` — the production fit backend.
 Gillespie is for forward-simulation sanity checks, not fits (too slow).

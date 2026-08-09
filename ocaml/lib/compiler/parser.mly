@@ -339,10 +339,12 @@ declaration:
       { DTimepoints tps }
   | STRATIFY LPAREN sa = stratify_args RPAREN
       { DStratify sa }
-  | LET name = IDENT ibs = index_bindings_opt COLON pk = param_kind EQ body = expr
-      { DLet { lname = name; lindices = ibs; lshape = None; lkind = Some pk; lbody = body } }
-  | LET name = IDENT ibs = index_bindings_opt shape = let_shape_opt EQ body = expr
-      { DLet { lname = name; lindices = ibs; lshape = shape; lkind = None; lbody = body } }
+  | d = doc_opt LET name = IDENT ibs = index_bindings_opt COLON pk = param_kind EQ body = expr
+      { DLet { lname = name; lindices = ibs; lshape = None; lkind = Some pk; lbody = body;
+               ldoc = d } }
+  | d = doc_opt LET name = IDENT ibs = index_bindings_opt shape = let_shape_opt EQ body = expr
+      { DLet { lname = name; lindices = ibs; lshape = shape; lkind = None; lbody = body;
+               ldoc = d } }
   | SCENARIOS LBRACE ss = list(scenario_block) RBRACE
       { DScenarios ss }
   | BALANCE LBRACE target = IDENT EQ e = expr RBRACE
