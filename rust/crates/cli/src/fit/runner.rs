@@ -852,14 +852,63 @@ pub fn run_quick_pfilter_with_dt(
     Ok((result.log_likelihood, stats))
 }
 
+/// Which `EstimatedParam` set the preflight table should report, and whether
+/// the chains start at different points.
+///
+/// gh#513: the table used to read `config.estimated_params` unconditionally
+/// while the chains ran from `per_chain_params`, so it could disagree with the
+/// run in BOTH directions — showing a random draw when the chains used a
+/// declared start, and a declared start when the chains used draws. This table
+/// is the only thing most users look at to confirm a stage begins where they
+/// asked, so a value that is merely *plausible* is worse than none.
+///
+/// Reports chain 1. With more than one chain the table cannot show them all
+/// without becoming unreadable, so it names which chain it is showing and
+/// points at `chain_starts.tsv`, which carries the full per-chain truth.
+///
+/// Split out from the printing so it is testable without capturing stderr.
+fn preflight_specs<'a>(
+    base: &'a [EstimatedParam],
+    per_chain: Option<&'a [Vec<EstimatedParam>]>,
+) -> (&'a [EstimatedParam], bool) {
+    let Some(chains) = per_chain.filter(|c| !c.is_empty()) else {
+        // No per-chain override: every chain runs from `base`, which is then
+        // exactly what the table should show.
+        return (base, false);
+    };
+    let shown = &chains[0][..];
+    // "Differ" means some chain starts somewhere else — compare against chain
+    // 1 rather than against `base`, since `base` is not what any chain ran.
+    let differ = chains[1..].iter().any(|c| {
+        c.len() != shown.len()
+            || c.iter().zip(shown).any(|(a, b)| a.initial != b.initial)
+    });
+    (shown, differ)
+}
+
 /// Print preflight transform report to stderr, pushing diagnostics to collector.
-pub fn print_preflight(config: &FitRunConfig, collector: &DiagnosticCollector) {
-    let n_auto = config.estimated_params.iter()
+///
+/// `per_chain_params` is the per-chain start override the chains will actually
+/// run from (`None` when every chain uses `config.estimated_params`). It is
+/// reported rather than the config, per gh#513.
+pub fn print_preflight(
+    config: &FitRunConfig,
+    per_chain_params: Option<&[Vec<EstimatedParam>]>,
+    collector: &DiagnosticCollector,
+) {
+    let (specs, starts_differ) =
+        preflight_specs(&config.estimated_params, per_chain_params);
+    let n_auto = specs.iter()
         .filter(|s| s.rw_sd_auto)
         .count();
 
-    eprintln!("\ntransforms:");
-    for spec in &config.estimated_params {
+    if starts_differ {
+        eprintln!("\ntransforms \x1b[2m(chain 1 of {}; chains start at different \
+                   points — see chain_starts.tsv)\x1b[0m:", config.n_chains);
+    } else {
+        eprintln!("\ntransforms:");
+    }
+    for spec in specs {
         let (tname, pos) = match &spec.transform {
             Transform::Log { lo, hi } => {
                 let z = spec.initial.max(1e-300).ln();
@@ -896,7 +945,7 @@ pub fn print_preflight(config: &FitRunConfig, collector: &DiagnosticCollector) {
 
     if n_auto > 0 {
         eprintln!("\n  \x1b[33m⚠ {}/{} parameters using auto rw_sd. Check traces and set explicit values.\x1b[0m",
-            n_auto, config.estimated_params.len());
+            n_auto, specs.len());
     }
 
     // Cooling schedule preview — uses the SAME per-iteration multiplier the run
@@ -1757,7 +1806,7 @@ pub fn run_chains_with_per_chain_params(
         .collect();
 
     // Preflight transform report
-    print_preflight(config, collector);
+    print_preflight(config, per_chain_params, collector);
 
     let results: Vec<(usize, IF2Result)> = (0..config.n_chains)
         .into_par_iter()
@@ -2862,6 +2911,67 @@ pub fn validate_prior_transform_compat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── gh#513: the preflight table must report the realised starts ─────
+
+    fn spec_at(name: &str, initial: f64) -> EstimatedParam {
+        EstimatedParam {
+            name: name.to_string(), index: 0, initial, rw_sd: 0.1,
+            transform: sim::inference::types::Transform::None,
+            lower: 0.0, upper: 1.0, rw_sd_auto: false, ivp: false,
+        }
+    }
+
+    /// With no per-chain override every chain runs from the config, so that is
+    /// what the table should show — and nothing "differs".
+    #[test]
+    fn preflight_reports_the_config_when_there_is_no_per_chain_override() {
+        let base = vec![spec_at("beta", 0.3)];
+        let (shown, differ) = preflight_specs(&base, None);
+        assert_eq!(shown[0].initial, 0.3);
+        assert!(!differ);
+        // An empty per-chain vector is the same case, not a panic.
+        let empty: Vec<Vec<EstimatedParam>> = Vec::new();
+        let (shown, differ) = preflight_specs(&base, Some(&empty));
+        assert_eq!(shown[0].initial, 0.3);
+        assert!(!differ);
+    }
+
+    /// The bug: the config said one thing and the chains did another. The
+    /// table must follow the chains.
+    #[test]
+    fn preflight_reports_the_chain_start_not_the_config() {
+        let base = vec![spec_at("beta", 0.3)];          // never run
+        let chains = vec![vec![spec_at("beta", 0.9)]];  // what chain 1 uses
+        let (shown, differ) = preflight_specs(&base, Some(&chains));
+        assert_eq!(shown[0].initial, 0.9,
+            "the table must report the realised chain start, not config \
+             .estimated_params — reporting 0.3 here is gh#513");
+        assert!(!differ, "one chain cannot differ from itself");
+    }
+
+    /// Multi-chain: report chain 1, and say so when the others start elsewhere
+    /// (the caller renders that as a header note pointing at chain_starts.tsv).
+    #[test]
+    fn preflight_flags_when_chains_start_at_different_points() {
+        let base = vec![spec_at("beta", 0.3)];
+        let spread = vec![
+            vec![spec_at("beta", 0.3)],
+            vec![spec_at("beta", 0.7)],
+        ];
+        let (shown, differ) = preflight_specs(&base, Some(&spread));
+        assert_eq!(shown[0].initial, 0.3, "chain 1 is the one reported");
+        assert!(differ, "chain 2 starts elsewhere — the header must say so");
+
+        // All chains identical (init = single with an override present):
+        // no note, because there is nothing the single row hides.
+        let same = vec![
+            vec![spec_at("beta", 0.3)],
+            vec![spec_at("beta", 0.3)],
+        ];
+        let (_, differ) = preflight_specs(&base, Some(&same));
+        assert!(!differ);
+    }
 
     /// Step 6 wiring regression: when in-run `IF2Result::final_loglik`
     /// disagrees with the clean-eval winner, `select_winner_summary`
