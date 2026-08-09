@@ -575,8 +575,9 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             eprintln!("  ESS fraction:           median {:.1}%, worst {:.1}%",
                 100.0 * med_ess_frac, 100.0 * min_ess_frac);
             eprintln!("  log-weight variance τ²: median {:.2}, max {:.2}", med_tau2, max_tau2);
-            eprintln!("  implied N to avoid collapse exp(τ²/2): ~{:.0} (median step), ~{:.0} (worst step)",
-                (0.5 * med_tau2).exp(), (0.5 * max_tau2).exp());
+            eprintln!("  implied N to avoid collapse exp(τ²/2): ~{} (median step), ~{} (worst step)",
+                fmt_implied_n((0.5 * med_tau2).exp()),
+                fmt_implied_n((0.5 * max_tau2).exp()));
             eprintln!("  [Snyder et al. 2008 heuristic — an order-of-magnitude floor at THIS θ and N, not a guarantee]");
         }
     }
@@ -1463,9 +1464,50 @@ fn write_filtering_tsv(
     Ok(())
 }
 
+/// Format a Snyder implied-particle-count estimate `exp(τ²/2)` for reading.
+///
+/// The quantity spans the whole float range: it is most useful exactly where
+/// it is astronomically large, because that is the case where the answer is
+/// "no affordable N will do — change the observation model" rather than
+/// "buy more particles". A raw integer defeats that reading — gh#509 reported
+/// a 48-digit one — so anything at or above a million prints as one
+/// significant decimal in scientific notation, where the exponent is the part
+/// that carries the decision. Below a million the plain integer stays, since
+/// there it is directly comparable to a `--particles` value.
+fn fmt_implied_n(x: f64) -> String {
+    if !x.is_finite() {
+        return format!("{}", x);
+    }
+    if x < 1e6 {
+        format!("{:.0}", x)
+    } else {
+        format!("{:.1e}", x)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── pf-health implied-N formatting (gh#509) ─────────────────────────
+    #[test]
+    fn implied_n_switches_to_scientific_above_a_million() {
+        // Below the threshold the plain integer is what you want: it is
+        // directly comparable to a `--particles` value you might actually
+        // type.
+        assert_eq!(fmt_implied_n(1.0), "1");
+        assert_eq!(fmt_implied_n(999_999.0), "999999");
+        // At and above it, only the exponent is read. gh#509's report had
+        // exp(218.90/2) print as a 48-digit integer, where the difference
+        // between "expensive" (1e12) and "impossible" (1e47) took a moment
+        // of counting digits to see.
+        assert_eq!(fmt_implied_n(2_536_463.0), "2.5e6");
+        assert_eq!(fmt_implied_n((0.5 * 218.90_f64).exp()), "3.4e47");
+        // τ² large enough to overflow the exponential must not print as a
+        // bare "inf" with no units of meaning — but it must not panic or
+        // print garbage either.
+        assert_eq!(fmt_implied_n(f64::INFINITY), "inf");
+    }
 
     // ── holes × output-mode compatibility guard ─────────────────────────
     #[test]
