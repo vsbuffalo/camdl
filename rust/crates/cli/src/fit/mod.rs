@@ -209,6 +209,43 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         config.condition_from = Some(config_v2::ConditionFrom::All(raw.trim().to_string()));
     }
 
+    // gh#514: the same treatment for the chain-start overrides. `--init`,
+    // `--posterior`, `--mle`, `--params`, `--survey-path` and `--survey-top-k`
+    // all change where the chains begin, and therefore the stored output — but
+    // they used to be applied at the DISPATCH site, well after the CAS claim,
+    // while the stage's `identity_payload` carried only the toml's values. Two
+    // runs differing solely in `--init` shared a run_id, and the second was
+    // served the first's result with a "cache hit" line and no warning.
+    // `--force` did not rescue it either: that path errors with "artifact
+    // already completed".
+    //
+    // Clap requires `--stage` alongside each of these, so exactly one stage is
+    // targeted. Writing them here — before `cas::fit_level_hash` and before the
+    // per-stage claim — makes a different override a different artifact.
+    // Leaving them unset leaves the toml's values in place, so a run with no
+    // overrides keys exactly as it did before and no cached fit is invalidated.
+    if let Some(stage_name) = a.stage.as_deref() {
+        if cli_init_method.is_some()
+            || cli_survey_path.is_some()
+            || cli_survey_top_k.is_some()
+        {
+            match config.stages.get_mut(stage_name) {
+                Some(stage) => stage.apply_cli_chain_start_overrides(
+                    cli_init_method.as_ref(),
+                    cli_survey_path.as_ref(),
+                    cli_survey_top_k,
+                ),
+                None => {
+                    eprintln!("error: --stage '{}' is not a stage in {} \
+                               (stages: {})",
+                        stage_name, fit_path,
+                        config.stages.keys().cloned().collect::<Vec<_>>().join(", "));
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     // Compile `model.camdl` → IR EXACTLY ONCE for the whole fit. Every
     // per-(cell × sweep point × stage) `FitRunConfig::build` then loads this
     // pre-compiled IR instead of re-invoking camdlc per unit (a multi-stage
