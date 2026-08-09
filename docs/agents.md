@@ -223,6 +223,53 @@ with `camdl fit summary` for context.
 
 ## Idioms / anti-idioms
 
+**If the data is dated, anchor the model.** Declare `origin` at the top level
+whenever you are fitting real surveillance data. This is the first decision in
+the file and the hardest to notice you got wrong:
+
+```camdl
+time_unit = 'days
+origin    = date("2020-03-01")   # t = 0 is 1 March 2020
+```
+
+The argument is a quoted ISO date and nothing else — `date(2020, 3, 1)` is
+**E101**.
+
+Anchored, camdl reads a dated `time_col` directly, and every time it reports
+back — an outbreak peak, an intervention date, a forecast window, `time_of_max`
+in a `quantities {}` block — is a calendar date you can check against the
+record. Unanchored, all of those are bare numbers on an axis whose zero means
+nothing, and only you know what day 84 was.
+
+**The anti-idiom is converting dates to integers before camdl sees them.** It
+looks like helpfulness — the data has `2020-03-01`, the model wants a number, so
+you map dates to day indices in your loader and hand camdl the integers. It
+compiles, it fits, the numbers are right, and the calendar is gone: nothing
+downstream can map an estimate back to a date, and the loss is invisible in
+every artifact, so it can survive a long way into an analysis before anyone
+notices.
+
+camdl refuses the dated file rather than guessing, and the refusal names the
+fix:
+
+```
+error: data has dated time cells but the model declares no `origin`.
+       Add `origin = date("YYYY-MM-DD")` to the model, or supply numeric times.
+```
+
+Take the first branch. "Supply numeric times" is there for data that genuinely
+has no calendar; reaching for it to silence the error gets you past the guard
+rather than past the problem.
+
+Anchoring is not always right. A textbook SIR, an SBC run, a simulation study on
+synthetic indexed time — none of these have a calendar, and `origin` would be a
+fiction. The rule is about provenance, not preference: **if a date exists in the
+source data, it should still exist in the output.** One constraint to know
+before you choose: `time_unit = 'months` and `'years` are refused in anchored
+mode (**E320**), because a calendar month is not a constant number of days —
+anchored models step on `'days` or `'weeks`. Read `camdl docs dates` before
+anchoring a monthly model; it has the migration.
+
 **Annotate your parameters with `#'` doc comments.** A name and kind
 (`beta : rate`) tells the next reader almost nothing about what the parameter
 _is_ — and parameters are the easiest part of a model to leave unexplained. Put
@@ -380,6 +427,7 @@ version-matched to the `camdl` you're running. No checkout, no network:
 | The `fit.toml` schema                               | `camdl docs fit-toml`                               |
 | The reasoning (identifiability, priors, the stance) | `camdl docs concepts`                               |
 | Backends / data format / debugging                  | `camdl docs backends` / `data` / `debugging`        |
+| Dated data and calendar time (`origin`, anchoring)  | `camdl docs dates`                                  |
 | Packaging a bug report (minimal repro example)      | `camdl docs mre`                                    |
 | Full topic list / search                            | `camdl docs` / `camdl docs --search <term>`         |
 
