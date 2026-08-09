@@ -60,7 +60,7 @@ model, each mapped to a TSV path. For out-of-sample validation, add
 | key                                          | meaning                                                                                                                                                    |
 | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bounds = [lo, hi]`                          | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen. |
-| `start = X`                                  | starting value. Optional — random from bounds (scout) or inherited from an upstream stage.                                                                 |
+| `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                     |
 | `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh` stage; `if2` ignores it. See "Priors" below.                                                          |
 | `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type if omitted.                                                              |
 | `ivp = true`                                 | initial-value parameter (e.g. `s0`, `i0`) — perturbed only at t=0.                                                                                         |
@@ -85,6 +85,42 @@ upstream one with `init_mle = "<stage-name>"`.
 the file is a typo, not a setting. (The forward backend for synthetic-data
 generation is `[synthetic].backend`, not a `[config]` setting — gh#241; the fit
 stages declare their own `backend`.)
+
+## Where a chain starts
+
+Two settings decide this, and they answer different questions.
+
+**`[estimate].start` sets the base point** — one θ for the whole stage. It is
+the top of a precedence chain: an upstream stage's result (`init_mle`) beats it,
+and below it sit `[fixed]`, the model's declared parameter value, and finally a
+draw from bounds if nothing else supplies one.
+
+**`init` decides how the chains are spread around that base point.** A stage
+with `chains = 1`, or with `init = "single"`, has nothing to spread, so every
+chain runs from the base point itself.
+
+| `init`                                        | where the chains start                                        |
+| --------------------------------------------- | ------------------------------------------------------------- |
+| `single`                                      | every chain at the base point                                 |
+| `uniform`                                     | chain 1 at the base point; the rest uniform within `bounds`   |
+| `lhs`                                         | Latin-hypercube stratified over `bounds`; base point unused   |
+| `uniform_unconstrained` (default)             | spread on the unconstrained scale; base point unused          |
+| `survey_top_k`                                | the top-K points from a `camdl survey` run; base point unused |
+| `from_prior`                                  | draws from the declared priors; base point unused             |
+| `from_posterior` / `from_mle` / `from_params` | rows or values read from the named source; base point unused  |
+
+The three spreading modes — `uniform`, `lhs`, `uniform_unconstrained` — fall
+back to the base point at `chains = 1`, since with one chain there is nothing to
+spread. The source-reading modes do not: they read one row from their source
+however many chains you asked for.
+
+So `start` is load-bearing wherever the table says "base point". When a mode
+ignores it, that is deliberate: the mode's whole purpose is to explore, and the
+chain-agreement gate is only informative if the chains genuinely start apart.
+
+Each stage writes a `chain_starts.tsv` recording where every chain actually
+began, before any perturbation. That file, not the config, is the authority on
+what a run did.
 
 > **Unknown keys are rejected.** A misplaced or misspelled key is a hard error
 > naming the offending key — `fit.toml` is parsed strictly. A top-level `dt` (it

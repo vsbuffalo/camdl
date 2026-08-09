@@ -87,7 +87,13 @@ pub fn run_stage(
         /* cooling */ 1.0,
         /* cooling_target_iters */ 1,
         seed,
-        /* random_starts */ prior_state.is_none(),
+        // gh#506: was `prior_state.is_none()`. Under this stage's default
+        // `init = "single"` the corruption was masked — `build_chain_param_vecs`
+        // returns None there and the chains fall back to `base_params`, which
+        // carries `[estimate].start` correctly. It bit `init = "uniform"`,
+        // whose chain 0 is documented to keep the seeded start and instead
+        // kept the random draw.
+        /* random_starts */ false,
     )?;
 
     // Reject models the ODE backend can't represent (e.g. `overdispersed`
