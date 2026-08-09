@@ -1049,7 +1049,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     prior_state.as_ref(),
                     *chains, *particles, *iterations,
                     *cooling, effective_cooling_target_iters,
-                    seed, effective_starts.is_none(),
+                    // gh#506: NOT `effective_starts.is_none()`. That asked
+                    // `build` to overwrite every `EstimatedParam::initial`
+                    // with a uniform draw whenever the stage had no upstream
+                    // `starts_from` — i.e. on every scout stage — which threw
+                    // away `[estimate].start` and made `init = "single"` mean
+                    // "single random point". Per-chain dispersion is `init`'s
+                    // job (`uniform` / `lhs` / `uniform_unconstrained`), and
+                    // this predated that machinery.
+                    seed, false,
                 ).unwrap_or_else(|e| {
                     eprintln!("error building run config: {}", e);
                     std::process::exit(1);
