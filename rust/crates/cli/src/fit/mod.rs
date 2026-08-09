@@ -1292,10 +1292,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     n_chains: *chains,
                     n_good_chains: None,
                     start_values,
-                    rw_sd,
+                    rw_sd: rw_sd.iter().map(|(k, v)| (k.clone(), *v)).collect(),
                     loglik_type: Some(loglik::LoglikType::If2),
                     acceptance_rate: None,
-                    tail_chain_agreement: chain_results.chain_agreement.clone(),
+                    tail_chain_agreement: chain_results.chain_agreement.iter().map(|(k, v)| (k.clone(), *v)).collect(),
                     ivp_params: run_config.estimated_params.iter()
                         .filter(|p| p.ivp).map(|p| p.name.clone()).collect(),
                     chain_logliks: chain_results.results.iter()

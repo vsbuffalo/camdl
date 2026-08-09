@@ -1,7 +1,6 @@
 //! Provenance hashing: input_hash (computation identity) and content_hash (tamper detection).
 
 use sha2::{Sha256, Digest};
-use std::collections::HashMap;
 
 use crate::version;
 
@@ -16,7 +15,7 @@ use crate::version;
 /// `sha256_hex`); it's mle-specific because it canonicalises numeric
 /// formatting with `{:.12}` precision before hashing. Lives in
 /// `fit::provenance` (not `crate::hashing`) for that reason.
-pub fn mle_params_tamper_hash(params: &HashMap<String, f64>) -> String {
+pub fn mle_params_tamper_hash(params: &std::collections::BTreeMap<String, f64>) -> String {
     let mut pairs: Vec<(&String, &f64)> = params.iter().collect();
     pairs.sort_by_key(|(k, _)| k.as_str());
     let mut h = Sha256::new();
@@ -88,7 +87,7 @@ pub struct DataEntry {
 /// Write mle_params.toml with a structured `[provenance]` block.
 pub fn write_mle_params(
     path: &str,
-    all_params: &HashMap<String, f64>,
+    all_params: &std::collections::BTreeMap<String, f64>,
     metadata: &MleMetadata,
 ) -> Result<(), String> {
     use std::io::Write;
@@ -239,7 +238,7 @@ pub fn verify_content_hash(path: &str) -> Result<ContentVerification, String> {
     // `[provenance]` table rather than relying on "not a comment" as
     // a filter — that old filter would have tried to parse every
     // line under `[provenance]` as a params line too.
-    let params: HashMap<String, f64> = match toml::from_str::<toml::Value>(&contents) {
+    let params: std::collections::BTreeMap<String, f64> = match toml::from_str::<toml::Value>(&contents) {
         Ok(toml::Value::Table(map)) => map.into_iter()
             .filter_map(|(k, v)| {
                 if k == "provenance" { return None; }
@@ -385,7 +384,7 @@ mod tests {
 
     #[test]
     fn content_hash_stable() {
-        let params: HashMap<String, f64> = [
+        let params: std::collections::BTreeMap<String, f64> = [
             ("beta".to_string(), 0.3),
             ("gamma".to_string(), 0.1),
         ].into();
@@ -397,8 +396,8 @@ mod tests {
 
     #[test]
     fn content_hash_changes_on_value_change() {
-        let params1: HashMap<String, f64> = [("beta".to_string(), 0.3)].into();
-        let params2: HashMap<String, f64> = [("beta".to_string(), 0.31)].into();
+        let params1: std::collections::BTreeMap<String, f64> = [("beta".to_string(), 0.3)].into();
+        let params2: std::collections::BTreeMap<String, f64> = [("beta".to_string(), 0.31)].into();
         assert_ne!(
             mle_params_tamper_hash(&params1),
             mle_params_tamper_hash(&params2),

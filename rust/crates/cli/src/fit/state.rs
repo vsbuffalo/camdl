@@ -1,7 +1,17 @@
 //! `fit_state.toml` — inter-stage handoff file.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+// gh#519: `fit_state.toml` is a serialized artifact whose digest is recorded
+// in `run.json`, so its byte layout has to be a function of its contents and
+// nothing else. `HashMap`'s iteration order is seeded randomly PER PROCESS, so
+// these three fields serialized in a different order on every run — two
+// otherwise-identical fits produced files with the same numbers on shuffled
+// lines, and therefore different digests. `BTreeMap` sorts by key, which is
+// deterministic by construction rather than by an upstream insertion order
+// that could itself come from a `HashMap`. Deserialization is unaffected: TOML
+// tables are unordered on read, so existing `fit_state.toml` files load
+// unchanged.
+use std::collections::BTreeMap;
 
 use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
 
@@ -21,8 +31,8 @@ pub struct FitState {
     pub best_chain: usize,
     pub n_chains: usize,
     pub n_good_chains: Option<usize>,
-    pub start_values: HashMap<String, f64>,
-    pub rw_sd: HashMap<String, f64>,
+    pub start_values: BTreeMap<String, f64>,
+    pub rw_sd: BTreeMap<String, f64>,
     /// What kind of log-likelihood is in `best_loglik` (gh#280). Serializes
     /// to the same `snake_case` tags this field carried as a free string
     /// before, so legacy `fit_state.toml` files deserialize unchanged.
@@ -37,8 +47,8 @@ pub struct FitState {
     /// can gate on scout's convergence without re-running. Absent in
     /// legacy fit_state.toml files — downstream readers must treat
     /// absence as "unknown, proceed with warning," not "converged."
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub tail_chain_agreement: HashMap<String, f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tail_chain_agreement: BTreeMap<String, f64>,
 
     /// Names of estimated parameters declared `ivp = true`. Refine's
     /// Â gate exempts these — IVP parameters are expected to be
@@ -148,8 +158,47 @@ impl FitState {
 mod tests {
     use super::*;
 
+    /// gh#519: `fit_state.toml`'s byte layout must be a function of its
+    /// contents alone. It was not — `start_values` and `rw_sd` were
+    /// `HashMap`s, whose iteration order is seeded randomly per process, so
+    /// two otherwise-identical fits wrote the same numbers on shuffled lines
+    /// and got different digests (which `run.json` records).
+    ///
+    /// Asserting "two serializations agree" would NOT catch a revert: within
+    /// one process a `HashMap` iterates the same key set the same way
+    /// regardless of insertion order. So assert the emitted keys are SORTED,
+    /// which only a sorted map guarantees. Eight keys chosen so that a
+    /// `HashMap` landing on sorted order by chance is a ~1-in-40000 event.
+    #[test]
+    fn serialized_parameter_keys_are_in_sorted_order() {
+        let mut st = synthetic_state();
+        st.start_values = BTreeMap::new();
+        // Inserted in deliberately non-alphabetical order.
+        for (k, v) in [("rho", 0.6), ("beta", 0.3), ("sigma_se", 0.05),
+                       ("gamma", 0.15), ("k", 20.0), ("iota", 1.0),
+                       ("psi", 0.4), ("N0", 1e6)] {
+            st.start_values.insert(k.into(), v);
+        }
+        let body = toml::to_string_pretty(&st).expect("serialize");
+
+        let keys: Vec<&str> = body.lines()
+            .skip_while(|l| !l.starts_with("[start_values]"))
+            .skip(1)
+            .take_while(|l| !l.trim().is_empty() && !l.starts_with('['))
+            .filter_map(|l| l.split('=').next().map(str::trim))
+            .collect();
+        assert_eq!(keys.len(), 8, "expected all 8 params in [start_values]: {keys:?}");
+
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted,
+            "fit_state.toml's parameter keys must serialize in sorted order — \
+             an unordered map here makes the file, and the digest run.json \
+             records for it, differ between identical runs (gh#519). Got: {keys:?}");
+    }
+
     fn synthetic_state() -> FitState {
-        let mut tail_chain_agreement = HashMap::new();
+        let mut tail_chain_agreement = BTreeMap::new();
         tail_chain_agreement.insert("beta".into(), 1.02);
         tail_chain_agreement.insert("gamma".into(), 1.07);
         FitState {
@@ -163,8 +212,8 @@ mod tests {
             best_chain: 1,
             n_chains: 2,
             n_good_chains: Some(2),
-            start_values: HashMap::from([("beta".into(), 0.8)]),
-            rw_sd: HashMap::new(),
+            start_values: BTreeMap::from([("beta".into(), 0.8)]),
+            rw_sd: BTreeMap::new(),
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement,

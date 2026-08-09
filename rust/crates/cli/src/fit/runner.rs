@@ -2657,8 +2657,11 @@ pub fn collect_all_params(
     model: &ir::Model,
     base_params: &[f64],
     compiled: &CompiledModel,
-) -> HashMap<String, f64> {
-    let mut params = HashMap::new();
+) -> std::collections::BTreeMap<String, f64> {
+    // gh#519: BTreeMap, not HashMap — this map is serialized into
+    // `fit_state.toml` and the params TOMLs, whose byte layout must be a
+    // function of their contents alone.
+    let mut params = std::collections::BTreeMap::new();
     for p in &model.parameters {
         let idx = compiled.param_index.get(p.name.as_str()).copied().unwrap();
         let value = if let Some(spec) = if2_params.iter().find(|s| s.name == p.name) {
@@ -2919,7 +2922,6 @@ mod tests {
     /// fixed params all got base_params[0] instead of their actual value.
     #[test]
     fn chain_output_fixed_params_correct() {
-        use std::collections::HashMap;
         use ir::{
             expr::{BinOpExpr, BinOpWrap, BinOp, Expr, ParamExpr, PopExpr},
             model::{Compartment, CompartmentKind, InitialConditions, OutputConfig, OutputSchedule, SimulationConfig},
@@ -3614,7 +3616,6 @@ mod tests {
     fn fit_state_overrides_config_start_in_base_params() {
         use crate::fit::state::FitState;
         use crate::fit::config_v2::FitConfigV2;
-        use std::collections::HashMap;
 
         // Tiny v2 fit.toml referencing the seir golden. We set
         // beta's `start = 0.1`; prior_state will supply 0.4. The
@@ -3678,7 +3679,7 @@ dt = 1.0
         // Scout produced a very different "best" — a clearly
         // distinguishable value so a win/loss is unambiguous.
         // Within [0.001, 0.5] but visibly far from est.start=0.1.
-        let mut start_values = HashMap::new();
+        let mut start_values = std::collections::BTreeMap::new();
         start_values.insert("beta".to_string(), 0.4);
         let prior_state = FitState {
             stage: "scout".into(), seed: 1,
@@ -3687,10 +3688,10 @@ dt = 1.0
             best_loglik: -100.0, initial_loglik: f64::NEG_INFINITY,
             best_chain: 0, n_chains: 1, n_good_chains: Some(1),
             start_values,
-            rw_sd: HashMap::new(),
+            rw_sd: std::collections::BTreeMap::new(),
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
-            tail_chain_agreement: HashMap::new(),
+            tail_chain_agreement: std::collections::BTreeMap::new(),
             ivp_params: Vec::new(),
             chain_logliks: Vec::new(),
             chain_eval_logliks: Vec::new(),
@@ -4539,7 +4540,6 @@ dt = 1.0
     // both ll(71) and ll(140) pins projected@21 = one week ⇒ the reset fired.
     #[test]
     fn ode_incidence_reset_fires_across_hole() {
-        use std::collections::HashMap;
         use ir::{
             expr::{ConstExpr, Expr, ProjectedExpr},
             model::{

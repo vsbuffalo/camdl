@@ -856,7 +856,6 @@ fn posterior_summaries(
 mod tests {
     use super::*;
     use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
-    use std::collections::HashMap;
 
     struct TempDir(PathBuf);
     impl TempDir {
@@ -918,11 +917,11 @@ mod tests {
     }
 
     fn synthetic_if2_state() -> FitState {
-        let mut start_values = HashMap::new();
+        let mut start_values = std::collections::BTreeMap::new();
         start_values.insert("R0".into(), 56.8);
         start_values.insert("sigma".into(), 0.115);
         start_values.insert("N0".into(), 1000.0); // fixed param, no Â
-        let mut agreement = HashMap::new();
+        let mut agreement = std::collections::BTreeMap::new();
         agreement.insert("R0".into(), 1.04);
         agreement.insert("sigma".into(), 1.01);
         FitState {
@@ -937,7 +936,7 @@ mod tests {
             n_chains: 4,
             n_good_chains: Some(4),
             start_values,
-            rw_sd: HashMap::new(),
+            rw_sd: Default::default(),
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: agreement,

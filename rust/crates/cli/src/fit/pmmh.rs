@@ -975,7 +975,7 @@ pub fn run_stage(
     write_summary(stage_dir, &results, &config, thin, &diagnostics, algo)?;
 
     // Write fit_state.toml
-    let mut start_values = HashMap::new();
+    let mut start_values = std::collections::BTreeMap::new();
     for spec in config.estimated_params.iter() {
         start_values.insert(spec.name.clone(), map_result.map_params[spec.index]);
     }
@@ -1033,12 +1033,12 @@ pub fn run_stage(
         // missing chain dirs.
         n_good_chains: if n_good_chains < n_chains { Some(n_good_chains) } else { None },
         start_values,
-        rw_sd: HashMap::new(),
+        rw_sd: std::collections::BTreeMap::new(),
         loglik_type: Some(LoglikType::Marginal),
         acceptance_rate: Some(map_result.acceptance_rate),
         // Bayesian stages don't produce an IF2-style Â table; the
         // refine-gates proposal only gates on scout→refine handoffs.
-        tail_chain_agreement: HashMap::new(),
+        tail_chain_agreement: std::collections::BTreeMap::new(),
         ivp_params: Vec::new(),
         chain_logliks: Vec::new(),
         chain_eval_logliks: Vec::new(),
