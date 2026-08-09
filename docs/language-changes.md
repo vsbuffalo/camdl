@@ -28,9 +28,12 @@ This is a **widening** — nothing that compiled before stops compiling. The
 migration only runs the other way: a model using the new form is rejected by an
 older binary, with `E001` pointing at the `#'` line.
 
-Both `let` forms take one (the plain binding and the `: rate`-annotated form),
-`@symbol` and `@ref` work as they do elsewhere, and the prose surfaces in
-`camdlc inspect --let <name>`.
+Both `let` forms take one — the plain binding and the `: rate`-annotated form.
+The prose surfaces in `camdlc inspect --let <name>`; `@symbol` overrides the
+name `camdlc render` prints, on the definition line and at every use of it in
+the derived dynamics. A **typed constant** `let` lowers to an IR parameter, so
+its prose also reaches `run.json` and `camdl fit summary`'s legend, exactly as a
+`parameters {}` entry's does.
 
 **Why here.** A derived quantity is where a modelling assumption hides.
 `let N = S + I + R` shows its arithmetic but not whether it is the total
