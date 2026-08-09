@@ -190,6 +190,39 @@ let test_let_becomes_definition () =
   has ~doc:"Definitions heading" "\\textbf{Definitions}" out;
   has ~doc:"let N as definition" "N &= S + I + R" out
 
+(* gh#527: `@symbol` on a `let`. gh#508 gave `let` a doc slot and the language
+   spec advertised the tag as working "as it does elsewhere", but
+   `populate_overrides` harvested only compartments and parameters — so the
+   override parsed, stored, and was never read. A `let` is where it earns its
+   keep: the code name (`N_total`) and the paper symbol (`N`) diverge for the
+   same reason a compartment's do. The override must reach BOTH the definition
+   line and every use of the name in the derived dynamics, or the document
+   contradicts itself. *)
+let sir_let_symbol = {|
+time_unit = 'days
+compartments { S, I, R }
+#' total population, the FOI denominator
+#' @symbol NTOT
+let N = S + I + R
+parameters {
+  beta  : rate in [0.001, 2.0]
+  gamma : rate in [0.001, 1.0]
+}
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+|}
+
+let test_let_symbol_override () =
+  let out = render sir_let_symbol in
+  has ~doc:"let's @symbol on the definition LHS" "NTOT &= S + I + R" out;
+  has ~doc:"let's @symbol at its use in the rate"
+      "\\frac{\\beta\\,S\\,I}{NTOT}" out;
+  (* And the un-overridden name must be gone from those positions, or the
+     override is merely additive rather than a substitution. *)
+  has_not ~doc:"bare N as the definition LHS" "N &= S + I + R" out
+
 let test_derived_ode_signs () =
   let out = render sir_symbol in
   (* source loses the flow (negative), sink gains it (positive). *)
@@ -333,6 +366,8 @@ let () =
       ( "symbols",
         [ Alcotest.test_case "@symbol override + \\frac flattening" `Quick
             test_symbol_override_and_frac;
+          Alcotest.test_case "@symbol on a let overrides its symbol (gh#527)" `Quick
+            test_let_symbol_override;
           Alcotest.test_case "greek fallback (negative control)" `Quick
             test_greek_fallback ] );
       ( "structure",

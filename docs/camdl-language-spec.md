@@ -95,8 +95,11 @@ the base model with global names and specifies how dimensions interact.
 
 A line starting `#'` documents the declaration **immediately below it**. Plain
 `#` is an ordinary comment that no tool reads; `#'` prose is carried through
-compilation and shown by `camdlc inspect`, `camdlc render`, and the parameter
-legend in `camdl fit summary`.
+compilation and shown by `camdlc inspect` for every documented declaration, and
+by `camdlc render`. A **parameter's** prose additionally reaches the IR, and so
+the legend in `camdl fit summary` — as does a typed constant `let`'s, since that
+lowers to a parameter. A derived `let` is not a parameter and surfaces through
+`camdlc inspect --let <name>`.
 
 A doc comment attaches to a **declaration**, never to a block keyword. Inside a
 block that means the member, not the `{`:

@@ -10793,6 +10793,54 @@ let test_doc_nonparam_reaches_ir () =
   Alcotest.(check bool) "quantity doc in the dictionary" true
     (List.mem_assoc "peak_prev" m.doc_index.di_quantities)
 
+(* gh#527. A TYPED CONST `let` is lifted into an IR parameter by
+   `expand_parameters`'s `from_lets`, so `camdl fit summary`'s legend and
+   `run.json` look its doc up under `parameters` — and found nothing, because
+   `build_doc_index` collected only `ctx.param_decls`. The prose on
+   `let omega : rate = 0.01` silently vanished, while the identical prose on a
+   `parameters {}` entry reached the legend. That is the failure mode gh#521
+   is about, reintroduced one declaration site over.
+
+   The negative control matters as much as the positive: a `let` that stays a
+   derived expression is NOT a parameter, and filing its doc under `parameters`
+   would name something that does not exist there. Its prose surfaces through
+   `camdlc inspect --let`, which reads the AST. *)
+let doc_const_let_src = {|
+time_unit = 'days
+compartments { S, I, R }
+#' total population — a derived expression, NOT a parameter
+let N = S + I + R
+#' waning immunity rate — mean 100-day protection
+let omega : rate = 0.01
+parameters { beta : rate in [0.001,1.0]  gamma : rate in [0.01,0.5] }
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+  waning    : R --> S @ omega * R
+}
+init { S = 1000  I = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+let test_doc_on_const_let_reaches_the_parameter_dictionary () =
+  let m = compile_expect_ok doc_const_let_src in
+  (* The typed const let really did become a parameter … *)
+  Alcotest.(check bool) "omega is an IR parameter" true
+    (List.exists (fun (p : Ir.parameter) -> p.name = "omega") m.parameters);
+  (* … so its doc must be findable where a parameter's doc is looked up. *)
+  Alcotest.(check bool) "const let's doc reaches di_parameters" true
+    (List.mem_assoc "omega" m.doc_index.di_parameters);
+  (* Negative control: a plain derived `let` is not a parameter and must not
+     appear under one — otherwise the dictionary names a parameter that does
+     not exist. *)
+  Alcotest.(check bool) "plain let is not an IR parameter" false
+    (List.exists (fun (p : Ir.parameter) -> p.name = "N") m.parameters);
+  Alcotest.(check bool) "plain let's doc is NOT filed under parameters" false
+    (List.mem_assoc "N" m.doc_index.di_parameters);
+  (* And the ordinary parameters are undisturbed. *)
+  Alcotest.(check bool) "declared parameters still collected" true
+    (List.length m.doc_index.di_parameters = 1)
+
 (* ── A3: statically empty restricted reduction → aggregated W202 ─────────────
    A `where` guard that selects no levels for some outer index leaves the
    reduction as `Const 0.0`, and the enclosing term folds away entirely. On the
@@ -11487,6 +11535,7 @@ let () =
       Alcotest.test_case "inspect --transitions shows doc prose"      `Quick test_doc_inspect_transition;
       Alcotest.test_case "inspect --summary shows dimension doc"      `Quick test_doc_inspect_dimension;
       Alcotest.test_case "non-parameter docs reach the dictionary"   `Quick test_doc_nonparam_reaches_ir;
+      Alcotest.test_case "a const let's doc reaches di_parameters (gh#527)" `Quick test_doc_on_const_let_reaches_the_parameter_dictionary;
       Alcotest.test_case "#' on a let compiles (gh#508)"             `Quick test_doc_on_let_compiles;
       Alcotest.test_case "inspect --let shows the let's doc prose"   `Quick test_doc_on_let_reaches_inspect;
     ];

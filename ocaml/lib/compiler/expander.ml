@@ -5291,10 +5291,34 @@ let build_doc_index ctx : Ir.doc_index =
       | Some doc -> Some (get_name d, doc)
       | None     -> None) decls
   in
+  (* gh#527: a typed const `let` LIFTS INTO AN IR PARAMETER
+     (`expand_parameters`'s `from_lets`), so its doc belongs in the parameter
+     category — that is where `camdl fit summary`'s legend and `run.json` look
+     it up, and the name they look up is this one. Without this,
+     `#' waning immunity rate` on `let omega : rate = 0.01` produced a
+     documented parameter whose documentation silently vanished, while the
+     identical prose on a `parameters {}` entry reached the legend.
+
+     Only the lets that actually lift are included. A `let` that stays a
+     derived expression is not a parameter, and filing its doc under
+     `parameters` would name something that does not exist there. Those keep
+     surfacing through `camdlc inspect --let`, which reads the AST directly —
+     they get no IR category, because nothing reads one (the failure mode of
+     gh#521). *)
+  let const_let_docs =
+    List.filter_map (fun (lb : Ast.let_binding) ->
+      match lb.lkind with
+      | Some _ when is_const_expr lb.lbody ->
+        (match ir_doc_of_ast lb.ldoc with
+         | Some doc -> Some (lb.lname, doc)
+         | None -> None)
+      | _ -> None) ctx.let_bindings
+  in
   { Ir.di_parameters =
       collect (function Ast.PScalar s -> s.pname | Ast.PIndexed i -> i.pname)
               (function Ast.PScalar s -> s.pdoc  | Ast.PIndexed i -> i.pdoc)
-              ctx.param_decls;
+              ctx.param_decls
+      @ const_let_docs;
     Ir.di_compartments =
       collect (fun (c : Ast.compartment_decl) -> c.cname) (fun c -> c.cdoc) ctx.comp_decls;
     Ir.di_transitions =

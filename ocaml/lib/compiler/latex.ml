@@ -310,6 +310,15 @@ let populate_overrides (decls : declaration list) : unit =
         List.iter
           (function PScalar { pname; pdoc; _ } | PIndexed { pname; pdoc; _ } -> add pname pdoc)
           ps
+      (* gh#527: a `let` carries `@symbol` too. gh#508 added the doc slot and
+         the language spec advertised the tag as working "as it does
+         elsewhere", but this table only harvested compartments and
+         parameters, so the override was parsed, stored on `ldoc`, and never
+         read — `#' @symbol NTOT` above `let N = …` still rendered as `N`.
+         A `let` is exactly where the override earns its keep: a derived
+         quantity's code name (`N_total`) and its paper symbol (`N`) diverge
+         for the same reason a compartment's do. *)
+      | DLet lb -> add lb.lname lb.ldoc
       | _ -> ())
     decls
 
