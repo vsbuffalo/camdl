@@ -257,6 +257,36 @@ impl clap::ValueEnum for InitMethod {
     }
 }
 
+/// Does this mode discard the base point — and with it `[estimate].start`?
+///
+/// gh#506 surfaced the question: `start` is load-bearing under some init modes
+/// and inert under others, and nothing said which. Declaring a start that the
+/// mode then ignores is not an error (the modes that ignore it do so on
+/// purpose — a chain-agreement gate is only informative if the chains genuinely
+/// start apart), but it IS a silent no-op, and the user who wrote the value
+/// deserves to know it had no effect.
+///
+/// `n_chains` matters because the three spreading modes fall back to the base
+/// point at one chain: there is nothing to spread.
+pub fn ignores_base_point(method: &InitMethod, n_chains: usize) -> bool {
+    match method {
+        // Every chain at the base point.
+        InitMethod::Single => false,
+        // Chain 1 keeps the seeded start; only 2..N are drawn.
+        InitMethod::Uniform => false,
+        // Stratified / unconstrained spreads use the base point for nothing —
+        // unless there is only one chain, where they degrade to it.
+        InitMethod::Lhs | InitMethod::UniformUnconstrained => n_chains >= 2,
+        // These read every chain's start from somewhere else entirely, at any
+        // chain count.
+        InitMethod::SurveyTopK
+        | InitMethod::FromPrior
+        | InitMethod::FromPosterior { .. }
+        | InitMethod::FromMle { .. }
+        | InitMethod::FromParams { .. } => true,
+    }
+}
+
 /// Build N chain starts according to `method`. Returns `None` when
 /// caller should pass `None` to `run_chains_with_per_chain_params`
 /// (i.e. all chains use `config.estimated_params` directly).
@@ -1217,6 +1247,42 @@ fn lhs_map_to_natural(spec: &EstimatedParam, u: f64) -> f64 {
 mod tests {
     use super::*;
     use sim::inference::types::Transform;
+
+    /// gh#506 follow-up. `ignores_base_point` decides whether a declared
+    /// `[estimate].start` has any effect, so it must agree exactly with what
+    /// `build_chain_starts` does — a disagreement means either a note that
+    /// contradicts the run, or silence where the start really was discarded.
+    #[test]
+    fn ignores_base_point_agrees_with_build_chain_starts() {
+        // The three spreading modes fall back to the base point at one chain
+        // (`build_chain_starts` returns None below n_chains = 2) and discard
+        // it above.
+        for m in [InitMethod::Uniform, InitMethod::Lhs,
+                  InitMethod::UniformUnconstrained] {
+            assert!(build_chain_starts(m.clone(), &[], 1, 1).is_none(),
+                "{m} must degrade to the base point at one chain");
+            assert!(!ignores_base_point(&m, 1),
+                "{m} at one chain uses the base point");
+        }
+        // Above one chain, `uniform` keeps chain 1 at the seeded start; the
+        // other two do not use it at all.
+        assert!(!ignores_base_point(&InitMethod::Uniform, 4),
+            "uniform's chain 1 keeps the seeded start");
+        assert!(ignores_base_point(&InitMethod::Lhs, 4));
+        assert!(ignores_base_point(&InitMethod::UniformUnconstrained, 4));
+
+        // `single` is the mode whose entire contract is the base point.
+        assert!(build_chain_starts(InitMethod::Single, &[], 8, 1).is_none());
+        assert!(!ignores_base_point(&InitMethod::Single, 8));
+        assert!(!ignores_base_point(&InitMethod::Single, 1));
+
+        // The source-reading modes read every chain from elsewhere at any
+        // chain count — they do NOT degrade to the base point at one chain.
+        assert!(ignores_base_point(&InitMethod::FromPrior, 1));
+        assert!(ignores_base_point(&InitMethod::SurveyTopK, 1));
+        assert!(ignores_base_point(
+            &InitMethod::FromParams { path: "p.toml".into() }, 1));
+    }
 
     fn ep(name: &str, lower: f64, upper: f64, transform: Transform, initial: f64) -> EstimatedParam {
         EstimatedParam {

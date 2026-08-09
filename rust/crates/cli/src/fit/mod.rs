@@ -1138,6 +1138,27 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     cli_survey_path.clone().or_else(|| survey_path.clone());
                 let effective_survey_top_k_n: Option<usize> =
                     cli_survey_top_k.or(*survey_top_k_n);
+                // gh#506 follow-up: a declared `start` that the chosen init
+                // mode discards is a silent no-op. Not an error — the
+                // spreading modes ignore it on purpose — but the user who
+                // wrote the value should hear that it had no effect, rather
+                // than inferring a start that never happened.
+                if effective_starts.is_none()
+                    && init::ignores_base_point(&effective_init, *chains)
+                {
+                    let declared: Vec<&str> = sweep_config.estimate.iter()
+                        .filter(|(_, spec)| spec.start.is_some())
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    if !declared.is_empty() {
+                        eprintln!(
+                            "  \x1b[33mnote:\x1b[0m `init = \"{}\"` draws every chain's \
+                             start, so `[estimate].start` is unused here for: {}. \
+                             Use `init = \"single\"` to start every chain at the \
+                             declared values, or drop the `start` entries.",
+                            effective_init, declared.join(", "));
+                    }
+                }
                 // For survey_top_k we need to keep the SurveyTopKResult
                 // around (not just the per-chain `chains`) so the
                 // chain_init_source / chain_starts.tsv writers can pull
