@@ -88,8 +88,36 @@ impl StatefulRng {
         StatefulRng(rng)
     }
 
+    /// Poisson(λ) draw.
+    ///
+    /// gh#517: a NaN λ is rejected FIRST, before the `<= 0.0` test and the
+    /// `min` clamp — both of which launder it. `NaN <= 0.0` is false, so the
+    /// zero-guard does not fire, and `f64::min` returns the non-NaN operand,
+    /// so `NAN.min(1e15) == 1e15`. A NaN rate therefore used to become a draw
+    /// of ~10^15 events: a finite, plausible-looking integer produced from an
+    /// undefined rate, on a path that runs per particle per observation.
+    ///
+    /// A NaN λ is always a defect upstream — a division by zero in a rate
+    /// expression, an unset covariate, a parameter that walked somewhere
+    /// undefined. There is no error channel here (the signature is infallible
+    /// and threading a `Result` would reach every backend), so it returns 0
+    /// and increments a counter that surfaces in the eval-stats summary. That
+    /// keeps it BOUNDED and VISIBLE rather than silently enormous. A
+    /// structural error is the better long-term answer; it needs the error
+    /// channel first.
+    ///
+    /// A non-finite λ that is +∞ keeps hitting the 1e15 clamp — that clamp
+    /// exists for genuinely huge finite rates and an infinite one is its
+    /// limiting case, so it is not the accident NaN is. It is counted too.
     pub fn poisson(&mut self, lambda: f64) -> u64 {
+        if lambda.is_nan() {
+            crate::eval_stats::inc_poisson_nonfinite();
+            return 0;
+        }
         if lambda <= 0.0 { return 0; }
+        if lambda.is_infinite() {
+            crate::eval_stats::inc_poisson_nonfinite();
+        }
         let lambda = lambda.min(1e15);
         match Poisson::new(lambda) {
             Ok(p) => p.sample(&mut self.0) as u64,
@@ -247,6 +275,54 @@ pub(crate) fn expand_u64_to_seed(v: u64) -> [u8; 32] {
     seed[16..24].copy_from_slice(&b3);
     seed[24..32].copy_from_slice(&b4);
     seed
+}
+
+#[cfg(test)]
+mod poisson_nonfinite_tests {
+    use super::*;
+
+    /// gh#517. `f64::min` propagates the non-NaN operand, and `NaN <= 0.0` is
+    /// false, so both guards in the old `poisson` let NaN straight through to
+    /// the 1e15 clamp — turning an undefined rate into a finite,
+    /// plausible-looking count of ~10^15 events.
+    #[test]
+    fn nan_lambda_does_not_become_a_draw_of_1e15() {
+        // The second laundering step, pinned as a fact so the test explains
+        // itself if it ever changes. (The first — that `NaN <= 0.0` is false,
+        // so the zero-guard never fires — cannot be asserted here: rustc's
+        // `invalid_nan_comparisons` lint rejects the comparison, which is
+        // itself the point.)
+        assert_eq!(f64::NAN.min(1e15), 1e15, "f64::min launders NaN");
+
+        let mut rng = StatefulRng::new(1);
+        let before = crate::eval_stats::EvalStats::snapshot();
+        let draw = rng.poisson(f64::NAN);
+        let after = crate::eval_stats::EvalStats::snapshot();
+
+        assert_eq!(draw, 0,
+            "a NaN rate must not produce events — got {draw}");
+        assert!(after.poisson_nonfinite > before.poisson_nonfinite,
+            "the draw must be counted, or it is silent again");
+    }
+
+    /// The ordinary cases must be untouched: this guard sits in the innermost
+    /// sampling loop of every chain-binomial run.
+    #[test]
+    fn finite_lambda_is_unaffected() {
+        let mut rng = StatefulRng::new(3);
+        assert_eq!(rng.poisson(0.0), 0);
+        assert_eq!(rng.poisson(-1.0), 0);
+        let draws: Vec<u64> = (0..2000).map(|_| rng.poisson(4.0)).collect();
+        let mean = draws.iter().sum::<u64>() as f64 / draws.len() as f64;
+        assert!((mean - 4.0).abs() < 0.25, "mean {mean} is not near lambda = 4");
+        // +inf still hits the documented 1e15 clamp — its limiting case, not
+        // the accident NaN is — but is counted so it is not silent either.
+        let before = crate::eval_stats::EvalStats::snapshot();
+        let big = rng.poisson(f64::INFINITY);
+        let after = crate::eval_stats::EvalStats::snapshot();
+        assert!(big > 0, "an infinite rate clamps to 1e15, not to zero");
+        assert!(after.poisson_nonfinite > before.poisson_nonfinite);
+    }
 }
 
 #[cfg(test)]

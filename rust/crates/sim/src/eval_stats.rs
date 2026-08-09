@@ -24,6 +24,13 @@ pub static BINOMIAL_FALLBACK: AtomicU64 = AtomicU64::new(0);
 /// the run hard-errors at the `eval_propensities` boundary — but it is counted
 /// here for the same end-of-run summary so a user sees an OOB happened.
 pub static TABLE_OOB:         AtomicU64 = AtomicU64::new(0);
+/// gh#517: a Poisson draw was asked for a non-finite rate. NaN is the one that
+/// matters — before the guard it was laundered into a draw of ~10^15 by
+/// `f64::min`, producing a finite, plausible-looking count from an undefined
+/// rate. It now returns 0. +inf keeps hitting the 1e15 clamp (its limiting
+/// case) and is counted here too. Either way the model produced an undefined
+/// rate, which is a defect upstream — not a numerical corner to absorb.
+pub static POISSON_NONFINITE: AtomicU64 = AtomicU64::new(0);
 
 /// gh#audit-C6 / S1. Process-global opt-in for the legacy silent-zero
 /// behaviour in eval_expr. Default false → numerical-collapse paths
@@ -86,6 +93,10 @@ pub struct EvalStats {
     pub neg_binomial_pois: u64,
     pub binomial_fallback: u64,
     pub table_oob:         u64,
+    /// gh#517: a Poisson draw asked for a non-finite rate. NaN returns 0;
+    /// +inf hits the 1e15 clamp. Either way the model produced an undefined
+    /// rate, which is a defect upstream, not a numerical corner.
+    pub poisson_nonfinite: u64,
 }
 
 impl EvalStats {
@@ -97,6 +108,7 @@ impl EvalStats {
             neg_binomial_pois: NEG_BINOMIAL_POIS.load(Ordering::Relaxed),
             binomial_fallback: BINOMIAL_FALLBACK.load(Ordering::Relaxed),
             table_oob:         TABLE_OOB.load(Ordering::Relaxed),
+            poisson_nonfinite: POISSON_NONFINITE.load(Ordering::Relaxed),
         }
     }
 
@@ -108,12 +120,14 @@ impl EvalStats {
             neg_binomial_pois: self.neg_binomial_pois.saturating_sub(earlier.neg_binomial_pois),
             binomial_fallback: self.binomial_fallback.saturating_sub(earlier.binomial_fallback),
             table_oob:         self.table_oob.saturating_sub(earlier.table_oob),
+            poisson_nonfinite: self.poisson_nonfinite.saturating_sub(earlier.poisson_nonfinite),
         }
     }
 
     pub fn total(&self) -> u64 {
         self.div_by_zero + self.pow_nan_inf + self.unop_nan
             + self.neg_binomial_pois + self.binomial_fallback + self.table_oob
+            + self.poisson_nonfinite
     }
 }
 
@@ -129,6 +143,8 @@ pub fn inc_neg_binomial_pois() { NEG_BINOMIAL_POIS.fetch_add(1, Ordering::Relaxe
 pub fn inc_binomial_fallback() { BINOMIAL_FALLBACK.fetch_add(1, Ordering::Relaxed); }
 #[inline]
 pub fn inc_table_oob()         { TABLE_OOB.fetch_add(1, Ordering::Relaxed); }
+#[inline]
+pub fn inc_poisson_nonfinite() { POISSON_NONFINITE.fetch_add(1, Ordering::Relaxed); }
 
 impl std::fmt::Display for EvalStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -139,6 +155,16 @@ impl std::fmt::Display for EvalStats {
         if self.neg_binomial_pois > 0 { writeln!(f, "  neg_binomial_pois: {}", self.neg_binomial_pois)?; }
         if self.binomial_fallback > 0 { writeln!(f, "  binomial_fallback: {}", self.binomial_fallback)?; }
         if self.table_oob         > 0 { writeln!(f, "  table_oob:         {}", self.table_oob)?; }
+        // gh#517. Named with its consequence, because unlike its neighbours a
+        // non-finite rate is not a numerical corner the run absorbed — it is a
+        // rate the model could not define, and the count is how many draws
+        // were made from it.
+        if self.poisson_nonfinite > 0 {
+            writeln!(f, "  poisson_nonfinite: {}  \
+                (a rate evaluated to NaN or inf; those draws returned 0 — \
+                check for a division by zero or an unset covariate)",
+                self.poisson_nonfinite)?;
+        }
         Ok(())
     }
 }
