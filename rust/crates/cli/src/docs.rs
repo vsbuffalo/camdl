@@ -103,6 +103,12 @@ const TOPICS: &[Topic] = &[
         body: include_str!("../../../../docs/camdl-data-spec.md"),
     },
     Topic {
+        slug: "dates",
+        aliases: &["calendar", "time", "origin", "anchored"],
+        summary: "Calendar time: anchoring a model with `origin`, dated data columns, reading results back as dates",
+        body: include_str!("../../../../docs/dates.md"),
+    },
+    Topic {
         slug: "debugging",
         aliases: &["debug", "eval", "trace"],
         summary: "Debugging via `camdl eval` and the substep tracer",
