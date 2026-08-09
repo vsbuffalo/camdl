@@ -10672,9 +10672,9 @@ parameters {
 simulate { from = 0 'days to = 5 'days }
 |}
 
-let doc_inspect_output view =
+let doc_inspect_output ?(src = doc_model_src) view =
   let detail =
-    match Compiler.compile_detail_result ~name:"doc_inspect" doc_model_src with
+    match Compiler.compile_detail_result ~name:"doc_inspect" src with
     | Ok d -> d
     | Error e -> Alcotest.failf "detail compile failed: %s" e
   in
@@ -10684,9 +10684,53 @@ let doc_inspect_output view =
    | `Params       -> Inspect.run_parameters   ppf detail.model detail.ctx
    | `Compartments -> Inspect.run_compartments ppf detail.model detail.ctx
    | `Transitions  -> Inspect.run_transitions  ppf detail.model detail.ctx None ~ascii:true
+   | `Let name     -> Inspect.run_let          ppf detail.ctx name
    | `Summary      -> Inspect.run_summary       ppf detail.model detail.ctx detail.summary);
   Format.pp_print_flush ppf ();
   Buffer.contents buf
+
+(* gh#508. `#'` was accepted on every declaration INSIDE a block but rejected
+   on a top-level `let` with a bare E001 — the one site with no structured
+   place for the prose and, arguably, the site that needs it most: a derived
+   quantity is where a modelling assumption hides. `let N = S + I + R` meaning
+   "total population" versus "the currently-infectious denominator" changes the
+   force of infection, and the expression cannot say which. *)
+let doc_let_src = {|
+time_unit = 'days
+compartments { S, I, R }
+#' total population, the force-of-infection denominator
+#' @symbol N
+let N = S + I + R
+#' effective contact rate after the behaviour brake
+let beta_eff : rate = beta
+parameters { beta : rate in [0.001,1.0]  gamma : rate in [0.01,0.5] }
+transitions {
+  infection : S --> I @ beta_eff * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+init { S = 1000  I = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+let test_doc_on_let_compiles () =
+  (* Both `let` forms carry a doc: the plain binding and the `: rate`
+     type-annotated one, which is a separate parser production. *)
+  ignore (compile_expect_ok doc_let_src)
+
+let test_doc_on_let_reaches_inspect () =
+  (* A doc field that parses and then surfaces nowhere is the failure mode
+     this fix exists to avoid (see gh#521, where exactly that happened to
+     contrasts) — so assert the prose reaches `inspect --let`, not merely
+     that it parses. *)
+  let out = doc_inspect_output ~src:doc_let_src (`Let "N") in
+  Alcotest.(check bool) "let doc prose reaches inspect --let" true
+    (contains_substring ~needle:"total population" out);
+  Alcotest.(check bool) "@symbol on a let is split out and rendered" true
+    (contains_substring ~needle:"N" out);
+  (* The type-annotated form surfaces too — it is a different production. *)
+  let out2 = doc_inspect_output ~src:doc_let_src (`Let "beta_eff") in
+  Alcotest.(check bool) "typed let doc prose reaches inspect --let" true
+    (contains_substring ~needle:"behaviour brake" out2)
 
 let test_doc_inspect_parameters () =
   let out = doc_inspect_output `Params in
@@ -11443,6 +11487,8 @@ let () =
       Alcotest.test_case "inspect --transitions shows doc prose"      `Quick test_doc_inspect_transition;
       Alcotest.test_case "inspect --summary shows dimension doc"      `Quick test_doc_inspect_dimension;
       Alcotest.test_case "non-parameter docs reach the dictionary"   `Quick test_doc_nonparam_reaches_ir;
+      Alcotest.test_case "#' on a let compiles (gh#508)"             `Quick test_doc_on_let_compiles;
+      Alcotest.test_case "inspect --let shows the let's doc prose"   `Quick test_doc_on_let_reaches_inspect;
     ];
     "quadratic_coupling_warning", [
       Alcotest.test_case "W104 on per-(p,q) transition" `Quick test_w104_perpair_warns;

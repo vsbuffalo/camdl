@@ -84,10 +84,64 @@ the base model with global names and specifies how dimensions interact.
 @    rate expression (how fast, always total propensity)
 -->  flow direction
 #    comment
+#'   doc comment (attaches to the declaration below it)
 { }  block grouping
 [ ]  index access and list literals
 ( )  function arguments
 '    unit literal prefix ('days, 'years)
+```
+
+#### Doc comments (`#'`)
+
+A line starting `#'` documents the declaration **immediately below it**. Plain
+`#` is an ordinary comment that no tool reads; `#'` prose is carried through
+compilation and shown by `camdlc inspect`, `camdlc render`, and the parameter
+legend in `camdl fit summary`.
+
+A doc comment attaches to a **declaration**, never to a block keyword. Inside a
+block that means the member, not the `{`:
+
+```camdl
+compartments {
+  #' fully susceptible
+  S,
+  #' confirmed and still transmitting — the infectious dwell ends here
+  C
+}
+```
+
+Writing `#'` above `compartments {` is a syntax error, because a block has no
+declaration for it to describe. The sites that take one are: `compartments`
+members, `parameters` members, `dimensions` entries, `transitions`,
+`observations` streams, `quantities`, and top-level `let` bindings.
+
+Whether `C` means "confirmed and still transmitting" or "confirmed, isolated,
+terminal" decides whether the `I` dwell is the effective infectious period, and
+so the generation interval, and so the R0 you infer from a given growth rate.
+That is a scientific fact about the model, and `#'` is where it lives.
+
+Two tags are recognised inside a doc comment; anything else is `E111`.
+
+```camdl
+#' basic reproduction number
+#' @symbol R_0
+#' @ref Anderson & May 1991, ch. 6
+R0 : positive in [0.5, 20]
+```
+
+`@symbol` overrides the symbol `camdlc render` prints for that name in the
+LaTeX and JSON projections — useful when the model identifier is spelled for
+code (`Conf`) and the paper spells it `C`. `@ref` records a citation or case
+definition. Both are optional, and either may appear without prose.
+
+A `let` binding is the highest-value site: a derived quantity is where a
+modelling assumption hides. `let N[p] = S[p] + E[p] + I[p] + C[p]` shows its
+arithmetic but not whether it is the total population or the
+force-of-infection denominator, and those are different models.
+
+```camdl
+#' total population per patch — the FOI denominator
+let N[p in patch] = S[p] + E[p] + I[p] + C[p]
 ```
 
 ---

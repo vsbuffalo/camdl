@@ -104,9 +104,16 @@ and run_namespace = NsQuantities | NsObservations
 type compartment_kind = Integer | Real
 
 (* A parsed `#'` doc-comment block immediately preceding a declaration: free-text
-   prose plus optional structured tags. Non-semantic metadata — it never reaches
-   the IR or affects compilation; it surfaces in `camdlc inspect`. `None` when the
-   declaration is undocumented. *)
+   prose plus optional structured tags. Non-semantic — it does not affect
+   compilation — but it is NOT compilation-local: `Expander.build_doc_index`
+   folds it into the IR envelope's `docs` dictionary, which `camdl fit summary`
+   reads for its parameter legend. It also surfaces in `camdlc inspect` and, via
+   `@symbol`, in `camdlc render`. `None` when the declaration is undocumented.
+
+   A doc attaches to a DECLARATION, never to a block keyword — the parser's
+   `doc_opt` slot sits on the member rules (`compartment_decl`, `param_decl`,
+   `transition_decl`, `obs_decl`, `quantity_decl`, `dim_entry`) and on the
+   top-level `let`. *)
 type doc = {
   d_text   : string option;   (* joined prose description (the non-@tag lines) *)
   d_symbol : string option;   (* `@symbol`: display label for plots / reports *)
@@ -284,6 +291,11 @@ type let_binding = {
   lshape   : string list option;  (* Some dims → shaped literal, None → scalar/indexed *)
   lkind    : param_type option;   (* optional type annotation: count, rate, etc. *)
   lbody    : expr;
+  (* gh#508: `#'` prose. A derived quantity is where a modelling assumption
+     hides — whether `let N[p] = S[p] + E[p] + I[p]` is "total population" or
+     "the currently-infectious denominator" changes the force of infection, and
+     the expression alone cannot say which. Surfaced by `camdlc inspect`. *)
+  ldoc     : doc option;
 }
 
 type stratify_decl = {
