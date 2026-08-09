@@ -1672,6 +1672,43 @@ impl Stage {
             _ => None,
         }
     }
+
+    /// Overwrite this stage's chain-start settings from the CLI.
+    ///
+    /// gh#514: these are keyed fields — `identity_payload` folds
+    /// `init_method` / `survey_path` / `survey_top_k_n` into the stage hash —
+    /// but the CLI overrides used to be applied at the *dispatch* site, well
+    /// after the CAS claim, so two runs differing only in `--init` shared a
+    /// `run_id` and the second was served the first's result. Writing them
+    /// into the in-memory stage BEFORE the claim makes a different `--init` a
+    /// different artifact, exactly as a different toml `init` already is.
+    ///
+    /// Same shape as the `--condition-from` override, which writes into the
+    /// config before `cas::fit_level_hash` for the same reason.
+    ///
+    /// A `None` argument leaves the field as the toml declared it, so a run
+    /// with no CLI overrides keys identically to before — no existing cached
+    /// fit is invalidated by this.
+    pub fn apply_cli_chain_start_overrides(
+        &mut self,
+        init: Option<&super::init::InitMethod>,
+        survey: Option<&std::path::PathBuf>,
+        top_k: Option<usize>,
+    ) {
+        let (init_method, survey_path, survey_top_k_n) = match self {
+            Stage::IF2 { init_method, survey_path, survey_top_k_n, .. }
+            | Stage::PGAS { init_method, survey_path, survey_top_k_n, .. }
+            | Stage::PMMH { init_method, survey_path, survey_top_k_n, .. }
+            | Stage::Mh { init_method, survey_path, survey_top_k_n, .. }
+            | Stage::Nuts { init_method, survey_path, survey_top_k_n, .. } =>
+                (init_method, survey_path, survey_top_k_n),
+            // NLopt / pfilter stages take no chain-start override.
+            _ => return,
+        };
+        if let Some(m) = init { *init_method = m.clone(); }
+        if let Some(p) = survey { *survey_path = Some(p.clone()); }
+        if let Some(k) = top_k { *survey_top_k_n = Some(k); }
+    }
 }
 
 // ─── Clean-evaluation + gate (IF2 scout/refine) ─────────────────────────────
@@ -2924,6 +2961,87 @@ cooling = 0.7
 "#
         ))
         .unwrap()
+    }
+
+    // ── gh#514: a CLI chain-start override must re-key the stage ────────
+
+    fn scout_stage(init: &str) -> Stage {
+        let cfg = parse(&format!(r#"
+[model]
+camdl = "m.camdl"
+
+[estimate]
+beta = {{ bounds = [0.01, 2.0] }}
+
+[fixed]
+N0 = 1000000
+
+[stages.scout]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 4
+particles  = 100
+iterations = 10
+cooling    = 0.7
+init       = "{init}"
+"#)).unwrap();
+        cfg.stages["scout"].clone()
+    }
+
+    /// The count-in-the-key rule: anything that changes where the chains
+    /// start changes the stored output, so it must change the stage's
+    /// identity. Before gh#514 the CLI overrides were applied after the CAS
+    /// claim, so two runs differing only in `--init` collided and the second
+    /// was served the first's result.
+    #[test]
+    fn cli_init_override_changes_the_stage_identity() {
+        let declared = scout_stage("single");
+        let mut overridden = scout_stage("single");
+        overridden.apply_cli_chain_start_overrides(
+            Some(&crate::fit::init::InitMethod::Lhs), None, None);
+
+        assert_ne!(declared.identity_payload(), overridden.identity_payload(),
+            "a stage run under `--init lhs` must not share an identity with \
+             the same stage run under its declared `init = single` — that \
+             collision is gh#514, and it silently returns the other run's \
+             result");
+
+        // And the override must land on the value the run actually uses, not
+        // merely perturb the hash.
+        assert_eq!(overridden.identity_payload(), scout_stage("lhs").identity_payload(),
+            "`--init lhs` must key identically to `init = \"lhs\"` written in \
+             the toml — they are the same fit");
+    }
+
+    /// The other half, and the one that protects existing users: a run with
+    /// no CLI overrides must key exactly as it did before, so no cached fit
+    /// is invalidated by this change.
+    #[test]
+    fn no_cli_override_leaves_the_stage_identity_untouched() {
+        let declared = scout_stage("uniform");
+        let mut untouched = scout_stage("uniform");
+        untouched.apply_cli_chain_start_overrides(None, None, None);
+        assert_eq!(declared.identity_payload(), untouched.identity_payload());
+    }
+
+    /// `--survey-path` and `--survey-top-k` ride the same seam and are
+    /// equally keyed — `survey_top_k_n` is a count, and a count that changes
+    /// the stored output belongs in the key.
+    #[test]
+    fn cli_survey_overrides_change_the_stage_identity() {
+        let base = scout_stage("survey_top_k");
+
+        let mut with_path = scout_stage("survey_top_k");
+        with_path.apply_cli_chain_start_overrides(
+            None, Some(&std::path::PathBuf::from("results/survey-abc")), None);
+        assert_ne!(base.identity_payload(), with_path.identity_payload(),
+            "--survey-path selects which points seed the chains");
+
+        let mut with_k = scout_stage("survey_top_k");
+        with_k.apply_cli_chain_start_overrides(None, None, Some(3));
+        assert_ne!(base.identity_payload(), with_k.identity_payload(),
+            "--survey-top-k selects how many points seed the chains");
+        assert_ne!(with_path.identity_payload(), with_k.identity_payload());
     }
 
     #[test]
