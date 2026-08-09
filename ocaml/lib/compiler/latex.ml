@@ -297,9 +297,15 @@ let derived_ode (transitions : transition_decl list) (inst : stoich_ref) : strin
 
 (* ── Document ───────────────────────────────────────────────────────────────── *)
 
-(* Harvest `#' @symbol …` blocks off compartments and parameters into the
-   override table, so the modeler controls the symbol where the auto-heuristic
-   would guess (a FOI written \Lambda, a rate written \beta_h). *)
+(* Harvest `#' @symbol …` blocks off compartments, parameters and `let`
+   definitions into the override table, so the modeler controls the symbol where
+   the auto-heuristic would guess (a FOI written \Lambda, a rate written
+   \beta_h).
+
+   A `let` is the site where the heuristic guesses worst: the name is chosen for
+   code (`foi_h`, `Ntot`) while the paper spells it `\Lambda_h`, `N`. The symbol
+   propagates everywhere the name renders, not just the definition's own
+   left-hand side, because every emission path routes through `comp_sym`. *)
 let populate_overrides (decls : declaration list) : unit =
   Hashtbl.clear overrides;
   let add name = function Some { d_symbol = Some s; _ } -> Hashtbl.replace overrides name s | _ -> () in
@@ -310,6 +316,7 @@ let populate_overrides (decls : declaration list) : unit =
         List.iter
           (function PScalar { pname; pdoc; _ } | PIndexed { pname; pdoc; _ } -> add pname pdoc)
           ps
+      | DLet lb -> add lb.lname lb.ldoc
       | _ -> ())
     decls
 

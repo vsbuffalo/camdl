@@ -10699,7 +10699,7 @@ let doc_let_src = {|
 time_unit = 'days
 compartments { S, I, R }
 #' total population, the force-of-infection denominator
-#' @symbol N
+#' @symbol \Pi
 let N = S + I + R
 #' effective contact rate after the behaviour brake
 let beta_eff : rate = beta
@@ -10725,12 +10725,64 @@ let test_doc_on_let_reaches_inspect () =
   let out = doc_inspect_output ~src:doc_let_src (`Let "N") in
   Alcotest.(check bool) "let doc prose reaches inspect --let" true
     (contains_substring ~needle:"total population" out);
+  (* The needle must be the SYMBOL, not the let's own name — `run_let` prints
+     `lb.lname` in its header, so a needle of "N" is satisfied by the binding
+     existing at all and passes with `ldoc` entirely unread (gh#527). *)
   Alcotest.(check bool) "@symbol on a let is split out and rendered" true
-    (contains_substring ~needle:"N" out);
+    (contains_substring ~needle:"\\Pi" out);
   (* The type-annotated form surfaces too — it is a different production. *)
   let out2 = doc_inspect_output ~src:doc_let_src (`Let "beta_eff") in
   Alcotest.(check bool) "typed let doc prose reaches inspect --let" true
     (contains_substring ~needle:"behaviour brake" out2)
+
+(* gh#527. `expand_parameters` lifts a typed `let` with a CONSTANT body into a
+   fixed IR parameter, but `build_doc_index` had no lets category — so a
+   documented constant compiled to a parameter carrying no documentation, and
+   `camdl fit summary`'s legend showed it as the one undocumented row. The same
+   prose written on a `parameters {}` entry landed there fine, which is what
+   made it look like the doc had simply been ignored. *)
+let doc_const_let_src = {|
+time_unit = 'days
+compartments { S, I, R }
+#' waning immunity rate — mean 100-day protection
+#' @ref Anderson & May 1991, ch. 6
+let omega : rate = 0.01
+#' the running total, which is not a constant and so not a parameter
+let N = S + I + R
+parameters { beta : rate in [0.001,1.0]  gamma : rate in [0.01,0.5] }
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+  waning    : R --> S @ omega * R
+}
+init { S = 1000  I = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+let test_const_let_doc_reaches_parameter_legend () =
+  let m = compile_expect_ok doc_const_let_src in
+  (* The premise: `omega` really is lifted into the IR's parameter list. If
+     this ever stops being true the doc assertion below is meaningless, so
+     assert it rather than assume it. *)
+  Alcotest.(check bool) "omega is lifted to an IR parameter" true
+    (List.exists (fun (p : Ir.parameter) -> p.Ir.name = "omega") m.Ir.parameters);
+  (match List.assoc_opt "omega" m.Ir.doc_index.Ir.di_parameters with
+   | None -> Alcotest.fail "const let's doc is missing from di_parameters"
+   | Some (d : Ir.doc) ->
+     Alcotest.(check bool) "prose carried into the legend" true
+       (match d.Ir.text with
+        | Some t -> contains_substring ~needle:"waning immunity" t
+        | None -> false);
+     Alcotest.(check bool) "@ref carried into the legend" true
+       (match d.Ir.reference with
+        | Some r -> contains_substring ~needle:"Anderson & May" r
+        | None -> false));
+  (* Negative control. A non-constant `let` has no IR entity of its own, so it
+     must NOT appear in the parameter legend — otherwise the legend documents a
+     name the model has no parameter for. This is what keeps the doc index and
+     `expand_parameters` on the same predicate. *)
+  Alcotest.(check bool) "a non-const let stays out of the parameter legend" false
+    (List.mem_assoc "N" m.Ir.doc_index.Ir.di_parameters)
 
 let test_doc_inspect_parameters () =
   let out = doc_inspect_output `Params in
@@ -11489,6 +11541,8 @@ let () =
       Alcotest.test_case "non-parameter docs reach the dictionary"   `Quick test_doc_nonparam_reaches_ir;
       Alcotest.test_case "#' on a let compiles (gh#508)"             `Quick test_doc_on_let_compiles;
       Alcotest.test_case "inspect --let shows the let's doc prose"   `Quick test_doc_on_let_reaches_inspect;
+      Alcotest.test_case "const let's doc reaches the parameter legend (gh#527)"
+        `Quick test_const_let_doc_reaches_parameter_legend;
     ];
     "quadratic_coupling_warning", [
       Alcotest.test_case "W104 on per-(p,q) transition" `Quick test_w104_perpair_warns;

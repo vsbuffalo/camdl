@@ -5281,6 +5281,21 @@ let ir_doc_of_ast (d : Ast.doc option) : Ir.doc option =
   Option.map (fun (a : Ast.doc) ->
     { Ir.text = a.Ast.d_text; symbol = a.d_symbol; reference = a.d_ref }) d
 
+(* Which `let` bindings become IR parameters. A typed binding with a constant
+   body is lifted to a `Fixed` parameter by `expand_parameters`; everything else
+   is inlined and has no IR entity of its own.
+
+   Two callers must agree on this exactly — the lift itself, and the doc index
+   below. When they disagree, a documented constant compiles to a parameter with
+   no documentation: `let omega : rate = 0.01` appears in the fit summary's
+   parameter legend as the one undocumented row, and the modeller's stated
+   assumption is silently dropped (gh#527). One predicate, so they cannot
+   drift. *)
+let let_parameter_kind (lb : let_binding) : param_type option =
+  match lb.lkind with
+  | Some pk when is_const_expr lb.lbody -> Some pk
+  | _ -> None
+
 (* Fold every source declaration's `#'` doc into the model's doc dictionary,
    keyed by base declaration name (matching what an author wrote and the logical
    names ObsSchema groups by). Only documented declarations appear. *)
@@ -5294,7 +5309,16 @@ let build_doc_index ctx : Ir.doc_index =
   { Ir.di_parameters =
       collect (function Ast.PScalar s -> s.pname | Ast.PIndexed i -> i.pname)
               (function Ast.PScalar s -> s.pdoc  | Ast.PIndexed i -> i.pdoc)
-              ctx.param_decls;
+              ctx.param_decls
+      (* A typed const `let` IS a parameter in the IR, so its prose belongs in
+         the parameter legend alongside the ones declared in `parameters {}`.
+         An untyped or non-constant `let` has no IR entity; `camdlc inspect
+         --let` is where its doc surfaces. *)
+      @ collect (fun (lb : Ast.let_binding) -> lb.lname)
+                (fun (lb : Ast.let_binding) -> lb.ldoc)
+                (List.filter
+                   (fun lb -> let_parameter_kind lb <> None)
+                   ctx.let_bindings);
     Ir.di_compartments =
       collect (fun (c : Ast.compartment_decl) -> c.cname) (fun c -> c.cdoc) ctx.comp_decls;
     Ir.di_transitions =
@@ -5389,17 +5413,19 @@ let expand_parameters ctx =
         ) (expand_indexed_decl_names ctx pname pdims)
       end
   ) ctx.param_decls in
-  (* Typed const let bindings → fixed-value parameters *)
+  (* Typed const let bindings → fixed-value parameters. The same predicate
+     decides which of these carry their `#'` prose into the doc index, so the
+     legend can never miss one — see `let_parameter_kind`. *)
   let from_lets = List.filter_map (fun (lb : let_binding) ->
-    match lb.lkind with
-    | Some pk when is_const_expr lb.lbody ->
+    match let_parameter_kind lb with
+    | Some pk ->
       let v = eval_const_expr ctx lb.lbody in
       Some { Ir.name       = lb.lname;
              Ir.value      = Ir.Fixed v;
              Ir.param_kind = Some (ir_param_kind_of_ast pk);
              Ir.param_dim  = None;
            }
-    | _ -> None
+    | None -> None
   ) ctx.let_bindings in
   from_params @ from_lets
 

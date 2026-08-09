@@ -144,6 +144,15 @@ force-of-infection denominator, and those are different models.
 let N[p in patch] = S[p] + E[p] + I[p] + C[p]
 ```
 
+Which surfaces a `let`'s prose reaches depends on whether the binding becomes a
+model entity. A **typed** `let` with a **constant** body is a fixed parameter —
+`let omega : rate = 0.01` is indistinguishable, once compiled, from the same
+value declared in `parameters { }` — so its doc joins the parameter legend in
+`camdl fit summary` alongside the rest. Every other `let` is inlined and has no
+entity of its own; its prose lives in `camdlc inspect --let <name>`. `@symbol`
+applies either way, and applies everywhere the name is typeset, not only in the
+definition itself.
+
 ---
 
 ## 2. Time Unit and Dimensional Types
