@@ -970,7 +970,7 @@ pub fn run_stage(
             n_chains, best_sweep.log_complete_data_ll));
     }
 
-    let mut start_values = HashMap::new();
+    let mut start_values = std::collections::BTreeMap::new();
     for spec in &config.estimated_params {
         start_values.insert(spec.name.clone(), best_sweep.params[spec.index]);
     }
@@ -994,13 +994,13 @@ pub fn run_stage(
         n_chains,
         n_good_chains: None,
         start_values,
-        rw_sd: HashMap::new(),
+        rw_sd: std::collections::BTreeMap::new(),
         loglik_type: Some(LoglikType::CompleteData),
         acceptance_rate: Some(best_chain.1.iter()
             .map(|s| s.accepted.iter().filter(|&&a| a).count() as f64 / s.accepted.len().max(1) as f64)
             .sum::<f64>() / best_chain.1.len().max(1) as f64),
         // Bayesian stage, no IF2-style Â (chain agreement).
-        tail_chain_agreement: HashMap::new(),
+        tail_chain_agreement: std::collections::BTreeMap::new(),
         ivp_params: Vec::new(),
         chain_logliks: Vec::new(),
         chain_eval_logliks: Vec::new(),

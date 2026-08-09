@@ -247,7 +247,7 @@ pub fn run_stage(
 
     // Persist the winner's full parameter vector via fit_state.toml so
     // downstream stages (`refine`, `pgas`, `posterior`) can resume from it.
-    let mut start_values = std::collections::HashMap::new();
+    let mut start_values = std::collections::BTreeMap::new();
     let mut rw_sd = std::collections::HashMap::new();
     for (slot, name) in est_names.iter().enumerate() {
         start_values.insert(name.clone(), winner.params[slot]);
@@ -284,11 +284,12 @@ pub fn run_stage(
                 .filter(|(_, c)| matches!(c.status, OptStatus::Converged(_)))
                 .count(),
         ),
-        start_values,
-        rw_sd,
+        start_values: start_values.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        rw_sd: rw_sd.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         loglik_type: Some(LoglikType::OdeMarginal),
         acceptance_rate: None,
-        tail_chain_agreement: convergence.chain_agreement.clone(),
+        tail_chain_agreement: convergence.chain_agreement.iter()
+            .map(|(k, v)| (k.clone(), *v)).collect(),
         ivp_params,
         chain_logliks,
         chain_eval_logliks: Vec::new(),
@@ -315,7 +316,7 @@ pub fn run_stage(
     // Write mle_params.toml — full parameter vector at the winner with
     // a [provenance] block. `camdl fit summary` walks this file to render
     // per-cell MLE rows.
-    let mut all_params = std::collections::HashMap::new();
+    let mut all_params = std::collections::BTreeMap::new();
     for (i, name) in arc_config.param_names.iter().enumerate() {
         all_params.insert(name.clone(), arc_config.base_params[i]);
     }
