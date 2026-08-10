@@ -52,9 +52,12 @@ only when it is genuinely free:
   that touch no behaviour — one branch, **one commit per issue** so any can be
   dropped in review, one CI run.
 - **Never batch** two issues whose fixes touch the same function's semantics, or
-  anything on the high-risk surfaces (`pgas.rs`, `pgas_grad.rs`,
-  `obs_loglik.rs`, `obs_model.rs`, `if2.rs`, `particle_filter.rs`,
-  `chain_binomial.rs`). One at a time, each with its own red→green.
+  anything on the high-risk surfaces — CLAUDE.md's six (`pgas.rs`,
+  `pgas_grad.rs`, `obs_loglik.rs`, `obs_model.rs`, `if2.rs`,
+  `particle_filter.rs`) plus `chain_binomial.rs`, which is not on that list but
+  earned a place: gh#517 was a silent noise-model drop three lines from a draw,
+  in a function whose rate path was already guarded. One at a time, each with
+  its own red→green.
 - A batch's commit subjects still each name their `gh#NN`, so `git log --grep`
   and the changelog stay honest.
 
@@ -73,10 +76,12 @@ is still an open question, or fewer than three issues.
 
 ## The gate
 
-`make test` is 3+ hours locally and can wedge. The working loop is the narrowest
-suite that covers the change — one `cargo test -p <crate> --lib`, one
-`dune exec` test binary, one `--test` target. **CI is the real gate**, so push
-early and let it run while you start the next issue.
+The working loop is the narrowest suite that covers the change — one
+`cargo test -p <crate> --lib`, one `dune exec` test binary, one `--test` target.
+`make test` is the authoritative gate and is slow (tens of minutes on a warm
+tree, longer from cold); CLAUDE.md accepts **either** a full local `make test`
+**or** CI as authoritative, so push early and let CI run while you start the
+next issue. Do not skip both.
 
 Two things CI will not tell you, so check them locally before pushing:
 
