@@ -16,7 +16,7 @@
 //!   alongside its stage leaves.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Inference algorithm tag — discriminator enum naming the algorithm
 /// independent of the simulation backend. Recorded in a fit-stage leaf's
@@ -534,16 +534,23 @@ pub struct FitSidecar {
     pub fit_toml_path: String,
     #[serde(default)]
     pub fit_toml_hash: String,
+    // gh#542: the three maps below are `BTreeMap`, not `HashMap`, for the same
+    // reason gh#519 changed `FitState` — serde emits a map in ITERATION order,
+    // and only `serde_json::Value` normalises (its `Map` is a `BTreeMap` with
+    // `preserve_order` off). A `HashMap` here made `fit.meta.json` differ
+    // between two identical runs by key order alone, which defeats diffing two
+    // runs' metadata. The ordering requirement belongs to the artifact, so the
+    // type says so.
     #[serde(default)]
-    pub data_hashes: HashMap<String, String>,
+    pub data_hashes: BTreeMap<String, String>,
     #[serde(default)]
     pub estimated: Vec<String>,
     #[serde(default)]
-    pub fixed: HashMap<String, f64>,
+    pub fixed: BTreeMap<String, f64>,
     #[serde(default)]
     pub resolved_priors: Vec<ResolvedPriorEntry>,
     #[serde(default)]
-    pub parameters_provenance: HashMap<String, ParameterProvenance>,
+    pub parameters_provenance: BTreeMap<String, ParameterProvenance>,
     /// The run's observation/dimension schema ([`ObsSchema`]) — `streams` ×
     /// `dimensions` derived from the model's observation leaves. `None` for a
     /// sidecar written without a model in hand (CLI-only profile fits, test
@@ -626,6 +633,38 @@ pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Option<FitSidecar> {
     let bytes = std::fs::read(fit_segment.join("fit.meta.json")).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
+
+    /// gh#542: `fit.meta.json` must be byte-reproducible. serde emits a map in
+    /// ITERATION order and only `serde_json::Value` normalises, so a `HashMap`
+    /// here made two identical runs differ by key order alone — which defeats
+    /// diffing two runs' metadata, the thing the sidecar exists for.
+    ///
+    /// Asserts the emitted key ORDER, not just that two serialisations of the
+    /// same instance agree: within one process a `HashMap` iterates the same
+    /// way twice, so a round-trip check would pass with the bug present.
+    #[test]
+    fn fit_meta_json_emits_sorted_keys() {
+        let mut side = FitSidecar::default();
+        for k in ["zulu", "alpha", "mike", "bravo", "yankee", "charlie"] {
+            side.data_hashes.insert(k.to_string(), "h".to_string());
+            side.fixed.insert(k.to_string(), 1.0);
+        }
+        let json = serde_json::to_string(&side).unwrap();
+
+        for field in ["data_hashes", "fixed"] {
+            let start = json.find(&format!("\"{field}\"")).expect("field present");
+            let seen: Vec<&str> = ["alpha", "bravo", "charlie", "mike", "yankee", "zulu"]
+                .iter()
+                .map(|k| (json[start..].find(&format!("\"{k}\"")).unwrap(), *k))
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_values()
+                .collect();
+            assert_eq!(seen, ["alpha", "bravo", "charlie", "mike", "yankee", "zulu"],
+                "`{field}` must serialise in sorted key order, got {seen:?} — \
+                 insertion order was deliberately unsorted, so this fails if the \
+                 field goes back to a HashMap");
+        }
+    }
 
 #[cfg(test)]
 mod tests {

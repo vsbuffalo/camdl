@@ -2069,9 +2069,12 @@ fn build_fit_sidecar(
         model_identity,
         fit_toml_path: fit_path.to_string(),
         fit_toml_hash,
-        data_hashes,
+        // gh#542: the in-memory maps stay `HashMap`; the ARTIFACT is ordered.
+        // Same seam gh#519 used for `FitState` — the ordering requirement
+        // belongs to `fit.meta.json`, not to the computation that feeds it.
+        data_hashes: data_hashes.into_iter().collect(),
         estimated,
-        fixed,
+        fixed: fixed.into_iter().collect(),
         resolved_priors,
         // gh#83/gh#85 step 9: top-level parameter provenance is populated by
         // the fit-finalization layer that owns the resolved-params view.
