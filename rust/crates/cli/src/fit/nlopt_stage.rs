@@ -87,12 +87,17 @@ pub fn run_stage(
         /* cooling */ 1.0,
         /* cooling_target_iters */ 1,
         seed,
-        // gh#506: was `prior_state.is_none()`. Under this stage's default
-        // `init = "single"` the corruption was masked — `build_chain_param_vecs`
-        // returns None there and the chains fall back to `base_params`, which
-        // carries `[estimate].start` correctly. It bit `init = "uniform"`,
-        // whose chain 0 is documented to keep the seeded start and instead
-        // kept the random draw.
+        // gh#506: was `prior_state.is_none()`. The corruption was masked
+        // here, but NOT for the reason that commit gave — it said "this
+        // stage's default `init = \"single\"`", and the default is
+        // `UniformUnconstrained` (`config_v2.rs`'s `#[serde(default)]` on
+        // `InitMethod`, whose `Default` is `init.rs`'s `UniformUnconstrained`).
+        //
+        // The masking is real by a different route: nlopt reads `.initial`
+        // only through `build_chain_param_vecs`, whose `None` fallback is
+        // `base_params`, which carries `[estimate].start` correctly. So only
+        // `init = "uniform"`'s chain 0 was affected — documented to keep the
+        // seeded start, and instead kept the random draw (gh#528).
         /* random_starts */ false,
     )?;
 
