@@ -28,12 +28,22 @@ const BINV_THRESHOLD: f64 = 10.0;
 ///   - return the first `x` whose pmf is no longer representable, i.e. the
 ///     far tail of the numerically-supported range.
 ///
-/// We take the second. Equal distortion in total variation, but it places the
-/// stray mass ~5 orders of magnitude closer to where it belongs: for a source
-/// compartment of 5e6 with `n*p = 9`, the tail runs out around x = 295, while
-/// `n` would mean "the entire susceptible population left the compartment in
-/// one substep" — a catastrophic trajectory from a rounding error. It also
-/// terminates in a few hundred iterations rather than `n` of them.
+/// We take the second **where it is available**, which is the large-`n` case
+/// this function exists for. It places the stray mass ~5 orders of magnitude
+/// closer to where it belongs: for a source compartment of 5e6 with `n*p = 9`,
+/// the tail runs out around x = 295, while `n` would mean "the entire
+/// susceptible population left the compartment in one substep" — a
+/// catastrophic trajectory from a rounding error. It also terminates in a few
+/// hundred iterations rather than `n` of them.
+///
+/// gh#530: the first repair is still taken when the SUPPORT ends before the
+/// pmf underflows — small `n`, where `x > n` fires first. There the pmf at
+/// `x = n` is perfectly representable (`Binomial(100, 0.05)`: `0.05^100 ≈
+/// 8e-131`), so there is no "first unrepresentable `x`" to return and `n` is
+/// the only defined answer. `binv_inverse_cdf(100, 0.05, 1 - 2^-53) == 100`.
+/// Not a defect — but this comment used to describe the second repair as
+/// universal, and the test below encodes the exception (`k < n || n < 1_000`)
+/// while the prose did not.
 fn binv_inverse_cdf(n: u64, p: f64, u: f64) -> u64 {
     let q = 1.0 - p;
     let s = p / q;
@@ -416,6 +426,63 @@ mod binomial_termination_tests {
         // p > 0.5 at huge n exercises the flip AND the flip-back on this path.
         let hi = rng.binomial(n, 1.0 - 1e-9);
         assert!(hi >= n - 40, "flip-back wrong at huge n: {hi} vs n={n}");
+    }
+
+    /// gh#530: the differential above proves the WALK replicates `rand_distr`.
+    /// Nothing proved the ROUTING did — the branch predicate, the symmetry
+    /// flip, the flip-back, and above all the number of RNG words consumed.
+    /// Drift in any of those silently moves every chain-binomial trajectory,
+    /// and every test in this module would still pass.
+    ///
+    /// So: sample the same seeded stream through `StatefulRng::binomial` and
+    /// through `rand_distr::Binomial` directly, and require both the value and
+    /// the resulting stream POSITION to agree. The position is the half that
+    /// matters — a wrapper consuming one extra word returns a plausible value
+    /// and desynchronises everything drawn afterwards.
+    #[test]
+    fn binomial_matches_rand_distr_in_value_and_rng_words_consumed() {
+        use rand::SeedableRng;
+        // Spans both branches: n*p below 10 (BINV) and at/above it (BTPE),
+        // p on each side of 0.5 to exercise the flip, and n across the
+        // i32::MAX boundary that selects the large-n initial term.
+        // Bounded to n <= i32::MAX ON PURPOSE. Above it we deliberately DIVERGE
+        // from `rand_distr` — gh#525 routes large n with small n*p to BINV
+        // because upstream's BTPE setup computes p4 <= 0 there and panics in
+        // `Uniform::new`. Upstream cannot be an oracle where upstream is the
+        // bug; including n = 2^31 here panics the test inside rand_distr, which
+        // is how this boundary got documented rather than assumed.
+        let cases: [(u64, f64); 8] = [
+            (10, 0.3), (1_000, 0.005), (1_000_000, 1e-6),   // BINV
+            (100, 0.99), (20, 0.9),                          // BINV via the flip
+            (1_000, 0.5), (10_000, 0.2), (100, 0.5),         // BTPE
+        ];
+        let mut compared = 0usize;
+        for (n, p) in cases {
+            for seed in 0..8u64 {
+                let base = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+
+                let mut ours = StatefulRng(base.clone());
+                let got = ours.binomial(n, p);
+                let ours_pos = ours.0.get_word_pos();
+
+                let mut theirs = base.clone();
+                let want = Binomial::new(n, p).unwrap().sample(&mut theirs);
+                let theirs_pos = theirs.get_word_pos();
+
+                assert_eq!(got, want,
+                    "value differs at n={n} p={p:e} seed={seed} — the routing or \
+                     the flip drifted from rand_distr");
+                assert_eq!(ours_pos, theirs_pos,
+                    "RNG stream position differs at n={n} p={p:e} seed={seed}: \
+                     ours={ours_pos} theirs={theirs_pos}. A different number of \
+                     words consumed desynchronises every subsequent draw, so \
+                     every trajectory and golden moves.");
+                compared += 1;
+            }
+        }
+        // Non-vacuity: the grid must actually have run. A `cases` array
+        // silently emptied by a later edit would otherwise pass.
+        assert_eq!(compared, 64, "the comparison grid did not run in full");
     }
 
     /// The neighbouring regime must keep using BTPE, unchanged — `n*p >= 10`
