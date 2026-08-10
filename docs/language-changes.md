@@ -13,6 +13,51 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-10 — a reduction must use its binder
+
+**What.** `sum(v in d, …)` where neither the body nor the `where` predicate
+mentions `v` is rejected with `E334`, located at the binder.
+
+**Migration.**
+
+```camdl
+sum(b in age, I[a])     # old: accepted, and silently doubled on a 2-level age
+sum(b in age, I[b])     # new: index the body by the binder
+I[a]                    # new: or drop the reduction
+```
+
+**Diagnostic.**
+
+```text
+error[E334]: transition 'infection': reduction binder 'b' is never used, so
+             `sum(b in age, …)` adds 2 identical copies of its body
+  8│  … @ beta * S[a] * sum(b in age, I[a]) / N[a]
+   │                        ~~~~~~~^
+  = hint: index the body by 'b' (e.g. `… I[b] …`), or drop the reduction and
+          write the body on its own — as written it multiplies by 2
+```
+
+**Why.** The reduction evaluates its body once per level and adds the results.
+If the body does not depend on the binder, that is `|d|` copies of one term — on
+a two-level dimension, exactly a silent doubling of whatever the term
+contributes. Nothing said so, and the factor is invisible in the model text.
+
+**What is still legal.** A binder used only by the `where` predicate:
+
+```camdl
+sum(q in patch where dist[p,q] < 50 and q != p, 1.0)   # neighbour count
+```
+
+The reduction depends on `q` through the predicate, which is what makes the
+result meaningful. Only a binder used by neither the predicate nor the body
+fires.
+
+A binder that _shadows_ an enclosing binding keeps its own diagnostic, `E283`;
+it is a different mistake and is reported first, so one mistake still gets one
+error.
+
+Increment A5 of `docs/dev/proposals/2026-07-31-aggregation-semantics.md`.
+
 ## 2026-08-10 — an indexed `let` must be indexed where it is used
 
 **What.** A `let` that declares index binders or a shape may no longer be
