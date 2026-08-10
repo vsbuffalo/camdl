@@ -1834,12 +1834,22 @@ pub fn run_chains_with_per_chain_params(
                              "PF degenerate"),
                         _ => unreachable!(),
                     };
+                    // gh#513: report the start THIS chain ran from, not the
+                    // configured one. `per_chain` is the same slice
+                    // `run_one_chain` resolved with above, and `.initial` is
+                    // what `if2.rs` seeds each estimated slot from — so this is
+                    // the value that actually produced the degeneracy.
+                    //
+                    // Reading `config.base_params[spec.index]` here made the
+                    // diagnostic contradict its own advice: under any dispersing
+                    // `init` mode it printed the declared start, then told the
+                    // reader to consult `chain_starts.tsv`, which disagreed. The
+                    // one place a user looks to find out why a chain died is the
+                    // worst place to name a value no chain used.
+                    let init_specs = per_chain.unwrap_or(&config.estimated_params);
                     let params: std::collections::BTreeMap<String, f64> =
-                        config.estimated_params.iter()
-                            .map(|spec| (
-                                spec.name.clone(),
-                                config.base_params.get(spec.index).copied().unwrap_or(f64::NAN),
-                            ))
+                        init_specs.iter()
+                            .map(|spec| (spec.name.clone(), spec.initial))
                             .collect();
                     collector.push(DiagnosticKind::BadInit {
                         chain_id, params, reason: reason.clone(),
