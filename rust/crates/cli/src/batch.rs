@@ -246,16 +246,7 @@ fn default_dt() -> f64 { 1.0 }
 fn default_output_dir() -> String { crate::run_paths::DEFAULT_OUTPUT_ROOT.to_string() }
 fn default_parallel() -> usize { 1 }
 
-/// Is `exp.config.model` a `.camdl` SOURCE path, rather than a compiled
-/// `.ir.json`? `resolve_ir_path` accepts either, so anything downstream that
-/// needs source specifically has to ask (gh#496 — the render archive shells
-/// out to `camdlc render`, which does not read IR).
-///
-/// Deliberately the same test `resolve_ir_path` applies (`ends_with`, not an
-/// extension parse), so the two cannot disagree about what a model path is.
-fn model_is_camdl_source(model_path: &str) -> bool {
-    model_path.ends_with(".camdl")
-}
+use crate::util::model_is_camdl_source;
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
