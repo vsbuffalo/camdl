@@ -1396,6 +1396,31 @@ pub struct NloptStageConfig {
 fn default_nlopt_tolerance() -> f64 { 1e-6 }
 fn default_nlopt_max_evals() -> usize { 5000 }
 
+/// Every CLI flag that overrides a stage setting, gathered in one place.
+///
+/// Exists so the override surface is a *type* rather than two dozen scattered
+/// assignments: adding a flag means adding a field here, and the compiler then
+/// asks where it is applied. See [`Stage::apply_cli_overrides`] for why that
+/// matters.
+#[derive(Default)]
+pub struct CliStageOverrides<'a> {
+    pub init: Option<&'a super::init::InitMethod>,
+    pub survey_path: Option<&'a std::path::PathBuf>,
+    pub survey_top_k: Option<usize>,
+    pub tempering: Option<&'a [f64]>,
+    pub max_tree_depth: Option<usize>,
+    pub trajectory_warmup: Option<usize>,
+    pub csmc_sweeps_per_nuts: Option<usize>,
+    pub n_trajectories: Option<usize>,
+    /// Flags, so `false` means "not given" — there is no `--dense-mass` to turn
+    /// it back on, and no `--adapt`.
+    pub diagonal_mass: bool,
+    pub no_nuts: bool,
+    pub no_adapt: bool,
+    pub adapt_start: Option<usize>,
+    pub rho: Option<f64>,
+}
+
 impl Stage {
     pub fn starts_from(&self) -> &StartsFrom {
         match self {
@@ -1673,41 +1698,89 @@ impl Stage {
         }
     }
 
-    /// Overwrite this stage's chain-start settings from the CLI.
+    /// Apply the CLI stage overrides to the config, in place.
     ///
-    /// gh#514: these are keyed fields — `identity_payload` folds
-    /// `init_method` / `survey_path` / `survey_top_k_n` into the stage hash —
-    /// but the CLI overrides used to be applied at the *dispatch* site, well
-    /// after the CAS claim, so two runs differing only in `--init` shared a
-    /// `run_id` and the second was served the first's result. Writing them
-    /// into the in-memory stage BEFORE the claim makes a different `--init` a
-    /// different artifact, exactly as a different toml `init` already is.
+    /// gh#540 (and gh#514, its `--init` special case). Every field written
+    /// here is identity-defining — `identity_payload` hashes it, or
+    /// `cas_n_trajectories` does — but the overrides used to be applied at the
+    /// *dispatch* site, to the runtime `*StageOpts` struct, long after the CAS
+    /// claim had hashed the config struct. So two runs differing only in
+    /// `--no-nuts`, `--tempering`, `--rho`, `--n-trajectories` (…) shared a
+    /// `run_id`, and the second was handed the first's result. The user asks
+    /// for a different sampler, or more output, and silently receives the
+    /// cheaper cached one.
     ///
-    /// Same shape as the `--condition-from` override, which writes into the
-    /// config before `cas::fit_level_hash` for the same reason.
+    /// The fix is the ORDER, not the fields. The data flow has to be
     ///
-    /// A `None` argument leaves the field as the toml declared it, so a run
-    /// with no CLI overrides keys identically to before — no existing cached
-    /// fit is invalidated by this.
-    pub fn apply_cli_chain_start_overrides(
-        &mut self,
-        init: Option<&super::init::InitMethod>,
-        survey: Option<&std::path::PathBuf>,
-        top_k: Option<usize>,
-    ) {
-        let (init_method, survey_path, survey_top_k_n) = match self {
+    /// ```text
+    /// toml -> Stage -> [CLI overrides] -> identity hash -> from_stage -> Opts
+    /// ```
+    ///
+    /// where it used to be `… -> identity hash -> from_stage -> Opts -> [CLI]`,
+    /// i.e. the override arrived on the far side of both gates.
+    ///
+    /// Putting it on the near side buys two things at once:
+    ///
+    /// 1. **Identity.** A different flag is a different artifact, exactly as a
+    ///    different toml value already is.
+    /// 2. **Validation.** `*StageOpts::from_stage` is where a stage's values
+    ///    are checked — the tempering ladder's `β ∈ (0, 1]` range
+    ///    (`pgas.rs`), `rho ∈ [0, 1)` (`pmmh.rs`). Applying overrides
+    ///    afterwards skipped those, which is why the dispatch site had grown
+    ///    hand-rolled partial copies — the `--tempering` one checked only the
+    ///    first β and let `--tempering 1.0,5.0` through, and a β > 1
+    ///    concentrates the likelihood sharper than the posterior, converging
+    ///    to the wrong target with no runtime error. Those copies are deleted:
+    ///    the real check now sees the merged value.
+    ///
+    /// A `None`/`false` field leaves the toml's value alone, so a run with no
+    /// CLI overrides keys exactly as before and no cached fit is invalidated.
+    /// Stages that do not carry a setting silently ignore it — `--rho` on a
+    /// PGAS stage is not an error here, it simply has nowhere to land.
+    pub fn apply_cli_overrides(&mut self, o: &CliStageOverrides<'_>) {
+        // Chain starts: every sampler stage carries them.
+        match self {
             Stage::IF2 { init_method, survey_path, survey_top_k_n, .. }
             | Stage::PGAS { init_method, survey_path, survey_top_k_n, .. }
             | Stage::PMMH { init_method, survey_path, survey_top_k_n, .. }
             | Stage::Mh { init_method, survey_path, survey_top_k_n, .. }
-            | Stage::Nuts { init_method, survey_path, survey_top_k_n, .. } =>
-                (init_method, survey_path, survey_top_k_n),
-            // NLopt / pfilter stages take no chain-start override.
-            _ => return,
-        };
-        if let Some(m) = init { *init_method = m.clone(); }
-        if let Some(p) = survey { *survey_path = Some(p.clone()); }
-        if let Some(k) = top_k { *survey_top_k_n = Some(k); }
+            | Stage::Nuts { init_method, survey_path, survey_top_k_n, .. } => {
+                if let Some(m) = o.init { *init_method = m.clone(); }
+                if let Some(p) = o.survey_path { *survey_path = Some(p.clone()); }
+                if let Some(k) = o.survey_top_k { *survey_top_k_n = Some(k); }
+            }
+            // NLopt / pfilter take no chain-start override.
+            _ => {}
+        }
+        // Per-algorithm sampler + output settings.
+        match self {
+            Stage::PGAS {
+                tempering, max_tree_depth, trajectory_warmup,
+                csmc_sweeps_per_nuts, n_trajectories, dense_mass, use_nuts, ..
+            } => {
+                if let Some(t) = o.tempering { *tempering = t.to_vec(); }
+                if let Some(d) = o.max_tree_depth { *max_tree_depth = d; }
+                if let Some(w) = o.trajectory_warmup { *trajectory_warmup = w; }
+                if let Some(s) = o.csmc_sweeps_per_nuts { *csmc_sweeps_per_nuts = s; }
+                if let Some(n) = o.n_trajectories { *n_trajectories = n; }
+                if o.diagonal_mass { *dense_mass = false; }
+                if o.no_nuts { *use_nuts = false; }
+            }
+            Stage::PMMH { adapt, adapt_start, rho, .. } => {
+                if o.no_adapt { *adapt = false; }
+                if let Some(s) = o.adapt_start { *adapt_start = s; }
+                if let Some(r) = o.rho { *rho = Some(r); }
+            }
+            Stage::Mh { adapt, adapt_start, .. } => {
+                if o.no_adapt { *adapt = false; }
+                if let Some(s) = o.adapt_start { *adapt_start = s; }
+            }
+            Stage::Nuts { max_tree_depth, dense_mass, .. } => {
+                if let Some(d) = o.max_tree_depth { *max_tree_depth = d; }
+                if o.diagonal_mass { *dense_mass = false; }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2997,8 +3070,10 @@ init       = "{init}"
     fn cli_init_override_changes_the_stage_identity() {
         let declared = scout_stage("single");
         let mut overridden = scout_stage("single");
-        overridden.apply_cli_chain_start_overrides(
-            Some(&crate::fit::init::InitMethod::Lhs), None, None);
+        overridden.apply_cli_overrides(&CliStageOverrides {
+            init: Some(&crate::fit::init::InitMethod::Lhs),
+            ..Default::default()
+        });
 
         assert_ne!(declared.identity_payload(), overridden.identity_payload(),
             "a stage run under `--init lhs` must not share an identity with \
@@ -3020,7 +3095,7 @@ init       = "{init}"
     fn no_cli_override_leaves_the_stage_identity_untouched() {
         let declared = scout_stage("uniform");
         let mut untouched = scout_stage("uniform");
-        untouched.apply_cli_chain_start_overrides(None, None, None);
+        untouched.apply_cli_overrides(&CliStageOverrides::default());
         assert_eq!(declared.identity_payload(), untouched.identity_payload());
     }
 
@@ -3032,16 +3107,116 @@ init       = "{init}"
         let base = scout_stage("survey_top_k");
 
         let mut with_path = scout_stage("survey_top_k");
-        with_path.apply_cli_chain_start_overrides(
-            None, Some(&std::path::PathBuf::from("results/survey-abc")), None);
+        let sp = std::path::PathBuf::from("results/survey-abc");
+        with_path.apply_cli_overrides(&CliStageOverrides {
+            survey_path: Some(&sp), ..Default::default() });
         assert_ne!(base.identity_payload(), with_path.identity_payload(),
             "--survey-path selects which points seed the chains");
 
         let mut with_k = scout_stage("survey_top_k");
-        with_k.apply_cli_chain_start_overrides(None, None, Some(3));
+        with_k.apply_cli_overrides(&CliStageOverrides {
+            survey_top_k: Some(3), ..Default::default() });
         assert_ne!(base.identity_payload(), with_k.identity_payload(),
             "--survey-top-k selects how many points seed the chains");
         assert_ne!(with_path.identity_payload(), with_k.identity_payload());
+    }
+
+    /// A stage of the given algorithm. Each algorithm takes a different key
+    /// set (`Stage` is a tagged enum with a strict per-variant key check), so
+    /// the whole block is spelled out rather than parameterized.
+    fn identity_fixture_stage(algo: &str) -> Stage {
+        let block = match algo {
+            "if2" => "algorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+                      chains = 4\nparticles = 100\niterations = 10\ncooling = 0.7\n",
+            "pgas" => "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
+                       chains = 4\nparticles = 100\nsweeps = 50\n",
+            "pmmh" => "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\n\
+                       chains = 4\nparticles = 100\niterations = 50\n",
+            // `dense_mass = true` deliberately: NUTS defaults it to false, so
+            // without this `--diagonal-mass` would be a no-op here and the
+            // enumeration test below would pass vacuously.
+            "nuts" => "algorithm = \"nuts\"\nbackend = \"ode\"\n\
+                       chains = 4\nsamples = 50\nwarmup = 25\ndense_mass = true\n",
+            other => panic!("unhandled algorithm in fixture: {other}"),
+        };
+        let cfg = parse(&format!(r#"
+[model]
+camdl = "m.camdl"
+
+[estimate]
+beta = {{ bounds = [0.01, 2.0], prior = {{ log_normal = {{ mu = 0.0, sigma = 1.0 }} }} }}
+
+[fixed]
+N0 = 1000000
+
+[stages.s]
+{block}"#)).unwrap();
+        cfg.stages["s"].clone()
+    }
+
+    /// gh#540: the pin. Every field of `CliStageOverrides` must change the
+    /// stage identity, on every stage that carries it.
+    ///
+    /// This is the check that makes the NEXT flag safe by default: adding a
+    /// field to `CliStageOverrides` without keying it fails here, rather than
+    /// being found by review two months later — which is how #514 and #540
+    /// were both found.
+    ///
+    /// Written as one case per override so a failure names the flag, and
+    /// asserted against a stage that actually carries the field (`--rho` has
+    /// nowhere to land on PGAS, and is not expected to key there).
+    #[test]
+    fn every_cli_override_changes_the_stage_identity() {
+        use std::path::PathBuf;
+        let survey = PathBuf::from("results/survey-abc");
+        let lhs = crate::fit::init::InitMethod::Lhs;
+
+        // (flag name, stage algorithm to apply it to, the override)
+        let cases: Vec<(&str, &str, CliStageOverrides)> = vec![
+            ("--init", "pgas", CliStageOverrides { init: Some(&lhs), ..Default::default() }),
+            ("--survey-path", "pgas", CliStageOverrides { survey_path: Some(&survey), ..Default::default() }),
+            ("--survey-top-k", "pgas", CliStageOverrides { survey_top_k: Some(3), ..Default::default() }),
+            ("--tempering", "pgas", CliStageOverrides { tempering: Some(&[1.0, 0.5]), ..Default::default() }),
+            ("--max-tree-depth", "pgas", CliStageOverrides { max_tree_depth: Some(7), ..Default::default() }),
+            ("--trajectory-warmup", "pgas", CliStageOverrides { trajectory_warmup: Some(9), ..Default::default() }),
+            ("--csmc-sweeps-per-nuts", "pgas", CliStageOverrides { csmc_sweeps_per_nuts: Some(4), ..Default::default() }),
+            ("--n-trajectories", "pgas", CliStageOverrides { n_trajectories: Some(77), ..Default::default() }),
+            ("--diagonal-mass", "pgas", CliStageOverrides { diagonal_mass: true, ..Default::default() }),
+            ("--no-nuts", "pgas", CliStageOverrides { no_nuts: true, ..Default::default() }),
+            ("--no-adapt", "pmmh", CliStageOverrides { no_adapt: true, ..Default::default() }),
+            ("--adapt-start", "pmmh", CliStageOverrides { adapt_start: Some(42), ..Default::default() }),
+            ("--rho", "pmmh", CliStageOverrides { rho: Some(0.25), ..Default::default() }),
+            ("--max-tree-depth", "nuts", CliStageOverrides { max_tree_depth: Some(7), ..Default::default() }),
+            ("--diagonal-mass", "nuts", CliStageOverrides { diagonal_mass: true, ..Default::default() }),
+        ];
+
+        for (flag, algo, ov) in cases {
+            let base = identity_fixture_stage(algo);
+            let mut overridden = identity_fixture_stage(algo);
+            overridden.apply_cli_overrides(&ov);
+
+            // `n_trajectories` is deliberately omitted from `identity_payload`
+            // and folded separately by `cas_n_trajectories`, so compare the
+            // pair that `stage_config_hash` actually hashes.
+            let key = |st: &Stage| (st.identity_payload(), st.cas_n_trajectories());
+            assert_ne!(key(&base), key(&overridden),
+                "`{flag}` on a {algo} stage does not change the stage identity —                  a run with the flag would collide with a run without it and be                  served the other's result (gh#540)");
+        }
+    }
+
+    /// Applying NOTHING must leave every stage byte-identical, or the fix
+    /// would silently invalidate every cached fit rather than only the
+    /// colliding ones.
+    #[test]
+    fn empty_cli_overrides_leave_every_stage_identity_untouched() {
+        for algo in ["if2", "pgas", "pmmh", "nuts"] {
+            let base = identity_fixture_stage(algo);
+            let mut untouched = identity_fixture_stage(algo);
+            untouched.apply_cli_overrides(&CliStageOverrides::default());
+            assert_eq!(base.identity_payload(), untouched.identity_payload(),
+                "an empty override set moved the {algo} identity");
+            assert_eq!(base.cas_n_trajectories(), untouched.cas_n_trajectories());
+        }
     }
 
     #[test]

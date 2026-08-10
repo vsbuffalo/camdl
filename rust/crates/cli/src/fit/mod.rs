@@ -209,39 +209,49 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         config.condition_from = Some(config_v2::ConditionFrom::All(raw.trim().to_string()));
     }
 
-    // gh#514: the same treatment for the chain-start overrides. `--init`,
-    // `--posterior`, `--mle`, `--params`, `--survey-path` and `--survey-top-k`
-    // all change where the chains begin, and therefore the stored output — but
-    // they used to be applied at the DISPATCH site, well after the CAS claim,
-    // while the stage's `identity_payload` carried only the toml's values. Two
-    // runs differing solely in `--init` shared a run_id, and the second was
-    // served the first's result with a "cache hit" line and no warning.
-    // `--force` did not rescue it either: that path errors with "artifact
-    // already completed".
+    // gh#540 (and gh#514, its `--init` case): apply EVERY CLI stage override
+    // here, to the config struct, before the identity is computed from it.
+    //
+    // These flags used to be applied at the DISPATCH site, to the runtime
+    // `*StageOpts` struct, long after the CAS claim had already hashed the
+    // config struct. So two runs differing only in `--no-nuts`, `--tempering`,
+    // `--rho`, `--n-trajectories` (…) shared a `run_id`, and the second was
+    // handed the first's result with a "cache hit" line and no warning — the
+    // user asks for a different sampler, or more output, and silently gets the
+    // cheaper cached one. `--force` does not rescue it: that path errors with
+    // "artifact already completed".
+    //
+    // Applying them here also routes CLI values through `from_stage`'s
+    // validation, which they previously bypassed — see `apply_cli_overrides`.
     //
     // Clap requires `--stage` alongside each of these, so exactly one stage is
-    // targeted. Writing them here — before `cas::fit_level_hash` and before the
-    // per-stage claim — makes a different override a different artifact.
-    // Leaving them unset leaves the toml's values in place, so a run with no
-    // overrides keys exactly as it did before and no cached fit is invalidated.
+    // targeted. Leaving a flag unset leaves the toml's value in place, so a run
+    // with no overrides keys exactly as before and no cached fit is
+    // invalidated.
     if let Some(stage_name) = a.stage.as_deref() {
-        if cli_init_method.is_some()
-            || cli_survey_path.is_some()
-            || cli_survey_top_k.is_some()
-        {
-            match config.stages.get_mut(stage_name) {
-                Some(stage) => stage.apply_cli_chain_start_overrides(
-                    cli_init_method.as_ref(),
-                    cli_survey_path.as_ref(),
-                    cli_survey_top_k,
-                ),
-                None => {
-                    eprintln!("error: --stage '{}' is not a stage in {} \
-                               (stages: {})",
-                        stage_name, fit_path,
-                        config.stages.keys().cloned().collect::<Vec<_>>().join(", "));
-                    std::process::exit(1);
-                }
+        let overrides = config_v2::CliStageOverrides {
+            init: cli_init_method.as_ref(),
+            survey_path: cli_survey_path.as_ref(),
+            survey_top_k: cli_survey_top_k,
+            tempering: a.tempering.as_deref(),
+            max_tree_depth: a.max_tree_depth,
+            trajectory_warmup: a.trajectory_warmup,
+            csmc_sweeps_per_nuts: a.csmc_sweeps_per_nuts,
+            n_trajectories: a.n_trajectories,
+            diagonal_mass: a.diagonal_mass,
+            no_nuts: a.no_nuts,
+            no_adapt: a.no_adapt,
+            adapt_start: a.adapt_start,
+            rho: a.rho,
+        };
+        match config.stages.get_mut(stage_name) {
+            Some(stage) => stage.apply_cli_overrides(&overrides),
+            None => {
+                eprintln!("error: --stage '{}' is not a stage in {} \
+                           (stages: {})",
+                    stage_name, fit_path,
+                    config.stages.keys().cloned().collect::<Vec<_>>().join(", "));
+                std::process::exit(1);
             }
         }
     }
@@ -1423,30 +1433,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             Stage::PGAS { .. } => {
                 let mut pgas_opts = pgas::PgasStageOpts::from_stage(stage)
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-                // Apply CLI overrides (each requires --stage; clap enforces).
-                if let Some(ref t) = a.tempering {
-                    if t.is_empty() || (t[0] - 1.0).abs() > 1e-9 {
-                        eprintln!("error: --tempering must start with β=1.0 (cold chain). \
-                                   Got: {:?}", t);
-                        std::process::exit(1);
-                    }
-                    pgas_opts.tempering = t.clone();
-                }
-                if let Some(d) = a.max_tree_depth { pgas_opts.max_tree_depth = d; }
-                if let Some(w) = a.trajectory_warmup { pgas_opts.trajectory_warmup = w; }
-                if let Some(s) = a.csmc_sweeps_per_nuts { pgas_opts.csmc_sweeps_per_nuts = s; }
-                if let Some(n) = a.n_trajectories { pgas_opts.n_trajectories = n; }
-                if a.diagonal_mass { pgas_opts.dense_mass = false; }
-                if a.no_nuts       { pgas_opts.use_nuts   = false; }
-                if let Some(m) = cli_init_method.clone() { pgas_opts.init_method = m; }
-                // gh#51 v2: CLI survey-path / survey-top-k overrides.
-                // Same priority as IF2 / PMMH: CLI > stage TOML.
-                if let Some(ref p) = cli_survey_path {
-                    pgas_opts.survey_path = Some(p.clone());
-                }
-                if let Some(k) = cli_survey_top_k {
-                    pgas_opts.survey_top_k_n = Some(k);
-                }
+                // gh#540: CLI overrides are applied to the stage config before
+                // the CAS claim (see `Stage::apply_cli_overrides`), so
+                // `from_stage` above already carries them — and validated them.
+                // The hand-rolled `--tempering` check that used to sit here was
+                // a partial copy of `from_stage`'s: it checked only the first
+                // β and let `--tempering 1.0,5.0` through.
 
                 pgas::run_stage(
                     &sweep_config,
@@ -1470,27 +1462,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             Stage::PMMH { .. } => {
                 let mut pmmh_opts = pmmh::PmmhStageOpts::from_stage(stage)
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-                if a.no_adapt { pmmh_opts.adapt = false; }
-                if let Some(s) = a.adapt_start { pmmh_opts.adapt_start = s; }
-                if let Some(r) = a.rho {
-                    if !(0.0..1.0).contains(&r) {
-                        eprintln!("error: --rho must be in [0, 1). Got: {}", r);
-                        std::process::exit(1);
-                    }
-                    pmmh_opts.rho = Some(r);
-                }
-                if let Some(m) = cli_init_method.clone() { pmmh_opts.init_method = m; }
-                // gh#51 v2: CLI survey-path / survey-top-k flags
-                // override the stage-config values. Same priority chain
-                // as IF2: CLI > stage TOML > default. `pmmh::run_stage`
-                // does the cross-check resolution internally once it
-                // has built the FitRunConfig.
-                if let Some(ref p) = cli_survey_path {
-                    pmmh_opts.survey_path = Some(p.clone());
-                }
-                if let Some(k) = cli_survey_top_k {
-                    pmmh_opts.survey_top_k_n = Some(k);
-                }
+                // gh#540: applied to the stage config before the CAS claim, so
+                // `from_stage` above carries them AND validated them — the
+                // hand-rolled `--rho` range check that used to sit here
+                // duplicated `PmmhStageOpts::from_stage`'s.
 
                 pmmh::run_stage(
                     &sweep_config,
@@ -1523,17 +1498,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // uses neither).
                 let mut pmmh_opts = pmmh::PmmhStageOpts::from_stage(stage)
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-                if a.no_adapt { pmmh_opts.adapt = false; }
-                if let Some(s) = a.adapt_start { pmmh_opts.adapt_start = s; }
-                if let Some(m) = cli_init_method.clone() { pmmh_opts.init_method = m; }
-                // gh#51 v2: CLI survey-path / survey-top-k flags override the
-                // stage-config values. Same priority chain as PMMH.
-                if let Some(ref p) = cli_survey_path {
-                    pmmh_opts.survey_path = Some(p.clone());
-                }
-                if let Some(k) = cli_survey_top_k {
-                    pmmh_opts.survey_top_k_n = Some(k);
-                }
+                // gh#540: applied to the stage config before the CAS claim.
 
                 // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by
                 // default; honours the same CLI flags as the IF2 path
@@ -1567,11 +1532,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // marginal likelihood (gh#275 Phase 2) via `det_grad` + NUTS.
                 let mut nuts_opts = nuts::NutsStageOpts::from_stage(stage)
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-                if let Some(d) = a.max_tree_depth { nuts_opts.max_tree_depth = d; }
-                if a.diagonal_mass { nuts_opts.dense_mass = false; }
-                if let Some(m) = cli_init_method.clone() { nuts_opts.init_method = m; }
-                if let Some(ref p) = cli_survey_path { nuts_opts.survey_path = Some(p.clone()); }
-                if let Some(k) = cli_survey_top_k { nuts_opts.survey_top_k_n = Some(k); }
+                // gh#540: applied to the stage config before the CAS claim.
 
                 nuts::run_stage(
                     &sweep_config,
