@@ -874,6 +874,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         }
 
+        // gh#541: same treatment for the other two file-backed chain-start
+        // sources. `--posterior`'s draws.tsv and `--params`' TOML were folded
+        // by PATH only (gh#514), so rewriting either in place left the run_id
+        // unchanged and the fit was served from cache — the previous file's
+        // starting values, silently. `--survey-path` above and `--mle` (via
+        // `cas_dep_from_dir` on the upstream leaf) already keyed on content.
+        if let Some((src, artifact)) = stage.init_source_file() {
+            if let Some(dep) = cas::cas_file_dep(&src, artifact) {
+                deps.push(dep);
+            }
+        }
+
         // ── CAS identity + claim ──
         let ordinal = config.stages.get_index_of(*stage_name).map(|i| i + 1).unwrap_or(0);
         let ctx = cas::FitStageCtx {
