@@ -11477,8 +11477,87 @@ let test_gh492_self_reference_in_index_position_is_not_a_cycle () =
   | Some (Error e) -> Alcotest.failf "should compile: %s" e
   | Some (Ok _) -> ()
 
+(* ── A4: an empty index list on the compartment read path ───────────────────
+   `I[]` compiles today and its IR is byte-identical to bare `I`. That is loose
+   semantics: the brackets look like they select something and select nothing,
+   so a half-finished edit (`I[` … `]` with the index deleted) reads as a
+   stratum reference and silently means the total.
+
+   Scoped to the COMPARTMENT read path, because the sibling constructs already
+   reject it with their own codes — those are pinned below so this check cannot
+   quietly take them over. *)
+let empty_index_model ~body =
+  Printf.sprintf
+    "time_unit = 'days\n\
+     compartments { S, I, R }\n\
+     dimensions { age = [child, adult] }\n\
+     stratify(by = age)\n\
+     parameters { beta : rate in [0,2]  gamma : rate in [0,1] }\n\
+     tables { C : age × age = [[12.0,4.0],[4.0,8.0]] }\n\
+     let N[a in age] = S[a] + I[a] + R[a]\n\
+     transitions {\n\
+     infection[a in age] : S[a] --> I[a] @ %s\n\
+     recovery[a in age] : I[a] --> R[a] @ gamma * I[a]\n\
+     }\n\
+     init { S[child]=99 I[child]=1 S[adult]=100 }\n\
+     simulate { from = 0 'days to = 10 'days }\n"
+    body
+
+let test_a4_empty_index_on_compartment_rejected () =
+  compile_expect_error_code ~code:"E204" ~contains:"'I[]' has an empty index list"
+    (empty_index_model ~body:"beta * S[a] * I[] / N[a]")
+
+let test_a4_hint_names_both_replacements () =
+  (* Breaking change: the diagnostic IS the migration, so it must name what to
+     write instead — the total, and a stratum reference. *)
+  compile_expect_error_code ~code:"E204" ~contains:"write `I`"
+    (empty_index_model ~body:"beta * S[a] * I[] / N[a]")
+
+(* An unstratified compartment is the same mistake, not a special case. *)
+let test_a4_empty_index_on_unstratified_compartment_rejected () =
+  compile_expect_error_code ~code:"E204" ~contains:"empty index list"
+    ("time_unit = 'days\n\
+      compartments { S, I, R }\n\
+      let N = S + I + R\n\
+      parameters { beta : rate in [0,2]  gamma : rate in [0,1] }\n\
+      transitions {\n\
+      infection : S --> I @ beta * S * I[] / N\n\
+      recovery : I --> R @ gamma * I\n\
+      }\n\
+      init { S=99 I=1 }\n\
+      simulate { from = 0 'days to = 10 'days }\n")
+
+(* The three siblings keep their own codes. A4 must not widen into them. *)
+let test_a4_sibling_empty_index_codes_unchanged () =
+  compile_expect_error_code ~code:"E299" ~contains:"rho"
+    ("time_unit = 'days\n\
+      compartments { S, I, R }\n\
+      dimensions { age = [child, adult] }\n\
+      stratify(by = age)\n\
+      parameters { beta : rate in [0,2]  gamma : rate in [0,1]\n\
+                   rho[age] : probability in [0,1] }\n\
+      let N[a in age] = S[a] + I[a] + R[a]\n\
+      transitions {\n\
+      infection[a in age] : S[a] --> I[a] @ beta * rho[] * S[a] * I[a] / N[a]\n\
+      recovery[a in age] : I[a] --> R[a] @ gamma * I[a]\n\
+      }\n\
+      init { S[child]=99 I[child]=1 S[adult]=100 }\n\
+      simulate { from = 0 'days to = 10 'days }\n");
+  compile_expect_error_code ~code:"E202" ~contains:"table 'C'"
+    (empty_index_model ~body:"beta * C[] * S[a] * I[a] / N[a]")
+
 let () =
   Alcotest.run "compiler" [
+    "empty_index_list_a4", [
+      Alcotest.test_case "E204 rejects `I[]` on the compartment read path"
+        `Quick test_a4_empty_index_on_compartment_rejected;
+      Alcotest.test_case "E204's hint names the replacement forms"
+        `Quick test_a4_hint_names_both_replacements;
+      Alcotest.test_case "E204 fires on an unstratified compartment too"
+        `Quick test_a4_empty_index_on_unstratified_compartment_rejected;
+      Alcotest.test_case "sibling empty-index codes (E299/E202) are unchanged"
+        `Quick test_a4_sibling_empty_index_codes_unchanged;
+    ];
     "flat_multi_binder_sum_c2", [
       Alcotest.test_case "flat lowering is byte-identical to nested (incl. guards)"
         `Quick test_c2_flat_equals_nested;
