@@ -2370,10 +2370,16 @@ impl FitConfigV2 {
         // as-written) consistent with either reading.
         //
         // The rule this restores: a path written IN a file anchors at that
-        // file; a path typed on the command line (`--output-dir`) anchors at
-        // the CWD, and so does the `results/` default when no `output_dir` is
-        // declared at all. Both of those are typed where the CWD is the
-        // obvious frame.
+        // file; what does not come from the file anchors at the CWD, which is
+        // the frame it was typed in — the `results/` default when no
+        // `output_dir` is declared, and `CAMDL_OUTPUT_DIR`.
+        //
+        // gh#531: this used to cite `--output-dir` as the command-line case.
+        // `fit run` has no such flag — `FitRunArgs` carries no `output_dir`,
+        // and both call sites pass `output_root(None, config.output_dir…)`.
+        // The flag exists on `simulate` and `batch run`, neither of which
+        // loads a fit.toml, so it documented a precedence layer unreachable
+        // from here.
         if let Some(dir) = &mut config.output_dir {
             *dir = crate::util::resolve_relative_to_toml(toml_path, dir);
         }

@@ -1,4 +1,4 @@
-# Paths are relative to this file; output_dir is relative to the working dir
+# Paths are relative to this file; output_dir too (gh#507) — the harness cds into this directory, so the resolved location is unchanged
 # (the Makefile runs from this case dir, so both resolve here).
 output_dir = "results"
 
