@@ -594,7 +594,37 @@ pub fn step_one(
                 ir::transition::DrawMethod::Poisson => ResolvedDraw::Poisson,
                 ir::transition::DrawMethod::Deterministic => ResolvedDraw::Deterministic,
                 ir::transition::DrawMethod::Overdispersed { .. } => {
-                    let sigma_sq = eval_resolved(model.resolved.overdispersion[i].as_ref().unwrap(), &ctx);
+                    let mut sigma_sq =
+                        eval_resolved(model.resolved.overdispersion[i].as_ref().unwrap(), &ctx);
+                    // gh#517: the RATE is guaranteed finite — `eval_propensities`
+                    // above guards every transition's propensity and errors by
+                    // default. The overdispersion is not: it is resolved here by
+                    // a bare `eval_resolved`, which has no error channel.
+                    //
+                    // A non-finite sigma^2 does not fail loudly downstream, it
+                    // fails silently and in the wrong direction. Both consumers
+                    // treat `sigma_sq <= 0.0` as a legitimate, COUNTED "no
+                    // overdispersion" — but `NaN <= 0.0` is false, so a NaN
+                    // slips past that arm into `Gamma::new`'s `Err(_) => 1.0`
+                    // fallback (`rng.rs`), which is uncounted. The run then
+                    // continues with the noise model switched off and reports a
+                    // posterior for a model the user did not specify.
+                    //
+                    // Same policy as the rate, so the two cannot disagree about
+                    // the same NaN: coerce under `--allow-degenerate-rates`,
+                    // hard-error by default. Coercing to 0.0 lands on the
+                    // documented "no overdispersion" path rather than inventing
+                    // a value, and `neg_binomial` counts it.
+                    if !sigma_sq.is_finite() {
+                        if crate::eval_stats::allow_degenerate_rates() {
+                            sigma_sq = 0.0;
+                        } else {
+                            return Err(SimError::NumericalCollapse {
+                                kind: crate::error::CollapseKind::UnOpNan,
+                                t,
+                            });
+                        }
+                    }
                     ResolvedDraw::Overdispersed(sigma_sq)
                 }
             });
