@@ -946,10 +946,27 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             "warning: cannot read compiled IR {} to archive: {}", ir_src, e),
                     }
                 }
-                // Archive the model's display render (`model.render.json`) beside
-                // the IR so a viewer (camdl-watch) can show the model's math
-                // without recompiling. Best-effort + identity-neutral, like the
-                // IR archive above; a render failure never aborts the fit.
+                // Archive the model's display render (`model.render.json`) and
+                // the flow graph (`model.graph.json`) beside the IR so a viewer
+                // (camdl-watch) can show the model's math without recompiling.
+                // Best-effort + identity-neutral, like the IR archive above; a
+                // render failure never aborts the fit.
+                //
+                // gh#536: guarded on the model being SOURCE. `camdlc render`
+                // does not read IR, and `[model] camdl` accepts a compiled
+                // `.ir.json` — several tests fit against one. Unguarded, every
+                // such fit printed "parse error in …/sir.ir.json" twice, which
+                // reads as "your compiled IR is malformed" when nothing is
+                // wrong. gh#496 fixed exactly this for `batch run` and reasoned
+                // that the fit path was safe because `config.model.camdl` "is
+                // source by construction"; it is not. One guard over both
+                // blocks, since they share the precondition.
+                if !crate::util::model_is_camdl_source(&config.model.camdl) {
+                    eprintln!(
+                        "note: model given as compiled IR; skipping model.render.json / \
+                         model.graph.json (pass the .camdl source to archive the display render)"
+                    );
+                } else {
                 match crate::util::render_model_json(std::path::Path::new(&config.model.camdl)) {
                     Ok(json) => {
                         let dest = seg.join("model.render.json");
@@ -972,6 +989,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         }
                     }
                     Err(e) => eprintln!("warning: cannot render model graph for archive: {}", e),
+                }
                 }
             }
         }

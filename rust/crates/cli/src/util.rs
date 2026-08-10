@@ -1131,6 +1131,22 @@ pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
 /// capturing the bytes. Used to archive `model.render.json` beside a run so a
 /// viewer can show the model's math without recompiling. Best-effort — the
 /// caller treats an `Err` as "skip the archive", never a hard failure.
+/// Is `model_path` a `.camdl` SOURCE path, rather than a compiled `.ir.json`?
+///
+/// `resolve_ir_path` accepts either, so anything downstream that needs source
+/// specifically has to ask — the render archive shells out to `camdlc render`,
+/// which does not read IR and reports "parse error in <your>.ir.json", a
+/// message that reads as "your compiled IR is malformed" when nothing is wrong.
+///
+/// Deliberately the same test `resolve_ir_path` applies (`ends_with`, not an
+/// extension parse), so the two cannot disagree about what a model path is.
+///
+/// Lives here rather than in `batch.rs` because both `batch run` (gh#496) and
+/// `fit run` (gh#536) need it; a second copy is how they drift apart.
+pub fn model_is_camdl_source(model_path: &str) -> bool {
+    model_path.ends_with(".camdl")
+}
+
 pub fn render_model_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, String> {
     let camdlc = find_camdlc()?;
     let out = std::process::Command::new(&camdlc)
