@@ -136,15 +136,15 @@ draw from bounds if nothing else supplies one.
 with `chains = 1`, or with `init = "single"`, has nothing to spread, so every
 chain runs from the base point itself.
 
-| `init`                                        | where the chains start                                        |
-| --------------------------------------------- | ------------------------------------------------------------- |
-| `single`                                      | every chain at the base point                                 |
-| `uniform`                                     | chain 1 at the base point; the rest uniform within `bounds`   |
-| `lhs`                                         | Latin-hypercube stratified over `bounds`; base point unused   |
-| `uniform_unconstrained` (default)             | spread on the unconstrained scale; base point unused          |
-| `survey_top_k`                                | the top-K points from a `camdl survey` run; base point unused |
-| `from_prior`                                  | draws from the declared priors; base point unused             |
-| `from_posterior` / `from_mle` / `from_params` | rows or values read from the named source; base point unused  |
+| `init`                                        | where the chains start                                                                                                                                         |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `single`                                      | every chain at the base point                                                                                                                                  |
+| `uniform`                                     | chain 1 at the base point; the rest uniform within `bounds`                                                                                                    |
+| `lhs`                                         | Latin-hypercube stratified over `bounds`; base point unused                                                                                                    |
+| `uniform_unconstrained` (default)             | spread on the unconstrained scale; base point unused                                                                                                           |
+| `survey_top_k`                                | the top-K points from a `camdl survey` run; base point used only for a parameter the survey did not sweep                                                      |
+| `from_prior`                                  | draws from the declared priors; base point unused                                                                                                              |
+| `from_posterior` / `from_mle` / `from_params` | rows or values read from the named source; a name missing from that source falls back to bounds-uniform, or to the base point when the model declares no range |
 
 The three spreading modes — `uniform`, `lhs`, `uniform_unconstrained` — fall
 back to the base point at `chains = 1`, since with one chain there is nothing to

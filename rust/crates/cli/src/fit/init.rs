@@ -279,6 +279,18 @@ pub fn ignores_base_point(method: &InitMethod, n_chains: usize) -> bool {
         InitMethod::Lhs | InitMethod::UniformUnconstrained => n_chains >= 2,
         // These read every chain's start from somewhere else entirely, at any
         // chain count.
+        //
+        // Per METHOD, not per parameter — and the distinction is real. A
+        // parameter the survey never swept falls back to `spec.initial`
+        // (`build_survey_chain_starts`), and a name missing from a
+        // `from_mle`/`from_params` source falls back to bounds-uniform, or to
+        // the base point when the model declares no range
+        // (`chain_starts.rs`). So for THOSE parameters the declared `start` is
+        // still load-bearing, and the note this drives is conservative rather
+        // than exact: it can say "discarded" about a start that one parameter
+        // out of several still used. Erring toward warning is the right
+        // direction for a heads-up, but a per-parameter answer would be the
+        // honest one if this ever becomes load-bearing.
         InitMethod::SurveyTopK
         | InitMethod::FromPrior
         | InitMethod::FromPosterior { .. }
