@@ -11659,8 +11659,86 @@ let test_a6_positive_controls () =
   ignore (compile_expect_ok
     (bare_indexed_let_model ~decl:"let N = S + I + R" ~use:"N"))
 
+(* ── A5: a reduction binder the reduction never uses ────────────────────────
+   `sum(a in age, I)` evaluates the body once per level of `age` and adds the
+   results — but the body does not depend on `a`, so it is |age| copies of the
+   same term. On a two-level dimension that is exactly a silent doubling
+   (proposal §4.4). Nothing said so.
+
+   "Uses" means the guard OR the body. A binder used only in the guard is a
+   real idiom — `sum(q in patch where dist[p,q] < 50 and q != p, 1.0)` counts
+   in-radius neighbours — so it must keep compiling. *)
+let reduction_binder_model ~body =
+  Printf.sprintf
+    "time_unit = 'days\n\
+     compartments { S, I, R }\n\
+     dimensions { age = [child, adult]  patch = [north, south] }\n\
+     stratify(by = age)\n\
+     stratify(by = patch)\n\
+     parameters { beta : rate in [0,2]  gamma : rate in [0,1] }\n\
+     tables { dist : patch × patch = [[0.0,10.0],[10.0,0.0]] }\n\
+     let N[a in age, p in patch] = S[a,p] + I[a,p] + R[a,p]\n\
+     transitions {\n\
+     infection[a in age, p in patch] : S[a,p] --> I[a,p] @ beta * S[a,p] * (%s)\n\
+     recovery[a in age, p in patch] : I[a,p] --> R[a,p] @ gamma * I[a,p]\n\
+     }\n\
+     init { S[child,north]=99 I[child,north]=1 S[adult,north]=100\n\
+            S[child,south]=100 S[adult,south]=100 }\n\
+     simulate { from = 0 'days to = 10 'days }\n"
+    body
+
+let test_a5_unused_binder_rejected () =
+  compile_expect_error_code ~code:"E334" ~contains:"'b'"
+    (reduction_binder_model ~body:"sum(b in age, I[a,p] / N[a,p])")
+
+let test_a5_message_says_the_reduction_multiplies () =
+  (* The diagnostic has to explain the CONSEQUENCE — that the term is silently
+     multiplied by the level count — or it reads as pedantry about an unused
+     variable. *)
+  compile_expect_error_code ~code:"E334" ~contains:"2 identical"
+    (reduction_binder_model ~body:"sum(b in age, I[a,p] / N[a,p])")
+
+(* §4.4's exact case: a bare family inside a sum over a dimension it carries. *)
+let test_a5_section_4_4_case_rejected () =
+  compile_expect_error_code ~code:"E334" ~contains:"'b'"
+    (reduction_binder_model ~body:"sum(b in age, I / N[a,p])")
+
+(* Positive control 1 — the binder is used only by the `where` predicate. This
+   is a neighbour count, not a mistake, and must keep compiling. *)
+let test_a5_guard_only_use_is_legal () =
+  ignore (compile_expect_ok
+    (reduction_binder_model
+       ~body:"(I[a,p] / N[a,p]) \
+              * sum(q in patch where dist[p,q] < 50 and q != p, 1.0)"))
+
+(* Positive control 2 — nested sums, each binder used by the inner body. *)
+let test_a5_nested_binders_both_used () =
+  ignore (compile_expect_ok
+    (reduction_binder_model
+       ~body:"sum(b in age, sum(q in patch, I[b,q] / N[b,q]))"))
+
+(* E283 regression, required by the proposal: a SHADOWING binder keeps its own
+   diagnostic and must not be rerouted to A5. *)
+let test_a5_shadowed_binder_still_e283 () =
+  compile_expect_error_code ~code:"E283" ~contains:"shadows"
+    (reduction_binder_model ~body:"sum(a in age, sum(a in age, I[a,p] / N[a,p]))")
+
 let () =
   Alcotest.run "compiler" [
+    "unused_reduction_binder_a5", [
+      Alcotest.test_case "E334 rejects a binder the reduction never uses"
+        `Quick test_a5_unused_binder_rejected;
+      Alcotest.test_case "the message names the silent multiplication"
+        `Quick test_a5_message_says_the_reduction_multiplies;
+      Alcotest.test_case "§4.4's `sum(b in age, I)` is rejected"
+        `Quick test_a5_section_4_4_case_rejected;
+      Alcotest.test_case "a binder used only by the `where` guard is legal"
+        `Quick test_a5_guard_only_use_is_legal;
+      Alcotest.test_case "nested sums with both binders used still compile"
+        `Quick test_a5_nested_binders_both_used;
+      Alcotest.test_case "E283 regression: a shadowing binder is not rerouted"
+        `Quick test_a5_shadowed_binder_still_e283;
+    ];
     "bare_indexed_let_a6", [
       Alcotest.test_case "E299 names the `let`, not a mangled identifier"
         `Quick test_a6_bare_indexed_let_names_the_let;

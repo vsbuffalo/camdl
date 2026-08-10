@@ -9030,8 +9030,57 @@ let check_shadowing ctx =
         ()
   ) ctx.let_bindings
 
+(** Does binder [v] occur in a `where` predicate? A predicate names index
+    variables directly (never expressions), so this is a name comparison. *)
+let rec guard_mentions v = function
+  | GEq (a, b) | GNeq (a, b) -> a = v || b = v
+  | GTab (_, idxs, _, operand) ->
+    List.mem v idxs || (match operand with GoName n -> n = v | GoNum _ -> false)
+  | GAnd (g1, g2) | GOr (g1, g2) -> guard_mentions v g1 || guard_mentions v g2
+
+(** Does binder [v] occur free in [e]? Descent stops at an inner `sum` that
+    rebinds [v] — that occurrence belongs to the inner binder. (E283 forbids
+    the shadowing outright, so in practice this arm is defensive; it keeps the
+    predicate honest as a free-variable test rather than a text search.)
+
+    An index variable reaches an expression two ways: as `EIdent v` and as the
+    BASE of an indexed reference, since `resolve_expr`'s EIndex arm resolves
+    the base through [env] (`sum(c in compartments, c[a])`). Both count. *)
+let rec expr_mentions v (e : expr) : bool =
+  match e with
+  | EIdent (n, _) -> n = v
+  | EIndex (n, items, _) ->
+    n = v
+    || List.exists (function IPosn e | INamed (_, e) -> expr_mentions v e) items
+  | EBinOp (_, l, r)  -> expr_mentions v l || expr_mentions v r
+  | EUnOp (_, e)      -> expr_mentions v e
+  | ESum (bv, _, g, b, _) ->
+    (* the inner binder's own guard is still in the OUTER scope *)
+    (match g with Some g -> guard_mentions v g | None -> false)
+    || (bv <> v && expr_mentions v b)
+  | ECond (p, t, f)   ->
+    expr_mentions v p || expr_mentions v t || expr_mentions v f
+  | EFuncCall (_, args) -> List.exists (fun (_, e) -> expr_mentions v e) args
+  | EList es          -> List.exists (expr_mentions v) es
+  | ERange (lo, hi)   -> expr_mentions v lo || expr_mentions v hi
+  | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> false
+
 (** E283: reject a `sum` bound variable that shadows an enclosing index or
-    bound variable. Resolution is first-match-wins (`resolve_expr`'s ESum arm
+    bound variable.
+
+    E334 (A5) rides along in the same walk: a binder that the reduction never
+    uses. `sum(a in age, I)` evaluates a body that does not depend on `a` once
+    per level and adds the results — |age| copies of one term, which on a
+    two-level dimension is exactly a silent doubling (proposal §4.4). The walk
+    already visits every binder with its own loc, so this needs no second pass.
+
+    "Uses" means the guard OR the body. A binder used only by the predicate is
+    a real idiom — `sum(q in patch where dist[p,q] < 50 and q != p, 1.0)`
+    counts in-radius neighbours — and stays legal.
+
+    A SHADOWING binder never reaches the E334 arm: E283 fires first and the
+    walk moves on, so one mistake gets one diagnostic. That ordering is pinned
+    by a regression test. Resolution is first-match-wins (`resolve_expr`'s ESum arm
     prepends `(v, _) :: env`), so a shadowing `sum` silently rebinds — e.g.
     `sum(p in patch, …)` inside `infection[p in patch]` becomes a global sum
     over all patches instead of the per-stratum term, with no diagnostic. This
@@ -9058,6 +9107,23 @@ let check_no_shadowing ctx =
         decl v v)
       ()
   in
+  let report_unused ~loc decl v d =
+    let n = List.length (dim_levels_or_empty ctx d) in
+    Diagnostics.error ctx.diags
+      ~code:"E334"
+      ~loc:(diag_loc_of_ast_ctx ctx loc)
+      ~message:(Printf.sprintf
+        "%s: reduction binder '%s' is never used, so `sum(%s in %s, …)` adds \
+         %d identical copies of its body"
+        decl v v d n)
+      ~hint:(Printf.sprintf
+        "index the body by '%s' (e.g. `… I[%s] …`), or drop the reduction and \
+         write the body on its own%s"
+        v v
+        (if n > 1 then Printf.sprintf " — as written it multiplies by %d" n
+         else ""))
+      ()
+  in
   let rec walk decl bound (e : expr) =
     match e with
     | EConst _ | EUnit _ | EIdent _ -> ()
@@ -9065,8 +9131,11 @@ let check_no_shadowing ctx =
       List.iter (function IPosn e | INamed (_, e) -> walk decl bound e) items
     | EBinOp (_, l, r) -> walk decl bound l; walk decl bound r
     | EUnOp (_, e) -> walk decl bound e
-    | ESum (v, _, _, b, sum_loc) ->
-      if List.mem v bound then report ~loc:sum_loc decl v;
+    | ESum (v, d, g, b, sum_loc) ->
+      if List.mem v bound then report ~loc:sum_loc decl v
+      else if not (expr_mentions v b
+                   || (match g with Some g -> guard_mentions v g | None -> false))
+      then report_unused ~loc:sum_loc decl v d;
       walk decl (v :: bound) b
     | ECond (p, t, f) -> walk decl bound p; walk decl bound t; walk decl bound f
     | EFuncCall (_, args) -> List.iter (fun (_, e) -> walk decl bound e) args
