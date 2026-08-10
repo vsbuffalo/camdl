@@ -13,6 +13,66 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-10 — an indexed `let` must be indexed where it is used
+
+**What.** A `let` that declares index binders or a shape may no longer be
+referenced bare. `E299`, located at the use.
+
+**Migration.**
+
+```camdl
+let N[a in age] = S[a] + I[a] + R[a]
+
+… / N          # old: broken two ways, see below
+… / N[a]       # new
+```
+
+**Diagnostic.**
+
+```text
+error[E299]: let binding 'N' expects 1 index but was given 0
+  8│  infection[a in age] : S[a] --> I[a] @ beta * S[a] * I[a] / N
+   │                                                             ^
+  = hint: it is declared over [age] — index every axis, e.g. `N[child]`
+```
+
+**Why.** A bare reference inlined the body with nothing bound for the binder,
+and what happened next depended on whether the body used it.
+
+If it did, you got one error per reference in the body, none naming the mistake,
+all naming identifiers you never wrote, with the caret on a `let` line that is
+correct:
+
+```text
+error[E100]: undeclared name 'I_a'
+error[E100]: undeclared name 'R_a'
+error[E100]: undeclared name 'S_a'
+```
+
+`I_a` is the internal mangled name — `a` was unbound, so `I[a]` mangled the
+binder into the compartment name.
+
+If it did **not** — a body that is a constant or depends only on outer names —
+there was no diagnostic at all:
+
+```camdl
+let scale[a in age] = 1000.0
+…  @ beta * S[a] * I[a] / (N[a] * scale)     # compiled clean
+```
+
+The binder was silently dropped and one shared value used everywhere, where the
+author asked for one per age band. That is the quiet case, and it is the reason
+this is an error rather than a lint.
+
+**What is unchanged.** An unindexed `let` referenced bare (`let N = S + I + R`,
+then `N`) is untouched, as is a correctly indexed reference. This is about a
+declaration that promises a family and a use that does not pick a member.
+
+Increment A6 of `docs/dev/proposals/2026-07-31-aggregation-semantics.md`.
+Distinct from the 2026-08-05 entry below (`[a in aeg]`, an undeclared dimension
+in a binder): same mangled-name symptom, different trigger and different site,
+and that fix did not cover this.
+
 ## 2026-08-10 — `I[]` on a compartment read is rejected
 
 **What.** An empty index list on a compartment read is now `E204`. It used to
