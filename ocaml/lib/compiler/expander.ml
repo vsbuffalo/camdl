@@ -3531,15 +3531,42 @@ let indexed_param_dims ctx name =
    index count. Returns true iff the arity matches; on mismatch it emits a
    located E299 and the caller substitutes a placeholder so the pass keeps
    collecting diagnostics. *)
-let check_index_arity ctx ~loc ~kind ~name ~declared ~provided : bool =
+let check_index_arity ctx ~loc ?axes ~kind ~name ~declared ~provided () : bool =
   if declared = provided then true
   else begin
     let plural n = if n = 1 then "index" else "indices" in
+    (* [axes] is the declared axis list, when the caller has it. A reference
+       that supplied NO indices at all (A6: a bare reference to an indexed
+       declaration) is the case where "index it with exactly 1 index" does not
+       tell the reader what to type, so show the shape. *)
+    let hint =
+      match axes with
+      | Some (_ :: _ as ds) when provided = 0 ->
+        (* The example must name LEVELS, not dimensions — `N[age]` does not
+           compile, `N[child]` does. Same bar gh#493 set for E287's hint. Fall
+           back to naming the axes only when a level list is unavailable (a
+           dimension error is already reported elsewhere). *)
+        let levels = List.map (fun d ->
+          match dim_values ctx d with
+          | Some (lvl :: _) -> Some lvl
+          | _               -> None) ds in
+        let axis_list = String.concat ", " ds in
+        if List.for_all Option.is_some levels then
+          Printf.sprintf
+            "it is declared over [%s] — index every axis, e.g. `%s[%s]`"
+            axis_list name
+            (String.concat ", " (List.filter_map Fun.id levels))
+        else
+          Printf.sprintf
+            "it is declared over [%s] — index every axis" axis_list
+      | _ ->
+        Printf.sprintf "index it with exactly %d %s" declared (plural declared)
+    in
     Diagnostics.error ctx.diags
       ~code:"E299" ~loc
       ~message:(Printf.sprintf "%s '%s' expects %d %s but was given %d"
                   kind name declared (plural declared) provided)
-      ~hint:(Printf.sprintf "index it with exactly %d %s" declared (plural declared))
+      ~hint
       ();
     false
   end
@@ -3803,7 +3830,8 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     match Hashtbl.find_opt ctx.let_tbl base_name with
     | Some lb when lb.lindices <> [] ->
       if not (check_index_arity ctx ~loc:idx_loc ~kind:"let binding" ~name:base_name
-                ~declared:(List.length lb.lindices) ~provided:(List.length items))
+                ~axes:(dims_of_index_bindings lb.lindices)
+                ~declared:(List.length lb.lindices) ~provided:(List.length items) ())
       then Ir.Const 0.0
       else
       let items = resolve_index_order ctx ~loc:idx_loc
@@ -3853,7 +3881,8 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
         | Some fd -> fd.findices <> [] | None -> false) then
       (let fd = Hashtbl.find ctx.func_tbl base_name in
        if not (check_index_arity ctx ~loc:idx_loc ~kind:"forcing" ~name:base_name
-                 ~declared:(List.length fd.findices) ~provided:(List.length items))
+                 ~axes:(dims_of_index_bindings fd.findices)
+                 ~declared:(List.length fd.findices) ~provided:(List.length items) ())
        then Ir.Const 0.0
        else
          let items = resolve_index_order ctx ~loc:idx_loc
@@ -3867,7 +3896,8 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       (let declared =
          match indexed_param_dims ctx base_name with Some d -> List.length d | None -> 1 in
        if not (check_index_arity ctx ~loc:idx_loc ~kind:"parameter" ~name:base_name
-                 ~declared ~provided:(List.length items))
+                 ?axes:(indexed_param_dims ctx base_name)
+                 ~declared ~provided:(List.length items) ())
        then Ir.Const 0.0
        else
        let items = resolve_index_order ctx ~loc:idx_loc
@@ -4435,6 +4465,28 @@ and resolve_ident_name ctx name ~loc =
      bound (gh#492; E201 already emitted by [check_let_cycles]). *)
   else if Hashtbl.mem ctx.cyclic_lets name then Ir.Const 0.0
   else match Hashtbl.find_opt ctx.let_tbl name with
+  | Some lb when lb.lindices <> [] || lb.lshape <> None ->
+    (* A6: an indexed or shaped `let` referenced BARE. Inlining its body here
+       would leave every binder unbound, so the body's own indexed references
+       mangle the binder into the name — `let N[a in age] = S[a] + I[a] + R[a]`
+       used as bare `N` produced
+
+         error[E100]: undeclared name 'I_a'   (and 'R_a', and 'S_a')
+
+       three errors, none naming the mistake, all naming identifiers the user
+       never wrote, with the caret on a `let` line that is correct. Report the
+       arity at the USE instead, which is where the mistake is.
+
+       This is NOT the same defect as an index binder over an undeclared
+       dimension (`[a in aeg]`, the 2026-08-05 change): same mangled-name
+       symptom, different trigger, different site. That fix left this one. *)
+    let axes = match lb.lshape with
+      | Some shape -> shape
+      | None       -> dims_of_index_bindings lb.lindices
+    in
+    ignore (check_index_arity ctx ~loc ~axes ~kind:"let binding" ~name
+              ~declared:(List.length axes) ~provided:0 ());
+    Ir.Const 0.0  (* placeholder — keep collecting diagnostics this pass *)
   | Some lb ->
     if lb.lkind <> None && is_const_expr lb.lbody then
       (* Typed const let → treat as parameter (dimcheck will see param_kind) *)

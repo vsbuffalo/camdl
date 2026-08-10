@@ -17,6 +17,19 @@ let contains_substring ~needle s =
       else loop (i + 1)
     in loop 0
 
+(** Occurrences of [needle] in [s]. Used where the assertion is "the user sees
+    exactly one of these", which the raw diagnostic list cannot answer —
+    `Diagnostics` de-duplicates only in the rendered / JSON payloads. *)
+let count_substring ~needle s =
+  let nl = String.length needle and sl = String.length s in
+  if nl = 0 then 0
+  else
+    let rec loop i acc =
+      if i > sl - nl then acc
+      else if String.sub s i nl = needle then loop (i + nl) (acc + 1)
+      else loop (i + 1) acc
+    in loop 0 0
+
 let compile_expect_ok src =
   match Compiler.compile ~name:"test" src with
   | Ok m -> m
@@ -11546,8 +11559,122 @@ let test_a4_sibling_empty_index_codes_unchanged () =
   compile_expect_error_code ~code:"E202" ~contains:"table 'C'"
     (empty_index_model ~body:"beta * C[] * S[a] * I[a] / N[a]")
 
+(* ── A6: a bare reference to an indexed `let`, diagnosed at the use site ─────
+   `let N[a in age] = S[a] + I[a] + R[a]` referenced as bare `N` inlines the
+   body with NOTHING bound for `a`, so `I[a]` mangles to `I_a` and the user
+   gets, on the `let` line rather than at the use:
+
+     error[E100]: undeclared name 'I_a'
+     error[E100]: undeclared name 'R_a'
+
+   Two errors, neither naming the actual mistake, both naming identifiers the
+   user never wrote, and the caret pointing at a `let` that is correct.
+
+   Distinct from the 2026-08-05 change (`[a in aeg]`, an UNDECLARED dimension
+   in a binder), which produced the same mangled-name symptom from a different
+   trigger and a different site. This is the case A6 is named for, and it
+   survived that fix. *)
+let bare_indexed_let_model ~decl ~use =
+  Printf.sprintf
+    "time_unit = 'days\n\
+     compartments { S, I, R }\n\
+     dimensions { age = [child, adult] }\n\
+     stratify(by = age)\n\
+     parameters { beta : rate in [0,2]  gamma : rate in [0,1] }\n\
+     %s\n\
+     transitions {\n\
+     infection[a in age] : S[a] --> I[a] @ beta * S[a] * I[a] / %s\n\
+     recovery[a in age] : I[a] --> R[a] @ gamma * I[a]\n\
+     }\n\
+     init { S[child]=99 I[child]=1 S[adult]=100 }\n\
+     simulate { from = 0 'days to = 10 'days }\n"
+    decl use
+
+let a6_indexed_let_src =
+  bare_indexed_let_model
+    ~decl:"let N[a in age] = S[a] + I[a] + R[a]" ~use:"N"
+
+let test_a6_bare_indexed_let_names_the_let () =
+  compile_expect_error_code ~code:"E299" ~contains:"'N'" a6_indexed_let_src
+
+let test_a6_bare_indexed_let_says_it_needs_an_index () =
+  compile_expect_error_code ~code:"E299" ~contains:"but was given 0"
+    a6_indexed_let_src
+
+(* The whole point is WHERE it points. The old E100s landed on the `let` line
+   (6); the diagnostic must land on the use (8). *)
+let test_a6_diagnostic_is_at_the_use_site () =
+  (* Count what the USER sees. The transition expands to one instantiation per
+     age level, so the raw diagnostic list holds one E299 per instantiation;
+     `Diagnostics`' sort_uniq collapses them on (file, line, code, message) in
+     the rendered and JSON payloads. Asserting on the raw list would pin the
+     instantiation count, which is not the contract. *)
+  Diagnostics.json_errors_mode := true;
+  let payload = match Compiler.compile ~name:"a6" a6_indexed_let_src with
+    | Ok _ -> Alcotest.fail "a bare indexed `let` must not compile"
+    | Error e -> e in
+  Diagnostics.json_errors_mode := false;
+  Alcotest.(check int) "exactly one E299 reaches the user for the one bare reference"
+    1 (count_substring ~needle:"\"code\":\"E299\"" payload);
+  Alcotest.(check bool)
+    (Printf.sprintf "located at the USE (line 8), not the `let` (line 6): %s" payload)
+    true (contains_substring ~needle:"\"line\":8" payload);
+  (* and the mangled-name errors it replaces are gone from the raw list too *)
+  let ds = Compiler.collect_diagnostics ~name:"a6" a6_indexed_let_src in
+  let mangled =
+    List.filter (fun (dg : Diagnostics.diagnostic) ->
+      dg.code = "E100"
+      && (contains_substring ~needle:"I_a" dg.message
+          || contains_substring ~needle:"R_a" dg.message
+          || contains_substring ~needle:"S_a" dg.message)) ds in
+  Alcotest.(check int) "no E100 naming a mangled identifier the user never wrote"
+    0 (List.length mangled)
+
+(* A shaped `let` is the same mistake through a different branch. *)
+let test_a6_bare_shaped_let_rejected () =
+  compile_expect_error_code ~code:"E299" ~contains:"'W'"
+    (bare_indexed_let_model
+       ~decl:"let W : age = [1.0, 2.0]\n     let N[a in age] = S[a] + I[a] + R[a]"
+       ~use:"(N[a] * W)")
+
+(* THE CASE THAT MATTERS. When the body does not mention its own binder, there
+   was no error at all — the binder was silently ignored and the body inlined,
+   so a model that asked for a per-stratum value quietly got one shared value.
+   Mutation-checked: reverting the fix and keeping this test compiles clean. *)
+let a6_silent_src =
+  bare_indexed_let_model
+    ~decl:"let scale[a in age] = 1000.0\n     \
+           let N[a in age] = S[a] + I[a] + R[a]"
+    ~use:"(N[a] * scale)"
+
+let test_a6_silently_dropped_binder_now_errors () =
+  compile_expect_error_code ~code:"E299" ~contains:"'scale'" a6_silent_src
+
+(* Positive controls: a correctly indexed reference, and an UNindexed `let`
+   referenced bare, must both keep working. *)
+let test_a6_positive_controls () =
+  ignore (compile_expect_ok
+    (bare_indexed_let_model
+       ~decl:"let N[a in age] = S[a] + I[a] + R[a]" ~use:"N[a]"));
+  ignore (compile_expect_ok
+    (bare_indexed_let_model ~decl:"let N = S + I + R" ~use:"N"))
+
 let () =
   Alcotest.run "compiler" [
+    "bare_indexed_let_a6", [
+      Alcotest.test_case "E299 names the `let`, not a mangled identifier"
+        `Quick test_a6_bare_indexed_let_names_the_let;
+      Alcotest.test_case "E299 says the reference supplied no indices"
+        `Quick test_a6_bare_indexed_let_says_it_needs_an_index;
+      Alcotest.test_case "the diagnostic lands on the use site"
+        `Quick test_a6_diagnostic_is_at_the_use_site;
+      Alcotest.test_case "a bare shaped `let` is rejected too"
+        `Quick test_a6_bare_shaped_let_rejected;
+      Alcotest.test_case "a binder the body never mentions no longer compiles silently"
+        `Quick test_a6_silently_dropped_binder_now_errors;
+      Alcotest.test_case "indexed use and unindexed `let` still compile"
+        `Quick test_a6_positive_controls;
+    ];
     "empty_index_list_a4", [
       Alcotest.test_case "E204 rejects `I[]` on the compartment read path"
         `Quick test_a4_empty_index_on_compartment_rejected;
