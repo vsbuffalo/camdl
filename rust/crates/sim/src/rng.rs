@@ -38,7 +38,25 @@ fn binv_inverse_cdf(n: u64, p: f64, u: f64) -> u64 {
     let q = 1.0 - p;
     let s = p / q;
     let a = ((n + 1) as f64) * s;
-    let mut r = q.powi(n as i32);
+    // The pmf at x = 0, i.e. q^n.
+    //
+    // Below `i32::MAX` this is `powi`, byte-for-byte what `rand_distr` computes
+    // and therefore what every existing trajectory was generated with — do not
+    // "improve" it.
+    //
+    // Above it, `powi` cannot express the exponent at all, which is why
+    // `rand_distr` excludes large `n` from BINV and forces it into BTPE, where
+    // it panics for small `n·p` (gh#525). `exp(n · ln1p(-p))` is the same
+    // quantity computed a way that has an exponent to spare; `ln_1p` rather
+    // than `(1-p).ln()` because `p` is necessarily tiny here (`n·p < 10` with
+    // `n > 2^31` means `p < 5e-9`), which is exactly where `ln(1-p)` loses its
+    // significant digits and `ln1p` does not. No existing draw takes this
+    // branch — the inputs that reach it used to abort the process.
+    let mut r = if n <= (i32::MAX as u64) {
+        q.powi(n as i32)
+    } else {
+        ((n as f64) * (-p).ln_1p()).exp()
+    };
     let mut u = u;
     let mut x: u64 = 0;
     while u > r {
@@ -199,8 +217,45 @@ impl StatefulRng {
         // value from the identical RNG position, so no trajectory, golden, or
         // run_id moves. See `binv_inverse_cdf` for what happens when it would
         // NOT have terminated.
+        // gh#525: the `n <= i32::MAX` half of `rand_distr`'s predicate is
+        // dropped here, deliberately. Upstream carries it because its BINV
+        // computes `q.powi(n as i32)` and cannot express a larger exponent —
+        // but the effect is to force LARGE n with SMALL n·p into BTPE, which is
+        // invalid there: BTPE's triangle radius
+        //
+        //     p1 = (2.195·sqrt(npq) − 4.6·q).floor() + 0.5
+        //
+        // goes NEGATIVE once n·p is small, so `p4 <= 0` and the setup panics in
+        // `Uniform::new(0., p4)` — an unattributed abort from inside a
+        // dependency, mid-fit. `n·p < 10` is precisely the regime BINV exists
+        // for, at any n, so it routes there and `binv_inverse_cdf` computes the
+        // large-n initial term without `powi`.
+        //
+        // Reachable from user data, not just exotic models:
+        // `obs_model.rs:499` takes its binomial denominator from a data column,
+        // so a TSV with a large `n_examined` and a small reporting probability
+        // crashed the process.
+        //
+        // Nothing that previously worked changes: for `n <= i32::MAX` the
+        // routing, the recurrence, and the single `gen::<f64>()` are untouched.
+        //
+        // Nor did the inputs this newly admits work before — but "they aborted"
+        // is only part of it, and the smaller part. `p4 <= 0` (the panic) needs
+        // `n*p <= 4.35`; the band above it, up to `BINV_THRESHOLD`, did NOT
+        // abort. Measured on the pre-change code at n = 4_294_967_296, 200k
+        // draws:
+        //
+        //     n*p = 4.4  ->  mean 4.3414, chi2 2339   (biased: lambda_r -> 0
+        //                    degenerates p4 to +/-5e9)
+        //     n*p = 5.0  ->  did not return in 6s     (BTPE spinning)
+        //     n*p = 6.0  ->  did not return in 6s
+        //
+        // So this corner previously panicked, hung, or returned a wrong
+        // distribution depending on where in it you landed — and the hang is a
+        // second instance of the gh#510 class, never separately reported. The
+        // BINV values here are sound (chi2 18.6 at n*p = 4.4).
         let p_flipped = if p <= 0.5 { p } else { 1.0 - p };
-        if (n as f64) * p_flipped < BINV_THRESHOLD && n <= (i32::MAX as u64) {
+        if (n as f64) * p_flipped < BINV_THRESHOLD {
             let u: f64 = rand::Rng::gen(&mut self.0);
             let k = binv_inverse_cdf(n, p_flipped, u);
             return if p_flipped != p { n - k } else { k };
@@ -314,6 +369,66 @@ mod binomial_termination_tests {
         assert!(skipped > 0,
             "no input in the grid made the upstream loop diverge — this test \
              is not covering the gh#510 case at all");
+    }
+
+    /// gh#525: `n > i32::MAX` with a small `n·p`. `rand_distr` forces this
+    /// into BTPE (its BINV is capped by `powi`'s i32 exponent), where the
+    /// triangle radius `p1 = (2.195·sqrt(npq) − 4.6·q).floor() + 0.5` goes
+    /// negative and `Uniform::new(0., p4)` panics with `low >= high`.
+    ///
+    /// The reachable path is a DATA COLUMN: `obs_model.rs:499` takes the
+    /// binomial denominator from the user's TSV, so a large `n_examined` with
+    /// a small reporting probability aborted the process from inside a
+    /// dependency, mid-fit, with no model context.
+    #[test]
+    fn huge_n_with_small_np_returns_instead_of_panicking() {
+        let mut rng = StatefulRng::new(11);
+        // n*p = 2.1 — squarely the BINV regime, at an n `powi` cannot reach.
+        let n: u64 = 2_147_483_648; // i32::MAX + 1
+        let draws: Vec<u64> = (0..2000).map(|_| rng.binomial(n, 1e-9)).collect();
+        let mean = draws.iter().sum::<u64>() as f64 / draws.len() as f64;
+        assert!((mean - 2.147).abs() < 0.25,
+            "mean {mean} is not near n*p = 2.147 — the large-n initial term is wrong");
+
+        // The sharp one. `binv_inverse_cdf` opens with r = (1-p)^n and returns
+        // 0 whenever u <= r, so P(X = 0) IS the initial term, directly
+        // observable. That makes this the assertion that pins the `powi` fix
+        // rather than merely surviving it:
+        //
+        //   correct  ((n as f64) * (-p).ln_1p()).exp()  ->  0.11678
+        //   reverted  q.powi(n as i32), n as i32 = -2^31 ->  8.5633
+        //
+        // A "pmf" of 8.56 exceeds every u, so EVERY draw returns 0 and the
+        // zero-fraction goes to 1.0. The other checks in this test (d <= n,
+        // the flip-back) are satisfied by an all-zero sample, which is why
+        // four of five assertions here used to survive reverting the fix.
+        let zero_frac = draws.iter().filter(|&&d| d == 0).count() as f64 / draws.len() as f64;
+        let expect_zero = ((n as f64) * (-1e-9f64).ln_1p()).exp(); // 0.116777…
+        assert!((zero_frac - expect_zero).abs() < 0.04,
+            "P(X=0) = {zero_frac}, expected {expect_zero:.5} = (1-p)^n. A value \
+             near 1.0 means the initial pmf term exceeded 1 — the truncating \
+             `n as i32` cast that this fix exists to avoid.");
+
+        // The reporter's exact case. n*p = 2.1e-3, so anything above a couple
+        // of events would be extraordinary; `<= 5` is a real bound here, not a
+        // restatement of `d <= n`.
+        assert!(rng.binomial(2_147_483_648, 1e-12) <= 5);
+        // p > 0.5 at huge n exercises the flip AND the flip-back on this path.
+        let hi = rng.binomial(n, 1.0 - 1e-9);
+        assert!(hi >= n - 40, "flip-back wrong at huge n: {hi} vs n={n}");
+    }
+
+    /// The neighbouring regime must keep using BTPE, unchanged — `n*p >= 10`
+    /// at huge `n` is where BTPE is valid and where every existing draw of
+    /// that shape came from.
+    #[test]
+    fn huge_n_with_large_np_still_routes_to_btpe() {
+        let mut rng = StatefulRng::new(13);
+        let n: u64 = 10_000_000_000;
+        let draws: Vec<u64> = (0..100).map(|_| rng.binomial(n, 0.5)).collect();
+        let mean = draws.iter().sum::<u64>() as f64 / draws.len() as f64;
+        assert!((mean / (n as f64) - 0.5).abs() < 0.01,
+            "mean {mean} is not near n*p = 5e9");
     }
 
     /// The inputs that hang `rand_distr` 0.4.3. Verified against the real
