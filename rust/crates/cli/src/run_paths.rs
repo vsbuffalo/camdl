@@ -11,10 +11,13 @@
 
 use std::path::PathBuf;
 
-/// Default output root: `./output`. Overridden by explicit CLI
-/// `--output-dir`, fit.toml `output_dir`, or batch.toml `output_dir`
-/// — in that precedence order. Callers should resolve via
-/// [`output_root`] so the three entry points can't drift.
+/// Overridden by an explicit CLI `--output-dir` (on `simulate` / `batch run`),
+/// fit.toml `output_dir`, or batch.toml `output_dir` — in that precedence
+/// order. Callers should resolve via [`output_root`] so the three entry points
+/// can't drift.
+///
+/// gh#531: this said "Default output root: `./output`", three lines above the
+/// constant that says `results/`. Stale since the rename.
 /// Default output root. `results/` pairs with `data/` in the research-
 /// workflow vocabulary the project's downstream users (book chapters,
 /// vignettes) already speak. Was briefly `output/` during the
