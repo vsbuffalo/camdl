@@ -452,8 +452,8 @@ The compiler catches errors at compile time with domain-specific messages:
 error[E100]: parameter name 't' is reserved for simulation time
   = hint: choose a different name
 
-error[E203]: C_age is declared as age × age, but index 2 ('j') is bound
-  to 'sex'. Did you mean 'j in age'?
+error[E332]: 'sex' is not a dimension of table 'C_age'
+  = hint: its dimensions are: age, age
 
 warning[W301]: periodic range 7:100 is not aligned to step size 7
   = hint: use step = 1 for exact boundaries
