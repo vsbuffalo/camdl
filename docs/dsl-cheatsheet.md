@@ -288,7 +288,7 @@ The compiler issues E-codes with source locations and fix-hints.
 | Code | Class    | Typical trigger                                                                            |
 | ---- | -------- | ------------------------------------------------------------------------------------------ |
 | E100 | naming   | parameter name shadows reserved (`t`, etc.)                                                |
-| E203 | indexing | named-index references wrong dimension                                                     |
+| E332 | indexing | a named index labels a dimension the thing indexed does not have                           |
 | E220 | date     | `date(...)` without `origin` declared                                                      |
 | E300 | dim      | transition rate not P·T⁻¹                                                                  |
 | E301 | dim      | non-dimensionless argument to `exp`/`log`                                                  |
