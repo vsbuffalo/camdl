@@ -3629,6 +3629,48 @@ let partial_index_hint ctx env ~base ~items ~dropped : string =
      explicitly with `%s`"
     all_form (if List.length dropped = 1 then "" else "s") sum_form
 
+(** E204 (A4): `I[]` — brackets the user wrote, with nothing in them.
+
+    Its IR is byte-identical to bare `I`, which is exactly the problem: the
+    brackets look like they select a stratum and select nothing, so a
+    half-finished edit reads as a stratum reference and silently means the
+    total across all strata.
+
+    NOT shared with the observation projection head, unlike
+    [partial_index_error] below. There, an empty [items] is how a genuine BARE
+    name arrives (`projected = I`, `prevalence(I)`) — the brackets are absent
+    rather than empty, and the two are indistinguishable once the head has
+    normalized to (base, items). Only the syntactic `EIndex (_, [], _)` on the
+    read path proves the user typed `[]`, so the check lives there.
+
+    Scoped to compartments: the siblings already reject an empty list with
+    their own codes (`beta[]` → E299, `C_age[]` → E202, `S[]` in stoichiometry
+    → E272). *)
+let empty_index_error ctx ~loc ~base ~items : bool =
+  if items <> [] || not (Hashtbl.mem ctx.comp_tbl base) then false
+  else begin
+    let stratum_hint =
+      (* Name a REAL level, so the suggested form compiles — the bar gh#493 set
+         for E287's hint. *)
+      match comp_dims ctx base with
+      | []     -> ""
+      | d :: _ ->
+        (match dim_values ctx d with
+         | Some (lvl :: _) ->
+           Printf.sprintf "; to read one stratum write `%s[%s]`" base lvl
+         | _ ->
+           (* levels unresolvable — a dimension error is reported elsewhere *)
+           Printf.sprintf "; to read one stratum index `%s`" d)
+    in
+    Diagnostics.error ctx.diags
+      ~code:"E204" ~loc
+      ~message:(Printf.sprintf "'%s[]' has an empty index list" base)
+      ~hint:(Printf.sprintf
+        "for the total across all strata write `%s`%s" base stratum_hint)
+      ();
+    true
+  end
+
 (** E287: a compartment stratified over 2+ dimensions referenced with SOME but
     not all of them indexed has no defined cell. Returns [true] when it
     emitted, so the caller can substitute a placeholder and keep collecting
@@ -3847,7 +3889,8 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
        cell. Without the guard it fell through to name-mangling (`E_adult`)
        and was then E100'd against a synthetic compartment the user never
        wrote. [partial_index_error] is shared with the projection head. *)
-    if partial_index_error ctx env ~loc:idx_loc ~base:base_name ~items then
+    if empty_index_error ctx ~loc:idx_loc ~base:base_name ~items
+       || partial_index_error ctx env ~loc:idx_loc ~base:base_name ~items then
       Ir.Const 0.0  (* placeholder — keep collecting diagnostics this pass *)
     else
     let items = resolve_index_order ctx ~loc:idx_loc

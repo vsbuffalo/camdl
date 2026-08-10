@@ -13,6 +13,38 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-10 — `I[]` on a compartment read is rejected
+
+**What.** An empty index list on a compartment read is now `E204`. It used to
+compile, producing IR byte-identical to the bare name.
+
+**Migration.**
+
+```camdl
+I[]         # old: accepted, meant the total across all strata
+I           # new: the total across all strata
+I[child]    # new: one stratum
+```
+
+**Diagnostic.**
+
+```text
+error[E204]: 'I[]' has an empty index list
+  = hint: for the total across all strata write `I`; to read one stratum
+          write `I[child]`
+```
+
+**Why.** The brackets look like they select a stratum and select nothing, so a
+half-finished edit — deleting the index and leaving the brackets — reads as a
+stratum reference while silently meaning the total. The sibling constructs
+already rejected the same shape (`beta[]` → `E299`, `C_age[]` → `E202`, `S[]` in
+stoichiometry → `E272`); the compartment read path was the hole.
+
+A genuine bare name is untouched: `projected = I` and `prevalence(I)` still mean
+the total across all strata. Only brackets you actually typed are rejected.
+
+Corpus impact: zero — no committed `.camdl` uses the form.
+
 ## 2026-08-09 — `#'` doc comments attach to `let` bindings
 
 **What.** A `#'` doc comment above a top-level `let` is now accepted; it was a
