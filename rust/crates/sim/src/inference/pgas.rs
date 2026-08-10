@@ -1941,6 +1941,49 @@ fn swap_log_alpha(beta_i: f64, beta_j: f64, ll_i: f64, ll_j: f64) -> f64 {
 #[cfg(test)]
 mod swap_log_alpha_tests {
     use super::swap_log_alpha;
+    use crate::inference::mh_accept;
+    use crate::rng::StatefulRng;
+
+    /// gh#471. The swap site keeps its own `log_alpha >= 0.0 || u_ln < log_alpha`
+    /// form rather than routing through `mh_accept`, because the two consume
+    /// RNG differently (`||` short-circuits on a certain accept). They are kept
+    /// only because they make the same DECISION — and that equivalence is
+    /// CONDITIONAL, which is what this pins.
+    ///
+    /// The condition is `u ∈ [0, 1)`: `u_ln` is then strictly negative, so
+    /// `log_alpha == 0.0` accepts under both forms. `log_alpha == 0.0` is not a
+    /// corner here — it is exactly what equal βs or equal log-likelihoods
+    /// produce. If `uniform()` ever moved to a convention that can return 1.0,
+    /// `u_ln` could reach 0 and the two forms would silently disagree at that
+    /// value.
+    #[test]
+    fn swap_forms_agree_given_half_open_uniform() {
+        // The precondition itself, asserted rather than assumed.
+        let mut rng = StatefulRng::new(9);
+        for _ in 0..10_000 {
+            let u = rng.uniform();
+            assert!((0.0..1.0).contains(&u), "uniform() returned {u}, outside [0, 1)");
+        }
+
+        let u_lns = [
+            f64::NEG_INFINITY,          // u = 0
+            (1e-300f64).ln(),
+            (0.5f64).ln(),
+            (1.0 - f64::EPSILON / 2.0).ln(), // the largest u the RNG can return
+        ];
+        let alphas = [
+            f64::INFINITY, f64::NEG_INFINITY, f64::NAN,
+            0.0, -0.0, 50.0, -50.0, 1e-300, -1e-300,
+        ];
+        for &la in &alphas {
+            for &u_ln in &u_lns {
+                let swap_form = la >= 0.0 || u_ln < la;
+                assert_eq!(swap_form, mh_accept(la, u_ln),
+                    "forms disagree at log_alpha={la}, u_ln={u_ln} — the swap \
+                     site may no longer keep its own form");
+            }
+        }
+    }
 
     /// The invariant, not an example: for arbitrary rungs and states, the
     /// returned value must equal the log ratio of the joint product target
@@ -2756,7 +2799,22 @@ pub fn run_pgas(
                                   + (proposed_log_prior_i - current_log_prior_i)
                                   + (proposed_log_jac_i - current_log_jac_i);
 
-                    if log_alpha.is_finite() && rng.uniform().ln() < log_alpha {
+                    // gh#471: `mh_accept`, not an inline `is_finite()` guard.
+                    // gh#334 removed that guard from PMMH and never reached
+                    // here — `9f99405d` touched only `pmmh.rs`. The guard
+                    // uniquely mis-rejects `log_alpha = +∞`, which is the
+                    // acceptance ratio of the one move that matters when a
+                    // chain sits at `ll = −∞`: a proposal to a finite θ, whose
+                    // true Metropolis probability is 1. Rejecting it freezes
+                    // the parameter block for the rest of the run.
+                    //
+                    // That state is reachable without anything going wrong
+                    // mid-run: `pgas.rs`'s initial-loglik check only WARNS on a
+                    // non-finite `current_ll` and falls through, seeding every
+                    // rung with it. And the whole-fit backstop (gh#226) fires
+                    // only when EVERY chain is `−∞`, so a mixed run exits 0
+                    // with one frozen chain folded into the posterior and R̂.
+                    if crate::inference::mh_accept(log_alpha, rng.uniform().ln()) {
                         rungs[rung].params[spec.index] = theta_new;
                         rungs[rung].transformed[i] = z_new;
                         rungs[rung].ll = proposed_ll;
@@ -2826,6 +2884,30 @@ pub fn run_pgas(
                 let log_alpha = swap_log_alpha(
                     betas[i], betas[j], rungs[i].ll, rungs[j].ll);
 
+                // Not routed through `mh_accept`, deliberately — but for a
+                // narrower reason than an earlier version of this comment
+                // claimed, and the difference is worth stating because that
+                // claim is what let gh#550 sit here for four months.
+                //
+                // The two forms make the same DECISION, given that
+                // `StatefulRng::uniform` returns `u ∈ [0, 1)`: `u_ln` is then
+                // strictly negative, so `log_alpha == 0.0` (common here —
+                // it is what equal βs or equal lls produce) accepts under
+                // both. That precondition is load-bearing. If `uniform` ever
+                // moved to an `OpenClosed01` convention, `u_ln` could reach 0
+                // and the two would silently diverge at exactly that value.
+                // `swap_forms_agree_given_half_open_uniform` pins it.
+                //
+                // What differs is RNG CONSUMPTION: `||` short-circuits on a
+                // certain accept and draws no uniform, where
+                // `mh_accept(…, rng.uniform().ln())` always draws one.
+                // Converting would be distribution-neutral and
+                // stream-breaking for tempered NUTS runs, which reach this
+                // site but not the θ-block accept above. That is the whole of
+                // the reason to leave it — NOT any claim that the site is
+                // otherwise beyond scrutiny. gh#550 was a sign error sitting
+                // two lines above this comment while it asserted the site was
+                // fine.
                 if log_alpha >= 0.0 || rng.uniform().ln() < log_alpha {
                     swap_accepted[i] += 1;
 
