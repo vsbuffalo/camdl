@@ -1885,6 +1885,146 @@ pub(crate) fn prior_log_density_and_grad_z(
 // Rung state for parallel tempering
 // ═══════════════════════════════════════════════════════════════════
 
+/// Log Metropolis acceptance ratio for a replica-exchange swap between rung `i`
+/// (inverse temperature `beta_i`, currently holding a state with untempered
+/// log-likelihood `ll_i`) and rung `j`.
+///
+/// # Derivation
+///
+/// Rung `k` targets `π_k(x) ∝ L(x)^{β_k} · p(x)`. The proposal exchanges the two
+/// rungs' states and is its own reverse, so the Hastings ratio is 1 and the
+/// acceptance ratio is just the ratio of joint target densities:
+///
+/// ```text
+/// log(now)   = β_i·ℓ_i + β_j·ℓ_j + log p(x_i) + log p(x_j)
+/// log(after) = β_i·ℓ_j + β_j·ℓ_i + log p(x_j) + log p(x_i)
+/// ```
+///
+/// The prior terms are identical — the same two states appear either way, only
+/// assigned to different rungs — so they cancel, leaving
+///
+/// ```text
+/// log α = (β_i − β_j)(ℓ_j − ℓ_i)
+/// ```
+///
+/// Read it in words: `i` is the colder rung, so `(β_i − β_j) > 0` and the sign
+/// is the sign of `(ℓ_j − ℓ_i)`. **Accept when the hotter rung holds the better
+/// state** — i.e. when the free-roaming chain has found somewhere good, move it
+/// down to the chain whose draws we report. That is the entire purpose of the
+/// ladder.
+///
+/// # Why this is a named function rather than an inline expression (gh#550)
+///
+/// It shipped inverted, as `(β_i − β_j)(ℓ_i − ℓ_j)`, from 2026-04-09 to
+/// 2026-08-10 — so it rejected exactly the swaps above and accepted their
+/// opposites, moving states from the deliberately-flattened rungs INTO the cold
+/// one. Every surface signal stayed healthy (finite log-liks, plausible swap
+/// rates), and the inline comment restated the same wrong formula, so review saw
+/// agreement rather than a contradiction.
+///
+/// Two things follow, both deliberate here. The comment above **derives** the
+/// result instead of restating it, so it can disagree with the code. And the
+/// expression is a function so it can be tested without running a fit — the
+/// direct reason no test pinned it before.
+///
+/// The likely origin of the slip: the physics literature states this in
+/// energies, `Δ = (β_i − β_j)(E_i − E_j)` (Hukushima & Nemoto 1996, eq. 6), with
+/// Boltzmann weight `e^{−βE}`. Ours is `L^β = e^{βℓ}`, so `E = −ℓ`; substituting
+/// without the sign flip produces exactly the shipped expression.
+///
+/// Incident: `docs/dev/incidents/2026-08-10-pgas-tempering-swap-sign.md`.
+#[inline]
+fn swap_log_alpha(beta_i: f64, beta_j: f64, ll_i: f64, ll_j: f64) -> f64 {
+    (beta_i - beta_j) * (ll_j - ll_i)
+}
+
+#[cfg(test)]
+mod swap_log_alpha_tests {
+    use super::swap_log_alpha;
+
+    /// The invariant, not an example: for arbitrary rungs and states, the
+    /// returned value must equal the log ratio of the joint product target
+    /// computed INDEPENDENTLY from its definition.
+    ///
+    /// This is the test that would have caught gh#550. A single worked case can
+    /// be satisfied by a coincidentally-correct wrong formula; this cannot,
+    /// because the oracle is built from `π_k ∝ L^{β_k}·p` rather than from any
+    /// rearrangement of the expression under test.
+    #[test]
+    fn matches_the_product_target_ratio_computed_independently() {
+        // Oracle: log Π(after) − log Π(now), with the priors written out and
+        // cancelled by construction rather than by algebra.
+        fn oracle(beta_i: f64, beta_j: f64, ll_i: f64, ll_j: f64) -> f64 {
+            let log_now   = beta_i * ll_i + beta_j * ll_j;
+            let log_after = beta_i * ll_j + beta_j * ll_i;
+            log_after - log_now
+        }
+
+        let betas = [1.0, 0.8, 0.5, 0.25, 0.05];
+        let lls   = [-1.0, -12.5, -200.0, -1e4, 0.0, -3.25];
+        let mut checked = 0usize;
+        for (bi, &beta_i) in betas.iter().enumerate() {
+            for &beta_j in betas.iter().skip(bi + 1) {
+                for &ll_i in &lls {
+                    for &ll_j in &lls {
+                        let got = swap_log_alpha(beta_i, beta_j, ll_i, ll_j);
+                        let want = oracle(beta_i, beta_j, ll_i, ll_j);
+                        assert!((got - want).abs() <= 1e-9 * want.abs().max(1.0),
+                            "beta_i={beta_i} beta_j={beta_j} ll_i={ll_i} ll_j={ll_j}: \
+                             got {got}, product-target ratio is {want}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 300, "grid barely ran: {checked} comparisons");
+    }
+
+    /// The direction the ladder exists for, as a named case: a hot rung holding
+    /// a much better state must be accepted with certainty.
+    ///
+    /// gh#550 shipped the negation, which gave log α = −50 here — a rejection
+    /// probability of 1 − 2e−22 for a trade that raises the joint density by a
+    /// factor of e^50.
+    #[test]
+    fn accepts_when_the_hotter_rung_holds_the_better_state() {
+        // Cold rung β=1.0 stuck at ll=-200; hot rung β=0.5 found ll=-100.
+        let log_alpha = swap_log_alpha(1.0, 0.5, -200.0, -100.0);
+        assert!(log_alpha > 0.0,
+            "a hot rung holding the better state must be accepted; got {log_alpha}");
+        assert!((log_alpha - 50.0).abs() < 1e-9, "expected +50, got {log_alpha}");
+
+        // And the converse: when the COLD rung is already better, the trade
+        // would move the worse state into the reported chain, so it must not be
+        // automatic. This is the arm the inverted code accepted with certainty.
+        let reverse = swap_log_alpha(1.0, 0.5, -100.0, -200.0);
+        assert!(reverse < 0.0,
+            "swapping a worse state into the cold rung must be penalised; got {reverse}");
+    }
+
+    /// Antisymmetry in the rung roles: proposing the same exchange from either
+    /// side is the same move, so the ratio must simply negate. Guards against a
+    /// future "fix" that special-cases one ordering.
+    #[test]
+    fn negates_when_the_two_rungs_are_swapped() {
+        for (beta_i, beta_j, ll_i, ll_j) in
+            [(1.0, 0.5, -200.0, -100.0), (0.9, 0.1, -1.0, -50.0), (1.0, 0.99, 0.0, -0.5)]
+        {
+            let a = swap_log_alpha(beta_i, beta_j, ll_i, ll_j);
+            let b = swap_log_alpha(beta_j, beta_i, ll_j, ll_i);
+            assert!((a - b).abs() < 1e-12, "not symmetric under role exchange: {a} vs {b}");
+        }
+    }
+
+    /// Equal temperatures or equal likelihoods leave nothing to gain, so the
+    /// ratio is exactly 0 (accept — the states are interchangeable).
+    #[test]
+    fn is_zero_when_there_is_nothing_to_gain() {
+        assert_eq!(swap_log_alpha(0.7, 0.7, -10.0, -900.0), 0.0);
+        assert_eq!(swap_log_alpha(1.0, 0.3, -42.0, -42.0), 0.0);
+    }
+}
+
 /// Per-rung state for parallel tempering. Consolidates the 12+ parallel
 /// vectors that were previously maintained separately.
 struct RungState {
@@ -2679,9 +2819,12 @@ pub fn run_pgas(
                 let j = i + 1;
                 swap_proposed[i] += 1;
 
-                // Acceptance: α = min(1, exp((β_i - β_j) * (LL_i - LL_j)))
-                // where LL is the UNTEMPERED complete-data log-likelihood.
-                let log_alpha = (betas[i] - betas[j]) * (rungs[i].ll - rungs[j].ll);
+                // gh#550. Derivation in `swap_log_alpha`; the short version is
+                // that the sign is the sign of (ℓ_j − ℓ_i), so a swap is
+                // accepted when the HOTTER rung holds the better state — which
+                // is the whole purpose of the ladder.
+                let log_alpha = swap_log_alpha(
+                    betas[i], betas[j], rungs[i].ll, rungs[j].ll);
 
                 if log_alpha >= 0.0 || rng.uniform().ln() < log_alpha {
                     swap_accepted[i] += 1;
