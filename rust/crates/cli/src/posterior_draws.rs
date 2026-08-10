@@ -486,7 +486,7 @@ mod tests {
         let tmp = crate::test_support::unique_temp_dir("pdraws_fixed_dir");
         fs::create_dir_all(&tmp).unwrap();
         let sidecar = crate::run_meta::FitSidecar {
-            fixed: HashMap::from([("N0".to_string(), 1000.0), ("sigma".to_string(), 0.11)]),
+            fixed: std::collections::BTreeMap::from([("N0".to_string(), 1000.0), ("sigma".to_string(), 0.11)]),
             ..Default::default()
         };
         crate::run_meta::write_fit_sidecar(&tmp, Path::new("nonexistent.toml"), &sidecar).unwrap();

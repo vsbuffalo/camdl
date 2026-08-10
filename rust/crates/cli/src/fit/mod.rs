@@ -1997,7 +1997,7 @@ fn build_fit_sidecar(
         .unwrap_or_default();
     let fit_toml_bytes = std::fs::read(fit_path).unwrap_or_default();
     let fit_toml_hash = crate::hashing::sha256_hex(&fit_toml_bytes);
-    let data_hashes: std::collections::HashMap<String, String> = config
+    let data_hashes: std::collections::BTreeMap<String, String> = config
         .data.as_ref()
         .map(|d| d.observations.iter()
             .filter_map(|(name, path)| {
@@ -2006,7 +2006,7 @@ fn build_fit_sidecar(
             .collect())
         .unwrap_or_default();
     let estimated: Vec<String> = config.estimate.keys().cloned().collect();
-    let fixed: std::collections::HashMap<String, f64> = config.fixed
+    let fixed: std::collections::BTreeMap<String, f64> = config.fixed
         .resolve().unwrap_or_default().into_iter().collect();
     let stages_declared: Vec<String> = config.stages.keys().cloned().collect();
     // gh#75: resolve per-parameter prior provenance. We only emit

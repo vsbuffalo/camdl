@@ -16,7 +16,7 @@
 //! of the new format — `walk_fits_root`, `table_row`, `fit summary`, `browse`
 //! all read it instead of synthesizing a legacy `run_meta::Run`.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use runid::{ArtifactKind, RunRecord};
@@ -71,11 +71,11 @@ pub struct FitView {
     pub model_identity: String,
     pub fit_toml_path: String,
     pub fit_toml_hash: String,
-    pub data_hashes: HashMap<String, String>,
+    pub data_hashes: BTreeMap<String, String>,
     pub estimated: Vec<String>,
-    pub fixed: HashMap<String, f64>,
+    pub fixed: BTreeMap<String, f64>,
     pub resolved_priors: Vec<ResolvedPriorEntry>,
-    pub parameters_provenance: HashMap<String, ParameterProvenance>,
+    pub parameters_provenance: BTreeMap<String, ParameterProvenance>,
 
     // ── from the leaves ──
     /// Bare stage names in execution order (the `NN-` ordinal prefix sorts
@@ -280,11 +280,11 @@ mod tests {
             model_identity: "f00d".repeat(16),
             fit_toml_path: "fit.toml".into(),
             fit_toml_hash: "cafe".repeat(16),
-            data_hashes: HashMap::from([("cases".to_string(), "d4ta".repeat(2))]),
+            data_hashes: BTreeMap::from([("cases".to_string(), "d4ta".repeat(2))]),
             estimated: vec!["beta".into(), "gamma".into()],
-            fixed: HashMap::from([("N0".to_string(), 1000.0)]),
+            fixed: BTreeMap::from([("N0".to_string(), 1000.0)]),
             resolved_priors: vec![],
-            parameters_provenance: HashMap::new(),
+            parameters_provenance: BTreeMap::new(),
             schema: None,
             docs: Default::default(),
         };

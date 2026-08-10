@@ -291,8 +291,8 @@ impl ConfigDiff {
 }
 
 fn diff_data_hashes(
-    this: &std::collections::HashMap<String, String>,
-    baseline: &std::collections::HashMap<String, String>,
+    this: &std::collections::BTreeMap<String, String>,
+    baseline: &std::collections::BTreeMap<String, String>,
 ) -> DataHashesDiff {
     let this_keys: BTreeSet<&str> = this.keys().map(|s| s.as_str()).collect();
     let base_keys: BTreeSet<&str> = baseline.keys().map(|s| s.as_str()).collect();
@@ -473,7 +473,7 @@ fn stage_settings_map(stage: &Stage) -> BTreeMap<String, serde_json::Value> {
 mod tests {
     use super::*;
     use crate::fit::config_v2::FitConfigV2;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn fitmeta(model_identity: &str) -> FitView {
         FitView {
@@ -486,9 +486,9 @@ mod tests {
             model_identity: model_identity.into(),
             fit_toml_path: "fit.toml".into(),
             fit_toml_hash: "h".repeat(64),
-            data_hashes: HashMap::new(),
+            data_hashes: BTreeMap::new(),
             estimated: Vec::new(),
-            fixed: HashMap::new(),
+            fixed: BTreeMap::new(),
             resolved_priors: Vec::new(),
             parameters_provenance: Default::default(),
             stages_declared: Vec::new(),

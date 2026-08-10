@@ -16,7 +16,7 @@
 //!   alongside its stage leaves.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Inference algorithm tag — discriminator enum naming the algorithm
 /// independent of the simulation backend. Recorded in a fit-stage leaf's
@@ -535,15 +535,25 @@ pub struct FitSidecar {
     #[serde(default)]
     pub fit_toml_hash: String,
     #[serde(default)]
-    pub data_hashes: HashMap<String, String>,
+    // gh#542, sibling of gh#519. These three are serialized into
+    // `fit.meta.json` via `to_vec_pretty`, and serde's `HashMap` impl emits in
+    // ITERATION order — only `serde_json::Value` normalizes, because its `Map`
+    // is a `BTreeMap` with `preserve_order` off. So two identical fits produced
+    // metadata differing only in key order, which defeats the artifact-diff
+    // workflow the sidecar exists for: you cannot diff two runs and have the
+    // diff mean something. `BTreeMap` is deterministic by construction rather
+    // than by an upstream insertion order that could itself come from a
+    // `HashMap`. Deserialization is unaffected — JSON objects are unordered on
+    // read, so existing `fit.meta.json` files load unchanged.
+    pub data_hashes: BTreeMap<String, String>,
     #[serde(default)]
     pub estimated: Vec<String>,
     #[serde(default)]
-    pub fixed: HashMap<String, f64>,
+    pub fixed: BTreeMap<String, f64>,
     #[serde(default)]
     pub resolved_priors: Vec<ResolvedPriorEntry>,
     #[serde(default)]
-    pub parameters_provenance: HashMap<String, ParameterProvenance>,
+    pub parameters_provenance: BTreeMap<String, ParameterProvenance>,
     /// The run's observation/dimension schema ([`ObsSchema`]) — `streams` ×
     /// `dimensions` derived from the model's observation leaves. `None` for a
     /// sidecar written without a model in hand (CLI-only profile fits, test
@@ -629,6 +639,52 @@ pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Option<FitSidecar> {
 
 #[cfg(test)]
 mod tests {
+
+    /// gh#542, sibling of gh#519. `fit.meta.json` is written with
+    /// `to_vec_pretty(sidecar)`, and serde's `HashMap` impl emits in ITERATION
+    /// order — only `serde_json::Value` normalizes, because its `Map` is a
+    /// `BTreeMap` with `preserve_order` off. So two identical fits produced
+    /// metadata differing only in key order, defeating the artifact-diff
+    /// workflow the sidecar exists for.
+    ///
+    /// Asserting "two serializations agree" would NOT catch a revert: within one
+    /// process a `HashMap` iterates the same key set the same way regardless of
+    /// insertion order. So assert the emitted keys are SORTED, which only a
+    /// sorted map guarantees, over enough keys that a `HashMap` landing on
+    /// sorted order by chance is negligible.
+    #[test]
+    fn sidecar_serializes_its_maps_in_sorted_key_order() {
+        let mut side = FitSidecar::default();
+        for k in ["weekly_cases", "afp", "deaths", "es", "cases", "hosp",
+                  "prev", "sero"] {
+            side.data_hashes.insert(k.to_string(), format!("{k}-hash"));
+        }
+        for k in ["rho", "N0", "k", "gamma", "iota", "psi", "sigma", "beta"] {
+            side.fixed.insert(k.to_string(), 1.0);
+        }
+
+        let json = serde_json::to_string_pretty(&side).expect("serialize");
+
+        // Read the key order off the RAW TEXT, not a reparsed Value — the
+        // latter is a BTreeMap and would report sorted order regardless.
+        for field in ["data_hashes", "fixed"] {
+            let needle = format!("\"{field}\": {{");
+            let start = json.find(&needle).expect("field present");
+            let body = &json[start..];
+            let end = body.find('}').expect("field closes");
+            let keys: Vec<&str> = body[..end].lines().skip(1)
+                .filter_map(|l| l.trim().split('"').nth(1))
+                .collect();
+            assert_eq!(keys.len(), 8, "expected 8 keys in {field}: {keys:?}");
+            let mut sorted = keys.clone();
+            sorted.sort();
+            assert_eq!(keys, sorted,
+                "{field} must serialize in sorted key order — an unordered map \
+                 here makes fit.meta.json differ between identical runs \
+                 (gh#542). Got: {keys:?}");
+        }
+    }
+
     use super::*;
 
     #[test]
