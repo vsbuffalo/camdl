@@ -1689,25 +1689,111 @@ impl Stage {
     /// A `None` argument leaves the field as the toml declared it, so a run
     /// with no CLI overrides keys identically to before — no existing cached
     /// fit is invalidated by this.
-    pub fn apply_cli_chain_start_overrides(
-        &mut self,
-        init: Option<&super::init::InitMethod>,
-        survey: Option<&std::path::PathBuf>,
-        top_k: Option<usize>,
-    ) {
-        let (init_method, survey_path, survey_top_k_n) = match self {
+    pub fn apply_cli_overrides(&mut self, cli: &CliStageOverrides) {
+        // ── Chain-start overrides (gh#514) ──
+        if let Some((init_method, survey_path, survey_top_k_n)) = match self {
             Stage::IF2 { init_method, survey_path, survey_top_k_n, .. }
             | Stage::PGAS { init_method, survey_path, survey_top_k_n, .. }
             | Stage::PMMH { init_method, survey_path, survey_top_k_n, .. }
             | Stage::Mh { init_method, survey_path, survey_top_k_n, .. }
             | Stage::Nuts { init_method, survey_path, survey_top_k_n, .. } =>
-                (init_method, survey_path, survey_top_k_n),
+                Some((init_method, survey_path, survey_top_k_n)),
             // NLopt / pfilter stages take no chain-start override.
-            _ => return,
-        };
-        if let Some(m) = init { *init_method = m.clone(); }
-        if let Some(p) = survey { *survey_path = Some(p.clone()); }
-        if let Some(k) = top_k { *survey_top_k_n = Some(k); }
+            _ => None,
+        } {
+            if let Some(m) = &cli.init { *init_method = m.clone(); }
+            if let Some(p) = &cli.survey_path { *survey_path = Some(p.clone()); }
+            if let Some(k) = cli.survey_top_k { *survey_top_k_n = Some(k); }
+        }
+
+        // ── Sampler and output overrides (gh#540) ──
+        // Each of these used to be written into the `*StageOpts` struct at the
+        // dispatch site, AFTER the identity was taken from this one — so a run
+        // differing only in `--n-trajectories` or `--no-nuts` shared a `run_id`
+        // with the previous run and was served its result. Writing them here
+        // means the identity sees them, and the dispatch site has nothing left
+        // to override: `*StageOpts::from_stage` reads what is written below.
+        match self {
+            Stage::PGAS {
+                tempering, max_tree_depth, trajectory_warmup,
+                csmc_sweeps_per_nuts, n_trajectories, dense_mass, use_nuts, ..
+            } => {
+                if let Some(t) = &cli.tempering { *tempering = t.clone(); }
+                if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
+                if let Some(w) = cli.trajectory_warmup { *trajectory_warmup = w; }
+                if let Some(s) = cli.csmc_sweeps_per_nuts { *csmc_sweeps_per_nuts = s; }
+                if let Some(n) = cli.n_trajectories { *n_trajectories = n; }
+                if cli.diagonal_mass { *dense_mass = false; }
+                if cli.no_nuts { *use_nuts = false; }
+            }
+            Stage::Nuts { max_tree_depth, dense_mass, .. } => {
+                if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
+                if cli.diagonal_mass { *dense_mass = false; }
+            }
+            Stage::PMMH { adapt, adapt_start, rho, .. } => {
+                if cli.no_adapt { *adapt = false; }
+                if let Some(s) = cli.adapt_start { *adapt_start = s; }
+                if let Some(r) = cli.rho { *rho = Some(r); }
+            }
+            Stage::Mh { adapt, adapt_start, .. } => {
+                if cli.no_adapt { *adapt = false; }
+                if let Some(s) = cli.adapt_start { *adapt_start = s; }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every CLI flag that changes what a stage COMPUTES or STORES, collected in
+/// one place so it can be written into the stage before its content address is
+/// taken.
+///
+/// The point of the struct is that it is the only route. gh#514 fixed five
+/// chain-start flags by folding them into the identity; gh#540 found thirteen
+/// more with the same defect, because each was applied at its own dispatch
+/// site and nothing forced a new flag to go through the identity. A flag added
+/// to `FitRunArgs` and forgotten here still bypasses — but it now has to bypass
+/// ONE place with a name, rather than blend into a list of `if let Some(..)`
+/// lines two hundred lines from the claim.
+///
+/// Presentation-only flags (progress bars, `--no-run`, output verbosity) are
+/// deliberately absent: they do not change the artifact, so keying on them
+/// would invalidate cached fits for nothing.
+#[derive(Debug, Clone, Default)]
+pub struct CliStageOverrides {
+    pub init: Option<super::init::InitMethod>,
+    pub survey_path: Option<std::path::PathBuf>,
+    pub survey_top_k: Option<usize>,
+    pub tempering: Option<Vec<f64>>,
+    pub max_tree_depth: Option<usize>,
+    pub trajectory_warmup: Option<usize>,
+    pub csmc_sweeps_per_nuts: Option<usize>,
+    pub n_trajectories: Option<usize>,
+    pub diagonal_mass: bool,
+    pub no_nuts: bool,
+    pub no_adapt: bool,
+    pub adapt_start: Option<usize>,
+    pub rho: Option<f64>,
+}
+
+impl CliStageOverrides {
+    /// True when nothing was passed — the caller skips the whole override step,
+    /// so a run with no CLI overrides keys byte-identically to before and no
+    /// stored fit is invalidated.
+    pub fn is_empty(&self) -> bool {
+        self.init.is_none()
+            && self.survey_path.is_none()
+            && self.survey_top_k.is_none()
+            && self.tempering.is_none()
+            && self.max_tree_depth.is_none()
+            && self.trajectory_warmup.is_none()
+            && self.csmc_sweeps_per_nuts.is_none()
+            && self.n_trajectories.is_none()
+            && !self.diagonal_mass
+            && !self.no_nuts
+            && !self.no_adapt
+            && self.adapt_start.is_none()
+            && self.rho.is_none()
     }
 }
 
@@ -2965,6 +3051,50 @@ cooling = 0.7
 
     // ── gh#514: a CLI chain-start override must re-key the stage ────────
 
+    /// A `pgas` stage, for the sampler/output flags that only exist there.
+    fn pgas_stage() -> Stage {
+        let cfg = parse(r#"
+[model]
+camdl = "m.camdl"
+
+[estimate]
+beta = { bounds = [0.01, 2.0], prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }
+
+[fixed]
+N0 = 1000000
+
+[stages.posterior]
+algorithm  = "pgas"
+backend    = "chain_binomial"
+chains     = 2
+particles  = 100
+sweeps     = 10
+"#).unwrap();
+        cfg.stages["posterior"].clone()
+    }
+
+    /// A `pmmh` stage, for `--no-adapt` / `--adapt-start` / `--rho`.
+    fn pmmh_stage() -> Stage {
+        let cfg = parse(r#"
+[model]
+camdl = "m.camdl"
+
+[estimate]
+beta = { bounds = [0.01, 2.0], prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }
+
+[fixed]
+N0 = 1000000
+
+[stages.posterior]
+algorithm  = "pmmh"
+backend    = "chain_binomial"
+chains     = 2
+particles  = 100
+iterations = 10
+"#).unwrap();
+        cfg.stages["posterior"].clone()
+    }
+
     fn scout_stage(init: &str) -> Stage {
         let cfg = parse(&format!(r#"
 [model]
@@ -2997,8 +3127,8 @@ init       = "{init}"
     fn cli_init_override_changes_the_stage_identity() {
         let declared = scout_stage("single");
         let mut overridden = scout_stage("single");
-        overridden.apply_cli_chain_start_overrides(
-            Some(&crate::fit::init::InitMethod::Lhs), None, None);
+        overridden.apply_cli_overrides(&CliStageOverrides {
+            init: Some(crate::fit::init::InitMethod::Lhs), ..Default::default() });
 
         assert_ne!(declared.identity_payload(), overridden.identity_payload(),
             "a stage run under `--init lhs` must not share an identity with \
@@ -3013,6 +3143,73 @@ init       = "{init}"
              the toml — they are the same fit");
     }
 
+    /// gh#540: EVERY sampler/output flag must move the stage identity, not
+    /// just the five chain-start ones gh#514 covered. Each of these was
+    /// applied to the `*StageOpts` struct at the dispatch site, AFTER the
+    /// identity was taken from the stage — so `--n-trajectories 500` was
+    /// served the 200-trajectory leaf, and `--no-nuts` was served a posterior
+    /// drawn by NUTS.
+    ///
+    /// Table-driven so a flag added to `CliStageOverrides` without a case here
+    /// is conspicuous. A per-flag test would let the fourteenth flag slip in
+    /// silently, which is exactly how the thirteen got here.
+    ///
+    /// `--n-trajectories` is deliberately NOT in this table:
+    /// `identity_payload` omits it on purpose (see
+    /// `pgas_identity_payload_omits_n_trajectories`) because it shapes output
+    /// rather than the statistical fit, and it reaches the key by the separate
+    /// `cas_n_trajectories` route that `StageConfig` folds in. It gets its own
+    /// test below rather than a row here that would assert the wrong thing.
+    #[test]
+    fn every_cli_sampler_flag_changes_the_stage_identity() {
+        let cases: Vec<(&str, Stage, CliStageOverrides)> = vec![
+            ("--tempering", pgas_stage(),
+             CliStageOverrides { tempering: Some(vec![1.0, 0.5]), ..Default::default() }),
+            ("--max-tree-depth", pgas_stage(),
+             CliStageOverrides { max_tree_depth: Some(7), ..Default::default() }),
+            ("--trajectory-warmup", pgas_stage(),
+             CliStageOverrides { trajectory_warmup: Some(3), ..Default::default() }),
+            ("--csmc-sweeps-per-nuts", pgas_stage(),
+             CliStageOverrides { csmc_sweeps_per_nuts: Some(4), ..Default::default() }),
+            ("--diagonal-mass", pgas_stage(),
+             CliStageOverrides { diagonal_mass: true, ..Default::default() }),
+            ("--no-nuts", pgas_stage(),
+             CliStageOverrides { no_nuts: true, ..Default::default() }),
+            ("--no-adapt", pmmh_stage(),
+             CliStageOverrides { no_adapt: true, ..Default::default() }),
+            ("--adapt-start", pmmh_stage(),
+             CliStageOverrides { adapt_start: Some(42), ..Default::default() }),
+            ("--rho", pmmh_stage(),
+             CliStageOverrides { rho: Some(0.9), ..Default::default() }),
+        ];
+        for (flag, base, cli) in cases {
+            let mut overridden = base.clone();
+            overridden.apply_cli_overrides(&cli);
+            assert_ne!(
+                base.identity_payload(), overridden.identity_payload(),
+                "{flag} changes what the stage computes or stores, so it must \
+                 change the stage identity. Sharing an identity means the run \
+                 is served the OTHER setting's stored result (gh#540)."
+            );
+        }
+    }
+
+    /// `--n-trajectories` is the sharpest case, because `cas.rs` documents it
+    /// as folded count-in-the-key and it was not. Pinned separately from the
+    /// table so the claim in that doc comment has a test under it.
+    #[test]
+    fn n_trajectories_is_count_in_the_key() {
+        let base = pgas_stage();
+        let mut more = pgas_stage();
+        more.apply_cli_overrides(&CliStageOverrides {
+            n_trajectories: Some(500), ..Default::default() });
+        assert_ne!(base.cas_n_trajectories(), more.cas_n_trajectories(),
+            "`--n-trajectories` must reach `cas_n_trajectories` — it reads the \
+             stage, and the flag used to be applied to the opts struct instead, \
+             so a 500-trajectory request was served the 200-trajectory leaf");
+        assert_eq!(more.cas_n_trajectories(), 500);
+    }
+
     /// The other half, and the one that protects existing users: a run with
     /// no CLI overrides must key exactly as it did before, so no cached fit
     /// is invalidated by this change.
@@ -3020,7 +3217,7 @@ init       = "{init}"
     fn no_cli_override_leaves_the_stage_identity_untouched() {
         let declared = scout_stage("uniform");
         let mut untouched = scout_stage("uniform");
-        untouched.apply_cli_chain_start_overrides(None, None, None);
+        untouched.apply_cli_overrides(&CliStageOverrides::default());
         assert_eq!(declared.identity_payload(), untouched.identity_payload());
     }
 
@@ -3032,13 +3229,15 @@ init       = "{init}"
         let base = scout_stage("survey_top_k");
 
         let mut with_path = scout_stage("survey_top_k");
-        with_path.apply_cli_chain_start_overrides(
-            None, Some(&std::path::PathBuf::from("results/survey-abc")), None);
+        with_path.apply_cli_overrides(&CliStageOverrides {
+            survey_path: Some(std::path::PathBuf::from("results/survey-abc")),
+            ..Default::default() });
         assert_ne!(base.identity_payload(), with_path.identity_payload(),
             "--survey-path selects which points seed the chains");
 
         let mut with_k = scout_stage("survey_top_k");
-        with_k.apply_cli_chain_start_overrides(None, None, Some(3));
+        with_k.apply_cli_overrides(&CliStageOverrides {
+            survey_top_k: Some(3), ..Default::default() });
         assert_ne!(base.identity_payload(), with_k.identity_payload(),
             "--survey-top-k selects how many points seed the chains");
         assert_ne!(with_path.identity_payload(), with_k.identity_payload());

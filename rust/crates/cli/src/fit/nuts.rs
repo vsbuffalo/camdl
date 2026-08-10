@@ -29,7 +29,18 @@ pub struct NutsStageOpts {
     pub target_accept: f64,
     pub dense_mass: bool,
     pub init_method: super::init::InitMethod,
+    /// gh#546: populated by `from_stage` and read by NOTHING — survey-based
+    /// initialisation is inert on a `nuts` stage. Kept (rather than deleted)
+    /// so the gap stays visible: the fix is either to wire the landscape into
+    /// the chain starts as `if2`/`pmmh`/`pgas` do, or to refuse
+    /// `init = "survey_top_k"` here with a diagnostic. Silently accepting and
+    /// ignoring is the one option that is not acceptable.
+    ///
+    /// Until gh#540 these were written by the CLI at the dispatch site, which
+    /// masked the dead-code lint and hid the fact that nobody read them.
+    #[allow(dead_code)]
     pub survey_path: Option<std::path::PathBuf>,
+    #[allow(dead_code)]
     pub survey_top_k_n: Option<usize>,
     /// Coarse warm-up step (gh#396 follow-on); `None` = off. Validated against the
     /// fit-wide `dt` and the observation streams in `run_stage`.
