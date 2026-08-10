@@ -2586,6 +2586,143 @@ let index_item_to_str env item =
   | INamed (_, EIdent (s, _)) -> (match List.assoc_opt s env with Some v -> v | None -> s)
   | INamed (_, _)             -> "?"
 
+(** The declared dimension names behind an [index_binding list] — the shape
+    [let], forcings, transitions and observation streams store their indices in,
+    as opposed to the plain [string list] that [comp_dims] / [table_dims] /
+    [indexed_param_dims] return. [IComp] binds over compartments rather than a
+    dimension and contributes nothing to name-mangling order. *)
+let dims_of_index_bindings (bs : index_binding list) : string list =
+  List.filter_map (function
+    | IBind (_, d)      -> Some d
+    | IConsec (_, _, d) -> Some d
+    | IComp _           -> None) bs
+
+(** Declared dimensions of a transition, by name. No helper existed — the
+    transition's indices live on [tr.trindices] as an [index_binding list],
+    while compartments/tables/parameters each had their own [string list]
+    accessor. Returns [] for an unknown name; the reference is diagnosed
+    elsewhere. *)
+let transition_dims ctx tname : string list =
+  match List.find_opt (fun (t : transition_decl) -> t.trname = tname)
+          ctx.orig_transitions with
+  | Some t -> dims_of_index_bindings t.trindices
+  | None   -> []
+
+(** Declared dimensions of an observation stream, by name. Like
+    [transition_dims], no accessor existed. *)
+let obs_dims ctx oname : string list =
+  match List.find_opt (fun (o : obs_decl) -> o.oname = oname) ctx.obs_decls with
+  | Some o -> dims_of_index_bindings o.oindices
+  | None   -> []
+
+(** The dimension label a named index carries, if it is one. *)
+let index_item_dim = function
+  | INamed (d, _) -> Some d
+  | IPosn _       -> None
+
+(** Order a reference's index items by the DECLARED dimension vector of the
+    thing being indexed, rather than by source order (gh#459).
+
+    [index_item_to_str] above discards the label on [INamed], so
+    [S\[patch = north, age = child\]] used to lower to the same string list as
+    [S\[north, child\]]. On a compartment declared over [\[age; patch\]] that is
+    the wrong cell. It is usually caught downstream — the mangled name is not a
+    declared compartment and E100 fires — but it is SILENT exactly when two
+    dimensions share a level name, which is ordinary epidemiological vocabulary
+    ([low, high], [pos, neg], [urban, rural]). In that case the reversed
+    selector names a real cell that is not the one written, and the model
+    compiles clean while reading the wrong compartment.
+
+    The spec has promised order-independence in three places since it was
+    written (§5 "order doesn't matter", §12 "named index (order-independent)",
+    and the recommendation to prefer named indexing precisely because it
+    "survives a later reordering of the dimension declarations"), and also
+    promises the membership check this adds: "the compiler resolves named
+    indices to positional and validates dimension membership".
+
+    [dims] is the declared dimension vector. Returns the items reordered to
+    match it, so every existing caller can keep doing
+    [List.map (index_item_to_str env)] on the result.
+
+    Diagnostics, all new:
+    - E332 — a named index whose label is not a dimension of this object.
+      Nothing checked this before: [S\[nosuchdim = m, age = child\]] compiled
+      clean.
+    - E333 — the same dimension named twice.
+    - E326 — positional and named indices mixed in one reference.
+
+    E326 needs a word, because the spec used to permit the mix
+    ([S\[child, sex = female\]], §5) while recommending against it in the same
+    breath ("for clarity, use one style consistently"). Permitting it forces a
+    rule nobody should have to hold: in [S\[female, age = child\]] on
+    [\[age; sex\]], does [female] mean position 0 (age — an error) or the first
+    dimension left un-named (sex — valid)? Both readings fit the spec's single
+    example. Rather than pick one and document it, the mix is refused: if you
+    reach for a keyword, use keywords throughout. The advisory becomes the rule.
+
+    No model in the repository uses the mixed form, and pre-1.0 breaking changes
+    are expected (VERSIONING.md).
+
+    A reference with no named items is returned untouched and cannot change
+    behaviour, which is what keeps every positional model byte-identical. *)
+let resolve_index_order ctx ~loc ~what ~dims (items : index_item list) =
+  if List.for_all (fun it -> index_item_dim it = None) items then items
+  else begin
+    let named, positional = List.partition (fun it -> index_item_dim it <> None) items in
+    (* E326: one style per reference. Checked first — with a mix present, any
+       placement this function chose would be a guess at what was meant. *)
+    let bad = ref false in
+    if positional <> [] then begin
+      bad := true;
+      Diagnostics.error ctx.diags ~code:"E326" ~loc
+        ~message:(Printf.sprintf
+          "%s mixes positional and named indices in one reference" what)
+        ~hint:(Printf.sprintf
+          "use one style: either all positional, in declared order (%s), or \
+           name every dimension (%s)"
+          (String.concat ", " dims)
+          (String.concat ", " (List.map (fun d -> d ^ " = …") dims)))
+        ()
+    end;
+    (* E332 / E333: validate the labels before using them to place anything. *)
+    let seen = Hashtbl.create 8 in
+    List.iter (fun it ->
+      match index_item_dim it with
+      | None -> ()
+      | Some d ->
+        if not (List.mem d dims) then begin
+          bad := true;
+          Diagnostics.error ctx.diags ~code:"E332" ~loc
+            ~message:(Printf.sprintf
+              "'%s' is not a dimension of %s" d what)
+            ~hint:(if dims = [] then Printf.sprintf "%s is not stratified" what
+                   else Printf.sprintf "its dimensions are: %s"
+                          (String.concat ", " dims))
+            ()
+        end
+        else if Hashtbl.mem seen d then begin
+          bad := true;
+          Diagnostics.error ctx.diags ~code:"E333" ~loc
+            ~message:(Printf.sprintf
+              "dimension '%s' is indexed twice in the same reference" d)
+            ~hint:"each dimension takes exactly one index"
+            ()
+        end
+        else Hashtbl.replace seen d ()) named;
+    (* On any diagnostic above, hand back the items UNCHANGED. The reference is
+       already rejected and the compile will abort at the end of this phase; the
+       only thing reordering could add is a second, misleading error. Deduping
+       `S[sex = a, sex = b]` down to one item, for instance, produced a
+       one-index name (`S_a`) and an E100 about a compartment the user never
+       wrote — the same confusing-synthetic-name failure the partial-index guard
+       exists to prevent. Same disposition as `shape_index`'s "fall through with
+       0s so downstream diagnostic-collection continues". *)
+    if !bad then items
+    else
+      List.filter_map (fun d ->
+        List.find_opt (fun it -> index_item_dim it = Some d) named) dims
+  end
+
 (** Flatten a nested EList into a depth-first left-to-right list of leaf exprs. *)
 let rec flatten_ast_list = function
   | EList es -> List.concat_map flatten_ast_list es
@@ -2618,6 +2755,7 @@ let shape_index ctx ~loc shape items env =
        continues; the compile aborts at the end of this phase. *)
     0
   end else
+  let items = resolve_index_order ctx ~loc ~what:"shaped let" ~dims:shape items in
   let pairs = List.mapi (fun i dim ->
     let item     = List.nth items i in
     let val_name = index_item_to_str env item in
@@ -3595,6 +3733,9 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       Ir.TableLookup (base_name, [Ir.Const 0.0])
     end
     else if tdims <> [] then
+      let items = resolve_index_order ctx ~loc:idx_loc
+                    ~what:(Printf.sprintf "table '%s'" base_name)
+                    ~dims:tdims items in
       let per_dim = List.mapi (fun i item ->
         let dim      = List.nth tdims i in
         let val_name = index_item_to_str env item in
@@ -3623,6 +3764,9 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
                 ~declared:(List.length lb.lindices) ~provided:(List.length items))
       then Ir.Const 0.0
       else
+      let items = resolve_index_order ctx ~loc:idx_loc
+                    ~what:(Printf.sprintf "let binding '%s'" base_name)
+                    ~dims:(dims_of_index_bindings lb.lindices) items in
       let inner_env = List.mapi (fun i ib ->
         let var_name = match ib with
           | IBind (v, _)      -> v
@@ -3670,6 +3814,9 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
                  ~declared:(List.length fd.findices) ~provided:(List.length items))
        then Ir.Const 0.0
        else
+         let items = resolve_index_order ctx ~loc:idx_loc
+                       ~what:(Printf.sprintf "forcing '%s'" base_name)
+                       ~dims:(dims_of_index_bindings fd.findices) items in
          let idx_vals = List.map (index_item_to_str env) items in
          Ir.TimeFunc (String.concat "_" (base_name :: idx_vals)))
     else
@@ -3681,6 +3828,10 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
                  ~declared ~provided:(List.length items))
        then Ir.Const 0.0
        else
+       let items = resolve_index_order ctx ~loc:idx_loc
+                     ~what:(Printf.sprintf "parameter '%s'" base_name)
+                     ~dims:(Option.value ~default:[] (indexed_param_dims ctx base_name))
+                     items in
        match items with
        | [IPosn (EIdent (idx, _))] | [INamed (_, EIdent (idx, _))] ->
          let concrete = resolve_index ctx env idx in
@@ -3699,6 +3850,9 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     if partial_index_error ctx env ~loc:idx_loc ~base:base_name ~items then
       Ir.Const 0.0  (* placeholder — keep collecting diagnostics this pass *)
     else
+    let items = resolve_index_order ctx ~loc:idx_loc
+                  ~what:(Printf.sprintf "compartment '%s'" base_name)
+                  ~dims:(comp_dims ctx base_name) items in
     let idx_vals = List.map (index_item_to_str env) items in
     let concrete = String.concat "_" (base_name :: idx_vals) in
     resolve_ident_name ctx concrete ~loc:idx_loc
@@ -4312,6 +4466,9 @@ and resolve_ident_name ctx name ~loc =
     aborts. *)
 let resolve_stoich_ref ctx env (cname, items) =
   let base = match List.assoc_opt cname env with Some n -> n | None -> cname in
+  let items = resolve_index_order ctx ~loc:Diagnostics.no_loc
+                ~what:(Printf.sprintf "compartment '%s'" base)
+                ~dims:(comp_dims ctx base) items in
   let idx_vals = List.map (index_item_to_str env) items in
   if idx_vals = [] then begin
     let expansions = expand_compartment_name ctx base in
@@ -5706,12 +5863,21 @@ let expand_init ctx =
       let concrete_name =
         if ie.iindices = [] then ie.icomp
         else
+          (* gh#459: `init { S[age = b, sex = a] = 100 }` seeds a compartment,
+             so it has to agree with every other reference to that cell about
+             which one it is. This match is a hand-inlined copy of
+             `index_item_to_str` — it carried the same defect and would have
+             survived a fix applied only there, leaving `init` silently seeding
+             the wrong cell while rates and projections read the right one. *)
+          let items = resolve_index_order ctx ~loc:Diagnostics.no_loc
+                        ~what:(Printf.sprintf "compartment '%s'" ie.icomp)
+                        ~dims:(comp_dims ctx ie.icomp) ie.iindices in
           let idx_vals = List.map (function
             | IPosn (EIdent (s, _))     -> s
             | IPosn (EConst f)          -> string_of_float f
             | INamed (_, EIdent (s, _)) -> s
             | _                         -> "?"
-          ) ie.iindices in
+          ) items in
           String.concat "_" (ie.icomp :: idx_vals)
       in
       check_membership ie concrete_name;
@@ -6655,6 +6821,13 @@ let expand_time_functions ctx : Ir.time_function list * (string * float) list =
 
 (* The expanded name a `set`/`add` target denotes. Both verbs build it the same
    way, and both must then be validated — see [check_action_target]. *)
+(* gh#459: the ONE `index_item_to_str` caller deliberately left unrouted. A
+   named index cannot reach here: the grammar builds every `set`/`add` with an
+   empty index list — `AAdd (comp, [], count)` at parser.mly:995, 999, 1003,
+   1080 and `ASet ($1, [], e)` at :1141 — so `idxs` is always `[]` and the
+   first branch below is the only one taken from parsed source. If the grammar
+   ever gains an indexed action target, this needs `resolve_index_order` with
+   `comp_dims`. *)
 let concrete_action_target env comp idxs =
   match List.map (index_item_to_str env) idxs with
   | []       -> comp
@@ -7067,6 +7240,9 @@ let lower_obs_quantity ctx env ~name ~loc (e : expr) : Ir.trigger_quantity =
         (match se with
          | EIdent (s, _) | EFuncCall (s, []) -> s
          | EIndex (base, items, _) ->
+           let items = resolve_index_order ctx ~loc
+                         ~what:(Printf.sprintf "observation stream '%s'" base)
+                         ~dims:(obs_dims ctx base) items in
            let parts = List.map (index_item_to_str env) items in
            if parts = [] then base else String.concat "_" (base :: parts)
          | _ ->
@@ -7608,6 +7784,9 @@ let expand_observations ctx =
           (match List.filter_map
                    (fun (k, e) -> if k = "" then Some e else None) iargs with
            | [ EIndex (tr, idxs, _) ] ->
+             let idxs = resolve_index_order ctx ~loc:Diagnostics.no_loc
+                          ~what:(Printf.sprintf "transition '%s'" tr)
+                          ~dims:(transition_dims ctx tr) idxs in
              Some [ String.concat "_"
                       (tr :: List.map (index_item_to_str local_env) idxs) ]
            | _ -> None)
@@ -7622,6 +7801,9 @@ let expand_observations ctx =
           else String.concat "_" (name :: idx_vals) in
         Ir.CumulativeFlow concrete
       | ProjPrevalence (name, idxs) ->
+        let idxs = resolve_index_order ctx ~loc:od_loc
+                     ~what:(Printf.sprintf "compartment '%s'" name)
+                     ~dims:(comp_dims ctx name) idxs in
         let idx_vals = List.map (index_item_to_str env) idxs in
         (* `ProjPrevalence` carries no loc of its own, so a partial index here
            falls back to the observation declaration's. *)
@@ -7630,12 +7812,18 @@ let expand_observations ctx =
         (match List.assoc_opt "" args with
          | Some (EIdent (n, _))    -> incidence_projection n
          | Some (EIndex (n, idxs, _)) ->
+           let idxs = resolve_index_order ctx ~loc:od_loc
+                        ~what:(Printf.sprintf "transition '%s'" n)
+                        ~dims:(transition_dims ctx n) idxs in
            Ir.CumulativeFlow (String.concat "_" (n :: List.map (index_item_to_str env) idxs))
          | _ -> Ir.CumulativeFlow "?")
       | ProjDerived (EFuncCall ("prevalence", args)) ->
         (match List.filter_map (fun (k, e) -> if k = "" then Some e else None) args with
          | [ EIdent (n, _) ]         -> prevalence_projection n []
          | [ EIndex (n, idxs, l) ]   ->
+           let idxs = resolve_index_order ctx ~loc:(diag_loc_of_ast_ctx ctx l)
+                        ~what:(Printf.sprintf "compartment '%s'" n)
+                        ~dims:(comp_dims ctx n) idxs in
            prevalence_projection ~items:idxs ~loc:(diag_loc_of_ast_ctx ctx l)
              n (List.map (index_item_to_str env) idxs)
          | [] ->
@@ -7687,6 +7875,22 @@ let expand_observations ctx =
         else
           Ir.CumulativeFlow name
       | ProjDerived (EIndex (name, idxs, idx_l) as e) ->
+        (* gh#459: this arm is polymorphic — `name` may be a let family, an
+           expanded compartment, a compartment, or a transition, and the
+           dispatch happens below. The dimension lookup has to follow the same
+           order, or a named index would be ordered against the wrong object's
+           dimensions. *)
+        let idxs =
+          let dims =
+            match Hashtbl.find_opt ctx.let_tbl name with
+            | Some lb when lb.lindices <> [] -> dims_of_index_bindings lb.lindices
+            | _ ->
+              if Hashtbl.mem ctx.comp_tbl name then comp_dims ctx name
+              else transition_dims ctx name
+          in
+          resolve_index_order ctx ~loc:(diag_loc_of_ast_ctx ctx idx_l)
+            ~what:(Printf.sprintf "'%s'" name) ~dims idxs
+        in
         let idx_vals = List.map (index_item_to_str env) idxs in
         let concrete = String.concat "_" (name :: idx_vals) in
         (* An indexed let-family reference (e.g. `projected = m[v]` with
@@ -8124,6 +8328,13 @@ let classify_quantity_body ctx env
         (* Indexed prior-scalar QRef. Pragmatic check: the explicit index levels
            must all belong to this cell's stratum (cross-stratum is rejected);
            the QRef then carries the cell stratum. *)
+        (* The membership test below is order-INSENSITIVE, so ordering was
+           never wrong here — but the dimension label was still discarded, so
+           `q[nosuchdim = x]` passed unchecked. Routed through the resolver for
+           its validation half (E332/E333/E326). *)
+        let items = resolve_index_order ctx ~loc:Diagnostics.no_loc
+                      ~what:(Printf.sprintf "quantity '%s'" name)
+                      ~dims:(List.map fst cell_stratum) items in
         let levels = List.map (index_item_to_str env) items in
         let cell_levels = List.map snd cell_stratum in
         if List.for_all (fun lv -> List.mem lv cell_levels) levels then
