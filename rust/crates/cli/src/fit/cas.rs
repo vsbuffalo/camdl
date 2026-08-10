@@ -498,6 +498,34 @@ pub fn cas_dep_from_dir(dir: &Path) -> Option<ArtifactRef> {
 /// init anyway, producing no stored output to mis-key). The `landscape.tsv`
 /// digest is the bytes the top-K rows are actually read from; `run_id` falls
 /// back to it if `run.json` is missing.
+/// Content dependency on a chain-start SOURCE FILE — `--posterior`'s
+/// `draws.tsv` or `--params`' TOML (gh#541).
+///
+/// Same argument `cas_survey_dep` makes one function below, and the codebase
+/// already states it there: "the path string in `identity_payload` only
+/// distinguishes a *different* directory, not the same path rewritten". A path
+/// answers WHICH FILE; the starting values are WHAT IS IN IT. Rewrite
+/// `draws.tsv` in place with different draws, re-run, and a path-keyed identity
+/// serves the previous file's fit.
+///
+/// `--survey-path` (`cas_survey_dep`) and `--mle` (which folds the upstream
+/// leaf's `fit_state.toml` digest via `cas_dep_from_dir`) already got this
+/// right; these two were the gap.
+///
+/// Missing or unreadable file → `None`, and the run proceeds unkeyed on it. The
+/// loader downstream fails with a real message naming the path; refusing here
+/// would replace that with a worse one from the identity layer.
+pub fn cas_file_dep(path: &Path, artifact: &str) -> Option<ArtifactRef> {
+    let bytes = std::fs::read(path).ok()?;
+    let digest = ContentHash::digest_bytes(&bytes);
+    Some(ArtifactRef {
+        run_id: digest,
+        kind: ArtifactKind::FitStage,
+        artifact: artifact.to_string(),
+        digest,
+    })
+}
+
 pub fn cas_survey_dep(dir: &Path) -> Option<ArtifactRef> {
     let landscape = std::fs::read(dir.join("landscape.tsv")).ok()?;
     let digest = ContentHash::digest_bytes(&landscape);
@@ -917,5 +945,47 @@ mod tests {
         // No landscape.tsv → no dep (unreadable survey; fit will fail in init).
         let d3 = tempfile::tempdir().unwrap();
         assert!(cas_survey_dep(d3.path()).is_none());
+    }
+
+    /// gh#541: the same property for `--posterior` / `--params`. These were
+    /// folded by PATH only, so rewriting the file in place left the run_id
+    /// unchanged and the fit came back from cache with the OLD starting values.
+    #[test]
+    fn cas_file_dep_is_content_sensitive_not_path_sensitive() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("draws.tsv");
+
+        // The load-bearing direction: SAME path, DIFFERENT bytes must re-key.
+        // This is the assertion the bug fails — a path-keyed identity gives one
+        // digest for both writes.
+        std::fs::write(&path, b"beta	gamma
+0.30	0.15
+").unwrap();
+        let before = cas_file_dep(&path, "draws.tsv").expect("dep from a readable file");
+        std::fs::write(&path, b"beta	gamma
+0.90	0.45
+").unwrap();
+        let after = cas_file_dep(&path, "draws.tsv").expect("dep from a readable file");
+        assert_ne!(before.digest, after.digest,
+            "rewriting the draws file in place must change the dep digest —              otherwise the re-run is served the previous file's fit (gh#541)");
+
+        // And the other direction, so the test cannot pass by digesting
+        // something incidental like the path or an mtime: the SAME bytes at a
+        // DIFFERENT path must give the SAME digest.
+        let e = tempfile::tempdir().unwrap();
+        let elsewhere = e.path().join("draws.tsv");
+        std::fs::write(&elsewhere, b"beta	gamma
+0.90	0.45
+").unwrap();
+        let moved = cas_file_dep(&elsewhere, "draws.tsv").expect("dep from a readable file");
+        assert_eq!(after.digest, moved.digest,
+            "identical starting values at a different path are the same input");
+
+        assert_eq!(after.artifact, "draws.tsv");
+
+        // Missing file → no dep. The loader downstream reports the missing
+        // path with a real message; failing here would replace it with a worse
+        // one from the identity layer.
+        assert!(cas_file_dep(&d.path().join("nope.tsv"), "draws.tsv").is_none());
     }
 }

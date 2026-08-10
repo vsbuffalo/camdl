@@ -1658,6 +1658,36 @@ impl Stage {
     /// landscape digest) into the stage's `deps` so regenerating the survey
     /// re-keys the fit, even at the same path (the path string in
     /// `identity_payload` only catches a *different* directory).
+    /// The chain-start SOURCE FILE this stage reads, when its `init` names one
+    /// (gh#541). Sibling of [`Self::survey_init_path`]; the caller folds the
+    /// file's CONTENT into `deps` so rewriting it in place re-keys the fit.
+    ///
+    /// Returns the path and the artifact name to record. `FitDir` variants
+    /// resolve to the file the loader will actually open, so the digest is
+    /// taken on the bytes that determine the starting values rather than on a
+    /// directory. `FromMle` is absent on purpose: it already folds the upstream
+    /// leaf's `fit_state.toml` digest through `starts_from_override` /
+    /// `cas_dep_from_dir`, and adding a second dep for it would double-count.
+    pub fn init_source_file(&self) -> Option<(std::path::PathBuf, &'static str)> {
+        use super::init::{InitMethod, PosteriorSource};
+        let init = match self {
+            Stage::IF2 { init_method, .. }
+            | Stage::PGAS { init_method, .. }
+            | Stage::PMMH { init_method, .. }
+            | Stage::Mh { init_method, .. }
+            | Stage::Nuts { init_method, .. } => init_method,
+            _ => return None,
+        };
+        match init {
+            InitMethod::FromPosterior { source } => Some(match source {
+                PosteriorSource::DrawsTsv(p) => (p.clone(), "draws.tsv"),
+                PosteriorSource::FitDir(d)   => (d.join("draws.tsv"), "draws.tsv"),
+            }),
+            InitMethod::FromParams { path } => Some((path.clone(), "params.toml")),
+            _ => None,
+        }
+    }
+
     pub fn survey_init_path(&self) -> Option<&std::path::Path> {
         let (init, path) = match self {
             Stage::IF2 { init_method, survey_path, .. }
