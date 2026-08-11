@@ -35,9 +35,18 @@ Branch: `feat/aggregation-remaining` (off `main` @ `9643c246`).
     expensive one. Build it rather than adding a fourth ad-hoc arm.
   - **The `E100` hint is actively harmful**: `incidence` in a rate says "add a
     declaration in forcing { }", which an agent will try.
-- [ ] **3. C4 + C4a** — `lowering` metadata replaces the `__` sniff; apply the
-      `via` rewrite to `quantities` / `interventions` / `events` / `reactive`.
-      No bump.
+- [x] **3. C4a** — `8d38d1c8`. Extracted `apply_via_rewrite`; added
+      `quantities {}`. Both new tests mutation-checked (drop a walk → red).
+      Golden-neutral, `make test-ocaml` green.
+
+  **C4 folded into §8.1** (proposal updated). The `__` sniff turned out to have
+  exactly one consumer — the staged-endpoint diagnostic — and §8.1's `Generated`
+  constructor answers it directly, so a standalone `lowering` record would build
+  the same authority twice. C4 now ships inside step 4a.
+
+  The asymmetry was worse than the proposal recorded: gh#463 had added the
+  action containers to the **hyper_erlang** copy only, so `erlang` was missing
+  interventions/events/reactive _and_ both were missing `quantities`.
 
   **The seam, located.** The rewrite closure `rw` is applied to five containers
   by hand, and the same five-container block is written **twice** — once for

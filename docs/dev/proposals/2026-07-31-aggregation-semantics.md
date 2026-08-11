@@ -738,8 +738,17 @@ This closed the user-facing symptom of gh#111 (indexed references lowered by
 string concat) while leaving the underlying resolver unbuilt — see §8.1, which
 takes a further slice of it.
 
-**C4. Lowering metadata describes lowering, not axes**, at family granularity —
-O(number of `via` declarations), not O(cells):
+**C4 folds into §8.1.** Measured after C4a landed: the `__` sniff has exactly
+**one** consumer — `expander.ml`'s staged-endpoint diagnostic, which tests
+`String.sub d 0 2 = "__"` to decide whether to name a synthesized axis the user
+never wrote. §8.1's `Generated` constructor answers that question directly
+(`staged ep = List.exists is_generated ep.ep_dims`), so building C4's standalone
+`lowering` record first and the typed name second would build the same authority
+twice. C4 ships as part of §8.1, inside B's bump; the record below is retained
+as the shape of the payload `Generated` carries.
+
+**C4 (retained, as §8.1's payload). Lowering metadata describes lowering, not
+axes**, at family granularity — O(number of `via` declarations), not O(cells):
 
 ```ocaml
 type lowering =
