@@ -1,9 +1,9 @@
 # Observation and aggregation primitives
 
-Date: 2026-07-31 Status: Increments A–D ready to implement; Increment E ready
-once A–D land; Increment F is a named follow-up RFC Supersedes:
-`2026-07-27-stratum-provenance.md` Fixes: gh#488 Partially fixes: gh#478 (closed
-by Increment E) Related: gh#459, gh#333, gh#487
+Date: 2026-07-31 Status: Increment A shipped, and C2/C3 with it; B, the rest of
+C, D ready to implement; Increment E ready once B–D land; Increment F is a named
+follow-up RFC Supersedes: `2026-07-27-stratum-provenance.md` Fixes: gh#488
+Partially fixes: gh#478 (closed by Increment E) Related: gh#111, gh#333, gh#487
 
 ## 1. Summary
 
@@ -436,6 +436,11 @@ let N = S + E + I + R                     # the total population — unchanged
 
 ## 6. Increment A — safety fixes
 
+**Shipped.** A1 + A3 in `b9e6e04a` (PR#489), A2 in `bbf94fb1` (PR#498, gh#488),
+A6 in `1d03947d` (PR#500), A4 + A5 + A7 in `9643c246` (PR#558). The user-facing
+migrations are in `docs/language-changes.md`. Retained below as the decision
+record; open residue is gh#559, gh#560 and gh#504.
+
 Measured over 322 `.camdl` across camdl and six sibling repos. **Corpus impact
 is zero for every item. These remain breaking language changes** — a user with a
 model we have not seen experiences them as such.
@@ -475,8 +480,8 @@ which one to leave.
 
 **Disposition is per-site, and one is not a `[]` default.** `expander.ml:8913`
 is a `List.filter_map` whose `None` arm _drops_ the dimension from
-`model_structure.dimensions` — the field `deme.rs` reads (C6). It must become an
-error, not an empty list. Every other site emits a located diagnostic at the
+`model_structure.dimensions` — the field `deme.rs` reads (§8.1). It must become
+an error, not an empty list. Every other site emits a located diagnostic at the
 point of use. Where A2's new error would fire alongside an existing E263
 (`:2454`, `:3275`), A2 **replaces** it rather than adding a second diagnostic
 for one mistake.
@@ -616,6 +621,12 @@ so 0.30 → 0.31 invalidates every stored fit and simulate — not only models u
 `incidence`. Unavoidable if B ships; it belongs in the release notes, not only
 here.
 
+**One bump carries both changes.** The typed dimension name (§8.1) also re-keys,
+so it lands in this bump rather than paying a second invalidation. Land it as a
+stacked sequence — §8.1 first, goldens regenerated, green; then B1/B2; then
+B3/B4; then B5 — so no commit batches two semantic changes without an
+intermediate green run.
+
 **B8. `inc_<stream>` stays the raw flow sum.** `incidence_streams()`
 (`multi_stream_obs.rs:1026`) builds it as the unweighted `Σ flows[i]`. Under a
 weighted projection it diverges from `projected`, which is correct — a modeller
@@ -623,7 +634,53 @@ wants true incidence in the trajectory and reported counts in the predictive —
 but its doc comment currently claims it is "the model's declared `FlowSum`
 projection" and must be restated.
 
+**B9. Scope becomes a rule, because B5 deletes the accident that enforced it.**
+Today `incidence` is contained to observation blocks only because the projection
+dispatch is the sole thing that resolves it. Verified at HEAD: a `let` holding
+`incidence` compiles as long as nothing references it, because an unused hoisted
+binding is never walked, and errors the moment it is used:
+
+```camdl
+let recent = incidence(infection)                     # compiles — never resolved
+transitions { waning : R --> S @ 0.001 * recent }     # error[E100]: undeclared function 'incidence'
+quantities  { cum = final(incidence(infection)) }     # error[E100]: undeclared function 'incidence'
+```
+
+`E100` is the wrong diagnostic — `incidence` is a documented construct, not an
+unknown name — and after B5 there is no dispatch left to produce even that. B
+must therefore add an explicit check with a located diagnostic, modelled on the
+`E278` arm that already does this for `observed`/`sum_observed`
+(`expander.ml:4280`):
+
+```text
+error[E2xx]: `incidence(infection)` is only meaningful inside an observation stream
+  = note: it reads the flow accumulated since THIS stream's last observation and
+          then resets it, so it needs an observation interval to be defined
+  = hint: for a policy trigger on recent cases, use
+              sum_observed(<stream>, window = 28 'days)
+          in `reactive_interventions { … }`
+  = note: reporting cumulative incidence as a quantity is gh#565
+```
+
+Why the restriction is semantic and not an implementation limit: the counter is
+per-stream and resets on that stream's observation times. A rate reading it
+would (i) have no defined window on a model with two cadences, and (ii) make the
+process itself depend on the reporting schedule, so the same model fitted to
+weekly and to monthly data would be two different processes. B2's reset
+invariant — keyed on the stream, a reference contributing twice but resetting
+once — also has no owner outside a stream.
+
+Build the check on the scope table from gh#566 if that audit has landed; a
+fourth ad-hoc arm otherwise, with the table as the stated follow-up. Ship a red
+test for the `let` route specifically — it is the one an implementer misses,
+since the naive test (`incidence` directly in a rate) already fails today for
+the wrong reason.
+
 ## 8. Increment C — `sum` forms and dimension identity
+
+**C2 and C3 are shipped**; C4/C4a remain; C5 and C6 are superseded by the typed
+dimension name (gh#568, §8.1 below), which lands inside Increment B's
+`ir/VERSION` bump rather than here.
 
 **C1 is subsumed by C2.** There is no separate `sum(family)` production; the
 no-binder form falls out of the uniform rule (§5.4). Nothing is added to the
@@ -632,7 +689,7 @@ reservation at `expander.ml:7714-7718` stays unreachable because `sum` remains a
 lexer keyword rather than becoming an `EFuncCall`.
 
 **C2. Flat multi-binder — replace the existing productions, do not add alongside
-them.**
+them.** _Shipped in `b9e6e04a` (PR#489)._
 
 ```camdl
 sum(a in age, m in imm, k in compound, N[v,a,m,k])
@@ -662,20 +719,24 @@ suite would pass while the sugar claim was false.
 
 Corpus: 32 nested sites in 11 files, maximum depth 3, all camdl-garki.
 
-**C3. Named indexing resolves by name, not position.** Today `INamed` parses
-(`parser.mly:697`) and is discarded (`expander.ml:2415`):
+**C3. Named indexing resolves by name, not position.** _Shipped as gh#459
+(`6a3330a2`), outside this proposal's PRs._ `INamed` used to parse
+(`parser.mly:697`) and be discarded, so correct dimension names in the wrong
+order produced an error naming an identifier the user never wrote. Both
+spellings now lower identically:
 
 ```camdl
-I[age = a, patch = p]     # ok
-I[patch = p, age = a]     # error[E100]: undeclared name 'I_north_adult'
+I[age = a, patch = p]     # both resolve to I_child_north
+I[patch = p, age = a]     # byte-identical IR
 ```
-
-Correct dimension names in the wrong order produce an error naming an identifier
-the user never wrote. This is a live defect independent of everything else here.
 
 Cross-dimension level-name collisions stay legal — `I[low, high]` with
 `age = [low, high]` and `risk = [low, high]` resolves unambiguously by declared
 axis order.
+
+This closed the user-facing symptom of gh#111 (indexed references lowered by
+string concat) while leaving the underlying resolver unbuilt — see §8.1, which
+takes a further slice of it.
 
 **C4. Lowering metadata describes lowering, not axes**, at family granularity —
 O(number of `via` declarations), not O(cells):
@@ -715,18 +776,28 @@ and on a `hyper_erlang` compartment, `quantities { peak = max(I) }` gives
 `error[E100]: undeclared name 'I'` for a compartment declared in
 `compartments { S, I, R }`.
 
-This is a prerequisite for C5, not an independent nicety: the only
+This is a prerequisite for §8.1, not an independent nicety: the only
 dimension-safe workaround today is `sum(s in __recov_stage, I[child, s])`, which
-compiles now and which C5 deletes. Without C4a the sole surviving spelling is
-the explicit enumeration `I_child_s1 + I_child_s2 + I_child_s3`, which §13 names
-as the form that silently drops a stage when `stages` changes. C5's corpus
-measurement does not establish safety here, because no committed model reports a
-quantity on one stratum of a staged compartment.
+compiles now and which §8.1 removes from the surface. Without C4a the sole
+surviving spelling is the explicit enumeration
+`I_child_s1 + I_child_s2 + I_child_s3`, which §13 names as the form that
+silently drops a stage when `stages` changes. No committed model reports a
+quantity on one stratum of a staged compartment, so corpus measurement does not
+establish safety here.
 
-**C5. Reserve the `__` prefix in the lexer.** Ships **after C4a**. The C4 tag
-answers "is this generated?" but does not prevent a _collision_, because
-generated axes are registered in the same `dim_registry`
-(`expander.ml:1453-1458`). Today:
+### 8.1 Generated dimension names are a type, not a prefix
+
+Supersedes C5 (reserve `__` in the lexer) and C6 (an inert `generated : bool` on
+`Dimension`). gh#568. **Lands inside Increment B's `ir/VERSION` bump**, not here
+— it re-keys, and B re-keys anyway (§7, B7).
+
+A `via erlang(...)` declaration mints its staging axis by string concatenation —
+`let dim_name = Printf.sprintf "__%s_stage" tr.trname` (`expander.ml:1529`) —
+and registers it in the user's own `dim_registry` (`expander.ml:1453-1458`). The
+prefix is then carrying three jobs: classification (the sniff at
+`expander.ml:6332`), collision avoidance, and display. C4 takes the first
+(`lowering` becomes authoritative). What remains is a name that must not collide
+and must not be shown:
 
 ```camdl
 dimensions { __onset_stage = [x1, x2] }
@@ -734,49 +805,73 @@ onset : E --> I via erlang(stages = 3, mean = 4 'days)
   → error[E212]: dimension '__onset_stage' is declared more than once in dimensions {}
 ```
 
-The modeller declared it once. Rejecting `__`-prefixed identifiers at
-`lexer.mll:131` makes the collision structurally impossible. Corpus: **zero**
-`__`-prefixed identifiers across 6507 `.camdl` files.
+The modeller declared it once.
 
-**Scope the guarantee honestly.** It covers identifiers passing through the
-lexer. It does **not** cover dimension levels read from a data file —
-`dimensions { patch = read("patches.tsv", column = "patch") }` with a `__north`
-row compiles today and produces `S___north`. Either reject those at
-`resolve_dimensions` or document the asymmetry; this proposal takes the former.
-It also makes an observation column named `__cases` a lex error — accepted.
+**The fix is to make the discriminant a type:**
 
-A separate namespace for generated axes was considered and rejected on
-measurement: most readers of `ctx.stratifies` want the **union** — `comp_dims`
-enumerates cells and needs every axis, as do `n_pre` (`:1419`),
-`src_is_stratified` (`:1580`) and the E214 check (`:1995`). Splitting would make
-the common case worse to serve the rare one.
+```ocaml
+type dim_name =
+  | User      of string
+  | Generated of { kind : lowering_kind; source : string }
+```
 
-**C6. Generated dimension names are labelled, never omitted.** They currently
-leak: `model_structure.dimensions[].name` and
-`model_structure.compartment_dims.<comp>[]` both carry `__recovery_stage`, as do
-two `camdlc inspect` lines. `camdlc render` is clean.
+A user-supplied string cannot construct a `Generated`, so the collision is
+structurally impossible, no lexer reservation is needed, and "did someone
+remember to check the flag?" stops being a question. Display and diagnostics
+match on the constructor.
 
-**Omitting them is not an option.** `rust/crates/sim/src/lineage/deme.rs:85-99`
-reconstructs expanded cell names from `compartment_dims` + `dimensions`; a
-missing dimension hits its defensive `None => break` and leaves every `I_*` cell
-at `DemeId(0)`, silently mis-attributed in the `#[lineage]` line list. Both
-fields are also hashed into run identity (`runid/ir_hash.rs:1092-1094`), so
-omission re-keys every `via` model's cached fits.
+**This does not split the registry.** A separate namespace for generated axes
+was considered and rejected on measurement: most readers of `ctx.stratifies`
+want the **union** — `comp_dims` enumerates cells and needs every axis, as do
+`n_pre` (`:1419`), `src_is_stratified` (`:1580`) and the E214 check (`:1995`).
+Splitting would make the common case worse to serve the rare one. The typed
+variant keeps one list and moves the discriminant into the element, so every
+union consumer is unaffected. The earlier rejection is of a different design.
 
-So: add an inert `generated : bool` to `Dimension` only, leave `hash_into`
-(`ir_hash.rs:1086-1091`, which writes `name` then `values` explicitly and is
-hand-written rather than derived) untouched so the change is hash-neutral, and
-filter at the presentation layer (`inspect`, diagnostics).
+**What it costs, stated.** `Dimension.name` is a `String` in the IR and
+`ModelStructure.compartment_dims` is hashed as `HashMap<String, Vec<String>>`
+via `h.write_str_map(...)` (`runid/ir_hash.rs:1092-1094`), so the representation
+change forces `hash_into` to change and re-keys every stored fit and simulate.
+That is accepted rather than designed around: pre-1.0, invalidating cached runs
+is cheap and a wrong representation is not. Riding B's bump makes it one
+invalidation instead of two.
 
-Do **not** change the `compartment_dims` payload. It is hashed by
-`h.write_str_map(self.compartment_dims.iter())`, which requires `Vec<String>` —
-changing the payload type forces a `hash_into` change and a re-key. The flag is
-a property of the dimension and is already reachable by name lookup in
-`dimensions`.
+**Names must still reach the IR, not be omitted.**
+`rust/crates/sim/src/lineage/deme.rs:85-99` reconstructs expanded cell names
+from `compartment_dims` + `dimensions`; a missing dimension hits its defensive
+`None => break` and leaves every `I_*` cell at `DemeId(0)`, silently
+mis-attributed in the `#[lineage]` line list. The serialized form therefore
+carries the discriminant alongside the name rather than dropping generated axes.
 
-Generated **compartment** names (`I__fatal__1`) are intentionally visible — they
-are trajectory columns and scenario-referenceable transition names. The
-invariant is scoped to generated **dimension** names.
+**The ADT is the in-memory type; the wire keeps `name` plus an optional
+discriminant.** `"name"` stays a plain string and the discriminant is a sibling
+field, absent for `User`. Two reasons, one of them binding:
+
+- `ir/golden/` is a **frozen** set, deliberately not regenerated (gh#384), and
+  its files are loaded directly as IR by Rust tests (`backend_provenance.rs:27`,
+  `gh90_multi_stream_data.rs:44`, `output_view_e2e.rs:23`, …). A required new
+  field or a retagged `name` would fail to deserialize there, and §12 already
+  records that the frozen set cannot absorb a required IR field. An
+  absent-means-`User` discriminant loads every frozen file unchanged. Verified:
+  **no file under `ir/golden/` contains a `__` identifier**, so none carries a
+  generated axis and none is mislabelled by the default.
+- Illegal states become unrepresentable where the mistakes happen — in the
+  expander, which mints and consumes these names — without making the wire
+  format carry an OCaml sum type.
+
+So the parse direction is total (`name` + optional tag → `dim_name`) and the
+serialize direction is a match. `hash_into` writes the discriminant, which is
+what re-keys a `via` model; a model with no generated axis is hash-identical
+under this change alone and re-keys only from B's `ir_version` bump.
+
+**Generated compartment names (`I__fatal__1`) stay visible** — they are
+trajectory columns and scenario-referenceable transition names. The invariant is
+scoped to generated _dimension_ names.
+
+**Scope.** This is one slice of gh#111 (indexed references lowered by string
+concat), taken because it is small and B's bump pays for it. It is not the
+`resolve_indexed_ref` resolver. If the design starts to demand that resolver,
+stop and scope gh#111 rather than growing this section.
 
 ## 9. Increment D — `prevalence` as safe sugar
 
@@ -801,19 +896,52 @@ mechanism with A3 rather than growing a second one — same key, same flush poin
 
 D6. **Removals.** The single-argument form `prevalence(X)` and the
 multi-positional form `prevalence(X1, X2)` both go. The `→ X` migration is
-IR-identical (verified on `all_lifecycle.camdl` and `ross_macdonald.camdl`), so
-no golden regenerates:
+IR-identical (verified on `all_lifecycle.camdl` and `ross_macdonald.camdl`, and
+re-verified at HEAD: `prevalence(I)` and bare `I` both lower to
+`{"current_pop_sum": ["I_child","I_adult"]}`), so no golden regenerates.
+
+**The diagnostic carries the whole migration inline.** Someone hitting this —
+often an agent updating a model it did not write — must not have to open a doc
+to fix a one-line change; a hint that only names a doc gets guessed at instead.
+Both branches, spelled with the user's own operand:
 
 ```text
-error[E2xx]: `prevalence(X)` is the same value as `X`
-  = hint: for an absolute count write `Y1[a] + Y2[a]`
-          for a proportion write `prevalence(of = Y1[a] + Y2[a], among = N_local[a])`
+error[E2xx]: `prevalence(I)` was removed — it returned a count, not a proportion
+  17│      projected     = prevalence(I)
+    │                      ^^^^^^^^^^^^^
+  = note: `prevalence(X)` produced exactly the same IR as `X`; the name promised
+          a proportion and returned a stock
+  = hint: for the same value, drop the call:
+              projected = I
+          for an actual proportion, name the denominator:
+              projected = prevalence(of = I, among = N_local)
+  = see: `camdl docs language-changes` (2026-XX-XX)
 ```
+
+The multi-positional form gets the same shape with `projected = I + R` and
+`prevalence(of = I + R, among = N_local)`.
+
+The trailing `see:` is keyed to the **date**, which is how
+`docs/language-changes.md` headings are keyed, so a reader can jump to the
+entry. It is deliberately not a version: every alpha build reports
+`0.1.0+<hash>`, so a version in the message would be wrong for anyone on a dev
+build and would duplicate a fact that belongs in one place.
+
+D6a. **The `docs/language-changes.md` entry is a deliverable of this increment,
+not a follow-up.** It is the surface an agent reaches when someone else's model
+stops compiling, and it ships offline and version-matched via
+`camdl docs language-changes`. Format is the file's existing one — what changed,
+migration old → new, the diagnostic. D7's dimension change gets its own
+paragraph there rather than a line in a hint, because it is the part that cannot
+be mechanically applied.
 
 D7. **The proportion form changes the projection's dimension**, so every
 downstream likelihood kwarg must be rechecked — a count into `poisson(rate = …)`
 becomes a proportion, which is `E304`. Migration must move such streams to a
-probability slot or keep the count form.
+probability slot or keep the count form. Unlike D6's removals this is a
+modelling decision, not a rewrite: which likelihood the stream should have is a
+judgment about the surveillance system, so it cannot be codemodded and must be
+called out as manual in the language-changes entry.
 
 ## 10. Increment E — the observation-boundary rule
 
@@ -840,8 +968,22 @@ are hoisted and their bodies resolved exactly once (`register_hoisted_binding`,
 otherwise which context resolves first determines the diagnostic, and
 record-field evaluation order is unspecified in OCaml.
 
-**Interim warning, shipping with Increment A.** Non-breaking. Warn when all
-three hold:
+**Interim warning — decided: fold into Increment E, do not ship separately.** It
+was specified to ship with Increment A; A shipped (§6) without it, and on review
+that is the right outcome rather than an omission to correct. Its stated purpose
+is to give users warning-time before E breaks them, and it cannot serve that
+purpose: conjunct (a) requires an **indexed** stream, while both of §12's
+Increment-E hits are in un-indexed ones, so the predicate is structurally blind
+to the models E will actually break — a point §12 already makes below. Corpus is
+0 hits. So it would add a per-site tally mechanism to warn about a case nobody
+has, while staying silent on the case everybody has.
+
+Ship the predicate as part of E instead, where the same walk backs a hard error,
+and keep the positive-control model below as an E test. Retained here because
+the predicate itself is E's, and the two rejected variants are load-bearing
+design history.
+
+Non-breaking. Warn when all three hold:
 
 ```text
 E-warn(stream S):
@@ -981,14 +1123,25 @@ numbers of axes and nothing says so.
     run-identity hash, and has no user-facing annotation.
 16. Generated dimension names are labelled, never omitted; generated compartment
     names stay visible.
-17. `__` is reserved at the lexer, with the file-sourced-level asymmetry closed.
-18. Composability (`incidence`) precedes the observation-boundary rule.
-19. Reduction weights must be constant over the interval — free of flows, of
+17. **A generated dimension name is a type, not a `__` prefix** (§8.1, gh#568).
+    Supersedes the earlier decisions to reserve `__` at the lexer and to carry
+    an inert `generated : bool`. The registry is not split — the discriminant
+    moves into the element, so every union consumer is unaffected. It re-keys,
+    and rides Increment B's bump rather than paying a second invalidation.
+18. **A re-key is not a design constraint.** Where representation quality and
+    identity stability conflict, take the representation and schedule the bump
+    (`CLAUDE.md`, `4833858f`).
+19. Composability (`incidence`) precedes the observation-boundary rule.
+20. Reduction weights must be constant over the interval — free of flows, of
     time, **and of state**.
-20. The `via` rewrite extends to `quantities`, `interventions`, `events` and
-    `reactive_interventions` (C4a), and C5 ships after it.
-21. The interim warning fires only on a **bare** reference, and does not preview
-    the un-indexed migration.
+21. The `via` rewrite extends to `quantities`, `interventions`, `events` and
+    `reactive_interventions` (C4a), and §8.1 ships after it.
+22. **`incidence` stays scoped to observation streams, by an explicit rule**
+    (§7, B9) — B5 deletes the dispatch that enforced it by accident. Reporting a
+    flow outside an observation is gh#565, not a relaxation of this.
+23. The interim warning fires only on a **bare** reference, does not preview the
+    un-indexed migration, and therefore **folds into Increment E** rather than
+    shipping separately (§10).
 
 ## 15. Tests
 
@@ -1011,8 +1164,16 @@ numbers of axes and nothing says so.
 - Flat multi-binder byte-identical to nested, **including guarded cases**.
 - `sum(S + I)` and the other rejected arguments → located errors.
 - `E283` regression: same-name shadowing is not rerouted to A5.
-- `deme.rs` reconstruction still works after C6, and `run_id` is unchanged for a
-  `via` model.
+- `deme.rs` reconstruction still works after §8.1 — cell names round-trip
+  through the typed dimension name, with the `#[lineage]` line list unchanged on
+  a `via` model. `run_id` **does** move (§8.1 re-keys); the assertion is that it
+  moves once, with B's bump, and that goldens regenerate atomically.
+- A user identifier spelled `__foo` compiles and cannot collide with a generated
+  axis (§8.1) — the case C5's lexer reservation would have rejected outright.
+- `incidence` outside an observation stream is a located error naming the
+  construct, **including via an indirection**: `let r = incidence(tr)` used in a
+  rate or a quantity (B9). The direct-in-a-rate case is not sufficient — it
+  already fails today for the wrong reason.
 - The §10 indexed-stream positive control.
 - Positive controls that must keep passing: bare `I` in a rate;
   `let N = S + E +
@@ -1025,6 +1186,24 @@ numbers of axes and nothing says so.
 Named, tracked, not folded in.
 
 - **Increment F**, above.
+- **A flow source for `quantities {}` — gh#565.** The concrete instance of the
+  cumulative-flow primitive named below. `QuantitySource` is
+  `State(Expr) | Observation { stream }`, so cumulative incidence has no correct
+  spelling; the workaround `final(N0 - S)` is right only when `S` never refills.
+  Measured on a 730-day SIRS with 100-day immunity: true cumulative infections
+  52,694 against the workaround's 7,109, a factor of 7.41, and 7,109 reads as a
+  plausible 71% attack rate. It compounds through `contrasts {}`, whose operands
+  are quantity members. **Increment B does not close this** — B scopes
+  `incidence` to observation streams (§7, B9).
+- **Block-scoped constructs have no declaration — gh#566.** Three different
+  mechanisms enforce scope today: a targeted `E278` arm for
+  `observed`/`sum_observed`, a hardcoded name list plus `E290` for the temporal
+  reductions, and nothing at all for `incidence`/`prevalence` (which fall
+  through to `E100: undeclared function`). B9 needs a fourth check; the audit
+  and one scope table are the fix.
+- **`observed(s, window =, reduce =)` — gh#567.** `sum_observed` encodes the
+  reducer in the function name, and the IR's `Mean`/`Max` variants have no
+  surface syntax at all. Cosmetic; no IR change.
 - **Composable `prevalence`.** Revisit when a model needs a checked ratio nested
   inside an expression; the escape hatch is plain division.
 - **Deme identity should exclude residence structure.** `global_stratum_index`
