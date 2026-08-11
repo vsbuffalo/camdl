@@ -38,6 +38,40 @@ Branch: `feat/aggregation-remaining` (off `main` @ `9643c246`).
 - [ ] **3. C4 + C4a** — `lowering` metadata replaces the `__` sniff; apply the
       `via` rewrite to `quantities` / `interventions` / `events` / `reactive`.
       No bump.
+
+  **The seam, located.** The rewrite closure `rw` is applied to five containers
+  by hand, and the same five-container block is written **twice** — once for
+  `erlang` (`expander.ml:1612-1660`, `sum_staged_refs`) and once for
+  `hyper_erlang` (`:1899`, `sum_hyper_refs`). That duplication _is_ the defect:
+  a container added later is silently absent from both. So C4a is not "add four
+  more lines twice" — extract one
+
+  ```ocaml
+  val apply_expr_rewrite : ctx -> (expr -> expr) -> unit
+  ```
+
+  that walks every expr-bearing container, and call it from both sites. A new
+  container then has exactly one place to be forgotten, and the C4a test
+  (identical expression in `observations` / `quantities` / `interventions` /
+  `events` on a staged compartment) guards it.
+
+  Container shapes for the four missing walkers (`ast.ml`):
+
+  - `quantity_decl` — rewrite `qd_body`.
+  - `intervention_decl` (`interv_decls` **and** `event_decls`, same type) —
+    rewrite `ivaction : action_decl list`, `ivschedule`, `ivguard`.
+    `action_decl = ATransfer of (string * expr) list | ASet of string *
+    index_item list * expr | AAdd of string * index_item list * expr`
+    — the `index_item list` needs the same `IPosn`/`INamed` treatment the
+    transition stoich already gets.
+  - `reactive_decl` — rewrite `rxaction`, `rxafter`, `rxonce`, `rxcooldown`,
+    `rxguard`. **Not `rxwhen`**: a trigger predicate reads `observed(stream)`
+    and a static threshold, never a compartment, so a staged reference cannot
+    legitimately appear there (confirmed by the gh#566 matrix — every
+    non-trigger construct in `reactive` is already E279/E273).
+
+  Rewriting a schedule or guard that contains no staged reference is identity,
+  so over-applying is safe; under-applying is the bug being fixed.
 - [ ] **4. Increment B** — `ir/VERSION` 0.30 → 0.31. Land as a stacked sequence
       behind one bump, each piece green:
   - [ ] 4a. typed `dim_name` + goldens regenerated
