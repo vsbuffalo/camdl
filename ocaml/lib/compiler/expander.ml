@@ -1423,10 +1423,93 @@ let rec sum_hyper_refs ~src ~(cells : string list) (e : expr) : expr =
   | EList es          -> EList (List.map recur es)
   | ERange (lo, hi)   -> ERange (recur lo, recur hi)
 
+(** Apply a `via`-lowering rewrite to EVERY expr-bearing declaration container.
+
+    The two lowerings differ only in [rw] — [sum_staged_refs] for `erlang`,
+    [sum_hyper_refs] for `hyper_erlang` — so the walk over containers is shared
+    rather than written twice. It was written twice, and the two copies drifted:
+    `hyper_erlang` grew the action containers with gh#463 and `erlang` did not,
+    and NEITHER ever covered `quantities {}`. That is proposal
+    `2026-07-31-aggregation-semantics.md` C4a — identical syntax compiling in one
+    block and failing E287 in another. One function means a container added later
+    has exactly one place to be forgotten.
+
+    Two deliberate exclusions:
+
+    - **Action ENDPOINTS** (`from =` / `to =`) are not rewritten, only value
+      operands (`fraction` / `count` / a `set`/`add` amount). An endpoint names a
+      compartment and a staged source has no single cell to name, so rewriting one
+      would turn E100 into E264 (gh#463). Expanding a staged endpoint is gh#460.
+    - **A reactive trigger predicate** ([rxwhen]) is not rewritten. It reads
+      `observed(stream)` against a static threshold and can never carry a
+      compartment reference — every non-trigger construct there is already
+      rejected by E279/E273. *)
+let apply_via_rewrite ctx (rw : expr -> expr) : unit =
+  let rw_items items =
+    List.map (function IPosn e -> IPosn (rw e)
+                     | INamed (n, e) -> INamed (n, rw e)) items in
+  let rw_dst = function
+    | DstSum refs -> DstSum (List.map (fun (c, items) -> (c, rw_items items)) refs)
+    | DstBranch brs ->
+      DstBranch (List.map (fun ((c, items), w) -> ((c, rw_items items), rw w)) brs)
+  in
+  let rw_dyn = function
+    | Rate e -> Rate (rw e)
+    | Via _ as v -> v   (* unlowered via transitions keep their raw call *)
+  in
+  let rw_action = function
+    | ATransfer kwargs ->
+      ATransfer (List.map (fun (k, e) ->
+        if k = "fraction" || k = "count" then (k, rw e) else (k, e)) kwargs)
+    | ASet (c, idxs, e) -> ASet (c, idxs, rw e)
+    | AAdd (c, idxs, e) -> AAdd (c, idxs, rw e)
+  in
+  let rw_iv (iv : intervention_decl) =
+    { iv with ivaction = List.map rw_action iv.ivaction } in
+  ctx.transitions <- List.map (fun (t : transition_decl) ->
+    { t with
+      trsrc = List.map (fun (c, items) -> (c, rw_items items)) t.trsrc;
+      trdst = rw_dst t.trdst;
+      trdyn = rw_dyn t.trdyn }
+  ) ctx.transitions;
+  ctx.let_bindings <- List.map (fun (lb : let_binding) ->
+    { lb with lbody = rw lb.lbody }) ctx.let_bindings;
+  ctx.init_entries <- List.map (fun (ie : init_entry) ->
+    { ie with ivalue = rw ie.ivalue }) ctx.init_entries;
+  ctx.balance_decl <- Option.map (fun (bd : balance_decl) ->
+    { bd with bexpr = rw bd.bexpr }) ctx.balance_decl;
+  ctx.obs_decls <- List.map (fun (od : obs_decl) ->
+    let oprojection = match od.oprojection with
+      | Some (ProjDerived e) -> Some (ProjDerived (rw e))
+      | other -> other
+    in
+    let omeasurement = Option.map (fun (om : obs_measurement) ->
+      let rw_kwargs = List.map (fun (key, e) -> (key, rw e)) in
+      let om_lik = match om.om_lik with
+        | LikNegBinomial a  -> LikNegBinomial  (rw_kwargs a)
+        | LikPoisson a      -> LikPoisson      (rw_kwargs a)
+        | LikNormal a       -> LikNormal       (rw_kwargs a)
+        | LikBinomial a     -> LikBinomial     (rw_kwargs a)
+        | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
+        | LikBeta a         -> LikBeta         (rw_kwargs a)
+        | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
+        | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
+      in
+      { om with om_lik }) od.omeasurement
+    in
+    { od with oprojection; omeasurement }
+  ) ctx.obs_decls;
+  ctx.quantity_decls <- List.map (fun (qd : quantity_decl) ->
+    { qd with qd_body = rw qd.qd_body }) ctx.quantity_decls;
+  ctx.interv_decls   <- List.map rw_iv ctx.interv_decls;
+  ctx.event_decls    <- List.map rw_iv ctx.event_decls;
+  ctx.reactive_decls <- List.map (fun (rx : reactive_decl) ->
+    { rx with rxaction = rw_action rx.rxaction }) ctx.reactive_decls
+
 (* Lower every `via erlang(...)` transition in [ctx] into the manual staged form.
    Mutates ctx.dim_decls / ctx.stratifies / ctx.transitions / ctx.init_entries,
-   and — when the staged source is itself stratified — ctx.let_bindings /
-   ctx.obs_decls / ctx.balance_decl, to rewrite partial references to the staged
+   and — when the staged source is itself stratified — every other expr-bearing
+   container via [apply_via_rewrite], to rewrite partial references to the staged
    compartment into stage-sums ([sum_staged_refs]). The original `via` transition
    is replaced by the consecutive chain + exit, so no `via` transition survives to
    reach [expand_transitions_counted] (its E243 placeholder becomes unreachable). *)
@@ -1630,58 +1713,7 @@ let lower_via_transitions ctx =
               `n_pre + 1` index, so they are immune to this rewrite (the predicate
               fires only at exactly `n_pre` indices). Runs over every expr-bearing
               declaration so no reference to the staged compartment escapes. *)
-        let rw e = sum_staged_refs ~src ~n_pre ~dim_name ~sum_var e in
-        let rw_dst = function
-          | DstSum refs ->
-            DstSum (List.map (fun (c, items) ->
-              (c, List.map (function IPosn e -> IPosn (rw e)
-                                   | INamed (n, e) -> INamed (n, rw e)) items)) refs)
-          | DstBranch branches ->
-            DstBranch (List.map (fun (r, w) ->
-              let (c, items) = r in
-              ((c, List.map (function IPosn e -> IPosn (rw e)
-                                    | INamed (n, e) -> INamed (n, rw e)) items), rw w))
-              branches)
-        in
-        let rw_dyn = function
-          | Rate e -> Rate (rw e)
-          | Via _ as v -> v   (* unlowered via transitions keep their raw call *)
-        in
-        ctx.transitions <- List.map (fun (t : transition_decl) ->
-          { t with
-            trsrc = List.map (fun (c, items) ->
-              (c, List.map (function IPosn e -> IPosn (rw e)
-                                   | INamed (n, e) -> INamed (n, rw e)) items)) t.trsrc;
-            trdst = rw_dst t.trdst;
-            trdyn = rw_dyn t.trdyn }
-        ) ctx.transitions;
-        ctx.let_bindings <- List.map (fun (lb : let_binding) ->
-          { lb with lbody = rw lb.lbody }) ctx.let_bindings;
-        ctx.init_entries <- List.map (fun (ie : init_entry) ->
-          { ie with ivalue = rw ie.ivalue }) ctx.init_entries;
-        ctx.balance_decl <- Option.map (fun (bd : balance_decl) ->
-          { bd with bexpr = rw bd.bexpr }) ctx.balance_decl;
-        ctx.obs_decls <- List.map (fun (od : obs_decl) ->
-          let oprojection = match od.oprojection with
-            | Some (ProjDerived e) -> Some (ProjDerived (rw e))
-            | other -> other
-          in
-          let omeasurement = Option.map (fun (om : obs_measurement) ->
-            let rw_kwargs = List.map (fun (key, e) -> (key, rw e)) in
-            let om_lik = match om.om_lik with
-              | LikNegBinomial a  -> LikNegBinomial  (rw_kwargs a)
-              | LikPoisson a      -> LikPoisson      (rw_kwargs a)
-              | LikNormal a       -> LikNormal       (rw_kwargs a)
-              | LikBinomial a     -> LikBinomial     (rw_kwargs a)
-              | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
-              | LikBeta a         -> LikBeta         (rw_kwargs a)
-              | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
-              | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
-            in
-            { om with om_lik }) od.omeasurement
-          in
-          { od with oprojection; omeasurement }
-        ) ctx.obs_decls
+        apply_via_rewrite ctx (sum_staged_refs ~src ~n_pre ~dim_name ~sum_var)
         end
 
       | [ (src, src_pre_items) ], HyperErlang { branches } ->
@@ -1917,70 +1949,7 @@ let lower_via_transitions ctx =
                 over all branch stage cells (the FOI, lets, balance, observations,
                 and the new init exprs). The synthesized chains reference the flat
                 cells by name, so they are untouched. *)
-          let rw e = sum_hyper_refs ~src ~cells:all_cells e in
-          let rw_items items =
-            List.map (function IPosn e -> IPosn (rw e)
-                             | INamed (n, e) -> INamed (n, rw e)) items in
-          let rw_dst = function
-            | DstSum refs -> DstSum (List.map (fun (c, items) -> (c, rw_items items)) refs)
-            | DstBranch brs ->
-              DstBranch (List.map (fun ((c, items), w) -> ((c, rw_items items), rw w)) brs)
-          in
-          let rw_dyn = function
-            | Rate e -> Rate (rw e)
-            | Via _ as v -> v in
-          ctx.transitions <- List.map (fun (t : transition_decl) ->
-            { t with
-              trsrc = List.map (fun (c, items) -> (c, rw_items items)) t.trsrc;
-              trdst = rw_dst t.trdst;
-              trdyn = rw_dyn t.trdyn }
-          ) ctx.transitions;
-          ctx.let_bindings <- List.map (fun (lb : let_binding) ->
-            { lb with lbody = rw lb.lbody }) ctx.let_bindings;
-          ctx.init_entries <- List.map (fun (ie : init_entry) ->
-            { ie with ivalue = rw ie.ivalue }) ctx.init_entries;
-          ctx.balance_decl <- Option.map (fun (bd : balance_decl) ->
-            { bd with bexpr = rw bd.bexpr }) ctx.balance_decl;
-          ctx.obs_decls <- List.map (fun (od : obs_decl) ->
-            let oprojection = match od.oprojection with
-              | Some (ProjDerived e) -> Some (ProjDerived (rw e))
-              | other -> other in
-            let omeasurement = Option.map (fun (om : obs_measurement) ->
-              let rw_kwargs = List.map (fun (key, e) -> (key, rw e)) in
-              let om_lik = match om.om_lik with
-                | LikNegBinomial a  -> LikNegBinomial  (rw_kwargs a)
-                | LikPoisson a      -> LikPoisson      (rw_kwargs a)
-                | LikNormal a       -> LikNormal       (rw_kwargs a)
-                | LikBinomial a     -> LikBinomial     (rw_kwargs a)
-                | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
-                | LikBeta a         -> LikBeta         (rw_kwargs a)
-                | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
-                | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
-              in
-              { om with om_lik }) od.omeasurement in
-            { od with oprojection; omeasurement }
-          ) ctx.obs_decls;
-
-          (* 6b. Action operands are ordinary expressions too, so a bare [src]
-                 in one must be rewritten like any other (gh#463). Rewrite the
-                 VALUE operands only — `set`/`add` amounts and a transfer's
-                 `fraction`/`count`. Endpoints (`from =` / `to =`) name a
-                 compartment, and a staged source has no single cell to name;
-                 rewriting them to a sum would only turn E100 into E264.
-                 Expanding a staged endpoint is gh#460's job. *)
-          let rw_action = function
-            | ATransfer kwargs ->
-              ATransfer (List.map (fun (k, e) ->
-                if k = "fraction" || k = "count" then (k, rw e) else (k, e)) kwargs)
-            | ASet (c, idxs, e) -> ASet (c, idxs, rw e)
-            | AAdd (c, idxs, e) -> AAdd (c, idxs, rw e)
-          in
-          let rw_iv (iv : intervention_decl) =
-            { iv with ivaction = List.map rw_action iv.ivaction } in
-          ctx.interv_decls   <- List.map rw_iv ctx.interv_decls;
-          ctx.event_decls    <- List.map rw_iv ctx.event_decls;
-          ctx.reactive_decls <- List.map (fun (rx : reactive_decl) ->
-            { rx with rxaction = rw_action rx.rxaction }) ctx.reactive_decls;
+          apply_via_rewrite ctx (sum_hyper_refs ~src ~cells:all_cells);
 
           (* 7. Remove the now-replaced base compartment [src] — its flat per-branch
                 cells carry the whole population, and a surviving bare `src`

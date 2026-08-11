@@ -519,6 +519,90 @@ let test_age_inflow_and_init_land_in_stage1 () =
      Alcotest.(check bool) "init has no bare I_child" false (List.mem_assoc "I_child" kvs)
    | _ -> Alcotest.fail "expected explicit init")
 
+(* ── C4a: the rewrite reaches every expr-bearing container ───────────────── *)
+
+(* Proposal 2026-07-31-aggregation-semantics C4a. The partial-reference rewrite
+   used to be applied to five containers by a block written out twice — once for
+   `erlang`, once for `hyper_erlang` — and the two copies drifted: gh#463 added
+   the action containers to `hyper_erlang` only, and NEITHER ever covered
+   `quantities {}`. So `I[child]` on an age × staged compartment resolved to a
+   stage-sum in `observations` and raised E287 in `quantities`, from identical
+   syntax. Both sites now go through [apply_via_rewrite].
+
+   Asserted at the IR level rather than "it compiles": the quantity's body must
+   be the same three-cell stage sum the FOI gets, so removing the rewrite from
+   the quantity walk fails here rather than passing vacuously. *)
+
+let staged_container_src body =
+  "time_unit = 'days\n\
+   compartments { S, E, I, R }\n\
+   dimensions { age = [child, adult] }\n\
+   stratify(by = age)\n\
+   let N_local[a in age] = S[a] + E[a] + I[a] + R[a]\n\
+   parameters {\n\
+  \  beta  : rate in [0.001, 0.5]\n\
+  \  gamma : rate in [0.01, 1.0]\n\
+   }\n\
+   transitions {\n\
+  \  infection[a in age] : S[a] --> I[a] @ beta * S[a] * I[a] / N_local[a]\n\
+  \  recovery[a in age] : I[a] --> R[a] via erlang(stages = 3, rate = gamma)\n\
+   }\n\
+   init { S[child] = 4990  S[adult] = 5000  I[child] = 10 }\n"
+  ^ body
+  ^ "\nsimulate { from = 0 'days  to = 100 'days }\n"
+
+let stage_cells_of_child = [ "I_child_s1"; "I_child_s2"; "I_child_s3" ]
+
+(* A partial reference `I[child]` on an [age, stage] compartment must lower to
+   the sum over that age's stage cells — never to a bare `I_child`, which has no
+   cell. *)
+let check_is_child_stage_sum ~what (e : Ir.expr) =
+  let rec find_popsum = function
+    | Ir.PopSum ns -> Some ns
+    | Ir.BinOp b   -> (match find_popsum b.Ir.left with
+                       | Some x -> Some x | None -> find_popsum b.Ir.right)
+    | Ir.UnOp u    -> find_popsum u.Ir.arg
+    | Ir.Reduce ts -> List.fold_left
+                        (fun acc t -> match acc with Some _ -> acc | None -> find_popsum t)
+                        None ts
+    | _            -> None
+  in
+  match find_popsum e with
+  | Some ns ->
+    Alcotest.(check (list string)) (what ^ ": sums this age's stage cells")
+      stage_cells_of_child (List.sort compare ns)
+  | None ->
+    Alcotest.failf "%s: expected a PopSum over %s, found none — the via rewrite \
+                    did not reach this container"
+      what (String.concat ", " stage_cells_of_child)
+
+let test_c4a_quantity_sees_the_stage_rewrite () =
+  let m = compile_ok (staged_container_src "quantities { prev_child = I[child] }") in
+  match List.filter (fun (q : Ir.quantity) -> q.Ir.q_name = "prev_child") m.Ir.quantities with
+  | [ { Ir.q_body = Ir.QBReduced { source = Ir.QSState e; reduce = None }; _ } ] ->
+    check_is_child_stage_sum ~what:"quantities" e
+  | [ _ ] -> Alcotest.fail "prev_child: expected an unreduced state series"
+  | []    -> Alcotest.fail "no quantity named prev_child"
+  | _     -> Alcotest.fail "multiple prev_child leaves"
+
+(* The same expression, in an intervention's VALUE operand. Endpoints
+   (`from =` / `to =`) are deliberately NOT rewritten — a staged source has no
+   single cell to name, and that is gh#460. *)
+let test_c4a_intervention_value_operand_sees_the_rewrite () =
+  let m = compile_ok (staged_container_src
+    "interventions { cull : transfer(count = 0.5 * I[child], from = S[child], to = R[child]) \
+     at [30] }") in
+  let counts =
+    List.concat_map (fun (iv : Ir.intervention) ->
+      List.filter_map (function
+        | Ir.AbsoluteTransfer t -> Some t.Ir.count
+        | _ -> None) iv.Ir.actions) m.Ir.interventions
+  in
+  match counts with
+  | [ e ] -> check_is_child_stage_sum ~what:"interventions" e
+  | []    -> Alcotest.fail "no AbsoluteTransfer action found"
+  | _     -> Alcotest.fail "expected exactly one AbsoluteTransfer action"
+
 let () =
   Alcotest.run "via_lowering"
     [ ( "t1-anchor",
@@ -562,4 +646,9 @@ let () =
           Alcotest.test_case "FOI rewrite sums each age's stages (no dangling I[a])" `Quick
             test_foi_rewrite_sums_stages_per_age;
           Alcotest.test_case "age inflow + init land in (age, stage 1)" `Quick
-            test_age_inflow_and_init_land_in_stage1 ] ) ]
+            test_age_inflow_and_init_land_in_stage1 ] );
+      ( "c4a-containers",
+        [ Alcotest.test_case "quantities {} sees the stage rewrite" `Quick
+            test_c4a_quantity_sees_the_stage_rewrite;
+          Alcotest.test_case "intervention value operand sees the stage rewrite" `Quick
+            test_c4a_intervention_value_operand_sees_the_rewrite ] ) ]
