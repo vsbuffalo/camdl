@@ -1257,6 +1257,38 @@ fn run_simulate(a: &args::SimulateArgs) {
         if q_model.quantities.is_empty() {
             None
         } else if let Some(out_dir) = a.quantities_out.clone() {
+            // gh#562: refuse rather than pool. `SimQuantities` accumulates every
+            // cell into ONE `draws` vector and renders it with
+            // `DesignCoords::none()`, so with more than one `--scenario` the
+            // quantiles are taken across the baseline AND its counterfactual
+            // together. The file that comes out looks like a correct posterior
+            // band and describes neither arm — the worst shape a wrong answer
+            // can take, because nothing in it says so.
+            //
+            // Scenario is a PARTITION of the cell grid; draws/replicates/seeds
+            // are the band. Collapsing the two axes is the defect. The real fix
+            // is a per-scenario accumulator (the `by_scenario` map
+            // `fit predict` already keeps, `predict.rs:748`); until that lands,
+            // a refusal is strictly better than a plausible-looking average.
+            if a.scenarios.len() > 1 {
+                eprintln!(
+                    "error: --quantities-out with {} scenarios would pool them into \
+                     a single band.\n  \
+                     Quantiles would be taken across scenarios as if they were \
+                     draws, producing one ribbon that describes neither arm \
+                     (gh#562).\n  \
+                     Run one scenario at a time:\n    \
+                     {}\n  \
+                     `camdl fit predict` already bands per scenario and is \
+                     unaffected.",
+                    a.scenarios.len(),
+                    a.scenarios.iter()
+                        .map(|s| format!("camdl simulate … --scenario {s} --quantities-out <dir>/{s}"))
+                        .collect::<Vec<_>>()
+                        .join("\n    "),
+                );
+                std::process::exit(1);
+            }
             let banded = draws_path.is_some() || total_runs > 1;
             Some(SimQuantities {
                 quantities: q_model.quantities.clone(),
