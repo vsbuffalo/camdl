@@ -104,6 +104,14 @@ Runbook: `docs/dev/testing.md` ("Gotcha: camdlc version check"). The deeper fix
   `rust/crates/ir/src/`**, breaks every golden and requires the atomic
   OCaml+Rust+golden update — flag it and confirm before proceeding. Mechanics:
   the `golden-update` skill.
+- **That gate is care, not avoidance.** A bump costs a confirmation and a
+  sequencing decision; it is never a reason to prefer a worse design. Pre-1.0,
+  invalidating cached runs is cheap and a wrong representation is not. So: do
+  **not** contort a schema to stay hash-neutral, do not defer a structural fix
+  because it re-keys, and do not present hash-neutrality as a design virtue — it
+  is a scheduling convenience. State what the bump invalidates, confirm, and
+  then do the better thing. When several re-keying changes are pending, propose
+  landing them in one bump rather than dropping any of them. (`VERSIONING.md`.)
 
 ## Markdown
 
