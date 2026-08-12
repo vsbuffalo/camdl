@@ -712,9 +712,11 @@ fn run_simulate(a: &args::SimulateArgs) {
         .map(|p| p.to_string_lossy().into_owned()).collect();
     let set_vec_entries: Vec<(String, String)> = a.param_vec.iter()
         .map(|pv| (pv.prefix.clone(), pv.file.clone())).collect();
-    let scenario_names: Vec<String> = a.scenarios.iter()
-        .flat_map(|s| s.split(',').map(|t| t.trim().to_string()))
-        .collect();
+    let scenario_names: Vec<String> = crate::args::split_scenario_names(&a.scenarios)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
     let adhoc_enable: Vec<String>  = a.enable.clone();
     let adhoc_disable: Vec<String> = a.disable.clone();
     let seeds: Vec<u64> = match &a.seeds {
