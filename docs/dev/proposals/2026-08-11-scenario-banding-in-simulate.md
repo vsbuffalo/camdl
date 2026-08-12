@@ -23,39 +23,60 @@ records that design and why it was rejected.
 Scope is `rust/crates/cli` only. No IR change, no `ir/VERSION` bump, no golden
 churn, no run-identity move.
 
-## 1. The rule: which reductions may cross which axes
+## 1. The rule: design coordinates condition, sampling coordinates marginalize
 
-A run grid is a product of axes that mean two different things:
+A run grid is a product of axes that play two different roles:
 
 ```
 cells  =  scenario × sweep-point  ×  draw × replicate × seed
           ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾     ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
-          PARTITION                   BAND
+          DESIGN (conditioning)      SAMPLING
 ```
 
-**Partition axes** index distinct objects. A baseline and a 50 %-coverage arm
-are two different counterfactual worlds; a sweep point at `R0 = 2` and one at
-`R0 = 4` are two different models.
+**Design coordinates** — scenario, sweep point — say _which world was
+simulated_. A baseline and a 50 %-coverage arm are two different counterfactual
+worlds; a sweep point at `R0 = 2` and one at `R0 = 4` are two different models.
 
-**Band axes** index repeated sampling of one object — a posterior draw, a
-stochastic replicate, a seed.
+**Sampling coordinates** — parameter draw, stochastic replicate, process/
+observation seed — index repeated sampling _within_ one world.
 
-The rule is not "never reduce across a partition axis", which would be wrong:
-`fit/contrasts.rs` reduces across the scenario axis on purpose, pairing draw _i_
-of one arm with draw _i_ of the other under a shared `arm_seed`
-(`contrasts.rs:307`), and produces cases-averted — the canonical policy output.
-The correct statement distinguishes two kinds of reduction:
+A quantity output is therefore an empirical approximation to
 
-- A **marginal** reduction — a quantile, a mean, anything treating its inputs as
-  exchangeable samples of one thing — **must not cross a partition axis**. Its
-  output is a statement about a single object, and there is no single object.
-- A **paired** reduction — one that matches cells across the partition axis by
-  their band coordinate and reduces the _matched differences_ — **is exactly
-  what a partition axis is for**. Contrasts is this, and it is correct.
+```
+p(Q | scenario, sweep)
+```
 
-The quantity band is a marginal reduction. Pooling scenarios into it is the
-defect. Contrasts is the proof that the distinction is a real property of the
-reduction rather than a blanket prohibition on the axis.
+and the summary reduces over the sampling coordinates while holding the design
+coordinates fixed. The bug computes something closer to `Σ_s p(Q | s) · w_s`
+without the user ever having defined a measure `w_s` over scenarios — an
+implicit, uniform, and unstated weighting over counterfactual worlds.
+
+That gives the rule its sharpest form:
+
+> **Never implicitly marginalize a design coordinate.** Sampling coordinates may
+> be marginalized freely. A design coordinate may be eliminated only by an
+> explicit measure over its levels, or by a contrast operator applied across
+> them.
+
+The second escape is the one already in the codebase, and it is worth being
+precise about why it is legitimate. `fit/contrasts.rs` crosses the scenario axis
+deliberately, pairing draw _i_ of one arm with draw _i_ of the other under a
+shared `arm_seed` (`contrasts.rs:307`):
+
+```
+D_i = Q_{i,baseline} − Q_{i,intervention}
+```
+
+This is not a different flavour of marginalization. The contrast **constructs a
+new random variable first**, holding the pairing coordinate _i_ fixed
+throughout; only afterwards are the sampling coordinates marginalized to give
+quantiles of `D`. The design coordinate is consumed by the operator, never
+averaged over.
+
+So the pipeline in general is: **condition on design axes → construct the
+estimand or contrast → summarize over sampling axes.** The quantity band is the
+degenerate case where the estimand is `Q` itself. Pooling scenarios into it
+skips the first step.
 
 ## 2. Where `simulate` loses it
 
@@ -125,10 +146,15 @@ So the fix is to use the key that is already in scope, not to add a type:
 
 ```rust
 struct SimQuantities {
-    // … quantities / banded / out_dir / compiled / eval / calendar unchanged …
+    // … quantities / out_dir / compiled / eval / calendar unchanged …
+    /// Point vs banded, replacing the former `banded: bool` so there is one
+    /// representation of the state rather than two (§3.4).
+    mode: Mode,
     /// Per scenario: that scenario's draws and its own time axis. Insertion
     /// order is the engine's canonical order (scenario outermost, `plan_grid`
-    /// at `engine.rs:168`), so the rendered file lists scenarios in CLI order.
+    /// at `engine.rs:168`); the merge phase is strictly ordered even under
+    /// Rayon (`engine.rs:245-248`), so this is deterministic — pinned by
+    /// test 7.6 rather than left as an assumption.
     by_scenario: IndexMap<String, ScenarioQuant>,
 }
 
@@ -140,23 +166,44 @@ struct ScenarioQuant {
 
 fn push_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
     // … evaluator build and per-cell param resolution unchanged …
-    let acc = self.by_scenario
-        .entry(cell.spec.scenario.name().to_string())
-        .or_default();
-    if acc.times.is_empty() {
-        acc.times = cell.traj.snapshots.iter().map(|s| s.t).collect();
+    let times: Vec<f64> = cell.traj.snapshots.iter().map(|s| s.t).collect();
+    let scenario = cell.spec.scenario.name();
+    let acc = self.by_scenario.entry(scenario.to_string()).or_default();
+    if acc.draws.is_empty() {
+        acc.times = times;
+    } else if !time_grids_match(&acc.times, &times) {
+        // Later cells PROVE compatibility rather than being assumed into the
+        // first cell's axis. Without this, a future feature that lets cells of
+        // ONE scenario differ in cadence would silently reinstate the original
+        // bug at smaller scale — first-wins, no diagnostic.
+        return Err(format!(
+            "scenario '{scenario}': cell {} has {} output times but this \
+             scenario's earlier cells have {}. Quantity cells within a \
+             scenario must share a time grid.",
+            cell.spec.run_idx, times.len(), acc.times.len()
+        ));
     }
     acc.draws.push(results);
     Ok(())
 }
 ```
 
-This is the whole of the gh#562 fix. It is worth being explicit that no
-additional type is required for the guarantee, because the guarantee is a
-property of the _API shape_ — an accumulator whose only input is a whole cell —
-and not of a key type. An accumulator exposing `push(key, draws)` would be
-strictly weaker no matter how well the key were typed, because the caller could
-pass one key for every cell.
+`time_grids_match` compares length and then element-wise within the module's
+existing output-time tolerance (`OUTPUT_EPS`, `sim/src/schedule.rs`) rather than
+by exact float equality, since the grid is derived arithmetically per cell.
+
+Guarding on `acc.draws.is_empty()` rather than `acc.times.is_empty()` matters: a
+legitimately empty time grid (a model whose output window admits no rows) would
+otherwise re-enter the first-wins branch on every cell and never check.
+
+This is the whole of the gh#562 fix. No additional type is required for the
+guarantee, because the guarantee is a property of the _API shape_ — an
+accumulator whose only input is a whole cell — not of a key type. A `Band` type
+can prove a band is internally well-formed; it cannot prove observations were
+assigned to the _correct_ band. That invariant belongs at the assignment
+operation, and `push_cell` is the assignment operation. An accumulator exposing
+`push(key, draws)` is strictly weaker however well the key is typed, because the
+caller can consistently supply the wrong one.
 
 ### 3.2 `DesignCoords::none()` is deleted
 
@@ -180,38 +227,57 @@ helpers that take it by value (`quantity_header:177`, `point_header:199`,
 `render_banded_leaf:401`, `render_point_leaf:483`) are unchanged apart from the
 field type.
 
-### 3.3 Knowing the scenario and printing it are separate decisions
+### 3.3 The scenario column is unconditional
 
 `push_design_header_cols` currently emits the column iff `coords.scenario` is
-`Some`. With the `Option` gone, emission becomes an explicit flag on the render
-call rather than a side effect of the coordinate being populated:
+`Some`. With the `Option` gone, quantity output **always** carries a `scenario`
+column, on both verbs.
+
+No `ScenarioCol::{Always, WhenMultiple}` toggle is introduced. Conditional
+emission is a schema policy we have decided is wrong (decision 1), and making it
+a first-class selectable state would keep it conveniently reintroducible — the
+same objection that retires `DesignCoords::none()`. Do not represent states you
+have decided should not occur. If backwards compatibility ever becomes a real
+requirement, it arrives then, under a name that says it is a compatibility shim.
+
+The separation that does matter is retained by construction: the renderer
+_always knows_ which design cell it is rendering (the correctness property, now
+carried by a non-optional field), and printing follows from that rather than
+determining it.
+
+### 3.4 `Mode` derived from the param source, replacing `banded: bool`
+
+`SimQuantities.banded: bool` and `quantity_output::Mode` are two representations
+of one state. The `bool` goes; `Mode` is stored directly and derived once:
 
 ```rust
-pub(crate) enum ScenarioCol { Always, WhenMultiple }
+let mode = match job.source {
+    ParamSource::Point { replicates: 1 } => Mode::Point,
+    _ => Mode::Banded,
+};
 ```
 
-Keeping these separate matters: the renderer must _always_ know which band it is
-rendering (that is the correctness property), while whether the column appears
-in the header is a formatting choice with compatibility consequences. Conflating
-them is what let "no scenario column" and "no partition identity" be the same
-value. Resolved to `Always` — see decision 1.
+This implements the rule already documented at `quantity_output.rs:23` ("keyed
+by the param-source kind, never the cell count alone"). It fixes 2.3 without the
+regression a cell-count predicate would introduce: `--draws <file>` with a
+single row must stay banded (`simulate_quantities.rs:190-192` pins the intent),
+which `draws.len() > 1` would silently flip to point mode.
 
-### 3.4 `banded` keyed on the param source
+`Mode` is one value for the whole render — a stacked file has one header per
+quantity, so a mixed set would emit two schemas under one header. It is derived
+from the param source, a property of the run, so no mixture can arise.
 
-```rust
-let banded = !matches!(job.source, ParamSource::Point { replicates: 1 });
-```
-
-This implements the rule already documented at `quantity_output.rs:23`. It fixes
-2.3 without introducing the regression a cell-count test would: `--draws
-<file>`
-with a single row must stay banded (`simulate_quantities.rs:190-192` pins the
-intent), which a `draws.len() > 1` predicate would silently flip to point mode.
-
-`Mode` remains one value for the whole render — a stacked file has one header
-per quantity, so a mixed set would emit two schemas under one header. It is
-derived from the param source, which is a property of the run, so no mixture can
-arise.
+**This is the weakest part of the design and is deliberately not fixed here.**
+`ParamSource` is not the property we actually care about. The real question is
+whether a collection of points carries _sampling semantics_ — whether a quantile
+over it means anything. `--draws posterior.tsv` and
+`--draws sensitivity-grid.tsv` have identical types and completely different
+interpretations; `--draws uniform` bands today, though quantiles of a
+space-filling sample describe the sampling scheme rather than a belief.
+`ParamSource` is a proxy that is wrong in both directions. Recorded as a
+follow-up (§9) rather than solved inside a bug fix, because the honest fix is a
+model-level declaration of sampling semantics, not a better discriminant over
+CLI flags.
 
 ### 3.5 The stacking loop moves to a neutral module
 
@@ -224,7 +290,6 @@ pub(crate) fn render_stacked<'a>(
     quantities: &[ir::quantity::Quantity],
     groups: impl Iterator<Item = (DesignCoords<'a>, &'a [Vec<QuantityResult>], &'a [f64])>,
     mode: Mode,
-    scenario_col: ScenarioCol,
     calendar: &io::CalendarMeta,
 ) -> Result<(Vec<(String, String)>, String), String>
 ```
@@ -303,8 +368,16 @@ six of seven. `CellSpec` also has four construction sites, not one:
 `batch.rs:1019` (`predict_cells`, the dry-run cache predictor) has no
 `ParamSource` in scope and would have to guess the kind.
 
-The generalization is revisited when `batch run --quantities-out` is actually
-written — §9.
+**We are also not restructuring `fit predict` to make the abstraction viable.**
+Routing predict's sweep through `CellSpec` so that a single `BandKey::of` would
+work is a change to a fitted-model path, motivated entirely by the elegance of
+an abstraction with one currently-useful component (`scenario`) — the sweep half
+is unreachable in the quantity path because batch emits no quantities. That is
+architecture-driven rather than requirement-driven development. The asymmetry is
+real but costs nothing until some operation must reason uniformly across both
+paths, and none does. When `batch run --quantities-out` exists there will be two
+real design axes and two independent clients of the concept, and that is when
+the abstraction should emerge — §9.
 
 ## 5. Migration
 
@@ -314,10 +387,10 @@ unit tests (`predict.rs:2161`, `:2173`, `:2181`, `:2189`) move out of
 `fit/predict.rs`; `quantity_output.rs:20` and `contrasts.rs:48` update their
 imports rather than going through a re-export. Pure move, byte-identical.
 
-**Increment 2 — `DesignCoords.scenario: &str`, `none()` deleted, `ScenarioCol`
-added, `render_stacked` lifted; `fit predict` routed through it.** Predict
-passes `ScenarioCol::Always` (its current behaviour). Expected output change:
-exactly one — predict's `quantities.json` gains the `calendar` block it
+**Increment 2 — `DesignCoords.scenario: &str`, `none()` deleted,
+`render_stacked` lifted; `fit predict` routed through it.** Predict already
+emits the column unconditionally, so its header is unchanged. Expected output
+change: exactly one — predict's `quantities.json` gains the `calendar` block it
 currently drops (§6). Everything else byte-identical under A/B.
 
 **Increment 3 — `simulate` keyed by scenario (gh#562).** `SimQuantities.draws`/
@@ -376,6 +449,12 @@ snapshot counts: assert each band renders against its own axis and neither is
 truncated or padded to the other. This is the gh#561 prerequisite, testable
 before gh#561 exists.
 
+**7.2b Within-scenario time-grid mismatch is an error, not first-wins.** A unit
+test on the accumulator: push two cells into the same scenario with different
+grids, assert a located error naming the scenario and both lengths. This pins
+§3.1's assertion; without it the check is untested and would rot into a no-op
+the first time someone "simplified" it back to `if times.is_empty()`.
+
 **7.3 `banded` excludes the scenario factor.** Two scenarios, fixed params, no
 `--draws`, `--quantities-out`: assert point mode (a bare `value` column), not a
 two-point band. Requires increment 3, since the refusal short-circuits it today.
@@ -385,7 +464,18 @@ cell-count predicate would introduce (§3.4).
 
 **7.5 `fit predict` manifest carries `calendar`.** Red before increment 2.
 
-**7.6 A/B byte-identity.** Increments 1 and 2 (apart from the calendar block):
+**7.6 Scenario order is deterministic under `--parallel`.** `IndexMap` insertion
+order decides the order scenarios appear in the output, so it depends on the
+order `merge_cell` is called. That is safe today — `run_job` collects the
+simulation phase into a `Vec` (Rayon's `into_par_iter().map().collect()`
+preserves input order) and the merge phase then runs strictly in canonical order
+(`engine.rs:222-248`) — but it is an implementation detail this design now
+depends on for reproducible output. Run the same multi-scenario job at
+`--parallel 1` and `--parallel 8` and assert the rendered TSVs are
+byte-identical. Without this the dependency is invisible and a future change to
+merge-on-completion would silently reorder decision artifacts.
+
+**7.7 A/B byte-identity.** Increments 1 and 2 (apart from the calendar block):
 same command, same seed, diff every artifact; only timestamps and mtimes may
 differ. The A/B must include a multi-scenario predict run — an A/B over
 single-scenario runs exercises none of the changed paths.
@@ -398,15 +488,15 @@ Test churn to expect from decision 1, measured rather than estimated: the
 
 ## 8. Decisions
 
-1. **Always emit the `scenario` column, or only when more than one scenario?**
-   **Always** (`ScenarioCol::Always` on both verbs). Conditional emission makes
-   a file's column layout depend on how many scenarios the model happens to
-   declare, so adding a second scenario silently reshapes an existing consumer's
-   input — the failure mode this whole proposal is about, in a smaller key. It
-   also aligns `simulate` with `fit predict`, the artifact its output is most
-   often compared against. The cost is the test churn measured in §7. This is
-   the one call the gh#562 handoff explicitly reserved for the maintainer; it is
-   a one-line flip to `WhenMultiple` if preferred.
+1. **Always emit the `scenario` column?** **Yes, unconditionally, with no toggle
+   type.** Conditional emission makes a file's column layout depend on how many
+   scenarios the model happens to declare, so adding a second scenario silently
+   reshapes an existing consumer's input — the failure mode this whole proposal
+   is about, in a smaller key. It also aligns `simulate` with `fit predict`. And
+   having decided conditional emission is the wrong policy, we do not keep it as
+   a selectable `ScenarioCol::WhenMultiple`: a first-class name makes a rejected
+   policy conveniently reintroducible, which is the same objection that retires
+   `DesignCoords::none()`. The cost is the test churn measured in §7.
 
    Noted and not fixed here: the trajectory TSV emits `scenario` only when
    `n_scenarios > 1` (`main.rs:2037`, `:2048`), so it retains the instability
@@ -415,15 +505,29 @@ Test churn to expect from decision 1, measured rather than estimated: the
 2. **A general partition-coordinate type?** **No** — §4. Revisited when
    `batch run --quantities-out` exists.
 
-3. **Per-scenario `times`?** **Yes** — §2.2. A run-global axis becomes
-   silent-wrong the moment gh#561 lands, and per-scenario is the only form that
-   needs no second change later.
+3. **Per-scenario `times`, first-wins or validated?** **Per-scenario, and
+   validated** — §2.2, §3.1. First-wins would leave a smaller copy of the
+   original bug shape: correct under today's assumption that cells of one
+   scenario share a cadence, silently wrong the moment that assumption ends.
+   Later cells prove compatibility or the run errors.
 
 4. **Unify the accumulators?** **No** — §3.6. Unify the stacking only.
 
-5. **Keep the multi-scenario refusal as a guard after the fix?** **No.** A
+5. **Restructure `fit predict` so both verbs carry design coordinates the same
+   way?** **No** — §4. Requirement-driven, not architecture-driven: the
+   asymmetry costs nothing until some operation must reason uniformly across
+   both paths, and none does.
+
+6. **Keep the multi-scenario refusal as a guard after the fix?** **No.** A
    refusal that can no longer fire is dead code, and keeping it would imply the
    pooling is still expressible.
+
+7. **Should `RunSink` express grouping?** **No.** `RunSink` is a _delivery_
+   abstraction — "here is a completed cell". Grouping is an _interpretation_ of
+   cells, and pushing it into the trait would couple the engine to a downstream
+   statistical operation that `CasSink` has no use for. That three sinks
+   accumulate differently is not evidence the trait is wrong: the differences
+   are genuine (§3.6).
 
 ## 9. Follow-ups
 
@@ -436,11 +540,58 @@ Test churn to expect from decision 1, measured rather than estimated: the
   `:2048`), so unequal horizons need no padding and no split. What a scenario
   `to` _shorter_ than the model window means remains gh#561's to decide.
 - **`batch run --quantities-out`** — the point at which the §4 generalization is
-  re-examined against a real second partition axis. Two things must be solved
-  there and are not solved here: predict-style sweep coordinates that do not
-  live in the cell, and CAS cache hits, which `run_job` filters out before
-  simulation (`engine.rs:209-219`) so a warm run would band over only the missed
-  cells.
+  re-examined against a real second design axis. Two things must be solved there
+  and are not solved here: predict-style sweep coordinates that do not live in
+  the cell, and CAS cache hits, which `run_job` filters out before simulation
+  (`engine.rs:209-219`) so a warm run would band over only the missed cells.
+
+  The shape to reach for then is **not** `PointKind`/`BandKey` but a role on the
+  axis itself, declared where the design is defined rather than inferred from a
+  CLI flag:
+
+  ```rust
+  struct Axis { name: String, values: Vec<Value>, role: AxisRole }
+  enum AxisRole { Condition, Sample(SamplingSemantics) }
+  ```
+
+  with contrasts operating explicitly on a `Condition` axis. The generic rule is
+  then exactly §1: condition on design axes → construct the estimand or contrast
+  → summarize over sampling axes. This is the conceptual endpoint; it should not
+  be built before there are two real clients.
+
+- **Sampling semantics are not `ParamSource`** (§3.4). `--draws posterior.tsv`
+  and `--draws sensitivity-grid.tsv` are the same type and different objects.
+  The honest fix is a model- or invocation-level declaration of whether a point
+  set carries a measure, feeding `AxisRole::Sample(_)` above. Until then the
+  software should stop making a stronger statistical claim than it can justify:
+
+  - `n_draws` in the quantity TSVs actually counts _samples_, not parameter
+    draws — a `Point { replicates: 5 }` run reports `n_draws = 5` with zero
+    parameter draws. Rename to `n_samples`, and have the manifest carry the
+    decomposition (`parameter_points`, `replicates_per_point`,
+    `summary: empirical_quantiles`) so a consumer can tell what varied.
+  - Reserve "credible interval" for point sets with posterior-probability
+    semantics. "Quantile band" is the honest term for everything the renderer
+    currently produces.
+
+  This is exactly the plausible-but-semantically-wrong metadata that motivated
+  gh#562, one level up, and it wants its own issue rather than riding along.
+
+- **Design-coordinate honesty: scenario overrides a colliding sweep silently.**
+  Parameter resolution has a documented five-tier precedence
+  (`camdl-run-spec.md` §1.3, implemented in `params_resolver.rs`) in which a
+  scenario (tier 4) beats a draw/sweep point (tier 3.5). Two of the three verbs
+  guard the resulting ambiguity via `scenario_param_footprint`: an explicit
+  `--draws` file colliding with a scenario is a hard error
+  (`engine.rs:357-402`), and `fit predict` rejects a scenario×sweep clash
+  (`predict.rs:1065`). **`batch run` has neither guard**, and it is the only
+  verb with real sweeps. A manifest with `[sweep] beta = [0.3, 0.5, 0.7]` and a
+  scenario setting `beta = 0.2` runs three cells that are byte-identical
+  trajectories, while the dry-run reports three sweep points, the CAS leaves are
+  stored under `beta_0.3-…`/`beta_0.5-…`/`beta_0.7-…`, and each carries a
+  distinct `params`-level hash. The design coordinate names a value the executed
+  model does not have. Own issue; the fix is to extend the existing footprint
+  guard to `batch`, matching the policy the other two verbs already implement.
 - **The trajectory TSV's conditional `scenario` column** (`main.rs:2037`) — same
   schema-instability argument as decision 1, different artifact, its own
   compatibility surface.
