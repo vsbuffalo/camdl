@@ -78,22 +78,39 @@ skips the first step.
 
 ### 1.1 The rule applies to composition, not only to reduction
 
-The same framing settles a second question. Two design axes compose honestly iff
-the map from design coordinates to resolved models is **injective** — distinct
-coordinates must denote distinct models. Where they do not, the coordinate names
-a run that does not exist.
+The same framing settles a second question: when may two design axes be
+combined?
 
-`simulate` has one design axis today, so this does not arise here. It arises in
-`batch run`, where a scenario resolves at a higher tier than a sweep point, and
-a scenario `set` on a swept parameter is a constant map: three sweep points, one
-model, three labels. Not injective. Note it is **not** enough to permit relative
-transforms and forbid absolute ones — `scale = { mu = 0.0 }` compiles clean and
-is equally constant.
+A coordinate is only useful if it _denotes_ — if a consumer can read
+`sweep:mu = 1` and know what was simulated. Two conditions are needed, and it is
+worth being explicit that the obvious one alone is not sufficient.
 
-Filed as gh#572 with the rule to reject all scenario/sweep parameter overlap
-across the three verbs, matching what `fit predict` already enforces, and to
-record injectivity as the criterion for relaxing it if a real use case appears.
-Not implemented here; different verbs, different code paths.
+**Distinctness.** The map from design coordinates to resolved models must be
+injective. `simulate` has one design axis today so this does not bite here, but
+in `batch run` a scenario resolves at tier 4 and a sweep point at tier 3.5
+(`params_resolver.rs:717-740`, `:742-783`), so a scenario `set` on a swept
+parameter is a constant map: three sweep points, one model, three labels.
+Relative-versus-absolute is _not_ the discriminator — `scale = { mu = 0.0 }`
+compiles clean (nothing validates the factor: `ir/model.rs:118`,
+`expander.ml:9919`) and is equally constant.
+
+**Denotation.** Every emitted coordinate must equal the value it labels. This is
+the condition injectivity misses, and it is why distinctness alone cannot be the
+rule. Sweep `mu ∈ {1,2,3}` under a scenario `scale = { mu = 2.0 }` composes to
+{2,4,6} — perfectly injective — but the emitted coordinate is the _grid_ value:
+`push_design_row_cells` writes it verbatim (`quantity_output.rs:167-169`) under
+a `sweep:mu` header (`:156`). A consumer joining on `sweep:mu = 1` gets a model
+that ran `mu = 2`. Distinct, and still a lie.
+
+Requiring both collapses to a simple, checkable rule: **the scenario's parameter
+footprint and the swept parameter set must be disjoint.** That is exactly what
+`fit predict` already enforces (`predict.rs:1062-1086` via
+`scenario_param_footprint`), so the guard is not a conservative stopgap awaiting
+a cleverer criterion — it is the correct rule, and a distinctness-only test
+would wrongly license relaxing it.
+
+Filed as gh#572 to apply it in all three verbs. Not implemented here; different
+verbs, different code paths.
 
 ## 2. Where `simulate` loses it
 
@@ -300,6 +317,34 @@ formatting policy. That distinction is what made a
 rejected schema policy conveniently selectable, the same objection that retires
 `DesignCoords::none()`.
 
+**The flag must reach `render_quantities`, not only the shared stacker.**
+Emission is decided at three sites, all currently keyed on
+`coords.scenario.is_some()`: `push_design_header_cols`
+(`quantity_output.rs:152-155`), `push_design_row_cells` (`:163-166`), and the
+manifest field (`:362-364`). All three are inside `render_quantities`
+(`:245-252`), which builds the header, the rows _and_ the manifest. So
+`render_quantities` takes `emit_scenario_col: bool` and `StackedQuantities`
+forwards it. Threading it only into the stacker would leave the `Option` as the
+sole suppression mechanism, and deleting `DesignCoords::none()` would then make
+the column unconditional.
+
+**`--enable`/`--disable` create no scenario axis, and get no column.** They are
+mutually exclusive with `--scenario` (`main.rs:780-787`) but still build a
+scenario patch — `ScenarioRef::Inline { name: "baseline", enable, disable }`
+(`main.rs:1114-1120`) — which drives the intervention filter through the same
+resolver path as a preset (`params_resolver.rs:661-672`). So
+`simulate --enable sia --quantities-out d` emits a file schema-identical to the
+un-patched run.
+
+That is correct, for the reason the rule is stated in terms of an _axis_: an
+ad-hoc patch is one modification of the single world being simulated, cannot
+co-occur with `--scenario`, and never yields more than one design cell. There is
+nothing for a per-row column to distinguish, and inventing a label would
+reintroduce exactly the §2.4 fabrication. What the run _does_ need is provenance
+— which run produced this file — and that belongs in the manifest, not in a
+column repeated on every row. The manifest does not currently carry the ad-hoc
+patch; recorded as a follow-up (§9) rather than fixed here.
+
 `fit predict` continues to emit unconditionally, and the asymmetry is principled
 rather than an inconsistency: predict's output _can_ contain the un-overlaid
 fitted model alongside overlay rows in one file, so "no overlay" is a genuine
@@ -311,9 +356,16 @@ A `simulate` run cannot produce that mixture.
 `--scenario a --scenario a` would give `Mode::Point` with two cells in one
 accumulator and fail with "point-mode quantities require exactly one
 realization" (`quantity_output.rs:259-264`) _after_ the whole grid has simulated
-and committed leaves. Rejecting at parse — matching predict's guard at
-`args/mod.rs:1260` — turns a late, confusing failure into an immediate one. This
-rejects input that is currently accepted; approved deliberately.
+and committed leaves. Rejecting at parse turns a late, confusing failure into an
+immediate one. This rejects input that is currently accepted; approved
+deliberately.
+
+`fit predict` has the **same** gap and a worse symptom: `scenario_refs()`
+(`args/mod.rs:1254-1259`) does not deduplicate either — the check at `:1260` is
+the `fitted` reserved-name guard, not a dedup — so `--scenario a --scenario a`
+merges both passes into `by_scenario["a"]` and bands over each draw twice,
+reporting `n_draws = 2N`. Filed as gh#579; both verbs should route through one
+check rather than two.
 
 **One file, stacked long, not one file per scenario.** Splitting by design
 coordinate was considered and rejected. The risk it would address — a user
@@ -368,28 +420,49 @@ better discriminant over CLI flags.
 stack the bodies, merge the manifests" loop (`predict.rs:1342-1357`), and
 `simulate` now needs it verbatim:
 
+A function taking all groups at once cannot serve `predict`: its sink is rebuilt
+inside `for sweep_pt in &sweep_points` (`predict.rs:1259-1271`) and cannot
+outlive the loop, while the stacking accumulators live outside it
+(`:1232-1233`). A one-shot call would absorb only predict's _inner_
+(per-scenario) stacking and leave the outer per-sweep-point header-drop
+duplicated in `predict.rs` — moving the bug-prone logic up one frame rather than
+removing it, which is the entire point of the lift.
+
+So the seam is an accumulator, fed incrementally by both verbs:
+
 ```rust
-pub(crate) fn render_stacked<'a>(
-    quantities: &[ir::quantity::Quantity],
-    groups: impl Iterator<Item = (DesignCoords<'a>, &'a [Vec<QuantityResult>], &'a [f64])>,
-    mode: Mode,
-    emit_scenario_col: bool,
-    calendar: &io::CalendarMeta,
-) -> Result<(Vec<(String, String)>, String), String>
+pub(crate) struct StackedQuantities { /* bodies, manifest entries, mode, flag */ }
+
+impl StackedQuantities {
+    pub(crate) fn new(mode: Mode, emit_scenario_col: bool) -> Self;
+    /// One design cell. The first group for a quantity contributes its header
+    /// and rows; later groups contribute rows only, so all groups stack under
+    /// one header.
+    pub(crate) fn push_group(
+        &mut self,
+        quantities: &[ir::quantity::Quantity],
+        coords: DesignCoords<'_>,
+        draws: &[Vec<QuantityResult>],
+        times: &[f64],
+    ) -> Result<(), String>;
+    pub(crate) fn finish(self, calendar: &io::CalendarMeta)
+        -> Result<(Vec<(String, String)>, String), String>;
+}
 ```
 
-An iterator rather than a collection, because `predict` yields groups from a
-sink rebuilt per sweep point that cannot outlive the loop, while `simulate`
-yields them from one long-lived map.
+`predict` pushes once per (sweep point × scenario) from inside both loops;
+`simulate` pushes once per scenario. The header-drop and manifest merge then
+exist in exactly one place.
 
 The caller supplies coordinates here, which is safe precisely because it is a
 _rendering_ seam, not an accumulation seam: the pooling was possible because the
 accumulator merged cells, and a renderer handed already-separated groups cannot
 re-merge them.
 
-Note this absorbs only predict's **inner** (per-scenario) stacking; its outer
-per-sweep-point loop and manifest merge stay in `predict.rs`. Hoisting both
-would mean restructuring the sweep loop, which §4 declines.
+One wrinkle for the implementer: predict's per-scenario loop also builds
+`ff_cells` via `assemble_predictive` (`predict.rs:1364-1370`), so routing it
+through `StackedQuantities` is a small restructure of that loop body, not a
+verbatim extraction. Output stays byte-identical either way.
 
 ### 3.6 What is not unified
 
@@ -461,17 +534,38 @@ should emerge (§9).
 
 ## 5. Migration
 
-**Increment 1 — move the quantile primitives to `cli/src/quantile.rs`.** `band`,
-`quantile`, `fmt_time`, `fmt_value`, `QUANTILE_LEVELS` and `quantile`'s four
-unit tests (`predict.rs:2160-2196`) move out of `fit/predict.rs`;
-`quantity_output.rs:20` and `contrasts.rs:48` update their imports rather than
-going through a re-export. `write_tsv` stays in `predict`. Pure move,
-byte-identical.
+**Increment 1 — move the quantile primitives to `cli/src/quantile.rs`.** Moves
+`QUANTILE_LEVELS` (`predict.rs:339-342`), `quantile` (`:346-362`), `band`
+(`:364-377`), `fmt_time` (`:521-528`), `fmt_value` (`:530-540`), and the four
+unit tests at **`:2160-2194`** — not `:2196`, which is the doc comment for
+`cloud()`, a helper the remaining `subsample_draws` tests still need.
+`level_for` (`:513-519`) and `write_tsv` (`:542-552`) stay.
 
-**Increment 2a — lift `render_stacked`, add the calendar line.** `fit predict`
-routed through the shared stacker; `"calendar": calendar.to_json()` added at
-`predict.rs:1376` (§6). One intended output change (predict's manifest gains
-`calendar`); otherwise byte-identical.
+Three things a literal reading would miss:
+
+- **`predict.rs` needs its own import back.** It has ten internal use sites
+  (`QUANTILE_LEVELS` at `:438`, `:1529`, `:1530`; `fmt_value` at `:455`, `:476`,
+  `:505`; `fmt_time` at `:459`, `:498`; `band` at `:1743`, `:2001`). Import
+  exactly those four — **not** `quantile`, whose only caller is `band`; an
+  unused import is a hard local error, since `rust/.cargo/config.toml` sets
+  `rustflags = ["-D", "warnings"]`.
+- **`mod quantile;` must be added to `main.rs`**, beside `mod quantity_output;`.
+  A private `mod` at the crate root is sufficient — it is an ancestor of every
+  module, so existing visibilities resolve unchanged.
+- **`contrasts.rs:48` is a split, not a rewrite**: `write_tsv` stays in
+  `predict`, so that one `use` becomes two.
+
+Pure move; outputs byte-identical (all five are pure functions of their
+arguments, and Rust does not perform FP contraction).
+
+**Increment 2a — lift `StackedQuantities`, add the calendar line.** The
+`emit_scenario_col` flag is _not_ introduced here: in 2a `DesignCoords.scenario`
+is still `Option`, so the parameter would have no reader and CI runs
+`cargo clippy --all-targets -- -D warnings` (`.github/workflows/ci.yml:79`). 2a
+lifts the stacker under the existing `Option` semantics; the flag arrives in 2b
+with the field change. `fit predict` routed through the shared stacker;
+`"calendar": calendar.to_json()` added at `predict.rs:1376` (§6). One intended
+output change (predict's manifest gains `calendar`); otherwise byte-identical.
 
 **Increment 2b — `DesignCoords.scenario: &str`, `none()` deleted.** This is
 where the simulate header churn lands, because dropping the `Option` forces the
@@ -501,8 +595,8 @@ one thing the block exists to prevent, and it bites hardest on dated outbreak
 work.
 
 This is **not** fixed structurally by the lift — predict builds its top-level
-manifest outside `render_stacked`, per sweep point — so it is one explicit line
-in increment 2a. Pinned by test 7.5.
+manifest outside the shared stacker, per sweep point — so it is one explicit
+line in increment 2a. Pinned by test 7.5.
 
 ## 7. Tests
 
@@ -559,14 +653,22 @@ cell-count predicate would introduce (§3.4).
 
 **7.6 `fit predict` manifest carries `calendar`.** Red before increment 2a.
 
-**7.7 Scenario order is deterministic under parallelism.** `IndexMap` insertion
-order decides output order, so it depends on `merge_cell` call order. Safe today
-— `run_job` collects the Rayon phase into a `Vec` (input order preserved) and
-merges strictly in canonical order (`engine.rs:222-247`) — but the design now
-depends on it. `simulate` has no `--parallel` and hardcodes `parallel: 1`
-(`main.rs:1183`), so pin this on `fit predict`, which derives its thread count
-from `available_parallelism()` (`predict.rs:1258`): run the same multi-scenario
-job under `RAYON_NUM_THREADS=1` and `=8` and assert byte-identical TSVs.
+**7.7 `run_job` merges in canonical order under parallelism.** `IndexMap`
+insertion order decides output order, so it depends on `merge_cell` call order,
+which the design now leans on for reproducible artifacts. Test the invariant
+directly rather than through a verb: a unit test on `engine::run_job` with a
+recording sink, a multi-scenario job and `parallel: 8`, asserting the merge
+sequence equals `plan_grid` order.
+
+An end-to-end thread-count test would be **vacuous** for both verbs, which is
+worth recording so nobody writes one. `simulate` hardcodes `parallel: 1`
+(`main.rs:1183`). `fit predict` runs one scenario per `run_job` call inside a
+sequential `for sref in &scenario_refs` loop (`predict.rs:1273`, with
+`scenarios: vec![sref.clone()]` at `:1310`), so its `by_scenario` order is fixed
+outside the Rayon phase entirely and no thread count can perturb it. The
+property is only exercised when a _single_ `run_job` carries several scenarios
+with `parallel > 1` — which today is `batch run` alone (`batch.rs:715`, `:725`),
+and it emits no quantities.
 
 **7.8 A/B byte-identity.** Increments 1 and 2a (apart from the calendar block):
 same command, same seed, diff every artifact; only timestamps and mtimes may
@@ -579,11 +681,21 @@ header _and_ return the value row, so ~40 assertions across
 `quantities_surface.rs:83-107` break unless the helper strips the leading
 scenario cell; plus `quantities_surface.rs:123-125`, `:130`, `:133`;
 `simulate_quantities.rs:131`, `:135`, `:144`, `:153` (point) and `:221`, `:231`,
-`:241` (banded). Three files. Doc surfaces describing the schema also need
-updating: `docs/camdl-language-spec.md:3817`, `docs/dsl-cheatsheet.md:277`,
-`docs/user-features.md:370`, `docs/agents.md:354`. `fit_table.rs:414-421` is a
-live in-repo consumer of the predict schema and is unaffected, but should be
-checked.
+`:241` (banded); and `quantities_surface.rs:126` (`Some("b\t764")`), which the
+`:123-125` range misses. **Four** files, not three — `quantity_output.rs`'s own
+tests are the fourth: `DesignCoords::none()` has five in-module call sites
+(`:584`, `:620`, `:660`, `:701`, `:778`), and
+`banded_render_with_scenario_tags_header_rows_and_manifest` (`:776-789`) asserts
+that a `None` scenario _omits_ the column and the manifest field. Its subject
+stops being constructible, so it is rewritten against `emit_scenario_col`, not
+re-spelled.
+
+Doc surfaces mentioning the artifact (`docs/camdl-language-spec.md:3817`,
+`docs/dsl-cheatsheet.md:277`, `docs/user-features.md:370`, `docs/agents.md:354`)
+should be checked, though none prints a column list, so the edit is likely
+smaller than a schema change implies. `fit_table.rs:414-421` reads a `scenario`
+column and matches `"fitted"`, but is predict-only and predict still emits
+unconditionally — verified unaffected.
 
 ## 8. Decisions
 
@@ -623,10 +735,13 @@ checked.
 - **gh#573** — the scenario-level run identity omits `scale` and the composed
   set, so two presets differing only in `scale` or `compose` share a `run_id`.
   Independent of this change and ordered after it.
-- **gh#577 — stop fabricating a scenario member** (§2.4). Suppressing the column
-  keeps the borrowed name out of user data, but the placeholder remains
-  internally and in CAS leaf paths. The root fix — absence represented as
-  absence — touches `effective_scenarios`/`plan_grid` and changes store path
+- **gh#577 — stop fabricating a scenario member** (§2.4). Note there are three
+  fabrication sites, not two: `main.rs:1116` (the job's scenario ref),
+  `engine.rs:338-344` (`effective_scenarios`), and `main.rs:1748-1755`, which
+  builds a `ResolvedEntry { name: "baseline" }` for the CAS path. Suppressing
+  the column keeps the borrowed name out of user data, but the placeholder
+  remains internally and in CAS leaf paths. The root fix — absence represented
+  as absence — touches `effective_scenarios`/`plan_grid` and changes store path
   labels, so it is out of scope for a cli-only banding fix.
 - **gh#576 — the trajectory TSV's `scenario` column** uses the `n_scenarios > 1`
   rule (`main.rs:2037`), so after this change a single-scenario run emits the
@@ -642,6 +757,17 @@ checked.
   `summary: empirical_quantiles`), and reserve "credible interval" for point
   sets with posterior-probability semantics — "quantile band" is honest for
   everything the renderer produces today.
+- **gh#579 — `fit predict` duplicate `--scenario` names double-count draws.**
+  `scenario_refs()` does not deduplicate, so both passes merge into one
+  accumulator and the band reports `n_draws = 2N`. gh#562's shape in the verb
+  this proposal treats as the correct model. Both verbs should route through one
+  dedup check (§3.3).
+- **The quantities manifest carries no ad-hoc scenario patch.** With
+  `--enable`/`--disable` the run simulates a modified world but emits no design
+  coordinate, by design (§3.3) — one cell, nothing for a per-row column to
+  distinguish. Provenance still belongs somewhere, and the manifest is the
+  place: it should record the ad-hoc `enable`/`disable` lists alongside the
+  calendar block.
 - **gh#574 — `--stdout` silently suppresses `--quantities-out`.**
   `simulate --stdout` returns at `main.rs:1376-1387`, before the quantities
   writer at `:1433`, so `--stdout --quantities-out d` writes nothing to `d`
