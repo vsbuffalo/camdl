@@ -108,9 +108,21 @@ surfaces only as a dt-convergence FAIL **[agent]**.
 The asymmetry is the dangerous part. The _safe_ spelling hard-errors cleanly;
 the _general_ one zeroes silently.
 
-Adjacent, same site, **not** the same bug and not yet tested: `main.rs:2357`
-uses `compiled.default_params`, so a derived-expression projection referencing a
-parameter appears to ignore `--param` overrides. Own entry, own issue.
+The `compiled.default_params` at `main.rs:2357` is **not** a second bug, though
+it reads like one. The model handed to `CompiledModel::new` has already had
+`--params` and `--param` applied, so `default_params` carries the resolved
+values. Checked: **[verified]**
+
+```
+$ camdl simulate rho_test.camdl --scenario baseline --seed 1 --obs a.tsv
+                                              # projected = rho * I, rho = 1.0
+  0  14   5  19   10  37   15  88   20 155   25 214   30 271
+$ camdl simulate rho_test.camdl --scenario baseline --param rho=0.1 --seed 1 --obs b.tsv
+  0   0   5   1   10  10   15  11   20  17   25  20   30  27
+```
+
+The override reaches the projection. Only the _real compartment_ state is
+unpopulated.
 
 **Independent.** The interim refusal (reject a real-compartment reference at
 `StreamProjection::from_ir`) is a small change and can land immediately, ahead
