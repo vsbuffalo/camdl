@@ -1610,7 +1610,7 @@ fn materialize_obs_for_quantities(
         };
         let sampler =
             sim::inference::obs_model::compile_obs_sample_pf(obs_ir, compiled.clone(), params);
-        let projected = project_all_obs_times(traj, obs_ir, model, &times);
+        let projected = project_all_obs_times(traj, obs_ir, model, &times)?;
         let mut vals = Vec::with_capacity(times.len());
         for (ti, &t) in times.iter().enumerate() {
             let snap = snap_at(traj, t);
@@ -2142,7 +2142,7 @@ impl engine::RunSink for StreamSink {
                 let obs_times = self.obs_times_cache[si].clone();
                 let projected_values = project_all_obs_times(
                     traj, obs_ir, model, &obs_times,
-                );
+                )?;
                 for (ti, &obs_t) in obs_times.iter().enumerate() {
                     // GH #6 fix: pass the actual compartment state at the obs
                     // time so the likelihood p/mean expressions can resolve
@@ -2307,12 +2307,65 @@ pub(crate) fn obs_emit_schedule_times(
 /// For CumulativeFlow: accumulate per-snapshot flows, difference between
 /// consecutive observation times to get per-interval flow counts.
 /// For CurrentPop/CurrentPopSum: read state at snapshot closest to each obs time.
+/// Every observation time must land on a recorded snapshot.
+///
+/// The projection below reads the trajectory, not integrator state, so an
+/// observation time that falls BETWEEN snapshots silently reads the earlier one:
+/// a flow collapses its whole interval onto the snapshot boundary (six zeros
+/// then a lump) and a stock becomes a step function. The emitted file still
+/// carries the requested timestamps, so the corruption is invisible — and
+/// `--obs` output is normally fitted (incident
+/// `docs/dev/incidents/2026-08-12-obs-quantized-to-output-grid.md`, gh#589).
+///
+/// The condition is MISALIGNMENT, not coarseness: an `emit_schedule` at t = 3.5
+/// against output every 1 snaps exactly as badly as daily-against-weekly.
+///
+/// This is a guard, not the fix. The fix is to sample from integrator state at
+/// observation times, which removes the coupling entirely.
+fn check_obs_times_on_snapshot_grid(
+    traj: &sim::Trajectory,
+    obs_ir: &ir::observation::ObservationModel,
+    obs_times: &[f64],
+) -> Result<(), String> {
+    let snaps: Vec<f64> = traj.snapshots.iter().map(|s| s.t).collect();
+    if snaps.is_empty() {
+        return Ok(()); // nothing recorded; a separate error path covers this
+    }
+    // Relative tolerance, matching how output times are compared elsewhere
+    // (`chain_binomial.rs`): a bare absolute epsilon degenerates to exact
+    // equality on a calendar-anchored model.
+    let on_grid = |t: f64| {
+        snaps.iter().any(|&s| (s - t).abs() <= sim::schedule::OUTPUT_EPS * t.abs().max(1.0))
+    };
+    let Some(&bad) = obs_times.iter().find(|&&t| !on_grid(t)) else {
+        return Ok(());
+    };
+    let before = snaps.iter().rev().find(|&&s| s < bad);
+    let after = snaps.iter().find(|&&s| s > bad);
+    Err(format!(
+        "observation stream '{}' emits at t = {bad}, which is not a recorded \
+         output time (nearest recorded: {} and {}).\n  \
+         Observations are projected from the recorded trajectory, so an emit \
+         time between snapshots would read the earlier snapshot — a flow would \
+         report its whole interval on one boundary and zeros elsewhere, and a \
+         stock would step. The emitted file would still carry the requested \
+         timestamps (gh#589).\n  \
+         Fix: align the output cadence with the emit schedule — remove \
+         `--output-every` / the `output {{ trajectories {{ every = N }} }}` \
+         block, or set the emit schedule to a multiple of the output cadence.",
+        obs_ir.name,
+        before.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
+        after.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
+    ))
+}
+
 pub(crate) fn project_all_obs_times(
     traj: &sim::Trajectory,
     obs_ir: &ir::observation::ObservationModel,
     model: &ir::Model,
     obs_times: &[f64],
-) -> Vec<f64> {
+) -> Result<Vec<f64>, String> {
+    check_obs_times_on_snapshot_grid(traj, obs_ir, obs_times)?;
     // Per-interval incidence over a set of transition flow indices: build the
     // running cumulative flow at each snapshot, read it at each obs time, then
     // difference consecutive obs times. Shared by CumulativeFlow (one exact
@@ -2359,30 +2412,30 @@ pub(crate) fn project_all_obs_times(
                 .filter(|(_, tr)| tr.name == *flow_name)
                 .map(|(i, _)| i)
                 .collect();
-            incidence_over(&flow_indices)
+            Ok(incidence_over(&flow_indices))
         }
         ir::observation::Projection::CumulativeFlowSum(flow_names) => {
             let flow_indices: Vec<usize> = flow_names.iter()
                 .filter_map(|fname| model.transitions.iter()
                     .position(|tr| tr.name == *fname))
                 .collect();
-            incidence_over(&flow_indices)
+            Ok(incidence_over(&flow_indices))
         }
         ir::observation::Projection::CurrentPop(comp_name) => {
             let loc = resolve_comp_local(model, &obs_ir.name, comp_name);
-            obs_times.iter().map(|&obs_t| {
+            Ok(obs_times.iter().map(|&obs_t| {
                 let snap = snap_at(traj, obs_t);
                 read_comp(snap, &loc)
-            }).collect()
+            }).collect())
         }
         ir::observation::Projection::CurrentPopSum(names) => {
             let locs: Vec<_> = names.iter()
                 .map(|name| resolve_comp_local(model, &obs_ir.name, name))
                 .collect();
-            obs_times.iter().map(|&obs_t| {
+            Ok(obs_times.iter().map(|&obs_t| {
                 let snap = snap_at(traj, obs_t);
                 locs.iter().map(|loc| read_comp(snap, loc)).sum()
-            }).collect()
+            }).collect())
         }
         ir::observation::Projection::DerivedExpr(_) => {
             // Delegated to the shared `StreamProjection` evaluator in
@@ -2409,13 +2462,13 @@ pub(crate) fn project_all_obs_times(
             // FlowSum is never produced by DerivedExpr, but pass an
             // empty slice so the helper's signature is uniform.
             let empty_flows: &[u64] = &[];
-            obs_times.iter().map(|&obs_t| {
+            Ok(obs_times.iter().map(|&obs_t| {
                 let snap = snap_at(traj, obs_t);
                 eval_stream_projection(
                     &stream_proj, empty_flows, &snap.int_state.counts,
                     &params, &compiled, &real_s, obs_t,
                 )
-            }).collect()
+            }).collect())
         }
     }
 }

@@ -751,7 +751,7 @@ impl crate::engine::RunSink for PredictiveSink {
                 self.compiled.clone(),
                 &params,
             );
-            let projected = crate::project_all_obs_times(&cell.traj, obs_ir, model, times);
+            let projected = crate::project_all_obs_times(&cell.traj, obs_ir, model, times)?;
             let leaf_aux = &self.leaf_aux[si];
             let mut stream_vals: Vec<f64> = Vec::with_capacity(times.len());
             for (ti, &t) in times.iter().enumerate() {
