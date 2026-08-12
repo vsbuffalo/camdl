@@ -1258,52 +1258,31 @@ fn run_simulate(a: &args::SimulateArgs) {
         if q_model.quantities.is_empty() {
             None
         } else if let Some(out_dir) = a.quantities_out.clone() {
-            // gh#562: refuse rather than pool. `SimQuantities` accumulates every
-            // cell into ONE `draws` vector and renders it with
-            // `DesignCoords::none()`, so with more than one `--scenario` the
-            // quantiles are taken across the baseline AND its counterfactual
-            // together. The file that comes out looks like a correct posterior
-            // band and describes neither arm — the worst shape a wrong answer
-            // can take, because nothing in it says so.
+            // Scenario is a DESIGN coordinate, draws/replicates/seeds are
+            // SAMPLING coordinates; the accumulator keys on the former so a
+            // quantile is only ever taken over the latter (gh#562, proposal §1).
             //
-            // Scenario is a PARTITION of the cell grid; draws/replicates/seeds
-            // are the band. Collapsing the two axes is the defect. The real fix
-            // is a per-scenario accumulator (the `by_scenario` map
-            // `fit predict` already keeps, `predict.rs:748`); until that lands,
-            // a refusal is strictly better than a plausible-looking average.
-            // Keyed on the GRID's scenario count, not on `a.scenarios.len()`
-            // (the raw repeated-flag count). `--scenario a,b` is one flag
-            // carrying two names — comma-split into `scenario_names` above —
-            // so a flag-count guard passes it straight through to the pooling
-            // it exists to prevent.
-            if n_scenarios > 1 {
-                eprintln!(
-                    "error: --quantities-out with {} scenarios would pool them into \
-                     a single band.\n  \
-                     Quantiles would be taken across scenarios as if they were \
-                     draws, producing one ribbon that describes neither arm \
-                     (gh#562).\n  \
-                     Run one scenario at a time:\n    \
-                     {}\n  \
-                     `camdl fit predict` already bands per scenario and is \
-                     unaffected.",
-                    n_scenarios,
-                    scenario_names.iter()
-                        .map(|s| format!("camdl simulate … --scenario {s} --quantities-out <dir>/{s}"))
-                        .collect::<Vec<_>>()
-                        .join("\n    "),
-                );
-                std::process::exit(1);
-            }
-            let banded = draws_path.is_some() || total_runs > 1;
+            // `Mode` is keyed on the param-source KIND, never the cell count —
+            // the cell count includes the scenario factor, so counting it would
+            // report a two-point "posterior band" over a baseline and its
+            // counterfactual. A `--draws` file with a single row must still
+            // band.
+            let mode = if matches!(
+                job.source,
+                crate::sim_job::ParamSource::Point { replicates: 1 }
+            ) {
+                crate::quantity_output::Mode::Point
+            } else {
+                crate::quantity_output::Mode::Banded
+            };
             Some(SimQuantities {
                 quantities: q_model.quantities.clone(),
-                banded,
+                mode,
+                scenario_axis: !scenario_names.is_empty(),
                 out_dir,
                 compiled: None,
                 eval: None,
-                draws: Vec::new(),
-                times: Vec::new(),
+                by_scenario: indexmap::IndexMap::new(),
                 calendar: io::CalendarMeta::from_model(&q_model),
             })
         } else {
@@ -1432,22 +1411,29 @@ fn run_simulate(a: &args::SimulateArgs) {
 
     // ── Write generated quantities (regenerated sidecar, NOT in the CAS leaf) ─
     if let Some(q) = &sink.quant {
-        if !q.draws.is_empty() {
-            let mode = if q.banded {
-                crate::quantity_output::Mode::Banded
-            } else {
-                crate::quantity_output::Mode::Point
-            };
-            let (outs, manifest) =
-                crate::quantity_output::render_quantities(
-                    &q.quantities, &q.draws, &q.times, mode,
-                    crate::quantity_output::DesignCoords::none(),
-                    &q.calendar,
-                )
+        if !q.by_scenario.is_empty() {
+            // One design cell per scenario, each banded over ITS OWN draws. The
+            // `scenario` column is emitted iff the run has a scenario axis: with
+            // no `--scenario` there is exactly one cell and no coordinate to
+            // report, and labelling it would name a world the run did not
+            // simulate (proposal §2.4, §3.3).
+            let mut stacked = crate::quantity_output::StackedQuantities::new(q.mode);
+            for (scenario, acc) in &q.by_scenario {
+                let coords = crate::quantity_output::DesignCoords {
+                    scenario: q.scenario_axis.then_some(scenario.as_str()),
+                    sweep: &[],
+                };
+                stacked
+                    .push_group(&q.quantities, coords, &acc.draws, &acc.times, &q.calendar)
                     .unwrap_or_else(|e| {
                         eprintln!("error rendering quantities: {}", e);
                         std::process::exit(1);
                     });
+            }
+            let (outs, manifest) = stacked.finish(&q.calendar).unwrap_or_else(|e| {
+                eprintln!("error rendering quantities: {}", e);
+                std::process::exit(1);
+            });
             std::fs::create_dir_all(&q.out_dir).unwrap_or_else(|e| {
                 eprintln!("error: cannot create quantities dir {}: {}", q.out_dir.display(), e);
                 std::process::exit(1);
@@ -1544,22 +1530,59 @@ struct SimQuantities {
     quantities: Vec<ir::quantity::Quantity>,
     /// Banded (`--draws`/multi-cell) vs point (single fixed-params cell). Keyed
     /// by the param-source kind, not the cell count alone.
-    banded: bool,
+    mode: crate::quantity_output::Mode,
+    /// Whether this run HAS a scenario axis (any `--scenario` was passed). A
+    /// fact about the run, fixed at construction: with no axis there is no
+    /// design coordinate to report, and inventing one would name a world the
+    /// run did not simulate (proposal §2.4).
+    scenario_axis: bool,
     /// The directory to write `quantities/<name>.tsv` + `quantities.json` into.
     out_dir: std::path::PathBuf,
     /// Built lazily on the first `merge_cell` from that cell's resolved model —
     /// the compile happens once per run, never per cell.
     compiled: Option<std::sync::Arc<sim::CompiledModel>>,
     eval: Option<sim::quantity::QuantityEvaluator>,
-    /// One inner `Vec` per cell: each quantity leaf's value, in `quantities`
-    /// order. Retains derived values, never the trajectory.
-    draws: Vec<Vec<sim::quantity::QuantityResult>>,
-    /// The trajectory snapshot times, captured once (every cell shares the output
-    /// cadence) — the time axis a series quantity is rendered against.
-    times: Vec<f64>,
+    /// Per scenario: that scenario's draws and its own time axis.
+    ///
+    /// Scenario is a DESIGN coordinate — it says which world was simulated —
+    /// while draws/replicates/seeds are SAMPLING coordinates within one world.
+    /// A quantile summarises the second kind only; taking one across scenarios
+    /// averages a baseline and its counterfactual into a ribbon describing
+    /// neither (gh#562). Keyed here, at the point cells are assigned, because
+    /// that is where the information exists — a renderer handed already-merged
+    /// cells cannot un-merge them.
+    ///
+    /// Insertion order is the engine's canonical order (scenario outermost),
+    /// and `run_job` merges strictly in that order even under Rayon, so the
+    /// rendered file lists scenarios deterministically.
+    by_scenario: indexmap::IndexMap<String, ScenarioQuant>,
     /// Calendar semantics for the `time` axis, stamped into `quantities.json` so
     /// a consumer maps `time → Date` without re-deriving `origin`/`time_unit`.
     calendar: io::CalendarMeta,
+}
+
+/// One scenario's accumulated quantity draws and the time axis they were
+/// produced on. Per scenario, not per run: once a scenario can declare its own
+/// horizon (gh#561), a run-global axis would render a September scenario
+/// against an August one.
+#[derive(Default)]
+struct ScenarioQuant {
+    /// One inner `Vec` per cell: each quantity leaf's value, in `quantities`
+    /// order. Retains derived values, never the trajectory.
+    draws: Vec<Vec<sim::quantity::QuantityResult>>,
+    times: Vec<f64>,
+}
+
+/// Whether two output-time grids agree, on the RELATIVE tolerance the rest of
+/// the codebase uses for output times (`chain_binomial.rs` compares
+/// `OUTPUT_EPS * t.abs().max(1.0)`). A bare absolute `OUTPUT_EPS` would
+/// degenerate to exact equality on a calendar-anchored model, where one ulp at
+/// t ~ 1e5 days already exceeds 1e-12.
+fn time_grids_match(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            (x - y).abs() <= sim::schedule::OUTPUT_EPS * x.abs().max(1.0)
+        })
 }
 
 /// Materialize the per-draw `y_sim` for the streams an `observations.<stream>`
@@ -1656,10 +1679,30 @@ impl SimQuantities {
             )?)
         };
         let results = eval.eval_draw(&params, &cell.traj, compiled, obs_set.as_ref());
-        if self.times.is_empty() {
-            self.times = cell.traj.snapshots.iter().map(|s| s.t).collect();
+        let times: Vec<f64> = cell.traj.snapshots.iter().map(|s| s.t).collect();
+        // The key is DERIVED from the cell, never supplied by a caller — that is
+        // what makes pooling unrepresentable here. An accumulator taking a key
+        // parameter would be strictly weaker, however well the key were typed,
+        // because a caller could pass one key for every cell.
+        let scenario = cell.spec.scenario.name();
+        let acc = self.by_scenario.entry(scenario.to_string()).or_default();
+        if acc.draws.is_empty() {
+            acc.times = times;
+        } else if !time_grids_match(&acc.times, &times) {
+            // Later cells PROVE compatibility rather than being folded into the
+            // first cell's axis. Without this, a future feature letting cells of
+            // ONE scenario differ in cadence would silently reinstate gh#562 at
+            // smaller scale — first-wins, no diagnostic.
+            return Err(format!(
+                "scenario '{scenario}': cell {} has {} output times but this \
+                 scenario's earlier cells have {}. Quantity cells within a \
+                 scenario must share a time grid.",
+                cell.spec.run_idx,
+                times.len(),
+                acc.times.len()
+            ));
         }
-        self.draws.push(results);
+        acc.draws.push(results);
         Ok(())
     }
 }

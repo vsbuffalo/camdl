@@ -71,10 +71,19 @@ fn scalar_f(qdir: &Path, name: &str) -> f64 {
     let txt = std::fs::read_to_string(qdir.join("quantities").join(format!("{name}.tsv")))
         .unwrap_or_else(|e| panic!("read {name}.tsv: {e}"));
     let mut lines = txt.lines();
-    assert_eq!(lines.next(), Some("value"), "{name}: point scalar header");
+    // This fixture runs with `--scenario baseline`, so it has a scenario axis
+    // and the design coordinate leads the row (gh#562).
+    assert_eq!(
+        lines.next(),
+        Some("scenario\tvalue"),
+        "{name}: point scalar header carries the scenario coordinate"
+    );
     lines
         .next()
         .unwrap_or_else(|| panic!("{name}: missing value row"))
+        .rsplit('\t')
+        .next()
+        .expect("value field")
         .trim()
         .parse()
         .unwrap_or_else(|e| panic!("{name}: parse value: {e}"))

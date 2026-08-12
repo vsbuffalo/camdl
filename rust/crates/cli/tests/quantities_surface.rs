@@ -71,8 +71,21 @@ fn scalar(qdir: &Path, name: &str) -> String {
     let txt = std::fs::read_to_string(qdir.join("quantities").join(format!("{name}.tsv")))
         .unwrap_or_else(|e| panic!("read {name}.tsv: {e}"));
     let mut lines = txt.lines();
-    assert_eq!(lines.next(), Some("value"), "{name}: point scalar header");
-    lines.next().unwrap_or_else(|| panic!("{name}: missing value row")).trim().to_string()
+    // This fixture runs with `--scenario baseline`, so it has a scenario axis
+    // and the design coordinate leads the row (gh#562).
+    assert_eq!(
+        lines.next(),
+        Some("scenario\tvalue"),
+        "{name}: point scalar header carries the scenario coordinate"
+    );
+    lines
+        .next()
+        .unwrap_or_else(|| panic!("{name}: missing value row"))
+        .rsplit('\t')
+        .next()
+        .expect("value field")
+        .trim()
+        .to_string()
 }
 
 fn scalar_f(qdir: &Path, name: &str) -> f64 {
@@ -119,18 +132,24 @@ fn simulate_emits_the_full_quantity_surface() {
     assert!(scalar_f(&qdir, "high_days") + scalar_f(&qdir, "low_days") <= n_snap);
 
     // ── Stratified scalar: one row per patch ──
+    // The run passes `--scenario baseline`, so the design coordinate leads every
+    // header ahead of the stratum dims and the value (gh#562).
     let final_r = std::fs::read_to_string(qdir.join("quantities/final_R.tsv")).unwrap();
     let mut frl = final_r.lines();
-    assert_eq!(frl.next(), Some("patch\tvalue"), "stratified scalar header");
-    assert_eq!(frl.next(), Some("a\t887"));
-    assert_eq!(frl.next(), Some("b\t764"));
+    assert_eq!(frl.next(), Some("scenario\tpatch\tvalue"), "stratified scalar header");
+    assert_eq!(frl.next(), Some("baseline\ta\t887"));
+    assert_eq!(frl.next(), Some("baseline\tb\t764"));
 
     // ── Series shapes: total (time+value), stratified (time+patch+value) ──
     let total = std::fs::read_to_string(qdir.join("quantities/total_prev.tsv")).unwrap();
-    assert_eq!(total.lines().next(), Some("time\tvalue"), "series header");
+    assert_eq!(total.lines().next(), Some("scenario\ttime\tvalue"), "series header");
     assert_eq!(total.lines().count(), 1 + 201, "one row per snapshot");
     let prev = std::fs::read_to_string(qdir.join("quantities/prevalence.tsv")).unwrap();
-    assert_eq!(prev.lines().next(), Some("time\tpatch\tvalue"), "stratified series header");
+    assert_eq!(
+        prev.lines().next(),
+        Some("scenario\ttime\tpatch\tvalue"),
+        "stratified series header"
+    );
 
     // ── Manifest: one entry per logical quantity; every Time / Derived-of-Time
     //    quantity is statically censorable ──
