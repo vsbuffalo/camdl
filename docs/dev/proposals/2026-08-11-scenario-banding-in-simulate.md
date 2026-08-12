@@ -623,29 +623,29 @@ checked.
 - **gh#573** — the scenario-level run identity omits `scale` and the composed
   set, so two presets differing only in `scale` or `compose` share a `run_id`.
   Independent of this change and ordered after it.
-- **Stop fabricating a scenario member** (§2.4). Suppressing the column keeps
-  the borrowed name out of user data, but the placeholder remains internally and
-  in CAS leaf paths. The root fix — absence represented as absence — touches
-  `effective_scenarios`/`plan_grid` and changes store path labels, so it is out
-  of scope for a cli-only banding fix.
-- **The trajectory TSV's `scenario` column** uses the `n_scenarios > 1` rule
-  (`main.rs:2037`), so after this change a single-scenario run emits the column
-  in `quantities/*.tsv` and not in the trajectory beside it. Same
+- **gh#577 — stop fabricating a scenario member** (§2.4). Suppressing the column
+  keeps the borrowed name out of user data, but the placeholder remains
+  internally and in CAS leaf paths. The root fix — absence represented as
+  absence — touches `effective_scenarios`/`plan_grid` and changes store path
+  labels, so it is out of scope for a cli-only banding fix.
+- **gh#576 — the trajectory TSV's `scenario` column** uses the `n_scenarios > 1`
+  rule (`main.rs:2037`), so after this change a single-scenario run emits the
+  column in `quantities/*.tsv` and not in the trajectory beside it. Same
   schema-instability argument as decision 1, different artifact and a larger
   compatibility surface.
-- **Sampling semantics are not `ParamSource`** (§3.4). The honest fix is a
-  declaration of whether a point set carries a measure. Until then the software
-  claims more than it can justify: `n_draws` counts _samples_, not parameter
-  draws — a `Point { replicates: 5 }` run reports `n_draws = 5` with zero
-  parameter draws. Rename to `n_samples`, have the manifest carry the
+- **gh#575 — sampling semantics are not `ParamSource`** (§3.4). The honest fix
+  is a declaration of whether a point set carries a measure. Until then the
+  software claims more than it can justify: `n_draws` counts _samples_, not
+  parameter draws — a `Point { replicates: 5 }` run reports `n_draws = 5` with
+  zero parameter draws. Rename to `n_samples`, have the manifest carry the
   decomposition (`parameter_points`, `replicates_per_point`,
   `summary: empirical_quantiles`), and reserve "credible interval" for point
   sets with posterior-probability semantics — "quantile band" is honest for
   everything the renderer produces today.
-- **`--stdout` silently suppresses `--quantities-out`.** `simulate --stdout`
-  returns at `main.rs:1376-1387`, before the quantities writer at `:1433`, so
-  `--stdout --quantities-out d` writes nothing to `d` without saying so.
-  Pre-existing, adjacent.
+- **gh#574 — `--stdout` silently suppresses `--quantities-out`.**
+  `simulate --stdout` returns at `main.rs:1376-1387`, before the quantities
+  writer at `:1433`, so `--stdout --quantities-out d` writes nothing to `d`
+  without saying so. Pre-existing, adjacent.
 - **`batch run --quantities-out`** — where the §4 generalization is re-examined
   against a real second design axis. The shape to reach for then is not
   `PointKind`/`BandKey` but a role on the axis itself, declared where the design
@@ -660,20 +660,31 @@ checked.
   must be solved there: predict-style sweep coordinates that do not live in the
   cell, and CAS cache hits, which `run_job` filters out before simulation
   (`engine.rs:209-219`) so a warm run would band over only the missed cells.
-- **Verify the quantity evaluator across scenarios.** `push_cell` compiles
-  `CompiledModel` + `QuantityEvaluator` from the _first_ cell only
-  (`main.rs:1621-1632`), and `CompiledModel::new` bakes `time_function`
-  piecewise breakpoints and spline knots at default parameter values
-  (`compiled_model.rs:1277-1289`, `:1363-1374`). If a scenario `set`s a
-  parameter appearing in a time-function structural position, scenarios 2..n
-  would evaluate quantities against scenario 1's baked constants. Pre-existing
-  for `--draws` (the gh#186 shape), but removing the refusal widens it to
-  scenario overrides, which are the feature's whole point. **Unproven** — test
-  before increment 3 lands: a `time_function` whose piecewise value references a
-  parameter, a quantity reading it, two scenarios setting that parameter
-  differently, assert the bands differ.
+  Considered and **closed**, recorded so it is not re-raised: the quantity
+  evaluator compiles `CompiledModel` + `QuantityEvaluator` from the _first_ cell
+  only (`main.rs:1621-1632`), and `CompiledModel::new` bakes `time_function`
+  piecewise breakpoints/values and spline knots at default parameter values
+  (`compiled_model.rs:1277-1289`, `:1363-1374`). A scenario `set` on a parameter
+  in a structural forcing position would therefore have scenarios 2..n
+  evaluating quantities against scenario 1's constants. It is unreachable: the
+  compiler rejects the precondition outright.
 
-## 10. The workflow documentation gap (tier 2)
+```
+$ camdl check tf.camdl      # piecewise `values = [0.0, k]`, k a parameter
+error[E600]: forcing `drive`: parameter 'k' drives the piecewise forcing
+coefficient, which is structural data — interpolation knots, piecewise step
+grids, and the spline basis are precomputed at construction and cannot vary per
+step, so they cannot be an estimated parameter. Make the coefficient a constant,
+or use a sinusoidal, fourier, or periodic forcing (whose coefficients are live)
+```
+
+E600 covers parameters, and a scenario `set`/`scale` acts on parameters, so
+neither the draw axis nor the scenario axis can reach the baked path. Forcings
+whose coefficients _are_ live (sinusoidal, fourier, periodic) are evaluated per
+step and are unaffected. Compile-once is therefore safe, and increment 3 is not
+gated on it.
+
+## 10. The workflow documentation gap (tier 2, gh#578)
 
 Not a scope item; recorded because this proposal's whole subject is the
 posterior→scenario path and the gap sits directly on it.
