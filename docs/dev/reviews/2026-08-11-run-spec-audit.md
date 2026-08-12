@@ -24,6 +24,26 @@ Three findings were reported independently by more than one agent working from
 different slices and different evidence; those are marked **[corroborated]** and
 carry unusually high confidence.
 
+## Where each finding was filed
+
+| Finding                        | Filed as                                                   |
+| ------------------------------ | ---------------------------------------------------------- |
+| 1, 3, 4, 5, 6, 7, 8, 9, 10, 19 | gh#583 (cluster; 9 folded into 1). gh#573 is a sibling.    |
+| 2                              | gh#584                                                     |
+| 11                             | gh#572 — pre-existing, broadened to cover generated draws  |
+| 12                             | gh#587                                                     |
+| 13                             | gh#588                                                     |
+| 14                             | gh#585                                                     |
+| 15, 16, 17                     | gh#586                                                     |
+| 18                             | gh#591                                                     |
+| 20                             | gh#590                                                     |
+| 21                             | split: gh#592, gh#593, gh#594, gh#595; label case → gh#577 |
+| 22                             | gh#589                                                     |
+| 23                             | no issue — subsumed by the spec rewrite                    |
+
+One defect found while verifying rather than auditing — the CLI-docs gate cannot
+express an intentional negative example — is gh#596.
+
 ---
 
 ## Correctness — silent wrong answers
