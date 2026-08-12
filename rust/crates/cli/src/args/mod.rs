@@ -1228,6 +1228,39 @@ pub struct FitPredictArgs {
 /// preset, so reusing `baseline` would mislead.
 pub const FITTED: &str = "fitted";
 
+/// Split `--scenario` values on commas, trim, drop empties, and reject repeats.
+///
+/// One shared check because both verbs mis-handle a repeat, differently and
+/// both badly: `simulate` would accumulate two cells into one scenario bucket
+/// and fail with "point-mode quantities require exactly one realization" AFTER
+/// the whole grid had simulated and committed leaves, while `fit predict` bands
+/// each posterior draw twice and reports `n_draws = 2N` — a band that looks
+/// right with a sample count that is not (gh#579). A repeat is never what the
+/// user meant, so it is rejected at parse where the diagnostic can name it.
+///
+/// Note the split happens here: `--scenario a,b` is one flag carrying two
+/// names, which is why a guard counting flags rather than names missed it
+/// (gh#562).
+pub fn split_scenario_names(raw: &[String]) -> Result<Vec<String>, String> {
+    let names: Vec<String> = raw
+        .iter()
+        .flat_map(|s| s.split(',').map(|t| t.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for n in &names {
+        if !seen.insert(n.as_str()) {
+            return Err(format!(
+                "scenario '{n}' is named more than once.\n  \
+                 Each `--scenario` selects one arm to run; repeating a name would \
+                 run and summarize it twice.\n  \
+                 Fix: drop the duplicate."
+            ));
+        }
+    }
+    Ok(names)
+}
+
 impl FitPredictArgs {
     /// The raw fit handle (`--fit` or the positional form), unparsed.
     pub fn fit(&self) -> Result<&str, String> {
@@ -1251,12 +1284,7 @@ impl FitPredictArgs {
     /// migration-style diagnostic the OCaml `scenarios {}` reservation uses.
     pub fn scenario_refs(&self) -> Result<Vec<crate::sim_job::ScenarioRef>, String> {
         use crate::sim_job::ScenarioRef;
-        let names: Vec<String> = self
-            .scenarios
-            .iter()
-            .flat_map(|s| s.split(',').map(|t| t.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .collect();
+        let names = split_scenario_names(&self.scenarios)?;
         if let Some(bad) = names.iter().find(|n| n.as_str() == FITTED) {
             return Err(format!(
                 "scenario name '{bad}' is reserved: it labels the no-overlay row \

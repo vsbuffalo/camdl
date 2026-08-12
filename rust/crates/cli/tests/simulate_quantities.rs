@@ -398,6 +398,51 @@ fn simulate_without_scenario_emits_no_scenario_column() {
     );
 }
 
+/// A repeated `--scenario` name is rejected at parse, in both spellings.
+///
+/// Without this, `simulate` accumulates two cells into ONE scenario bucket and
+/// fails with "point-mode quantities require exactly one realization" only
+/// after the whole grid has simulated and committed leaves — a late, confusing
+/// failure for an input that is never what the user meant. `fit predict` has
+/// the same gap with a worse symptom (gh#579), so both verbs route through one
+/// check.
+#[test]
+fn simulate_rejects_duplicate_scenario_names() {
+    let bin = skip_if_missing();
+
+    for (label, args) in [
+        ("repeated flags", vec!["--scenario", "baseline", "--scenario", "baseline"]),
+        ("comma-separated", vec!["--scenario", "baseline,baseline"]),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let model = write_model(tmp.path());
+        let results_dir = tmp.path().join("results");
+        let mut argv = vec![
+            "simulate",
+            model.to_str().unwrap(),
+            "--seed", "1",
+            "--output-dir", results_dir.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(&args);
+
+        let out = run(&bin, &argv);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "{label}: a repeated scenario name must be rejected, got exit 0.\nstderr={stderr}"
+        );
+        assert!(
+            stderr.contains("named more than once"),
+            "{label}: the error must name the repeat, got:\n{stderr}"
+        );
+        // Rejected at parse — before anything was simulated or committed.
+        assert!(
+            !results_dir.exists(),
+            "{label}: nothing may be written when the arguments are rejected"
+        );
+    }
+}
+
 #[test]
 fn simulate_without_quantities_out_skips_with_a_note() {
     let bin = skip_if_missing();
