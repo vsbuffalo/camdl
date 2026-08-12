@@ -17,7 +17,7 @@
 
 use indexmap::IndexMap;
 
-use crate::fit::predict::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
+use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 
 /// Banded (predict, `simulate --draws`) vs point (a single fixed-params
 /// `simulate` run). Keyed by the param-source kind, never the cell count alone.

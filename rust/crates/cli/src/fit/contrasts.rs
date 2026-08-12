@@ -45,7 +45,8 @@ use sim::quantity::{QuantityDrawValue, QuantityEvaluator, QuantityResult};
 
 use crate::args::types::ForwardBackend;
 use crate::fit::joint::{resolve_joint, LatentPath};
-use crate::fit::predict::{band, fmt_time, fmt_value, write_tsv, QUANTILE_LEVELS};
+use crate::fit::predict::write_tsv;
+use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 use crate::params_resolver::{resolve_parameters, ParameterInputs};
 
 // ── Shape model (the per-draw value of a contrast operand / body) ───────────────

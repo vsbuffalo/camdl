@@ -11,6 +11,7 @@ mod output_schema;  // run.json output_schema: column roles for tabular outputs 
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
 mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
+mod quantile; // shared quantile reduction + numeric formatting (proposal 2026-08-11 §3.6)
 mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by fit predict + simulate)
 mod run_paths;      // canonical output-path helpers
 mod cas;
