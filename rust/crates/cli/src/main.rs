@@ -1270,7 +1270,12 @@ fn run_simulate(a: &args::SimulateArgs) {
             // is a per-scenario accumulator (the `by_scenario` map
             // `fit predict` already keeps, `predict.rs:748`); until that lands,
             // a refusal is strictly better than a plausible-looking average.
-            if a.scenarios.len() > 1 {
+            // Keyed on the GRID's scenario count, not on `a.scenarios.len()`
+            // (the raw repeated-flag count). `--scenario a,b` is one flag
+            // carrying two names — comma-split into `scenario_names` above —
+            // so a flag-count guard passes it straight through to the pooling
+            // it exists to prevent.
+            if n_scenarios > 1 {
                 eprintln!(
                     "error: --quantities-out with {} scenarios would pool them into \
                      a single band.\n  \
@@ -1281,8 +1286,8 @@ fn run_simulate(a: &args::SimulateArgs) {
                      {}\n  \
                      `camdl fit predict` already bands per scenario and is \
                      unaffected.",
-                    a.scenarios.len(),
-                    a.scenarios.iter()
+                    n_scenarios,
+                    scenario_names.iter()
                         .map(|s| format!("camdl simulate … --scenario {s} --quantities-out <dir>/{s}"))
                         .collect::<Vec<_>>()
                         .join("\n    "),
