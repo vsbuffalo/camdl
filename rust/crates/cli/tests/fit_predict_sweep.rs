@@ -242,6 +242,28 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
         "one peak row per sweep cell, each tagged with its k value; saw {qcells:?}"
     );
 
+    // ── quantities.json carries the calendar block ──────────────────────────
+    // `fit predict` used to build its merged manifest with `schema` +
+    // `quantities` only, so a consumer could not map the numeric `time` column
+    // to dates without re-parsing the model — the one thing the block exists to
+    // prevent, and it bites hardest on dated outbreak work. `simulate`'s
+    // manifest always carried it; predict's two OTHER sidecars did too. Only
+    // this one dropped it.
+    let qmanf = peakf
+        .parent()
+        .and_then(|d| d.parent())
+        .map(|seg| seg.join("quantities.json"))
+        .expect("quantities.json sits beside the quantities/ dir");
+    let qm: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&qmanf).unwrap()).unwrap();
+    assert_eq!(qm["schema"], "camdl.quantities/v1", "manifest schema tag");
+    assert_eq!(
+        qm["calendar"]["time_unit"], "days",
+        "the quantities manifest must carry calendar semantics for the time \
+         column, got: {}",
+        qm["calendar"]
+    );
+
     // ── predictive.json: the sweep:k coordinate is named in the join contract ──
     let pmf = std::fs::read_dir(results.join("fits"))
         .unwrap()

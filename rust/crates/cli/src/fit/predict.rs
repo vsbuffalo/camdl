@@ -1167,12 +1167,13 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             .collect();
 
         // The free-forward cells (one per sweep-point × scenario, engine canonical
-        // order), plus the stacked quantity bodies + merged manifest entries — all
-        // accumulated across the sweep grid. quantity name → accumulated TSV body
-        // (header written once, from the first design cell's render).
+        // order), plus the stacked quantity files — accumulated across the whole
+        // sweep grid, since one design cell is a (sweep point, scenario) pair and
+        // the sink is rebuilt per sweep point.
         let mut ff_cells: Vec<FreeForwardCell> = Vec::new();
-        let mut quant_bodies: IndexMap<String, String> = IndexMap::new();
-        let mut quant_manifest_entries: Vec<serde_json::Value> = Vec::new();
+        let mut stacked = crate::quantity_output::StackedQuantities::new(
+            crate::quantity_output::Mode::Banded,
+        );
 
         // ── Honor --n-draws on free-forward: an even, deterministic subsample of
         // the whole posterior cloud (gh#387). Without it the free-forward path
@@ -1273,35 +1274,15 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     sweep: sweep_pt,
                 };
                 if !model.quantities.is_empty() {
-                    let (outs, manifest) = crate::quantity_output::render_quantities(
+                    // One design cell = this (sweep point, scenario). The shared
+                    // stacker owns the header-drop and the manifest merge.
+                    stacked.push_group(
                         &model.quantities,
+                        coords,
                         &accum.quant_draws,
                         &accum.quant_times,
-                        crate::quantity_output::Mode::Banded,
-                        coords,
                         &calendar,
                     )?;
-                    for (name, content) in outs {
-                        // First design cell for this quantity: keep its header +
-                        // rows. Subsequent cells: append only the data rows (drop
-                        // the repeated header line) so all cells stack under one
-                        // header.
-                        match quant_bodies.entry(name) {
-                            indexmap::map::Entry::Vacant(e) => {
-                                e.insert(content);
-                            }
-                            indexmap::map::Entry::Occupied(mut e) => {
-                                let body: String =
-                                    content.split_inclusive('\n').skip(1).collect();
-                                e.get_mut().push_str(&body);
-                            }
-                        }
-                    }
-                    let m: serde_json::Value = serde_json::from_str(&manifest)
-                        .map_err(|e| format!("parsing quantities manifest: {e}"))?;
-                    if let Some(arr) = m["quantities"].as_array() {
-                        quant_manifest_entries.extend(arr.iter().cloned());
-                    }
                 }
                 ff_cells.push(FreeForwardCell {
                     sweep: sweep_pt.clone(),
@@ -1313,16 +1294,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             }
         }
 
-        if !model.quantities.is_empty() {
-            quantity_outputs = quant_bodies.into_iter().collect();
-            let merged = serde_json::json!({
-                "schema": "camdl.quantities/v1",
-                "quantities": quant_manifest_entries,
-            });
-            quantity_manifest = Some(
-                serde_json::to_string_pretty(&merged)
-                    .map_err(|e| format!("serializing quantities manifest: {e}"))?,
-            );
+        if !stacked.is_empty() {
+            let (outs, manifest) = stacked.finish(&calendar)?;
+            quantity_outputs = outs;
+            quantity_manifest = Some(manifest);
         }
         free_forward = Some(ff_cells);
     }
