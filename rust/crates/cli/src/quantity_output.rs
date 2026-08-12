@@ -387,6 +387,97 @@ pub(crate) fn render_quantities(
     Ok((outputs, manifest_str))
 }
 
+// ── Stacking design cells into one file set ────────────────────────────────
+
+/// Accumulates rendered design cells into one file set.
+///
+/// A quantity artifact holds one header per quantity and the rows of every
+/// design cell stacked beneath it. Both verbs need that stacking — `simulate`
+/// over its scenarios, `fit predict` over (sweep point × scenario) — and it is
+/// the bug-prone part: drop the wrong line and a header lands mid-file; merge
+/// the manifests wrongly and a consumer cannot tell the cells apart.
+///
+/// Fed incrementally rather than taking all cells at once, because `predict`
+/// builds its sink inside the sweep loop and cannot hold every cell live at the
+/// same time. That is also why a one-shot function would not do: it would
+/// absorb only predict's inner (per-scenario) stacking and leave the outer
+/// per-sweep-point pass duplicated, moving the logic up a frame rather than
+/// removing it.
+///
+/// Proposal: `docs/dev/proposals/2026-08-11-scenario-banding-in-simulate.md` §3.5.
+pub(crate) struct StackedQuantities {
+    /// Quantity name → its accumulated file text (header + every cell's rows).
+    bodies: IndexMap<String, String>,
+    /// One manifest entry per (quantity, design cell), each tagged with its
+    /// coordinates so a consumer can group by them.
+    manifest_entries: Vec<serde_json::Value>,
+    mode: Mode,
+}
+
+impl StackedQuantities {
+    pub(crate) fn new(mode: Mode) -> Self {
+        StackedQuantities { bodies: IndexMap::new(), manifest_entries: Vec::new(), mode }
+    }
+
+    /// Render one design cell and stack it. The first cell for a quantity
+    /// contributes its header and rows; later cells contribute rows only.
+    pub(crate) fn push_group(
+        &mut self,
+        quantities: &[ir::quantity::Quantity],
+        coords: DesignCoords<'_>,
+        draws: &[Vec<sim::quantity::QuantityResult>],
+        times: &[f64],
+        calendar: &io::CalendarMeta,
+    ) -> Result<(), String> {
+        let (outs, manifest) =
+            render_quantities(quantities, draws, times, self.mode, coords, calendar)?;
+        for (name, content) in outs {
+            match self.bodies.entry(name) {
+                indexmap::map::Entry::Vacant(e) => {
+                    e.insert(content);
+                }
+                indexmap::map::Entry::Occupied(mut e) => {
+                    // Drop the repeated header line so every cell stacks under
+                    // the first one.
+                    let body: String = content.split_inclusive('\n').skip(1).collect();
+                    e.get_mut().push_str(&body);
+                }
+            }
+        }
+        let m: serde_json::Value = serde_json::from_str(&manifest)
+            .map_err(|e| format!("parsing quantities manifest: {e}"))?;
+        if let Some(arr) = m["quantities"].as_array() {
+            self.manifest_entries.extend(arr.iter().cloned());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.bodies.is_empty()
+    }
+
+    /// The stacked files plus one merged manifest.
+    ///
+    /// The manifest carries the calendar block. `fit predict` previously built
+    /// its own merged document with `schema` + `quantities` only, so a consumer
+    /// of a predict quantities manifest could not map the numeric `time` column
+    /// to dates without re-parsing the model — the one thing the block exists to
+    /// prevent (proposal §6).
+    pub(crate) fn finish(
+        self,
+        calendar: &io::CalendarMeta,
+    ) -> Result<(Vec<(String, String)>, String), String> {
+        let merged = serde_json::json!({
+            "schema": "camdl.quantities/v1",
+            "calendar": calendar.to_json(),
+            "quantities": self.manifest_entries,
+        });
+        let manifest = serde_json::to_string_pretty(&merged)
+            .map_err(|e| format!("serializing quantities manifest: {e}"))?;
+        Ok((self.bodies.into_iter().collect(), manifest))
+    }
+}
+
 /// Banded rendering of one leaf (one column per draw → a quantile band). Every
 /// row is prefixed with the design overlay cells (`scenario`, then this cell's
 /// swept values) — empty `coords` prefix nothing.
