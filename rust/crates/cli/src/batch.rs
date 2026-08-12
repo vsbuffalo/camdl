@@ -1695,7 +1695,7 @@ fn write_obs_into_cas(
             obs_ir, compiled.clone(), &params,
         );
         let obs_times = crate::obs_emit_schedule_times(obs_ir)?;
-        let projected = crate::project_all_obs_times(traj, obs_ir, model, &obs_times);
+        let projected = crate::project_all_obs_times(traj, obs_ir, model, &obs_times)?;
 
         let path = obs_dir.join(format!("{}.tsv", obs_ir.name));
         let mut out = std::io::BufWriter::new(
