@@ -72,6 +72,14 @@ scenarios {
       I0    = 10
     }
   }
+  ctrl {
+    set = {
+      beta  = 0.2
+      gamma = 0.1
+      N0    = 1000
+      I0    = 10
+    }
+  }
 }
 "#;
 
@@ -241,6 +249,65 @@ fn simulate_draws_run_writes_banded_quantities() {
         "n_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
         "time-scalar banded header carries the censoring trio"
     );
+}
+
+/// gh#562: `--quantities-out` across more than one scenario pools the arms into
+/// a single band, so it is refused until the per-scenario accumulator lands.
+///
+/// The guard must key on the number of scenarios the GRID will run, not on how
+/// many times `--scenario` was typed. `--scenario a,b` is ONE flag carrying TWO
+/// names (comma-split in `run_simulate`), and a flag-count guard let it through:
+/// it exited 0 and wrote a pooled band with `n_draws = draws x scenarios` and no
+/// `scenario` column — the exact silent-wrong the refusal exists to stop. Both
+/// spellings are asserted here so the hole cannot reopen in one of them.
+#[test]
+fn simulate_refuses_quantities_out_across_scenarios_in_both_spellings() {
+    let bin = skip_if_missing();
+
+    for (label, scenario_args) in [
+        ("repeated flags", vec!["--scenario", "baseline", "--scenario", "ctrl"]),
+        ("comma-separated", vec!["--scenario", "baseline,ctrl"]),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let model = write_model(tmp.path());
+        let qdir = tmp.path().join("q");
+
+        let results_dir = tmp.path().join("results");
+        let mut args = vec![
+            "simulate",
+            model.to_str().unwrap(),
+            "--draws",
+            "uniform",
+            "-n",
+            "5",
+            "--seed",
+            "7",
+            "--output-dir",
+            results_dir.to_str().unwrap(),
+            "--quantities-out",
+            qdir.to_str().unwrap(),
+        ];
+        args.extend_from_slice(&scenario_args);
+
+        let out = run(&bin, &args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert!(
+            !out.status.success(),
+            "{label}: multi-scenario --quantities-out must be refused, got exit 0.\n\
+             stderr={stderr}"
+        );
+        assert!(
+            stderr.contains("gh#562"),
+            "{label}: the refusal must name gh#562, got:\n{stderr}"
+        );
+        // And nothing was written — a refusal that still emits the pooled file
+        // would be worse than no refusal, because the file looks authoritative.
+        assert!(
+            !qdir.exists(),
+            "{label}: no quantities sidecar may be written when the run is refused"
+        );
+    }
 }
 
 #[test]
