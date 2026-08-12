@@ -134,36 +134,47 @@ fn simulate_point_run_writes_quantities_sidecar() {
     let prev_txt = std::fs::read_to_string(&prev)
         .unwrap_or_else(|_| panic!("missing {}", prev.display()));
     let mut plines = prev_txt.lines();
+    // This run passes `--scenario baseline`, so it HAS a scenario axis and the
+    // design coordinate leads every row (gh#562).
     assert_eq!(
         plines.next().unwrap(),
-        "time\tvalue",
-        "point series header is `time\\tvalue`, no n_draws/quantiles"
+        "scenario\ttime\tvalue",
+        "point series header carries the scenario coordinate, then `time value`"
     );
     let prow: Vec<&str> = plines.next().expect("at least one prevalence row").split('\t').collect();
-    assert_eq!(prow.len(), 2, "point series row is `time value`");
-    assert!(prow[0].parse::<f64>().is_ok(), "time column numeric, got {:?}", prow[0]);
-    assert!(prow[1].parse::<f64>().is_ok(), "value column numeric, got {:?}", prow[1]);
+    assert_eq!(prow.len(), 3, "point series row is `scenario time value`");
+    assert_eq!(prow[0], "baseline", "the scenario that was actually applied");
+    assert!(prow[1].parse::<f64>().is_ok(), "time column numeric, got {:?}", prow[1]);
+    assert!(prow[2].parse::<f64>().is_ok(), "value column numeric, got {:?}", prow[2]);
 
     // ── peak.tsv: a value scalar → bare `value` ──
     let peak = qdir.join("quantities").join("peak.tsv");
     let peak_txt = std::fs::read_to_string(&peak)
         .unwrap_or_else(|_| panic!("missing {}", peak.display()));
     let mut klines = peak_txt.lines();
-    assert_eq!(klines.next().unwrap(), "value", "point scalar header is bare `value`");
-    let krow = klines.next().expect("a peak row");
-    assert!(krow.parse::<f64>().is_ok(), "peak value numeric, got {:?}", krow);
+    assert_eq!(
+        klines.next().unwrap(), "scenario\tvalue",
+        "point scalar header is `scenario value`"
+    );
+    let krow: Vec<&str> = klines.next().expect("a peak row").split('\t').collect();
+    assert_eq!(krow[0], "baseline");
+    assert!(krow[1].parse::<f64>().is_ok(), "peak value numeric, got {:?}", krow[1]);
 
     // ── onset.tsv: a time scalar → bare `value`; a finite time OR `NA` ──
     let onset = qdir.join("quantities").join("onset.tsv");
     let onset_txt = std::fs::read_to_string(&onset)
         .unwrap_or_else(|_| panic!("missing {}", onset.display()));
     let mut olines = onset_txt.lines();
-    assert_eq!(olines.next().unwrap(), "value", "point time-scalar header is bare `value`");
-    let orow = olines.next().expect("an onset row");
+    assert_eq!(
+        olines.next().unwrap(), "scenario\tvalue",
+        "point time-scalar header is `scenario value`"
+    );
+    let orow: Vec<&str> = olines.next().expect("an onset row").split('\t').collect();
+    assert_eq!(orow[0], "baseline");
     assert!(
-        orow == "NA" || orow.parse::<f64>().is_ok(),
+        orow[1] == "NA" || orow[1].parse::<f64>().is_ok(),
         "onset is a finite time or NA (right-censored), got {:?}",
-        orow
+        orow[1]
     );
 
     // ── quantities.json: the manifest, one entry per logical quantity ──
@@ -251,63 +262,140 @@ fn simulate_draws_run_writes_banded_quantities() {
     );
 }
 
-/// gh#562: `--quantities-out` across more than one scenario pools the arms into
-/// a single band, so it is refused until the per-scenario accumulator lands.
+/// gh#562: each scenario gets its OWN band.
 ///
-/// The guard must key on the number of scenarios the GRID will run, not on how
-/// many times `--scenario` was typed. `--scenario a,b` is ONE flag carrying TWO
-/// names (comma-split in `run_simulate`), and a flag-count guard let it through:
-/// it exited 0 and wrote a pooled band with `n_draws = draws x scenarios` and no
-/// `scenario` column — the exact silent-wrong the refusal exists to stop. Both
-/// spellings are asserted here so the hole cannot reopen in one of them.
+/// Scenario is a design coordinate — it says which world was simulated — while
+/// draws are sampling coordinates within one world. A quantile summarises the
+/// second kind only. Pooling them averaged a baseline and its counterfactual
+/// into one ribbon describing neither, in a file whose shape was
+/// indistinguishable from a correct posterior band.
+///
+/// The load-bearing assertion is `n_draws == 5` per scenario, NOT 10. A test
+/// that only checked for the `scenario` column would pass against a version
+/// that emits the column and still pools.
 #[test]
-fn simulate_refuses_quantities_out_across_scenarios_in_both_spellings() {
+fn simulate_bands_each_scenario_separately() {
     let bin = skip_if_missing();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = write_model(tmp.path());
+    let qdir = tmp.path().join("q");
+    let results_dir = tmp.path().join("results");
 
-    for (label, scenario_args) in [
-        ("repeated flags", vec!["--scenario", "baseline", "--scenario", "ctrl"]),
-        ("comma-separated", vec!["--scenario", "baseline,ctrl"]),
-    ] {
-        let tmp = tempfile::tempdir().unwrap();
-        let model = write_model(tmp.path());
-        let qdir = tmp.path().join("q");
-
-        let results_dir = tmp.path().join("results");
-        let mut args = vec![
+    let out = run(
+        &bin,
+        &[
             "simulate",
             model.to_str().unwrap(),
-            "--draws",
-            "uniform",
-            "-n",
-            "5",
-            "--seed",
-            "7",
-            "--output-dir",
-            results_dir.to_str().unwrap(),
-            "--quantities-out",
-            qdir.to_str().unwrap(),
-        ];
-        args.extend_from_slice(&scenario_args);
+            "--draws", "uniform",
+            "-n", "5",
+            "--seed", "7",
+            "--scenario", "baseline",
+            "--scenario", "ctrl",
+            "--output-dir", results_dir.to_str().unwrap(),
+            "--quantities-out", qdir.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "multi-scenario --quantities-out must succeed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-        let out = run(&bin, &args);
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    let prev = qdir.join("quantities").join("prevalence.tsv");
+    let txt = std::fs::read_to_string(&prev)
+        .unwrap_or_else(|_| panic!("missing {}", prev.display()));
+    let mut lines = txt.lines();
 
-        assert!(
-            !out.status.success(),
-            "{label}: multi-scenario --quantities-out must be refused, got exit 0.\n\
-             stderr={stderr}"
-        );
-        assert!(
-            stderr.contains("gh#562"),
-            "{label}: the refusal must name gh#562, got:\n{stderr}"
-        );
-        // And nothing was written — a refusal that still emits the pooled file
-        // would be worse than no refusal, because the file looks authoritative.
-        assert!(
-            !qdir.exists(),
-            "{label}: no quantities sidecar may be written when the run is refused"
+    let header = lines.next().expect("header");
+    assert_eq!(
+        header, "scenario\ttime\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "the scenario column leads the banded series header"
+    );
+
+    let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
+    assert!(!rows.is_empty(), "at least one band row");
+
+    // Both arms present, and nothing else.
+    let scenarios: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r[0]).collect();
+    assert_eq!(
+        scenarios,
+        ["baseline", "ctrl"].into_iter().collect(),
+        "one group per scenario"
+    );
+
+    // THE assertion: 5 draws per scenario, not 5 x 2 pooled.
+    for r in &rows {
+        assert_eq!(
+            r[2], "5",
+            "n_draws must be the PER-SCENARIO draw count; 10 means the arms were \
+             pooled into one band (gh#562). Row: {r:?}"
         );
     }
+
+    // Each arm contributes the same number of time rows.
+    let n_base = rows.iter().filter(|r| r[0] == "baseline").count();
+    let n_ctrl = rows.iter().filter(|r| r[0] == "ctrl").count();
+    assert_eq!(n_base, n_ctrl, "both arms band over the same time grid");
+
+    // The manifest tags one entry per (quantity, scenario).
+    let mjson: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(qdir.join("quantities.json")).unwrap(),
+    )
+    .unwrap();
+    let prev_entries: Vec<&serde_json::Value> = mjson["quantities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|q| q["name"] == "prevalence")
+        .collect();
+    assert_eq!(prev_entries.len(), 2, "one manifest entry per (quantity, scenario)");
+    let tagged: std::collections::BTreeSet<&str> = prev_entries
+        .iter()
+        .map(|q| q["scenario"].as_str().expect("scenario tag"))
+        .collect();
+    assert_eq!(tagged, ["baseline", "ctrl"].into_iter().collect());
+    assert_eq!(
+        mjson["calendar"]["time_unit"], "days",
+        "calendar semantics travel with the artifact"
+    );
+}
+
+/// With no `--scenario` there is no scenario axis, so no coordinate is emitted.
+///
+/// The runtime synthesizes a scenario named `baseline` internally to give the
+/// grid a non-empty axis (`main.rs`), and `baseline` is an ordinary name a model
+/// may declare — this fixture declares one. Emitting it would stamp
+/// `scenario = baseline` on rows where the `baseline` preset was NOT applied: a
+/// design coordinate naming a world the run did not simulate.
+#[test]
+fn simulate_without_scenario_emits_no_scenario_column() {
+    let bin = skip_if_missing();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = write_model(tmp.path());
+    let qdir = tmp.path().join("q");
+    let results_dir = tmp.path().join("results");
+
+    let out = run(
+        &bin,
+        &[
+            "simulate",
+            model.to_str().unwrap(),
+            "--draws", "uniform",
+            "-n", "3",
+            "--seed", "7",
+            "--output-dir", results_dir.to_str().unwrap(),
+            "--quantities-out", qdir.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let txt = std::fs::read_to_string(qdir.join("quantities").join("prevalence.tsv")).unwrap();
+    let header = txt.lines().next().unwrap();
+    assert_eq!(
+        header, "time\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "no --scenario means no scenario axis and no fabricated coordinate"
+    );
 }
 
 #[test]

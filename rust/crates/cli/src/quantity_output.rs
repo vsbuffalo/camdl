@@ -37,16 +37,14 @@ pub(crate) enum Mode {
 /// columns), keeping its output byte-identical.
 #[derive(Clone, Copy)]
 pub(crate) struct DesignCoords<'a> {
+    /// The scenario this design cell belongs to. `None` means the run has **no
+    /// scenario axis** — not "do not label these cells". The distinction is the
+    /// whole of gh#562: the old `none()` constructor meant the latter, and was
+    /// passed by a caller that had pooled several scenarios, so the renderer
+    /// labelled a mixture as if it were one arm. Every caller now derives this
+    /// from the cell it is rendering.
     pub scenario: Option<&'a str>,
     pub sweep: &'a [(String, f64)],
-}
-
-impl<'a> DesignCoords<'a> {
-    /// No overlay — the `simulate` path: omit the `scenario` column and any
-    /// `sweep:<param>` columns.
-    pub fn none() -> Self {
-        DesignCoords { scenario: None, sweep: &[] }
-    }
 }
 
 /// A scalar quantity leaf's banding result: either a real band over the finite
@@ -672,7 +670,7 @@ mod tests {
 
     #[test]
     fn quantity_header_is_a_function_of_shape_and_dims() {
-        let none = DesignCoords::none();
+        let none = DesignCoords { scenario: None, sweep: &[] };
         assert_eq!(
             quantity_header(QShape::Series, &[], none),
             "time\tn_draws\tq05\tq25\tq50\tq75\tq95"
@@ -708,7 +706,7 @@ mod tests {
 
     #[test]
     fn point_header_is_a_bare_value_column() {
-        let none = DesignCoords::none();
+        let none = DesignCoords { scenario: None, sweep: &[] };
         // Series: time + value (no n_draws / quantiles).
         assert_eq!(point_header(QShape::Series, &[], none), "time\tvalue");
         assert_eq!(point_header(QShape::Series, &["patch".to_string()], none), "time\tpatch\tvalue");
@@ -748,7 +746,7 @@ mod tests {
         ]];
         let times = vec![0.0, 7.0];
         let (outs, _manifest) =
-            render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords::none(), &test_cal()).unwrap();
+            render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords { scenario: None, sweep: &[] }, &test_cal()).unwrap();
 
         let prev = &outs.iter().find(|(n, _)| n == "prevalence").unwrap().1;
         let plines: Vec<&str> = prev.trim_end().lines().collect();
@@ -789,7 +787,7 @@ mod tests {
     #[test]
     fn point_mode_rejects_multiple_realizations() {
         let draws: Vec<Vec<sim::quantity::QuantityResult>> = vec![vec![], vec![]];
-        let err = render_quantities(&[], &draws, &[], Mode::Point, DesignCoords::none(), &test_cal()).unwrap_err();
+        let err = render_quantities(&[], &draws, &[], Mode::Point, DesignCoords { scenario: None, sweep: &[] }, &test_cal()).unwrap_err();
         assert!(err.contains("exactly one realization"), "got: {err}");
     }
 
@@ -866,7 +864,7 @@ mod tests {
 
         // None → no scenario column or field (simulate's byte-identical path).
         let (outs2, manifest2) =
-            render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords::none(), &test_cal()).unwrap();
+            render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords { scenario: None, sweep: &[] }, &test_cal()).unwrap();
         let peak2 = &outs2.iter().find(|(n, _)| n == "peak").unwrap().1;
         assert_eq!(
             peak2.lines().next().unwrap(),
