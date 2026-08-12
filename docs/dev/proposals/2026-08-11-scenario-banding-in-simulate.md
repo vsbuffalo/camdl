@@ -1,7 +1,7 @@
 # Per-scenario banding in `simulate --quantities-out`
 
 - Date: 2026-08-11
-- Status: proposed
+- Status: implemented (increments 1, 2a, 3) — see the deviation note in §5
 - Fixes: gh#562
 - Unblocks: gh#561 (ordered strictly after)
 - Related: gh#572 (scenario×sweep overlap), gh#573 (scenario run_id collision)
@@ -533,6 +533,21 @@ real design axes and two independent clients, and that is when the abstraction
 should emerge (§9).
 
 ## 5. Migration
+
+> **Deviation, recorded rather than improvised (implemented 2026-08-11).**
+> Increment 2b — replacing `DesignCoords.scenario: Option<&str>` with `&str`
+> plus an `emit_scenario_col` flag — was **dropped**. Once the accumulator keys
+> by scenario (increment 3), the `Option` encodes exactly the property the flag
+> would carry: `None` means _this run has no scenario axis_, which is a real
+> design fact, not the "do not label these cells" the old `none()` constructor
+> meant. A separate boolean would reconstruct the same information one field
+> over. The compiler confirmed the reasoning independently: rewriting the render
+> site made `DesignCoords::none()` dead, and it was deleted on that basis, so
+> the value the bug was written in terms of is gone either way. What survives
+> from 2b is therefore folded into increment 3; what is dropped is the field
+> retype and the flag. The predicted ~40-assertion churn also came in smaller
+> than measured, because tests that pass no `--scenario` are unaffected by the
+> axis rule.
 
 **Increment 1 — move the quantile primitives to `cli/src/quantile.rs`.** Moves
 `QUANTILE_LEVELS` (`predict.rs:339-342`), `quantile` (`:346-362`), `band`
