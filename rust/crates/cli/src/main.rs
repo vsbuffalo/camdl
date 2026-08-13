@@ -2334,6 +2334,7 @@ pub(crate) const OBS_SNAP_EPS: f64 = 1e-9;
 fn check_obs_times_on_snapshot_grid(
     traj: &sim::Trajectory,
     stream: &str,
+    time_unit: &str,
     obs_times: &[f64],
 ) -> Result<(), String> {
     let snaps: Vec<f64> = traj.snapshots.iter().map(|s| s.t).collect();
@@ -2366,20 +2367,33 @@ fn check_obs_times_on_snapshot_grid(
     };
     let before = snaps.iter().rev().find(|&&s| s < bad);
     let after = snaps.iter().find(|&&s| s > bad);
+    // The guidance deliberately states the INVARIANT rather than naming one fix.
+    // Observation times reach this check from two unrelated places — a model's
+    // `emit_schedule` (simulate/batch/synthetic) and a loaded data file's time
+    // column (`fit predict`) — and advice that fits one is wrong for the other.
+    // Telling a `fit predict` user to "change the emit schedule" is nonsense:
+    // there isn't one, and they cannot rewrite their data's dates.
     Err(format!(
-        "observation stream '{}' emits at t = {bad}, which is not a recorded \
-         output time (nearest recorded: {} and {}).\n  \
-         Observations are projected from the recorded trajectory, so an emit \
-         time between snapshots would read the earlier snapshot — a flow would \
+        "observation stream '{}' needs a value at t = {bad}, which is not a \
+         recorded output time (nearest recorded: {} and {}).\n  \
+         Observations are projected from the recorded trajectory, so a time \
+         between snapshots would read the earlier snapshot — a flow would \
          report its whole interval on one boundary and zeros elsewhere, and a \
-         stock would step. The emitted file would still carry the requested \
-         timestamps (gh#589).\n  \
-         Fix: align the output cadence with the emit schedule — remove \
-         `--output-every` / the `output {{ trajectories {{ every = N }} }}` \
-         block, or set the emit schedule to a multiple of the output cadence.",
+         stock would step. The output would still carry the requested \
+         timestamps, so the error is invisible in the file (gh#589).\n  \
+         Required: every observation time must also be an output time.\n  \
+         Note the output schedule defaults to every 1.0 {}, independent of \
+         `dt` — so sub-unit observation times need an explicit \
+         `output {{ trajectories {{ every = ... }} }}`.\n  \
+         If these times come from an `emit_schedule`, make it a multiple of \
+         the output cadence (or widen the output schedule to match). If they \
+         come from a data file — `fit predict` projects at the observed times, \
+         not an `emit_schedule` — the output schedule must be fine enough to \
+         include them.",
         stream,
         before.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
         after.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
+        time_unit,
     ))
 }
 
@@ -2389,7 +2403,7 @@ pub(crate) fn project_all_obs_times(
     model: &ir::Model,
     obs_times: &[f64],
 ) -> Result<Vec<f64>, String> {
-    check_obs_times_on_snapshot_grid(traj, &obs_ir.name, obs_times)?;
+    check_obs_times_on_snapshot_grid(traj, &obs_ir.name, &model.time_unit, obs_times)?;
     // Per-interval incidence over a set of transition flow indices: build the
     // running cumulative flow at each snapshot, read it at each obs time, then
     // difference consecutive obs times. Shared by CumulativeFlow (one exact
@@ -3328,7 +3342,7 @@ mod obs_grid_guard_tests {
             "precondition: snap_at resolves t=3009 to the 3008 snapshot"
         );
 
-        let err = check_obs_times_on_snapshot_grid(&tr, "s", &[t_obs])
+        let err = check_obs_times_on_snapshot_grid(&tr, "s", "days", &[t_obs])
             .expect_err("a snapshot the resolver skips must be rejected");
         assert!(err.contains("not a recorded output time"), "got: {err}");
     }
@@ -3337,11 +3351,11 @@ mod obs_grid_guard_tests {
     #[test]
     fn exact_and_within_tolerance_snapshots_are_accepted() {
         let tr = traj(&[0.0, 1.0, 2.0]);
-        check_obs_times_on_snapshot_grid(&tr, "s", &[0.0, 1.0, 2.0])
+        check_obs_times_on_snapshot_grid(&tr, "s", "days", &[0.0, 1.0, 2.0])
             .expect("exact grid hits are fine");
 
         let tr2 = traj(&[0.0, 1.0 - 1e-10]);
-        check_obs_times_on_snapshot_grid(&tr2, "s", &[1.0])
+        check_obs_times_on_snapshot_grid(&tr2, "s", "days", &[1.0])
             .expect("within OBS_SNAP_EPS resolves to that snapshot, so it is fine");
     }
 
@@ -3351,7 +3365,7 @@ mod obs_grid_guard_tests {
     #[test]
     fn empty_trajectory_is_an_error_not_a_pass() {
         let tr = traj(&[]);
-        let err = check_obs_times_on_snapshot_grid(&tr, "s", &[0.0])
+        let err = check_obs_times_on_snapshot_grid(&tr, "s", "days", &[0.0])
             .expect_err("no snapshots must be an error");
         assert!(err.contains("recorded no trajectory snapshots"), "got: {err}");
     }
