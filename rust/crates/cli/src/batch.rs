@@ -1674,6 +1674,19 @@ fn write_obs_into_cas(
     let obs_hash = crate::hashing::sha256_hex(obs_json.as_bytes());
     let obs_seed = process_seed ^ crate::util::SEED_MIX_OBS;
 
+    // Preflight EVERY stream before creating any file (gh#589 review).
+    //
+    // The per-stream loop below validates and writes in the same iteration, so
+    // an aligned stream followed by a misaligned one would leave the first
+    // stream's `.tsv` on disk while the error aborts before `obs.json` is
+    // written — a child directory that exists, is incomplete, and carries no
+    // provenance to say so. Validation is cheap and pure, so hoisting it turns
+    // a partial write into no write.
+    for obs_ir in &model.observations {
+        let times = crate::obs_emit_schedule_times(obs_ir)?;
+        crate::project_all_obs_times(traj, obs_ir, model, &times)?;
+    }
+
     let obs_dir = run_dir.join("obs").join(format!(
         "{}-{}", &obs_hash[..8.min(obs_hash.len())], obs_seed,
     ));
