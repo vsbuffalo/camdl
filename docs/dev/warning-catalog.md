@@ -152,22 +152,23 @@ documented at each emit site in `ocaml/lib/compiler/`.)
 
 ## Warnings
 
-| Code | Severity | Category   | Summary                                                                                                     |
-| ---- | -------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
-| W100 | Warning  | model-file | inconsistent digit grouping in a numeric literal (drained from the lexer)                                   |
-| W103 | Warning  | model-file | questionable model-file construct                                                                           |
-| W104 | Warning  | model-file | absolute path in a file reference (`read(...)` or a forcing `data =`) — non-portable model (gh#211, gh#307) |
-| W105 | Warning  | model-file | per-(p,q) coupling antipattern (O(P²) transitions); use a summed rate `sum(q in dim where …)`               |
-| W200 | Warning  | IR         | suspicious IR shape                                                                                         |
-| W201 | Warning  | IR         | suspicious IR shape                                                                                         |
-| W202 | Warning  | IR         | a restricted reduction's `where` predicate selected no levels at some instantiation (aggregated per site)   |
-| W301 | Warning  | covariate  | periodic range not aligned to step size                                                                     |
-| W310 | Warning  | covariate  | covariate / interpolation issue                                                                             |
-| W311 | Warning  | covariate  | covariate / interpolation issue                                                                             |
-| W324 | Warning  | calendar   | bare number in `simulate.from`/`.to` with a calendar origin declared                                        |
-| W325 | Warning  | calendar   | bare number in a recurring/at time position with a calendar origin declared                                 |
-| W327 | Warning  | calendar   | calendar `add_*`/`subtract_*` round-trip is not in general the identity (month-end clamping)                |
-| W328 | Warning  | calendar   | `date_range` `end` does not land on a cadence boundary                                                      |
+| Code | Severity | Category   | Summary                                                                                                                |
+| ---- | -------- | ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| W100 | Warning  | model-file | inconsistent digit grouping in a numeric literal (drained from the lexer)                                              |
+| W103 | Warning  | model-file | questionable model-file construct                                                                                      |
+| W104 | Warning  | model-file | absolute path in a file reference (`read(...)` or a forcing `data =`) — non-portable model (gh#211, gh#307)            |
+| W105 | Warning  | model-file | per-(p,q) coupling antipattern (O(P²) transitions); use a summed rate `sum(q in dim where …)`                          |
+| W106 | Warning  | model-file | a scenario's `simulate { to }` runs past the last `at = [...]` output time, so the extra window emits nothing (gh#561) |
+| W200 | Warning  | IR         | suspicious IR shape                                                                                                    |
+| W201 | Warning  | IR         | suspicious IR shape                                                                                                    |
+| W202 | Warning  | IR         | a restricted reduction's `where` predicate selected no levels at some instantiation (aggregated per site)              |
+| W301 | Warning  | covariate  | periodic range not aligned to step size                                                                                |
+| W310 | Warning  | covariate  | covariate / interpolation issue                                                                                        |
+| W311 | Warning  | covariate  | covariate / interpolation issue                                                                                        |
+| W324 | Warning  | calendar   | bare number in `simulate.from`/`.to` with a calendar origin declared                                                   |
+| W325 | Warning  | calendar   | bare number in a recurring/at time position with a calendar origin declared                                            |
+| W327 | Warning  | calendar   | calendar `add_*`/`subtract_*` round-trip is not in general the identity (month-end clamping)                           |
+| W328 | Warning  | calendar   | `date_range` `end` does not land on a cadence boundary                                                                 |
 
 (Each row should eventually be expanded with a one-paragraph rationale
 documenting the failure mode the warning catches. Future emit-site additions

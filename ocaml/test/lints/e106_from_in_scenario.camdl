@@ -1,0 +1,39 @@
+# gh#561: `from` is not a per-scenario override. Shifting t_start per scenario
+# changes when init {} is evaluated AND the draw sequence, so it breaks the
+# paired-seed CRN coupling the way dt does. Before this was trapped, `from`
+# parsed, contributed nothing, and dragged the scenario's `to` to 0.0.
+#
+# expect: E106 Error
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+  N0    : count in [100, 100000]
+  I0    : count in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+
+scenarios {
+  shifted {
+    simulate { from = 10 'days  to = 120 'days }
+  }
+}

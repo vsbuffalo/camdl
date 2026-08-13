@@ -1,0 +1,42 @@
+# gh#561: with an explicit `at = [...]` output list, output_times filters to
+# entries <= t_end, so a scenario horizon PAST the largest listed time adds no
+# snapshots. Quantities reduce over snapshots, so `final(...)` for that scenario
+# is the value at the last LISTED time (90), not at the declared `to` (200) —
+# the horizon has no observable effect. Well-defined, so a warning, not an error.
+#
+# expect: W106 Warning
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+  N0    : count in [100, 100000]
+  I0    : count in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+
+output { trajectories { at = [0 'days, 30 'days, 60 'days, 90 'days] } }
+
+scenarios {
+  overshoot {
+    simulate { to = 200 'days }
+  }
+}

@@ -1506,14 +1506,29 @@ scenario_block:
 
 scenario_field:
   | SIMULATE LBRACE kvs = list(simulate_kv) RBRACE
-      { (* A scenario's `simulate {}` block overrides only the end time
-           (`to`); it lowers to ScTEnd. `dt`/`integrator`/`atol`/`rtol` are
-           whole-model knobs, not per-scenario overrides, so reject them here
-           rather than silently drop them (no-loose-semantics). *)
-        (match List.find_map (function
+      { (* A scenario's `simulate {}` block overrides ONLY the end time
+           (`to`), and `to` is required; it lowers to ScTEnd.
+
+           The rule (gh#561 proposal §2): a scenario may overlay anything
+           that leaves the trajectory PREFIX intact. `to` qualifies —
+           extending or truncating the horizon never re-tiles
+           [t_start, old_end], so paired-seed CRN survives and two
+           scenarios differing only in horizon stay byte-identical over
+           their shared span. `dt`/`integrator`/`atol`/`rtol` re-tile the
+           substep grid, so arms would diverge from t_start for purely
+           numerical reasons and every between-arm difference would mix in
+           discretization error. `from` is the same class with an extra
+           edge: `init {}` is evaluated at t_start, so shifting it changes
+           both the initial condition's timing and the draw sequence.
+
+           All are rejected here rather than silently dropped
+           (no-loose-semantics). *)
+        let rejected = List.find_map (function
            | `Dt _         -> Some "dt"
            | `Integrator _ -> Some "integrator"
-           | _             -> None) kvs with
+           | `From _       -> Some "from"
+           | _             -> None) kvs in
+        (match rejected with
          | Some key ->
            Parser_errors.push_error ~sp:$startpos ~ep:$endpos
              ~code:"E106"
@@ -1521,8 +1536,25 @@ scenario_field:
                "`%s` is not a per-scenario override: set it once in the \
                 top-level `simulate {}` block" key)
          | None -> ());
+        (* `to` is the block's only legal key, so a block that omits it —
+           including an empty one — cannot mean anything. Before this was
+           trapped it fell back to `EConst 0.0`, i.e. a scenario horizon of
+           zero, which is inert only while the runtime discards the field
+           (gh#561). The 0.0 below is now reached ONLY on an error path, as a
+           parser recovery value.
+
+           Suppressed when a rejected key was already reported: in
+           `simulate { from = 10 }` the missing `to` is a CONSEQUENCE of the
+           `from`, and the rejection points at the actual mistake. *)
         let e = match List.find_map (function `To e -> Some e | _ -> None) kvs with
-                | Some e -> e | None -> EConst 0.0 in
+                | Some e -> e
+                | None ->
+                  if rejected = None then
+                    Parser_errors.push_error ~sp:$startpos ~ep:$endpos
+                      ~code:"E106"
+                      ~msg:"a scenario's `simulate {}` block must set `to`: it \
+                            overrides the scenario's end time and nothing else";
+                  EConst 0.0 in
         Ast.ScTEnd e }
   | k = IDENT EQ LBRACE ps = list(scenario_kv_item) RBRACE
       { match k with

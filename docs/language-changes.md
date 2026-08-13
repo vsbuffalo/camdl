@@ -13,6 +13,48 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-13 — a scenario's `simulate {}` must set `to`, and only `to`
+
+**What.** Inside `scenarios { … }`, a `simulate {}` block overrides the end time
+and nothing else. `from` now joins `dt` and `integrator` as `E106`, and a block
+that omits `to` — including an empty `simulate { }` — is `E106` too. Previously
+`from` parsed and was silently discarded, and an absent `to` fell back to `0.0`,
+so `simulate { from = 10 'days }` compiled to a scenario horizon of **zero**.
+That was inert only because the runtime discarded the field; it is being wired
+up (gh#561), which would have run those scenarios to `t = 0`.
+
+The rule: a scenario overlays what leaves the **trajectory prefix** intact. `to`
+qualifies; `from`/`dt`/`integrator` re-tile the substep grid and would mix
+discretization error into every between-arm comparison.
+
+**Migration.**
+
+```camdl
+scenarios {
+  a { simulate { from = 10 'days  to = 120 'days } }  # old: `from` dropped
+  a { simulate { to = 120 'days } }                   # new: set `from` once, top level
+
+  b { simulate { } }                                  # old: compiled to t_end = 0.0
+  b { simulate { to = 120 'days } }                   # new: state the horizon
+  b { }                                               # new: or drop the block
+}
+```
+
+**Diagnostic.**
+
+```text
+error[E106]: `from` is not a per-scenario override: set it once in the
+             top-level `simulate {}` block
+error[E106]: a scenario's `simulate {}` block must set `to`: it overrides the
+             scenario's end time and nothing else
+```
+
+**Also new.** `W106` warns when a scenario's `to` runs past the last
+`at = [...]` output time, where the extra window emits no snapshot and so
+changes neither the trajectory nor any `quantities {}` reduction.
+
+---
+
 ## 2026-08-10 — a reduction must use its binder
 
 **What.** `sum(v in d, …)` where neither the body nor the `where` predicate

@@ -1,0 +1,39 @@
+# gh#561: `to` is the only key a scenario's simulate {} may carry, and it is
+# required — a block that sets nothing cannot mean anything. Before this was
+# trapped, an empty block silently compiled to t_end = 0.0, which would run the
+# scenario to t = 0 once the runtime honours the field.
+#
+# expect: E106 Error
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+  N0    : count in [100, 100000]
+  I0    : count in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+
+scenarios {
+  empty_window {
+    simulate { }
+  }
+}

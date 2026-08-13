@@ -3895,8 +3895,23 @@ disable = [INTERVENTION, ...]      turn off interventions
 set     = { PARAM = EXPR, ... }    override parameter values
 scale   = { PARAM = FACTOR, ... }  multiply (compiler checks domain validity)
 compose = [SCENARIO, ...]          apply patches in sequence
-simulate { to = EXPR }             override only the end time (§17.2); dt/integrator are model-wide, not per-scenario (E106)
+simulate { to = EXPR }             override only the end time (§17.2); `to` is required, and from/dt/integrator are model-wide, not per-scenario (E106)
 ```
+
+A scenario may override the end time and nothing else. The rule is that a
+scenario overlays what leaves the **trajectory prefix** intact: extending or
+truncating `to` never re-tiles `[from, old_to]`, so two scenarios differing only
+in horizon stay byte-identical over their shared span and the paired-seed
+coupling (§3.1 of the run spec) survives. `dt` and `integrator` re-tile the
+substep grid, so arms would diverge from `from` for purely numerical reasons and
+any between-arm difference would mix in discretization error; `from` is the same
+class, with the extra wrinkle that `init {}` is evaluated at `t_start`. All
+three are `E106`, as is a `simulate {}` block that omits `to` — including an
+empty one, which cannot mean anything.
+
+Under an explicit `at = [...]` output list (§16), a scenario `to` past the last
+listed time emits no additional snapshot and so changes neither the trajectory
+nor any `quantities {}` reduction; the compiler warns (`W106`).
 
 **Indexed parameter syntax in set/scale.** For indexed parameters declared as
 `N0[patch]`, the `set` and `scale` blocks accept either the mangled name or the
