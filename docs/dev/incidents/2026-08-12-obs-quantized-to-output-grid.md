@@ -13,16 +13,17 @@
 ## Summary in one paragraph
 
 `camdl simulate --obs` derives observation values from the **recorded
-trajectory** rather than from integrator state at observation times. When the
-trajectory recording cadence is coarser than — or merely misaligned with — the
-observation `emit_schedule`, every observation between two snapshots reads the
-earlier snapshot. For a flow (`incidence`), the accumulated interval collapses
-onto the snapshot boundary: six zeros and a lump. For a stock (`prevalence`),
-the series becomes a step function. Nothing warns. The emitted file still
-carries daily timestamps and a daily header, so it is labelled as daily
-surveillance data and is weekly lumps. Because `--obs` exists to generate
-synthetic data that is then **fitted**, the corrupted series becomes the input
-to inference.
+trajectory** rather than from integrator state at observation times. When an
+observation time is absent from the recorded snapshots — a coarser or merely
+misaligned recording cadence, **or the default schedule against a sub-unit emit
+schedule, or `fit predict` projecting at irregular observed-data times** — that
+observation reads the preceding snapshot instead. For a flow (`incidence`), the
+accumulated interval collapses onto the snapshot boundary: six zeros and a lump.
+For a stock (`prevalence`), the series becomes a step function. Nothing warns.
+The emitted file still carries daily timestamps and a daily header, so it is
+labelled as daily surveillance data and is weekly lumps. Because `--obs` exists
+to generate synthetic data that is then **fitted**, the corrupted series becomes
+the input to inference.
 
 ## 1. Reproduction
 
@@ -133,7 +134,12 @@ _record_ into _score_, in a module that never touches those types.
 ## 5. Impact
 
 **Affected — every synthetic and predictive emission path**, not only
-`simulate --obs`. All five callers of `project_all_obs_times` share the defect:
+`simulate --obs`. All five callers of `project_all_obs_times` share the defect.
+Note `fit predict` is not driven by `emit_schedule` at all: its projection times
+are the **loaded observed-data times** (`predict.rs:1142-1151`), which for real
+surveillance data are irregular and need not land on any regular grid. That
+makes it the highest-exposure path, and it is reachable with no `output` block
+and no unusual flag:
 
 | caller                 | path                               |
 | ---------------------- | ---------------------------------- |
@@ -168,14 +174,29 @@ recovery case for file size would silently convert it into the trap above.
 
 ## 6. Remediation
 
-**Now — make it loud.** Reject, or warn at high visibility, when observation
-times are not a subset of output times. The condition is **misalignment, not
-coarseness**: an `emit_schedule` at t = 3.5 against output every 1 snaps exactly
-as badly as daily-against-weekly.
+**Now — make it loud.** Reject when observation times are not a subset of output
+times. The condition is **misalignment, not coarseness**: an `emit_schedule` at
+t = 3.5 against output every 1 snaps exactly as badly as daily-against-weekly.
+Shipped in #597, inside `project_all_obs_times` so all five callers are covered.
 
-**Then — re-seat the emission.** Sample observations from integrator state at
-observation times. The `Schedule` already carries observation times as their own
-axis, so the information exists; this path reads the wrong source.
+**Then — re-seat the emission**, and this is harder than an earlier draft of
+this report claimed. That draft said the run "already stops at observation
+times, we just don't keep what it saw", reading `next_stop`'s formula
+(`min(t_end, next_output, next_effect, next_obs)`) without checking whether the
+axis it consults is populated. It is not: `Schedule::new` sets
+`obs_times: Vec::new()` (`schedule.rs:214`) and the comment says so — the
+observation axis is filled only for the inference drivers. **The forward path
+does not visit observation times at all.**
+
+Adding those stops is not free either. For the exact backends a new boundary
+changes reaction-versus-boundary competition, hence RNG consumption order, hence
+the trajectories themselves — moving every stored artifact digest. The
+constraint is not "don't change `traj.tsv`", it is "don't change what was
+simulated", which likely pushes the design toward a separate capture or
+interpolation rather than new stops. `chain_binomial` cannot represent arbitrary
+off-`dt` observation times by construction (Snap policy), so it needs a
+gh#125-style observation-to-`dt` check regardless, while still letting the
+_output_ cadence differ.
 
 **And consolidate, because it is the same work.** The five callers above each
 re-implement _compile sampler → project → snap → sample_ slightly differently.
