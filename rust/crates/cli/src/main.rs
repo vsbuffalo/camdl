@@ -2307,6 +2307,15 @@ pub(crate) fn obs_emit_schedule_times(
 /// For CumulativeFlow: accumulate per-snapshot flows, difference between
 /// consecutive observation times to get per-interval flow counts.
 /// For CurrentPop/CurrentPopSum: read state at snapshot closest to each obs time.
+/// Tolerance for "this observation time IS this recorded snapshot".
+///
+/// Absolute, and deliberately the single authority: the guard, `snap_at`, and
+/// the incidence walk must agree, or the guard validates one relationship while
+/// the projection resolves a different one (gh#589 review). Absolute rather
+/// than relative because that is what the resolvers have always used; changing
+/// the resolvers' behaviour is a separate question from making them consistent.
+pub(crate) const OBS_SNAP_EPS: f64 = 1e-9;
+
 /// Every observation time must land on a recorded snapshot.
 ///
 /// The projection below reads the trajectory, not integrator state, so an
@@ -2324,20 +2333,35 @@ pub(crate) fn obs_emit_schedule_times(
 /// observation times, which removes the coupling entirely.
 fn check_obs_times_on_snapshot_grid(
     traj: &sim::Trajectory,
-    obs_ir: &ir::observation::ObservationModel,
+    stream: &str,
     obs_times: &[f64],
 ) -> Result<(), String> {
     let snaps: Vec<f64> = traj.snapshots.iter().map(|s| s.t).collect();
     if snaps.is_empty() {
-        return Ok(()); // nothing recorded; a separate error path covers this
+        return Err(format!(
+            "observation stream '{}' cannot be emitted: the run recorded no \
+             trajectory snapshots.\n  \
+             Check the output schedule — an `output {{ trajectories {{ at = [...] }} }}` \
+             block with no time inside [t_start, t_end] records nothing.",
+            stream
+        ));
     }
-    // Relative tolerance, matching how output times are compared elsewhere
-    // (`chain_binomial.rs`): a bare absolute epsilon degenerates to exact
-    // equality on a calendar-anchored model.
-    let on_grid = |t: f64| {
-        snaps.iter().any(|&s| (s - t).abs() <= sim::schedule::OUTPUT_EPS * t.abs().max(1.0))
+    // The guard must use the SAME predicate the projection resolves with, not a
+    // parallel one. An earlier version compared with a RELATIVE tolerance while
+    // `snap_at` and `incidence_over` resolve with an ABSOLUTE `OBS_SNAP_EPS`;
+    // those cross over at t > 1000, beyond which the guard accepted times the
+    // projection then snapped away from — reinstating the silent-wrong this
+    // guard exists to prevent, one layer up. Validating a relationship under one
+    // predicate and resolving it under another is the defect, so there is now
+    // one predicate.
+    let resolved_index = |t: f64| -> Option<usize> {
+        traj.snapshots.iter().rposition(|s| s.t <= t + OBS_SNAP_EPS)
     };
-    let Some(&bad) = obs_times.iter().find(|&&t| !on_grid(t)) else {
+    let off_grid = obs_times.iter().find(|&&t| match resolved_index(t) {
+        Some(i) => (traj.snapshots[i].t - t).abs() > OBS_SNAP_EPS,
+        None => true,
+    });
+    let Some(&bad) = off_grid else {
         return Ok(());
     };
     let before = snaps.iter().rev().find(|&&s| s < bad);
@@ -2353,7 +2377,7 @@ fn check_obs_times_on_snapshot_grid(
          Fix: align the output cadence with the emit schedule — remove \
          `--output-every` / the `output {{ trajectories {{ every = N }} }}` \
          block, or set the emit schedule to a multiple of the output cadence.",
-        obs_ir.name,
+        stream,
         before.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
         after.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
     ))
@@ -2365,7 +2389,7 @@ pub(crate) fn project_all_obs_times(
     model: &ir::Model,
     obs_times: &[f64],
 ) -> Result<Vec<f64>, String> {
-    check_obs_times_on_snapshot_grid(traj, obs_ir, obs_times)?;
+    check_obs_times_on_snapshot_grid(traj, &obs_ir.name, obs_times)?;
     // Per-interval incidence over a set of transition flow indices: build the
     // running cumulative flow at each snapshot, read it at each obs time, then
     // difference consecutive obs times. Shared by CumulativeFlow (one exact
@@ -2386,11 +2410,11 @@ pub(crate) fn project_all_obs_times(
         let mut snap_idx = 0;
         for &obs_t in obs_times {
             while snap_idx + 1 < cum_at_snap.len()
-                && cum_at_snap[snap_idx + 1].0 <= obs_t + 1e-9
+                && cum_at_snap[snap_idx + 1].0 <= obs_t + OBS_SNAP_EPS
             {
                 snap_idx += 1;
             }
-            cum_at_obs.push(if snap_idx < cum_at_snap.len() && cum_at_snap[snap_idx].0 <= obs_t + 1e-9 {
+            cum_at_obs.push(if snap_idx < cum_at_snap.len() && cum_at_snap[snap_idx].0 <= obs_t + OBS_SNAP_EPS {
                 cum_at_snap[snap_idx].1
             } else {
                 0.0
@@ -2498,7 +2522,7 @@ fn resolve_comp_local(model: &ir::Model, obs_name: &str, comp_name: &str) -> Com
 
 pub(crate) fn snap_at(traj: &sim::Trajectory, obs_t: f64) -> &sim::Snapshot {
     traj.snapshots.iter().rev()
-        .find(|s| s.t <= obs_t + 1e-9)
+        .find(|s| s.t <= obs_t + OBS_SNAP_EPS)
         .unwrap_or_else(|| {
             eprintln!("error: no snapshot at or before t={}", obs_t);
             std::process::exit(1);
@@ -3262,6 +3286,74 @@ fn format_param_value(v: f64) -> String {
         format!("{:.4e}", v)
     } else {
         format!("{:.6}", v)
+    }
+}
+
+#[cfg(test)]
+mod obs_grid_guard_tests {
+    use super::*;
+
+    fn traj(times: &[f64]) -> sim::Trajectory {
+        let mut tr = sim::Trajectory::new();
+        for &t in times {
+            tr.push(sim::Snapshot {
+                t,
+                int_state: sim::state::IntState { counts: vec![0] },
+                real_state: sim::state::RealState::new(0),
+                flows: sim::state::Flows::Int(vec![0]),
+            });
+        }
+        tr
+    }
+
+    /// The guard must agree with the RESOLVER, not approximate it.
+    ///
+    /// An earlier version compared with a relative `OUTPUT_EPS * |t|` while
+    /// `snap_at`/`incidence_over` resolve with an absolute `OBS_SNAP_EPS`.
+    /// Those cross at t > 1000: at t = 3009 the relative window is ~3.0e-9,
+    /// wider than the absolute 1e-9, so a snapshot 2e-9 late was ACCEPTED by
+    /// the guard and then skipped by the resolver, which fell back to the
+    /// previous snapshot — the silent-wrong the guard exists to prevent,
+    /// reintroduced one layer up.
+    #[test]
+    fn near_equal_snapshot_the_resolver_would_skip_is_rejected() {
+        let t_obs = 3009.0;
+        let late = t_obs + 2e-9; // inside a relative window, outside OBS_SNAP_EPS
+        let tr = traj(&[3008.0, late]);
+
+        // Precondition: the resolver really does skip it and fall back.
+        assert_eq!(
+            snap_at(&tr, t_obs).t,
+            3008.0,
+            "precondition: snap_at resolves t=3009 to the 3008 snapshot"
+        );
+
+        let err = check_obs_times_on_snapshot_grid(&tr, "s", &[t_obs])
+            .expect_err("a snapshot the resolver skips must be rejected");
+        assert!(err.contains("not a recorded output time"), "got: {err}");
+    }
+
+    /// An exact hit, and one inside the resolver's own tolerance, are accepted.
+    #[test]
+    fn exact_and_within_tolerance_snapshots_are_accepted() {
+        let tr = traj(&[0.0, 1.0, 2.0]);
+        check_obs_times_on_snapshot_grid(&tr, "s", &[0.0, 1.0, 2.0])
+            .expect("exact grid hits are fine");
+
+        let tr2 = traj(&[0.0, 1.0 - 1e-10]);
+        check_obs_times_on_snapshot_grid(&tr2, "s", &[1.0])
+            .expect("within OBS_SNAP_EPS resolves to that snapshot, so it is fine");
+    }
+
+    /// An empty trajectory is an ERROR, not silently Ok. The previous version
+    /// returned Ok claiming "a separate error path covers this"; there is none
+    /// — `snap_at` calls `process::exit(1)` after partial artifacts are written.
+    #[test]
+    fn empty_trajectory_is_an_error_not_a_pass() {
+        let tr = traj(&[]);
+        let err = check_obs_times_on_snapshot_grid(&tr, "s", &[0.0])
+            .expect_err("no snapshots must be an error");
+        assert!(err.contains("recorded no trajectory snapshots"), "got: {err}");
     }
 }
 
