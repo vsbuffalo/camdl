@@ -2633,6 +2633,32 @@ pub fn apply_integrator_override(
     }
 }
 
+/// Apply a named scenario's own simulation horizon (gh#561) to the model in
+/// place: `scenarios { endemic { simulate { to = 3650 'days } } }` makes 3650
+/// this cell's `simulation.t_end`.
+///
+/// The single application point. `t_end` is the sole horizon authority
+/// (gh#143), so writing it here is enough — every backend derives its output
+/// and boundary times from it downstream, and nothing else needs threading.
+///
+/// No-op when the run names no scenario, when the named scenario is not a model
+/// preset (an inline ad-hoc patch, or the implicit `baseline`), or when the
+/// preset declares no `simulate {}` block. A shorter horizon than the model's is
+/// as legal as a longer one: it is this cell's window, and the ensemble's rows
+/// are ragged across scenarios by design.
+///
+/// The scenario is looked up by name rather than passed pre-resolved so that
+/// this stays a property of the model + the scenario reference, matching how
+/// [`apply_integrator_override`] sits next to it.
+pub fn apply_scenario_horizon(model: &mut ir::Model, scenario: Option<&str>) {
+    let Some(name) = scenario else { return };
+    let Some(t_end) = model.presets.iter().find(|p| p.name == name).and_then(|p| p.t_end)
+    else {
+        return;
+    };
+    model.simulation.t_end = t_end;
+}
+
 impl Default for SimRun {
     fn default() -> Self {
         SimRun {
@@ -2675,6 +2701,18 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
         .map_err(|e| format!("IR load error from {}: {}", ir_path_resolved, e))?;
     // gh#166: CLI `--integrator` override (method only), before validate/compile.
     apply_integrator_override(&mut model, run.integrator);
+    // gh#561: a named scenario may declare its own horizon (`scenarios { x {
+    // simulate { to = … } } }`). Applying it HERE — onto `simulation.t_end`,
+    // before validate/compile — is the whole of the runtime change: `t_end` is
+    // the sole horizon authority (gh#143) and `sim::output::output_times`
+    // is the single seam every backend builds its schedule through, so the
+    // output times, the boundary times and the integrator loop all follow with
+    // no further threading.
+    //
+    // Only a NAMED preset can carry one; an inline ad-hoc scenario has no
+    // horizon (there is no CLI spelling for one), which is why this reads
+    // `scenario_name` rather than the inline fields.
+    apply_scenario_horizon(&mut model, run.scenario_name.as_deref());
     // RC1 in 2026-04-19 engine review.
     ir::validate::validate(&model).map_err(|errs| {
         let mut msg = format!("IR validation failed ({} error(s)):\n", errs.len());

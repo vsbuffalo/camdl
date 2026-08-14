@@ -308,6 +308,16 @@ pub struct ResolvedEntry {
     pub enable: Vec<String>,
     pub disable: Vec<String>,
     pub params: HashMap<String, f64>,
+    /// The scenario's own simulation horizon (`scenarios { x { simulate { to
+    /// = … } } }`), when it declares one — otherwise the cell inherits
+    /// `model.simulation.t_end` (gh#561).
+    ///
+    /// Identity-relevant: it changes the stored trajectory, so it is folded
+    /// into the cell's `config` level by [`CasSink::cell_resolve`]. A model
+    /// preset carries whatever it declared; an inline ad-hoc scenario is
+    /// always `None`, because a horizon is a model-file declaration and there
+    /// is no CLI spelling for one.
+    pub t_end: Option<f64>,
 }
 
 /// Resolve every `[[scenario]]` entry against the model's preset names
@@ -347,6 +357,7 @@ fn resolve_batch_scenarios(
                         enable: preset.enable.clone(),
                         disable: preset.disable.clone(),
                         params: preset.params.clone(),
+                        t_end: preset.t_end,
                     })
                 }
                 ResolvedScenario::Adhoc { name, enable, disable, params } => {
@@ -356,6 +367,9 @@ fn resolve_batch_scenarios(
                         enable,
                         disable,
                         params: params.into_iter().collect(),
+                        // An ad-hoc patch has no horizon: `simulate { to }` is
+                        // a model-file declaration with no CLI spelling.
+                        t_end: None,
                     })
                 }
             }
@@ -922,7 +936,18 @@ impl CasSink {
             backend: self.backend,
             dt: self.dt,
             t_start: self.base_model.simulation.t_start,
-            t_end: self.base_model.simulation.t_end,
+            // gh#561: the cell's EFFECTIVE horizon, not the base model's. A
+            // scenario declaring its own `simulate { to }` produces a different
+            // trajectory, so it must re-key (`feedback: count-in-the-key`) —
+            // otherwise a horizon menu whose scenarios carry no `set`/`enable`
+            // delta resolves every cell to one `run_id` and the store serves
+            // one trajectory for all of them.
+            //
+            // This folds the RESOLVED VALUE into the existing `SimConfig::t_end`
+            // rather than adding a field to the scenario level, so it costs
+            // nothing for models that don't use the feature: a preset with no
+            // `to`, or one equal to the model horizon, hashes exactly as before.
+            t_end: resolved.t_end.unwrap_or(self.base_model.simulation.t_end),
             output: &self.base_model.output.times,
             allow_degenerate_rates: self.allow_degenerate_rates,
             no_flows: self.output_cols.no_flows,
@@ -2216,6 +2241,7 @@ mod tests {
                 enable: vec![],
                 disable: vec![],
                 params: HashMap::new(),
+                t_end: None,
             }],
             model_path: "model.ir.json".to_string(),
             model_stem: Some("sir".to_string()),

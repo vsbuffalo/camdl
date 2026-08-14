@@ -1812,6 +1812,8 @@ fn build_simulate_cas_sink(
             enable: run.adhoc_enable.clone(),
             disable: run.adhoc_disable.clone(),
             params: HashMap::new(),
+            // The implicit baseline is the model as written — its horizon.
+            t_end: None,
         }]
     } else {
         scenario_names.iter().map(|name| {
@@ -1828,6 +1830,7 @@ fn build_simulate_cas_sink(
                 enable: preset.enable.clone(),
                 disable: preset.disable.clone(),
                 params: preset.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                t_end: preset.t_end,
             })
         }).collect::<Result<Vec<_>, String>>()?
     };
