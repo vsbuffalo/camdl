@@ -3909,9 +3909,12 @@ class, with the extra wrinkle that `init {}` is evaluated at `t_start`. All
 three are `E106`, as is a `simulate {}` block that omits `to` — including an
 empty one, which cannot mean anything.
 
-Under an explicit `at = [...]` output list (§16), a scenario `to` past the last
-listed time emits no additional snapshot and so changes neither the trajectory
-nor any `quantities {}` reduction; the compiler warns (`W106`).
+Under an explicit `at = [...]` output list (§16), emission is exactly the listed
+times within the horizon, so a scenario `to` is **inert** when it selects the
+same entries the model horizon already would — no listed time falls between the
+two. The compiler warns (`W106`) in that case only: a `to` that pulls in (or
+drops) a listed time changes both the trajectory and every `quantities {}`
+reduction, and is not warned about.
 
 **Indexed parameter syntax in set/scale.** For indexed parameters declared as
 `N0[patch]`, the `set` and `scale` blocks accept either the mangled name or the

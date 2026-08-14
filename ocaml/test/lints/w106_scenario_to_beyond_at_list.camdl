@@ -1,8 +1,13 @@
-# gh#561: with an explicit `at = [...]` output list, output_times filters to
-# entries <= t_end, so a scenario horizon PAST the largest listed time adds no
-# snapshots. Quantities reduce over snapshots, so `final(...)` for that scenario
-# is the value at the last LISTED time (90), not at the declared `to` (200) —
-# the horizon has no observable effect. Well-defined, so a warning, not an error.
+# gh#561: with an explicit `at = [...]` output list, emission is exactly the
+# listed times <= t_end. A scenario `to` is therefore INERT when it selects the
+# same entries the model horizon would — here nothing is listed between 80 and
+# 200, so `overshoot` records the same three snapshots (0, 30, 60) either way
+# and no `quantities {}` reduction moves. Well-defined, so a warning.
+#
+# Note the predicate is against the MODEL horizon, not against max(at): with the
+# same list and a model horizon of 40, a scenario `to = 200` WOULD pick up 60
+# and must not warn. The clean_scenario_to_selects_more_at_times.camdl fixture
+# pins that direction.
 #
 # expect: W106 Warning
 time_unit = 'days
@@ -33,7 +38,7 @@ simulate {
   to   = 80 'days
 }
 
-output { trajectories { at = [0 'days, 30 'days, 60 'days, 90 'days] } }
+output { trajectories { at = [0 'days, 30 'days, 60 'days] } }
 
 scenarios {
   overshoot {

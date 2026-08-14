@@ -9896,21 +9896,24 @@ let expand_scenarios ctx : Ir.preset list =
     ) own.rs_scale
   ) ctx.scenario_decls;
 
-  (* The largest explicit `at = [...]` trajectory-output time, if the model
-     uses that schedule. Computed once, outside the per-scenario map: it is a
-     whole-model property and resolving it per scenario would be O(N·|at|) for
-     the same answer. `None` under a regular (`every =`) schedule, which
-     enumerates all the way to `t_end` and so can never be outrun. *)
-  let at_list_max =
+  (* The explicit `at = [...]` trajectory-output times, if the model uses that
+     schedule, plus the model horizon they are compared against. Resolved once,
+     outside the per-scenario map: both are whole-model properties, and doing it
+     per scenario would be O(N·|at|) for the same answer. `None` under a regular
+     (`every =`) schedule, which enumerates all the way to whatever `t_end` the
+     cell has and so is never made inert by a horizon override. *)
+  let at_list =
     match ctx.output_decl with
     | Some { out_trajectories = Some ot; _ } ->
       (match ot.otschedule with
-       | SchedAt (_ :: _ as ts) ->
-         Some (List.fold_left
-                 (fun acc e -> Float.max acc (resolve_float_expr ctx e))
-                 neg_infinity ts)
+       | SchedAt (_ :: _ as ts) -> Some (List.map (resolve_float_expr ctx) ts)
        | _ -> None)
     | _ -> None
+  in
+  let t_end =
+    match ctx.simulate with
+    | None    -> 100.0
+    | Some sd -> resolve_float_expr ctx sd.sim_to
   in
 
   (* Pass 3: for each scenario, resolve parents then emit IR preset. *)
@@ -9963,23 +9966,37 @@ let expand_scenarios ctx : Ir.preset list =
     let set_vals   = resolve_fold resolved.rs_set in
     let scale_vals = resolve_fold resolved.rs_scale in
     let t_end_val  = Option.map (resolve_float_expr ctx) resolved.rs_t_end in
-    (* W106: `output_times` confines emission to `[start, t_end]`, so under an
-       explicit `at = [...]` list a scenario horizon past the largest listed
-       time records no extra snapshot. Because `quantities {}` reduces over
-       snapshots, that scenario's `final(...)` is the value at the last LISTED
-       time, not at the declared `to` — the override has no observable effect.
-       The run is still well-defined, so this warns rather than erroring: it
-       does not do what the author wrote (gh#561 proposal §3.3). *)
-    (match t_end_val, at_list_max with
-     | Some te, Some mx when te > mx ->
-       Diagnostics.warning ctx.diags ~code:"W106" ~loc:Diagnostics.no_loc
-         ~message:(Printf.sprintf
-           "scenario '%s' sets `to = %g`, past the last `at = [...]` output \
-            time (%g). Emission is confined to the output list, so no snapshot \
-            is recorded beyond %g and the extra window changes neither the \
-            trajectory nor any `quantities {}` reduction. Extend the `at` list \
-            to cover %g, or drop the per-scenario `to`."
-           resolved.rs_name te mx mx te) ()
+    (* W106: under an explicit `at = [...]` output list, `output_times` emits
+       exactly the listed times `<= t_end`. So a scenario's `to` is a NO-OP
+       precisely when it selects the same entries the model horizon would —
+       i.e. when no listed time falls between the two horizons. Then the
+       trajectory and every `quantities {}` reduction (which reduce over
+       snapshots) are identical with and without the override, and the author
+       has written something inert (gh#561 proposal §3.3).
+
+       The comparison is against the MODEL horizon, not against `max(at)`.
+       "Past the last listed time" is a different and wrong test: with
+       `simulate { to = 80 }`, `at = [0,30,60,90]` and a scenario `to = 200`,
+       the override DOES select the entry at 90 that 80 excludes, so it changes
+       both the trajectory and `final(...)` — warning there, and advising the
+       author to drop it, would silently change their answer. This form also
+       catches the mirror case the old test missed: a `to` that truncates
+       without dropping any listed time. *)
+    (match t_end_val, at_list with
+     | Some te, Some ats when te <> t_end ->
+       let lo = Float.min te t_end and hi = Float.max te t_end in
+       (* Selected sets differ iff some listed time lies in (lo, hi]. *)
+       let changes = List.exists (fun a -> a > lo && a <= hi) ats in
+       if not changes then
+         Diagnostics.warning ctx.diags ~code:"W106" ~loc:Diagnostics.no_loc
+           ~message:(Printf.sprintf
+             "scenario '%s' sets `to = %g`, but the model emits only the times \
+              listed in `at = [...]` and none of them lies between the model \
+              horizon (%g) and %g. The scenario therefore records exactly the \
+              same snapshots either way, so neither the trajectory nor any \
+              `quantities {}` reduction changes. Add the times you want to the \
+              `at` list, or drop the per-scenario `to`."
+             resolved.rs_name te t_end te) ()
      | _ -> ());
     { Ir.preset_name    = resolved.rs_name;
       Ir.preset_label   = Option.value resolved.rs_label ~default:resolved.rs_name;

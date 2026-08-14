@@ -49,9 +49,10 @@ error[E106]: a scenario's `simulate {}` block must set `to`: it overrides the
              scenario's end time and nothing else
 ```
 
-**Also new.** `W106` warns when a scenario's `to` runs past the last
-`at = [...]` output time, where the extra window emits no snapshot and so
-changes neither the trajectory nor any `quantities {}` reduction.
+**Also new.** `W106` warns when a scenario's `to` is inert: under an explicit
+`at = [...]` output list, when it selects exactly the times the model horizon
+already would, so neither the trajectory nor any `quantities {}` reduction
+changes.
 
 ---
 

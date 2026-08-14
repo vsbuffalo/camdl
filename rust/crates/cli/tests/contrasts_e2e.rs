@@ -853,6 +853,102 @@ contrasts {
 simulate { from = 0 'days  to = 80 'days }
 "#;
 
+/// The case a pairwise arm-vs-arm guard misses: BOTH arms declare the same
+/// non-model horizon. This is the natural authoring pattern — the fit window in
+/// `simulate {}`, the projection window on the arms — so it is the one that
+/// matters most.
+const MODEL_BOTH_ARMS_AGREE_OFF_MODEL: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+compartments { S, I, R, D, V }
+parameters {
+  beta  : rate         in [0.05, 1.5]  ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate         in [0.05, 0.5]  ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate         in [0.0, 0.3]
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]   ~ beta(alpha = 2.0, beta = 5.0)
+  k     : positive     in [1.0, 100.0] ~ half_normal(sigma = 10.0)
+}
+let N = S + I + R + D + V
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+  death     : I --> D  @ mu * I
+}
+init { S = N0 - I0  I = I0 }
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia]  simulate { to = 200 'days } }
+  with_sia { enable  = [sia]  simulate { to = 200 'days } }
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+quantities {
+  total = final(D)
+}
+contrasts {
+  averted = no_sia.quantities.total - with_sia.quantities.total
+}
+simulate { from = 0 'days  to = 80 'days }
+"#;
+
+/// gh#561: the guard must compare each arm against the horizon the replay
+/// ACTUALLY uses (`model.simulation.t_end`), not the arms against each other.
+///
+/// With both arms at `to = 200` and a model horizon of 80, a pairwise check
+/// sees 200 == 200 and passes — and `run_end = model.simulation.t_end` then
+/// replays both to 80. The deaths-averted number is `final(D)` at day 80 for a
+/// question the author posed at day 200, with nothing in the artifact saying
+/// so: gh#561's own silent drop surviving inside its fix.
+#[test]
+fn contrast_arms_agreeing_on_a_non_model_horizon_are_refused() {
+    let bin = skip_if_missing_binary();
+    let tmp =
+        std::env::temp_dir().join(format!("camdl_contrasts_bothoff_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL_BOTH_ARMS_AGREE_OFF_MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(
+        out.status.success(),
+        "fit run failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out =
+        run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "both arms declaring t = 200 against a model horizon of 80 must be \
+         refused — the replay uses 80 either way; it succeeded.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("declares a simulation horizon"),
+        "the refusal must name the declared-vs-replayed mismatch; stderr:\n{stderr}"
+    );
+    let results = tmp.join("results");
+    assert!(
+        find_artifact(&results, "contrasts", "averted").is_none(),
+        "a refused contrast must not leave a contrasts/averted.tsv behind"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn contrast_arms_with_different_horizons_are_refused() {
     let bin = skip_if_missing_binary();
@@ -880,12 +976,15 @@ fn contrast_arms_with_different_horizons_are_refused() {
          differenced; it succeeded.\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("disagree on the simulation horizon"),
-        "the refusal must name the horizon disagreement; stderr:\n{stderr}"
+        stderr.contains("declares a simulation horizon"),
+        "the refusal must name the declared-vs-replayed mismatch; stderr:\n{stderr}"
     );
+    // The offending arm and both numbers, so the reader can act without
+    // re-reading the model.
     assert!(
-        stderr.contains("no_sia") && stderr.contains("with_sia"),
-        "the refusal must name BOTH arms; stderr:\n{stderr}"
+        stderr.contains("with_sia") && stderr.contains("200") && stderr.contains("80"),
+        "the refusal must name the offending arm and both horizons; \
+         stderr:\n{stderr}"
     );
 
     // No contrast file is left behind — a refused contrast must not leave an

@@ -100,9 +100,15 @@ struct Run {
     _tmp: tempfile::TempDir,
 }
 
-/// Simulate `scenarios` from `model` into a private CAS store, returning the
-/// wide-format TSV path plus the store root.
-fn simulate(bin: &Path, model: &Path, params: &Path, scenarios: &[&str]) -> Run {
+/// Simulate `scenarios` from `model` into a private CAS store on `backend`,
+/// returning the wide-format TSV path plus the store root.
+fn simulate_on(
+    bin: &Path,
+    model: &Path,
+    params: &Path,
+    scenarios: &[&str],
+    backend: &str,
+) -> Run {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("traj.tsv");
     let store = tmp.path().join("store");
@@ -113,7 +119,7 @@ fn simulate(bin: &Path, model: &Path, params: &Path, scenarios: &[&str]) -> Run 
         "--params",
         &params.to_string_lossy(),
         "--backend",
-        "ode", // deterministic: no RNG variation to mask the window
+        backend,
         "--seed",
         "7",
         "--output-dir",
@@ -131,6 +137,11 @@ fn simulate(bin: &Path, model: &Path, params: &Path, scenarios: &[&str]) -> Run 
         String::from_utf8_lossy(&o.stderr)
     );
     Run { out, store, _tmp: tmp }
+}
+
+/// The deterministic default: window and identity claims do not need RNG.
+fn simulate(bin: &Path, model: &Path, params: &Path, scenarios: &[&str]) -> Run {
+    simulate_on(bin, model, params, scenarios, "ode")
 }
 
 /// Rows of the wide TSV as `(scenario, t, S)`, skipping the `#` version
@@ -265,8 +276,24 @@ fn shorter_scenario_horizon_truncates_only_that_cell() {
 /// the horizon never re-tiles `[t_start, old_end]`. Two scenarios differing
 /// ONLY in horizon must therefore agree exactly over their shared span — which
 /// is what keeps paired-seed CRN meaningful across a horizon menu.
+///
+/// Run on the STOCHASTIC backends. The argument in §2 is about the RNG stream
+/// being consumed per substep in state order; under a fixed-step ODE the prefix
+/// is identical by construction, so an ODE-only version of this test would
+/// remove the very mechanism the claim is about and could not detect a
+/// paired-seed break (`.claude/rules/sim-and-inference.md`: tests follow the
+/// matrix).
 #[test]
-fn differing_horizons_share_an_identical_prefix() {
+fn differing_horizons_share_an_identical_prefix_chain_binomial() {
+    assert_prefix_identical("chain_binomial");
+}
+
+#[test]
+fn differing_horizons_share_an_identical_prefix_gillespie() {
+    assert_prefix_identical("gillespie");
+}
+
+fn assert_prefix_identical(backend: &str) {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let model = tmp.path().join("m.camdl");
@@ -274,7 +301,7 @@ fn differing_horizons_share_an_identical_prefix() {
     write_horizon_menu_model(&model);
     write_params(&params);
 
-    let run = simulate(&bin, &model, &params, &["shorter", "longer"]);
+    let run = simulate_on(&bin, &model, &params, &["shorter", "longer"], backend);
     let r = rows(&run.out);
     let short: Vec<(f64, f64)> =
         r.iter().filter(|(s, _, _)| s == "shorter").map(|(_, t, v)| (*t, *v)).collect();
@@ -371,5 +398,204 @@ fn absent_or_equal_horizon_does_not_rekey() {
         scenario_of(&b),
         "the horizon must not enter the SCENARIO level: both scenarios carry \
          an empty enable/disable/set delta and must hash identically"
+    );
+}
+
+// ── Composition ─────────────────────────────────────────────────────────────
+
+/// `extends` has always inherited a parent's horizon (the expander merges it);
+/// `compose` must too, walking the chain the way `set` and `scale` already do.
+/// Otherwise `combined { compose = [endemic] }` silently runs to the model
+/// horizon while `endemic` runs to its own — the same silent drop gh#561 is
+/// about, one level up from the parser, and the identity would key on the
+/// window the cell does not run.
+fn write_compose_model(path: &Path) {
+    let src = r#"
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate in [0.001, 2.0]
+  gamma : rate in [0.001, 1.0]
+}
+
+init { S = 990  I = 10  R = 0 }
+
+transitions {
+  infection : S --> I  @ beta * S * I / (S + I + R)
+  recovery  : I --> R  @ gamma * I
+}
+
+simulate { from = 0 'days  to = 80 'days }
+
+scenarios {
+  endemic  { simulate { to = 160 'days } }
+  combined { compose = [endemic] }
+  inherit  { extends = endemic }
+  own      { compose = [endemic]  simulate { to = 200 'days } }
+}
+"#;
+    std::fs::write(path, src).unwrap();
+}
+
+#[test]
+fn a_composed_scenario_inherits_the_horizon_and_its_own_wins() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("m.camdl");
+    let params = tmp.path().join("p.toml");
+    write_compose_model(&model);
+    write_params(&params);
+
+    let run = simulate(&bin, &model, &params, &["endemic", "combined", "inherit", "own"]);
+    let r = rows(&run.out);
+
+    assert_eq!(last_t(&r, "endemic"), 160.0, "the declaring scenario runs its own window");
+    assert_eq!(
+        last_t(&r, "combined"),
+        160.0,
+        "`compose = [endemic]` must inherit endemic's horizon, not fall back to \
+         the model's 80 — `set`/`scale` compose, and the horizon is a preset \
+         field like any other"
+    );
+    assert_eq!(last_t(&r, "inherit"), 160.0, "`extends` inherits it (unchanged)");
+    assert_eq!(
+        last_t(&r, "own"),
+        200.0,
+        "a composing scenario's OWN `to` applies last and wins, mirroring how \
+         its own `set` wins over a composed member's"
+    );
+
+    // Identity follows the same composed value: endemic/combined/inherit all
+    // resolve to 160 and carry an identical (empty) scenario delta, so they are
+    // legitimately ONE cell; `own` runs 200 and must be a second. Two windows,
+    // two run_ids — and in particular `combined` must not be keyed on the model
+    // horizon it does not run.
+    let ids = distinct_run_ids(&run.store);
+    assert_eq!(
+        ids.len(),
+        2,
+        "expected two distinct windows (160 and 200) → two run_ids, got {ids:#?}"
+    );
+}
+
+// ── The observation axis ────────────────────────────────────────────────────
+
+/// A model with an observation stream, so the horizon's SECOND time axis is
+/// exercised. `prevalence(I)` is the dangerous projection: past the end of the
+/// trajectory every reader clamps to the last snapshot, so a fabricated tail is
+/// a frozen compartment wearing fresh observation noise — it reads as a
+/// perfectly plausible plateau rather than as obviously missing data.
+fn write_observed_model(path: &Path) {
+    let src = r#"
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate in [0.001, 2.0]
+  gamma : rate in [0.001, 1.0]
+  rho   : probability in [0.0, 1.0]
+}
+
+init { S = 990  I = 10  R = 0 }
+
+transitions {
+  infection : S --> I  @ beta * S * I / (S + I + R)
+  recovery  : I --> R  @ gamma * I
+}
+
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    projected     = prevalence(I)
+    cases         ~ poisson(rate = rho * projected)
+    emit_schedule = every 10 'days
+  }
+}
+
+quantities { last_seen = final(observations.cases) }
+
+simulate { from = 0 'days  to = 100 'days }
+
+scenarios {
+  shorter { simulate { to = 40 'days } }
+}
+"#;
+    std::fs::write(path, src).unwrap();
+}
+
+/// gh#561: the observation emission schedule must follow the CELL's horizon.
+///
+/// The expander bakes `ObsRegular.end` from the MODEL-level `simulate { to }`
+/// at compile time, so it is a copy of the model horizon, not an author-declared
+/// observation end. Trusting it once a scenario can shorten the window emits
+/// observations past the end of that scenario's own trajectory — and every
+/// reader clamps, so those rows are FABRICATED. Exit code 0, no warning, and for
+/// a prevalence stream the tail is not obviously fake.
+///
+/// This is the same silent-wrong class gh#561 exists to remove, on the second
+/// time axis. It reaches `simulate --obs`, the CAS `obs/` subtree, `[synthetic]`
+/// dataset generation, and obs-sourced `quantities {}`.
+#[test]
+fn a_shortened_horizon_emits_no_observations_past_its_own_trajectory() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("m.camdl");
+    let params = tmp.path().join("p.toml");
+    write_observed_model(&model);
+    std::fs::write(&params, "beta = 0.35\ngamma = 0.1\nrho = 0.5\n").unwrap();
+
+    let store = tmp.path().join("store");
+    let obs = tmp.path().join("obs.tsv");
+    let traj = tmp.path().join("traj.tsv");
+    let out = Command::new(&bin)
+        .args([
+            "simulate",
+            &model.to_string_lossy(),
+            "--params",
+            &params.to_string_lossy(),
+            "--backend",
+            "ode",
+            "--seed",
+            "7",
+            "--scenario",
+            "shorter",
+            "--output-dir",
+            &store.to_string_lossy(),
+            "--obs",
+            &obs.to_string_lossy(),
+            "-o",
+            &traj.to_string_lossy(),
+        ])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "simulate failed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The trajectory stops at the scenario's own 40.
+    let traj_last = rows(&traj).iter().map(|(_, t, _)| *t).fold(f64::NEG_INFINITY, f64::max);
+    assert_eq!(traj_last, 40.0, "the scenario's trajectory must end at its declared 40");
+
+    // So must the observations. Before the fix these ran to the model's 100,
+    // with t = 50..100 read off the frozen final snapshot.
+    let txt = std::fs::read_to_string(&obs).unwrap();
+    let obs_times: Vec<f64> = txt
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .skip(1)
+        .map(|l| l.split('\t').next().unwrap().parse().unwrap())
+        .collect();
+    assert!(!obs_times.is_empty(), "the scenario must still emit its own observations");
+    let obs_last = obs_times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    assert_eq!(
+        obs_last, 40.0,
+        "observations must stop at the cell's horizon (40), not the model's \
+         (100) — rows past the trajectory are read off the clamped final \
+         snapshot and are fabricated. Emitted times: {obs_times:?}"
     );
 }

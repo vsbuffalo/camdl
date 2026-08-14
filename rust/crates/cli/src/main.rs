@@ -888,8 +888,9 @@ fn run_simulate(a: &args::SimulateArgs) {
         }
         // Validate schedule compatibility for --obs (single file)
         if obs_path.is_some() && model_check.observations.len() > 1 {
+            let obs_end = model_check.simulation.t_end;
             let schedules: Vec<_> = model_check.observations.iter()
-                .map(|o| obs_emit_schedule_times(o).unwrap_or_else(|e| {
+                .map(|o| obs_emit_schedule_times(o, obs_end).unwrap_or_else(|e| {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
                 }))
@@ -1605,7 +1606,11 @@ fn materialize_obs_for_quantities(
         std::collections::HashMap::new();
     for obs_ir in &model.observations {
         let times = match &obs_ir.emit_schedule {
-            Some(s) => obs_schedule_times(s),
+            // The CELL's horizon (`model` here is the cell's resolved model, so
+            // a scenario `simulate { to }` has already moved it) — never the
+            // schedule's baked `end`, which would reduce an obs-sourced quantity
+            // over fabricated tail values (gh#561).
+            Some(s) => obs_schedule_times(s, model.simulation.t_end),
             None => continue, // fit-only — consumes no RNG, mirroring `--obs`
         };
         let sampler =
@@ -1830,7 +1835,11 @@ fn build_simulate_cas_sink(
                 enable: preset.enable.clone(),
                 disable: preset.disable.clone(),
                 params: preset.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                t_end: preset.t_end,
+                // Composed, via the single horizon authority — NOT `preset.t_end`,
+                // which misses a horizon inherited through `compose = [...]` and
+                // would then key the cell on a window it does not run (gh#561).
+                t_end: crate::params_resolver::composed_preset_t_end(&base_model, name)
+                    .map_err(|e| e.to_string())?,
             })
         }).collect::<Result<Vec<_>, String>>()?
     };
@@ -2147,7 +2156,10 @@ impl engine::RunSink for StreamSink {
                 for obs_model in &model.observations {
                     self.obs_stream_names.push(obs_model.name.clone());
                     self.obs_data.push(Vec::new());
-                    let times = obs_emit_schedule_times(obs_model)?;
+                    // `model` is the cell's resolved model, so this is the
+                    // cell's own horizon under a per-scenario `to` (gh#561).
+                    let times =
+                        obs_emit_schedule_times(obs_model, model.simulation.t_end)?;
                     self.obs_times_cache.push(times);
                 }
             }
@@ -2286,30 +2298,49 @@ impl StreamSink {
 /// Generate observation times from an IR schedule.
 pub(crate) fn obs_schedule_times(
     schedule: &ir::observation::ObservationSchedule,
+    t_end: f64,
 ) -> Vec<f64> {
     match schedule {
         ir::observation::ObservationSchedule::Regular(reg) => {
             let mut times = Vec::new();
             let mut t = reg.start;
-            while t <= reg.end + 1e-9 {
+            while t <= t_end + 1e-9 {
                 times.push(t);
                 t += reg.step;
             }
             times
         }
-        ir::observation::ObservationSchedule::AtTimes(times) => times.clone(),
+        ir::observation::ObservationSchedule::AtTimes(times) => {
+            times.iter().copied().filter(|&t| t <= t_end).collect()
+        }
     }
 }
 
-/// Emission times for `simulate --obs` on one stream. `emit_schedule` is the
-/// SIMULATE-only cadence (proposal §2.5); a model that only ever fits omits it
-/// and so cannot generate synthetic data — a hard error naming the fix, not a
-/// silent empty series.
+/// Emission times for `simulate --obs` on one stream, confined to `t_end`.
+/// `emit_schedule` is the SIMULATE-only cadence (proposal §2.5); a model that
+/// only ever fits omits it and so cannot generate synthetic data — a hard error
+/// naming the fix, not a silent empty series.
+///
+/// **`t_end` is the RUN's horizon, not the schedule's baked `end`** (gh#561).
+/// The expander bakes `ObsRegular.end` from the MODEL-level `simulate { to }` at
+/// compile time (`expander.ml:7692`), so it is a copy of the model horizon and
+/// not an author-declared observation end. Once a scenario can move the window,
+/// trusting the baked value emits observations past the end of the run's own
+/// trajectory — and every reader clamps (`snap_at` returns the last snapshot
+/// ≤ t, and the cumulative-flow reader freezes), so the surplus rows are
+/// FABRICATED: zeros for an incidence stream, and for a prevalence stream a
+/// frozen compartment dressed in fresh observation noise, which reads as a
+/// perfectly plausible plateau. Confining to the run's horizon — exactly what
+/// `sim::output::output_times` does for the trajectory axis — makes the
+/// observation axis honour `simulation.t_end` as the sole horizon authority too
+/// (gh#143). Byte-identical whenever the run uses the model horizon, since the
+/// baked `end` is then the same number.
 pub(crate) fn obs_emit_schedule_times(
     obs: &ir::observation::ObservationModel,
+    t_end: f64,
 ) -> Result<Vec<f64>, String> {
     match &obs.emit_schedule {
-        Some(s) => Ok(obs_schedule_times(s)),
+        Some(s) => Ok(obs_schedule_times(s, t_end)),
         None => Err(format!(
             "observation stream '{}' has no `emit_schedule` — it is fit-only \
              and cannot generate synthetic data. Add `emit_schedule = every N 'unit` \

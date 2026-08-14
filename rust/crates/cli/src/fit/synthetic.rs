@@ -142,7 +142,11 @@ fn generate_one_dataset(
     let mut all_times: Vec<Vec<f64>> = Vec::with_capacity(model.observations.len());
     let mut all_draws: Vec<Vec<f64>> = Vec::with_capacity(model.observations.len());
     for obs_ir in &model.observations {
-        let times = crate::obs_emit_schedule_times(obs_ir)?;
+        // The generated dataset must not extend past the window the trajectory
+        // beside it was run over — under `[synthetic] scenario = "X"` with a
+        // shortened horizon the surplus rows are fabricated, and a recovery
+        // study would then fit invented data (gh#561).
+        let times = crate::obs_emit_schedule_times(obs_ir, model.simulation.t_end)?;
         let projected = crate::project_all_obs_times(&traj, obs_ir, &model, &times)?;
 
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(

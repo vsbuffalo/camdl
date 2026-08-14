@@ -1257,6 +1257,7 @@ simulate_body:
               | "rtol" -> sim_rtol := Some (e, eloc)
               | _ -> ()  (* opt-key validity already diagnosed in simulate_kv *)
             ) opts
+          | `UnknownKey _ -> ()  (* already diagnosed in simulate_kv *)
         ) kvs;
         { sim_from = !sim_from; sim_to = !sim_to; sim_dt = !sim_dt;
           sim_integrator = !sim_integrator; sim_atol = !sim_atol; sim_rtol = !sim_rtol } }
@@ -1306,7 +1307,12 @@ simulate_kv:
             ~code:"E106"
             ~msg:(Printf.sprintf
               "unknown simulate key '%s': expected one of from, to, dt, integrator" k);
-          `Dt e  (* placeholder; the error above aborts compilation *)
+          (* A DISTINGUISHABLE recovery value; the error above aborts
+             compilation. It must not be `` `Dt ``: the scenario-block rule
+             scans these variants to reject the whole-model knobs, and a `Dt`
+             placeholder made an unknown key report "`dt` is not a per-scenario
+             override" FIRST — naming a key the author never wrote (gh#561). *)
+          `UnknownKey e
         end }
 
 (* A single `key = expr` inside an `integrator = rk45 { ... }` block. The value's

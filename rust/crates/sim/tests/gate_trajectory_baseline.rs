@@ -46,6 +46,19 @@ fn discover_models() -> Vec<String> {
     names
 }
 
+/// Load a golden IR and apply its first preset's parameter VALUES — deliberately
+/// not its `simulate { to }`, if it declares one.
+///
+/// This gate pins engine determinism: same model, same backend, byte-identical
+/// trajectory, against committed hashes. The model-level horizon is the window
+/// it means to pin, so a preset horizon is deliberately out of scope here — a
+/// scenario's own window is covered by `cli/tests/scenario_horizon.rs` (gh#561).
+/// Applying it would move `sir_demography`'s baseline from the model's 365 to
+/// the preset's 100 and re-capture three hashes for tidiness rather than
+/// correctness.
+///
+/// So this applies half a preset on purpose. If that ever stops being the right
+/// call, the change is one line here plus a reviewed baseline re-capture.
 fn load_and_apply_baseline(name: &str) -> ir::Model {
     let path = ocaml_golden_dir().join(format!("{}.ir.json", name));
     let contents = std::fs::read_to_string(&path)

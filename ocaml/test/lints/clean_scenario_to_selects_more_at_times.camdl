@@ -1,0 +1,46 @@
+# gh#561 negative control for W106, and the case the FIRST version of the lint
+# got wrong. Model horizon 40, `at = [0, 30, 60, 90]`, scenario `to = 200`.
+#
+# The old predicate ("is `to` past the last listed time?") stayed quiet here and
+# fired on the mirror case, which is backwards. What matters is whether the two
+# horizons select the same listed times: 40 selects {0, 30}, 200 selects
+# {0, 30, 60, 90}. The override is doing real work — it adds two snapshots and
+# moves every `quantities {}` reduction — so warning here, and advising the
+# author to drop it, would silently change their answer.
+#
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+  N0    : count in [100, 100000]
+  I0    : count in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 40 'days
+}
+
+output { trajectories { at = [0 'days, 30 'days, 60 'days, 90 'days] } }
+
+scenarios {
+  overshoot {
+    simulate { to = 200 'days }
+  }
+}

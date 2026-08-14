@@ -1,0 +1,43 @@
+# gh#561: an unknown key inside a scenario's `simulate {}` must report ONE
+# error, naming the key the author actually wrote.
+#
+# The parser returns a recovery value for an unknown key. While that value was
+# `Dt`, the scenario-block scan (which rejects the whole-model knobs) mistook it
+# for a real `dt` and reported "`dt` is not a per-scenario override" FIRST —
+# naming a key absent from the file, and suppressing the missing-`to` error too.
+# A distinguishable `UnknownKey` recovery variant keeps one mistake to one error.
+#
+# expect: E106 Error
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+  N0    : count in [100, 100000]
+  I0    : count in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+
+scenarios {
+  odd {
+    simulate { to = 120 'days  wobble = 3 }
+  }
+}

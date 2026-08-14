@@ -139,15 +139,22 @@ are trapped; `from` parses, contributes nothing, and (via 3.1) drags `to` to
 zero. This violates the no-loose-semantics rule directly.
 
 **3.3 A `to` beyond an `at [...]` output list is a silent no-op.** With
-`output { trajectories { at = [...] } }`, `output_times` filters to entries
-`≤ t_end` (`sim/src/output.rs:31`), so extending a scenario's horizon past the
-largest listed time adds no snapshots. Because `quantities {}` reduces over
-snapshots (`quantity.rs:339`, `eval_series` maps `traj.snapshots`), `final(I)`
-for that scenario is the value at the last _listed_ time, not at `to` — the
-declared horizon has no observable effect. **Decision:** emit **W106** at
-compile time when a scenario's `to` exceeds the largest `at` entry, naming both
-numbers. Not an error: the run is well-defined, it just doesn't do what the
-author wrote.
+`output { trajectories { at = [...] } }`, `output_times` emits exactly the
+listed entries `≤ t_end` (`sim/src/output.rs:31`), and `quantities {}` reduces
+over those snapshots (`quantity.rs:339`, `eval_series` maps `traj.snapshots`).
+So a scenario's `to` is **inert** precisely when it selects the same entries the
+model horizon already would.
+
+**Decision:** emit **W106** at compile time when no listed time falls between
+the model horizon and the scenario's `to` — in either direction, so a `to` that
+truncates without dropping a listed time is caught too. Not an error: the run is
+well-defined, it just doesn't do what the author wrote.
+
+The predicate is deliberately NOT "is `to` past the last listed entry". With
+`simulate { to = 80 }`, `at = [0, 30, 60, 90]` and a scenario `to = 200`, the
+override selects the entry at 90 that 80 excludes — it changes the trajectory
+and every reduction over it — so warning there, and telling the author to drop
+the `to`, would silently change their answer.
 
 ## 4. Where it is dropped today
 
@@ -256,6 +263,21 @@ construction. `sir_demography` is the exception and the motivating case:
 `baseline` 100, `endemic` 3650, model 365. After this change each scenario runs
 its declared window, which is what the fixture has always claimed.
 
+**Decision on `compose`.** `extends` inherits a parent's horizon (the expander
+merges `rs_t_end`, `expander.ml:9638`); `compose = [...]` did not, so
+`combined { compose = [endemic] }` silently ran to the model horizon while
+`endemic` ran to its own. Latent while the field was dead — every scenario ran
+to the model horizon — and live the moment it is honoured.
+
+The horizon composes, walking the chain exactly as `resolve_preset_params` and
+`composed_preset_scale` already do for `set` and `scale`: composed members in
+list order, the parent's own value last and winning. A horizon is a preset field
+like any other, and making it the one field that cannot compose would be its own
+surprise. (Refusing a horizon-bearing `compose` member was the alternative; it
+was rejected because the last-wins rule it objects to is the rule `set` has had
+since the beginning, and no committed model uses `compose` at all, so neither
+choice breaks anything today.)
+
 **Decision on the trajectory baseline gate.** `load_and_apply_baseline`
 (`rust/crates/sim/tests/gate_trajectory_baseline.rs:49`) applies
 `presets.first()`'s _params_ but not its horizon — half a preset. Leave it
@@ -331,18 +353,52 @@ Each lands green on its own.
 
 Increments 2 and 3 landed as one commit, per the note above.
 
-Two deviations, both toward the rule this proposal argues from rather than away
-from it:
+One deviation:
 
-- **§3.1's "absent `to`" became E106 rather than lowering to `None`.** With
-  `from`, `dt`, and `integrator` all rejected, `to` is the block's only legal
-  key, so a block that omits it cannot mean anything and there is no `None` case
-  left to represent at parse time. `Option` survives where it belongs, on
-  `Preset::t_end`. The missing-`to` error is additionally suppressed when a
-  rejected key was already reported, so `simulate { from = 10 }` yields one
-  error naming the root cause instead of two.
 - **The `fit predict` test uses a contrast-free model.** With a contrast
   present, the §6.1 arm guard fires first and masks the §6.2 guard under test.
+
+One refinement inside §3.1's decision: the missing-`to` error is suppressed when
+a rejected key was already reported, so `simulate { from = 10 }` yields one
+error naming the root cause instead of two.
+
+### What a three-agent review changed
+
+Three reviewers (correctness / test quality / DSL-and-docs) read the branch. The
+substantive findings, all reproduced before acting:
+
+- **§3.3's W106 predicate was wrong**, and its advice would have silently
+  changed answers. "Past the last `at` entry" is not "inert" — §3.3 now carries
+  the corrected predicate and the counter-example. The fixture was rewritten to
+  a genuinely-inert model and gains a `clean_` sibling pinning the case the old
+  predicate got backwards.
+- **The observation time axis was left behind.** `ObsRegular.end` is baked from
+  the model horizon at compile time (`expander.ml:7692`), so a shortened
+  scenario kept emitting observations past the end of its own trajectory, where
+  every reader clamps — fabricating rows on four paths (`simulate --obs`, the
+  CAS `obs/` subtree, `[synthetic]` datasets, obs-sourced `quantities {}`). For
+  a `prevalence` stream the tail is a frozen compartment wearing fresh
+  observation noise, which reads as a plausible plateau. Emission now follows
+  the run's horizon, exactly as `output_times` does for the trajectory axis; the
+  observation axis is a second, independent axis and §5.2's "nothing else needs
+  threading" was wrong about it.
+- **§6.1's guard compared arms to each other rather than to the horizon they
+  replay at**, so two arms declaring the same non-model horizon — the natural
+  "fit window in `simulate {}`, projection window on the arms" pattern — passed
+  and were silently replayed at the model horizon. Now each arm is compared
+  against `model.simulation.t_end`, which also stops it over-refusing across
+  independent contrasts.
+- **An unknown key inside a scenario's `simulate {}` reported a spurious `dt`
+  rejection first**, because the parser's recovery placeholder was
+  indistinguishable from a real `dt`. It now has its own variant.
+- **"What horizon does this scenario run to" had four independent answers** that
+  agreed only by coincidence. They now route through one accessor,
+  `params_resolver::composed_preset_t_end` / `effective_horizon`, per
+  `.claude/rules/rust-conventions.md`. That also settled the `compose` question
+  below.
+- The §2 prefix test ran on the ODE backend, which consumes no random numbers —
+  it could not have detected a paired-seed break. It now runs on
+  `chain_binomial` and `gillespie`.
 
 Verified: `make test` green end to end (exit 0, 227 suites, integration
 included); no golden, IR, or `ir/VERSION` movement. The identity change was

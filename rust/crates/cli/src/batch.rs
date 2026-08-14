@@ -351,13 +351,17 @@ fn resolve_batch_scenarios(
                     let preset = model.presets.iter()
                         .find(|p| p.name == name)
                         .expect("resolve_scenario_ref confirmed preset exists");
+                    // Composed, via the single horizon authority — see the twin
+                    // site in `main.rs` (gh#561).
+                    let t_end = crate::params_resolver::composed_preset_t_end(model, &name)
+                        .map_err(|e| e.to_string())?;
                     Ok(ResolvedEntry {
                         name,
                         route: Some(preset.name.clone()),
                         enable: preset.enable.clone(),
                         disable: preset.disable.clone(),
                         params: preset.params.clone(),
-                        t_end: preset.t_end,
+                        t_end,
                     })
                 }
                 ResolvedScenario::Adhoc { name, enable, disable, params } => {
@@ -1708,7 +1712,10 @@ fn write_obs_into_cas(
     // provenance to say so. Validation is cheap and pure, so hoisting it turns
     // a partial write into no write.
     for obs_ir in &model.observations {
-        let times = crate::obs_emit_schedule_times(obs_ir)?;
+        // Must use the SAME horizon the write loop below uses — a preflight that
+        // validates a different set of times than gets written is worse than no
+        // preflight (gh#561 + gh#589).
+        let times = crate::obs_emit_schedule_times(obs_ir, model.simulation.t_end)?;
         crate::project_all_obs_times(traj, obs_ir, model, &times)?;
     }
 
@@ -1732,7 +1739,10 @@ fn write_obs_into_cas(
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
             obs_ir, compiled.clone(), &params,
         );
-        let obs_times = crate::obs_emit_schedule_times(obs_ir)?;
+        // The cell's own horizon (a per-scenario `simulate { to }` has already
+        // moved `model.simulation.t_end`), so the CAS `obs/` subtree never
+        // carries rows past the end of the trajectory beside it (gh#561).
+        let obs_times = crate::obs_emit_schedule_times(obs_ir, model.simulation.t_end)?;
         let projected = crate::project_all_obs_times(traj, obs_ir, model, &obs_times)?;
 
         let path = obs_dir.join(format!("{}.tsv", obs_ir.name));

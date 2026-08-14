@@ -485,6 +485,75 @@ pub fn composed_preset_scale(
     Ok(out)
 }
 
+/// The simulation horizon a named scenario declares (`scenarios { x { simulate
+/// { to = … } } }`), walking its `compose` chain — or `None` when neither the
+/// preset nor anything it composes declares one, in which case the cell runs to
+/// `model.simulation.t_end` (gh#561).
+///
+/// **The single authority for "what horizon does this scenario run to."** Every
+/// consumer goes through here — the window (`util::apply_scenario_horizon`), the
+/// run identity (`batch::ResolvedEntry::t_end`), and the two guards that refuse a
+/// horizon where reductions are differenced (`fit::contrasts`, `fit::predict`).
+/// Before this existed, four sites each did their own `model.presets` lookup and
+/// agreed only by coincidence; a window/identity divergence is a silent-wrong
+/// (the store would serve one trajectory under another's key), so it is worth
+/// making unrepresentable rather than merely absent.
+///
+/// Composition mirrors [`resolve_preset_params`] and [`composed_preset_scale`]
+/// exactly — composed sub-scenarios first in list order, the parent's own value
+/// last and winning — because a horizon is a preset field like any other and
+/// making it the one field that does NOT compose would be its own surprise.
+/// Nested compose is rejected, as it is for `set` and `scale`.
+pub fn composed_preset_t_end(
+    model: &ir::Model,
+    preset_name: &str,
+) -> Result<Option<f64>, ResolveError> {
+    let available = || -> Vec<String> {
+        model.presets.iter().map(|p| p.name.clone()).collect()
+    };
+    let preset = model.presets.iter()
+        .find(|p| p.name == preset_name)
+        .ok_or_else(|| ResolveError::ScenarioNotFound {
+            name: preset_name.to_string(),
+            available: available(),
+        })?;
+    let mut out: Option<f64> = None;
+    for sc_name in &preset.compose {
+        let sub = model.presets.iter().find(|p| p.name == *sc_name)
+            .ok_or_else(|| ResolveError::ScenarioNotFound {
+                name: sc_name.clone(),
+                available: available(),
+            })?;
+        if !sub.compose.is_empty() {
+            return Err(ResolveError::NestedCompose { name: sc_name.clone() });
+        }
+        if let Some(t) = sub.t_end {
+            out = Some(t);
+        }
+    }
+    // The parent's own `to` applies last → wins on collision.
+    if let Some(t) = preset.t_end {
+        out = Some(t);
+    }
+    Ok(out)
+}
+
+/// The horizon a cell actually runs to under `scenario`: the scenario's declared
+/// horizon if it has one (composed, per [`composed_preset_t_end`]), else the
+/// model's. `None` scenario, an inline ad-hoc patch, or a name that is not a
+/// model preset (the implicit `baseline` / `fitted`) all resolve to the model's.
+///
+/// The resolved-value form every consumer wants; see [`composed_preset_t_end`]
+/// for why this is one function and not four.
+pub fn effective_horizon(model: &ir::Model, scenario: Option<&str>) -> f64 {
+    let model_end = model.simulation.t_end;
+    let Some(name) = scenario else { return model_end };
+    if !model.presets.iter().any(|p| p.name == name) {
+        return model_end;
+    }
+    composed_preset_t_end(model, name).ok().flatten().unwrap_or(model_end)
+}
+
 /// The set of parameter names a scenario reference touches — its `set` ∪
 /// `scale` ∪ composed-preset keys for a named preset, or its inline `params`
 /// keys for an ad-hoc patch.

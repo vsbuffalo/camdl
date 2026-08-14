@@ -964,8 +964,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // restating the run horizon is a no-op and keeps working.
     for sref in &scenario_refs {
         let name = sref.name();
-        if let Some(t_end) =
-            model.presets.iter().find(|p| p.name == name).and_then(|p| p.t_end)
+        // The single horizon authority, so this cannot drift from the window the
+        // simulate path would run (and so a horizon reached via `compose` is
+        // caught too).
+        let t_end = crate::params_resolver::effective_horizon(&model, Some(name));
         {
             if t_end != model.simulation.t_end {
                 return Err(format!(

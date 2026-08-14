@@ -2637,26 +2637,20 @@ pub fn apply_integrator_override(
 /// place: `scenarios { endemic { simulate { to = 3650 'days } } }` makes 3650
 /// this cell's `simulation.t_end`.
 ///
-/// The single application point. `t_end` is the sole horizon authority
-/// (gh#143), so writing it here is enough — every backend derives its output
-/// and boundary times from it downstream, and nothing else needs threading.
+/// The single application point, reading the single authority
+/// ([`crate::params_resolver::effective_horizon`]). `t_end` is the sole horizon
+/// authority (gh#143), so writing it here is enough — every backend derives its
+/// output times, boundary times and observation emission times from it
+/// downstream, and nothing else needs threading.
 ///
-/// No-op when the run names no scenario, when the named scenario is not a model
-/// preset (an inline ad-hoc patch, or the implicit `baseline`), or when the
-/// preset declares no `simulate {}` block. A shorter horizon than the model's is
-/// as legal as a longer one: it is this cell's window, and the ensemble's rows
-/// are ragged across scenarios by design.
-///
-/// The scenario is looked up by name rather than passed pre-resolved so that
-/// this stays a property of the model + the scenario reference, matching how
-/// [`apply_integrator_override`] sits next to it.
+/// A no-op (writes back the same value) when the run names no scenario, when
+/// the named scenario is not a model preset, or when neither it nor anything it
+/// composes declares a horizon. A shorter horizon than the model's is as legal
+/// as a longer one: it is this cell's window, and the ensemble's rows are ragged
+/// across scenarios by design.
 pub fn apply_scenario_horizon(model: &mut ir::Model, scenario: Option<&str>) {
-    let Some(name) = scenario else { return };
-    let Some(t_end) = model.presets.iter().find(|p| p.name == name).and_then(|p| p.t_end)
-    else {
-        return;
-    };
-    model.simulation.t_end = t_end;
+    model.simulation.t_end =
+        crate::params_resolver::effective_horizon(model, scenario);
 }
 
 impl Default for SimRun {
