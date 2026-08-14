@@ -1,7 +1,7 @@
 # Per-scenario simulation horizon (`scenarios { … simulate { to } }`)
 
 - Date: 2026-08-13
-- Status: proposed
+- Status: implemented (all four increments; §10)
 - Fixes: gh#561
 - Builds on: `2026-08-11-scenario-banding-in-simulate.md` (landed; it names this
   work as the thing it unblocks)
@@ -326,3 +326,31 @@ Each lands green on its own.
    Increments 2 and 3 land together or 3 first; 2 without 3 is a live cache
    collision.
 4. **Guards** — contrasts and `fit predict`. Tests 8–9.
+
+### As implemented
+
+Increments 2 and 3 landed as one commit, per the note above.
+
+Two deviations, both toward the rule this proposal argues from rather than away
+from it:
+
+- **§3.1's "absent `to`" became E106 rather than lowering to `None`.** With
+  `from`, `dt`, and `integrator` all rejected, `to` is the block's only legal
+  key, so a block that omits it cannot mean anything and there is no `None` case
+  left to represent at parse time. `Option` survives where it belongs, on
+  `Preset::t_end`. The missing-`to` error is additionally suppressed when a
+  rejected key was already reported, so `simulate { from = 10 }` yields one
+  error naming the root cause instead of two.
+- **The `fit predict` test uses a contrast-free model.** With a contrast
+  present, the §6.1 arm guard fires first and masks the §6.2 guard under test.
+
+Verified: `make test` green end to end (exit 0, 227 suites, integration
+included); no golden, IR, or `ir/VERSION` movement. The identity change was
+mutation-checked in isolation — reverting only the `cell_resolve` line leaves
+the window tests green and fails exactly the `run_id` test — and each guard
+likewise turns exactly its own test red when disabled.
+
+`ocaml/golden/sir_demography.camdl` now behaves as written: `baseline` runs to
+its declared 100 days and `endemic` to its declared 3650, where both previously
+took the model's 365. Per §7 the trajectory baseline gate is unchanged, so no
+baseline hash moved.
