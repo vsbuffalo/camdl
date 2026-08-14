@@ -268,6 +268,19 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let (mut model_pre, model_json) = crate::util::load_model(&ir_path)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
 
+    // gh#561: every profile point runs the filter, whose window is the
+    // observation times — the model horizon is never read here. A scenario's
+    // own `simulate { to }` therefore moves nothing, so refuse it rather than
+    // discard it silently (the same guard as `pfilter` and `fit predict`).
+    if let Err(e) = crate::util::refuse_scenario_horizon(
+        &model_pre, scenario_name.as_deref(), "profile",
+        "each profile point scores through a particle filter at the observation \
+         times, so the window comes from the data, not the model horizon",
+    ) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+
     // ── Optional --fit toml resolution (gh#73) ──────────────────────
     //
     // When `--fit <path.toml>` is supplied, the fit-toml is the source

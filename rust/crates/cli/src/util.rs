@@ -2653,6 +2653,41 @@ pub fn apply_scenario_horizon(model: &mut ir::Model, scenario: Option<&str>) {
         crate::params_resolver::effective_horizon(model, scenario);
 }
 
+/// Refuse a scenario whose declared horizon this command structurally cannot
+/// honour (gh#561).
+///
+/// The commands whose window comes from the DATA — `pfilter`, `profile`,
+/// `fit predict` — score or emit at the observation times, so
+/// `scenarios { x { simulate { to = … } } }` moves nothing for them. Ignoring it
+/// is exactly the silent drop gh#561 exists to remove, so each refuses instead,
+/// naming `why` and pointing at the command that does run the scenario's own
+/// window.
+///
+/// Only a genuine difference from the model horizon is refused: a preset that
+/// restates the run horizon is a no-op and keeps working. Reads the single
+/// horizon authority, so it cannot drift from what `simulate` would run.
+pub fn refuse_scenario_horizon(
+    model: &ir::Model,
+    scenario: Option<&str>,
+    subcommand: &str,
+    why: &str,
+) -> Result<(), String> {
+    let Some(name) = scenario else { return Ok(()) };
+    let declared = crate::params_resolver::effective_horizon(model, Some(name));
+    if declared == model.simulation.t_end {
+        return Ok(());
+    }
+    Err(format!(
+        "scenario '{name}' declares a simulation horizon of t = {declared}, but \
+         `camdl {subcommand}` cannot honour it: {why} (the model horizon is {}).\n  \
+         Fix: to project under this scenario's own window use \
+         `camdl simulate --scenario {name}` (add `--draws posterior --fit <fit>` \
+         to propagate a fitted posterior); or drop the scenario's \
+         `simulate {{ to }}` so it runs at the model horizon.",
+        model.simulation.t_end
+    ))
+}
+
 impl Default for SimRun {
     fn default() -> Self {
         SimRun {

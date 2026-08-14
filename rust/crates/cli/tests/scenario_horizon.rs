@@ -401,6 +401,64 @@ fn absent_or_equal_horizon_does_not_rekey() {
     );
 }
 
+// ── The data-windowed commands refuse a horizon they cannot honour ──────────
+
+/// gh#561: `pfilter` and `profile` score through a particle filter, whose
+/// window is the OBSERVATION times — `SMCConfig` carries a `t_start` and no
+/// `t_end`, and neither module reads `simulation.t_end` at all. A scenario's own
+/// `simulate { to }` therefore moves nothing for them, including the
+/// `--save-paths` grid, which is written over the observation-time axis.
+///
+/// Silently ignoring a declared horizon is precisely the bug gh#561 removes, so
+/// both refuse and point at `simulate`, which does run the scenario's window.
+#[test]
+fn pfilter_and_profile_refuse_a_scenario_horizon_they_cannot_honour() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("m.camdl");
+    let params = tmp.path().join("p.toml");
+    let data = tmp.path().join("cases.tsv");
+    write_observed_model(&model);
+    std::fs::write(&params, "beta = 0.35\ngamma = 0.1\nrho = 0.5\n").unwrap();
+    std::fs::write(&data, "time\tcases\n10\t20\n20\t40\n30\t60\n40\t50\n").unwrap();
+
+    for (subcmd, extra) in [
+        ("pfilter", vec![]),
+        // `profile` needs a grid and a walk width before it will run at all;
+        // both are checked ahead of the guard under test.
+        ("profile", vec!["--sweep", "beta=0.3,0.4", "--rw-sd", "auto"]),
+    ] {
+        let mut cmd = Command::new(&bin);
+        cmd.env("CAMDL_SKIP_VERSION_CHECK", "1").args([
+            subcmd,
+            &model.to_string_lossy(),
+            "--data",
+            &data.to_string_lossy(),
+            "--scenario",
+            "shorter",
+            "--particles",
+            "50",
+        ]);
+        cmd.args(&extra);
+        let out = cmd.output().expect("spawn");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            !out.status.success(),
+            "`camdl {subcmd}` must refuse scenario `shorter` (to = 40) against a \
+             model horizon of 100 — it cannot honour it. stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("declares a simulation horizon"),
+            "`{subcmd}`'s refusal must name the declared horizon; stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("camdl simulate --scenario"),
+            "`{subcmd}`'s refusal must point at the command that runs the \
+             scenario's own window; stderr:\n{stderr}"
+        );
+    }
+}
+
 // ── Composition ─────────────────────────────────────────────────────────────
 
 /// `extends` has always inherited a parent's horizon (the expander merges it);

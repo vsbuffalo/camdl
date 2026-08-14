@@ -46,6 +46,21 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let (model_in, _model_json) = crate::util::load_model(&ir_path)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
 
+    // gh#561: a filter's window is the OBSERVATION times, not the model horizon
+    // — `SMCConfig` carries a `t_start` and no `t_end`, and the schedule is
+    // built from `obs_model.obs_time(i)`. So a scenario's own `simulate { to }`
+    // cannot move anything here, including the `--save-paths` grid. Refuse
+    // rather than ignore it: silently discarding a declared horizon is the bug
+    // gh#561 exists to remove, and the same guard sits on `fit predict`.
+    if let Err(e) = crate::util::refuse_scenario_horizon(
+        &model_in, scenario_name.as_deref(), "pfilter",
+        "a particle filter scores at the observation times, so its window comes \
+         from the data, not the model horizon",
+    ) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+
     // Unified resolver (2026-05-25 CLI UX rev 2). Maps the legacy
     // surface (`--params FILE` (repeatable) + `--param NAME=VALUE` +
     // scenario/enable/disable) onto the resolver inputs. pfilter is

@@ -243,13 +243,27 @@ naming both. Refuse only on a genuine difference — a preset whose `to` equals
 the model horizon is a no-op and must keep working, which is what the 12
 redundant golden fixtures (§7) rely on.
 
-**6.2 `fit predict --scenario`.** The free-forward replay emits at `leaf_times`,
-which is the observed data's time column (`predict.rs:745` via `load_leaf_obs`),
-so a per-scenario horizon is inert there — the same silent drop this proposal
-exists to remove, on another path. **Decision:** hard-error when a
-`fit predict --scenario X` names a preset whose effective horizon differs from
-the model's, pointing at the follow-up. Extending predict's forecast window past
-the last observation is a real and separate defect, filed as its own issue (§9).
+**6.2 The data-windowed commands.** `fit predict`, `pfilter` and `profile` all
+take their time axis from the DATA, not the model horizon, so a per-scenario
+`simulate { to }` is inert for all three — the same silent drop this proposal
+exists to remove, on three more paths.
+
+- `fit predict`'s free-forward replay emits at `leaf_times`, the observed data's
+  time column (`predict.rs:745` via `load_leaf_obs`).
+- `pfilter` and `profile` score through the particle filter, whose schedule is
+  built from `obs_model.obs_time(i)` (`particle_filter.rs:185`); `SMCConfig`
+  carries a `t_start` and **no** `t_end`, and neither module reads
+  `simulation.t_end` anywhere. `--save-paths` is written over that same
+  observation-time axis, so it is a filtered path across the data window, not a
+  projection past it.
+
+**Decision:** all three hard-error when a named scenario's effective horizon
+differs from the model's, through one shared `util::refuse_scenario_horizon` so
+the wording and the "only a genuine difference" rule cannot drift between them.
+Each names the reason its window is data-bound and points at
+`camdl simulate --scenario`, which does run the scenario's own window. Extending
+predict's forecast window past the last observation is a real and separate
+defect, filed as its own issue (§9).
 
 ## 7. Fixture and golden impact
 
@@ -399,6 +413,11 @@ substantive findings, all reproduced before acting:
 - The §2 prefix test ran on the ODE backend, which consumes no random numbers —
   it could not have detected a paired-seed break. It now runs on
   `chain_binomial` and `gillespie`.
+- **`pfilter` and `profile` accepted `--scenario` and ignored a declared
+  horizon**, with no guard on either. Both were originally left as a follow-up;
+  they are folded in here (§6.2) because "silently ignored on two commands" is
+  the same defect this proposal is about, and the guard is three lines once the
+  shared authority exists.
 
 Verified: `make test` green end to end (exit 0, 227 suites, integration
 included); no golden, IR, or `ir/VERSION` movement. The identity change was

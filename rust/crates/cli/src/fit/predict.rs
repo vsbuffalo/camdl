@@ -963,25 +963,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // Only a genuine difference from the model horizon is refused: a preset
     // restating the run horizon is a no-op and keeps working.
     for sref in &scenario_refs {
-        let name = sref.name();
-        // The single horizon authority, so this cannot drift from the window the
-        // simulate path would run (and so a horizon reached via `compose` is
-        // caught too).
-        let t_end = crate::params_resolver::effective_horizon(&model, Some(name));
-        {
-            if t_end != model.simulation.t_end {
-                return Err(format!(
-                    "scenario '{name}' declares `simulate {{ to = {t_end} }}`, but \
-                     `fit predict` emits at the observed times, so it cannot honour \
-                     a per-scenario horizon (the model horizon is {}).\n  \
-                     Fix: for a projection under this scenario use \
-                     `camdl simulate --draws posterior --fit <fit> --scenario {name}`, \
-                     which runs the scenario's own window; or drop the \
-                     `simulate {{ to }}` to predict at the fitted horizon.",
-                    model.simulation.t_end
-                ));
-            }
-        }
+        crate::util::refuse_scenario_horizon(
+            &model, Some(sref.name()), "fit predict",
+            "the predictive is emitted at the observed times, so its window \
+             comes from the data, not the model horizon",
+        )?;
     }
     // Layer 1 supports param-overlay scenarios cleanly; an intervention-toggling
     // scenario (enable/disable) replays correctly through the engine — the engine

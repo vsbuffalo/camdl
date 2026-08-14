@@ -1079,11 +1079,11 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
          succeeded.\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("emits at the observed times"),
+        stderr.contains("emitted at the observed times"),
         "the refusal must say WHY the horizon cannot be honoured; stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("--draws posterior"),
+        stderr.contains("camdl simulate --scenario"),
         "the refusal must point at the command that DOES run the scenario's own \
          window; stderr:\n{stderr}"
     );
