@@ -798,3 +798,213 @@ k   = 10.0
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ── gh#561: the arms reading refuses a per-scenario horizon ──────────────────
+//
+// A per-scenario `simulate { to }` is honoured on the `simulate` path — a MENU
+// of runs, each answering its own question (see `tests/scenario_horizon.rs`).
+// A contrast DIFFERENCES its operands, so unequal windows compare the windows
+// rather than the counterfactual, and `fit predict` emits at the OBSERVED times
+// so it cannot move its window at all. Both refuse rather than silently ignore.
+
+/// `MODEL` reduced to one contrast, with a horizon declared on ONE of its two
+/// arms — so the arms disagree (model horizon 80, `with_sia` asks for 200).
+const MODEL_RAGGED_CONTRAST_ARMS: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+compartments { S, I, R, D, V }
+parameters {
+  beta  : rate         in [0.05, 1.5]  ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate         in [0.05, 0.5]  ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate         in [0.0, 0.3]
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]   ~ beta(alpha = 2.0, beta = 5.0)
+  k     : positive     in [1.0, 100.0] ~ half_normal(sigma = 10.0)
+}
+let N = S + I + R + D + V
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+  death     : I --> D  @ mu * I
+}
+init { S = N0 - I0  I = I0 }
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia] }
+  with_sia { enable  = [sia]  simulate { to = 200 'days } }
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+quantities {
+  total = final(D)
+}
+contrasts {
+  averted = no_sia.quantities.total - with_sia.quantities.total
+}
+simulate { from = 0 'days  to = 80 'days }
+"#;
+
+#[test]
+fn contrast_arms_with_different_horizons_are_refused() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_contrasts_horizon_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL_RAGGED_CONTRAST_ARMS).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(
+        out.status.success(),
+        "fit run failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out =
+        run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "a contrast whose arms declare different horizons must be refused, not \
+         differenced; it succeeded.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("disagree on the simulation horizon"),
+        "the refusal must name the horizon disagreement; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no_sia") && stderr.contains("with_sia"),
+        "the refusal must name BOTH arms; stderr:\n{stderr}"
+    );
+
+    // No contrast file is left behind — a refused contrast must not leave an
+    // artifact a reader could mistake for a valid one.
+    let results = tmp.join("results");
+    assert!(
+        find_artifact(&results, "contrasts", "averted").is_none(),
+        "a refused contrast must not leave a contrasts/averted.tsv behind"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The same shape with NO `contrasts {}` block, so the `fit predict` guard is
+/// exercised in isolation — with a contrast present the (correct) contrast-arm
+/// refusal fires first and would mask it.
+const MODEL_SCENARIO_HORIZON_NO_CONTRAST: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+compartments { S, I, R, D, V }
+parameters {
+  beta  : rate         in [0.05, 1.5]  ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate         in [0.05, 0.5]  ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate         in [0.0, 0.3]
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]   ~ beta(alpha = 2.0, beta = 5.0)
+  k     : positive     in [1.0, 100.0] ~ half_normal(sigma = 10.0)
+}
+let N = S + I + R + D + V
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+  death     : I --> D  @ mu * I
+}
+init { S = N0 - I0  I = I0 }
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia] }
+  with_sia { enable  = [sia]  simulate { to = 200 'days } }
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+quantities {
+  total = final(D)
+}
+simulate { from = 0 'days  to = 80 'days }
+"#;
+
+#[test]
+fn fit_predict_scenario_with_its_own_horizon_is_refused() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_predict_horizon_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL_SCENARIO_HORIZON_NO_CONTRAST).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    // PGAS, not IF2: `fit predict` gates on a posterior cloud BEFORE it reaches
+    // the scenario overlay, so an optimizer fit would fail on that gate instead
+    // and never exercise this guard.
+    std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(
+        out.status.success(),
+        "fit run failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `with_sia` declares `to = 200`; the model horizon is 80.
+    let out = run(
+        &bin,
+        &tmp,
+        &[
+            "fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward", "--scenario",
+            "with_sia",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "fit predict must refuse a scenario whose horizon it cannot honour; it \
+         succeeded.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("emits at the observed times"),
+        "the refusal must say WHY the horizon cannot be honoured; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--draws posterior"),
+        "the refusal must point at the command that DOES run the scenario's own \
+         window; stderr:\n{stderr}"
+    );
+
+    // Negative control: the sibling scenario declares no horizon, so it is
+    // unaffected — the guard fires on a genuine difference, not on the mere
+    // presence of a per-scenario `simulate {}` anywhere in the model.
+    let out = run(
+        &bin,
+        &tmp,
+        &[
+            "fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward", "--scenario",
+            "no_sia",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "a scenario with no declared horizon must still predict:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

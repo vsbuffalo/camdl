@@ -237,6 +237,18 @@ pub fn emit_contrasts(
     // compilation — estimated parameters have no model default.
     let placeholder: Vec<(String, f64)> =
         forkable[0].0.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    // gh#561: a contrast is the ARMS reading of `scenarios {}` — its operands
+    // are differenced, and differencing reductions taken over unequal windows
+    // is meaningless (`final(I)` at 100 days minus `final(I)` at 3650 days is
+    // an artifact of the windows, not a counterfactual). Both arms replay over
+    // `run_end` below, so a per-scenario horizon cannot be honoured here;
+    // refuse rather than silently ignore it.
+    //
+    // Only a genuine DIFFERENCE is refused: a preset whose `to` equals the
+    // model horizon is a no-op, which is what the many fixtures that restate
+    // the run horizon per scenario rely on.
+    check_arm_horizons_agree(model, &runs_union)?;
+
     let mut arms: HashMap<String, Arm> = HashMap::new();
     for run in &runs_union {
         if !arms.contains_key(run) {
@@ -331,6 +343,47 @@ fn resolve_stage_dir(segment: &Path, stage: Option<&str>) -> Result<PathBuf, Str
         .parent()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| format!("draws path has no parent: {}", pref.draws_path.display()))
+}
+
+/// The horizon a contrast arm would run to: its scenario's own
+/// `simulate { to }` when it declares one, else the model's (gh#561).
+/// `fitted` names no preset, so it is always the model horizon.
+fn arm_horizon(model: &ir::Model, run: &str) -> f64 {
+    model
+        .presets
+        .iter()
+        .find(|p| p.name == run)
+        .and_then(|p| p.t_end)
+        .unwrap_or(model.simulation.t_end)
+}
+
+/// Refuse a contrast whose arms would run to different horizons.
+///
+/// The arms/menu split (gh#561 proposal §1): `simulate --scenario a
+/// --scenario b` runs a MENU and unequal windows are fine — each arm answers
+/// its own question. A contrast DIFFERENCES its operands, so unequal windows
+/// make the result an artifact of the windows rather than a counterfactual.
+/// Both arms replay over one `run_end`, so honouring a per-arm horizon here
+/// would need a design (which window does the difference belong to?) that the
+/// contrast surface does not have.
+fn check_arm_horizons_agree(model: &ir::Model, runs: &[String]) -> Result<(), String> {
+    let Some(first) = runs.first() else { return Ok(()) };
+    let want = arm_horizon(model, first);
+    for run in runs.iter().skip(1) {
+        let got = arm_horizon(model, run);
+        if got != want {
+            return Err(format!(
+                "contrast arms disagree on the simulation horizon: '{first}' runs \
+                 to t = {want} but '{run}' runs to t = {got}. Differencing \
+                 reductions taken over different windows compares the windows, \
+                 not the counterfactual.\n  \
+                 Fix: drop the per-scenario `simulate {{ to }}` from one of them \
+                 so both arms share the model horizon, or compare them as \
+                 separate `simulate --scenario` runs instead of a contrast."
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ── One arm: a per-run compiled model + quantity evaluator ──────────────────────

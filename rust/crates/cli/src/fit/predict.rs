@@ -954,6 +954,33 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     for sref in &scenario_refs {
         crate::sim_job::resolve_scenario_ref(sref, &preset_names)?;
     }
+    // gh#561: `fit predict` emits at the OBSERVED times (`leaf_times`, from the
+    // bound data), so a scenario's own `simulate { to }` cannot move this
+    // command's output window — honouring it here would be a no-op, and
+    // silently ignoring a declared horizon is the exact bug gh#561 is about.
+    // Refuse, and name the two things that do work.
+    //
+    // Only a genuine difference from the model horizon is refused: a preset
+    // restating the run horizon is a no-op and keeps working.
+    for sref in &scenario_refs {
+        let name = sref.name();
+        if let Some(t_end) =
+            model.presets.iter().find(|p| p.name == name).and_then(|p| p.t_end)
+        {
+            if t_end != model.simulation.t_end {
+                return Err(format!(
+                    "scenario '{name}' declares `simulate {{ to = {t_end} }}`, but \
+                     `fit predict` emits at the observed times, so it cannot honour \
+                     a per-scenario horizon (the model horizon is {}).\n  \
+                     Fix: for a projection under this scenario use \
+                     `camdl simulate --draws posterior --fit <fit> --scenario {name}`, \
+                     which runs the scenario's own window; or drop the \
+                     `simulate {{ to }}` to predict at the fitted horizon.",
+                    model.simulation.t_end
+                ));
+            }
+        }
+    }
     // Layer 1 supports param-overlay scenarios cleanly; an intervention-toggling
     // scenario (enable/disable) replays correctly through the engine — the engine
     // recompiles the model per cell with the scenario's intervention set applied
