@@ -484,6 +484,27 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
     }
 
+    // gh#604: every key the user typed under `[data.observations]` /
+    // `[data.holdout]` must name a declared observation source. Checked HERE —
+    // before the identity digests below read a single byte — because those
+    // digests open each bound path, so an unbound key would otherwise surface
+    // as "cannot read data file '<key>'", diagnosing a missing file when the
+    // real fault is a binding that names no stream. The motivating case is a
+    // top-level key (`condition_from`) written below the `[data.observations]`
+    // header, which TOML scopes into the table.
+    if let Ok(ds) = config.data_spec() {
+        for (origin, table) in [
+            ("[data.observations]", Some(&ds.observations)),
+            ("[data.holdout]", ds.holdout.as_ref()),
+        ] {
+            let Some(table) = table else { continue };
+            if let Err(e) = runner::check_bound_sources(&model, origin, table) {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // ── Compute the fit-wide identity + sidecar (no fit-root run.json) ──
     //
     // Per-stage run.json records live inside each stage dir; the fit as a

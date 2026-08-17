@@ -1338,6 +1338,58 @@ pub(crate) fn data_bindings_to_effective(
     Ok(effective)
 }
 
+/// Reject a data-binding key that names no observation stream `source`.
+///
+/// `[data.observations]`, `[data.holdout]` and `--data NAME=PATH` all key by
+/// observation SOURCE (the `from <label>`, defaulting to the stream name;
+/// §2.4). A key matching none of them binds a file to nothing — at best a
+/// mistyped stream name, at worst a *top-level* fit.toml setting that TOML
+/// scoping captured into the table by accident, which then silently does not
+/// apply (`condition_from` written below the `[data.observations]` header is
+/// the motivating case: it reverts conditioning to none while looking set).
+///
+/// `origin` names the table (or flag) the keys were typed in, so the message
+/// points at what the user wrote.
+///
+/// The fit driver calls this BEFORE the identity digests read any bytes, so an
+/// unbound key reports as a binding error naming the real sources rather than
+/// as an unreadable data file.
+pub(crate) fn check_bound_sources(
+    model: &ir::Model,
+    origin: &str,
+    bound: &indexmap::IndexMap<String, String>,
+) -> Result<(), String> {
+    let mut sources: Vec<&str> =
+        model.observations.iter().map(|o| o.source.as_str()).collect();
+    sources.sort_unstable();
+    sources.dedup();
+    for (key, path) in bound {
+        if sources.contains(&key.as_str()) {
+            continue;
+        }
+        // A key whose value is not even a readable file is far likelier to be a
+        // top-level setting swallowed by the preceding `[table]` header than a
+        // mistyped stream name — and the two have different fixes, so say which
+        // one the evidence points at rather than offering both.
+        let hint = if std::path::Path::new(path).is_file() {
+            String::new()
+        } else {
+            format!(
+                " Its value (\"{path}\") is not a readable file either — if \
+                 `{key}` was meant as a TOP-LEVEL fit.toml key, note that TOML \
+                 binds every key after a `[table]` header to that table, so it \
+                 must sit ABOVE the first `[table]`."
+            )
+        };
+        return Err(format!(
+            "{origin}: '{key}' is not an observation source. Keys here bind a \
+             data file to an observation stream declared in the model's \
+             `observations {{ }}` block.{hint} Available sources: {}",
+            sources.join(", ")));
+    }
+    Ok(())
+}
+
 /// Resolve the DATA-bound observation streams (BY SOURCE) and load each one's
 /// per-observation values + aux, returning one [`ObsStream`] per bound leaf.
 ///
@@ -1372,23 +1424,7 @@ pub(crate) fn resolve_and_load_obs_streams(
             .collect();
     obs_blocks.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // Every bound source must name a real observation stream — a key in
-    // `[data.observations]` (or a `--data NAME=` source) that matches no
-    // stream's `source` is a typo, not a silent no-op.
-    for src in effective.keys() {
-        if !model.observations.iter().any(|o| &o.source == src) {
-            return Err(format!(
-                "data source '{}' is bound to a file but matches no observation \
-                 stream's source. Available sources: {}",
-                src,
-                {
-                    let mut s: Vec<&str> = model.observations.iter()
-                        .map(|o| o.source.as_str()).collect();
-                    s.sort_unstable(); s.dedup();
-                    s.join(", ")
-                }));
-        }
-    }
+    check_bound_sources(model, "[data.observations] / --data", effective)?;
     if obs_blocks.is_empty() {
         return Err(
             "no observation stream is bound to a data file — check that \
