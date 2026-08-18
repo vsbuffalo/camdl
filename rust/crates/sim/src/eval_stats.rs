@@ -19,6 +19,11 @@ pub static POW_NAN_INF:       AtomicU64 = AtomicU64::new(0);
 pub static UNOP_NAN:          AtomicU64 = AtomicU64::new(0);
 pub static NEG_BINOMIAL_POIS: AtomicU64 = AtomicU64::new(0);
 pub static BINOMIAL_FALLBACK: AtomicU64 = AtomicU64::new(0);
+/// gh#619: a likelihood argument (mean, rate, p, …) evaluated to NaN during
+/// observation *sampling* — typically 0/0 from a collapsed-compartment
+/// denominator in a degenerate prior draw. The sampler draws 0 (the honest
+/// dead-epidemic value) instead of panicking or handing NaN to rand_distr.
+pub static OBS_SAMPLE_NAN:    AtomicU64 = AtomicU64::new(0);
 /// gh#127 (#12): out-of-range table lookups hit by the fast evaluator. Unlike
 /// the others this is NOT a silent-fallback path — the lookup returns NaN and
 /// the run hard-errors at the `eval_propensities` boundary — but it is counted
@@ -85,6 +90,7 @@ pub struct EvalStats {
     pub unop_nan:          u64,
     pub neg_binomial_pois: u64,
     pub binomial_fallback: u64,
+    pub obs_sample_nan:    u64,
     pub table_oob:         u64,
 }
 
@@ -96,6 +102,7 @@ impl EvalStats {
             unop_nan:          UNOP_NAN.load(Ordering::Relaxed),
             neg_binomial_pois: NEG_BINOMIAL_POIS.load(Ordering::Relaxed),
             binomial_fallback: BINOMIAL_FALLBACK.load(Ordering::Relaxed),
+            obs_sample_nan:    OBS_SAMPLE_NAN.load(Ordering::Relaxed),
             table_oob:         TABLE_OOB.load(Ordering::Relaxed),
         }
     }
@@ -107,13 +114,15 @@ impl EvalStats {
             unop_nan:          self.unop_nan.saturating_sub(earlier.unop_nan),
             neg_binomial_pois: self.neg_binomial_pois.saturating_sub(earlier.neg_binomial_pois),
             binomial_fallback: self.binomial_fallback.saturating_sub(earlier.binomial_fallback),
+            obs_sample_nan:    self.obs_sample_nan.saturating_sub(earlier.obs_sample_nan),
             table_oob:         self.table_oob.saturating_sub(earlier.table_oob),
         }
     }
 
     pub fn total(&self) -> u64 {
         self.div_by_zero + self.pow_nan_inf + self.unop_nan
-            + self.neg_binomial_pois + self.binomial_fallback + self.table_oob
+            + self.neg_binomial_pois + self.binomial_fallback
+            + self.obs_sample_nan + self.table_oob
     }
 }
 
@@ -128,6 +137,8 @@ pub fn inc_neg_binomial_pois() { NEG_BINOMIAL_POIS.fetch_add(1, Ordering::Relaxe
 #[inline]
 pub fn inc_binomial_fallback() { BINOMIAL_FALLBACK.fetch_add(1, Ordering::Relaxed); }
 #[inline]
+pub fn inc_obs_sample_nan()    { OBS_SAMPLE_NAN.fetch_add(1, Ordering::Relaxed); }
+#[inline]
 pub fn inc_table_oob()         { TABLE_OOB.fetch_add(1, Ordering::Relaxed); }
 
 impl std::fmt::Display for EvalStats {
@@ -138,6 +149,7 @@ impl std::fmt::Display for EvalStats {
         if self.unop_nan          > 0 { writeln!(f, "  unop_nan:          {}", self.unop_nan)?; }
         if self.neg_binomial_pois > 0 { writeln!(f, "  neg_binomial_pois: {}", self.neg_binomial_pois)?; }
         if self.binomial_fallback > 0 { writeln!(f, "  binomial_fallback: {}", self.binomial_fallback)?; }
+        if self.obs_sample_nan    > 0 { writeln!(f, "  obs_sample_nan:    {}", self.obs_sample_nan)?; }
         if self.table_oob         > 0 { writeln!(f, "  table_oob:         {}", self.table_oob)?; }
         Ok(())
     }

@@ -455,6 +455,52 @@ pub fn compile_obs_sample_pf(
     })
 }
 
+/// True iff any likelihood argument is NaN — typically `0/0` from a
+/// collapsed-compartment denominator in a degenerate prior draw (gh#619).
+/// Such a draw has no defined value; every arm of [`sample_obs_resolved`]
+/// emits 0 (the honest dead-epidemic value, consistent with the documented
+/// missing-aux behaviour) and counts the event so the end-of-run eval-stats
+/// summary surfaces it. Counting here, not silently: a NaN that reached a
+/// sampler used to abort the whole run (neg_binomial), draw ~1e15
+/// (`rng.poisson`'s NaN.min(1e15) cap), or produce in-range garbage
+/// (Beta-family shapes floored to epsilon).
+#[inline]
+fn obs_args_nan(vals: &[f64]) -> bool {
+    if vals.iter().any(|v| v.is_nan()) {
+        crate::eval_stats::inc_obs_sample_nan();
+        true
+    } else {
+        false
+    }
+}
+
+/// Draw `NegBinomial(mean, dispersion)` via the Gamma–Poisson mixture:
+/// `g ~ Gamma(k, mean/k)`, `y ~ Poisson(g)`. Total over degenerate inputs
+/// (gh#619) — callers guard NaN via [`obs_args_nan`] first:
+///
+/// - `mean <= 0` or `dispersion <= 0`: mass at zero → 0 (pre-existing
+///   behaviour);
+/// - `mean/k` under- or overflows even though both are positive (e.g. the
+///   smallest subnormal mean over k = 500, or k = inf): the Gamma mixing
+///   density is degenerate and `Gamma::new` rejects the scale — previously
+///   an `unwrap()` that aborted the run mid-`--obs`-file. The exact
+///   `k → ∞` limit is `Poisson(mean)`, the same fallback `rng::neg_binomial`
+///   documents for its degenerate-shape regime, counted the same way.
+fn draw_neg_binomial(mean: f64, dispersion: f64, rng: &mut StatefulRng) -> f64 {
+    if mean <= 0.0 || dispersion <= 0.0 {
+        return 0.0;
+    }
+    let scale = mean / dispersion;
+    if scale <= 0.0 || !scale.is_finite() {
+        crate::eval_stats::inc_neg_binomial_pois();
+        return rng.poisson(mean) as f64;
+    }
+    let g = Gamma::new(dispersion, scale)
+        .expect("guarded: shape and scale are positive and finite")
+        .sample(rng.inner_mut());
+    rng.poisson(g) as f64
+}
+
 /// Draw one sample from the resolved observation model at observation
 /// time `t`. Likelihood expressions referencing `time` (e.g. a reporting
 /// ramp) are evaluated at `t`; a frozen 0.0 silently corrupts any
@@ -479,23 +525,25 @@ pub(crate) fn sample_obs_resolved(
         ResolvedLikelihood::NegBinomial { mean, dispersion, .. } => {
             let m = eval_resolved(mean, &ctx(projected));
             let k = eval_resolved(dispersion, &ctx(projected));
-            if m <= 0.0 || k <= 0.0 { return 0.0; }
-            let g = Gamma::new(k, m / k).unwrap().sample(rng.inner_mut());
-            rng.poisson(g) as f64
+            if obs_args_nan(&[m, k]) { return 0.0; }
+            draw_neg_binomial(m, k, rng)
         }
         ResolvedLikelihood::Normal { mean, sd, .. } => {
             let m = eval_resolved(mean, &ctx(projected));
             let s = eval_resolved(sd, &ctx(projected));
+            if obs_args_nan(&[m, s]) { return 0.0; }
             let draw = Normal::new(m, s.max(1e-10)).unwrap().sample(rng.inner_mut());
             draw.round().max(0.0)
         }
         ResolvedLikelihood::Poisson { rate, .. } => {
             let r = eval_resolved(rate, &ctx(projected));
+            if obs_args_nan(&[r]) { return 0.0; }
             rng.poisson(r) as f64
         }
         ResolvedLikelihood::Binomial { n, p, .. } => {
             let n_val = eval_resolved(n, &ctx(projected));
             let p_val = eval_resolved(p, &ctx(projected));
+            if obs_args_nan(&[n_val, p_val]) { return 0.0; }
             rng.binomial(n_val.round().max(0.0) as u64, p_val.clamp(0.0, 1.0)) as f64
         }
         ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
@@ -503,8 +551,11 @@ pub(crate) fn sample_obs_resolved(
             // then k ~ Binomial(n, p). Uses the inner RNG directly for
             // the Beta draw (Gamma(a,1)/(Gamma(a,1)+Gamma(b,1))).
             let n_val = eval_resolved(n, &ctx(projected));
-            let alpha_val = eval_resolved(alpha, &ctx(projected)).max(LOG_PROB_FLOOR);
-            let beta_val  = eval_resolved(beta,  &ctx(projected)).max(LOG_PROB_FLOOR);
+            let alpha_raw = eval_resolved(alpha, &ctx(projected));
+            let beta_raw  = eval_resolved(beta,  &ctx(projected));
+            if obs_args_nan(&[n_val, alpha_raw, beta_raw]) { return 0.0; }
+            let alpha_val = alpha_raw.max(LOG_PROB_FLOOR);
+            let beta_val  = beta_raw.max(LOG_PROB_FLOOR);
             let n_int = n_val.round().max(0.0) as u64;
             use rand_distr::{Gamma, Distribution};
             let inner = rng.inner_mut();
@@ -519,6 +570,7 @@ pub(crate) fn sample_obs_resolved(
             // BetaBinomial p-draw) — the continuous proportion, not a count.
             let m = eval_resolved(mean, &ctx(projected));
             let c = eval_resolved(concentration, &ctx(projected));
+            if obs_args_nan(&[m, c]) { return 0.0; }
             let a = (m * c).max(LOG_PROB_FLOOR);
             let b = ((1.0 - m) * c).max(LOG_PROB_FLOOR);
             use rand_distr::{Distribution, Gamma};
@@ -530,19 +582,22 @@ pub(crate) fn sample_obs_resolved(
         ResolvedLikelihood::Bernoulli { p, .. } => {
             // Clamp before sampling — an out-of-range p would
             // otherwise always-1 (p > 1) or always-0 (p < 0).
-            let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
+            let p_raw = eval_resolved(p, &ctx(projected));
+            if obs_args_nan(&[p_raw]) { return 0.0; }
+            let p_val = p_raw.clamp(0.0, 1.0);
             if rng.uniform() < p_val { 1.0 } else { 0.0 }
         }
         ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi } => {
             // With prob pi draw a structural zero; otherwise draw from the
             // NegBinomial base (Gamma-Poisson mixture, mirroring the NB arm).
-            let p = eval_resolved(pi, &ctx(projected)).clamp(0.0, 1.0);
+            let pi_raw = eval_resolved(pi, &ctx(projected));
+            if obs_args_nan(&[pi_raw]) { return 0.0; }
+            let p = pi_raw.clamp(0.0, 1.0);
             if rng.uniform() < p { return 0.0; }
             let m = eval_resolved(mean, &ctx(projected));
             let k = eval_resolved(dispersion, &ctx(projected));
-            if m <= 0.0 || k <= 0.0 { return 0.0; }
-            let g = Gamma::new(k, m / k).unwrap().sample(rng.inner_mut());
-            rng.poisson(g) as f64
+            if obs_args_nan(&[m, k]) { return 0.0; }
+            draw_neg_binomial(m, k, rng)
         }
     }
 }
