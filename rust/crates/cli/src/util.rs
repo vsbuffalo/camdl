@@ -2638,23 +2638,72 @@ pub fn apply_integrator_override(
 /// this cell's `simulation.t_end`.
 ///
 /// The single application point, reading the single authority
-/// ([`crate::params_resolver::effective_horizon`]). `t_end` is the sole horizon
-/// authority (gh#143), so writing it here is enough — every backend derives its
-/// output times, boundary times and observation emission times from it
-/// downstream, and nothing else needs threading.
+/// ([`crate::params_resolver::effective_horizon`]). Output times, boundary
+/// times and observation emission times all follow `simulation.t_end`
+/// downstream.
+///
+/// **The exception — and why an EXTENDING horizon is refused on some models.**
+/// `simulation.t_end` is not quite the sole horizon authority: the compiler
+/// bakes a copy of the model horizon into a recurring intervention's
+/// `Recurring.end` when the author omits `until` (`expander.ml:7258`), and
+/// unconditionally for the `every P at_day D` form (`expander.ml:7290`); the
+/// steppers fire `while t <= rs.end` (`intervention.rs:93`). So extending the
+/// window past the model horizon would run the dynamics to the new end while
+/// every such campaign silently stops firing at the old one — a decade-long
+/// projection whose routine immunisation switches off after year one, with no
+/// diagnostic. Until the baked copies are collapsed onto `simulation.t_end` in
+/// the IR (the gh#143 move, applied to this axis — filed as a follow-up), that
+/// combination is refused with the one-line fix (`until = ...`) in the message.
+/// A SHORTER horizon is safe unconditionally: the simulation stops before the
+/// baked end, so nothing fires late. (Reactive policies also carry a baked
+/// emit window, but a scenario cannot enable one — `enable` resolves against
+/// `interventions {}` only — so they are unreachable here.)
 ///
 /// A no-op (writes back the same value) when the run names no scenario, when
 /// the named scenario is not a model preset, or when neither it nor anything it
-/// composes declares a horizon. A shorter horizon than the model's is as legal
-/// as a longer one: it is this cell's window, and the ensemble's rows are ragged
-/// across scenarios by design.
+/// composes declares a horizon.
 pub fn apply_scenario_horizon(
     model: &mut ir::Model,
     scenario: Option<&str>,
 ) -> Result<(), String> {
-    model.simulation.t_end =
-        crate::params_resolver::effective_horizon(model, scenario)
-            .map_err(|e| e.to_string())?;
+    let new_end = crate::params_resolver::effective_horizon(model, scenario)
+        .map_err(|e| e.to_string())?;
+    let old_end = model.simulation.t_end;
+    if new_end > old_end {
+        // Baked = the recurring end equals the model horizon it was copied
+        // from. An author-declared `until` at exactly the model horizon is
+        // indistinguishable and also refused — conservative, and the fix in
+        // the message covers it (state the intended end explicitly).
+        let baked: Vec<&str> = model
+            .interventions
+            .iter()
+            .filter(|iv| {
+                matches!(
+                    &iv.fire,
+                    ir::intervention::FireSource::Scheduled(
+                        ir::intervention::InterventionSchedule::Recurring(rs)
+                    ) if rs.end == old_end
+                )
+            })
+            .map(|iv| iv.name.as_str())
+            .collect();
+        if !baked.is_empty() {
+            return Err(format!(
+                "scenario '{}' extends the horizon to t = {new_end}, but \
+                 recurring intervention(s) [{}] stop at the model horizon \
+                 t = {old_end} — the compiler bakes the model horizon in as \
+                 their end when the recurring `to` is omitted, so the extended window \
+                 would run with the campaign silently switched off.\n  \
+                 Fix: declare the intended end explicitly on each — \
+                 `to = {new_end} 'days` (or later) inside the recurring \
+                 schedule — or move the horizon to the model's own \
+                 `simulate {{ to }}`.",
+                scenario.unwrap_or("?"),
+                baked.join(", "),
+            ));
+        }
+    }
+    model.simulation.t_end = new_end;
     Ok(())
 }
 

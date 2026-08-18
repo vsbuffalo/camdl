@@ -886,9 +886,44 @@ fn run_simulate(a: &args::SimulateArgs) {
             eprintln!("error: --obs/--obs-dir requested but model has no observations blocks");
             std::process::exit(1);
         }
-        // Validate schedule compatibility for --obs (single file)
+        // gh#561: the combined --obs/--obs-dir writers cache one obs-time axis
+        // for the whole grid (`obs_times_cache`, filled at run_idx == 0) and
+        // the wide writer hard-codes one row count per cell — so scenarios with
+        // DIFFERENT effective horizons cannot share them. Whichever scenario
+        // ran first would set every cell's axis: a shorter sibling would then
+        // emit rows past its own trajectory (fabricated, read off the clamped
+        // final snapshot), a longer one would be truncated — and which of the
+        // two happened would depend on flag order. The CAS obs/ subtree is
+        // per-cell and unaffected; refuse the combined mirrors and point at it.
+        let mut horizons: Vec<(String, f64)> = Vec::new();
+        for s in &scenario_list {
+            let h = crate::params_resolver::effective_horizon(&model_check, s.as_deref())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                });
+            horizons.push((s.clone().unwrap_or_else(|| "baseline".into()), h));
+        }
+        if horizons.iter().any(|(_, h)| *h != horizons[0].1) {
+            let list: Vec<String> =
+                horizons.iter().map(|(n, h)| format!("{n} → t = {h}")).collect();
+            eprintln!(
+                "error: --obs/--obs-dir cannot combine scenarios with different \
+                 horizons ({}): the combined file has one time axis, so the \
+                 shorter scenario's rows past its own trajectory would be \
+                 fabricated.\n  Fix: run each scenario in its own invocation, or \
+                 read the per-cell obs/ artifacts from the store (`camdl cat`).",
+                list.join(", ")
+            );
+            std::process::exit(1);
+        }
+        // Validate schedule compatibility for --obs (single file), at the
+        // CELLS' shared horizon (all equal — checked above), not the base
+        // model's: two `at`-list schedules can agree when confined to the model
+        // horizon and diverge over an extended one, which would mislabel one
+        // stream's late draws with the other's times.
         if obs_path.is_some() && model_check.observations.len() > 1 {
-            let obs_end = model_check.simulation.t_end;
+            let obs_end = horizons[0].1;
             let schedules: Vec<_> = model_check.observations.iter()
                 .map(|o| obs_emit_schedule_times(o, obs_end).unwrap_or_else(|e| {
                     eprintln!("error: {}", e);

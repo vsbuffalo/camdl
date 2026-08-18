@@ -657,3 +657,183 @@ fn a_shortened_horizon_emits_no_observations_past_its_own_trajectory() {
          snapshot and are fabricated. Emitted times: {obs_times:?}"
     );
 }
+
+// ── The baked intervention end ──────────────────────────────────────────────
+
+/// A recurring campaign whose `until` is omitted, so the compiler bakes the
+/// MODEL horizon in as its end — plus the same campaign with an explicit
+/// `until` covering the extended window.
+fn write_campaign_model(path: &Path, until: Option<&str>) {
+    let until_clause = until.map(|u| format!("  to = {u}\n")).unwrap_or_default();
+    let src = format!(
+        r#"
+time_unit = 'days
+
+compartments {{ S, I, R, V }}
+
+parameters {{
+  beta  : rate in [0.001, 2.0]
+  gamma : rate in [0.001, 1.0]
+}}
+
+init {{ S = 990  I = 10  R = 0 }}
+
+transitions {{
+  infection : S --> I  @ beta * S * I / (S + I + R + V)
+  recovery  : I --> R  @ gamma * I
+}}
+
+interventions {{
+  boost : transfer(fraction = 0.1, from = S, to = V) {{
+  every = 20 'days
+{until_clause}  }}
+}}
+
+simulate {{ from = 0 'days  to = 60 'days }}
+
+scenarios {{
+  long_on  {{ enable = [boost]  simulate {{ to = 200 'days }} }}
+  short_on {{ enable = [boost]  simulate {{ to = 40 'days }} }}
+}}
+"#
+    );
+    std::fs::write(path, src).unwrap();
+}
+
+/// gh#561 round-2: the compiler bakes the model horizon into a recurring
+/// intervention's end when `until` is omitted (`expander.ml:7258`), and the
+/// stepper fires `while t <= rs.end`. Honouring an EXTENDING scenario horizon
+/// would therefore run the dynamics to the new end while the campaign silently
+/// stops at the old one — a ten-year projection whose immunisation switches off
+/// after year one. Until the baked copies collapse onto `simulation.t_end` in
+/// the IR (follow-up), that combination is refused with the `until = ...` fix
+/// in the message; an explicit `until`, and a SHORTENED horizon, both run.
+#[test]
+fn extending_past_a_baked_intervention_end_is_refused() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let params = tmp.path().join("p.toml");
+    std::fs::write(&params, "beta = 0.35\ngamma = 0.1\n").unwrap();
+
+    // Baked end (no `until`) + extending scenario → refused, naming both.
+    let baked = tmp.path().join("baked.camdl");
+    write_campaign_model(&baked, None);
+    let out = Command::new(&bin)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .args([
+            "simulate", &baked.to_string_lossy(), "--params", &params.to_string_lossy(),
+            "--backend", "ode", "--scenario", "long_on", "--stdout",
+        ])
+        .output()
+        .expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "an extending horizon over a baked campaign end must be refused — the \
+         campaign would silently stop at t = 60 inside a t = 200 window. \
+         stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("boost") && stderr.contains("to = 200"),
+        "the refusal must name the campaign and the recurring `to` fix; stderr:\n{stderr}"
+    );
+
+    // A SHORTENED horizon over the same baked end is safe and must run.
+    let out = Command::new(&bin)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .args([
+            "simulate", &baked.to_string_lossy(), "--params", &params.to_string_lossy(),
+            "--backend", "ode", "--scenario", "short_on", "--stdout",
+        ])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "a shortened horizon stops before the baked end and must run:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // An explicit `until` covering the window unlocks the extension, and the
+    // campaign actually fires through it: V climbs past the old horizon.
+    let explicit = tmp.path().join("explicit.camdl");
+    write_campaign_model(&explicit, Some("200 'days"));
+    let out = Command::new(&bin)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .args([
+            "simulate", &explicit.to_string_lossy(), "--params", &params.to_string_lossy(),
+            "--backend", "ode", "--scenario", "long_on", "--stdout",
+        ])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "an explicit `until` covering the window must run:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let rows: Vec<&str> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .collect();
+    let header: Vec<&str> = rows[0].split('\t').collect();
+    let t_i = header.iter().position(|c| *c == "t").expect("t column");
+    let v_i = header.iter().position(|c| *c == "V").expect("V column");
+    let v_at = |t: f64| -> f64 {
+        rows[1..]
+            .iter()
+            .map(|l| l.split('\t').collect::<Vec<_>>())
+            .find(|f| f[t_i].parse::<f64>().unwrap() == t)
+            .map(|f| f[v_i].parse::<f64>().unwrap())
+            .unwrap_or_else(|| panic!("no row at t = {t}"))
+    };
+    assert!(
+        v_at(200.0) > v_at(60.0),
+        "the campaign must keep firing past the old model horizon: \
+         V(200) = {} vs V(60) = {}",
+        v_at(200.0),
+        v_at(60.0)
+    );
+}
+
+/// gh#561 round-2: the combined `--obs`/`--obs-dir` writers cache one obs-time
+/// axis for the whole grid, so scenarios with different horizons cannot share
+/// them — whichever ran first would set every cell's axis, and which scenario
+/// got fabricated (or truncated) rows depended on FLAG ORDER. Refused, in both
+/// orders; equal horizons still work.
+#[test]
+fn obs_mirror_refuses_scenarios_with_different_horizons() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("m.camdl");
+    let params = tmp.path().join("p.toml");
+    write_observed_model(&model); // model to = 100; `shorter { to = 40 }`
+    std::fs::write(&params, "beta = 0.35\ngamma = 0.1\nrho = 0.5\n").unwrap();
+
+    for order in [["shorter", "baseline"], ["baseline", "shorter"]] {
+        let obs = tmp.path().join("obs.tsv");
+        let traj = tmp.path().join("traj.tsv");
+        let store = tmp.path().join("store");
+        let out = Command::new(&bin)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .args([
+                "simulate", &model.to_string_lossy(), "--params",
+                &params.to_string_lossy(), "--backend", "ode", "--seed", "7",
+                "--scenario", order[0], "--scenario", order[1],
+                "--output-dir", &store.to_string_lossy(),
+                "--obs", &obs.to_string_lossy(), "-o", &traj.to_string_lossy(),
+            ])
+            .output()
+            .expect("spawn");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            !out.status.success(),
+            "--obs across horizons 40 and 100 must be refused in order \
+             {order:?} — the shared axis fabricates or truncates one arm. \
+             stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("different") && stderr.contains("horizon"),
+            "the refusal must name the horizon mismatch; stderr:\n{stderr}"
+        );
+    }
+}

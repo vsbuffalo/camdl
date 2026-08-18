@@ -9981,9 +9981,19 @@ let expand_scenarios ctx : Ir.preset list =
        both the trajectory and `final(...)` — warning there, and advising the
        author to drop it, would silently change their answer. This form also
        catches the mirror case the old test missed: a `to` that truncates
-       without dropping any listed time. *)
+       without dropping any listed time.
+
+       Suppressed entirely when any observation stream carries an
+       `emit_schedule`: observation emission follows the RUN horizon (gh#561),
+       so even a snapshot-inert `to` still moves the emitted series and any
+       `observations.<stream>` quantity over it — "changes nothing" would be
+       false, and the advice to drop the `to` would silently change those
+       numbers (measured 31% on an `integral(observations.cases)`). *)
+    let obs_axis_moves =
+      List.exists (fun (o : obs_decl) -> o.oschedule <> None) ctx.obs_decls
+    in
     (match t_end_val, at_list with
-     | Some te, Some ats when te <> t_end ->
+     | Some te, Some ats when te <> t_end && not obs_axis_moves ->
        let lo = Float.min te t_end and hi = Float.max te t_end in
        (* Selected sets differ iff some listed time lies in (lo, hi]. *)
        let changes = List.exists (fun a -> a > lo && a <= hi) ats in
