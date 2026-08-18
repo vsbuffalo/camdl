@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.30",
+  "ir_version": "0.31",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "sir_vaccination",

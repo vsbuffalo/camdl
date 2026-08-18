@@ -92,12 +92,17 @@ enum QShape {
 
 impl QShape {
     fn of(body: &ir::quantity::QuantityBody) -> QShape {
-        use ir::quantity::{QuantityBody, TemporalReduce};
+        use ir::quantity::{QuantityBody, TemporalReduce, ValueReduce};
         match body {
             QuantityBody::Reduced { reduce: None, .. } => QShape::Series,
             QuantityBody::Reduced { reduce: Some(TemporalReduce::Time(_)), .. } => {
                 QShape::ScalarCensorable
             }
+            // value_at censors out-of-window (proposal 2026-08-17) — it needs
+            // the censoring trio like a Time scalar, not the plain path.
+            QuantityBody::Reduced {
+                reduce: Some(TemporalReduce::Value(ValueReduce::ValueAt(_))), ..
+            } => QShape::ScalarCensorable,
             QuantityBody::Reduced { reduce: Some(_), .. } => QShape::ScalarPlain,
             QuantityBody::Derived(_) => QShape::ScalarPlain,
         }
@@ -120,6 +125,7 @@ fn reduce_name(r: &ir::quantity::TemporalReduce) -> &'static str {
         TemporalReduce::Value(ValueReduce::Mean) => "mean",
         TemporalReduce::Value(ValueReduce::CountAbove(_)) => "count_above",
         TemporalReduce::Value(ValueReduce::CountBelow(_)) => "count_below",
+        TemporalReduce::Value(ValueReduce::ValueAt(_)) => "value_at",
         TemporalReduce::Time(TimeReduce::TimeOfMax) => "time_of_max",
         TemporalReduce::Time(TimeReduce::TimeOfMin) => "time_of_min",
         TemporalReduce::Time(TimeReduce::FirstAbove(_)) => "first_above",
@@ -281,6 +287,12 @@ pub(crate) fn render_quantities(
     for q in quantities {
         let is_cens = match &q.body {
             QuantityBody::Reduced { reduce: Some(TemporalReduce::Time(_)), .. } => true,
+            // value_at censors out-of-window, so a Derived over it must too.
+            QuantityBody::Reduced {
+                reduce:
+                    Some(TemporalReduce::Value(ir::quantity::ValueReduce::ValueAt(_))),
+                ..
+            } => true,
             QuantityBody::Derived(se) => {
                 let mut refs = Vec::new();
                 collect_qrefs(se, &mut refs);

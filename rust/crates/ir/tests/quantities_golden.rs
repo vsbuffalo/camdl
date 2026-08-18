@@ -28,7 +28,7 @@ fn q<'a>(m: &'a ir::Model, name: &str) -> &'a ir::quantity::Quantity {
 #[test]
 fn showcase_golden_deserialises_every_variant() {
     let m = model();
-    assert_eq!(m.quantities.len(), 24, "19 state + 2 derived + 3 obs leaves (stratified families expanded)");
+    assert_eq!(m.quantities.len(), 27, "21 state + 2 derived + 4 obs leaves (stratified families expanded)");
 
     // ── State source: a bare series (reduce = None) ──
     match &q(&m, "total_prev").body {
@@ -60,6 +60,28 @@ fn showcase_golden_deserialises_every_variant() {
     assert!(matches!(
         &q(&m, "final_R").body,
         QuantityBody::Reduced { reduce: Some(TemporalReduce::Value(ValueReduce::Final)), .. }
+    ));
+
+    assert!(matches!(
+        &q(&m, "prev_at_50").body,
+        QuantityBody::Reduced {
+            reduce:
+                Some(TemporalReduce::Value(ValueReduce::ValueAt(
+                    ir::quantity::TimeAnchor::Time(_)
+                ))),
+            ..
+        }
+    ));
+    // Obs-source value_at: the anchor rides the same wire shape.
+    assert!(matches!(
+        &q(&m, "cases_at_28").body,
+        QuantityBody::Reduced {
+            source: QuantitySource::Observation { .. },
+            reduce:
+                Some(TemporalReduce::Value(ValueReduce::ValueAt(
+                    ir::quantity::TimeAnchor::Time(_)
+                ))),
+        }
     ));
 
     // ── Integral ──

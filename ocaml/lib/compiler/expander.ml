@@ -3511,7 +3511,7 @@ let note_restricted_reduction ctx ~loc ~var ~dim ~empty env =
    it to reject a reduction name that leaked into a rate / binding (E290). *)
 let temporal_reduction_names =
   [ "final"; "mean"; "integral";
-    "count_above"; "count_below";
+    "count_above"; "count_below"; "value_at";
     "time_of_max"; "time_of_min";
     "first_above"; "first_below"; "last_above"; "last_below" ]
 
@@ -8599,6 +8599,41 @@ let classify_quantity_body ctx env
         | Some (x, th) ->
           reduced_state (Ir.RValue (Ir.VCountBelow (resolve_expr ctx env th))) x
         | None -> wrong_arity fn "two arguments, e.g. count_below(I, thresh)")
+     | "value_at" ->
+       (* value_at(SERIES, TIME): the series value at the last output time
+          <= TIME, censored outside the trajectory window (proposal
+          2026-08-17). TIME is a constant time expression, or the bare
+          `last_obs` anchor — symbolic in the IR, resolved at evaluation
+          time, so the compiled model stays data-independent. `last_obs` is
+          intercepted HERE and nowhere else: outside this position it stays
+          an unknown identifier and cannot reach the model dynamics. *)
+       (match two with
+        | Some (x, t) ->
+          let rec mentions_last_obs = function
+            | EIdent ("last_obs", _) -> true
+            | EBinOp (_, a, b) -> mentions_last_obs a || mentions_last_obs b
+            | EUnOp (_, e) -> mentions_last_obs e
+            | ECond (p, a, b) ->
+              mentions_last_obs p || mentions_last_obs a || mentions_last_obs b
+            | EFuncCall (_, args) ->
+              List.exists (fun (_, e) -> mentions_last_obs e) args
+            | _ -> false
+          in
+          (match t with
+           | EIdent ("last_obs", _) ->
+             reduced_state (Ir.RValue (Ir.VValueAt Ir.ALastObs)) x
+           | _ when mentions_last_obs t ->
+             err ~hint:"anchor arithmetic is not supported: write the bare \
+                        anchor `value_at(expr, last_obs)`, or a literal time \
+                        `value_at(expr, date(\"...\"))`"
+               "`last_obs` must be the whole second argument of `value_at`"
+           | _ ->
+             reduced_state
+               (Ir.RValue (Ir.VValueAt (Ir.ATime (resolve_expr ctx env t)))) x)
+        | None ->
+          wrong_arity fn
+            "two arguments, e.g. value_at(N0 - S, date(\"2026-08-10\")) or \
+             value_at(N0 - S, last_obs)")
      | "first_above" ->
        (match two with
         | Some (x, th) ->

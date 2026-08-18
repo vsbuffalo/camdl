@@ -3775,6 +3775,8 @@ quantities {
   fadeout         = last_above(I, 0)         # last time I is above 0
   outbreak_dur    = fadeout - takeoff        # arithmetic over already-reduced scalars
   peak_reported   = max(observations.cases)  # reduce a simulated observation stream
+  size_at_day_30  = value_at(N0 - S, 30)     # the series value at a stated time
+  outbreak_size   = value_at(N0 - S, last_obs)  # … at the end of observed data
 }
 ```
 
@@ -3786,7 +3788,7 @@ Each binding is `name = <expr>`. Whether a quantity is a **series** or a
   (`prevalence` above), on the trajectory's output schedule (§16).
 - **Scalar** — a **reduction** collapses a series to a single number or a single
   time. The temporal reductions are `final`, `mean`, `integral`,
-  `count_above` / `count_below`, `time_of_max` / `time_of_min`, and
+  `count_above` / `count_below`, `value_at`, `time_of_max` / `time_of_min`, and
   `first_above` / `first_below` / `last_above` / `last_below`. In addition, a
   **unary** `max` / `min` reduces a series to its peak / trough — binary
   `max(a, b)` / `min(a, b)` stay pointwise operators everywhere else.
@@ -3807,9 +3809,24 @@ names. A reduction name used in a _rate_ or a `let` binding (outside
 `quantities {}`) is rejected (**E290**): a reduction summarizes a whole run and
 is meaningless inside a per-step propensity.
 
+**Reading a series at a time.** `value_at(series, TIME)` is the series value
+at the last output time at or before `TIME` (the state *as of* `TIME`; values
+are never interpolated). `TIME` is a constant time expression —
+`date("2026-08-10")` under a declared `origin`, or a number in model time —
+**or the bare anchor `last_obs`**, the end of observed data. `last_obs` is
+resolved where data is in hand (`fit predict`); a forward `simulate` of a
+`last_obs` model is rejected with an error naming the quantity, because a
+simulation has no observed data to anchor to. `last_obs` is legal **only** as
+the whole second argument of `value_at` — arithmetic over it
+(`last_obs - 7`) is rejected, and outside `value_at` it is an ordinary
+unknown name.
+
 **Censoring.** A timing reduction that never resolves — `first_above` on a draw
 that never crosses the threshold, `time_of_max` on an all-zero series — is
-reported as **right-censored**, not as a fabricated time.
+reported as **right-censored**, not as a fabricated time. A `value_at` whose
+`TIME` falls outside the draw's trajectory window is censored the same way,
+never clamped to the window edge: clamping would silently report the value at
+the horizon instead of the value asked for.
 
 **Where they run, and run identity.** Quantities run wherever a simulation does:
 over prior-predictive draws (`simulate --draws`), over a fitted posterior

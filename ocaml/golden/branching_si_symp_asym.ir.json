@@ -1,4 +1,4 @@
-{"ir_version":"0.30","validated_by":"ocaml-compiler-v0.30","model":{"name":"branching_si_symp_asym","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.31","validated_by":"ocaml-compiler-v0.31","model":{"name":"branching_si_symp_asym","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I_symp","kind":"integer"},
 {"name":"I_asym","kind":"integer"}

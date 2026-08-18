@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.30",
-  "validated_by": "ocaml-compiler-v0.30",
+  "ir_version": "0.31",
+  "validated_by": "ocaml-compiler-v0.31",
   "model": {
     "name": "ross_macdonald",
     "version": "0.3",

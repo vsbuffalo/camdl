@@ -790,6 +790,8 @@ let reduced_value_dim (series : dim) (reduce : temporal_reduce option) : dim =
   match reduce with
   | None -> series
   | Some (RValue (VFinal | VMax | VMin | VMean)) -> series
+  (* value_at reads the series at a time — the value keeps the series dim. *)
+  | Some (RValue (VValueAt _)) -> series
   | Some (RValue (VCountAbove _ | VCountBelow _)) -> Known dimensionless
   | Some (RTime _) -> Known (make 0 1)
   | Some RIntegral ->

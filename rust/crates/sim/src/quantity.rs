@@ -75,6 +75,7 @@ enum RReduce {
     Mean,
     CountAbove(ResolvedExpr),
     CountBelow(ResolvedExpr),
+    ValueAt(RAnchor),
     TimeOfMax,
     TimeOfMin,
     FirstAbove(ResolvedExpr),
@@ -82,6 +83,16 @@ enum RReduce {
     LastAbove(ResolvedExpr),
     LastBelow(ResolvedExpr),
     Integral,
+}
+
+/// A resolved `value_at` anchor. `Expr` is evaluated once per draw (a constant
+/// or param expression; params are fixed within a draw); `LastObs` is the
+/// caller-resolved end of observed data — a data-free caller must gate on
+/// [`QuantityEvaluator::references_last_obs`] BEFORE `eval_draw`, so the
+/// `None` case is unreachable there.
+enum RAnchor {
+    Expr(ResolvedExpr),
+    LastObs,
 }
 
 enum RScalar {
@@ -98,6 +109,8 @@ enum RScalar {
 /// model; `eval_draw` is pure and re-runs per draw.
 pub struct QuantityEvaluator {
     programs: Vec<QProgram>,
+    /// Leaf names, parallel to `programs` (for gate error messages).
+    names: Vec<String>,
 }
 
 /// Canonical, order-independent key for a stratum cell.
@@ -161,7 +174,8 @@ impl QuantityEvaluator {
             };
             programs.push(prog);
         }
-        Ok(QuantityEvaluator { programs })
+        let names = quantities.iter().map(|q| q.name.clone()).collect();
+        Ok(QuantityEvaluator { programs, names })
     }
 
     /// Whether any quantity reduces an `observations.<stream>` source — the cue
@@ -171,6 +185,34 @@ impl QuantityEvaluator {
         self.programs.iter().any(|p| {
             matches!(p, QProgram::Reduced { source: QSource::Observation(_), .. })
         })
+    }
+
+    /// Whether any quantity reads at the `last_obs` anchor — the cue for a
+    /// caller to resolve the end of observed data before `eval_draw`. A
+    /// data-free caller (forward simulate) must hard-error naming the
+    /// quantities rather than pass `None` (proposal 2026-08-17).
+    pub fn references_last_obs(&self) -> bool {
+        self.programs.iter().any(|p| {
+            matches!(
+                p,
+                QProgram::Reduced { reduce: Some(RReduce::ValueAt(RAnchor::LastObs)), .. }
+            )
+        })
+    }
+
+    /// Names of the quantities that read at `last_obs` (for the data-free
+    /// caller's error message).
+    pub fn last_obs_quantity_names(&self) -> Vec<&str> {
+        self.programs
+            .iter()
+            .zip(&self.names)
+            .filter_map(|(p, n)| match p {
+                QProgram::Reduced { reduce: Some(RReduce::ValueAt(RAnchor::LastObs)), .. } => {
+                    Some(n.as_str())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// The distinct stream names reduced by `observations.<stream>` quantities
@@ -194,12 +236,17 @@ impl QuantityEvaluator {
     /// vector, `traj` the finished trajectory, `obs` the already-drawn `y_sim`
     /// series (v1.1; `None` for a state-only model). Pure; results are in the same
     /// order as the `quantities` list (so a `Derived` can read prior scalars).
+    /// `last_obs`: the caller-resolved end of observed data (max observation
+    /// time over the run's bound streams), required iff
+    /// [`references_last_obs`](Self::references_last_obs) — gate before
+    /// calling from a data-free context.
     pub fn eval_draw(
         &self,
         params: &[f64],
         traj: &Trajectory,
         compiled: &CompiledModel,
         obs: Option<&ObsSeriesSet>,
+        last_obs: Option<f64>,
     ) -> Vec<QuantityResult> {
         let snap_times: Vec<f64> = traj.snapshots.iter().map(|s| s.t).collect();
         let mut results: Vec<QuantityResult> = Vec::with_capacity(self.programs.len());
@@ -213,7 +260,7 @@ impl QuantityEvaluator {
                             Some(red) => {
                                 // State thresholds are evaluated at the snapshot times.
                                 let thresh = |te: &ResolvedExpr| eval_series(te, traj, compiled, params);
-                                QuantityResult::Scalar(fold_reduce(red, &series, &snap_times, &thresh))
+                                QuantityResult::Scalar(fold_reduce(red, &series, &snap_times, &thresh, last_obs))
                             }
                         }
                     }
@@ -238,7 +285,7 @@ impl QuantityEvaluator {
                                         .map(|&t| eval_at(te, snap_at(traj, t), compiled, params, t))
                                         .collect()
                                 };
-                                QuantityResult::Scalar(fold_reduce(red, &series, &otimes, &thresh))
+                                QuantityResult::Scalar(fold_reduce(red, &series, &otimes, &thresh, last_obs))
                             }
                         }
                     }
@@ -262,6 +309,12 @@ fn resolve_reduce(
         TemporalReduce::Value(ValueReduce::Mean) => RReduce::Mean,
         TemporalReduce::Value(ValueReduce::CountAbove(t)) => RReduce::CountAbove(resolve(t)?),
         TemporalReduce::Value(ValueReduce::CountBelow(t)) => RReduce::CountBelow(resolve(t)?),
+        TemporalReduce::Value(ValueReduce::ValueAt(ir::quantity::TimeAnchor::Time(t))) => {
+            RReduce::ValueAt(RAnchor::Expr(resolve(t)?))
+        }
+        TemporalReduce::Value(ValueReduce::ValueAt(ir::quantity::TimeAnchor::LastObs)) => {
+            RReduce::ValueAt(RAnchor::LastObs)
+        }
         TemporalReduce::Time(TimeReduce::TimeOfMax) => RReduce::TimeOfMax,
         TemporalReduce::Time(TimeReduce::TimeOfMin) => RReduce::TimeOfMin,
         TemporalReduce::Time(TimeReduce::FirstAbove(t)) => RReduce::FirstAbove(resolve(t)?),
@@ -364,10 +417,31 @@ fn fold_reduce(
     series: &[f64],
     times: &[f64],
     thresh: &impl Fn(&ResolvedExpr) -> Vec<f64>,
+    last_obs: Option<f64>,
 ) -> QuantityDrawValue {
     use QuantityDrawValue::*;
     match r {
         RReduce::Final => Value(series.last().copied().unwrap_or(f64::NAN)),
+        RReduce::ValueAt(anchor) => {
+            let t = match anchor {
+                // Params are fixed within a draw, so evaluating the (constant
+                // or param) time expression at the first snapshot is the
+                // expression's value for the draw.
+                RAnchor::Expr(e) => thresh(e).first().copied().unwrap_or(f64::NAN),
+                RAnchor::LastObs => match last_obs {
+                    Some(v) => v,
+                    None => {
+                        debug_assert!(
+                            false,
+                            "value_at(last_obs) reached eval without data; \
+                             callers gate on references_last_obs()"
+                        );
+                        f64::NAN // → Censored below, never a fabricated value
+                    }
+                },
+            };
+            value_at_locf(series, times, t)
+        }
         RReduce::Max => Value(reduce_finite(series, f64::NEG_INFINITY, |a, b| a.max(b))),
         RReduce::Min => Value(reduce_finite(series, f64::INFINITY, |a, b| a.min(b))),
         RReduce::Mean => {
@@ -426,6 +500,25 @@ fn eval_scalar(se: &RScalar, results: &[QuantityResult], params: &[f64]) -> Quan
 }
 
 // ── Fold helpers ────────────────────────────────────────────────────────────────
+
+/// The series value at the last time `<= t` (LOCF — "the state as of t").
+/// Censored outside the window, never clamped: clamping would silently answer
+/// a different question, which is the misreading `value_at` exists to prevent
+/// (proposal 2026-08-17). `times` is ascending (the output grid or a stream's
+/// observation times) and same-length as `series`.
+fn value_at_locf(series: &[f64], times: &[f64], t: f64) -> QuantityDrawValue {
+    use QuantityDrawValue::*;
+    debug_assert_eq!(series.len(), times.len());
+    if series.is_empty() || !t.is_finite() {
+        return Censored;
+    }
+    if t < times[0] || t > *times.last().expect("nonempty") {
+        return Censored;
+    }
+    // Number of times <= t; >= 1 here since t >= times[0].
+    let idx = times.partition_point(|&x| x <= t);
+    Value(series[idx - 1])
+}
 
 fn reduce_finite(series: &[f64], init: f64, f: impl Fn(f64, f64) -> f64) -> f64 {
     let mut acc = init;
@@ -555,6 +648,34 @@ fn apply_un(op: &UnOp, x: f64) -> f64 {
 mod tests {
     use super::*;
     use QuantityDrawValue::*;
+
+    #[test]
+    fn value_at_locf_reads_last_time_at_or_before_anchor() {
+        let times = [0.0, 7.0, 14.0, 21.0];
+        let series = [1.0, 5.0, 9.0, 13.0];
+        // Exactly on a snapshot → that snapshot.
+        assert_eq!(value_at_locf(&series, &times, 14.0), Value(9.0));
+        // Between snapshots → the LAST one at or before (LOCF), never
+        // interpolated: 10.0 sits between t=7 and t=14 → the t=7 value.
+        assert_eq!(value_at_locf(&series, &times, 10.0), Value(5.0));
+        // At the window edges → the edge values, not censored.
+        assert_eq!(value_at_locf(&series, &times, 0.0), Value(1.0));
+        assert_eq!(value_at_locf(&series, &times, 21.0), Value(13.0));
+    }
+
+    #[test]
+    fn value_at_locf_censors_outside_the_window_never_clamps() {
+        let times = [0.0, 7.0, 14.0];
+        let series = [1.0, 5.0, 9.0];
+        // Past the end: censored — clamping to final(9.0) would silently
+        // report the projection at the horizon, the misreading value_at
+        // exists to prevent (proposal 2026-08-17).
+        assert_eq!(value_at_locf(&series, &times, 14.0001), Censored);
+        // Before the start, non-finite, empty: censored.
+        assert_eq!(value_at_locf(&series, &times, -0.5), Censored);
+        assert_eq!(value_at_locf(&series, &times, f64::NAN), Censored);
+        assert_eq!(value_at_locf(&[], &[], 1.0), Censored);
+    }
 
     #[test]
     fn argmax_argmin_first_on_ties() {

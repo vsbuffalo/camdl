@@ -106,6 +106,29 @@ pub enum ValueReduce {
     CountAbove(Expr),
     /// Number of output times at which the series is below the threshold.
     CountBelow(Expr),
+    /// The series value at the last output time `<=` the anchor (LOCF);
+    /// censored outside the trajectory window — never clamped (proposal
+    /// 2026-08-17).
+    ValueAt(TimeAnchor),
+}
+
+/// When a `value_at` reads its series. Deliberately NOT a bare [`Expr`]: the
+/// `last_obs` anchor must be unrepresentable outside this position, so it
+/// cannot leak into the model dynamics (the `TriggerQuantity` precedent).
+///
+/// Serde (externally tagged): `{"time": <expr>}` / `"last_obs"` — matching the
+/// OCaml emitter (`serde.ml`, `value_reduce_to_json`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeAnchor {
+    /// A constant time expression — `date(...)` folded against the origin, or
+    /// a model-time literal.
+    Time(Expr),
+    /// The end of observed data: max observation time over the run's bound
+    /// streams, resolved by the CALLER at evaluation time (the compiled model
+    /// stays data-independent; a data-free context hard-errors at evaluator
+    /// construction).
+    LastObs,
 }
 
 /// A reduction whose result is a *time* (dimension `T`). A non-firing crossing is
@@ -178,6 +201,48 @@ mod tests {
         let json = serde_json::to_string(q).expect("serialize");
         let back: Quantity = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(*q, back, "quantity round-trip changed value; json was {json}");
+    }
+
+    #[test]
+    fn round_trips_value_at_both_anchors_and_pins_ocaml_wire_shape() {
+        // `value_at(I, 20)` — constant anchor.
+        let at_const = Quantity {
+            name: "size_at_20".into(),
+            stratum: vec![],
+            dimension: None,
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(Expr::pop("I")),
+                reduce: Some(TemporalReduce::Value(ValueReduce::ValueAt(
+                    TimeAnchor::Time(Expr::const_(20.0)),
+                ))),
+            },
+        };
+        rt_quantity(&at_const);
+        // `value_at(I, last_obs)` — symbolic anchor.
+        let at_last = Quantity {
+            name: "outbreak_size".into(),
+            stratum: vec![],
+            dimension: None,
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(Expr::pop("I")),
+                reduce: Some(TemporalReduce::Value(ValueReduce::ValueAt(TimeAnchor::LastObs))),
+            },
+        };
+        rt_quantity(&at_last);
+
+        // Pin the WIRE SHAPES the OCaml emitter writes (serde.ml,
+        // value_reduce_to_json) — a derive-level change that re-tags either
+        // form must fail here, not at the next cross-language run.
+        let json = serde_json::to_string(&at_const).unwrap();
+        assert!(
+            json.contains(r#""value_at":{"time":"#),
+            "constant anchor must serialize as {{\"time\": <expr>}}: {json}"
+        );
+        let json = serde_json::to_string(&at_last).unwrap();
+        assert!(
+            json.contains(r#""value_at":"last_obs""#),
+            "last_obs must serialize as the bare string: {json}"
+        );
     }
 
     #[test]

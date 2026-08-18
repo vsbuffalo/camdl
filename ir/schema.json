@@ -1377,6 +1377,24 @@
           "required": ["count_below"],
           "properties": { "count_below": { "$ref": "#/definitions/expr" } },
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["value_at"],
+          "properties": { "value_at": { "$ref": "#/definitions/time_anchor" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "time_anchor": {
+      "oneOf": [
+        { "type": "string", "enum": ["last_obs"] },
+        {
+          "type": "object",
+          "required": ["time"],
+          "properties": { "time": { "$ref": "#/definitions/expr" } },
+          "additionalProperties": false
         }
       ]
     },

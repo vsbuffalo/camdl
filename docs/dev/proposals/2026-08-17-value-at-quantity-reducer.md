@@ -148,6 +148,27 @@ Red first, then green:
 - **Mutation check** per repo convention: revert the LOCF arm to clamping,
   confirm the censoring e2e goes red.
 
+## Deviations found at implementation
+
+Two, both documented here per the follow-the-proposal rule:
+
+1. **The TIME dimension check is deferred, not implemented.** The proposal said
+   `TIME` "must check as dimension T" via a dimcheck sibling rule. The dimcheck
+   quantity pass is deliberately read-only (it computes result dimensions and
+   "never surfaces a new error on an existing quantity-bearing model" —
+   `dimcheck.ml`), and the existing `CountAbove` threshold expressions are not
+   dimension-enforced either. `value_at`'s time argument gets the same
+   treatment: the result-dimension rule is implemented (preserves the series
+   dimension); argument-dimension enforcement waits for whichever increment
+   dimension-checks reduction arguments as a class.
+2. **Censorability needed real plumbing, not "no new machinery".** The banding
+   layer classifies censorable scalars by reduction kind (`QShape::of`) and
+   propagates censorability through `Derived` arithmetic via an explicit set —
+   both keyed on `TemporalReduce::Time(_)` only. A censored `value_at` draw
+   would have gone down the plain-scalar path (dropped silently, no
+   `n_censored`). Both sites now include `ValueReduce::ValueAt(_)`; the e2e test
+   pins the censoring trio in the emitted TSV.
+
 ## Explicitly out of scope
 
 Anchor arithmetic and `first_obs` (deferred above); per-stream

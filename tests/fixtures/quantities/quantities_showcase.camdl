@@ -61,6 +61,12 @@ quantities {
   high_days   = count_above(I_total, thr)
   low_days    = count_below(I_total, thr)
   person_days = integral(I_total)
+  # value_at (proposal 2026-08-17): LOCF read at a stated time — the value at
+  # the last output time <= the anchor; censored outside the window (the
+  # `late` entry reads past t_end=200 and must band as censored, not clamp).
+  prev_at_50    = value_at(I_total, 50)
+  cases_at_28   = value_at(observations.cases, 28)
+  late          = value_at(I_total, 500)
   peak_t   = time_of_max(I_total)
   trough_t = time_of_min(I_total)
   onset    = first_above(I_total, thr)

@@ -1664,6 +1664,20 @@ impl SimQuantities {
                 }
             }
         }
+        // A `value_at(..., last_obs)` quantity anchors to the end of OBSERVED
+        // data; a forward simulation has none (even `--obs` output is synthetic
+        // y_sim, not observations). Hard error naming the quantities — the
+        // capability-gap convention — rather than an empty/NaN column
+        // (proposal 2026-08-17).
+        if eval.references_last_obs() {
+            return Err(format!(
+                "quantity `{}` reads `value_at(..., last_obs)`, but a forward \
+                 simulation has no observed data to anchor to. Evaluate it via \
+                 `fit predict` (where the fit's data supplies last_obs), or use \
+                 a literal time: `value_at(expr, date(\"...\"))`.",
+                eval.last_obs_quantity_names().join("`, `"),
+            ));
+        }
         // `observations.<stream>` quantities reduce the per-draw y_sim — sampled
         // here with the cell's obs_seed (the same draws `--obs` would emit). Only
         // built when a quantity actually references an observation stream.
@@ -1680,7 +1694,7 @@ impl SimQuantities {
                 cell.spec.obs_seed,
             )?)
         };
-        let results = eval.eval_draw(&params, &cell.traj, compiled, obs_set.as_ref());
+        let results = eval.eval_draw(&params, &cell.traj, compiled, obs_set.as_ref(), None);
         let times: Vec<f64> = cell.traj.snapshots.iter().map(|s| s.t).collect();
         // The key is DERIVED from the cell, never supplied by a caller — that is
         // what makes pooling unrepresentable here. An accumulator taking a key

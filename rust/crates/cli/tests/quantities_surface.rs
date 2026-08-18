@@ -157,15 +157,19 @@ fn simulate_emits_the_full_quantity_surface() {
         serde_json::from_str(&std::fs::read_to_string(qdir.join("quantities.json")).unwrap()).unwrap();
     assert_eq!(manifest["schema"], "camdl.quantities/v1");
     let qs = manifest["quantities"].as_array().unwrap();
-    assert_eq!(qs.len(), 22, "22 logical quantities (19 state + 3 obs; stratified families count once)");
+    assert_eq!(qs.len(), 25, "25 logical quantities (21 state + 4 obs; stratified families count once)");
     let censorable: std::collections::BTreeSet<&str> =
         qs.iter().filter(|q| q["censoring"].is_object()).map(|q| q["name"].as_str().unwrap()).collect();
     let expected: std::collections::BTreeSet<&str> = [
         "peak_t", "trough_t", "onset", "fadeout", "first_lo", "last_lo", "big_t", "never",
         "outbreak_dur", "half_dur", // Derived transitively referencing a Time scalar
         "cases_onset",              // obs-source Time reduction
+        "prev_at_50", "cases_at_28", "late", // value_at censors out-of-window
     ].into_iter().collect();
-    assert_eq!(censorable, expected, "exactly the Time + Derived-of-Time quantities are censorable");
+    assert_eq!(
+        censorable, expected,
+        "exactly the Time, Derived-of-Time, and value_at quantities are censorable"
+    );
 }
 
 // ── Independent recomputation oracle ─────────────────────────────────────────
@@ -291,6 +295,22 @@ fn quantities_match_independent_recomputation() {
     assert_eq!(scalar_opt(&qdir, "big_t"), cross_time(&i_total, &t, 0.5 * n_tot[0], true, true), "big_t");
     assert_eq!(scalar_opt(&qdir, "never"), None, "never");
 
+    // value_at: LOCF read — the value at the last output time <= the anchor;
+    // censored past the window (proposal 2026-08-17). Recomputed with an
+    // INDEPENDENT scan (not partition_point) over the emitted trajectory.
+    let locf = |series: &[f64], times: &[f64], anchor: f64| -> Option<f64> {
+        let mut out = None;
+        for i in 0..times.len() {
+            if times[i] <= anchor {
+                out = Some(series[i]);
+            }
+        }
+        if anchor < times[0] || anchor > *times.last().unwrap() { None } else { out }
+    };
+    assert_eq_f("prev_at_50", scalar_f(&qdir, "prev_at_50"), locf(&i_total, &t, 50.0).unwrap());
+    // `late` reads past t_end=200 — censored to NA, never clamped to final().
+    assert_eq!(scalar_opt(&qdir, "late"), None, "late must censor, not clamp");
+
     // Derived arithmetic over prior scalars.
     let (onset, fadeout) = (scalar_f(&qdir, "onset"), scalar_f(&qdir, "fadeout"));
     assert_eq_f("outbreak_dur", scalar_f(&qdir, "outbreak_dur"), fadeout - onset);
@@ -305,4 +325,16 @@ fn quantities_match_independent_recomputation() {
     assert_eq_f("peak_cases", scalar_f(&qdir, "peak_cases"), max_finite(&cases));
     assert_eq_f("total_cases", scalar_f(&qdir, "total_cases"), trapezoid(&cases, &ot));
     assert_eq!(scalar_opt(&qdir, "cases_onset"), cross_time(&cases, &ot, thr, true, true), "cases_onset");
+    // value_at over the obs source reads on the STREAM's own time axis
+    // (every 14 days), so the anchor 28 lands exactly on its second emission.
+    let locf_obs = {
+        let mut out = None;
+        for i in 0..ot.len() {
+            if ot[i] <= 28.0 {
+                out = Some(cases[i]);
+            }
+        }
+        out.unwrap()
+    };
+    assert_eq_f("cases_at_28", scalar_f(&qdir, "cases_at_28"), locf_obs);
 }

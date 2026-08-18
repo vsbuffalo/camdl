@@ -1,4 +1,4 @@
-{"ir_version":"0.30","validated_by":"ocaml-compiler-v0.30","model":{"name":"quantities_showcase","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.31","validated_by":"ocaml-compiler-v0.31","model":{"name":"quantities_showcase","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_a","kind":"integer"},
 {"name":"S_b","kind":"integer"},
 {"name":"I_a","kind":"integer"},
@@ -38,6 +38,9 @@
 {"name":"high_days","body":{"reduced":{"source":{"state":{"binding_ref":"I_total"}},"reduce":{"value":{"count_above":{"param":"thr"}}}}},"dimension":[0,0]},
 {"name":"low_days","body":{"reduced":{"source":{"state":{"binding_ref":"I_total"}},"reduce":{"value":{"count_below":{"param":"thr"}}}}},"dimension":[0,0]},
 {"name":"person_days","body":{"reduced":{"source":{"state":{"binding_ref":"I_total"}},"reduce":"integral"}},"dimension":[1,1]},
+{"name":"prev_at_50","body":{"reduced":{"source":{"state":{"binding_ref":"I_total"}},"reduce":{"value":{"value_at":{"time":{"const":50.0}}}}}},"dimension":[1,0]},
+{"name":"cases_at_28","body":{"reduced":{"source":{"observation":{"stream":"cases"}},"reduce":{"value":{"value_at":{"time":{"const":28.0}}}}}},"dimension":[1,0]},
+{"name":"late","body":{"reduced":{"source":{"state":{"binding_ref":"I_total"}},"reduce":{"value":{"value_at":{"time":{"const":500.0}}}}}},"dimension":[1,0]},
 {"name":"peak_t","body":{"reduced":{"source":{"state":{"binding_ref":"I_total"}},"reduce":{"time":"time_of_max"}}},"dimension":[0,1]},
 {"name":"trough_t","body":{"reduced":{"source":{"state":{"binding_ref":"I_total"}},"reduce":{"time":"time_of_min"}}},"dimension":[0,1]},
 {"name":"onset","body":{"reduced":{"source":{"state":{"binding_ref":"I_total"}},"reduce":{"time":{"first_above":{"param":"thr"}}}}},"dimension":[0,1]},

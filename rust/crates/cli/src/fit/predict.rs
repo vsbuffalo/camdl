@@ -773,11 +773,18 @@ impl crate::engine::RunSink for PredictiveSink {
 
         // Generated quantities: fold this draw's trajectory + the just-drawn y_sim
         // into its per-quantity values, using the SAME resolved params + draws as
-        // the predictive output above.
+        // the predictive output above. `last_obs` (the `value_at` anchor) is the
+        // end of the OBSERVED data axis — the max over the leaves' observation
+        // times, which predict carries for the predicted-vs-observed join.
+        let last_obs: Option<f64> = self
+            .leaf_times
+            .iter()
+            .flat_map(|ts| ts.iter().copied())
+            .fold(None, |acc: Option<f64>, t| Some(acc.map_or(t, |a| a.max(t))));
         let quant_results = self
             .quant_eval
             .as_ref()
-            .map(|eval| eval.eval_draw(&params, &cell.traj, &self.compiled, Some(&obs_set)));
+            .map(|eval| eval.eval_draw(&params, &cell.traj, &self.compiled, Some(&obs_set), last_obs));
         let snapshot_times: Vec<f64> = if quant_results.is_some() {
             cell.traj.snapshots.iter().map(|s| s.t).collect()
         } else {
@@ -1150,6 +1157,19 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     .unwrap_or_default()
             })
             .collect();
+        // A `value_at(..., last_obs)` quantity anchors to the observed-data
+        // axis; if no leaf carries any observation time the anchor is
+        // unresolvable — refuse loudly rather than silently censoring every
+        // draw (proposal 2026-08-17).
+        if let Some(eval) = quant_eval.as_deref() {
+            if eval.references_last_obs() && leaf_times.iter().all(|ts| ts.is_empty()) {
+                return Err(format!(
+                    "quantity `{}` reads `value_at(..., last_obs)`, but this \
+                     fit binds no observation times to anchor to.",
+                    eval.last_obs_quantity_names().join("`, `"),
+                ));
+            }
+        }
         // Observed aux per leaf, in the SAME model.observations order + the same
         // per-leaf time alignment as `leaf_times` (both cloned from the matched
         // `LeafObs`), so `leaf_aux[si][ti]` is the survey denominator at

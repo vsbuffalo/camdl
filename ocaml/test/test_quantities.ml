@@ -204,6 +204,38 @@ let test_final () =
   | Ir.QBReduced { source = Ir.QSState (Ir.Pop "D"); _ } -> ()
   | _ -> Alcotest.failf "total_deaths: expected source State(Pop D)"
 
+(* value_at with a constant time → RValue (VValueAt (ATime _)) (proposal
+   2026-08-17). *)
+let test_value_at_const () =
+  let m = compile_ok (model_with "      size_at_20 = value_at(I, 20)") in
+  match reduce_of m "size_at_20" with
+  | Ir.RValue (Ir.VValueAt (Ir.ATime (Ir.Const 20.0))) -> ()
+  | _ -> Alcotest.failf "size_at_20: expected RValue (VValueAt (ATime (Const 20)))"
+
+(* value_at with the bare `last_obs` anchor → symbolic ALastObs — the compiled
+   model stays data-independent; resolution happens at evaluation time. *)
+let test_value_at_last_obs () =
+  let m = compile_ok (model_with "      outbreak_size = value_at(I, last_obs)") in
+  match reduce_of m "outbreak_size" with
+  | Ir.RValue (Ir.VValueAt Ir.ALastObs) -> ()
+  | _ -> Alcotest.failf "outbreak_size: expected RValue (VValueAt ALastObs)"
+
+(* Arithmetic over the anchor is rejected (v1): `last_obs` must be the whole
+   second argument, so it cannot half-enter the expression language. *)
+let test_value_at_anchor_arithmetic_rejected () =
+  compile_expect_error_code ~code:"E289" ~contains:"whole second argument"
+    (model_with "      bad = value_at(I, last_obs - 7)")
+
+(* `last_obs` is intercepted ONLY inside value_at's second argument; anywhere
+   else it stays an unknown identifier (cannot leak into dynamics). *)
+let test_last_obs_outside_value_at_is_unknown () =
+  compile_expect_error_code ~code:"E100" ~contains:"last_obs"
+    (model_with "      bad = final(I + last_obs)")
+
+let test_value_at_wrong_arity () =
+  compile_expect_error_code ~code:"E289" ~contains:"two arguments"
+    (model_with "      bad = value_at(I)")
+
 (* binary max(a, b) is a pointwise operator → a *series* State quantity, NOT a
    reduction. Confirms the arity split. *)
 let test_binary_max_is_series () =
@@ -409,6 +441,14 @@ let () =
       Alcotest.test_case "first_above(I, i_thresh) → RTime FirstAbove" `Quick test_first_above;
       Alcotest.test_case "integral(I) → RIntegral" `Quick test_integral;
       Alcotest.test_case "final(D) → RValue VFinal" `Quick test_final;
+      Alcotest.test_case "value_at(I, 20) → RValue VValueAt ATime" `Quick test_value_at_const;
+      Alcotest.test_case "value_at(I, last_obs) → RValue VValueAt ALastObs" `Quick
+        test_value_at_last_obs;
+      Alcotest.test_case "E289 anchor arithmetic rejected" `Quick
+        test_value_at_anchor_arithmetic_rejected;
+      Alcotest.test_case "last_obs outside value_at stays unknown" `Quick
+        test_last_obs_outside_value_at_is_unknown;
+      Alcotest.test_case "E289 value_at arity" `Quick test_value_at_wrong_arity;
       Alcotest.test_case "binary max(I,R) stays pointwise series" `Quick test_binary_max_is_series;
     ];
     "stratified", [

@@ -1072,6 +1072,8 @@ let value_reduce_to_json (v : value_reduce) : Yojson.Safe.t =
   | VMean  -> str "mean"
   | VCountAbove e -> obj [("count_above", expr_to_json e)]
   | VCountBelow e -> obj [("count_below", expr_to_json e)]
+  | VValueAt (ATime e) -> obj [("value_at", obj [("time", expr_to_json e)])]
+  | VValueAt ALastObs  -> obj [("value_at", str "last_obs")]
 
 let value_reduce_of_json j : value_reduce =
   match j with
@@ -1081,8 +1083,10 @@ let value_reduce_of_json j : value_reduce =
   | `String "mean"  -> VMean
   | `Assoc [("count_above", e)] -> VCountAbove (expr_of_json e)
   | `Assoc [("count_below", e)] -> VCountBelow (expr_of_json e)
+  | `Assoc [("value_at", `String "last_obs")] -> VValueAt ALastObs
+  | `Assoc [("value_at", v)] -> VValueAt (ATime (expr_of_json (member "time" v)))
   | _ -> fail "unknown value_reduce \
-               (expected final/max/min/mean or count_above/count_below)"
+               (expected final/max/min/mean, count_above/count_below, or value_at)"
 
 let time_reduce_to_json (t : time_reduce) : Yojson.Safe.t =
   match t with

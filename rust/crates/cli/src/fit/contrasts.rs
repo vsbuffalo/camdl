@@ -358,6 +358,18 @@ impl Arm {
         );
         let quant_eval = QuantityEvaluator::new(&model.quantities, compiled.as_ref())
             .map_err(|e| format!("contrast arm '{run}': building quantity evaluator: {e}"))?;
+        // Contrast arms are forked FORWARD simulations — no observed data, so
+        // the `last_obs` anchor is unresolvable here. Hard error naming the
+        // quantities (proposal 2026-08-17), never an empty/NaN operand.
+        if quant_eval.references_last_obs() {
+            return Err(format!(
+                "contrast arm '{run}': quantity `{}` reads \
+                 `value_at(..., last_obs)`, which has no observed data to \
+                 anchor to in a forked forward run. Use a literal time \
+                 (`value_at(expr, date(\"...\"))`) for contrast operands.",
+                quant_eval.last_obs_quantity_names().join("`, `"),
+            ));
+        }
         Ok(Arm { compiled, quant_eval })
     }
 
@@ -417,7 +429,7 @@ impl Arm {
         .map_err(|e| format!("contrast arm '{run}': forking at fork={fork_t}: {e:?}"))?;
 
         let times: Vec<f64> = traj.snapshots.iter().map(|s| s.t).collect();
-        let quant = self.quant_eval.eval_draw(&pvec, &traj, self.compiled.as_ref(), None);
+        let quant = self.quant_eval.eval_draw(&pvec, &traj, self.compiled.as_ref(), None, None);
         Ok(ArmDrawResult { quant, times })
     }
 }
