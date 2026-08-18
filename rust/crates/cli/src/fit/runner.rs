@@ -208,6 +208,17 @@ impl FitRunConfig {
             fit.estimate.keys().cloned().collect();
         let table_files_resolver: std::collections::HashMap<String, std::path::PathBuf> =
             std::collections::HashMap::new();
+        // gh#561: a fit's window is the observation times, so a scenario's own
+        // `simulate { to }` cannot be honoured here — refuse rather than drop
+        // it silently. "Honour it instead" would be actively wrong on this
+        // path: the ODE gradient config reads `simulation.t_end`
+        // (`sim/src/inference/ode_grad.rs`), so a shortened scenario horizon
+        // would truncate integration before the last scored observation.
+        crate::util::refuse_scenario_horizon(
+            &model_pre, fit.scenario.as_deref(), "fit run",
+            "a fit scores at the observation times, so its window comes from \
+             the data, not the model horizon",
+        )?;
         let resolved = crate::params_resolver::resolve_parameters(
             crate::params_resolver::ParameterInputs {
                 model: &model_pre,

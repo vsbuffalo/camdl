@@ -368,7 +368,8 @@ fn resolve_stage_dir(segment: &Path, stage: Option<&str>) -> Result<PathBuf, Str
 fn check_arm_horizons(model: &ir::Model, runs: &[String]) -> Result<(), String> {
     let model_end = model.simulation.t_end;
     for run in runs {
-        let got = crate::params_resolver::effective_horizon(model, Some(run.as_str()));
+        let got = crate::params_resolver::effective_horizon(model, Some(run.as_str()))
+            .map_err(|e| format!("contrast arm '{run}': {e}"))?;
         if got != model_end {
             return Err(format!(
                 "contrast arm '{run}' declares a simulation horizon of t = {got}, \

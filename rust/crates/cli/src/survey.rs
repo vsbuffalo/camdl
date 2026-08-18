@@ -672,6 +672,16 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         let fit_toml_estimate: IndexSet<String> = config.estimate.keys().cloned().collect();
         let table_files: HashMap<String, std::path::PathBuf> = HashMap::new();
 
+        // gh#561: a survey evaluates the likelihood at grid points, so its
+        // window is the observation times — the model horizon is never read.
+        // A scenario's own `simulate { to }` moves nothing, so refuse it rather
+        // than discard it silently (same guard as pfilter / profile).
+        crate::util::refuse_scenario_horizon(
+            &model_pre, scenario_opt.as_deref(), "survey",
+            "a survey scores the likelihood at the observation times, so its \
+             window comes from the data, not the model horizon",
+        )?;
+
         let resolved = crate::params_resolver::resolve_parameters(
             crate::params_resolver::ParameterInputs {
                 model: &model_pre,
@@ -867,6 +877,12 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         let ftf: IndexMap<String, f64> = IndexMap::new();
         let fte: IndexSet<String> = IndexSet::new();
         let table_files: HashMap<String, std::path::PathBuf> = HashMap::new();
+        // gh#561, as in the fit-toml branch above.
+        crate::util::refuse_scenario_horizon(
+            &model_pre, a.scenario.as_deref(), "survey",
+            "a survey scores the likelihood at the observation times, so its \
+             window comes from the data, not the model horizon",
+        )?;
         let resolved = crate::params_resolver::resolve_parameters(
             crate::params_resolver::ParameterInputs {
                 model: &model_pre,

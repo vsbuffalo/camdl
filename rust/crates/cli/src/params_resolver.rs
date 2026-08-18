@@ -545,13 +545,23 @@ pub fn composed_preset_t_end(
 ///
 /// The resolved-value form every consumer wants; see [`composed_preset_t_end`]
 /// for why this is one function and not four.
-pub fn effective_horizon(model: &ir::Model, scenario: Option<&str>) -> f64 {
+/// Errors rather than falling back: a `NestedCompose` (or a compose list naming
+/// a preset that does not exist) must NOT resolve to "the model horizon". Both
+/// guards that refuse an unhonourable horizon read this, so a swallowed error
+/// would make them silently compare against the wrong number and pass — a guard
+/// that does not guard, which is the class of defect this whole change is about.
+pub fn effective_horizon(
+    model: &ir::Model,
+    scenario: Option<&str>,
+) -> Result<f64, ResolveError> {
     let model_end = model.simulation.t_end;
-    let Some(name) = scenario else { return model_end };
+    let Some(name) = scenario else { return Ok(model_end) };
+    // A name that is not a model preset is the implicit `baseline` / `fitted`
+    // sentinel or an inline ad-hoc patch: no declared horizon, no error.
     if !model.presets.iter().any(|p| p.name == name) {
-        return model_end;
+        return Ok(model_end);
     }
-    composed_preset_t_end(model, name).ok().flatten().unwrap_or(model_end)
+    Ok(composed_preset_t_end(model, name)?.unwrap_or(model_end))
 }
 
 /// The set of parameter names a scenario reference touches — its `set` ∪
@@ -1297,6 +1307,96 @@ mod tests {
             compose: compose.iter().map(|s| s.to_string()).collect(),
             t_end: None,
         }
+    }
+
+    fn mk_preset_t_end(name: &str, t_end: Option<f64>, compose: &[&str]) -> Preset {
+        let mut p = mk_preset(name, &[], compose);
+        p.t_end = t_end;
+        p
+    }
+
+    // ── The horizon authority (gh#561) ──────────────────────────────────────
+    //
+    // These mirror `resolve_preset_params`'s tests one-for-one, because the
+    // horizon composes by the SAME rule and the whole argument for composing it
+    // (rather than refusing) is that it behaves like its siblings. A divergence
+    // here is a silent-wrong: the window and the run identity both read these,
+    // so a wrong answer runs one trajectory and files it under another's key.
+
+    #[test]
+    fn composed_t_end_walks_compose() {
+        let mut model = mk_model(vec![]);
+        model.presets.push(mk_preset_t_end("child", Some(200.0), &[]));
+        model.presets.push(mk_preset_t_end("parent", None, &["child"]));
+        assert_eq!(composed_preset_t_end(&model, "parent").expect("ok"), Some(200.0));
+    }
+
+    #[test]
+    fn composed_t_end_parent_wins_over_composed_member() {
+        let mut model = mk_model(vec![]);
+        model.presets.push(mk_preset_t_end("child", Some(200.0), &[]));
+        model.presets.push(mk_preset_t_end("parent", Some(75.0), &["child"]));
+        assert_eq!(
+            composed_preset_t_end(&model, "parent").expect("ok"),
+            Some(75.0),
+            "the parent's own `to` applies last and wins, exactly as its own \
+             `set` beats a composed member's"
+        );
+    }
+
+    #[test]
+    fn composed_t_end_last_member_in_list_wins() {
+        // The multi-member case: two composed members each declaring a horizon.
+        // Last in list order wins, matching `resolve_preset_params`'s
+        // overwrite-on-duplicate. Order is the part a regression would silently
+        // change, so both directions are pinned.
+        let mut model = mk_model(vec![]);
+        model.presets.push(mk_preset_t_end("short", Some(50.0), &[]));
+        model.presets.push(mk_preset_t_end("long", Some(200.0), &[]));
+        model.presets.push(mk_preset_t_end("a", None, &["short", "long"]));
+        model.presets.push(mk_preset_t_end("b", None, &["long", "short"]));
+        assert_eq!(composed_preset_t_end(&model, "a").expect("ok"), Some(200.0));
+        assert_eq!(composed_preset_t_end(&model, "b").expect("ok"), Some(50.0));
+    }
+
+    #[test]
+    fn composed_t_end_rejects_nested_compose() {
+        let mut model = mk_model(vec![]);
+        model.presets.push(mk_preset_t_end("leaf", Some(200.0), &[]));
+        model.presets.push(mk_preset_t_end("mid", None, &["leaf"]));
+        model.presets.push(mk_preset_t_end("top", None, &["mid"]));
+        assert!(
+            matches!(
+                composed_preset_t_end(&model, "top"),
+                Err(ResolveError::NestedCompose { .. })
+            ),
+            "nested compose must error here exactly as it does for set/scale — \
+             NOT resolve to the model horizon, which would make the guards that \
+             read this compare against the wrong number and pass"
+        );
+    }
+
+    #[test]
+    fn effective_horizon_falls_back_and_propagates() {
+        let mut model = mk_model(vec![]);
+        model.simulation.t_end = 100.0;
+        model.presets.push(mk_preset_t_end("plain", None, &[]));
+        model.presets.push(mk_preset_t_end("declared", Some(160.0), &[]));
+        model.presets.push(mk_preset_t_end("leaf", Some(200.0), &[]));
+        model.presets.push(mk_preset_t_end("mid", None, &["leaf"]));
+        model.presets.push(mk_preset_t_end("top", None, &["mid"]));
+
+        // No scenario, and the implicit sentinels that name no preset, take the
+        // model horizon.
+        assert_eq!(effective_horizon(&model, None).expect("ok"), 100.0);
+        assert_eq!(effective_horizon(&model, Some("baseline")).expect("ok"), 100.0);
+        // A preset declaring nothing also takes it — this is what makes the
+        // change re-key nothing for models that don't use the feature.
+        assert_eq!(effective_horizon(&model, Some("plain")).expect("ok"), 100.0);
+        assert_eq!(effective_horizon(&model, Some("declared")).expect("ok"), 160.0);
+        assert_eq!(effective_horizon(&model, Some("mid")).expect("ok"), 200.0);
+        // And an error propagates rather than degrading to the model horizon.
+        assert!(effective_horizon(&model, Some("top")).is_err());
     }
 
     #[test]

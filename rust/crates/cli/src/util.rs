@@ -2648,9 +2648,14 @@ pub fn apply_integrator_override(
 /// composes declares a horizon. A shorter horizon than the model's is as legal
 /// as a longer one: it is this cell's window, and the ensemble's rows are ragged
 /// across scenarios by design.
-pub fn apply_scenario_horizon(model: &mut ir::Model, scenario: Option<&str>) {
+pub fn apply_scenario_horizon(
+    model: &mut ir::Model,
+    scenario: Option<&str>,
+) -> Result<(), String> {
     model.simulation.t_end =
-        crate::params_resolver::effective_horizon(model, scenario);
+        crate::params_resolver::effective_horizon(model, scenario)
+            .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Refuse a scenario whose declared horizon this command structurally cannot
@@ -2673,7 +2678,8 @@ pub fn refuse_scenario_horizon(
     why: &str,
 ) -> Result<(), String> {
     let Some(name) = scenario else { return Ok(()) };
-    let declared = crate::params_resolver::effective_horizon(model, Some(name));
+    let declared = crate::params_resolver::effective_horizon(model, Some(name))
+        .map_err(|e| e.to_string())?;
     if declared == model.simulation.t_end {
         return Ok(());
     }
@@ -2741,7 +2747,7 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     // Only a NAMED preset can carry one; an inline ad-hoc scenario has no
     // horizon (there is no CLI spelling for one), which is why this reads
     // `scenario_name` rather than the inline fields.
-    apply_scenario_horizon(&mut model, run.scenario_name.as_deref());
+    apply_scenario_horizon(&mut model, run.scenario_name.as_deref())?;
     // RC1 in 2026-04-19 engine review.
     ir::validate::validate(&model).map_err(|errs| {
         let mut msg = format!("IR validation failed ({} error(s)):\n", errs.len());
