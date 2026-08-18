@@ -2472,7 +2472,11 @@ fn check_obs_times_on_snapshot_grid(
          the output cadence (or widen the output schedule to match). If they \
          come from a data file — `fit predict` projects at the observed times, \
          not an `emit_schedule` — the output schedule must be fine enough to \
-         include them.",
+         include them. If the run's horizon comes from a scenario's \
+         `simulate {{ to }}` extending past an `at = [...]` output list \
+         (gh#561), the recording grid does not extend with it — add the \
+         extended window's times to the `at` list, or drop the per-scenario \
+         `to`.",
         stream,
         before.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
         after.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),

@@ -694,6 +694,7 @@ simulate {{ from = 0 'days  to = 60 'days }}
 scenarios {{
   long_on  {{ enable = [boost]  simulate {{ to = 200 'days }} }}
   short_on {{ enable = [boost]  simulate {{ to = 40 'days }} }}
+  long_off {{ simulate {{ to = 200 'days }} }}
 }}
 "#
     );
@@ -736,6 +737,26 @@ fn extending_past_a_baked_intervention_end_is_refused() {
     assert!(
         stderr.contains("boost") && stderr.contains("to = 200"),
         "the refusal must name the campaign and the recurring `to` fix; stderr:\n{stderr}"
+    );
+
+    // The precision control (round-3 review): an extending scenario that does
+    // NOT enable the campaign must run — the guard checks the RESOLVED model,
+    // after the scenario filter removed the un-fired campaign, so a horizon
+    // menu beside an intervention library is not refused over a campaign that
+    // could never fire.
+    let out = Command::new(&bin)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .args([
+            "simulate", &baked.to_string_lossy(), "--params", &params.to_string_lossy(),
+            "--backend", "ode", "--scenario", "long_off", "--stdout",
+        ])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "an extending horizon with the campaign NOT enabled must run — it \
+         cannot fire, so nothing is silently switched off:\n{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
     // A SHORTENED horizon over the same baked end is safe and must run.

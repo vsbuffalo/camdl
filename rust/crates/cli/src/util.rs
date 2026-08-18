@@ -2652,8 +2652,9 @@ pub fn apply_integrator_override(
 /// every such campaign silently stops firing at the old one — a decade-long
 /// projection whose routine immunisation switches off after year one, with no
 /// diagnostic. Until the baked copies are collapsed onto `simulation.t_end` in
-/// the IR (the gh#143 move, applied to this axis — filed as a follow-up), that
-/// combination is refused with the one-line fix (`until = ...`) in the message.
+/// the IR (gh#605 — the gh#143 move, applied to this axis), that combination is
+/// refused by [`check_baked_recurring_ends`], which runs AFTER the resolver's
+/// scenario filter so it only sees campaigns the scenario actually fires.
 /// A SHORTER horizon is safe unconditionally: the simulation stops before the
 /// baked end, so nothing fires late. (Reactive policies also carry a baked
 /// emit window, but a scenario cannot enable one — `enable` resolves against
@@ -2666,45 +2667,73 @@ pub fn apply_scenario_horizon(
     model: &mut ir::Model,
     scenario: Option<&str>,
 ) -> Result<(), String> {
-    let new_end = crate::params_resolver::effective_horizon(model, scenario)
-        .map_err(|e| e.to_string())?;
-    let old_end = model.simulation.t_end;
-    if new_end > old_end {
-        // Baked = the recurring end equals the model horizon it was copied
-        // from. An author-declared `until` at exactly the model horizon is
-        // indistinguishable and also refused — conservative, and the fix in
-        // the message covers it (state the intended end explicitly).
-        let baked: Vec<&str> = model
-            .interventions
-            .iter()
-            .filter(|iv| {
-                matches!(
-                    &iv.fire,
-                    ir::intervention::FireSource::Scheduled(
-                        ir::intervention::InterventionSchedule::Recurring(rs)
-                    ) if rs.end == old_end
-                )
-            })
-            .map(|iv| iv.name.as_str())
-            .collect();
-        if !baked.is_empty() {
-            return Err(format!(
-                "scenario '{}' extends the horizon to t = {new_end}, but \
-                 recurring intervention(s) [{}] stop at the model horizon \
-                 t = {old_end} — the compiler bakes the model horizon in as \
-                 their end when the recurring `to` is omitted, so the extended window \
-                 would run with the campaign silently switched off.\n  \
-                 Fix: declare the intended end explicitly on each — \
-                 `to = {new_end} 'days` (or later) inside the recurring \
-                 schedule — or move the horizon to the model's own \
-                 `simulate {{ to }}`.",
-                scenario.unwrap_or("?"),
-                baked.join(", "),
-            ));
+    model.simulation.t_end =
+        crate::params_resolver::effective_horizon(model, scenario)
+            .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Refuse an EXTENDED horizon that would outrun a baked recurring end (gh#561;
+/// see the [`apply_scenario_horizon`] doc comment for the full mechanism).
+///
+/// Called with the RESOLVED model — after `apply_scenario_filter` has removed
+/// every intervention the scenario does not fire — so the scan sees exactly the
+/// campaigns that would actually run. Checking before the filter over-refused:
+/// a horizon-menu scenario in a model carrying an intervention library for its
+/// OTHER scenarios was rejected over a campaign that could never fire. Events
+/// (`events {}`) survive the filter unless explicitly disabled, so an
+/// always-active recurring event is still caught.
+///
+/// `old_end` is the model horizon before the scenario's override; equality with
+/// it is what "baked" means. An author-declared recurring `to` at exactly the
+/// model horizon is indistinguishable from a baked one and also refused —
+/// conservative, and the fix in the message covers it.
+pub fn check_baked_recurring_ends(
+    model: &ir::Model,
+    scenario: Option<&str>,
+    old_end: f64,
+) -> Result<(), String> {
+    let new_end = model.simulation.t_end;
+    if new_end <= old_end {
+        return Ok(()); // shortening stops before any baked end — always safe
+    }
+    let (mut events, mut campaigns): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
+    for iv in &model.interventions {
+        let baked = matches!(
+            &iv.fire,
+            ir::intervention::FireSource::Scheduled(
+                ir::intervention::InterventionSchedule::Recurring(rs)
+            ) if rs.end == old_end
+        );
+        if baked {
+            if iv.kind.is_event() {
+                events.push(iv.name.as_str());
+            } else {
+                campaigns.push(iv.name.as_str());
+            }
         }
     }
-    model.simulation.t_end = new_end;
-    Ok(())
+    if events.is_empty() && campaigns.is_empty() {
+        return Ok(());
+    }
+    let mut what = Vec::new();
+    if !campaigns.is_empty() {
+        what.push(format!("recurring intervention(s) [{}]", campaigns.join(", ")));
+    }
+    if !events.is_empty() {
+        what.push(format!("recurring event(s) [{}]", events.join(", ")));
+    }
+    Err(format!(
+        "scenario '{}' extends the horizon to t = {new_end}, but {} stop at \
+         the model horizon t = {old_end} — the compiler bakes the model \
+         horizon in as their end when the recurring `to` is omitted, so the \
+         extended window would run with them silently switched off.\n  \
+         Fix: declare the intended end explicitly on each — \
+         `to = {new_end} 'days` (or later) inside the recurring schedule — \
+         or move the horizon to the model's own `simulate {{ to }}`.",
+        scenario.unwrap_or("?"),
+        what.join(" and "),
+    ))
 }
 
 /// Refuse a scenario whose declared horizon this command structurally cannot
@@ -2796,6 +2825,7 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     // Only a NAMED preset can carry one; an inline ad-hoc scenario has no
     // horizon (there is no CLI spelling for one), which is why this reads
     // `scenario_name` rather than the inline fields.
+    let pre_scenario_end = model.simulation.t_end;
     apply_scenario_horizon(&mut model, run.scenario_name.as_deref())?;
     // RC1 in 2026-04-19 engine review.
     ir::validate::validate(&model).map_err(|errs| {
@@ -2890,6 +2920,12 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     crate::params_resolver::print_warnings(&resolved);
 
     let model = resolved.model;
+    // The baked-end refusal runs HERE — after the resolver's scenario filter
+    // has removed every intervention this scenario does not fire — so it sees
+    // exactly the campaigns that would actually run (gh#561; the pre-filter
+    // version over-refused a horizon menu over an unrelated intervention
+    // library).
+    check_baked_recurring_ends(&model, run.scenario_name.as_deref(), pre_scenario_end)?;
     let compiled = CompiledModel::new(model.clone())
         .map_err(|e| format!("model compile error: {:?}", e))?;
 
