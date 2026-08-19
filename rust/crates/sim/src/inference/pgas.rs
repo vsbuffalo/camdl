@@ -2090,6 +2090,14 @@ struct RungState {
 // Main PGAS loop
 // ═══════════════════════════════════════════════════════════════════
 
+/// Whether the θ|X move runs NUTS (vs the MH-within-Gibbs fallback): NUTS is
+/// requested AND the compiler emitted gradient expressions. ONE predicate for
+/// the sampler and for every diagnostic that keys a healthy band on the
+/// kernel (gh#631) — the two must never disagree about which kernel ran.
+pub fn nuts_active(use_nuts: bool, model: &CompiledModel) -> bool {
+    use_nuts && model.model.transitions.iter().any(|t| !t.rate_grad.is_empty())
+}
+
 /// Run the PGAS Gibbs sampler.
 ///
 /// Alternates between:
@@ -2389,8 +2397,7 @@ pub fn run_pgas(
     }
 
     // Check if gradients are available (compiler emitted rate_grad)
-    let has_gradients = config.use_nuts && model.model.transitions.iter()
-        .any(|t| !t.rate_grad.is_empty());
+    let has_gradients = nuts_active(config.use_nuts, model);
     if has_gradients {
         eprintln!("  NUTS enabled (gradient expressions found in IR)");
     }

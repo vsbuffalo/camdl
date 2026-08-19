@@ -26,6 +26,17 @@ pub struct Diagnostic {
     pub timestamp: String,
 }
 
+/// The θ-move kernel behind an acceptance rate (gh#631). Bands differ:
+/// random-walk MH targets ~[15%, 50%]; NUTS dual-averaging targets ~0.8,
+/// healthy ≈ [60%, 95%] — applying the RW band to NUTS reported every
+/// well-tuned fit as `severity: error`, burying real failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptanceKernel {
+    RandomWalk,
+    Nuts,
+}
+
 /// Machine-readable diagnostic classification.
 ///
 /// Each variant carries exactly the data needed for programmatic decisions.
@@ -114,6 +125,11 @@ pub enum DiagnosticKind {
     AcceptanceRateUnhealthy {
         rate: f64,
         param: Option<String>,
+        /// Which θ-move kernel produced the rate (gh#631): the healthy band is
+        /// kernel-specific — [15%, 50%] for random-walk MH, [60%, 95%] for a
+        /// NUTS block (≈0.8 is the TARGET there, not a failure). Serialized so
+        /// diagnostics.json readers can key on it too.
+        kernel: AcceptanceKernel,
     },
 
     // ── Parameters ───────────────────────────────────────────────
@@ -207,8 +223,10 @@ impl DiagnosticKind {
             Self::ResumeParamMissing { .. } => Severity::Warning,
             Self::LowSwapRate { rate, .. } if *rate < 0.01 => Severity::Error,
             Self::LowSwapRate { .. } => Severity::Warning,
-            Self::AcceptanceRateUnhealthy { rate, .. }
+            Self::AcceptanceRateUnhealthy { rate, kernel: AcceptanceKernel::RandomWalk, .. }
                 if *rate < 0.05 || *rate > 0.80 => Severity::Error,
+            Self::AcceptanceRateUnhealthy { rate, kernel: AcceptanceKernel::Nuts, .. }
+                if *rate < 0.30 || *rate > 0.99 => Severity::Error,
             Self::AcceptanceRateUnhealthy { .. } => Severity::Warning,
             _ => Severity::Warning,
         }
@@ -261,10 +279,14 @@ impl DiagnosticKind {
                     renewal * 100.0),
             Self::GammaDensityDisabled { reason } =>
                 format!("Gamma density disabled: {}", reason),
-            Self::AcceptanceRateUnhealthy { rate, param } => {
+            Self::AcceptanceRateUnhealthy { rate, param, kernel } => {
                 let target = if param.is_some() { "parameter" } else { "chain" };
-                format!("{} acceptance rate {:.1}% is outside healthy range [15%, 50%].",
-                    target, rate * 100.0)
+                let band = match kernel {
+                    AcceptanceKernel::RandomWalk => "[15%, 50%] (random-walk MH)",
+                    AcceptanceKernel::Nuts => "[60%, 95%] (NUTS block; ~80% is the target)",
+                };
+                format!("{} acceptance rate {:.1}% is outside healthy range {}.",
+                    target, rate * 100.0, band)
             }
             Self::ParamNearBound { param, value, bound, bound_type } =>
                 format!("'{}' = {:.4} is near {} bound {:.4}.",
@@ -442,4 +464,45 @@ fn chrono_now() -> String {
     let (y, m, d) = ir::caltime::civil_from_unix_epoch_days((secs / 86400) as i64);
 
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hour, minute, second)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// gh#631: the healthy band is kernel-specific. 0.83 acceptance is a
+    /// well-tuned NUTS block (no error, in-band → this kind is not even
+    /// constructed by the emitter; when constructed near the edges it warns)
+    /// and simultaneously a broken random-walk chain (error).
+    #[test]
+    fn acceptance_severity_keys_on_kernel() {
+        let nuts_ok = DiagnosticKind::AcceptanceRateUnhealthy {
+            rate: 0.83, param: None, kernel: AcceptanceKernel::Nuts,
+        };
+        assert_eq!(nuts_ok.severity(), Severity::Warning,
+            "0.83 under NUTS is at worst a warning, never an error");
+        let rw_bad = DiagnosticKind::AcceptanceRateUnhealthy {
+            rate: 0.83, param: None, kernel: AcceptanceKernel::RandomWalk,
+        };
+        assert_eq!(rw_bad.severity(), Severity::Error,
+            "0.83 under random-walk MH is the >0.80 error band");
+        let nuts_collapsed = DiagnosticKind::AcceptanceRateUnhealthy {
+            rate: 0.004, param: None, kernel: AcceptanceKernel::Nuts,
+        };
+        assert_eq!(nuts_collapsed.severity(), Severity::Error,
+            "0.4% under NUTS is the genuinely-stuck error band");
+    }
+
+    #[test]
+    fn acceptance_message_names_the_kernel_band() {
+        let m = DiagnosticKind::AcceptanceRateUnhealthy {
+            rate: 0.83, param: Some("r_eff".into()), kernel: AcceptanceKernel::Nuts,
+        }.render();
+        assert!(m.contains("[60%, 95%]") && m.contains("NUTS"),
+            "NUTS message names its own band: {m}");
+        let m = DiagnosticKind::AcceptanceRateUnhealthy {
+            rate: 0.83, param: None, kernel: AcceptanceKernel::RandomWalk,
+        }.render();
+        assert!(m.contains("[15%, 50%]"), "RW message keeps its band: {m}");
+    }
 }

@@ -893,6 +893,9 @@ pub fn run_stage(
         if result.acceptance_rate < 0.10 || result.acceptance_rate > 0.50 {
             collector.push(DiagnosticKind::AcceptanceRateUnhealthy {
                 rate: result.acceptance_rate, param: None,
+                // PMMH's θ-move is random-walk MH — the [15%, 50%] band is
+                // the right one here (gh#631).
+                kernel: sim::inference::diagnostic::AcceptanceKernel::RandomWalk,
             });
         }
     }

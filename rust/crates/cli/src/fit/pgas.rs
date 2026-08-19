@@ -796,22 +796,46 @@ pub fn run_stage(
     // Compute diagnostics
     let diagnostics = compute_diagnostics(&all_results, &config.estimated_params);
 
-    // Report
-    eprintln!("\nacceptance rates:");
+    // Report. The healthy band is KERNEL-specific (gh#631): NUTS targets
+    // ~0.8, so the random-walk [10%, 50%] coloring/diagnostic reported every
+    // well-tuned NUTS fit as unhealthy — one severity:error per parameter —
+    // burying real failures (the ebola F8 stuck chain hid in that noise).
+    // The same predicate the sampler used decides the band; a BLOCK update
+    // (identical rate on every parameter) is reported once per chain, not
+    // once per parameter.
+    let nuts = sim::inference::pgas::nuts_active(use_nuts, config.compiled.as_ref());
+    let (lo, hi) = if nuts { (0.60, 0.95) } else { (0.10, 0.50) };
+    let kernel = if nuts {
+        sim::inference::diagnostic::AcceptanceKernel::Nuts
+    } else {
+        sim::inference::diagnostic::AcceptanceKernel::RandomWalk
+    };
+    eprintln!("\nacceptance rates{}:", if nuts { " (NUTS block; ~80% is the target)" } else { "" });
     for &(chain_id, _, ref rates) in &all_results {
+        let block_update = rates.len() > 1
+            && rates.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
         let summary: Vec<String> = config.estimated_params.iter().zip(rates)
             .map(|(p, &r)| {
-                let status = if r < 0.10 { "\x1b[31m" }
-                    else if r > 0.50 { "\x1b[33m" }
+                let status = if r < lo { "\x1b[31m" }
+                    else if r > hi { "\x1b[33m" }
                     else { "\x1b[32m" };
-                if !(0.10..=0.50).contains(&r) {
+                if !(lo..=hi).contains(&r) && !block_update {
                     collector.push(DiagnosticKind::AcceptanceRateUnhealthy {
-                        rate: r, param: Some(p.name.clone()),
+                        rate: r, param: Some(p.name.clone()), kernel,
                     });
                 }
                 format!("  {}={}{:.0}%\x1b[0m", p.name, status, r * 100.0)
             })
             .collect();
+        if block_update {
+            if let Some(&r) = rates.first() {
+                if !(lo..=hi).contains(&r) {
+                    collector.push(DiagnosticKind::AcceptanceRateUnhealthy {
+                        rate: r, param: None, kernel,
+                    });
+                }
+            }
+        }
         eprintln!("  chain {}: {}", chain_id + 1, summary.join(" "));
     }
 
