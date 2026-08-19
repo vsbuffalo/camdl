@@ -500,3 +500,40 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// gh#634: a fit toml that declares `condition_from` must have it FORWARDED
+/// to the pfilter `compare` derives the prequential with — otherwise the
+/// derived scores cover a window the fit never scored, and pfilter's
+/// wide-first-window guard (W329) refuses with advice to set condition_from,
+/// which the fit toml already sets (the wrong layer). The data's first obs is
+/// pushed late so the unconditioned child pfilter would hard-error: pre-fix,
+/// this compare FAILED with that misdirected message; post-fix it derives.
+#[test]
+fn compare_forwards_condition_from_to_derived_pfilter() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir()
+        .join(format!("camdl_cmp_cond_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    // First obs at t = 42 on a 7-day cadence: ratio 6 > the W329 threshold.
+    std::fs::write(tmp.join("weekly_cases.tsv"),
+        "time\tweekly_cases\n42\t626\n49\t327\n56\t91\n63\t45\n").unwrap();
+    let toml = fit_toml(0.6).replace(
+        "output_dir = \"results\"",
+        "output_dir = \"results\"\ncondition_from = \"first_obs - 1 week\"");
+    std::fs::write(tmp.join("fit.toml"), &toml).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr));
+
+    let out = run(&bin, &tmp, &["compare", "fit.toml", "fit.toml"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(),
+        "compare must forward the fit's condition_from to its derived \
+         pfilter (gh#634):\nstdout={stdout}\nstderr={stderr}");
+    assert!(!stderr.contains("State the conditioning window"),
+        "the W329 misdirection must not fire:\n{stderr}");
+}

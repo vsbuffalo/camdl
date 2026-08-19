@@ -337,6 +337,29 @@ fn derive_prequential(
     for (name, abs_path) in &streams {
         cmd.arg("--data").arg(format!("{name}={abs_path}"));
     }
+    // gh#634: forward the fit's conditioning window, or the derived
+    // prequential scores a window the fit never scored (and pfilter's W329
+    // guard then recommends setting condition_from — which the fit toml
+    // already sets, sending the user to the wrong layer). The CLI flag
+    // grammar is the transport (gh#621): a bare spec is the all-streams
+    // default, LABEL=SPEC a per-stream shadow.
+    if let Some(cond) = &config.condition_from {
+        use crate::fit::config_v2::{ConditionFrom, CONDITION_FROM_DEFAULT_KEY};
+        match cond {
+            ConditionFrom::All(spec) => {
+                cmd.arg("--condition-from").arg(spec);
+            }
+            ConditionFrom::PerStream(map) => {
+                for (label, spec) in map {
+                    if label == CONDITION_FROM_DEFAULT_KEY {
+                        cmd.arg("--condition-from").arg(spec);
+                    } else {
+                        cmd.arg("--condition-from").arg(format!("{label}={spec}"));
+                    }
+                }
+            }
+        }
+    }
     let output = match cmd.output() {
         Ok(o) => o,
         Err(e) => { cleanup(); return Err(format!("spawning `camdl pfilter`: {e}")); }
