@@ -219,12 +219,19 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // Rather than emit a silently-wrong diagnostic, reject the combination until
     // those paths thread holes through (follow-up). The plain filter loglik is
     // unaffected.
+    // gh#636: holes are first-class in the diagnostic outputs — per-stream
+    // prequential scores skip hole (stream, time) cells (they carry no term),
+    // the joint scores cover the present streams only, and the trace's
+    // observed column prints NA where nothing is present. Say so once, so a
+    // reader of the outputs knows rows were skipped rather than zero-filled.
     let has_holes = streams.iter().any(|s| s.cells.iter().any(|c| c.is_none()));
-    if let Err(e) = check_holes_output_compat(
-        has_holes, save_prequential.is_some(), trace_path.is_some(),
-    ) {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+    if has_holes && (save_prequential.is_some() || trace_path.is_some()) {
+        eprintln!(
+            "pfilter: data has missing observations (NA) — prequential/trace \
+             scores skip the missing (stream, time) cells; a step with no \
+             present stream is omitted from the prequential and prints NA in \
+             the trace."
+        );
     }
 
     // Canonical observations: the sorted-unique UNION of every stream's
@@ -544,6 +551,18 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // gh#268: the real observed value per union step (cross-stream sum),
         // not the never-scored 0.0 placeholder carried on the time axis.
         let observed = obs_model.joint_observed();
+        // gh#636: a step where NO stream carries a present value prints NA in
+        // the observed column (the placeholder 0 was the reason --trace used
+        // to refuse holes); a partial-hole step prints the present-stream sum,
+        // consistent with the omitted-factor ll_increment.
+        let per_stream_view = obs_model.per_stream_observed();
+        let observed_cell = |i: usize| -> String {
+            if per_stream_view[i].iter().any(|v| v.is_finite()) {
+                format!("{}", observed[i])
+            } else {
+                "NA".to_string()
+            }
+        };
         if let Some(ref preds) = result.predictions {
             writeln!(out, "time\tll_increment\tESS\tobs_mean\tobs_q05\tobs_q50\tobs_q95\tstate_mean\tstate_q05\tstate_q50\tstate_q95\tobserved").unwrap();
             for (i, obs) in observations.iter().enumerate() {
@@ -552,14 +571,14 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                     obs.time, result.ll_increments[i], result.ess_trace[i],
                     p.obs_mean, p.obs_q05, p.obs_q50, p.obs_q95,
                     p.state_mean, p.state_q05, p.state_q50, p.state_q95,
-                    observed[i]).unwrap();
+                    observed_cell(i)).unwrap();
             }
         } else {
             writeln!(out, "time\tll_increment\tESS\tobserved").unwrap();
             for (i, obs) in observations.iter().enumerate() {
                 writeln!(out, "{}\t{:.4}\t{:.1}\t{:.0}",
                     obs.time, result.ll_increments[i], result.ess_trace[i],
-                    observed[i]).unwrap();
+                    observed_cell(i)).unwrap();
             }
         }
         drop(out);
@@ -705,36 +724,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
 
 use crate::caltime_load::{check_substeps_and_grid, convert_time_column, TimeFormat, TimeOpts};
 
-/// Reject output modes that would silently mis-handle a hole (a missing `NA`
-/// observation). A hole is correct for the filter log-likelihood — it
-/// contributes no term but still resets the incidence bin — but `--save-prequential`
-/// and `--trace` read the dense placeholder view where a hole shows as `0`, so
-/// they would score / report a fictitious observed zero at a missing week.
-/// Hard-error rather than emit a silently-wrong diagnostic; full hole support
-/// for these paths is a follow-up. (The plain filter loglik is unaffected.)
-fn check_holes_output_compat(
-    has_holes: bool,
-    save_prequential: bool,
-    trace: bool,
-) -> Result<(), String> {
-    if !has_holes {
-        return Ok(());
-    }
-    if save_prequential {
-        return Err("--save-prequential is not yet supported with missing observations \
-            (NA holes): the prequential scores (elpd / CRPS / PIT) would treat a hole \
-            as an observed 0. The filter log-likelihood handles holes correctly; rerun \
-            without --save-prequential."
-            .to_string());
-    }
-    if trace {
-        return Err("--trace is not yet supported with missing observations (NA holes): \
-            the trace's `observed` column would report 0 at a missing week. The filter \
-            log-likelihood handles holes correctly; rerun without --trace."
-            .to_string());
-    }
-    Ok(())
-}
 
 /// gh#90: fit-toml fallback for `camdl pfilter --fit fit.toml` (no CLI
 /// `--data` flags). Reads `[data]` from the toml and returns a list of
@@ -1542,21 +1531,6 @@ mod tests {
     }
 
     // ── holes × output-mode compatibility guard ─────────────────────────
-    #[test]
-    fn holes_reject_prequential_and_trace_but_allow_plain_filter() {
-        // No holes: every output mode is fine.
-        assert!(check_holes_output_compat(false, true, true).is_ok());
-        // Holes + plain filter (no prequential/trace): fine — the loglik handles holes.
-        assert!(check_holes_output_compat(true, false, false).is_ok());
-        // Holes + prequential: rejected (would score a hole as observed 0).
-        let e = check_holes_output_compat(true, true, false).unwrap_err();
-        assert!(e.contains("--save-prequential") && e.contains("hole"),
-            "prequential rejection must name the flag + the cause: {e}");
-        // Holes + trace: rejected (observed column would report 0 at a hole).
-        let e = check_holes_output_compat(true, false, true).unwrap_err();
-        assert!(e.contains("--trace") && e.contains("hole"),
-            "trace rejection must name the flag + the cause: {e}");
-    }
 
     fn write_temp_tsv(name: &str, content: &str) -> String {
         let path = std::env::temp_dir().join(format!("camdl_test_{}.tsv", name));

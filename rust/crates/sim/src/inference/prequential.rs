@@ -314,10 +314,41 @@ pub fn build_trace(
         let y = y_obs[idx];
         let n = log_liks.len() as f64;
 
+        // gh#636: presence mask for this step. A hole (NA) or a
+        // not-scheduled sibling carries a non-finite observed value; the
+        // per-stream loop below already skips those. The JOINT scores must
+        // cover the SAME stream set: the recorded joint predictive sums every
+        // stream's draw, so at a partial-hole step it would be compared
+        // against an observed sum that omits the missing stream — a
+        // numerator/denominator mismatch, not a fictitious 0. Recompute the
+        // joint predictive over the PRESENT streams only; a step where no
+        // stream is present carries no information and is skipped entirely.
+        let present: Vec<usize> = (0..recorded.stream_names.len())
+            .filter(|&si| per_stream_observed[idx][si].is_finite())
+            .collect();
+        if present.is_empty() && !recorded.stream_names.is_empty() {
+            continue;
+        }
+        let all_present = present.len() == recorded.stream_names.len();
+        let joint_samples: Vec<f64> = if all_present {
+            // Hole-free step: the recorded joint is exactly this sum — reuse
+            // it so hole-free traces stay byte-identical.
+            samples.clone()
+        } else {
+            let n_particles = recorded.per_stream_samples[idx]
+                .first().map(|v| v.len()).unwrap_or(0);
+            (0..n_particles)
+                .map(|pi| present.iter()
+                    .map(|&si| recorded.per_stream_samples[idx][si][pi])
+                    .filter(|v| v.is_finite())
+                    .sum::<f64>())
+                .collect()
+        };
+
         // Uniform-weight log-score (see docstring).
         let log_score = super::types::log_sum_exp(log_liks) - n.ln();
-        let crps = crps_sample(samples, y);
-        let pit = pit_sample(samples, y);
+        let crps = crps_sample(&joint_samples, y);
+        let pit = pit_sample(&joint_samples, y);
         let ess = ess_trace[idx];
         if ess < ESS_THRESHOLD { ess_collapse_count += 1; }
 
@@ -346,9 +377,9 @@ pub fn build_trace(
         steps.push(PrequentialStep {
             t: recorded.obs_times[idx],
             y_obs: y,
-            y_pred_samples: samples.clone(),
+            interval: PredInterval::from_samples(&joint_samples),
+            y_pred_samples: joint_samples,
             log_score, crps, pit, ess,
-            interval: PredInterval::from_samples(samples),
             per_stream,
         });
     }
@@ -434,6 +465,51 @@ impl PredInterval {
 
 #[cfg(test)]
 mod tests {
+
+    /// gh#636: holes are first-class. At a partial-hole step the JOINT
+    /// predictive covers only the present streams (the recorded joint sums
+    /// every stream's draw — comparing that against an observed sum missing a
+    /// stream was a numerator/denominator mismatch); an all-hole step carries
+    /// no information and is omitted; a hole-free step reuses the recorded
+    /// joint byte-identically.
+    #[test]
+    fn build_trace_skips_holes_consistently() {
+        let recorded = super::super::particle_filter::PrequentialRecorded {
+            obs_times: vec![7.0, 14.0, 21.0],
+            log_liks: vec![vec![-2.0, -2.0]; 3],
+            // Recorded joint = A + B at every step (the recorder cannot know
+            // about holes).
+            y_pred_samples: vec![vec![13.0, 15.0]; 3],
+            stream_names: vec!["a".into(), "b".into()],
+            per_stream_log_liks: vec![vec![vec![-1.0, -1.0], vec![-1.0, -1.0]]; 3],
+            per_stream_samples: vec![
+                vec![vec![10.0, 12.0], vec![3.0, 3.0]]; 3
+            ],
+        };
+        // Step 0: both present. Step 1: stream b is a hole. Step 2: all holes.
+        let per_stream_observed = vec![
+            vec![11.0, 3.0],
+            vec![11.0, f64::NAN],
+            vec![f64::NAN, f64::NAN],
+        ];
+        let y_obs = vec![14.0, 11.0, 0.0];
+        let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
+                                &[100.0, 100.0, 100.0], 0);
+
+        assert_eq!(trace.steps.len(), 2, "the all-hole step is omitted");
+        // Hole-free step: recorded joint reused verbatim.
+        assert_eq!(trace.steps[0].y_pred_samples, vec![13.0, 15.0]);
+        assert_eq!(trace.steps[0].per_stream.len(), 2);
+        // Partial-hole step: joint = present stream (a) only.
+        assert_eq!(trace.steps[1].y_pred_samples, vec![10.0, 12.0],
+            "joint predictive covers the present streams only");
+        assert_eq!(trace.steps[1].per_stream.len(), 1,
+            "the hole stream has no per-stream score");
+        assert_eq!(trace.steps[1].per_stream[0].stream, "a");
+        // And the joint CRPS at that step is against the present-only sum.
+        let expect = crps_sample(&[10.0, 12.0], 11.0);
+        assert!((trace.steps[1].crps - expect).abs() < 1e-12);
+    }
     use super::*;
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool { (a - b).abs() < tol }
