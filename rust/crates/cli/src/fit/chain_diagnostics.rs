@@ -320,6 +320,58 @@ pub struct ChainNegInf {
     pub n_retained: usize,
 }
 
+/// One chain's point-mass screen (gh#635, ebola item 1): over `draws.tsv`,
+/// how many DISTINCT parameter vectors the chain retained. A chain that
+/// never accepted a θ-move keeps exactly one — a point mass at its start,
+/// which the −inf screen (gh#608) cannot see when that start has FINITE
+/// density. Its draws still enter every pooled number (3 such chains were
+/// 37.5% of a pooled cloud downstream, R̂ 5.14, masquerading as a mode).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChainUniqueDraws {
+    /// 1-based display index, aligned with the per-chain loglik table.
+    pub chain: usize,
+    /// Distinct parameter vectors among the retained draws.
+    pub n_unique: usize,
+    /// Retained draws for this chain.
+    pub n_draws: usize,
+}
+
+/// Per-chain distinct-parameter-vector counts from `draws.tsv`. The `chain`
+/// column is 0-based; vectors are compared as their exact on-disk text (the
+/// writer round-trips full precision, so textual equality is value
+/// equality). `None` when draws.tsv is missing/unreadable.
+pub fn read_chain_unique_draws(stage_dir: &Path) -> Option<Vec<ChainUniqueDraws>> {
+    let contents = std::fs::read_to_string(stage_dir.join("draws.tsv")).ok()?;
+    let mut lines = contents.lines();
+    let header = lines.next()?;
+    let mut cols = header.split('\t');
+    if cols.next() != Some("chain") {
+        return None;
+    }
+    use std::collections::{BTreeMap, HashSet};
+    let mut per_chain: BTreeMap<usize, (HashSet<&str>, usize)> = BTreeMap::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((chain_tok, rest)) = line.split_once('\t') else { continue };
+        let Ok(c) = chain_tok.parse::<usize>() else { continue };
+        // Strip the draw index (column 2): the PARAMS are what repeat.
+        let params = rest.split_once('\t').map(|(_, p)| p).unwrap_or(rest);
+        let e = per_chain.entry(c).or_default();
+        e.0.insert(params);
+        e.1 += 1;
+    }
+    if per_chain.is_empty() {
+        return None;
+    }
+    Some(per_chain.into_iter().map(|(c, (set, n))| ChainUniqueDraws {
+        chain: c + 1,
+        n_unique: set.len(),
+        n_draws: n,
+    }).collect())
+}
+
 /// Per-chain [`ChainNegInf`] screen over the retained trace rows. `None`
 /// when no chain traces exist (same discovery as the mean-loglik reader).
 pub fn read_chain_neginf(stage_dir: &Path) -> Option<Vec<ChainNegInf>> {

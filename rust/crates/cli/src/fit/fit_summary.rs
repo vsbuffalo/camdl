@@ -1180,6 +1180,23 @@ impl Formatter {
             }
         }
 
+        // gh#635 (ebola item 1): a POINT-MASS chain — one distinct parameter
+        // vector across all retained draws (zero accepted θ-moves) — evades
+        // both the mod-z score and the −inf screen when its start has finite
+        // density. Same loud treatment.
+        if let Some(uniq) = cd::read_chain_unique_draws(stage_dir) {
+            for u in uniq.iter().filter(|u| u.n_unique == 1 && u.n_draws > 1) {
+                s.push_str(&format!("    {}\n", self.err(&format!(
+                    "⚠ chain {}: ONE distinct parameter vector across {} retained \
+                     draws (zero accepted moves) — a point-mass chain; its draws \
+                     are in draws.tsv and every pooled number in this block. View \
+                     without it: --exclude-chains <stage>:{} (exclusion stays \
+                     explicit — gh#419).",
+                    u.chain, u.n_draws, u.chain,
+                ))));
+            }
+        }
+
         let flagged = cd::outlier_labels(&scores);
         if !flagged.is_empty() {
             // The one-line nudge: chains in a distinctly different part of the
@@ -2603,6 +2620,44 @@ mod tests {
         let table = fmt.bayesian_chain_loglik_table(&dir, 3);
         assert!(!table.contains("DEGENERATE"),
             "healthy chains must not be flagged:\n{table}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#635: a chain with ONE distinct parameter vector across its retained
+    /// draws (zero accepted moves, finite density — evades the −inf screen)
+    /// draws the loud point-mass flag; mixing chains do not.
+    #[test]
+    fn bayesian_chain_table_flags_point_mass_chain() {
+        let dir = crate::test_support::unique_temp_dir("summary_point_mass");
+        std::fs::create_dir_all(&dir).unwrap();
+        for c in 1..=3 {
+            let cd = dir.join(format!("chain_{c}"));
+            std::fs::create_dir_all(&cd).unwrap();
+            std::fs::write(cd.join("trace.tsv"), format!(
+                "step\tlog_likelihood\tlog_posterior\n1\t-5{c}.0\t-5{c}.5\n2\t-5{c}.1\t-5{c}.6\n3\t-5{c}.2\t-5{c}.7\n"))
+                .unwrap();
+        }
+        // Chains 0 and 1 mix (distinct vectors); chain 2 is frozen at one θ.
+        let mut draws = String::from("chain\tdraw\tbeta\tgamma\n");
+        for d in 0..3 {
+            draws.push_str(&format!("0\t{d}\t0.{d}1\t0.2\n"));
+            draws.push_str(&format!("1\t{d}\t0.{d}3\t0.2\n"));
+            draws.push_str(&format!("2\t{d}\t0.55\t0.20\n")); // identical every draw
+        }
+        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.bayesian_chain_loglik_table(&dir, 3);
+        assert!(table.contains("point-mass"),
+            "the frozen chain gets the loud flag:\n{table}");
+        assert!(table.contains("chain 3") && table.contains("across 3 retained"),
+            "the flag names the chain and the draw count:\n{table}");
+        assert!(table.contains("--exclude-chains"),
+            "the flag names the explicit fix:\n{table}");
+        // Exactly one flagged chain — mixing chains stay clean.
+        assert_eq!(table.matches("point-mass").count(), 1,
+            "only the frozen chain is flagged:\n{table}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
