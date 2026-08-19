@@ -494,9 +494,15 @@ thin = 1
         scenarios_seen.contains("low_rho") && scenarios_seen.contains("high_rho"),
         "both scenarios' rows are in the one file; saw {scenarios_seen:?}"
     );
+    // gh#625: the fitted no-overlay arm is ALWAYS emitted — it is the
+    // posterior predictive every scenario overlays. Naming scenarios used to
+    // silently drop it, leaving downstream sidecars with no reference arm to
+    // delta against (and the `--scenario fitted` diagnostic's "emitted
+    // automatically" claim false).
     assert!(
-        !scenarios_seen.contains("fitted"),
-        "explicit --scenario suppresses the no-overlay row; saw {scenarios_seen:?}"
+        scenarios_seen.contains("fitted"),
+        "the fitted reference arm must be present alongside named scenarios; \
+         saw {scenarios_seen:?}"
     );
 
     // ── ONE quantities/peak.tsv carries BOTH scenarios' rows, tagged ──
@@ -513,8 +519,9 @@ thin = 1
         klines.map(|l| l.split('\t').next().unwrap()).collect();
     assert_eq!(
         qscen,
-        ["high_rho", "low_rho"].into_iter().collect(),
-        "one quantity row per scenario, each tagged"
+        ["fitted", "high_rho", "low_rho"].into_iter().collect(),
+        "one quantity row per scenario plus the fitted reference (gh#625), \
+         each tagged"
     );
 
     // ── quantities.json: a `scenario` field per entry (one entry per scenario) ──
@@ -530,8 +537,10 @@ thin = 1
         .collect();
     assert_eq!(
         scen_fields,
-        ["high_rho".to_string(), "low_rho".to_string()].into_iter().collect(),
-        "manifest carries one peak entry per scenario, each with its scenario field"
+        ["fitted".to_string(), "high_rho".to_string(), "low_rho".to_string()]
+            .into_iter().collect(),
+        "manifest carries one peak entry per scenario plus the fitted \
+         reference (gh#625), each with its scenario field"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

@@ -1322,7 +1322,22 @@ impl FitPredictArgs {
                 params: indexmap::IndexMap::new(),
             }])
         } else {
-            Ok(names.into_iter().map(ScenarioRef::Named).collect())
+            // gh#625: the fitted no-overlay arm is ALWAYS emitted, first — it
+            // is the posterior predictive every scenario overlays, and its
+            // absence is never what the user wants (the ebola national
+            // predicts ended up with scenario deltas and no reference arm
+            // when one_step aborted). This also makes the reservation
+            // diagnostic above ("emitted automatically") true as written.
+            // `--scenario` conflicts with `--enable`/`--disable` at the clap
+            // level, so the prepended arm is guaranteed pure no-overlay.
+            let mut refs = vec![ScenarioRef::Inline {
+                name: FITTED.to_string(),
+                enable: self.enable.clone(),
+                disable: self.disable.clone(),
+                params: indexmap::IndexMap::new(),
+            }];
+            refs.extend(names.into_iter().map(ScenarioRef::Named));
+            Ok(refs)
         }
     }
 }
