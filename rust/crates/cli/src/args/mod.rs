@@ -559,7 +559,10 @@ pub struct SimulateArgs {
     #[arg(long)]
     pub fit: Option<PathBuf>,
 
-    /// Number of parameter draws (for --draws uniform/prior)
+    /// Number of parameter draws. For --draws uniform/prior: how many to
+    /// generate. For --draws posterior: a strided subsample cap across the
+    /// whole cloud (default 200, matching `fit predict` — never silently
+    /// replay a full 60k-draw posterior; gh#630).
     #[arg(short = 'n', long)]
     pub n_draws: Option<usize>,
 

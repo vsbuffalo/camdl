@@ -1718,7 +1718,7 @@ fn assemble_predictive(
 /// replay per draw, so a few hundred draws saturate q05…q95. The full cloud is
 /// never replayed silently — a full free-forward replay of a long-burn-in ODE
 /// fit is thousands of ~seconds-each solves (gh#387).
-const DEFAULT_PREDICT_DRAWS: usize = 200;
+pub(crate) const DEFAULT_PREDICT_DRAWS: usize = 200;
 
 /// Evenly-spaced, deterministic subsample of a posterior cloud down to `cap`
 /// draws (the whole cloud when `cap >= len`, always at least one). Both horizons
@@ -1727,7 +1727,7 @@ const DEFAULT_PREDICT_DRAWS: usize = 200;
 /// (`idx = i * total / n_used`), never `take(cap)` of the front — a front-take
 /// would bias the band toward early sweeps / a single chain. Chosen draws are
 /// returned in cloud order.
-fn subsample_draws(draws: &[IndexMap<String, f64>], cap: usize) -> Vec<&IndexMap<String, f64>> {
+pub(crate) fn subsample_draws<T>(draws: &[T], cap: usize) -> Vec<&T> {
     let total = draws.len();
     let n_used = cap.min(total).max(1);
     if n_used >= total {

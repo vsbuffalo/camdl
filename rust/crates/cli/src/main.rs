@@ -1184,6 +1184,25 @@ fn run_simulate(a: &args::SimulateArgs) {
             let method_label = resolved.method
                 .map(|m| m.as_str())
                 .unwrap_or("posterior");
+            // gh#630 (ebola F35): never silently replay the full cloud — a
+            // 60k-draw posterior is hours of forward solves and a 21 MB
+            // --draws-out. Same strided default cap as `fit predict`
+            // (never front-biased), raised or lowered with --n-draws.
+            let cap = a.n_draws.unwrap_or(crate::fit::predict::DEFAULT_PREDICT_DRAWS);
+            let total = loaded.len();
+            let loaded: Vec<HashMap<String, f64>> = if total > cap {
+                let picked: Vec<HashMap<String, f64>> =
+                    crate::fit::predict::subsample_draws(&loaded, cap)
+                        .into_iter().cloned().collect();
+                eprintln!(
+                    "draws: posterior — subsampling {} of {total} draws (strided \
+                     across the cloud; raise with --n-draws)",
+                    picked.len()
+                );
+                picked
+            } else {
+                loaded
+            };
             eprintln!("draws: posterior — {} draws from {} stage '{}' ({})",
                 loaded.len(), method_label, resolved.stage, resolved.draws_path.display());
             loaded
