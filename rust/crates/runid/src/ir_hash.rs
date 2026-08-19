@@ -1061,6 +1061,23 @@ impl ContentAddressed for SimulationConfig {
             if let Some(a) = atol { h.write_str("atol"); h.write_f64_bits(*a); }
             if let Some(r) = rtol { h.write_str("rtol"); h.write_f64_bits(*r); }
         }
+        // gh#616: same "only when present" idiom — an unanchored model keeps its
+        // pre-gh#616 run-id (no cache churn), while two anchored horizons that
+        // differ in anchor or offset get distinct content addresses. The sim
+        // path resolves and CLEARS this before the model is hashed, so what it
+        // guards is the paths that hash an as-compiled model (fit sidecar,
+        // model-level provenance).
+        hash_anchor_opt(h, &self.t_end_anchor);
+    }
+}
+
+/// Hash an optional observation anchor, contributing NOTHING when absent so an
+/// unanchored model's digest is byte-identical to its pre-gh#616 value.
+fn hash_anchor_opt(h: &mut CanonicalHasher, a: &Option<ir::anchor::AnchoredTime>) {
+    if let Some(a) = a {
+        h.write_str("t_end_anchor");
+        h.write_str(a.anchor.as_str());
+        h.write_f64_bits(a.offset);
     }
 }
 
@@ -1075,6 +1092,7 @@ impl ContentAddressed for Preset {
         h.write_str_f64_map(self.scale.iter());
         self.compose.hash_into(h);
         hash_opt_f64(h, &self.t_end);
+        hash_anchor_opt(h, &self.t_end_anchor);
     }
 }
 

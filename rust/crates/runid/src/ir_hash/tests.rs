@@ -167,6 +167,7 @@ fn representative_model() -> Model {
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![Preset {
             name: "high_beta".into(),
@@ -177,6 +178,7 @@ fn representative_model() -> Model {
             scale: HashMap::new(),
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         }],
         model_structure: Some(ModelStructure {
             dimensions: vec![Dimension {
@@ -728,6 +730,52 @@ fn integrator_choice_changes_run_id() {
     assert_ne!(rk4, rk45_default, "rk4 vs rk45 must hash distinctly");
     assert_ne!(rk45_default, rk45_a, "rk45 default-tols vs explicit tols must differ");
     assert_ne!(rk45_a, rk45_b, "a different atol must change the run-id");
+}
+
+/// gh#616: an anchored horizon is model identity — two models whose horizons
+/// anchor differently produce different trajectories from the same data, so they
+/// must not share a content address. `None` (the whole pre-gh#616 corpus, and
+/// every model after the resolver substitutes) contributes NOTHING, which is
+/// what `model_golden_hash` above proves: the pin did not move at the 0.32 bump.
+#[test]
+fn t_end_anchor_changes_run_id() {
+    use ir::anchor::{AnchoredTime, ObsAnchor};
+    let with = |a: Option<AnchoredTime>| {
+        let mut m = representative_model();
+        m.simulation.t_end_anchor = a;
+        m.content_hash()
+    };
+    let none = with(None);
+    let bare_last = with(Some(AnchoredTime::bare(ObsAnchor::Last)));
+    let bare_first = with(Some(AnchoredTime::bare(ObsAnchor::First)));
+    let last_plus_28 = with(Some(AnchoredTime { anchor: ObsAnchor::Last, offset: 28.0 }));
+    let last_plus_56 = with(Some(AnchoredTime { anchor: ObsAnchor::Last, offset: 56.0 }));
+
+    assert_eq!(none, representative_model().content_hash(),
+        "an unanchored model must keep its pre-gh#616 run-id");
+    assert_ne!(none, bare_last, "an anchored horizon must re-key");
+    assert_ne!(bare_last, bare_first, "first_obs vs last_obs must hash distinctly");
+    assert_ne!(bare_last, last_plus_28, "an offset must re-key");
+    assert_ne!(last_plus_28, last_plus_56, "a different offset must re-key");
+}
+
+/// A preset's anchored horizon re-keys on the same terms.
+#[test]
+fn preset_t_end_anchor_changes_run_id() {
+    use ir::anchor::{AnchoredTime, ObsAnchor};
+    let with = |a: Option<AnchoredTime>| {
+        let mut m = representative_model();
+        m.presets[0].t_end_anchor = a;
+        m.content_hash()
+    };
+    let none = with(None);
+    assert_eq!(none, representative_model().content_hash(),
+        "an unanchored preset must keep its pre-gh#616 run-id");
+    assert_ne!(none, with(Some(AnchoredTime::bare(ObsAnchor::Last))),
+        "an anchored preset horizon must re-key");
+    assert_ne!(with(Some(AnchoredTime::bare(ObsAnchor::Last))),
+               with(Some(AnchoredTime { anchor: ObsAnchor::Last, offset: 56.0 })),
+        "a preset offset must re-key");
 }
 
 /// Negative control: a structurally different model must hash differently

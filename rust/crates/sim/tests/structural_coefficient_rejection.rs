@@ -60,6 +60,7 @@ fn model_with_forcing(kind: TimeFuncKind) -> Model {
             time_semantics: "continuous".into(),
             dt: None, rng_seed: Some(1),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],

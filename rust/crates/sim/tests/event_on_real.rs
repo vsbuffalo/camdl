@@ -96,6 +96,7 @@ fn model_with_real_event() -> CompiledModel {
             t_start: 0.0, t_end: 5.0, time_semantics: "continuous".into(),
             dt: Some(1.0), rng_seed: Some(7),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],

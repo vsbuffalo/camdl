@@ -52,6 +52,7 @@ fn minimal_model(compartments: Vec<Compartment>, params: Vec<Parameter>) -> Mode
             dt: None,
             rng_seed: Some(42),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],

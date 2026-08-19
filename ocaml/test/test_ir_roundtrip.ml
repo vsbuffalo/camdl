@@ -351,6 +351,115 @@ let contrast_serde_test () =
     {|{"name":"averted","body":{"bin_op":{"op":"sub","left":{"run_member":{"run":"no_sia","ns":"quantities","member":"total"}},"right":{"run_member":{"run":"with_sia","ns":"quantities","member":"total"}}}}}|}
     (Yojson.Safe.to_string (Serde.contrast_to_json averted))
 
+(* gh#616: observation anchors. Two things to pin, and the second is the one
+   that matters for the 0.32 bump.
+
+   1. The codec itself — both wire spellings, both anchors, and the
+      normalisation (an explicit zero-offset object re-encodes to the bare
+      string, so the canonical form is unique).
+
+   2. **A model with no anchor must serialise byte-identically to its pre-0.32
+      form, modulo the version strings.** The new fields use the
+      append-when-present idiom (`integrator`-style), not the adjacent
+      null-emitting one (`dt`, `rng_seed`, a preset's `t_end`) — if either had
+      been written the null way, every one of the 108 committed IR files would
+      have gained a key and every golden diff would be noise that hides the
+      real change. This test is what makes that claim checkable rather than
+      asserted. *)
+
+let anchor_serde_test () =
+  let open Ir in
+  let rt (a : anchored_time) =
+    Serde.anchored_time_of_json (Serde.anchored_time_to_json a) = a in
+  let wire (a : anchored_time) =
+    Yojson.Safe.to_string (Serde.anchored_time_to_json a) in
+  (* Canonical emission: a zero offset is the BARE STRING — exactly what
+     `value_at(…, last_obs)` emitted before gh#616. *)
+  Alcotest.(check string) "bare last_obs wire" {|"last_obs"|}
+    (wire { anchor = AnchorLast; offset = 0.0 });
+  Alcotest.(check string) "bare first_obs wire" {|"first_obs"|}
+    (wire { anchor = AnchorFirst; offset = 0.0 });
+  Alcotest.(check string) "offset last_obs wire"
+    {|{"anchor":"last_obs","offset":28.0}|}
+    (wire { anchor = AnchorLast; offset = 28.0 });
+  Alcotest.(check string) "offset first_obs wire"
+    {|{"anchor":"first_obs","offset":-7.0}|}
+    (wire { anchor = AnchorFirst; offset = -7.0 });
+  List.iter (fun (label, a) ->
+    Alcotest.(check bool) (label ^ " round-trips") true (rt a))
+    [ ("bare last_obs",   { anchor = AnchorLast;  offset = 0.0 });
+      ("bare first_obs",  { anchor = AnchorFirst; offset = 0.0 });
+      ("last_obs + 28",   { anchor = AnchorLast;  offset = 28.0 });
+      ("first_obs - 7",   { anchor = AnchorFirst; offset = -7.0 }) ];
+  (* The object form with a zero offset decodes, then re-encodes canonically. *)
+  let zero_obj = `Assoc [("anchor", `String "last_obs"); ("offset", `Float 0.0)] in
+  Alcotest.(check string) "explicit zero offset normalises to the bare string"
+    {|"last_obs"|}
+    (Yojson.Safe.to_string
+       (Serde.anchored_time_to_json (Serde.anchored_time_of_json zero_obj)));
+  (* An unknown anchor is rejected, not silently defaulted. *)
+  let rejects_unknown =
+    try ignore (Serde.anchored_time_of_json (`String "mid_obs")); false
+    with Serde.DeserError _ -> true
+  in
+  Alcotest.(check bool) "unknown anchor is rejected" true rejects_unknown;
+  (* An anchored simulation config round-trips through the whole block. *)
+  let cfg = { t_start = 0.0; t_end = Float.nan; time_semantics = "continuous";
+              dt = None; rng_seed = None; integrator = Rk4;
+              t_end_anchor = Some { anchor = AnchorLast; offset = 28.0 } } in
+  let cfg' = Serde.simulation_config_of_json (Serde.simulation_config_to_json cfg) in
+  Alcotest.(check bool) "anchored simulation config round-trips" true
+    (cfg'.t_end_anchor = cfg.t_end_anchor);
+  Alcotest.(check bool) "the baked t_end stays NaN across the round-trip" true
+    (Float.is_nan cfg'.t_end)
+
+(* (2): the byte-identity claim, per golden. *)
+
+(* Does `hay` contain `needle`? (No Str dependency — this test suite links only
+   yojson + alcotest.) *)
+let contains hay needle =
+  let n = String.length needle and h = String.length hay in
+  let rec go i = i + n <= h && (String.sub hay i n = needle || go (i + 1)) in
+  n = 0 || go 0
+
+let no_anchor_bytes_unchanged_test name () =
+  let raw = read_golden name in
+  let m = match Serde.model_of_string raw with
+    | Ok m -> m
+    | Error e -> Alcotest.failf "deserialise failed for %s: %s" name e
+  in
+  Alcotest.(check bool) (name ^ ": golden declares no horizon anchor") true
+    (m.simulation.t_end_anchor = None
+     && List.for_all (fun (p : Ir.preset) -> p.preset_t_end_anchor = None) m.presets);
+  (* The whole corpus: not one byte of `t_end_anchor` anywhere in the emitted
+     IR of a model that declares no anchor. This is what fails if either new
+     field is ever switched to the adjacent null-emitting idiom. *)
+  let out = Serde.model_to_string m in
+  Alcotest.(check bool) (name ^ ": no t_end_anchor key is emitted") true
+    (not (contains out "t_end_anchor"))
+
+(* The precise pin: the exact `simulation` and preset objects the 0.31
+   serializer emitted for `sir_basic`, copied from the committed 0.31 golden.
+   Emitting a `"t_end_anchor": null` — or appending the key in a different
+   position — moves these strings and reddens the test. *)
+let no_anchor_wire_is_byte_identical_test () =
+  let m = match Serde.model_of_string (read_golden "sir_basic") with
+    | Ok m -> m | Error e -> Alcotest.failf "deserialise failed: %s" e in
+  Alcotest.(check string) "unanchored simulation block is unchanged from 0.31"
+    {|{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null}|}
+    (Yojson.Safe.to_string (Serde.simulation_config_to_json m.simulation));
+  let baseline = List.find (fun (p : Ir.preset) -> p.preset_name = "baseline") m.presets in
+  Alcotest.(check string) "unanchored preset is unchanged from 0.31"
+    {|{"name":"baseline","label":"default  (R0 ≈ 3)","params":{"beta":0.3,"gamma":0.1,"N0":1000.0,"I0":10.0},"enable":[],"disable":[],"t_end":80.0}|}
+    (Yojson.Safe.to_string (Serde.preset_to_json baseline));
+  (* And the anchored form APPENDS exactly one key at the end. *)
+  let anchored = { m.simulation with
+                   t_end = Float.nan;
+                   t_end_anchor = Some { Ir.anchor = Ir.AnchorLast; offset = 28.0 } } in
+  Alcotest.(check string) "an anchored simulation block appends one key"
+    {|{"t_start":0.0,"t_end":NaN,"time_semantics":"continuous","dt":null,"rng_seed":null,"t_end_anchor":{"anchor":"last_obs","offset":28.0}}|}
+    (Yojson.Safe.to_string (Serde.simulation_config_to_json anchored))
+
 let () =
   let tests =
     List.map (fun name ->
@@ -362,7 +471,18 @@ let () =
       Alcotest.test_case name `Quick (canonical_equiv_test name)
     ) golden_cases
   in
+  let byte_identity_tests =
+    List.map (fun name ->
+      Alcotest.test_case name `Quick (no_anchor_bytes_unchanged_test name)
+    ) golden_cases
+  in
+  let byte_identity_tests =
+    byte_identity_tests
+    @ [ Alcotest.test_case "sir_basic simulation + preset wire" `Quick
+          no_anchor_wire_is_byte_identical_test ]
+  in
   let invariant_tests = [
+    Alcotest.test_case "anchor serde (round-trip + pinned wire)" `Quick anchor_serde_test;
     Alcotest.test_case "prior_spec single slot" `Quick prior_spec_single_slot_test;
     Alcotest.test_case "integrator serde (rk45 round-trip + strict)" `Quick integrator_serde_test;
     Alcotest.test_case "expr serde (PerEvalRef round-trips)" `Quick expr_serde_test;
@@ -372,5 +492,6 @@ let () =
   Alcotest.run "IR round-trip" [
     ("golden", tests);
     ("canonical≡pretty", equiv_tests);
+    ("bytes-unchanged-no-anchor", byte_identity_tests);
     ("deser-invariants", invariant_tests);
   ]

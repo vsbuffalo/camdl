@@ -815,7 +815,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
             let resolved = match spec {
                 crate::fit::runner::TimeSpec::Absolute(v) => v,
-                crate::fit::runner::TimeSpec::Anchored { anchor, offset } => {
+                crate::fit::runner::TimeSpec::Anchored(anchored) => {
                     to_was_anchored = true;
                     let Some(fit_ref) = a.fit.as_ref() else {
                         eprintln!(
@@ -832,11 +832,11 @@ fn run_simulate(a: &args::SimulateArgs) {
                                 eprintln!("error: --to \"{raw}\": {e}");
                                 std::process::exit(1);
                             });
-                    let base = match anchor {
-                        crate::fit::runner::ObsAnchor::FirstObs => first_obs,
-                        crate::fit::runner::ObsAnchor::LastObs => last_obs,
+                    let base = match anchored.anchor {
+                        ir::anchor::ObsAnchor::First => first_obs,
+                        ir::anchor::ObsAnchor::Last => last_obs,
                     };
-                    base + offset
+                    anchored.resolve(base)
                 }
             };
             // NO existing validator checks horizon ordering (ir::validate never

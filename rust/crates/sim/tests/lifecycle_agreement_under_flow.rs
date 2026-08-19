@@ -129,6 +129,7 @@ fn flow_model() -> CompiledModel {
             t_start: 0.0, t_end: T_END, time_semantics: "continuous".into(),
             dt: Some(1.0), rng_seed: Some(7),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],

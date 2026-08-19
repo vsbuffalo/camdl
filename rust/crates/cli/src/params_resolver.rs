@@ -1156,6 +1156,7 @@ mod tests {
                 dt: None,
                 rng_seed: None,
                 integrator: Default::default(),
+                t_end_anchor: None,
             },
             presets: vec![],
             model_structure: None,
@@ -1266,6 +1267,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![];
         let ffiles = vec![];
@@ -1306,6 +1308,7 @@ mod tests {
             disable: vec![],
             compose: compose.iter().map(|s| s.to_string()).collect(),
             t_end: None,
+            t_end_anchor: None,
         }
     }
 
@@ -1437,6 +1440,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         // A parent that COMPOSES `scale_k` and sets `beta` (its own scale empty).
         let mut parent_params = HashMap::new();
@@ -1450,6 +1454,7 @@ mod tests {
             disable: vec![],
             compose: vec!["scale_k".into()],
             t_end: None,
+            t_end_anchor: None,
         });
         let fp =
             scenario_param_footprint(&model, &ScenarioRef::Named("combo".into())).unwrap();
@@ -1532,6 +1537,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![("beta".to_string(), 1.1)];
         let ffiles = vec![];
@@ -1668,6 +1674,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![];
         let ffiles = vec![];
@@ -1699,6 +1706,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![("beta".to_string(), 1.5)];
         let ffiles = vec![];
@@ -1729,6 +1737,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![];
         let ffiles = vec![];
@@ -1764,6 +1773,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![];
         let ffiles = vec![];
@@ -1799,6 +1809,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![];
         let ffiles = vec![];
@@ -1960,6 +1971,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![("d".to_string(), 4.0)];
         let ffiles = vec![];
@@ -1998,6 +2010,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![("beta".to_string(), 0.5)];
         let ffiles = vec![];
@@ -2055,6 +2068,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![];
         let ffiles = vec![];
@@ -2093,6 +2107,7 @@ mod tests {
             disable: vec![],
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let fcli = vec![("beta".to_string(), 0.3)];
         let ffiles = vec![];

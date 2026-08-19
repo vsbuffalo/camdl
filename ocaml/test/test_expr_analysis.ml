@@ -87,7 +87,7 @@ let model_with_bindings bs =
                trajectory = true; observations = true };
     simulation = { t_start = 0.0; t_end = 1.0; time_semantics = "continuous";
                    dt = None; rng_seed = None;
-                   integrator = Rk4 };
+                   integrator = Rk4; t_end_anchor = None };
     presets = []; model_structure = None; balance = None;
     identity_tracked_compartments = [];
     doc_index = empty_doc_index;

@@ -346,6 +346,7 @@ fn pure_ic_sir_model() -> (CompiledModel, Vec<f64>) {
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None,

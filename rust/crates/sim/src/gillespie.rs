@@ -574,6 +574,7 @@ mod tests {
             simulation: SimulationConfig {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(1), integrator: Default::default(),
+                t_end_anchor: None,
             },
             presets: vec![],
             model_structure: None,

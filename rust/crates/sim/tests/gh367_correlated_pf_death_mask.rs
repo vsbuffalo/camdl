@@ -145,6 +145,7 @@ fn chain_model(foi_rate: Expr) -> (CompiledModel, Vec<f64>) {
             dt: Some(DT),
             rng_seed: Some(42),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None,

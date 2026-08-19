@@ -166,6 +166,7 @@ fn build_model(interventions: Vec<Intervention>) -> CompiledModel {
             t_start: 0.0, t_end: 10.0, time_semantics: "continuous".into(),
             dt: Some(1.0), rng_seed: Some(42),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None,

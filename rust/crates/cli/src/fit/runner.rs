@@ -1656,20 +1656,24 @@ pub fn resolve_condition_from(
 /// An observation anchor in a time spec (gh#626): `first_obs` / `last_obs`.
 /// Which observation(s) it folds over is the CALLER's semantics — per-stream
 /// for `condition_from`, global (all bound streams) for `simulate --to`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ObsAnchor {
-    FirstObs,
-    LastObs,
-}
+///
+/// This is the IR's anchor type, not a CLI-local copy (gh#616): the DSL spells
+/// the same two anchors in `simulate { to }` / `breakpoints` / `value_at`, and
+/// a second enum would be a fork the two sides drift across.
+pub(crate) use ir::anchor::ObsAnchor;
 
 /// A parsed, data-free time spec (gh#626): either an absolute model time
 /// (number or date, resolved at parse) or an observation anchor plus a signed
 /// offset already converted to model time units. Parsing needs no data, so a
 /// caller can decide whether to load observations before resolving.
+///
+/// The anchored arm carries the IR's [`ir::anchor::AnchoredTime`], so a CLI
+/// `--to "last_obs + 8 weeks"` and a model's `to = last_obs + 8 'weeks` are the
+/// SAME value once parsed, and resolve through the same `AnchoredTime::resolve`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TimeSpec {
     Absolute(f64),
-    Anchored { anchor: ObsAnchor, offset: f64 },
+    Anchored(ir::anchor::AnchoredTime),
 }
 
 /// Parse the shared obs-anchored time grammar (gh#626):
@@ -1699,17 +1703,13 @@ pub(crate) fn parse_time_spec(
         return Ok(TimeSpec::Absolute(v));
     }
 
-    // Anchored form: ANCHOR, or ANCHOR (+|-) N UNIT.
-    let anchor_of = |tok: &str| match tok {
-        "first_obs" => Some(ObsAnchor::FirstObs),
-        "last_obs" => Some(ObsAnchor::LastObs),
-        _ => None,
-    };
+    // Anchored form: ANCHOR, or ANCHOR (+|-) N UNIT. The accepted spellings come
+    // from the IR's anchor type, so the CLI and the DSL cannot diverge.
     let head = s.split(['+', '-']).next().unwrap_or("").trim();
-    if let Some(anchor) = anchor_of(head) {
+    if let Ok(anchor) = head.parse::<ObsAnchor>() {
         let rest = s[head.len()..].trim_start();
         if rest.is_empty() {
-            return Ok(TimeSpec::Anchored { anchor, offset: 0.0 });
+            return Ok(TimeSpec::Anchored(ir::anchor::AnchoredTime::bare(anchor)));
         }
         let (sign, after) = match rest.split_at(1) {
             ("+", a) => (1.0, a.trim()),
@@ -1755,7 +1755,10 @@ pub(crate) fn parse_time_spec(
                  Use days / weeks / months / years."))?;
         let model_unit_days = ir::caltime::days_per_unit(time_unit)
             .map_err(|e| format!("{what}: model time_unit: {e}"))?;
-        return Ok(TimeSpec::Anchored { anchor, offset: sign * span_days / model_unit_days });
+        return Ok(TimeSpec::Anchored(ir::anchor::AnchoredTime {
+            anchor,
+            offset: sign * span_days / model_unit_days,
+        }));
     }
 
     // Commuted anchored form ("8 weeks + last_obs"): reject with the
@@ -1803,21 +1806,19 @@ fn parse_condition_spec(
     // calendar-date error).
     match parse_time_spec("condition_from", raw, origin, time_unit)? {
         TimeSpec::Absolute(v) => Ok(v),
-        TimeSpec::Anchored { anchor: ObsAnchor::LastObs, .. } => Err(format!(
+        TimeSpec::Anchored(a) if a.anchor == ObsAnchor::Last => Err(format!(
             "condition_from = \"{raw}\": the conditioning window precedes the \
              data, so it anchors to first_obs; last_obs is not meaningful \
              here."
         )),
-        TimeSpec::Anchored { anchor: ObsAnchor::FirstObs, offset } if offset > 0.0 => {
+        TimeSpec::Anchored(a) if a.offset > 0.0 => {
             Err(format!(
                 "condition_from = \"{raw}\": the relative form must subtract \
                  from first_obs, e.g. \"first_obs - 1 week\" (a boundary after \
                  the first observation would condition on nothing)."
             ))
         }
-        TimeSpec::Anchored { anchor: ObsAnchor::FirstObs, offset } => {
-            Ok(first_obs_time + offset)
-        }
+        TimeSpec::Anchored(a) => Ok(a.resolve(first_obs_time)),
     }
 }
 
@@ -3284,7 +3285,7 @@ mod tests {
                 m
             }),
             output: OutputConfig { times: OutputSchedule::AtTimes(vec![0.0, 80.0]), format: "tsv".into(), trajectory: true, observations: false },
-            simulation: SimulationConfig { t_start: 0.0, t_end: 80.0, time_semantics: "continuous".into(), dt: Some(1.0), rng_seed: Some(42), integrator: Default::default() },
+            simulation: SimulationConfig { t_start: 0.0, t_end: 80.0, time_semantics: "continuous".into(), dt: Some(1.0), rng_seed: Some(42), integrator: Default::default() , t_end_anchor: None },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
 
@@ -3460,6 +3461,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(42),
                 integrator: Default::default(),
+                t_end_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
@@ -3565,6 +3567,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(42),
                 integrator: Default::default(),
+                t_end_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
@@ -3705,6 +3708,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: None, rng_seed: None,
                 integrator: Default::default(),
+                t_end_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
@@ -3769,6 +3773,7 @@ mod tests {
             simulation: ir::model::SimulationConfig {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: None, rng_seed: None, integrator: Default::default(),
+                t_end_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None,
             identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
@@ -4420,6 +4425,7 @@ dt = 1.0
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(42),
                 integrator: Default::default(),
+                t_end_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
@@ -4930,6 +4936,7 @@ dt = 1.0
                 t_start: 0.0, t_end: 28.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(1),
                 integrator: Default::default(),
+                t_end_anchor: None,
             },
             presets: vec![],
             model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
@@ -5664,14 +5671,14 @@ dt = 1.0
     #[test]
     fn time_spec_anchored_forms() {
         assert_eq!(parse_time_spec("--to", "last_obs", None, "days").unwrap(),
-                   TimeSpec::Anchored { anchor: ObsAnchor::LastObs, offset: 0.0 });
+                   TimeSpec::Anchored(ir::anchor::AnchoredTime { anchor: ObsAnchor::Last, offset: 0.0 }));
         assert_eq!(parse_time_spec("--to", "last_obs + 8 weeks", None, "days").unwrap(),
-                   TimeSpec::Anchored { anchor: ObsAnchor::LastObs, offset: 56.0 });
+                   TimeSpec::Anchored(ir::anchor::AnchoredTime { anchor: ObsAnchor::Last, offset: 56.0 }));
         assert_eq!(parse_time_spec("--to", "first_obs - 1 week", None, "days").unwrap(),
-                   TimeSpec::Anchored { anchor: ObsAnchor::FirstObs, offset: -7.0 });
+                   TimeSpec::Anchored(ir::anchor::AnchoredTime { anchor: ObsAnchor::First, offset: -7.0 }));
         // Unit conversion into model units: weeks over a weekly model.
         assert_eq!(parse_time_spec("--to", "last_obs + 2 weeks", None, "weeks").unwrap(),
-                   TimeSpec::Anchored { anchor: ObsAnchor::LastObs, offset: 2.0 });
+                   TimeSpec::Anchored(ir::anchor::AnchoredTime { anchor: ObsAnchor::Last, offset: 2.0 }));
     }
 
     #[test]

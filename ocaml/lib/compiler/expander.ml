@@ -6009,7 +6009,7 @@ let expand_simulate ctx =
   | None ->
     { Ir.t_start = 0.0; Ir.t_end = 100.0;
       Ir.time_semantics = "continuous"; Ir.dt = None; Ir.rng_seed = None;
-      Ir.integrator = Ir.Rk4 }
+      Ir.integrator = Ir.Rk4; Ir.t_end_anchor = None }
   | Some sd ->
     let t_start = resolve_float_expr ctx sd.sim_from in
     let t_end   = resolve_float_expr ctx sd.sim_to   in
@@ -6081,7 +6081,7 @@ let expand_simulate ctx =
     in
     { Ir.t_start; Ir.t_end;
       Ir.time_semantics = "continuous"; Ir.dt; Ir.rng_seed = None;
-      Ir.integrator }
+      Ir.integrator; Ir.t_end_anchor = None }
 
 let expand_output ctx =
   (* The output window's upper bound is no longer stored on the schedule
@@ -10016,6 +10016,7 @@ let expand_scenarios ctx : Ir.preset list =
       Ir.preset_scale   = scale_vals;
       Ir.preset_compose = resolved.rs_compose;
       Ir.preset_t_end   = t_end_val;
+      Ir.preset_t_end_anchor = None;
     }
   ) ctx.scenario_decls
 

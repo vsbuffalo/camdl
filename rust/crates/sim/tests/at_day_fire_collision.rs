@@ -89,6 +89,7 @@ fn model_with_schedule(schedule: InterventionSchedule, end: f64) -> CompiledMode
             dt: Some(1.0),
             rng_seed: Some(1),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None,

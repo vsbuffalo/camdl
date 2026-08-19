@@ -101,6 +101,20 @@ pub struct SimulationConfig {
     /// and a default model adds no JSON noise.
     #[serde(default, skip_serializing_if = "is_default_integrator")]
     pub integrator:     Integrator,
+    /// gh#616: `simulate { to = last_obs + 4 'weeks }` — an observation-anchored
+    /// horizon whose value is not known until a run binds its data.
+    ///
+    /// **This field IS the unresolved marker.** While it is `Some`, `t_end`
+    /// carries `f64::NAN`, deliberately: every equality-based horizon guard then
+    /// fails closed instead of passing on a coincidence (two placeholder
+    /// horizons comparing equal is the gh#561 silent-drop class). The runtime
+    /// resolver substitutes the resolved time into `t_end` and CLEARS this, and
+    /// `CompiledModel::new` refuses any model that still carries it — one guard
+    /// at the choke point every path goes through, rather than one per entry
+    /// point. `None` for a literal horizon; omitted from the JSON then, so an
+    /// unanchored model's IR is byte-identical to its pre-gh#616 form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_end_anchor:   Option<crate::anchor::AnchoredTime>,
 }
 
 // ── Presets ───────────────────────────────────────────────────────────────────
@@ -120,6 +134,11 @@ pub struct Preset {
     pub compose: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t_end:  Option<f64>,
+    /// gh#616: a preset's own anchored horizon. Same contract as
+    /// [`SimulationConfig::t_end_anchor`] — while this is `Some`, `t_end` is
+    /// `Some(NAN)`, and the resolver clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_end_anchor: Option<crate::anchor::AnchoredTime>,
 }
 
 // ── Model structure ───────────────────────────────────────────────────────────

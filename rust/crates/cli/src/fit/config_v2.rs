@@ -4602,6 +4602,7 @@ cooling = 0.9
             scale: HashMap::new(),
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         model
     }
@@ -4660,6 +4661,7 @@ cooling = 0.9
             scale: HashMap::new(),
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         let mut pp = HashMap::new();
         for (k, v) in parent_params { pp.insert((*k).to_string(), *v); }
@@ -4672,6 +4674,7 @@ cooling = 0.9
             scale: HashMap::new(),
             compose: vec![child.to_string()],
             t_end: None,
+            t_end_anchor: None,
         });
         model
     }
@@ -4767,6 +4770,7 @@ cooling = 0.9
             scale: HashMap::new(),
             compose: vec![],
             t_end: None,
+            t_end_anchor: None,
         });
         for p in &mut model.presets {
             if p.name == "mid" { p.compose = vec!["leaf".to_string()]; }

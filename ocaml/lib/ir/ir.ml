@@ -683,6 +683,27 @@ type output_config = {
   observations: bool;
 }
 
+(* ── Observation anchors ─────────────────────────────────────────────────────── *)
+
+(* Which end of the observed record an anchor names. Resolved PER RUN from the
+   run's bound observation streams — `AnchorLast` is the maximum observation
+   time over them, `AnchorFirst` the minimum — so it is not a release constant:
+   two fit configs binding different stream sets resolve different values from
+   the same compiled model. *)
+type obs_anchor =
+  | AnchorFirst
+  | AnchorLast
+
+(* An observation anchor plus a constant offset ALREADY FOLDED to model time
+   units at compile time (`1 'weeks` under `time_unit = days` → 7.0). Only the
+   anchor's value binds later, so the compiled model stays data-independent and
+   the offset never needs the observation series to be interpreted.
+   `offset = 0.0` is a bare anchor. *)
+type anchored_time = {
+  anchor: obs_anchor;
+  offset: float;   (* model time units; signed *)
+}
+
 (* ── Simulation config ───────────────────────────────────────────────────────── *)
 
 (* gh#166: ODE integrator. Rk45 carries its dimensionless adaptive tolerances, so
@@ -698,6 +719,13 @@ type simulation_config = {
   dt:             float option;
   rng_seed:       int option;
   integrator:     integrator;
+  (* gh#616: `simulate { to = last_obs + 4 'weeks }`. When present, `t_end`
+     carries NO usable horizon — the compiler bakes NaN there so every
+     equality-based horizon guard fails closed — and this field IS the
+     unresolved marker: the Rust resolver substitutes the resolved time into
+     `t_end` and CLEARS this, and `CompiledModel::new` refuses any model that
+     still carries it. `None` for a literal horizon. *)
+  t_end_anchor:   anchored_time option;
 }
 
 (* ── Presets (named parameter sets for web UI / CLI) ─────────────────────────── *)
@@ -711,6 +739,10 @@ type preset = {
   preset_scale   : (string * float) list;
   preset_compose : string list;
   preset_t_end   : float option;
+  (* gh#616: a preset's own anchored horizon (`scenarios { s { simulate { to =
+     last_obs + 8 'weeks } } }`). Same contract as `simulation_config`'s:
+     `preset_t_end` is NaN while this is present, and the resolver clears it. *)
+  preset_t_end_anchor : anchored_time option;
 }
 
 (* ── Model structure ─────────────────────────────────────────────────────────── *)

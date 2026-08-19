@@ -89,6 +89,7 @@ fn model_with_lag(lag: Option<Expr>, params: Vec<Parameter>) -> Model {
             dt: None,
             rng_seed: Some(1),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None,

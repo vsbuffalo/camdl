@@ -122,6 +122,12 @@
       "comment": "Counterfactual contrasts (proposal 2026-06-25): named differences of two run-rooted operands (cases averted). Reporting-only and non-identity (excluded from run_id, like quantities). Omitted when empty.",
       "type": "array",
       "items": { "$ref": "#/definitions/contrast" }
+    },
+
+    "scenarios": {
+      "comment": "Named presets (the `scenarios {}` block). Omitted when empty.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/preset" }
     }
   },
 
@@ -1217,8 +1223,49 @@
             "atol": { "type": ["number", "null"] },
             "rtol": { "type": ["number", "null"] }
           }
+        },
+        "t_end_anchor": {
+          "comment": "gh#616: an observation-anchored horizon (`simulate { to = last_obs + 4 'weeks }`). PRESENT means the horizon is UNRESOLVED: `t_end` then carries NaN so every equality-based horizon guard fails closed, and the runtime resolver substitutes the resolved time into `t_end` and removes this key. A model that still carries it is refused at CompiledModel::new. Omitted for a literal horizon.",
+          "$ref": "#/definitions/anchored_time"
         }
       }
+    },
+
+    "preset": {
+      "comment": "A named scenario: a parameter set (plus enable/disable/scale/compose) and optionally its own horizon. Serialized under the model's `scenarios` key.",
+      "type": "object",
+      "required": ["name", "label", "params"],
+      "properties": {
+        "name": { "type": "string" },
+        "label": { "type": "string" },
+        "params": { "type": "object", "additionalProperties": { "type": "number" } },
+        "enable": { "type": "array", "items": { "type": "string" } },
+        "disable": { "type": "array", "items": { "type": "string" } },
+        "scale": { "type": "object", "additionalProperties": { "type": "number" } },
+        "compose": { "type": "array", "items": { "type": "string" } },
+        "t_end": { "type": ["number", "null"] },
+        "t_end_anchor": {
+          "comment": "gh#616: the preset's own anchored horizon; same unresolved-marker contract as simulation_config's.",
+          "$ref": "#/definitions/anchored_time"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "anchored_time": {
+      "comment": "gh#616: an observation anchor plus a constant offset ALREADY FOLDED to model time units by the compiler. The anchor's value is resolved per run from the run's bound observation streams (last_obs = max observation time, first_obs = min), so only it is data-dependent. Canonical encoding: a zero offset is the bare string; a non-zero offset is the object form. Both spellings decode.",
+      "oneOf": [
+        { "type": "string", "enum": ["first_obs", "last_obs"] },
+        {
+          "type": "object",
+          "required": ["anchor"],
+          "properties": {
+            "anchor": { "type": "string", "enum": ["first_obs", "last_obs"] },
+            "offset": { "type": "number" }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
 
     "quantity": {

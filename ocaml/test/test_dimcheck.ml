@@ -70,6 +70,7 @@ let empty_model
       dt = None;
       rng_seed = None;
       integrator = Rk4;
+      t_end_anchor = None;
     };
     presets = [];
     model_structure = None;

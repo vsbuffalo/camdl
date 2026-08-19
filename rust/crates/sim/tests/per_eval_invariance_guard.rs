@@ -70,6 +70,7 @@ fn model_with_per_eval_bindings(per_eval_bindings: Vec<Binding>) -> Model {
             dt: None,
             rng_seed: Some(1),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None,

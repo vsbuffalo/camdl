@@ -90,6 +90,44 @@ let opt_null f = function
   | `Null -> None
   | j     -> Some (f j)
 
+(* ── Observation anchors (gh#616) ────────────────────────────────────────── *)
+
+(* ONE codec shared by every anchor position — `simulation.t_end_anchor`, a
+   preset's, `value_at`'s time anchor, and the `obs_anchor` expr node — so the
+   spellings cannot drift apart.
+
+   Canonical form: a ZERO offset emits the bare string (`"last_obs"`), which is
+   exactly what `value_at(…, last_obs)` emitted before this feature, so the
+   pre-gh#616 corpus stays byte-identical. A non-zero offset emits the object
+   `{"anchor": …, "offset": …}`, where `offset` is already in MODEL time units.
+   Decoding accepts both spellings and re-encoding normalises back to the bare
+   string, so the round-trip is stable. *)
+
+let obs_anchor_to_str = function
+  | AnchorFirst -> "first_obs"
+  | AnchorLast  -> "last_obs"
+
+let obs_anchor_of_str = function
+  | "first_obs" -> AnchorFirst
+  | "last_obs"  -> AnchorLast
+  | s -> fail "unknown observation anchor '%s': expected \"first_obs\" or \"last_obs\"" s
+
+let anchored_time_to_json (a : anchored_time) : Yojson.Safe.t =
+  if a.offset = 0.0 then str (obs_anchor_to_str a.anchor)
+  else obj [ ("anchor", str (obs_anchor_to_str a.anchor));
+             ("offset", flt a.offset) ]
+
+let anchored_time_of_json j : anchored_time =
+  match j with
+  | `String s -> { anchor = obs_anchor_of_str s; offset = 0.0 }
+  | `Assoc _ ->
+    { anchor = obs_anchor_of_str (as_string (member "anchor" j));
+      offset = (match member_opt "offset" j with
+                | Some `Null | None -> 0.0
+                | Some v -> as_float v); }
+  | _ -> fail "anchored time must be \"first_obs\"/\"last_obs\" or \
+               {\"anchor\": …, \"offset\": …}"
+
 (* ── Expression ──────────────────────────────────────────────────────────── *)
 
 let bin_op_str = function
@@ -1528,6 +1566,12 @@ let simulation_config_to_json (s : simulation_config) : Yojson.Safe.t =
       ("rng_seed",       match s.rng_seed with None -> null | Some n -> int n);
     ]
     @ (match s.integrator with Rk4 -> [] | i -> [ ("integrator", integrator_to_json i) ])
+    (* gh#616: APPENDED when present, never emitted as null — an unanchored
+       model's simulation block is byte-identical to its pre-gh#616 form (the
+       `integrator` idiom, not the `dt`/`rng_seed` null-emitting one). *)
+    @ (match s.t_end_anchor with
+       | None -> []
+       | Some a -> [ ("t_end_anchor", anchored_time_to_json a) ])
   )
 
 let simulation_config_of_json j =
@@ -1537,6 +1581,9 @@ let simulation_config_of_json j =
     dt             = (match member_opt "dt"       j with Some `Null | None -> None | Some v -> Some (as_float v));
     rng_seed       = (match member_opt "rng_seed" j with Some `Null | None -> None | Some v -> Some (as_int   v));
     integrator     = (match member_opt "integrator" j with Some `Null | None -> Rk4 | Some v -> integrator_of_json v);
+    t_end_anchor   = (match member_opt "t_end_anchor" j with
+                      | Some `Null | None -> None
+                      | Some v -> Some (anchored_time_of_json v));
   }
 
 (* ── Presets ─────────────────────────────────────────────────────────────── *)
@@ -1553,6 +1600,10 @@ let preset_to_json (p : preset) : Yojson.Safe.t =
        else [("scale", obj (List.map (fun (k, v) -> (k, flt v)) p.preset_scale))])
     @ (if p.preset_compose = [] then []
        else [("compose", arr (List.map str p.preset_compose))])
+    (* gh#616: appended when present (see simulation_config_to_json). *)
+    @ (match p.preset_t_end_anchor with
+       | None -> []
+       | Some a -> [ ("t_end_anchor", anchored_time_to_json a) ])
   )
 
 let preset_of_json j =
@@ -1566,6 +1617,9 @@ let preset_of_json j =
                       | _ -> []);
     preset_compose = (match member_opt "compose" j with Some (`List xs) -> List.map as_string xs | _ -> []);
     preset_t_end   = (match member_opt "t_end" j with Some `Null | None -> None | Some v -> Some (as_float v));
+    preset_t_end_anchor = (match member_opt "t_end_anchor" j with
+                           | Some `Null | None -> None
+                           | Some v -> Some (anchored_time_of_json v));
   }
 
 (* ── Model structure ─────────────────────────────────────────────────────── *)

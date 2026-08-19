@@ -50,6 +50,7 @@ fn tiny_model() -> Model {
             dt: Some(1.0),
             rng_seed: None,
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None,

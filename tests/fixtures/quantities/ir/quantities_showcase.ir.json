@@ -1,4 +1,4 @@
-{"ir_version":"0.31","validated_by":"ocaml-compiler-v0.31","model":{"name":"quantities_showcase","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.32","validated_by":"ocaml-compiler-v0.32","model":{"name":"quantities_showcase","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_a","kind":"integer"},
 {"name":"S_b","kind":"integer"},
 {"name":"I_a","kind":"integer"},

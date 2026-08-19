@@ -148,6 +148,7 @@ fn dt_hidden_in_binding_requires_runtime_dt() {
             dt: Some(1.0),
             rng_seed: Some(1),
             integrator: Default::default(),
+            t_end_anchor: None,
         },
         presets: vec![],
         model_structure: None,
