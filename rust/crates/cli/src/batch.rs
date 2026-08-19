@@ -731,6 +731,8 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         integrator: None, // batch uses the model's declared integrator (no CLI override)
         source,
         scenarios: job_scenarios,
+        // gh#626: batch TOML has no `to` key (deliberate; CLI-only override).
+        t_end_override: None,
         // Batch seeds are always explicit (range / count / list).
         seeds: Seeds::Explicit(seeds.clone()),
         cli_overrides: Vec::new(),
@@ -1544,6 +1546,8 @@ fn run_design_experiment(
             integrator: None,
             source: ParamSource::Sweep { points, replicates: 1 },
             scenarios: job_scenarios.clone(),
+        // gh#626: batch TOML has no `to` key (deliberate; CLI-only override).
+        t_end_override: None,
             seeds: Seeds::Explicit(seeds.to_vec()),
             cli_overrides: Vec::new(),
             set_vec_entries: Vec::new(),

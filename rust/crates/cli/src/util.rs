@@ -2589,6 +2589,11 @@ pub struct SimRun {
     pub set_vec_entries: Vec<(String, String)>,
     pub table_files: HashMap<String, String>,
     pub scenario_name: Option<String>,
+    /// gh#626: resolved `--to` override, applied to `simulation.t_end` right
+    /// after `apply_scenario_horizon`. The conflict rule (a scenario horizon
+    /// differing from both the model's and this value is refused up front in
+    /// `run_simulate`) keeps the baked-end guard's `old_end` meaningful.
+    pub t_end_override: Option<f64>,
     pub adhoc_enable: Vec<String>,
     pub adhoc_disable: Vec<String>,
     /// An INLINE ad-hoc scenario's display name + `set`/`scale`. Distinct
@@ -2692,6 +2697,7 @@ pub fn check_baked_recurring_ends(
     model: &ir::Model,
     scenario: Option<&str>,
     old_end: f64,
+    via_to_flag: bool,
 ) -> Result<(), String> {
     let new_end = model.simulation.t_end;
     if new_end <= old_end {
@@ -2723,17 +2729,69 @@ pub fn check_baked_recurring_ends(
     if !events.is_empty() {
         what.push(format!("recurring event(s) [{}]", events.join(", ")));
     }
+    // gh#626: name the actual horizon source. With `--to` and no scenario,
+    // "scenario '?'" misattributed the extension and the fix advice pointed
+    // at retyping the literal model horizon `--to` exists to avoid.
+    let source = if via_to_flag {
+        "--to".to_string()
+    } else {
+        format!("scenario '{}'", scenario.unwrap_or("?"))
+    };
+    let fix_tail = if via_to_flag {
+        "or run without --to at the model horizon".to_string()
+    } else {
+        "or move the horizon to the model's own `simulate { to }`".to_string()
+    };
     Err(format!(
-        "scenario '{}' extends the horizon to t = {new_end}, but {} stop at \
+        "{source} extends the horizon to t = {new_end}, but {} stop at \
          the model horizon t = {old_end} — the compiler bakes the model \
          horizon in as their end when the recurring `to` is omitted, so the \
          extended window would run with them silently switched off.\n  \
          Fix: declare the intended end explicitly on each — \
          `to = {new_end} 'days` (or later) inside the recurring schedule — \
-         or move the horizon to the model's own `simulate {{ to }}`.",
-        scenario.unwrap_or("?"),
+         {fix_tail}.",
         what.join(" and "),
     ))
+}
+
+/// Refuse an extending `--to` on a model with reactive policies whose
+/// monitored emit window is baked at the old horizon (gh#626, review
+/// blocker). The reactive agenda walks a Regular emit schedule to the
+/// schedule's OWN baked `end` (`sim/src/reactive.rs::schedule_emit_times`),
+/// unlike the forward obs emitters, which take the run horizon (gh#561). So
+/// under an extended horizon the dynamics run to the new end while the
+/// policy silently stops monitoring at the old one — the silent-drop class.
+/// Scenarios cannot reach this (a scenario cannot enable a reactive policy);
+/// only `--to` can. The lift that removes this refusal — the reactive walk
+/// taking the run `t_end`, the same gh#143 move — is the gh#626 follow-up.
+pub fn check_reactive_baked_emit_end(
+    model: &ir::Model,
+    old_end: f64,
+    new_end: f64,
+) -> Result<(), String> {
+    if new_end <= old_end {
+        return Ok(()); // shortening is unconditionally safe
+    }
+    let has_reactive = model.interventions.iter().any(|iv| iv.fire.is_reactive());
+    if !has_reactive {
+        return Ok(());
+    }
+    let baked_stream = model.observations.iter().find(|o| matches!(
+        &o.emit_schedule,
+        Some(ir::observation::ObservationSchedule::Regular(r)) if (r.end - old_end).abs() < 1e-9
+    ));
+    if let Some(o) = baked_stream {
+        return Err(format!(
+            "--to extends the horizon to t = {new_end}, but this model has \
+             reactive policies and stream '{}''s emit schedule is baked to \
+             end at the model horizon t = {old_end} — the policies would \
+             silently stop monitoring at the old horizon while the dynamics \
+             run on (gh#626).\n  Fix: declare the emit schedule's end \
+             explicitly past the intended horizon, or run without --to.",
+            o.name,
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse a scenario whose declared horizon this command structurally cannot
@@ -2782,6 +2840,7 @@ impl Default for SimRun {
             set_vec_entries: Vec::new(),
             table_files: HashMap::new(),
             scenario_name: None,
+            t_end_override: None,
             adhoc_enable: Vec::new(),
             adhoc_disable: Vec::new(),
             scenario_inline_name: None,
@@ -2827,6 +2886,15 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     // `scenario_name` rather than the inline fields.
     let pre_scenario_end = model.simulation.t_end;
     apply_scenario_horizon(&mut model, run.scenario_name.as_deref())?;
+    // gh#626: the resolved `--to` override wins over both the model horizon
+    // and a scenario's (the up-front conflict rule refuses a scenario horizon
+    // differing from both, so this cannot silently discard one). The baked-end
+    // guard below still checks against `pre_scenario_end` — under `--to` that
+    // is the pre-override end, because a differing scenario horizon was
+    // already refused.
+    if let Some(t_end) = run.t_end_override {
+        model.simulation.t_end = t_end;
+    }
     // RC1 in 2026-04-19 engine review.
     ir::validate::validate(&model).map_err(|errs| {
         let mut msg = format!("IR validation failed ({} error(s)):\n", errs.len());
@@ -2925,7 +2993,15 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     // exactly the campaigns that would actually run (gh#561; the pre-filter
     // version over-refused a horizon menu over an unrelated intervention
     // library).
-    check_baked_recurring_ends(&model, run.scenario_name.as_deref(), pre_scenario_end)?;
+    check_baked_recurring_ends(
+        &model,
+        run.scenario_name.as_deref(),
+        pre_scenario_end,
+        run.t_end_override.is_some(),
+    )?;
+    if run.t_end_override.is_some() {
+        check_reactive_baked_emit_end(&model, pre_scenario_end, model.simulation.t_end)?;
+    }
     let compiled = CompiledModel::new(model.clone())
         .map_err(|e| format!("model compile error: {:?}", e))?;
 
@@ -3028,7 +3104,8 @@ pub fn simulate_compiled(
             eprintln!(
                 "\x1b[33mwarning:\x1b[0m every `at = [...]` output time is beyond the \
                  simulation horizon (t_end = {t_end}); the trajectory will have no rows \
-                 (gh#125). Add output times within [t_start, t_end], or raise t_end."
+                 (gh#125). Add output times within [t_start, t_end], raise t_end, \
+                 or drop a shortening `--to` (gh#626)."
             );
         }
     }

@@ -1288,6 +1288,8 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     // tier; the scenario NAME is carried for the sink's per-scenario
                     // partition (`cell.spec.scenario.name()`).
                     scenarios: vec![sref.clone()],
+                    // gh#626: the predictive window comes from the data.
+                    t_end_override: None,
                     seeds: crate::sim_job::Seeds::Single(seed),
                     cli_overrides: vec![],
                     set_vec_entries: vec![],

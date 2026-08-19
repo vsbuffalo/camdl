@@ -1653,6 +1653,141 @@ pub fn resolve_condition_from(
     Ok(Some(cond_from))
 }
 
+/// An observation anchor in a time spec (gh#626): `first_obs` / `last_obs`.
+/// Which observation(s) it folds over is the CALLER's semantics — per-stream
+/// for `condition_from`, global (all bound streams) for `simulate --to`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObsAnchor {
+    FirstObs,
+    LastObs,
+}
+
+/// A parsed, data-free time spec (gh#626): either an absolute model time
+/// (number or date, resolved at parse) or an observation anchor plus a signed
+/// offset already converted to model time units. Parsing needs no data, so a
+/// caller can decide whether to load observations before resolving.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum TimeSpec {
+    Absolute(f64),
+    Anchored { anchor: ObsAnchor, offset: f64 },
+}
+
+/// Parse the shared obs-anchored time grammar (gh#626):
+///
+/// ```text
+/// SPEC   := NUMBER | date("YYYY-MM-DD") | YYYY-MM-DD
+///         | ANCHOR | ANCHOR (+|-) N UNIT
+/// ANCHOR := first_obs | last_obs
+/// UNIT   := day(s)|d | week(s)|w | month(s)|mo | year(s)|yr|y
+/// ```
+///
+/// `what` names the surface in every message (`"--to"` / `"condition_from"`).
+/// Months and years are fixed spans (`days_per_unit`), not calendar
+/// arithmetic. Deliberate rejections, each with a hint: the commuted
+/// `8 weeks + last_obs` order and the DSL tick spelling (`8 'weeks`) — the
+/// canonical form is `ANCHOR ± N UNIT` with a plain unit word.
+pub(crate) fn parse_time_spec(
+    what: &str,
+    raw: &str,
+    origin: Option<&str>,
+    time_unit: &str,
+) -> Result<TimeSpec, String> {
+    let s = raw.trim();
+
+    // Bare model-time number.
+    if let Ok(v) = s.parse::<f64>() {
+        return Ok(TimeSpec::Absolute(v));
+    }
+
+    // Anchored form: ANCHOR, or ANCHOR (+|-) N UNIT.
+    let anchor_of = |tok: &str| match tok {
+        "first_obs" => Some(ObsAnchor::FirstObs),
+        "last_obs" => Some(ObsAnchor::LastObs),
+        _ => None,
+    };
+    let head = s.split(['+', '-']).next().unwrap_or("").trim();
+    if let Some(anchor) = anchor_of(head) {
+        let rest = s[head.len()..].trim_start();
+        if rest.is_empty() {
+            return Ok(TimeSpec::Anchored { anchor, offset: 0.0 });
+        }
+        let (sign, after) = match rest.split_at(1) {
+            ("+", a) => (1.0, a.trim()),
+            ("-", a) => (-1.0, a.trim()),
+            _ => {
+                return Err(format!(
+                    "{what} = \"{raw}\": expected \"{head} + <N> <unit>\" or \
+                     \"{head} - <N> <unit>\"."));
+            }
+        };
+        let mut it = after.split_whitespace();
+        let n_tok = it.next().ok_or_else(|| format!(
+            "{what} = \"{raw}\": expected \"{head} {} <N> <unit>\", e.g. \
+             \"last_obs + 8 weeks\".",
+            if sign > 0.0 { "+" } else { "-" }))?;
+        let unit_tok = it.next().ok_or_else(|| format!(
+            "{what} = \"{raw}\": missing unit; expected \
+             \"{head} {} <N> <unit>\", e.g. \"last_obs + 8 weeks\".",
+            if sign > 0.0 { "+" } else { "-" }))?;
+        if it.next().is_some() {
+            return Err(format!(
+                "{what} = \"{raw}\": trailing tokens after the unit; \
+                 expected exactly \"{head} ± <N> <unit>\"."));
+        }
+        let n: f64 = n_tok.parse().map_err(|_| format!(
+            "{what} = \"{raw}\": '{n_tok}' is not a number."))?;
+        if n < 0.0 {
+            return Err(format!(
+                "{what} = \"{raw}\": N must be non-negative (the sign is \
+                 the ± before it); got {n}."));
+        }
+        if let Some(stripped) = unit_tok.strip_prefix('\'') {
+            return Err(format!(
+                "{what} = \"{raw}\": the DSL tick spelling ('{stripped}) is \
+                 not accepted here — write the unit as a plain word: \
+                 \"{head} {} {n_tok} {stripped}\".",
+                if sign > 0.0 { "+" } else { "-" }));
+        }
+        let unit = canonical_duration_unit(unit_tok);
+        let span_days = n * ir::caltime::days_per_unit(&unit)
+            .map_err(|_| format!(
+                "{what} = \"{raw}\": unknown unit '{unit_tok}'. \
+                 Use days / weeks / months / years."))?;
+        let model_unit_days = ir::caltime::days_per_unit(time_unit)
+            .map_err(|e| format!("{what}: model time_unit: {e}"))?;
+        return Ok(TimeSpec::Anchored { anchor, offset: sign * span_days / model_unit_days });
+    }
+
+    // Commuted anchored form ("8 weeks + last_obs"): reject with the
+    // canonical spelling rather than silently not-a-date.
+    if s.contains("first_obs") || s.contains("last_obs") {
+        let a = if s.contains("last_obs") { "last_obs" } else { "first_obs" };
+        return Err(format!(
+            "{what} = \"{raw}\": write the anchor first — e.g. \
+             \"{a} + 8 weeks\"."));
+    }
+
+    // Absolute date form: date("YYYY-MM-DD") or bare YYYY-MM-DD.
+    let date_str = if let Some(inner) = s.strip_prefix("date(") {
+        inner.strip_suffix(')')
+            .map(|x| x.trim().trim_matches('"').to_string())
+            .ok_or_else(|| format!(
+                "{what} = \"{raw}\": malformed date(...) — expected \
+                 date(\"YYYY-MM-DD\")."))?
+    } else {
+        s.to_string()
+    };
+    let origin = origin.ok_or_else(|| format!(
+        "{what} = \"{raw}\" is a calendar date, but the model declares no \
+         `origin = date(\"…\")`. Either add an origin to the model or use a \
+         numeric model-time value for {what}."))?;
+    ir::caltime::date_to_internal(origin, &date_str, time_unit)
+        .map(TimeSpec::Absolute)
+        .map_err(|e| format!(
+            "{what} = \"{raw}\": cannot resolve date '{date_str}' against \
+             origin '{origin}' (time_unit = {time_unit}): {e:?}"))
+}
+
 /// Parse a string-form [`ConditionFrom::Spec`] to model time.
 fn parse_condition_spec(
     raw: &str,
@@ -1660,82 +1795,30 @@ fn parse_condition_spec(
     origin: Option<&str>,
     time_unit: &str,
 ) -> Result<f64, String> {
-    let s = raw.trim();
-
-    // Bare model-time number: "14" / "14.0" → used verbatim as `cond_from`.
-    // (The CLI and the `[condition_from]` table both carry strings now, so an
-    // absolute model-time boundary arrives as a numeric string.)
-    if let Ok(v) = s.parse::<f64>() {
-        return Ok(v);
-    }
-
-    // Relative form: "first_obs - <N> <unit>".
-    if let Some(rest) = s.strip_prefix("first_obs") {
-        let rest = rest.trim();
-        let after = rest.strip_prefix('-').ok_or_else(|| format!(
-            "condition_from = \"{raw}\": the relative form must subtract from \
-             first_obs, e.g. \"first_obs - 1 week\" (only `-` is supported)."
-        ))?;
-        let mut it = after.split_whitespace();
-        let n_tok = it.next().ok_or_else(|| format!(
-            "condition_from = \"{raw}\": expected \"first_obs - <N> <unit>\", \
-             e.g. \"first_obs - 1 week\"."
-        ))?;
-        let unit_tok = it.next().ok_or_else(|| format!(
-            "condition_from = \"{raw}\": missing unit; expected \
-             \"first_obs - <N> <unit>\", e.g. \"first_obs - 7 days\"."
-        ))?;
-        if it.next().is_some() {
-            return Err(format!(
-                "condition_from = \"{raw}\": trailing tokens after the unit; \
-                 expected exactly \"first_obs - <N> <unit>\"."
-            ));
+    // Thin wrapper over the shared obs-anchored grammar (gh#626): the
+    // ACCEPTANCE set is unchanged — `first_obs` only, subtraction only —
+    // enforced by post-restriction so conditioning and `--to` can never
+    // drift apart. Two rejection messages improved with the shared parser
+    // (`last_obs …` and `first_obs + …` used to fall through to a confusing
+    // calendar-date error).
+    match parse_time_spec("condition_from", raw, origin, time_unit)? {
+        TimeSpec::Absolute(v) => Ok(v),
+        TimeSpec::Anchored { anchor: ObsAnchor::LastObs, .. } => Err(format!(
+            "condition_from = \"{raw}\": the conditioning window precedes the \
+             data, so it anchors to first_obs; last_obs is not meaningful \
+             here."
+        )),
+        TimeSpec::Anchored { anchor: ObsAnchor::FirstObs, offset } if offset > 0.0 => {
+            Err(format!(
+                "condition_from = \"{raw}\": the relative form must subtract \
+                 from first_obs, e.g. \"first_obs - 1 week\" (a boundary after \
+                 the first observation would condition on nothing)."
+            ))
         }
-        let n: f64 = n_tok.parse().map_err(|_| format!(
-            "condition_from = \"{raw}\": '{n_tok}' is not a number."
-        ))?;
-        if n < 0.0 {
-            return Err(format!(
-                "condition_from = \"{raw}\": N must be non-negative (the form \
-                 already subtracts); got {n}."
-            ));
+        TimeSpec::Anchored { anchor: ObsAnchor::FirstObs, offset } => {
+            Ok(first_obs_time + offset)
         }
-        // Convert N <unit> into model-time units: N · days_per_unit(unit) /
-        // days_per_unit(model_time_unit). When the spec unit equals the model
-        // time unit this is just N.
-        let unit = canonical_duration_unit(unit_tok);
-        let span_days = n * ir::caltime::days_per_unit(&unit)
-            .map_err(|_| format!(
-                "condition_from = \"{raw}\": unknown unit '{unit_tok}'. \
-                 Use days / weeks / months / years."
-            ))?;
-        let model_unit_days = ir::caltime::days_per_unit(time_unit)
-            .map_err(|e| format!("condition_from: model time_unit: {e}"))?;
-        let offset = span_days / model_unit_days;
-        return Ok(first_obs_time - offset);
     }
-
-    // Absolute date form: date("YYYY-MM-DD") or a bare YYYY-MM-DD.
-    let date_str = if let Some(inner) = s.strip_prefix("date(") {
-        inner.strip_suffix(')')
-            .map(|x| x.trim().trim_matches('"').to_string())
-            .ok_or_else(|| format!(
-                "condition_from = \"{raw}\": malformed date(...) — expected \
-                 date(\"YYYY-MM-DD\")."
-            ))?
-    } else {
-        s.to_string()
-    };
-
-    let origin = origin.ok_or_else(|| format!(
-        "condition_from = \"{raw}\" is a calendar date, but the model declares \
-         no `origin = date(\"…\")`. Either add an origin to the model or use a \
-         numeric model-time value for condition_from."
-    ))?;
-    ir::caltime::date_to_internal(origin, &date_str, time_unit).map_err(|e| format!(
-        "condition_from = \"{raw}\": cannot resolve date '{date_str}' against \
-         origin '{origin}' (time_unit = {time_unit}): {e:?}"
-    ))
 }
 
 /// Normalize a user-written duration unit token to the canonical
@@ -5559,5 +5642,69 @@ dt = 1.0
                 "deaths: first_obs(7) − 1 week = 0 = t_start ⇒ no-op, no hole");
             std::fs::remove_dir_all(&dir).ok();
         }
+    }
+
+    // ── parse_time_spec / parse_condition_spec (gh#626) ─────────────────────
+
+    #[test]
+    fn time_spec_absolute_forms() {
+        assert_eq!(parse_time_spec("--to", "120", None, "days").unwrap(),
+                   TimeSpec::Absolute(120.0));
+        // Dates need an origin; resolved via caltime.
+        let got = parse_time_spec("--to", "date(\"2020-01-11\")",
+                                  Some("2020-01-01"), "days").unwrap();
+        assert_eq!(got, TimeSpec::Absolute(10.0));
+        let bare = parse_time_spec("--to", "2020-01-11",
+                                   Some("2020-01-01"), "days").unwrap();
+        assert_eq!(bare, TimeSpec::Absolute(10.0));
+        let err = parse_time_spec("--to", "2020-01-11", None, "days").unwrap_err();
+        assert!(err.contains("origin"), "dates without origin must say so: {err}");
+    }
+
+    #[test]
+    fn time_spec_anchored_forms() {
+        assert_eq!(parse_time_spec("--to", "last_obs", None, "days").unwrap(),
+                   TimeSpec::Anchored { anchor: ObsAnchor::LastObs, offset: 0.0 });
+        assert_eq!(parse_time_spec("--to", "last_obs + 8 weeks", None, "days").unwrap(),
+                   TimeSpec::Anchored { anchor: ObsAnchor::LastObs, offset: 56.0 });
+        assert_eq!(parse_time_spec("--to", "first_obs - 1 week", None, "days").unwrap(),
+                   TimeSpec::Anchored { anchor: ObsAnchor::FirstObs, offset: -7.0 });
+        // Unit conversion into model units: weeks over a weekly model.
+        assert_eq!(parse_time_spec("--to", "last_obs + 2 weeks", None, "weeks").unwrap(),
+                   TimeSpec::Anchored { anchor: ObsAnchor::LastObs, offset: 2.0 });
+    }
+
+    #[test]
+    fn time_spec_rejections_carry_hints() {
+        // Commuted order: rejected, hint names the canonical spelling.
+        let err = parse_time_spec("--to", "8 weeks + last_obs", None, "days").unwrap_err();
+        assert!(err.contains("anchor first") && err.contains("last_obs + 8 weeks"),
+            "commuted form must hint the canonical order: {err}");
+        // DSL tick spelling: rejected, hint strips the tick.
+        let err = parse_time_spec("--to", "last_obs + 8 'weeks", None, "days").unwrap_err();
+        assert!(err.contains("tick") && err.contains("plain word"),
+            "tick unit must hint the plain spelling: {err}");
+        // Unknown unit, trailing tokens, negative N.
+        assert!(parse_time_spec("--to", "last_obs + 8 fortnights", None, "days").is_err());
+        assert!(parse_time_spec("--to", "last_obs + 8 weeks extra", None, "days").is_err());
+        assert!(parse_time_spec("--to", "last_obs + -8 weeks", None, "days").is_err());
+    }
+
+    #[test]
+    fn condition_spec_acceptance_set_unchanged() {
+        // The wrapper keeps condition_from's restrictions: first_obs-only,
+        // subtraction-only — with clearer messages than the old date
+        // fall-through (gh#626).
+        assert_eq!(
+            parse_condition_spec("first_obs - 1 week", 42.0, None, "days").unwrap(),
+            35.0);
+        assert_eq!(parse_condition_spec("14", 42.0, None, "days").unwrap(), 14.0);
+        let err = parse_condition_spec("last_obs - 1 week", 42.0, None, "days").unwrap_err();
+        assert!(err.contains("first_obs") && err.contains("last_obs"),
+            "last_obs in condition_from must be the anchored rejection, not a \
+             date error: {err}");
+        let err = parse_condition_spec("first_obs + 1 week", 42.0, None, "days").unwrap_err();
+        assert!(err.contains("subtract"),
+            "addition in condition_from must be rejected: {err}");
     }
 }

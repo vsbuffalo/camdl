@@ -483,6 +483,18 @@ pub struct SimulateArgs {
     /// IR JSON or .camdl model file
     pub model: PathBuf,
 
+    /// Override the run's horizon (`simulation.t_end`), gh#626. SPEC is a
+    /// model-time number ("120"), a calendar date (date("YYYY-MM-DD") or
+    /// bare YYYY-MM-DD; needs a model origin), or an observation anchor
+    /// with optional offset: "last_obs", "last_obs + 8 weeks",
+    /// "first_obs - 1 week". Anchored forms require --fit (the fit's
+    /// [data.observations] supplies the observed times; last_obs = the max
+    /// observation time over the bound streams). months/years are fixed
+    /// spans (30.4375 d / 365.2425 d), not calendar arithmetic. A scenario
+    /// that declares its own different horizon is a hard error.
+    #[arg(long, value_name = "SPEC")]
+    pub to: Option<String>,
+
     /// gh#audit-C6 / S1. See InferenceCore.allow_degenerate_rates.
     /// Forward sim is the most likely user of this flag — if a model
     /// has a known empty-stratum-divisor and the user wants to keep
@@ -540,7 +552,11 @@ pub struct SimulateArgs {
     /// posterior draws from. With `--draws <file.tsv>`, a fit.toml (or results
     /// dir) whose `[fixed]` block backfills parameters absent from the file's
     /// columns — never overwriting a column the file provides (#273).
-    #[arg(long, requires = "draws")]
+    /// Also consulted (without --draws) by an anchored `--to`: the fit's
+    /// [data.observations] supplies the observed times the anchor resolves
+    /// against — a manual check requires --fit to come with --draws and/or
+    /// an anchored --to (gh#626).
+    #[arg(long)]
     pub fit: Option<PathBuf>,
 
     /// Number of parameter draws (for --draws uniform/prior)

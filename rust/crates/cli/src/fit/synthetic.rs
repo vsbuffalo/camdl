@@ -103,6 +103,7 @@ fn generate_one_dataset(
         set_vec_entries: vec![],
         table_files: Default::default(),
         scenario_name: spec.scenario.clone(),
+        t_end_override: None, // fit refuses horizons (gh#561)
         adhoc_enable: vec![],
         adhoc_disable: vec![],
         scenario_inline_name: None,

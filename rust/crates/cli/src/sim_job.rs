@@ -71,6 +71,11 @@ pub struct SimulateJob {
     /// σ layer — which scenarios to run. Empty ⇒ a single implicit
     /// baseline (run-spec §3.6).
     pub scenarios: Vec<ScenarioRef>,
+    /// gh#626: the resolved `--to` horizon override (model time), applied to
+    /// every cell after the scenario horizon in `resolve_run_model`, and keyed
+    /// into run identity via `ResolvedEntry.t_end`. `None` = no override
+    /// (batch TOML deliberately has no `to` key).
+    pub t_end_override: Option<f64>,
     /// S layer.
     pub seeds: Seeds,
     /// `--param NAME=VALUE` CLI overrides merged on top of every cell

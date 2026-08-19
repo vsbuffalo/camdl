@@ -462,6 +462,7 @@ pub fn build_cell_sim_run(
         set_vec_entries: job.set_vec_entries.clone(),
         table_files: table_files.clone(),
         scenario_name,
+        t_end_override: job.t_end_override,
         adhoc_enable,
         adhoc_disable,
         scenario_inline_name,

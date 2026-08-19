@@ -796,6 +796,91 @@ fn run_simulate(a: &args::SimulateArgs) {
         scenario_names.iter().map(|s| Some(s.clone())).collect()
     };
 
+    // ── gh#626: resolve `--to` (obs-anchored horizon override) once, up front.
+    // Anchored forms (`last_obs + 8 weeks`) fold over the fit's bound
+    // observation data; absolute forms (number, date) resolve data-free. The
+    // resolved value overrides every cell's `simulation.t_end` (applied in
+    // `resolve_run_model` after the scenario horizon) and is keyed into run
+    // identity via `ResolvedEntry.t_end`.
+    let mut to_was_anchored = false;
+    let t_end_override: Option<f64> = match a.to.as_deref() {
+        None => None,
+        Some(raw) => {
+            let (model_to, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            });
+            let spec = crate::fit::runner::parse_time_spec(
+                "--to", raw, model_to.origin.as_deref(), &model_to.time_unit,
+            ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+            let resolved = match spec {
+                crate::fit::runner::TimeSpec::Absolute(v) => v,
+                crate::fit::runner::TimeSpec::Anchored { anchor, offset } => {
+                    to_was_anchored = true;
+                    let Some(fit_ref) = a.fit.as_ref() else {
+                        eprintln!(
+                            "error: --to \"{raw}\" is anchored to observed data, but a \
+                             forward simulation binds none.\n  Fix: pass --fit \
+                             <fit.toml | fit run dir> — its [data.observations] \
+                             supplies the observed times the anchor resolves against."
+                        );
+                        std::process::exit(1);
+                    };
+                    let (first_obs, last_obs) =
+                        resolve_simulate_obs_anchors(&model_to, fit_ref, dt)
+                            .unwrap_or_else(|e| {
+                                eprintln!("error: --to \"{raw}\": {e}");
+                                std::process::exit(1);
+                            });
+                    let base = match anchor {
+                        crate::fit::runner::ObsAnchor::FirstObs => first_obs,
+                        crate::fit::runner::ObsAnchor::LastObs => last_obs,
+                    };
+                    base + offset
+                }
+            };
+            // NO existing validator checks horizon ordering (ir::validate never
+            // reads t_end); an inverted horizon would otherwise be a silent
+            // header-only TSV.
+            if resolved <= model_to.simulation.t_start {
+                eprintln!(
+                    "error: --to \"{raw}\" resolves to t = {resolved}, which is at or \
+                     before the model's t_start = {}. The horizon must lie after \
+                     the simulation start.",
+                    model_to.simulation.t_start
+                );
+                std::process::exit(1);
+            }
+            // Conflict rule (gh#561: never silently discard a declared
+            // horizon): a scenario whose composed horizon differs from BOTH
+            // the model's t_end and the resolved --to is refused. Equal to
+            // the resolved --to is the no-op precedent and allowed.
+            for sname in scenario_list.iter().flatten() {
+                let h = crate::params_resolver::effective_horizon(&model_to, Some(sname))
+                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                if h != model_to.simulation.t_end && h != resolved {
+                    eprintln!(
+                        "error: scenario '{sname}' declares its own horizon \
+                         (t = {h}) and --to \"{raw}\" resolves to t = {resolved} — \
+                         refusing to pick one silently.\n  Fix: drop the \
+                         scenario's `simulate {{ to }}` (keep it as a label-only \
+                         preset) or run it without --to."
+                    );
+                    std::process::exit(1);
+                }
+            }
+            eprintln!("simulate: --to \"{raw}\" → t_end = {resolved}");
+            Some(resolved)
+        }
+    };
+    // `--fit` without `--draws` is only meaningful for an anchored `--to`
+    // (the clap `requires = \"draws\"` was relaxed for gh#626 — keep the old
+    // ergonomics otherwise).
+    if a.fit.is_some() && a.draws.is_none() && !to_was_anchored {
+        eprintln!("error: --fit requires --draws (or an anchored --to).");
+        std::process::exit(1);
+    }
+
     let cas_root = output_dir_arg.clone()
         .unwrap_or_else(|| run_paths::DEFAULT_OUTPUT_ROOT.to_string());
 
@@ -863,6 +948,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         set_vec_entries,
         table_files,
         scenario_name: None, // set per-scenario in the loop
+        t_end_override, // gh#626: keys the CAS identity below; cells get it via the job
         adhoc_enable,
         adhoc_disable,
         scenario_inline_name: None,
@@ -897,11 +983,16 @@ fn run_simulate(a: &args::SimulateArgs) {
         // per-cell and unaffected; refuse the combined mirrors and point at it.
         let mut horizons: Vec<(String, f64)> = Vec::new();
         for s in &scenario_list {
-            let h = crate::params_resolver::effective_horizon(&model_check, s.as_deref())
-                .unwrap_or_else(|e| {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                });
+            // gh#626: the cells RUN at the overridden horizon, so the shared
+            // obs axis must be validated at it — not the raw model's.
+            let h = match t_end_override {
+                Some(v) => v,
+                None => crate::params_resolver::effective_horizon(&model_check, s.as_deref())
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }),
+            };
             horizons.push((s.clone().unwrap_or_else(|| "baseline".into()), h));
         }
         if horizons.iter().any(|(_, h)| *h != horizons[0].1) {
@@ -917,6 +1008,32 @@ fn run_simulate(a: &args::SimulateArgs) {
             );
             std::process::exit(1);
         }
+        // gh#626: an `at [...]` emit schedule cannot grow with the horizon —
+        // an extending --to would run longer and emit nothing past the listed
+        // times, exit 0. Refuse: the whole point of the extension is new rows.
+        if let Some(new_end) = t_end_override {
+            if new_end > model_check.simulation.t_end {
+                for o in &model_check.observations {
+                    if let Some(ir::observation::ObservationSchedule::AtTimes(ts)) =
+                        &o.emit_schedule
+                    {
+                        let max_t = ts.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                        if max_t < new_end {
+                            eprintln!(
+                                "error: --to extends the horizon to t = {new_end}, but \
+                                 stream '{}' emits at a fixed list ending at t = {max_t} \
+                                 — no synthetic observations would be emitted past it.\n  \
+                                 Fix: use a recurring emit schedule (`every …`), extend \
+                                 the `at [...]` list, or run without --to.",
+                                o.name
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+
         // Validate schedule compatibility for --obs (single file), at the
         // CELLS' shared horizon (all equal — checked above), not the base
         // model's: two `at`-list schedules can agree when confined to the model
@@ -1211,6 +1328,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         integrator: a.backend.integrator, // gh#166: CLI --integrator override
         source,
         scenarios,
+        t_end_override,
         seeds: job_seeds,
         cli_overrides: base_sim_run.overrides.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         set_vec_entries: base_sim_run.set_vec_entries.clone(),
@@ -1852,8 +1970,10 @@ fn build_simulate_cas_sink(
             enable: run.adhoc_enable.clone(),
             disable: run.adhoc_disable.clone(),
             params: HashMap::new(),
-            // The implicit baseline is the model as written — its horizon.
-            t_end: None,
+            // The implicit baseline is the model as written — its horizon —
+            // unless `--to` overrides it (gh#626): the override is what the
+            // cell RUNS, so it is what the cell is KEYED on.
+            t_end: run.t_end_override,
         }]
     } else {
         scenario_names.iter().map(|name| {
@@ -1873,8 +1993,13 @@ fn build_simulate_cas_sink(
                 // Composed, via the single horizon authority — NOT `preset.t_end`,
                 // which misses a horizon inherited through `compose = [...]` and
                 // would then key the cell on a window it does not run (gh#561).
-                t_end: crate::params_resolver::composed_preset_t_end(&base_model, name)
-                    .map_err(|e| e.to_string())?,
+                // `--to` (gh#626) wins when present — the up-front conflict rule
+                // has already refused any scenario horizon it would discard.
+                t_end: match run.t_end_override {
+                    Some(v) => Some(v),
+                    None => crate::params_resolver::composed_preset_t_end(&base_model, name)
+                        .map_err(|e| e.to_string())?,
+                },
             })
         }).collect::<Result<Vec<_>, String>>()?
     };
@@ -2330,6 +2455,85 @@ impl StreamSink {
 
 // ── Observation helpers ─────────────────────────────────────��───────────────
 
+/// gh#626: resolve the global observation anchors (`first_obs`, `last_obs`)
+/// for an anchored `--to`, from the fit's `[data.observations]` bindings.
+/// `--fit` accepts a fit toml, run directory, `@label`, or hash — the same
+/// resolution `fit predict` uses (`fit::handle::resolve_fit`; for a run dir
+/// the archived `fit.toml.original` is the fallback, whose relative data
+/// paths resolve against the segment — co-located data only, the same limit
+/// `fit predict <run-dir>` has). Streams load through the same shared seam as
+/// pfilter/profile, so dated time columns, long-form families, and holes
+/// resolve exactly as at fit time; `apply_conditioning_windows` is NOT
+/// applied (anchors fold over the raw streams; a conditioning hole must not
+/// shift `first_obs`). Hole rows count as observation times, matching
+/// `fit predict`'s `value_at` anchor.
+fn o_source(o: &ir::observation::ObservationModel) -> String { o.source.clone() }
+
+fn resolve_simulate_obs_anchors(
+    model: &ir::Model,
+    fit_ref: &std::path::Path,
+    dt: f64,
+) -> Result<(f64, f64), String> {
+    // A bare fit.toml needs NO completed run — only its [data.observations]
+    // is consulted. Run dirs / @labels / hashes resolve through the store.
+    let config = match crate::fit::handle::FitRef::classify(&fit_ref.to_string_lossy()) {
+        crate::fit::handle::FitRef::Config(path) => {
+            crate::fit::config_v2::FitConfigV2::load(&path.to_string_lossy())
+                .map_err(|e| format!("failed to load fit toml '{}': {e}", path.display()))?
+        }
+        _ => crate::fit::handle::resolve_fit(&fit_ref.to_string_lossy())
+            .map_err(|e| e.to_string())?
+            .config,
+    };
+    let data = config.data_spec().map_err(|e| format!(
+        "the fit config has no [data] block to read observed times from: {e}"))?;
+    let model_obs_names: Vec<String> =
+        model.observations.iter().map(|o| o.name.clone()).collect();
+    let effective_pairs = data.effective_observations(&model_obs_names)
+        .map_err(|e| format!("resolving [data.observations]: {e}"))?;
+    if effective_pairs.is_empty() {
+        return Err("the fit config's [data] resolves to zero observation \
+                    streams — nothing to anchor last_obs/first_obs to.".into());
+    }
+    let bound: Vec<(String, std::path::PathBuf)> = effective_pairs.iter()
+        .map(|(k, v)| (k.clone(), std::path::PathBuf::from(v)))
+        .collect();
+    let time_opts = crate::caltime_load::TimeOpts {
+        origin: model.origin.as_deref(),
+        time_unit: &model.time_unit,
+        dt,
+        t_start: model.simulation.t_start,
+        format: crate::caltime_load::TimeFormat::Auto,
+    };
+    // Only the observation TIMES are needed, so the streams load through
+    // `load_observations` directly (the same reader the shared seam wraps) —
+    // no CompiledModel, so a model whose estimated params carry no values
+    // still anchors. Conditioning is NOT applied (anchors fold over the raw
+    // streams), and hole rows count as observation times, both matching
+    // `fit predict`'s value_at anchor.
+    let effective = crate::fit::runner::data_bindings_to_effective(model, &bound)?;
+    let mut first = f64::INFINITY;
+    let mut last = f64::NEG_INFINITY;
+    for obs_model in model.observations.iter().filter(|o| effective.contains_key(&o.source)) {
+        let data_path = &effective[&o_source(obs_model)];
+        let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
+            .filter(|o| o.source == obs_model.source)
+            .collect();
+        let (obs, _cells, _aux) = crate::fit::runner::load_observations(
+            data_path, obs_model, &siblings, dt, &time_opts,
+        )?;
+        for o in &obs {
+            first = first.min(o.time);
+            last = last.max(o.time);
+        }
+    }
+    if !first.is_finite() || !last.is_finite() {
+        return Err("the bound observation streams contain no rows — nothing \
+                    to anchor last_obs/first_obs to.".into());
+    }
+    Ok((first, last))
+}
+
 /// Generate observation times from an IR schedule.
 pub(crate) fn obs_schedule_times(
     schedule: &ir::observation::ObservationSchedule,
@@ -2473,10 +2677,10 @@ fn check_obs_times_on_snapshot_grid(
          come from a data file — `fit predict` projects at the observed times, \
          not an `emit_schedule` — the output schedule must be fine enough to \
          include them. If the run's horizon comes from a scenario's \
-         `simulate {{ to }}` extending past an `at = [...]` output list \
-         (gh#561), the recording grid does not extend with it — add the \
-         extended window's times to the `at` list, or drop the per-scenario \
-         `to`.",
+         `simulate {{ to }}` or a `--to` override extending past an \
+         `at = [...]` output list (gh#561, gh#626), the recording grid does \
+         not extend with it — add the extended window's times to the `at` \
+         list, or drop the per-scenario `to` / the `--to`.",
         stream,
         before.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
         after.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
