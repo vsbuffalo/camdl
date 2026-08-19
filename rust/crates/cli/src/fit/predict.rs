@@ -1742,6 +1742,125 @@ fn subsample_draws(draws: &[IndexMap<String, f64>], cap: usize) -> Vec<&IndexMap
 /// kept (the recorder retains them), so a modest N yields a dense band cheaply.
 const ONE_STEP_N_PARTICLES: usize = 500;
 
+/// The pooled one-step predictive: per-(stream-leaf, obs-time) particle
+/// samples accumulated across posterior draws, plus how many draws
+/// contributed.
+#[cfg_attr(test, derive(Debug))]
+struct PooledOneStep {
+    /// Leaf stream names, from the first successful filter result (identical
+    /// across draws — same obs model).
+    stream_names: Vec<String>,
+    /// Union observation-time axis, same provenance.
+    obs_times: Vec<f64>,
+    /// `pooled[stream_idx][obs_idx]` = ỹ over (particles × draws). NaN entries
+    /// (a not-scheduled stream at a union time) are dropped, mirroring the
+    /// prequential capture's filter.
+    pooled: Vec<Vec<Vec<f64>>>,
+    /// Draws that contributed (= param_sets.len() − degenerate-skipped).
+    n_pooled: usize,
+}
+
+/// Filter every posterior draw and pool the per-(stream, time) one-step
+/// predictive samples. The filter call is injected (`run_filter(draw_idx,
+/// params, seed)`) so the skip policy below is unit-testable without a fit
+/// on disk; production passes `bootstrap_filter`.
+///
+/// Skip policy (gh#620): a draw whose filter bails with
+/// `SimError::PFDegenerate` — the statistical ESS-collapse /
+/// all-particles-dead bail — is skipped and counted, never fatal. A small
+/// tail of pathological draws is expected in a converging posterior, and one
+/// such draw must not abort the whole predictive. This mirrors the settled
+/// treatment of the same error everywhere else it occurs: PMMH's init-eval
+/// pushes a BadInit diagnostic and skips the chain (`pmmh.rs`), IF2 skips
+/// the one bad chain and continues (`runner.rs`), and the PF eval closures
+/// report −∞ so MH rejects the proposal cleanly (`sim/src/error.rs` on the
+/// variant). The deliberate contrast carries over too: any OTHER error —
+/// compute budget, model eval — stays fatal and aborts on first occurrence,
+/// because it trips identically for every draw and 200 identical skips
+/// would only bury it.
+///
+/// Skips are loud, never silent: one stderr summary line with the count and
+/// the first failure, and the returned `n_pooled` flows into the artifact's
+/// `n_draws` column, so the band never claims more draws than it used. If
+/// EVERY draw degenerates there is nothing to pool and the run errors.
+fn pool_one_step_draws(
+    param_sets: &[Vec<f64>],
+    base_seed: u64,
+    mut run_filter: impl FnMut(
+        usize,
+        &[f64],
+        u64,
+    ) -> Result<sim::inference::particle_filter::PFilterResult, sim::SimError>,
+) -> Result<PooledOneStep, String> {
+    let mut pooled: Vec<Vec<Vec<f64>>> = Vec::new();
+    let mut stream_names: Vec<String> = Vec::new();
+    let mut obs_times: Vec<f64> = Vec::new();
+    let mut skipped: Vec<(usize, String)> = Vec::new();
+
+    for (draw_idx, params) in param_sets.iter().enumerate() {
+        // Distinct, reproducible per-draw seed: mix the draw index into the
+        // base seed so each filter pass has its own RNG stream and the whole
+        // run is deterministic given `base_seed`. Keyed on the index, so a
+        // skipped draw does not shift the seeds of the draws after it.
+        let seed = base_seed ^ (0x9E37_79B9_7F4A_7C15u64.wrapping_mul(draw_idx as u64 + 1));
+        let result = match run_filter(draw_idx, params, seed) {
+            Ok(r) => r,
+            Err(e @ sim::SimError::PFDegenerate { .. }) => {
+                skipped.push((draw_idx, e.to_string()));
+                continue;
+            }
+            Err(e) => {
+                return Err(format!("one-step filter failed on draw {draw_idx}: {e:?}"));
+            }
+        };
+        let preq = result.prequential.ok_or_else(|| {
+            "one-step filter did not record prequential samples (record_prequential was \
+             requested but the result is empty — internal error)"
+                .to_string()
+        })?;
+
+        if pooled.is_empty() {
+            stream_names = preq.stream_names.clone();
+            obs_times = preq.obs_times.clone();
+            pooled = vec![vec![Vec::new(); obs_times.len()]; stream_names.len()];
+        }
+
+        // `per_stream_samples[obs_idx][stream_idx][particle]`.
+        for (obs_idx, per_stream) in preq.per_stream_samples.iter().enumerate() {
+            for (stream_idx, particles) in per_stream.iter().enumerate() {
+                for &y in particles {
+                    if y.is_finite() {
+                        pooled[stream_idx][obs_idx].push(y);
+                    }
+                }
+            }
+        }
+    }
+
+    let n_total = param_sets.len();
+    if skipped.len() == n_total && n_total > 0 {
+        let (first_idx, first_err) = &skipped[0];
+        return Err(format!(
+            "one_step horizon: the one-step filter degenerated on ALL {n_total} posterior \
+             draws — there is nothing to pool. First failure (draw {first_idx}): \
+             {first_err}"
+        ));
+    }
+    if !skipped.is_empty() {
+        let (first_idx, first_err) = &skipped[0];
+        eprintln!(
+            "fit predict: one_step horizon — skipped {}/{} posterior draws whose one-step \
+             filter degenerated (a small tail of degenerate draws is expected in a \
+             converging posterior; first: draw {first_idx}: {first_err}); bands pool the \
+             remaining {} draws",
+            skipped.len(),
+            n_total,
+            n_total - skipped.len(),
+        );
+    }
+    Ok(PooledOneStep { stream_names, obs_times, pooled, n_pooled: n_total - skipped.len() })
+}
+
 /// Build the one-step-ahead posterior predictive bands: for each (subsampled)
 /// posterior draw θ, run a bootstrap filter over the data with
 /// `record_prequential = true`, capturing the per-particle one-step predictive
@@ -1750,7 +1869,8 @@ const ONE_STEP_N_PARTICLES: usize = 500;
 /// (particles × draws) per `(stream-leaf, time)`, quantile, and group by logical
 /// source + stratum exactly like the free-forward path. Horizon = one_step.
 ///
-/// `n_draws_used` (out) is the subsample count actually filtered, for the
+/// `n_draws_used` (out) is the number of draws actually pooled — the
+/// subsample minus any degenerate-skipped draws (gh#620) — for the
 /// `n_draws` artifact column.
 fn one_step_bands(
     compiled: std::sync::Arc<sim::CompiledModel>,
@@ -1865,54 +1985,26 @@ fn one_step_bands(
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
-    // ── Pool per (stream_idx, obs_idx): all particle samples across all draws.
-    // `pooled[stream_idx][obs_idx]` accumulates ỹ over (particles × draws); the
-    // stream/time axes come from the FIRST result (identical across draws — same
-    // obs model). NaN entries (a not-scheduled stream at a union time) are
-    // dropped, mirroring the prequential capture's filter.
-    let mut pooled: Vec<Vec<Vec<f64>>> = Vec::new();
-    let mut stream_names: Vec<String> = Vec::new();
-    let mut obs_times: Vec<f64> = Vec::new();
-
-    for (draw_idx, draw) in chosen.iter().enumerate() {
-        // The draw's parameter vector — base defaults overlaid by name (the
-        // survey.rs:722-734 idiom). The cloud is schema-validated upstream, so
-        // every model parameter is present.
-        let mut params = compiled.default_params.clone();
-        for (name, &value) in draw.iter() {
-            if let Some(&idx) = compiled.param_index.get(name.as_str()) {
-                params[idx] = value;
-            }
-        }
-        // Distinct, reproducible per-draw seed: mix the draw index into the base
-        // seed so each filter pass has its own RNG stream and the whole run is
-        // deterministic given `base_seed`.
-        let seed = base_seed ^ (0x9E37_79B9_7F4A_7C15u64.wrapping_mul(draw_idx as u64 + 1));
-        let result = bootstrap_filter(&process, &obs_model, &params, &smc_config, seed)
-            .map_err(|e| format!("one-step filter failed on draw {draw_idx}: {e:?}"))?;
-        let preq = result.prequential.ok_or_else(|| {
-            "one-step filter did not record prequential samples (record_prequential was \
-             requested but the result is empty — internal error)"
-                .to_string()
-        })?;
-
-        if pooled.is_empty() {
-            stream_names = preq.stream_names.clone();
-            obs_times = preq.obs_times.clone();
-            pooled = vec![vec![Vec::new(); obs_times.len()]; stream_names.len()];
-        }
-
-        // `per_stream_samples[obs_idx][stream_idx][particle]`.
-        for (obs_idx, per_stream) in preq.per_stream_samples.iter().enumerate() {
-            for (stream_idx, particles) in per_stream.iter().enumerate() {
-                for &y in particles {
-                    if y.is_finite() {
-                        pooled[stream_idx][obs_idx].push(y);
-                    }
+    // Each draw's parameter vector — base defaults overlaid by name (the
+    // survey.rs:722-734 idiom). The cloud is schema-validated upstream, so
+    // every model parameter is present.
+    let param_sets: Vec<Vec<f64>> = chosen
+        .iter()
+        .map(|draw| {
+            let mut params = compiled.default_params.clone();
+            for (name, &value) in draw.iter() {
+                if let Some(&idx) = compiled.param_index.get(name.as_str()) {
+                    params[idx] = value;
                 }
             }
-        }
-    }
+            params
+        })
+        .collect();
+
+    let PooledOneStep { stream_names, obs_times, pooled, n_pooled } =
+        pool_one_step_draws(&param_sets, base_seed, |_, params, seed| {
+            bootstrap_filter(&process, &obs_model, params, &smc_config, seed)
+        })?;
 
     // ── Group leaves by logical source (first-appearance order), exactly like
     // `assemble_predictive`, and build one_step BandRows. `stream_names[si]` is
@@ -1958,7 +2050,7 @@ fn one_step_bands(
         streams.push(StreamBands { source: source.clone(), index_dims, rows });
     }
 
-    Ok((streams, n_used))
+    Ok((streams, n_pooled))
 }
 
 /// Group the observed leaves into `(source, index_dims, rows)` for the observed
@@ -2146,6 +2238,106 @@ mod tests {
         // Both horizons default to this cap; pin it so a silent drift is a test
         // failure, not a surprise 9-hour predict.
         assert_eq!(DEFAULT_PREDICT_DRAWS, 200);
+    }
+
+    // ── pool_one_step_draws skip policy (gh#620, ebola F11) ─────────────────
+
+    use sim::error::PFDegenerateKind;
+    use sim::inference::particle_filter::{PFilterResult, PrequentialRecorded};
+
+    /// A minimal successful filter result: one stream, two obs times, two
+    /// particles per (time, stream), samples = `base` and `base + 1`.
+    fn fake_pf_result(base: f64) -> PFilterResult {
+        let per_time = |b: f64| vec![vec![b, b + 1.0]]; // [stream][particle]
+        PFilterResult {
+            log_likelihood: -10.0,
+            ess_trace: vec![100.0, 100.0],
+            logw_var_trace: vec![0.1, 0.1],
+            ll_increments: vec![-5.0, -5.0],
+            predictions: None,
+            final_states: None,
+            ancestry: None,
+            prequential: Some(PrequentialRecorded {
+                obs_times: vec![7.0, 14.0],
+                log_liks: vec![vec![-5.0, -5.0], vec![-5.0, -5.0]],
+                y_pred_samples: vec![vec![base, base + 1.0], vec![base, base + 1.0]],
+                stream_names: vec!["cases".into()],
+                per_stream_log_liks: vec![vec![vec![-5.0, -5.0]], vec![vec![-5.0, -5.0]]],
+                per_stream_samples: vec![per_time(base), per_time(base)],
+            }),
+        }
+    }
+
+    fn degenerate() -> sim::SimError {
+        sim::SimError::PFDegenerate {
+            kind: PFDegenerateKind::EssCollapsed { last_ess: vec![1.0, 1.0, 1.0] },
+            obs_window: 3,
+            elapsed_s: 0.5,
+        }
+    }
+
+    #[test]
+    fn one_step_pool_skips_degenerate_draw_and_counts() {
+        // Draw 1 of 3 degenerates: it is skipped, the other two pool, and
+        // n_pooled says 2 — the artifact must not claim 3 draws (F11: one
+        // pathological draw of 200 used to abort the whole predictive).
+        let param_sets = vec![vec![0.0]; 3];
+        let out = pool_one_step_draws(&param_sets, 42, |draw_idx, _params, _seed| {
+            if draw_idx == 1 { Err(degenerate()) } else { Ok(fake_pf_result(10.0)) }
+        })
+        .expect("a single degenerate draw must not abort the pool");
+        assert_eq!(out.n_pooled, 2);
+        assert_eq!(out.stream_names, vec!["cases".to_string()]);
+        assert_eq!(out.obs_times, vec![7.0, 14.0]);
+        // 2 surviving draws × 2 particles per (stream, time).
+        assert_eq!(out.pooled[0][0].len(), 4);
+        assert_eq!(out.pooled[0][1].len(), 4);
+    }
+
+    #[test]
+    fn one_step_pool_aborts_on_structural_error() {
+        // A non-degeneracy error (here a numerical collapse) trips identically
+        // for every draw — it must abort on first occurrence, naming the draw,
+        // not be skipped 200 times.
+        let param_sets = vec![vec![0.0]; 3];
+        let err = pool_one_step_draws(&param_sets, 42, |draw_idx, _params, _seed| {
+            if draw_idx == 1 {
+                Err(sim::SimError::NumericalCollapse { kind: sim::CollapseKind::UnOpNan, t: 3.0 })
+            } else {
+                Ok(fake_pf_result(10.0))
+            }
+        })
+        .expect_err("structural errors must stay fatal");
+        assert!(err.contains("draw 1"), "fatal error must name the draw: {err}");
+    }
+
+    #[test]
+    fn one_step_pool_errors_when_all_draws_degenerate() {
+        // Nothing pooled → no band to emit; the run must error loudly, not
+        // return an empty artifact.
+        let param_sets = vec![vec![0.0]; 3];
+        let err = pool_one_step_draws(&param_sets, 42, |_, _, _| Err(degenerate()))
+            .expect_err("an all-degenerate pool must error");
+        assert!(err.contains("ALL 3"), "must say every draw degenerated: {err}");
+    }
+
+    #[test]
+    fn one_step_pool_seeds_keyed_on_draw_index() {
+        // A skipped draw must not shift later draws' seeds — reproducibility
+        // of the pooled band is keyed on (base_seed, draw index) alone.
+        use std::cell::RefCell;
+        let param_sets = vec![vec![0.0]; 3];
+        let seeds_with_skip = RefCell::new(Vec::new());
+        let _ = pool_one_step_draws(&param_sets, 42, |draw_idx, _params, seed| {
+            seeds_with_skip.borrow_mut().push((draw_idx, seed));
+            if draw_idx == 0 { Err(degenerate()) } else { Ok(fake_pf_result(10.0)) }
+        });
+        let seeds_no_skip = RefCell::new(Vec::new());
+        let _ = pool_one_step_draws(&param_sets, 42, |draw_idx, _params, seed| {
+            seeds_no_skip.borrow_mut().push((draw_idx, seed));
+            Ok(fake_pf_result(10.0))
+        });
+        assert_eq!(*seeds_with_skip.borrow(), *seeds_no_skip.borrow());
     }
 
     fn cb() -> crate::args::types::ForwardBackend {
