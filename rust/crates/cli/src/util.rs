@@ -2248,6 +2248,16 @@ pub fn load_table_file(path: &str) -> Result<Vec<ir::expr::Expr>, String> {
 
 /// Load parameter overrides from a TOML file.
 pub fn load_params_toml(path: &str) -> Result<HashMap<String, f64>, String> {
+    // gh#637 (ebola item 9): a `.tsv` params file is the column-per-parameter
+    // format `simulate --draws FILE` reads and `--draws-out` writes — accept
+    // it here (ONE data row; a multi-row cloud is ambiguous as a fixed-θ) so
+    // the same θ round-trips into every `--params` consumer without
+    // reformatting. Extension-sniffed: `.toml` behaviour is untouched.
+    if std::path::Path::new(path).extension()
+        .map(|e| e.eq_ignore_ascii_case("tsv")).unwrap_or(false)
+    {
+        return load_params_single_row_tsv(path);
+    }
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: {}", path, e))?;
     let table: toml::Table = content.parse()
@@ -2296,6 +2306,40 @@ pub fn load_params_toml(path: &str) -> Result<HashMap<String, f64>, String> {
 /// value or out-of-bounds value, returns an error. Params still at
 /// `value = None` (i.e. waiting on the scenario half) are skipped by
 /// `validate_parameter_values`.
+
+/// One-row column-per-parameter TSV → parameter map (gh#637). Bookkeeping
+/// columns (`chain`, `draw`, `replicate`, `seed`, `scenario`) are skipped so
+/// a row cut from `draws.tsv` or written by `--draws-out` reads back as-is.
+fn load_params_single_row_tsv(path: &str) -> Result<HashMap<String, f64>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("{}: {}", path, e))?;
+    let mut lines = content.lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'));
+    let header = lines.next().ok_or_else(|| format!("{path}: empty params TSV"))?;
+    let rows: Vec<&str> = lines.collect();
+    if rows.len() != 1 {
+        return Err(format!(
+            "{path}: a `--params` TSV must carry exactly ONE data row (a single \
+             θ); found {}. A multi-row cloud is `--draws {path}` on simulate, or \
+             cut the row you want.",
+            rows.len()));
+    }
+    const BOOKKEEPING: [&str; 5] = ["chain", "draw", "replicate", "seed", "scenario"];
+    let mut out = HashMap::new();
+    for (name, val) in header.split('\t').zip(rows[0].split('\t')) {
+        if BOOKKEEPING.contains(&name) {
+            continue;
+        }
+        let v: f64 = val.trim().parse().map_err(|_| format!(
+            "{path}: column '{name}': '{val}' is not a number."))?;
+        out.insert(name.to_string(), v);
+    }
+    if out.is_empty() {
+        return Err(format!("{path}: no parameter columns after the bookkeeping \
+                            columns were skipped."));
+    }
+    Ok(out)
+}
 pub fn apply_params_file(model: &mut ir::Model, path: &str) -> Result<(), String> {
     let vals = load_params_toml(path)?;
     for p in &mut model.parameters {
@@ -3496,6 +3540,34 @@ pub fn fmt_relative_time(from: std::time::SystemTime, now: std::time::SystemTime
 
 #[cfg(test)]
 mod tests {
+    // ── gh#637: --params accepts a one-row column-per-parameter TSV ─────────
+
+    #[test]
+    fn params_tsv_single_row_loads_and_skips_bookkeeping() {
+        let dir = std::env::temp_dir().join(format!("camdl_params_tsv_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("theta.tsv");
+        std::fs::write(&p, "chain\tdraw\tbeta\tgamma\n0\t1500\t0.35\t0.10\n").unwrap();
+        let got = load_params_toml(&p.to_string_lossy()).expect("one-row TSV loads");
+        assert_eq!(got.get("beta"), Some(&0.35));
+        assert_eq!(got.get("gamma"), Some(&0.10));
+        assert!(!got.contains_key("chain") && !got.contains_key("draw"),
+            "bookkeeping columns are skipped: {got:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn params_tsv_multi_row_is_refused_naming_the_count() {
+        let dir = std::env::temp_dir().join(format!("camdl_params_tsv_multi_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("cloud.tsv");
+        std::fs::write(&p, "beta\n0.3\n0.4\n").unwrap();
+        let err = load_params_toml(&p.to_string_lossy()).unwrap_err();
+        assert!(err.contains("exactly ONE data row") && err.contains("found 2"),
+            "multi-row cloud must be refused with the count: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
 
     // ── IR-cache read()-dependency sidecar (gh#260) ──────────────────────────
