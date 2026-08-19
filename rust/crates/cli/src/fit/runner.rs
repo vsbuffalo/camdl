@@ -347,141 +347,13 @@ impl FitRunConfig {
         // prepended as a LEADING reset-only HOLE to THAT stream's data/cells/aux
         // and added to the canonical union grid.
         {
-            use ir::observation::TemporalKind;
-            let t_start = compiled.model.simulation.t_start;
-
-            // Validate `[condition_from]` shadow labels (typo-safety + the
-            // reserved-`default` collision) against the bound streams' labels.
-            if let Some(spec) = &fit.condition_from {
-                let valid_labels: Vec<String> = {
-                    let mut v: Vec<String> =
-                        streams.iter().map(|s| s.obs_model_ir.source.clone()).collect();
-                    v.sort();
-                    v.dedup();
-                    v
-                };
-                spec.validate_labels(&valid_labels)?;
-            }
-
-            // Walk streams in a deterministic order, resolving each one's
-            // conditioning spec and applying the leading hole (or running the
-            // W329 enforcer when it resolves to NONE). Collect each inserted
-            // boundary so the canonical union is updated once afterwards.
-            let mut union_inserts: Vec<f64> = Vec::new();
-            for s in streams.iter_mut() {
-                let label = s.obs_model_ir.source.as_str();
-                let kind = s.projection.temporal_kind();
-                let first_obs_s = s.data.iter()
-                    .map(|o| o.time)
-                    .fold(f64::INFINITY, f64::min);
-
-                // The spec that applies to THIS stream: its shadow, else the
-                // all-streams default, else None (no conditioning).
-                let resolved_spec = fit.condition_from
-                    .as_ref()
-                    .and_then(|c| c.resolve_for(label));
-
-                match resolved_spec {
-                    Some(raw) => {
-                        // Explicit conditioning for this stream. Resolve against
-                        // ITS first obs + validate ∈ [t_start, first_obs_s).
-                        match resolve_condition_from(
-                            raw,
-                            first_obs_s,
-                            t_start,
-                            model.origin.as_deref(),
-                            &model.time_unit,
-                            dt,
-                        ).map_err(|e| format!("stream '{}': {e}", s.name))? {
-                            Some(cond_from) => {
-                                eprintln!(
-                                    "  \x1b[36mconditioning window:\x1b[0m stream \
-                                     '{}': warm-up [{t_start}, {cond_from}) simulated \
-                                     but not scored; first scored bin is \
-                                     ({cond_from}, {first_obs_s}]",
-                                    s.name
-                                );
-                                // Prepend the per-stream leading reset-only hole.
-                                // The `cells` are authoritative for scoring; the
-                                // `data` row's value (0.0) is a never-read
-                                // placeholder.
-                                s.data.insert(0, Observation { time: cond_from, value: 0.0 });
-                                s.cells.insert(0, None);
-                                s.aux.insert(0, Vec::new());
-                                union_inserts.push(cond_from);
-                            }
-                            None => {
-                                // cond_from == t_start: the user explicitly set
-                                // conditioning to the model origin — the documented
-                                // "score the whole leading window" opt-in. No
-                                // warm-up is discarded; the first bin is the full
-                                // (t_start, first_obs_s]. This is the deliberate
-                                // escape hatch out of W329, NOT a no-op to hide: on
-                                // a WIDE incidence window (the gh#134 shape) say so
-                                // loudly so the choice is visible, not silent.
-                                if kind == TemporalKind::Interval {
-                                    let obs_times: Vec<f64> =
-                                        s.data.iter().map(|o| o.time).collect();
-                                    if let Some(anomaly) =
-                                        crate::util::check_first_interval_window(t_start, &obs_times)
-                                    {
-                                        eprintln!(
-                                            "  \x1b[36mconditioning window:\x1b[0m \
-                                             incidence stream '{name}': condition_from \
-                                             resolves to the model origin (t_start = \
-                                             {t_start}) — scoring the FULL \
-                                             {window}-{unit} leading window against the \
-                                             first datum, no warm-up discarded (the \
-                                             gh#134 wide window, opted into explicitly).",
-                                            name = s.name,
-                                            window = fmt_span(anomaly.first_window),
-                                            unit = cadence_word(&model.time_unit),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        // No conditioning for this stream. The W329 detector
-                        // decides whether that is fine (window ≈ one cadence) or
-                        // the gh#134 wrong-number (anomalously wide window on an
-                        // incidence stream → hard error). Run against THIS
-                        // stream's own times (per-stream modal gap). A prevalence
-                        // stream is exempt from the hard error but still
-                        // soft-warns (free-running drift the first datum
-                        // corrects).
-                        let obs_times: Vec<f64> = s.data.iter().map(|o| o.time).collect();
-                        if let Some(anomaly) =
-                            crate::util::check_first_interval_window(t_start, &obs_times)
-                        {
-                            match kind {
-                                TemporalKind::Interval => {
-                                    // The first incidence bin would accumulate the
-                                    // whole leading span and score it against one
-                                    // datum. Name the per-stream fix EXACTLY.
-                                    return Err(format!(
-                                        "incidence stream '{name}' has a \
-                                         {window}-{unit} first window against a \
-                                         ~{cadence}-{unit} cadence; the first \
-                                         datum cannot constrain that whole span. \
-                                         State the conditioning window, e.g. \
-                                         `condition_from.{label} = \"first_obs - 1 week\"` \
-                                         (or a longer warm-up to discard).",
-                                        name = s.name,
-                                        window = fmt_span(anomaly.first_window),
-                                        cadence = fmt_span(anomaly.modal_gap),
-                                        unit = cadence_word(&model.time_unit),
-                                    ));
-                                }
-                                TemporalKind::Instant => {
-                                    eprintln!("{}", anomaly.warn_message());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let union_inserts = apply_conditioning_windows(
+                &mut streams,
+                fit.condition_from.as_ref(),
+                &model,
+                compiled.model.simulation.t_start,
+                dt,
+            )?;
 
             // Fold the per-stream boundaries into the canonical union grid (the
             // times every algorithm's substep walk reads). Sorted-unique so a
@@ -1399,6 +1271,184 @@ pub(crate) fn check_bound_sources(
             sources.join(", ")));
     }
     Ok(())
+}
+
+/// Resolve the conditioning spec for a standalone fixed-θ command (gh#621):
+/// the CLI `--condition-from` flags win; otherwise a `--fit` toml's
+/// `condition_from` key applies; otherwise none. The toml is re-parsed here
+/// (cheap, and the data-binding fallback already parses it independently);
+/// an unreadable toml is only an error when it is actually consulted.
+pub(crate) fn condition_spec_from_cli_or_toml(
+    cli_specs: &[String],
+    fit_toml: Option<&std::path::Path>,
+) -> Result<Option<crate::fit::config_v2::ConditionFrom>, String> {
+    if let Some(spec) = crate::fit::config_v2::ConditionFrom::from_cli_specs(cli_specs)? {
+        if fit_toml.is_some() {
+            eprintln!("--condition-from on CLI overrides --fit toml condition_from");
+        }
+        return Ok(Some(spec));
+    }
+    let Some(path) = fit_toml else { return Ok(None) };
+    let path_str = path.to_string_lossy().into_owned();
+    let fit_cfg = crate::fit::config_v2::FitConfigV2::load(&path_str)
+        .map_err(|e| format!("failed to load --fit toml '{path_str}': {e}"))?;
+    Ok(fit_cfg.condition_from)
+}
+
+/// Apply the per-stream conditioning windows (gh#134 multi-cadence Phase 3,
+/// gh#621) to already-loaded observation streams: validate the spec's shadow
+/// labels, resolve each stream's `condition_from` boundary, prepend the
+/// leading reset-only HOLE to that stream's data/cells/aux, and run the W329
+/// wide-first-window enforcer where a stream resolves to NO conditioning.
+/// Returns the inserted boundaries for the caller's canonical union grid
+/// (callers whose union is built FROM `streams` afterwards can ignore them —
+/// the hole is already in each stream's own schedule).
+///
+/// Shared by `fit run` (`FitRunConfig::build`), `pfilter`, and `profile`
+/// (gh#621): the fixed-θ scorers must score the SAME window the fit scores,
+/// or their logliks are incomparable and a −inf is ambiguous (a bad θ vs. an
+/// unconstrainable leading window).
+pub(crate) fn apply_conditioning_windows(
+    streams: &mut [ObsStream],
+    condition_from: Option<&crate::fit::config_v2::ConditionFrom>,
+    model: &ir::Model,
+    t_start: f64,
+    dt: f64,
+) -> Result<Vec<f64>, String> {
+    use ir::observation::TemporalKind;
+
+    // Validate `[condition_from]` shadow labels (typo-safety + the
+    // reserved-`default` collision) against the bound streams' labels.
+    if let Some(spec) = condition_from {
+        let valid_labels: Vec<String> = {
+            let mut v: Vec<String> =
+                streams.iter().map(|s| s.obs_model_ir.source.clone()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        spec.validate_labels(&valid_labels)?;
+    }
+
+    // Walk streams in a deterministic order, resolving each one's
+    // conditioning spec and applying the leading hole (or running the
+    // W329 enforcer when it resolves to NONE). Collect each inserted
+    // boundary so the canonical union is updated once afterwards.
+    let mut union_inserts: Vec<f64> = Vec::new();
+    for s in streams.iter_mut() {
+        let label = s.obs_model_ir.source.as_str();
+        let kind = s.projection.temporal_kind();
+        let first_obs_s = s.data.iter()
+            .map(|o| o.time)
+            .fold(f64::INFINITY, f64::min);
+
+        // The spec that applies to THIS stream: its shadow, else the
+        // all-streams default, else None (no conditioning).
+        let resolved_spec = condition_from.and_then(|c| c.resolve_for(label));
+
+        match resolved_spec {
+            Some(raw) => {
+                // Explicit conditioning for this stream. Resolve against
+                // ITS first obs + validate ∈ [t_start, first_obs_s).
+                match resolve_condition_from(
+                    raw,
+                    first_obs_s,
+                    t_start,
+                    model.origin.as_deref(),
+                    &model.time_unit,
+                    dt,
+                ).map_err(|e| format!("stream '{}': {e}", s.name))? {
+                    Some(cond_from) => {
+                        eprintln!(
+                            "  \x1b[36mconditioning window:\x1b[0m stream \
+                             '{}': warm-up [{t_start}, {cond_from}) simulated \
+                             but not scored; first scored bin is \
+                             ({cond_from}, {first_obs_s}]",
+                            s.name
+                        );
+                        // Prepend the per-stream leading reset-only hole.
+                        // The `cells` are authoritative for scoring; the
+                        // `data` row's value (0.0) is a never-read
+                        // placeholder.
+                        s.data.insert(0, Observation { time: cond_from, value: 0.0 });
+                        s.cells.insert(0, None);
+                        s.aux.insert(0, Vec::new());
+                        union_inserts.push(cond_from);
+                    }
+                    None => {
+                        // cond_from == t_start: the user explicitly set
+                        // conditioning to the model origin — the documented
+                        // "score the whole leading window" opt-in. No
+                        // warm-up is discarded; the first bin is the full
+                        // (t_start, first_obs_s]. This is the deliberate
+                        // escape hatch out of W329, NOT a no-op to hide: on
+                        // a WIDE incidence window (the gh#134 shape) say so
+                        // loudly so the choice is visible, not silent.
+                        if kind == TemporalKind::Interval {
+                            let obs_times: Vec<f64> =
+                                s.data.iter().map(|o| o.time).collect();
+                            if let Some(anomaly) =
+                                crate::util::check_first_interval_window(t_start, &obs_times)
+                            {
+                                eprintln!(
+                                    "  \x1b[36mconditioning window:\x1b[0m \
+                                     incidence stream '{name}': condition_from \
+                                     resolves to the model origin (t_start = \
+                                     {t_start}) — scoring the FULL \
+                                     {window}-{unit} leading window against the \
+                                     first datum, no warm-up discarded (the \
+                                     gh#134 wide window, opted into explicitly).",
+                                    name = s.name,
+                                    window = fmt_span(anomaly.first_window),
+                                    unit = cadence_word(&model.time_unit),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                // No conditioning for this stream. The W329 detector
+                // decides whether that is fine (window ≈ one cadence) or
+                // the gh#134 wrong-number (anomalously wide window on an
+                // incidence stream → hard error). Run against THIS
+                // stream's own times (per-stream modal gap). A prevalence
+                // stream is exempt from the hard error but still
+                // soft-warns (free-running drift the first datum
+                // corrects).
+                let obs_times: Vec<f64> = s.data.iter().map(|o| o.time).collect();
+                if let Some(anomaly) =
+                    crate::util::check_first_interval_window(t_start, &obs_times)
+                {
+                    match kind {
+                        TemporalKind::Interval => {
+                            // The first incidence bin would accumulate the
+                            // whole leading span and score it against one
+                            // datum. Name the per-stream fix EXACTLY.
+                            return Err(format!(
+                                "incidence stream '{name}' has a \
+                                 {window}-{unit} first window against a \
+                                 ~{cadence}-{unit} cadence; the first \
+                                 datum cannot constrain that whole span. \
+                                 State the conditioning window, e.g. \
+                                 `condition_from.{label} = \"first_obs - 1 week\"` \
+                                 (or a longer warm-up to discard).",
+                                name = s.name,
+                                window = fmt_span(anomaly.first_window),
+                                cadence = fmt_span(anomaly.modal_gap),
+                                unit = cadence_word(&model.time_unit),
+                            ));
+                        }
+                        TemporalKind::Instant => {
+                            eprintln!("{}", anomaly.warn_message());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(union_inserts)
 }
 
 /// Resolve the DATA-bound observation streams (BY SOURCE) and load each one's

@@ -188,9 +188,26 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // streams warning, whose key-space (leaf name / family root) must not change.
     let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    let streams = crate::fit::runner::resolve_and_load_obs_streams(
+    let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, dt, &time_opts,
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+
+    // gh#621: apply the conditioning window exactly as `fit run` does —
+    // `--condition-from` flags, else the `--fit` toml's `condition_from`.
+    // The leading reset-only hole lands in each stream's own schedule, so the
+    // union grid built below picks the boundary up with no extra plumbing. A
+    // pfilter that scored a window the fit never scores produced a loglik
+    // incomparable with the fit's, and W329 (the wide-first-window enforcer,
+    // inside the same call) never ran here.
+    {
+        let cond = crate::fit::runner::condition_spec_from_cli_or_toml(
+            &a.condition_from, a.fit.as_deref(),
+        ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        crate::fit::runner::apply_conditioning_windows(
+            &mut streams, cond.as_ref(), &model,
+            compiled.model.simulation.t_start, dt,
+        ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    }
     let n_streams = streams.len();
 
     // Holes (missing observations via `NA`) are correct for the filter

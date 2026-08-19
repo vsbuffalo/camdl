@@ -233,8 +233,14 @@ is anchored to **each stream's own** first observation, so in a multi-cadence
 model the same `default` gives each stream a window in its own cadence.
 
 `condition_from` and `ic_free` cannot be combined (the leading hole would leave
-`y_1` with nothing to condition on). It is a **`fit`-path** key today (`pfilter`
-/ `profile` don't read it yet).
+`y_1` with nothing to condition on).
+
+`camdl pfilter` and `camdl profile` apply the same conditioning, so a fixed-θ
+loglik is computed over the same scored window as the fit's: they read the
+`--fit` toml's `condition_from`, overridden by the repeatable flag
+`--condition-from SPEC` (all-streams default) / `--condition-from LABEL=SPEC`
+(per-stream shadow). The W329 wide-first-window hard error applies there
+identically.
 
 ## Priors
 

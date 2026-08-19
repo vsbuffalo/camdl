@@ -1555,6 +1555,17 @@ pub struct PfilterArgs {
     #[arg(long, value_name = "PATH")]
     pub fit: Option<PathBuf>,
 
+    /// Conditioning window (warm-up) boundary — the `condition_from` key of a
+    /// fit toml, as a flag (gh#621). The warm-up [t_start, boundary) is
+    /// simulated but NOT scored, so the loglik matches a fit that conditions
+    /// the same way. Repeatable, two forms: a bare SPEC (all-streams default,
+    /// at most one) and LABEL=SPEC (one stream's observation-block label).
+    /// SPEC forms: "first_obs - <N> <unit>", a model-time number, or a
+    /// calendar date. When absent, a `--fit` toml's `condition_from` applies;
+    /// this flag wins.
+    #[arg(long = "condition-from", value_name = "[LABEL=]SPEC")]
+    pub condition_from: Vec<String>,
+
     /// Number of independent filter runs
     #[arg(long, default_value_t = 1)]
     pub replicates: usize,
@@ -1746,6 +1757,17 @@ pub struct ProfileArgs {
     /// with a warning when none are declared).
     #[arg(long, value_name = "PATH")]
     pub fit: Option<PathBuf>,
+
+    /// Conditioning window (warm-up) boundary — the `condition_from` key of a
+    /// fit toml, as a flag (gh#621). The warm-up [t_start, boundary) is
+    /// simulated but NOT scored, so the loglik matches a fit that conditions
+    /// the same way. Repeatable, two forms: a bare SPEC (all-streams default,
+    /// at most one) and LABEL=SPEC (one stream's observation-block label).
+    /// SPEC forms: "first_obs - <N> <unit>", a model-time number, or a
+    /// calendar date. When absent, a `--fit` toml's `condition_from` applies;
+    /// this flag wins.
+    #[arg(long = "condition-from", value_name = "[LABEL=]SPEC")]
+    pub condition_from: Vec<String>,
 
     /// Suppress the `profile_flat_prior_fallback` warning when any
     /// estimated parameter resolves to a flat prior (gh#73). Use only

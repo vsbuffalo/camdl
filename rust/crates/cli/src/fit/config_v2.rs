@@ -218,6 +218,59 @@ pub enum ConditionFrom {
 pub const CONDITION_FROM_DEFAULT_KEY: &str = "default";
 
 impl ConditionFrom {
+    /// Build a [`ConditionFrom`] from repeatable CLI `--condition-from`
+    /// values (gh#621), mirroring the toml surface: a bare `SPEC` is the
+    /// all-streams default (at most one), `LABEL=SPEC` is a per-stream
+    /// shadow. Bare + labelled forms compose exactly like the toml's
+    /// `default` key + shadows. Returns `Ok(None)` for an empty list (no
+    /// flag given), so callers can fall back to a `--fit` toml's key.
+    pub fn from_cli_specs(specs: &[String]) -> Result<Option<ConditionFrom>, String> {
+        if specs.is_empty() {
+            return Ok(None);
+        }
+        let mut map = std::collections::BTreeMap::new();
+        let mut default: Option<String> = None;
+        for raw in specs {
+            // A spec is `LABEL=SPEC` only when the text before `=` looks like
+            // a stream label (no spaces): `first_obs - 7 days` has no `=`, and
+            // a hypothetical spec syntax containing `=` after a space is not
+            // split.
+            match raw.split_once('=') {
+                Some((label, spec)) if !label.trim().contains(' ') && !label.trim().is_empty() => {
+                    let label = label.trim();
+                    if label == CONDITION_FROM_DEFAULT_KEY {
+                        return Err(format!(
+                            "--condition-from {CONDITION_FROM_DEFAULT_KEY}=…: use the bare \
+                             form `--condition-from \"<spec>\"` for the all-streams \
+                             default (the `{CONDITION_FROM_DEFAULT_KEY}` key is the toml \
+                             spelling)."));
+                    }
+                    if map.insert(label.to_string(), spec.trim().to_string()).is_some() {
+                        return Err(format!(
+                            "--condition-from: stream '{label}' given twice."));
+                    }
+                }
+                _ => {
+                    if default.replace(raw.trim().to_string()).is_some() {
+                        return Err(
+                            "--condition-from: more than one bare (all-streams) spec; \
+                             give at most one, or use LABEL=SPEC per stream.".to_string());
+                    }
+                }
+            }
+        }
+        Ok(Some(match (default, map.is_empty()) {
+            (Some(d), true) => ConditionFrom::All(d),
+            (default, _) => {
+                let mut m = map;
+                if let Some(d) = default {
+                    m.insert(CONDITION_FROM_DEFAULT_KEY.to_string(), d);
+                }
+                ConditionFrom::PerStream(m)
+            }
+        }))
+    }
+
     /// Resolve the conditioning spec string for the stream labelled `label`
     /// (its observation-block label / IR `source`). Returns the per-stream
     /// shadow if present, else the all-streams default, else `None` (no
@@ -7025,5 +7078,50 @@ cooling = 0.70
 "#).expect("arbitrary [fixed] param keys must still be accepted");
         assert!(cfg.fixed.values.contains_key("some_param"),
             "[fixed] must keep flattening arbitrary param keys");
+    }
+
+    // ── ConditionFrom::from_cli_specs (gh#621) ──────────────────────────────
+
+    #[test]
+    fn condition_from_cli_bare_spec_is_all_streams() {
+        let got = ConditionFrom::from_cli_specs(&["first_obs - 7 days".into()])
+            .unwrap().unwrap();
+        assert_eq!(got, ConditionFrom::All("first_obs - 7 days".into()));
+        // The spec text contains spaces around a '-', never split as LABEL=.
+        assert_eq!(got.resolve_for("anything"), Some("first_obs - 7 days"));
+    }
+
+    #[test]
+    fn condition_from_cli_labeled_specs_are_shadows() {
+        let got = ConditionFrom::from_cli_specs(&[
+            "cases=first_obs - 7 days".into(),
+            "deaths=14".into(),
+        ]).unwrap().unwrap();
+        assert_eq!(got.resolve_for("cases"), Some("first_obs - 7 days"));
+        assert_eq!(got.resolve_for("deaths"), Some("14"));
+        assert_eq!(got.resolve_for("other"), None, "no default given");
+    }
+
+    #[test]
+    fn condition_from_cli_bare_plus_labeled_compose_like_toml_default() {
+        let got = ConditionFrom::from_cli_specs(&[
+            "first_obs - 7 days".into(),
+            "deaths=14".into(),
+        ]).unwrap().unwrap();
+        assert_eq!(got.resolve_for("deaths"), Some("14"), "shadow wins");
+        assert_eq!(got.resolve_for("cases"), Some("first_obs - 7 days"),
+            "bare spec is the all-streams default");
+    }
+
+    #[test]
+    fn condition_from_cli_rejects_duplicates_and_reserved_key() {
+        assert!(ConditionFrom::from_cli_specs(&["7".into(), "14".into()]).is_err(),
+            "two bare specs are ambiguous");
+        assert!(ConditionFrom::from_cli_specs(&["cases=7".into(), "cases=14".into()]).is_err(),
+            "one stream twice");
+        assert!(ConditionFrom::from_cli_specs(&["default=7".into()]).is_err(),
+            "the toml-reserved key is not a CLI label");
+        assert_eq!(ConditionFrom::from_cli_specs(&[]).unwrap(), None,
+            "no flags -> fall through to the toml");
     }
 }

@@ -484,9 +484,23 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     };
     let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    let streams = crate::fit::runner::resolve_and_load_obs_streams(
+    let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, dt, &time_opts,
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+
+    // gh#621: apply the conditioning window exactly as `fit run` does —
+    // `--condition-from` flags, else the `--fit` toml's `condition_from`.
+    // Without this, profile scored the first bin over the whole leading span
+    // (a window the fit never scores) and skipped W329.
+    {
+        let cond = crate::fit::runner::condition_spec_from_cli_or_toml(
+            &a.condition_from, a.fit.as_deref(),
+        ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        crate::fit::runner::apply_conditioning_windows(
+            &mut streams, cond.as_ref(), &model,
+            compiled.model.simulation.t_start, dt,
+        ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    }
 
     if streams.len() > 1 {
         eprintln!(
