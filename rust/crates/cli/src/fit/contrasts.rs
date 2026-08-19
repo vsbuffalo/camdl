@@ -411,16 +411,17 @@ impl Arm {
         );
         let quant_eval = QuantityEvaluator::new(&model.quantities, compiled.as_ref())
             .map_err(|e| format!("contrast arm '{run}': building quantity evaluator: {e}"))?;
-        // Contrast arms are forked FORWARD simulations — no observed data, so
-        // the `last_obs` anchor is unresolvable here. Hard error naming the
+        // Contrast arms are forked FORWARD simulations — no observed data, so an
+        // observation anchor is unresolvable here. Hard error naming the
         // quantities (proposal 2026-08-17), never an empty/NaN operand.
-        if quant_eval.references_last_obs() {
+        if quant_eval.references_obs_anchor() {
             return Err(format!(
-                "contrast arm '{run}': quantity `{}` reads \
-                 `value_at(..., last_obs)`, which has no observed data to \
-                 anchor to in a forked forward run. Use a literal time \
+                "contrast arm '{run}': quantity `{}` reads `value_at` at an \
+                 observation anchor (`last_obs` / `first_obs`, with or without \
+                 an offset), which has no observed data to anchor to in a \
+                 forked forward run. Use a literal time \
                  (`value_at(expr, date(\"...\"))`) for contrast operands.",
-                quant_eval.last_obs_quantity_names().join("`, `"),
+                quant_eval.obs_anchor_quantity_names().join("`, `"),
             ));
         }
         Ok(Arm { compiled, quant_eval })

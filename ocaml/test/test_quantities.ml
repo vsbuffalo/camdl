@@ -212,25 +212,98 @@ let test_value_at_const () =
   | Ir.RValue (Ir.VValueAt (Ir.ATime (Ir.Const 20.0))) -> ()
   | _ -> Alcotest.failf "size_at_20: expected RValue (VValueAt (ATime (Const 20)))"
 
-(* value_at with the bare `last_obs` anchor → symbolic ALastObs — the compiled
-   model stays data-independent; resolution happens at evaluation time. *)
+(* value_at with the bare `last_obs` anchor → a symbolic zero-offset AObs — the
+   compiled model stays data-independent; resolution happens at evaluation time. *)
 let test_value_at_last_obs () =
   let m = compile_ok (model_with "      outbreak_size = value_at(I, last_obs)") in
   match reduce_of m "outbreak_size" with
-  | Ir.RValue (Ir.VValueAt Ir.ALastObs) -> ()
-  | _ -> Alcotest.failf "outbreak_size: expected RValue (VValueAt ALastObs)"
+  | Ir.RValue (Ir.VValueAt (Ir.AObs { anchor = Ir.AnchorLast; offset = 0.0 })) -> ()
+  | _ -> Alcotest.failf "outbreak_size: expected RValue (VValueAt (AObs last_obs+0))"
 
-(* Arithmetic over the anchor is rejected (v1): `last_obs` must be the whole
-   second argument, so it cannot half-enter the expression language. *)
-let test_value_at_anchor_arithmetic_rejected () =
-  compile_expect_error_code ~code:"E289" ~contains:"whole second argument"
+(* gh#616: the offset is a CONSTANT duration, folded to model time units at
+   compile time (`time_unit = 'days`, so `1 'weeks` → 7.0). Only the anchor's
+   value binds later, which is what keeps the compiled model data-independent. *)
+let test_value_at_anchor_offset () =
+  let m = compile_ok
+    (model_with "      before = value_at(I, last_obs - 1 'weeks)\n\
+                \      after  = value_at(I, first_obs + 3 'days)") in
+  (match reduce_of m "before" with
+   | Ir.RValue (Ir.VValueAt (Ir.AObs { anchor = Ir.AnchorLast; offset })) ->
+     Alcotest.(check (float 1e-12)) "last_obs - 1 'weeks folds to -7 days" (-7.0) offset
+   | _ -> Alcotest.failf "before: expected AObs last_obs with an offset");
+  match reduce_of m "after" with
+  | Ir.RValue (Ir.VValueAt (Ir.AObs { anchor = Ir.AnchorFirst; offset })) ->
+    Alcotest.(check (float 1e-12)) "first_obs + 3 'days folds to 3" 3.0 offset
+  | _ -> Alcotest.failf "after: expected AObs first_obs with an offset"
+
+(* The offset folds through the MODEL's time unit, not through days: under
+   `time_unit = 'weeks`, `+ 14 'days` is 2, not 14. Getting this wrong would
+   place the read two weeks late and still look plausible. *)
+let test_value_at_offset_folds_in_model_units () =
+  let src = {|
+    time_unit = 'weeks
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    transitions {
+      infection : S --> I @ beta * S * I / (S + I + R)
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = 990  I = 10 }
+    simulate { from = 0 'weeks  to = 20 'weeks }
+    quantities { q = value_at(I, last_obs + 14 'days) }
+  |} in
+  match reduce_of (compile_ok src) "q" with
+  | Ir.RValue (Ir.VValueAt (Ir.AObs { anchor = Ir.AnchorLast; offset })) ->
+    Alcotest.(check (float 1e-12)) "14 'days under time_unit='weeks is 2" 2.0 offset
+  | _ -> Alcotest.failf "q: expected AObs last_obs with an offset"
+
+(* A bare number carries no unit to interpret, so it is refused rather than
+   guessed at (mirrors W324's posture on bare numerics in time positions). *)
+let test_value_at_bare_offset_rejected () =
+  compile_expect_error_code ~code:"E335" ~contains:"duration unit"
     (model_with "      bad = value_at(I, last_obs - 7)")
+
+(* An offset with the wrong dimension is refused: `'count` is not a duration. *)
+let test_value_at_non_duration_offset_rejected () =
+  compile_expect_error_code ~code:"E335" ~contains:"duration"
+    (model_with "      bad = value_at(I, last_obs + 3 'count)")
+
+(* The anchor must be the WHOLE term: it cannot half-enter the expression
+   language, or it would need a value everywhere expressions are evaluated. *)
+let test_value_at_anchor_arithmetic_rejected () =
+  compile_expect_error_code ~code:"E335" ~contains:"whole term"
+    (model_with "      bad = value_at(I, 2 * last_obs)")
+
+(* Under an origin, a calendar offset on an instant is the E321 violation
+   `date(...) + 6 'months` already is: a month is not a fixed number of days,
+   so the resolved time would move with the anchor. *)
+let test_value_at_calendar_offset_rejected_under_origin () =
+  let src = {|
+    time_unit = 'days
+    origin = date("2026-01-01")
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    transitions {
+      infection : S --> I @ beta * S * I / (S + I + R)
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = 990  I = 10 }
+    simulate { from = 0 'days  to = 100 'days }
+    quantities { bad = value_at(I, last_obs + 6 'months) }
+  |} in
+  compile_expect_error_code ~code:"E321" ~contains:"instant" src
 
 (* `last_obs` is intercepted ONLY inside value_at's second argument; anywhere
    else it stays an unknown identifier (cannot leak into dynamics). *)
 let test_last_obs_outside_value_at_is_unknown () =
   compile_expect_error_code ~code:"E100" ~contains:"last_obs"
     (model_with "      bad = final(I + last_obs)")
+
+(* Same for `first_obs`, which gh#616 adds to the anchor vocabulary — adding it
+   must not have made it a global identifier. *)
+let test_first_obs_outside_value_at_is_unknown () =
+  compile_expect_error_code ~code:"E100" ~contains:"first_obs"
+    (model_with "      bad = final(I + first_obs)")
 
 let test_value_at_wrong_arity () =
   compile_expect_error_code ~code:"E289" ~contains:"two arguments"
@@ -442,12 +515,24 @@ let () =
       Alcotest.test_case "integral(I) → RIntegral" `Quick test_integral;
       Alcotest.test_case "final(D) → RValue VFinal" `Quick test_final;
       Alcotest.test_case "value_at(I, 20) → RValue VValueAt ATime" `Quick test_value_at_const;
-      Alcotest.test_case "value_at(I, last_obs) → RValue VValueAt ALastObs" `Quick
+      Alcotest.test_case "value_at(I, last_obs) → RValue VValueAt AObs+0" `Quick
         test_value_at_last_obs;
-      Alcotest.test_case "E289 anchor arithmetic rejected" `Quick
+      Alcotest.test_case "value_at anchor ± constant duration folds at compile" `Quick
+        test_value_at_anchor_offset;
+      Alcotest.test_case "anchor offset folds in MODEL time units" `Quick
+        test_value_at_offset_folds_in_model_units;
+      Alcotest.test_case "E335 bare-number offset rejected" `Quick
+        test_value_at_bare_offset_rejected;
+      Alcotest.test_case "E335 non-duration offset rejected" `Quick
+        test_value_at_non_duration_offset_rejected;
+      Alcotest.test_case "E335 anchor inside a larger expression rejected" `Quick
         test_value_at_anchor_arithmetic_rejected;
+      Alcotest.test_case "E321 calendar offset on an anchor under origin" `Quick
+        test_value_at_calendar_offset_rejected_under_origin;
       Alcotest.test_case "last_obs outside value_at stays unknown" `Quick
         test_last_obs_outside_value_at_is_unknown;
+      Alcotest.test_case "first_obs outside value_at stays unknown" `Quick
+        test_first_obs_outside_value_at_is_unknown;
       Alcotest.test_case "E289 value_at arity" `Quick test_value_at_wrong_arity;
       Alcotest.test_case "binary max(I,R) stays pointwise series" `Quick test_binary_max_is_series;
     ];

@@ -773,18 +773,15 @@ impl crate::engine::RunSink for PredictiveSink {
 
         // Generated quantities: fold this draw's trajectory + the just-drawn y_sim
         // into its per-quantity values, using the SAME resolved params + draws as
-        // the predictive output above. `last_obs` (the `value_at` anchor) is the
-        // end of the OBSERVED data axis — the max over the leaves' observation
+        // the predictive output above. The `value_at` anchors are the two ends of
+        // the OBSERVED data axis — the min and max over the leaves' observation
         // times, which predict carries for the predicted-vs-observed join.
-        let last_obs: Option<f64> = self
-            .leaf_times
-            .iter()
-            .flat_map(|ts| ts.iter().copied())
-            .fold(None, |acc: Option<f64>, t| Some(acc.map_or(t, |a| a.max(t))));
-        let quant_results = self
-            .quant_eval
-            .as_ref()
-            .map(|eval| eval.eval_draw(&params, &cell.traj, &self.compiled, Some(&obs_set), last_obs));
+        let obs_anchors = sim::quantity::ObsAnchorTimes::of_times(
+            self.leaf_times.iter().flat_map(|ts| ts.iter().copied()),
+        );
+        let quant_results = self.quant_eval.as_ref().map(|eval| {
+            eval.eval_draw(&params, &cell.traj, &self.compiled, Some(&obs_set), obs_anchors)
+        });
         let snapshot_times: Vec<f64> = if quant_results.is_some() {
             cell.traj.snapshots.iter().map(|s| s.t).collect()
         } else {
@@ -1177,11 +1174,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         // unresolvable — refuse loudly rather than silently censoring every
         // draw (proposal 2026-08-17).
         if let Some(eval) = quant_eval.as_deref() {
-            if eval.references_last_obs() && leaf_times.iter().all(|ts| ts.is_empty()) {
+            if eval.references_obs_anchor() && leaf_times.iter().all(|ts| ts.is_empty()) {
                 return Err(format!(
-                    "quantity `{}` reads `value_at(..., last_obs)`, but this \
-                     fit binds no observation times to anchor to.",
-                    eval.last_obs_quantity_names().join("`, `"),
+                    "quantity `{}` reads `value_at` at an observation anchor \
+                     (`last_obs` / `first_obs`, with or without an offset), but \
+                     this fit binds no observation times to anchor to.",
+                    eval.obs_anchor_quantity_names().join("`, `"),
                 ));
             }
         }

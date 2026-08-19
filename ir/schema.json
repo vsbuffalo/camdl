@@ -1435,8 +1435,9 @@
     },
 
     "time_anchor": {
+      "comment": "When a `value_at` reads its series: a constant time expression, or an observation anchor (gh#616 generalized the bare `\"last_obs\"` string to the full `anchored_time`, which still emits that exact string at a zero offset). Discriminated by shape — the constant arm always carries a `time` key, the anchor arm never does.",
       "oneOf": [
-        { "type": "string", "enum": ["last_obs"] },
+        { "$ref": "#/definitions/anchored_time" },
         {
           "type": "object",
           "required": ["time"],

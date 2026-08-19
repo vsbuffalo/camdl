@@ -3813,12 +3813,33 @@ is meaningless inside a per-step propensity.
 at the last output time at or before `TIME` (the state *as of* `TIME`; values
 are never interpolated). `TIME` is a constant time expression —
 `date("2026-08-10")` under a declared `origin`, or a number in model time —
-**or the bare anchor `last_obs`**, the end of observed data. `last_obs` is
-resolved where data is in hand (`fit predict`); a forward `simulate` of a
-`last_obs` model is rejected with an error naming the quantity, because a
-simulation has no observed data to anchor to. `last_obs` is legal **only** as
-the whole second argument of `value_at` — arithmetic over it
-(`last_obs - 7`) is rejected, and outside `value_at` it is an ordinary
+**or an observation anchor**: `last_obs` (the end of observed data),
+`first_obs` (its start), each optionally plus or minus a constant duration.
+
+```camdl
+outbreak_size  = value_at(N0 - S, last_obs)
+a_week_earlier = value_at(N0 - S, last_obs - 1 'weeks)
+at_the_start   = value_at(N0 - S, first_obs)
+```
+
+An anchor's *value* is data-dependent and resolved where data is in hand
+(`fit predict`); the offset is **not** — it is folded to model time units at
+compile time, so the compiled model itself stays data-independent. A forward
+`simulate` of an anchored model is rejected with an error naming the quantity,
+because a simulation has no observed data to anchor to.
+
+The offset must carry a duration unit: a bare `last_obs - 7` is rejected
+(**E335**), because there is no unit to interpret. Under a declared `origin` a
+`'months`/`'years` offset is rejected too (**E321**) — an anchor is an instant,
+and a calendar month is not a fixed number of days, so the resolved time would
+move with the data. Note that camdl writes durations with a leading tick
+(`1 'weeks`); a bare word (`1 weeks`) is **E115**, which names the tick form.
+The command line takes the opposite convention (`--to "last_obs + 8 weeks"`,
+bare words), because a tick is a shell-quoting hazard.
+
+An anchor is legal **only** as the whole time argument, optionally `±` a
+constant duration; folding it into a larger expression (`2 * last_obs`) is
+rejected (**E335**), and outside its granted positions it is an ordinary
 unknown name.
 
 **Censoring.** A timing reduction that never resolves — `first_above` on a draw

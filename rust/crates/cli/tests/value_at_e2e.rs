@@ -63,6 +63,14 @@ observations {
 quantities {
   #' Cumulative infections at the end of observed data.
   outbreak_size = value_at(cum_inc, last_obs)
+  #' gh#616: one week before the end of data — t = 21, an observation time.
+  a_week_earlier = value_at(cum_inc, last_obs - 1 'weeks)
+  #' gh#616: the START of observed data — t = 7. Exercises the anchor the
+  #' data-free gate used to miss entirely.
+  at_first_obs  = value_at(cum_inc, first_obs)
+  #' gh#616: four weeks PAST the end of data — t = 56, past t_end = 40, so
+  #' every draw censors. Drop the offset and this lands on t = 28, in-window.
+  four_weeks_on = value_at(cum_inc, last_obs + 4 'weeks)
   #' Anchored past t_end = 40 — must censor every draw, never clamp.
   beyond        = value_at(cum_inc, date("2020-05-10"))
 }
@@ -175,7 +183,9 @@ fn predict_resolves_last_obs_and_censors_past_horizon() {
     )
     .expect("parse quantities.json");
     let entries = manifest["quantities"].as_array().expect("quantities array");
-    for name in ["outbreak_size", "beyond"] {
+    for name in
+        ["outbreak_size", "a_week_earlier", "at_first_obs", "four_weeks_on", "beyond"]
+    {
         let e = entries
             .iter()
             .find(|e| e["name"] == name)
@@ -187,32 +197,80 @@ fn predict_resolves_last_obs_and_censors_past_horizon() {
         );
     }
 
-    // The censoring trio, from the banded TSVs.
-    let trio = |name: &str| -> (u64, u64) {
+    // The censoring trio + the median, from the banded TSVs.
+    let read = |name: &str| -> (u64, u64, f64) {
         let path = segment.join("quantities").join(format!("{name}.tsv"));
         let body = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("no {}: {e}", path.display()));
         let mut lines = body.lines();
         let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
         let row: Vec<&str> = lines.next().expect("one data row").split('\t').collect();
-        let col = |c: &str| -> u64 {
+        let col = |c: &str| -> String {
             let i = header
                 .iter()
                 .position(|h| *h == c)
                 .unwrap_or_else(|| panic!("{c} missing from {header:?}"));
-            row[i].parse().unwrap_or_else(|e| panic!("{c}={:?}: {e}", row[i]))
+            row[i].to_string()
         };
-        (col("n_value"), col("n_censored"))
+        let num = |c: &str| -> u64 {
+            col(c).parse().unwrap_or_else(|e| panic!("{c}={:?}: {e}", col(c)))
+        };
+        // q50 is absent when every draw censored; report NaN then.
+        let med = header
+            .iter()
+            .position(|h| *h == "q50")
+            .and_then(|i| row[i].parse::<f64>().ok())
+            .unwrap_or(f64::NAN);
+        (num("n_value"), num("n_censored"), med)
     };
 
-    let (n_v, n_c) = trio("outbreak_size");
+    let (n_v, n_c, size_at_last) = read("outbreak_size");
     assert!(n_v > 0 && n_c == 0, "last_obs=28 is in-window: n_value={n_v} n_censored={n_c}");
 
-    let (n_v, n_c) = trio("beyond");
+    let (n_v, n_c, _) = read("beyond");
     assert!(
         n_v == 0 && n_c > 0,
         "an anchor past t_end must censor EVERY draw (clamping would report \
          final()): n_value={n_v} n_censored={n_c}"
+    );
+
+    // ── gh#616: the offset actually moves the read ───────────────────────────
+
+    // `last_obs - 1 'weeks` = t 21, in-window.
+    let (n_v, n_c, size_a_week_earlier) = read("a_week_earlier");
+    assert!(
+        n_v > 0 && n_c == 0,
+        "last_obs - 1 'weeks = t 21 is in-window: n_value={n_v} n_censored={n_c}"
+    );
+    // `first_obs` = t 7, in-window — the anchor the data-free gate used to miss.
+    let (n_v, n_c, size_at_first) = read("at_first_obs");
+    assert!(
+        n_v > 0 && n_c == 0,
+        "first_obs = t 7 is in-window: n_value={n_v} n_censored={n_c}"
+    );
+
+    // `cum_inc = I + R` is non-decreasing, so reading EARLIER must not read
+    // LARGER. This is what fails if the offset is dropped or its sign flipped:
+    // all three anchors would then land on the same time and compare equal.
+    assert!(
+        size_at_first <= size_a_week_earlier && size_a_week_earlier <= size_at_last,
+        "cumulative incidence is non-decreasing, so the three anchored reads must \
+         be ordered first_obs(t=7) <= last_obs-1w(t=21) <= last_obs(t=28); got \
+         {size_at_first} / {size_a_week_earlier} / {size_at_last}"
+    );
+    assert!(
+        size_at_first < size_at_last,
+        "t=7 and t=28 must read DIFFERENT values, or the anchors are not being \
+         resolved separately: {size_at_first} vs {size_at_last}"
+    );
+
+    // `last_obs + 4 'weeks` = t 56, past t_end = 40 → every draw censors. Drop
+    // the offset and this lands on t = 28 and bands instead.
+    let (n_v, n_c, _) = read("four_weeks_on");
+    assert!(
+        n_v == 0 && n_c > 0,
+        "last_obs + 4 'weeks = t 56 is past t_end = 40 and must censor every \
+         draw: n_value={n_v} n_censored={n_c}"
     );
 }
 
@@ -237,12 +295,21 @@ fn simulate_refuses_last_obs_naming_the_quantity() {
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("simulate");
-    assert!(!out.status.success(), "simulate must refuse a last_obs model");
+    assert!(!out.status.success(), "simulate must refuse an anchored model");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("outbreak_size") && stderr.contains("last_obs"),
         "the error must name the quantity and the anchor: {stderr}"
     );
+    // gh#616: EVERY anchored quantity must be named, not just a bare `last_obs`
+    // one. The gate was keyed on that single form, so an offset or `first_obs`
+    // quantity slipped past it and came back censored instead of refused.
+    for q in ["a_week_earlier", "at_first_obs", "four_weeks_on"] {
+        assert!(
+            stderr.contains(q),
+            "the refusal must name the anchored quantity `{q}`: {stderr}"
+        );
+    }
     assert!(
         stderr.contains("fit predict"),
         "the error must point at the surface that CAN resolve it: {stderr}"

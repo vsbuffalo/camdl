@@ -68,6 +68,40 @@ let capture_e001 (diags : Diagnostics.t) (body : unit -> ('a, unit) result)
       ~message:(Printexc.to_string exn) ();
     Error ()
 
+(* gh#616: camdl writes durations with a leading tick (`4 'weeks`); the CLI's
+   `--to "last_obs + 8 weeks"` writes them as bare words, because a tick is a
+   shell-quoting hazard. The asymmetry is deliberate, so it must be
+   self-correcting on both sides — the CLI already rejects the tick form by
+   name. On this side the bare word is only ever a parse failure, and where it
+   fails is not where it reads wrong: inside a `{ key = value }` block,
+   `to = 80 days` parses `80` as the value and `days` as the NEXT KEY, so the
+   parser does not complain until the closing brace, pointing at a token the
+   author has no reason to suspect.
+
+   Run only on the failure path: re-lex and look for a duration word directly
+   after a numeric literal, at or before the position the parse actually failed
+   (the parser cannot have failed before consuming it, so a later match belongs
+   to an unrelated error and is ignored). Returns the offending word and its
+   span. *)
+let bare_duration_word_before (src : string) ~(before : Lexing.position)
+    : (string * Lexing.position * Lexing.position) option =
+  let lexbuf = Lexing.from_string src in
+  let rec scan prev_was_number =
+    match Lexer.token lexbuf with
+    | exception _ -> None
+    | Parser.EOF -> None
+    | Parser.IDENT w
+      when prev_was_number
+        && List.mem w ["day"; "days"; "week"; "weeks";
+                       "month"; "months"; "year"; "years"] ->
+      let sp = lexbuf.Lexing.lex_start_p and ep = lexbuf.Lexing.lex_curr_p in
+      if sp.Lexing.pos_cnum <= before.Lexing.pos_cnum then Some (w, sp, ep)
+      else None
+    | Parser.INT _ | Parser.FLOAT _ -> scan true
+    | _ -> scan false
+  in
+  scan false
+
 let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
     : compile_detail option * Diagnostics.t * Source_cache.t =
   let source = Source_cache.of_string ~filename src in
@@ -93,9 +127,25 @@ let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
             Error ()
           | Parser.Error ->
             let pos = lexbuf.Lexing.lex_curr_p in
-            Diagnostics.error parse_diags ~code:"E001"
-              ~loc:(Diagnostics.loc_of_positions ~file:filename pos pos)
-              ~message:"syntax error" ();
+            (match bare_duration_word_before src ~before:pos with
+             | Some (w, sp, ep) ->
+               let plural =
+                 if w.[String.length w - 1] = 's' then w else w ^ "s" in
+               Diagnostics.error parse_diags ~code:"E115"
+                 ~loc:(Diagnostics.loc_of_positions ~file:filename sp ep)
+                 ~message:(Printf.sprintf
+                   "`%s` is not a unit here: camdl writes durations with a \
+                    leading tick" w)
+                 ~hint:(Printf.sprintf
+                   "write `'%s` — e.g. `to = 80 '%s`, `last_obs + 4 '%s`. \
+                    (The CLI's `--to \"last_obs + 8 weeks\"` takes bare words \
+                    instead, because a tick is a shell-quoting hazard.)"
+                   plural plural plural)
+                 ()
+             | None ->
+               Diagnostics.error parse_diags ~code:"E001"
+                 ~loc:(Diagnostics.loc_of_positions ~file:filename pos pos)
+                 ~message:"syntax error" ());
             Error ())
        in
        Passtime.record "parse" (Sys.time () -. t_parse);

@@ -806,14 +806,15 @@ type scalar_expr =
   | SBinOp of { op : bin_op; left : scalar_expr; right : scalar_expr }
   | SCond  of { pred : scalar_expr; then_ : scalar_expr; else_ : scalar_expr }
 
-(* When a `value_at` reads its series: a constant time expression, or the
-   symbolic end-of-observed-data anchor resolved at evaluation time (the
-   compiled model stays data-independent; a data-free context hard-errors at
-   evaluator construction). Deliberately NOT `expr` alone: `last_obs` must be
-   unrepresentable outside this position, so it cannot leak into dynamics. *)
+(* When a `value_at` reads its series: a constant time expression, or a symbolic
+   observation anchor (± a compile-folded constant offset) resolved at evaluation
+   time (the compiled model stays data-independent; a data-free context
+   hard-errors at evaluator construction). Deliberately NOT `expr` alone: an
+   anchor must be unrepresentable outside its three granted positions, so it
+   cannot leak into dynamics. *)
 type time_anchor =
   | ATime of expr
-  | ALastObs
+  | AObs  of anchored_time
 
 (* A reduction whose result has the same dimension as the series. *)
 type value_reduce =

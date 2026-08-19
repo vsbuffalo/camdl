@@ -5216,6 +5216,142 @@ let resolve_float_expr ctx e =
         ();
       0.0
 
+(* ── Constant-expression dimension ───────────────────────────────────────── *)
+
+(* NET (population, time) dimension of a constant expression, computed by VALUE
+   rather than by AST shape — a bare `1e-8 'days`, a composed `(1e-8) 'days` and
+   `0.5 * 1 'day` all classify identically. `None` means UNKNOWN (a sub-term is
+   not a unit-bearing constant, e.g. a named binding), which is not the same as
+   dimensionless.
+
+   Needed wherever dimcheck does not reach: the `simulate` block (rk45
+   tolerances, gh#166) and observation-anchor offsets (gh#616), both folded at
+   compile time. One helper so the two cannot drift. *)
+let rec const_expr_dim (e : expr) : (int * int) option =
+  match e with
+  | EConst _       -> Some (0, 0)
+  | EUnit (_, u)   -> Some (unit_lit_to_dim u)
+  | EUnOp (Neg, a) -> const_expr_dim a
+  | EBinOp ((Add | Sub), a, b) ->
+    (match const_expr_dim a, const_expr_dim b with
+     | Some da, Some db when da = db -> Some da
+     | _ -> None)
+  | EBinOp (Mul, a, b) ->
+    (match const_expr_dim a, const_expr_dim b with
+     | Some (pa, ta), Some (pb, tb) -> Some (pa + pb, ta + tb)
+     | _ -> None)
+  | EBinOp (Div, a, b) ->
+    (match const_expr_dim a, const_expr_dim b with
+     | Some (pa, ta), Some (pb, tb) -> Some (pa - pb, ta - tb)
+     | _ -> None)
+  | _ -> None
+
+(* ── Observation anchors (gh#616) ────────────────────────────────────────── *)
+
+(* `last_obs` / `first_obs` are ordinary identifiers everywhere in the DSL (an
+   undeclared one is E100) EXCEPT in three positions: `simulate { to }` (and a
+   preset's), a forcing `breakpoints` entry, and `value_at`'s time argument.
+   This classifier is the whole of that interception — one function, so the
+   three positions cannot accept different grammars. *)
+
+type anchor_class =
+  (* No anchor is mentioned anywhere in the expression: the caller handles it
+     as it always did. *)
+  | AnchorNone
+  (* A well-formed anchor, with any offset already folded to model time units. *)
+  | AnchorAt of Ir.anchored_time
+  (* An anchor is mentioned but the term is not a legal anchor expression; a
+     diagnostic has ALREADY been emitted, so the caller must not add another. *)
+  | AnchorBad
+
+let anchor_of_ident = function
+  | "first_obs" -> Some Ir.AnchorFirst
+  | "last_obs"  -> Some Ir.AnchorLast
+  | _           -> None
+
+(* Does this expression mention an observation anchor anywhere? Used to tell
+   "not an anchor at all" (leave alone) from "an anchor in a shape we refuse"
+   (diagnose), so a typo like `2 * last_obs` cannot fall through to E100 and
+   read as an undeclared-name problem. *)
+let rec mentions_obs_anchor = function
+  | EIdent (s, _) -> anchor_of_ident s <> None
+  | EBinOp (_, a, b) -> mentions_obs_anchor a || mentions_obs_anchor b
+  | EUnOp (_, e) -> mentions_obs_anchor e
+  | ECond (p, a, b) ->
+    mentions_obs_anchor p || mentions_obs_anchor a || mentions_obs_anchor b
+  | EFuncCall (_, args) -> List.exists (fun (_, e) -> mentions_obs_anchor e) args
+  | EList es -> List.exists mentions_obs_anchor es
+  | _ -> false
+
+(* Does the offset expression carry a CALENDAR unit ('months / 'years)? Those
+   are not a constant number of days, and an anchor IS an instant — so
+   `last_obs + 6 'months` is the same Rule-1 violation `date(...) + 6 'months`
+   already is (E321). Refused only under an origin, matching E321's scope. *)
+let rec mentions_calendar_unit = function
+  | EUnit (_, (Months | Years)) -> true
+  | EUnOp (_, e) -> mentions_calendar_unit e
+  | EBinOp (_, a, b) -> mentions_calendar_unit a || mentions_calendar_unit b
+  | _ -> false
+
+(* `~what` names the position in every message ("`simulate { to }`", "a
+   `breakpoints` entry", "`value_at`'s time argument"); `~example` is a correct
+   spelling for that position. *)
+let classify_anchor ctx ~what ~example ~loc (e : expr) : anchor_class =
+  let bad ?(code = "E335") ~message ~hint () =
+    Diagnostics.error ctx.diags ~code ~loc ~message ~hint ();
+    AnchorBad
+  in
+  (* The offset: a constant duration, folded to model time units NOW so the
+     compiled model carries no unit interpretation. *)
+  let offset ~anchor ~sign off =
+    if ctx.origin <> None && mentions_calendar_unit off then
+      bad ~code:"E321"
+        ~message:(Printf.sprintf
+          "calendar duration in %s: an observation anchor is an instant, so a \
+           `'months`/`'years` offset would silently mean a different number of \
+           days each time it resolves" what)
+        ~hint:"state the offset in `'days` or `'weeks`, which are fixed spans"
+        ()
+    else
+      match const_expr_dim off with
+      | Some (0, 1) ->
+        AnchorAt { Ir.anchor; offset = sign *. resolve_float_expr ctx off }
+      | Some (0, 0) ->
+        bad
+          ~message:(Printf.sprintf
+            "the offset on an observation anchor in %s must carry a duration \
+             unit; a bare number has no unit to interpret" what)
+          ~hint:(Printf.sprintf "write %s" example) ()
+      | Some _ ->
+        bad
+          ~message:(Printf.sprintf
+            "the offset on an observation anchor in %s must be a duration \
+             (dimension T); this one is not" what)
+          ~hint:(Printf.sprintf "write %s" example) ()
+      | None ->
+        bad
+          ~message:(Printf.sprintf
+            "the offset on an observation anchor in %s must be a CONSTANT \
+             duration — it is folded at compile time, so it cannot depend on a \
+             parameter or a binding" what)
+          ~hint:(Printf.sprintf "write %s" example) ()
+  in
+  match e with
+  | EIdent (s, _) when anchor_of_ident s <> None ->
+    AnchorAt { Ir.anchor = Option.get (anchor_of_ident s); offset = 0.0 }
+  | EBinOp (Add, EIdent (s, _), off) when anchor_of_ident s <> None ->
+    offset ~anchor:(Option.get (anchor_of_ident s)) ~sign:1.0 off
+  | EBinOp (Sub, EIdent (s, _), off) when anchor_of_ident s <> None ->
+    offset ~anchor:(Option.get (anchor_of_ident s)) ~sign:(-1.0) off
+  | _ when mentions_obs_anchor e ->
+    bad
+      ~message:(Printf.sprintf
+        "an observation anchor in %s must be the whole term, optionally plus \
+         or minus a constant duration — it cannot be combined into a larger \
+         expression" what)
+      ~hint:(Printf.sprintf "write %s" example) ()
+  | _ -> AnchorNone
+
 (* Resolve a bound expression to a float. Bounds are compile-time constants —
    a numeric literal or arithmetic of literals, possibly **negative** (e.g. a
    seed time `tau : instant in [-40, 120]` that may fall before the origin).
@@ -6025,31 +6161,10 @@ let expand_simulate ctx =
        composed `(1e-8) 'days`, and `0.5 * 1 'day` are all rejected, while a
        dimensionless `'ratio` unit is accepted. rk4 takes NO tolerances (the
        grammar permits `rk4 { ... }`; reject it semantically). *)
-    let rec tol_dim e : (int * int) option =
-      (* None when a sub-term is not a unit-bearing constant (e.g. a named
-         binding); those fall through to resolve_float_expr unchanged. *)
-      match e with
-      | EConst _       -> Some (0, 0)
-      | EUnit (_, u)   -> Some (unit_lit_to_dim u)
-      | EUnOp (Neg, a) -> tol_dim a
-      | EBinOp ((Add | Sub), a, b) ->
-        (match tol_dim a, tol_dim b with
-         | Some da, Some db when da = db -> Some da
-         | _ -> None)
-      | EBinOp (Mul, a, b) ->
-        (match tol_dim a, tol_dim b with
-         | Some (pa, ta), Some (pb, tb) -> Some (pa + pb, ta + tb)
-         | _ -> None)
-      | EBinOp (Div, a, b) ->
-        (match tol_dim a, tol_dim b with
-         | Some (pa, ta), Some (pb, tb) -> Some (pa - pb, ta - tb)
-         | _ -> None)
-      | _ -> None
-    in
     let resolve_tol name = function
       | None -> None
       | Some (e, eloc) ->
-        (match tol_dim e with
+        (match const_expr_dim e with
          | Some d when d <> (0, 0) ->
            Diagnostics.error ctx.diags ~code:"E106"
              ~loc:(diag_loc_of_ast_ctx ctx eloc)
@@ -8609,31 +8724,24 @@ let classify_quantity_body ctx env
           an unknown identifier and cannot reach the model dynamics. *)
        (match two with
         | Some (x, t) ->
-          let rec mentions_last_obs = function
-            | EIdent ("last_obs", _) -> true
-            | EBinOp (_, a, b) -> mentions_last_obs a || mentions_last_obs b
-            | EUnOp (_, e) -> mentions_last_obs e
-            | ECond (p, a, b) ->
-              mentions_last_obs p || mentions_last_obs a || mentions_last_obs b
-            | EFuncCall (_, args) ->
-              List.exists (fun (_, e) -> mentions_last_obs e) args
-            | _ -> false
-          in
-          (match t with
-           | EIdent ("last_obs", _) ->
-             reduced_state (Ir.RValue (Ir.VValueAt Ir.ALastObs)) x
-           | _ when mentions_last_obs t ->
-             err ~hint:"anchor arithmetic is not supported: write the bare \
-                        anchor `value_at(expr, last_obs)`, or a literal time \
-                        `value_at(expr, date(\"...\"))`"
-               "`last_obs` must be the whole second argument of `value_at`"
-           | _ ->
+          (match classify_anchor ctx
+                   ~what:"`value_at`'s time argument"
+                   ~example:"`value_at(N0 - S, last_obs - 1 'weeks)`"
+                   ~loc:Diagnostics.no_loc t with
+           | AnchorAt a -> reduced_state (Ir.RValue (Ir.VValueAt (Ir.AObs a))) x
+           (* The classifier already emitted the diagnostic; lower to a
+              placeholder so the rest of the model still compiles and the user
+              sees every error at once, not one per rebuild. *)
+           | AnchorBad ->
+             reduced_state
+               (Ir.RValue (Ir.VValueAt (Ir.ATime (Ir.Const 0.0)))) x
+           | AnchorNone ->
              reduced_state
                (Ir.RValue (Ir.VValueAt (Ir.ATime (resolve_expr ctx env t)))) x)
         | None ->
           wrong_arity fn
             "two arguments, e.g. value_at(N0 - S, date(\"2026-08-10\")) or \
-             value_at(N0 - S, last_obs)")
+             value_at(N0 - S, last_obs - 1 'weeks)")
      | "first_above" ->
        (match two with
         | Some (x, th) ->

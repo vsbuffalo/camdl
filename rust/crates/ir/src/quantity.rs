@@ -112,23 +112,55 @@ pub enum ValueReduce {
     ValueAt(TimeAnchor),
 }
 
-/// When a `value_at` reads its series. Deliberately NOT a bare [`Expr`]: the
-/// `last_obs` anchor must be unrepresentable outside this position, so it
-/// cannot leak into the model dynamics (the `TriggerQuantity` precedent).
+/// When a `value_at` reads its series. Deliberately NOT a bare [`Expr`]: an
+/// observation anchor must be unrepresentable outside its three granted
+/// positions, so it cannot leak into the model dynamics (the `TriggerQuantity`
+/// precedent).
 ///
-/// Serde (externally tagged): `{"time": <expr>}` / `"last_obs"` — matching the
-/// OCaml emitter (`serde.ml`, `value_reduce_to_json`).
+/// Wire: `{"time": <expr>}` for the constant arm; for the anchor arm, the
+/// shared [`crate::anchor::AnchoredTime`] encoding — the bare string
+/// `"last_obs"` at zero offset (byte-identical to the pre-gh#616 emission),
+/// `{"anchor": …, "offset": …}` with one. Matches the OCaml emitter
+/// (`serde.ml`, `value_reduce_to_json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(from = "TimeAnchorWire", into = "TimeAnchorWire")]
 pub enum TimeAnchor {
     /// A constant time expression — `date(...)` folded against the origin, or
     /// a model-time literal.
     Time(Expr),
-    /// The end of observed data: max observation time over the run's bound
-    /// streams, resolved by the CALLER at evaluation time (the compiled model
-    /// stays data-independent; a data-free context hard-errors at evaluator
-    /// construction).
-    LastObs,
+    /// An observation anchor ± a compile-folded constant offset. The anchor's
+    /// value is resolved by the CALLER at evaluation time (the compiled model
+    /// stays data-independent; a data-free context refuses at the gate rather
+    /// than reporting the quantity as censored).
+    Obs(crate::anchor::AnchoredTime),
+}
+
+/// The two wire shapes, as an untagged pair. `Time` requires a `time` key, so a
+/// bare anchor string and an `{"anchor": …}` object can only match `Obs` —
+/// the discrimination is by shape, with no tag to keep in sync.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum TimeAnchorWire {
+    Time { time: Expr },
+    Obs(crate::anchor::AnchoredTime),
+}
+
+impl From<TimeAnchorWire> for TimeAnchor {
+    fn from(w: TimeAnchorWire) -> Self {
+        match w {
+            TimeAnchorWire::Time { time } => TimeAnchor::Time(time),
+            TimeAnchorWire::Obs(a) => TimeAnchor::Obs(a),
+        }
+    }
+}
+
+impl From<TimeAnchor> for TimeAnchorWire {
+    fn from(a: TimeAnchor) -> Self {
+        match a {
+            TimeAnchor::Time(time) => TimeAnchorWire::Time { time },
+            TimeAnchor::Obs(a) => TimeAnchorWire::Obs(a),
+        }
+    }
 }
 
 /// A reduction whose result is a *time* (dimension `T`). A non-firing crossing is
@@ -225,10 +257,29 @@ mod tests {
             dimension: None,
             body: QuantityBody::Reduced {
                 source: QuantitySource::State(Expr::pop("I")),
-                reduce: Some(TemporalReduce::Value(ValueReduce::ValueAt(TimeAnchor::LastObs))),
+                reduce: Some(TemporalReduce::Value(ValueReduce::ValueAt(TimeAnchor::Obs(
+                    crate::anchor::AnchoredTime::bare(crate::anchor::ObsAnchor::Last),
+                )))),
             },
         };
         rt_quantity(&at_last);
+        // gh#616: `value_at(I, first_obs - 1 'weeks)` — anchor plus a
+        // compile-folded offset.
+        let at_offset = Quantity {
+            name: "before_start".into(),
+            stratum: vec![],
+            dimension: None,
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(Expr::pop("I")),
+                reduce: Some(TemporalReduce::Value(ValueReduce::ValueAt(TimeAnchor::Obs(
+                    crate::anchor::AnchoredTime {
+                        anchor: crate::anchor::ObsAnchor::First,
+                        offset: -7.0,
+                    },
+                )))),
+            },
+        };
+        rt_quantity(&at_offset);
 
         // Pin the WIRE SHAPES the OCaml emitter writes (serde.ml,
         // value_reduce_to_json) — a derive-level change that re-tags either
@@ -241,8 +292,36 @@ mod tests {
         let json = serde_json::to_string(&at_last).unwrap();
         assert!(
             json.contains(r#""value_at":"last_obs""#),
-            "last_obs must serialize as the bare string: {json}"
+            "a zero-offset anchor must serialize as the bare string: {json}"
         );
+        let json = serde_json::to_string(&at_offset).unwrap();
+        assert!(
+            json.contains(r#""value_at":{"anchor":"first_obs","offset":-7.0}"#),
+            "an offset anchor must serialize as the object form: {json}"
+        );
+    }
+
+    /// The untagged wire pair discriminates by SHAPE, so the constant arm and
+    /// the anchor arms must not be able to swallow each other. Decode each of
+    /// the three spellings the OCaml side emits and check it lands in the right
+    /// variant — `{"time": …}` in particular must not read as an anchor.
+    #[test]
+    fn time_anchor_wire_forms_discriminate() {
+        use crate::anchor::{AnchoredTime, ObsAnchor};
+        let cases: [(&str, TimeAnchor); 3] = [
+            (r#"{"time":{"const":20.0}}"#, TimeAnchor::Time(Expr::const_(20.0))),
+            (r#""last_obs""#, TimeAnchor::Obs(AnchoredTime::bare(ObsAnchor::Last))),
+            (
+                r#"{"anchor":"last_obs","offset":28.0}"#,
+                TimeAnchor::Obs(AnchoredTime { anchor: ObsAnchor::Last, offset: 28.0 }),
+            ),
+        ];
+        for (json, want) in cases {
+            let got: TimeAnchor = serde_json::from_str(json).unwrap_or_else(|e| {
+                panic!("decode {json}: {e}")
+            });
+            assert_eq!(got, want, "decode {json}");
+        }
     }
 
     #[test]

@@ -1111,7 +1111,9 @@ let value_reduce_to_json (v : value_reduce) : Yojson.Safe.t =
   | VCountAbove e -> obj [("count_above", expr_to_json e)]
   | VCountBelow e -> obj [("count_below", expr_to_json e)]
   | VValueAt (ATime e) -> obj [("value_at", obj [("time", expr_to_json e)])]
-  | VValueAt ALastObs  -> obj [("value_at", str "last_obs")]
+  (* gh#616: through the shared anchor codec — a zero offset still emits the
+     bare `"last_obs"` string, so pre-gh#616 IR is byte-identical. *)
+  | VValueAt (AObs a)  -> obj [("value_at", anchored_time_to_json a)]
 
 let value_reduce_of_json j : value_reduce =
   match j with
@@ -1121,7 +1123,11 @@ let value_reduce_of_json j : value_reduce =
   | `String "mean"  -> VMean
   | `Assoc [("count_above", e)] -> VCountAbove (expr_of_json e)
   | `Assoc [("count_below", e)] -> VCountBelow (expr_of_json e)
-  | `Assoc [("value_at", `String "last_obs")] -> VValueAt ALastObs
+  (* ORDER-SENSITIVE: both anchor arms must precede the `("value_at", v)`
+     catch-all below, which reads `v.time` and would otherwise swallow them. *)
+  | `Assoc [("value_at", (`String _ as a))] -> VValueAt (AObs (anchored_time_of_json a))
+  | `Assoc [("value_at", (`Assoc kvs as a))] when List.mem_assoc "anchor" kvs ->
+    VValueAt (AObs (anchored_time_of_json a))
   | `Assoc [("value_at", v)] -> VValueAt (ATime (expr_of_json (member "time" v)))
   | _ -> fail "unknown value_reduce \
                (expected final/max/min/mean, count_above/count_below, or value_at)"

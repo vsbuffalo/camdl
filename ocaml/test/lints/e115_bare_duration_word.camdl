@@ -1,0 +1,32 @@
+# gh#616: a bare duration WORD where a unit literal belongs is a named
+# migration diagnostic, not a bare `syntax error` at a token the author has no
+# reason to suspect. The CLI takes bare words (`--to "last_obs + 8 weeks"`)
+# because a tick is a shell-quoting hazard, so the asymmetry has to be
+# self-correcting on both sides.
+#
+# expect: E115 Error
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = 990
+  I = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 days
+}

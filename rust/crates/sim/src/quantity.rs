@@ -86,13 +86,43 @@ enum RReduce {
 }
 
 /// A resolved `value_at` anchor. `Expr` is evaluated once per draw (a constant
-/// or param expression; params are fixed within a draw); `LastObs` is the
-/// caller-resolved end of observed data — a data-free caller must gate on
-/// [`QuantityEvaluator::references_last_obs`] BEFORE `eval_draw`, so the
-/// `None` case is unreachable there.
+/// or param expression; params are fixed within a draw); `Obs` carries the
+/// symbolic observation anchor plus its compile-folded offset, and needs the
+/// caller-resolved observation times — a data-free caller must gate on
+/// [`QuantityEvaluator::references_obs_anchor`] BEFORE `eval_draw`.
 enum RAnchor {
     Expr(ResolvedExpr),
-    LastObs,
+    Obs(ir::anchor::AnchoredTime),
+}
+
+/// The run's resolved observation anchors: the min and max observation time
+/// over the run's bound streams. Both are carried because a model may read at
+/// either end, and resolving only the one a given model happens to use would
+/// re-introduce the "which anchor did the caller mean" question at every call
+/// site.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObsAnchorTimes {
+    pub first: f64,
+    pub last: f64,
+}
+
+impl ObsAnchorTimes {
+    /// Fold a run's observation times into the pair. `None` when there are no
+    /// observation times at all — the caller then has nothing to anchor to and
+    /// must refuse rather than pass a fabricated value.
+    pub fn of_times(times: impl IntoIterator<Item = f64>) -> Option<Self> {
+        let mut it = times.into_iter();
+        let t0 = it.next()?;
+        let (first, last) = it.fold((t0, t0), |(lo, hi), t| (lo.min(t), hi.max(t)));
+        Some(ObsAnchorTimes { first, last })
+    }
+
+    fn at(&self, a: ir::anchor::AnchoredTime) -> f64 {
+        a.resolve(match a.anchor {
+            ir::anchor::ObsAnchor::First => self.first,
+            ir::anchor::ObsAnchor::Last => self.last,
+        })
+    }
 }
 
 enum RScalar {
@@ -187,27 +217,29 @@ impl QuantityEvaluator {
         })
     }
 
-    /// Whether any quantity reads at the `last_obs` anchor — the cue for a
-    /// caller to resolve the end of observed data before `eval_draw`. A
+    /// Whether any quantity reads at an OBSERVATION ANCHOR — the cue for a
+    /// caller to resolve the observed-data window before `eval_draw`. A
     /// data-free caller (forward simulate) must hard-error naming the
     /// quantities rather than pass `None` (proposal 2026-08-17).
-    pub fn references_last_obs(&self) -> bool {
+    ///
+    /// gh#616: matches EVERY anchor form, not just a bare `last_obs`. While
+    /// this was keyed on one variant, a `first_obs` (or offset) quantity slipped
+    /// past the gate and came back NaN — reported as *censored*, which reads as
+    /// "the crossing never happened" rather than "we had no data".
+    pub fn references_obs_anchor(&self) -> bool {
         self.programs.iter().any(|p| {
-            matches!(
-                p,
-                QProgram::Reduced { reduce: Some(RReduce::ValueAt(RAnchor::LastObs)), .. }
-            )
+            matches!(p, QProgram::Reduced { reduce: Some(RReduce::ValueAt(RAnchor::Obs(_))), .. })
         })
     }
 
-    /// Names of the quantities that read at `last_obs` (for the data-free
-    /// caller's error message).
-    pub fn last_obs_quantity_names(&self) -> Vec<&str> {
+    /// Names of the quantities that read at an observation anchor (for the
+    /// data-free caller's error message).
+    pub fn obs_anchor_quantity_names(&self) -> Vec<&str> {
         self.programs
             .iter()
             .zip(&self.names)
             .filter_map(|(p, n)| match p {
-                QProgram::Reduced { reduce: Some(RReduce::ValueAt(RAnchor::LastObs)), .. } => {
+                QProgram::Reduced { reduce: Some(RReduce::ValueAt(RAnchor::Obs(_))), .. } => {
                     Some(n.as_str())
                 }
                 _ => None,
@@ -236,17 +268,18 @@ impl QuantityEvaluator {
     /// vector, `traj` the finished trajectory, `obs` the already-drawn `y_sim`
     /// series (v1.1; `None` for a state-only model). Pure; results are in the same
     /// order as the `quantities` list (so a `Derived` can read prior scalars).
-    /// `last_obs`: the caller-resolved end of observed data (max observation
-    /// time over the run's bound streams), required iff
-    /// [`references_last_obs`](Self::references_last_obs) — gate before
-    /// calling from a data-free context.
+    /// `obs_anchors`: the caller-resolved observed-data window (min and max
+    /// observation time over the run's bound streams), REQUIRED iff
+    /// [`references_obs_anchor`](Self::references_obs_anchor) — gate before
+    /// calling from a data-free context. Passing `None` when a quantity needs
+    /// it panics rather than censoring the value.
     pub fn eval_draw(
         &self,
         params: &[f64],
         traj: &Trajectory,
         compiled: &CompiledModel,
         obs: Option<&ObsSeriesSet>,
-        last_obs: Option<f64>,
+        obs_anchors: Option<ObsAnchorTimes>,
     ) -> Vec<QuantityResult> {
         let snap_times: Vec<f64> = traj.snapshots.iter().map(|s| s.t).collect();
         let mut results: Vec<QuantityResult> = Vec::with_capacity(self.programs.len());
@@ -260,7 +293,7 @@ impl QuantityEvaluator {
                             Some(red) => {
                                 // State thresholds are evaluated at the snapshot times.
                                 let thresh = |te: &ResolvedExpr| eval_series(te, traj, compiled, params);
-                                QuantityResult::Scalar(fold_reduce(red, &series, &snap_times, &thresh, last_obs))
+                                QuantityResult::Scalar(fold_reduce(red, &series, &snap_times, &thresh, obs_anchors))
                             }
                         }
                     }
@@ -285,7 +318,7 @@ impl QuantityEvaluator {
                                         .map(|&t| eval_at(te, snap_at(traj, t), compiled, params, t))
                                         .collect()
                                 };
-                                QuantityResult::Scalar(fold_reduce(red, &series, &otimes, &thresh, last_obs))
+                                QuantityResult::Scalar(fold_reduce(red, &series, &otimes, &thresh, obs_anchors))
                             }
                         }
                     }
@@ -312,8 +345,8 @@ fn resolve_reduce(
         TemporalReduce::Value(ValueReduce::ValueAt(ir::quantity::TimeAnchor::Time(t))) => {
             RReduce::ValueAt(RAnchor::Expr(resolve(t)?))
         }
-        TemporalReduce::Value(ValueReduce::ValueAt(ir::quantity::TimeAnchor::LastObs)) => {
-            RReduce::ValueAt(RAnchor::LastObs)
+        TemporalReduce::Value(ValueReduce::ValueAt(ir::quantity::TimeAnchor::Obs(a))) => {
+            RReduce::ValueAt(RAnchor::Obs(*a))
         }
         TemporalReduce::Time(TimeReduce::TimeOfMax) => RReduce::TimeOfMax,
         TemporalReduce::Time(TimeReduce::TimeOfMin) => RReduce::TimeOfMin,
@@ -417,7 +450,7 @@ fn fold_reduce(
     series: &[f64],
     times: &[f64],
     thresh: &impl Fn(&ResolvedExpr) -> Vec<f64>,
-    last_obs: Option<f64>,
+    obs_anchors: Option<ObsAnchorTimes>,
 ) -> QuantityDrawValue {
     use QuantityDrawValue::*;
     match r {
@@ -428,16 +461,22 @@ fn fold_reduce(
                 // or param) time expression at the first snapshot is the
                 // expression's value for the draw.
                 RAnchor::Expr(e) => thresh(e).first().copied().unwrap_or(f64::NAN),
-                RAnchor::LastObs => match last_obs {
-                    Some(v) => v,
-                    None => {
-                        debug_assert!(
-                            false,
-                            "value_at(last_obs) reached eval without data; \
-                             callers gate on references_last_obs()"
-                        );
-                        f64::NAN // → Censored below, never a fabricated value
-                    }
+                // gh#616: an UNCONDITIONAL failure, not a `debug_assert!`.
+                // Compiled out of release, the old assertion left the `None`
+                // arm returning NaN, which `value_at_locf` reports as
+                // *censored* — indistinguishable from "the anchor fell outside
+                // the trajectory window", so a missing-data bug read as a
+                // legitimate result. Callers gate on `references_obs_anchor`;
+                // reaching here means a gate is missing, which is a defect to
+                // surface, not to average over.
+                RAnchor::Obs(a) => match obs_anchors {
+                    Some(t) => t.at(*a),
+                    None => panic!(
+                        "value_at({a}) reached quantity evaluation with no observation \
+                         times; every caller must gate on \
+                         QuantityEvaluator::references_obs_anchor() and refuse, so this \
+                         is a missing gate at the call site"
+                    ),
                 },
             };
             value_at_locf(series, times, t)
@@ -648,6 +687,108 @@ fn apply_un(op: &UnOp, x: f64) -> f64 {
 mod tests {
     use super::*;
     use QuantityDrawValue::*;
+
+    // ── Observation anchors (gh#616) ─────────────────────────────────────────
+
+    /// The pair folds the run's observation times, and the offset is applied on
+    /// top of whichever end the anchor names. An offset applied to the WRONG end
+    /// would still produce a plausible in-window time, so pin both.
+    #[test]
+    fn obs_anchor_times_fold_and_resolve() {
+        use ir::anchor::{AnchoredTime, ObsAnchor};
+        let t = ObsAnchorTimes::of_times([21.0, 0.0, 14.0, 7.0]).expect("non-empty");
+        assert_eq!(t, ObsAnchorTimes { first: 0.0, last: 21.0 });
+        assert_eq!(t.at(AnchoredTime::bare(ObsAnchor::Last)), 21.0);
+        assert_eq!(t.at(AnchoredTime::bare(ObsAnchor::First)), 0.0);
+        assert_eq!(t.at(AnchoredTime { anchor: ObsAnchor::Last, offset: 28.0 }), 49.0);
+        assert_eq!(t.at(AnchoredTime { anchor: ObsAnchor::First, offset: -7.0 }), -7.0);
+    }
+
+    /// No observation times at all → `None`, so a caller cannot mistake an empty
+    /// stream set for an anchor at t = 0.
+    #[test]
+    fn obs_anchor_times_of_empty_is_none() {
+        assert_eq!(ObsAnchorTimes::of_times([]), None);
+    }
+
+    /// The gate matches EVERY anchor form. Keyed on one variant (as it was
+    /// before gh#616), a `first_obs` or offset quantity would slip past a
+    /// data-free caller's refusal and come back censored.
+    #[test]
+    fn the_gate_matches_every_anchor_form() {
+        use ir::anchor::{AnchoredTime, ObsAnchor};
+        let anchored = |a: AnchoredTime| QuantityEvaluator {
+            programs: vec![QProgram::Reduced {
+                source: QSource::Observation("s".into()),
+                reduce: Some(RReduce::ValueAt(RAnchor::Obs(a))),
+            }],
+            names: vec!["q".into()],
+        };
+        for a in [
+            AnchoredTime::bare(ObsAnchor::Last),
+            AnchoredTime::bare(ObsAnchor::First),
+            AnchoredTime { anchor: ObsAnchor::Last, offset: 28.0 },
+            AnchoredTime { anchor: ObsAnchor::First, offset: -7.0 },
+        ] {
+            let e = anchored(a);
+            assert!(e.references_obs_anchor(), "gate must fire for {a}");
+            assert_eq!(e.obs_anchor_quantity_names(), vec!["q"], "named for {a}");
+        }
+        // Negative control: a constant-time `value_at` needs no data and must
+        // NOT be gated, or every literal-time quantity would start refusing.
+        let literal = QuantityEvaluator {
+            programs: vec![QProgram::Reduced {
+                source: QSource::Observation("s".into()),
+                reduce: Some(RReduce::ValueAt(RAnchor::Expr(ResolvedExpr::Const(20.0)))),
+            }],
+            names: vec!["q".into()],
+        };
+        assert!(!literal.references_obs_anchor());
+        assert!(literal.obs_anchor_quantity_names().is_empty());
+    }
+
+    #[test]
+    fn fold_reduce_resolves_an_anchor_through_the_run_window() {
+        use ir::anchor::{AnchoredTime, ObsAnchor};
+        let times = [0.0, 7.0, 14.0, 21.0];
+        let series = [1.0, 5.0, 9.0, 13.0];
+        let thresh = |_: &ResolvedExpr| Vec::new();
+        let anchors = ObsAnchorTimes { first: 0.0, last: 14.0 };
+        // last_obs → the t=14 value.
+        let r = RReduce::ValueAt(RAnchor::Obs(AnchoredTime::bare(ObsAnchor::Last)));
+        assert_eq!(fold_reduce(&r, &series, &times, &thresh, Some(anchors)), Value(9.0));
+        // last_obs - 1 'weeks → t=7 (LOCF), not the t=14 value.
+        let r = RReduce::ValueAt(RAnchor::Obs(AnchoredTime {
+            anchor: ObsAnchor::Last,
+            offset: -7.0,
+        }));
+        assert_eq!(fold_reduce(&r, &series, &times, &thresh, Some(anchors)), Value(5.0));
+        // first_obs + 3 'days → t=3 → LOCF back to t=0.
+        let r = RReduce::ValueAt(RAnchor::Obs(AnchoredTime {
+            anchor: ObsAnchor::First,
+            offset: 3.0,
+        }));
+        assert_eq!(fold_reduce(&r, &series, &times, &thresh, Some(anchors)), Value(1.0));
+        // Past the trajectory window → censored, never clamped to the horizon.
+        let r = RReduce::ValueAt(RAnchor::Obs(AnchoredTime {
+            anchor: ObsAnchor::Last,
+            offset: 28.0,
+        }));
+        assert_eq!(fold_reduce(&r, &series, &times, &thresh, Some(anchors)), Censored);
+    }
+
+    /// Reaching evaluation with no observation times is a MISSING GATE, and must
+    /// fail loudly. Before gh#616 this was a `debug_assert!` — compiled out of
+    /// release, where the arm returned NaN and the value was reported as
+    /// *censored*, i.e. as a legitimate "outside the window" result.
+    #[test]
+    #[should_panic(expected = "no observation times")]
+    fn a_missing_gate_panics_instead_of_censoring() {
+        use ir::anchor::{AnchoredTime, ObsAnchor};
+        let r = RReduce::ValueAt(RAnchor::Obs(AnchoredTime::bare(ObsAnchor::First)));
+        let thresh = |_: &ResolvedExpr| Vec::new();
+        let _ = fold_reduce(&r, &[1.0, 2.0], &[0.0, 1.0], &thresh, None);
+    }
 
     #[test]
     fn value_at_locf_reads_last_time_at_or_before_anchor() {

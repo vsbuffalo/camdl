@@ -1950,13 +1950,15 @@ impl SimQuantities {
         // y_sim, not observations). Hard error naming the quantities — the
         // capability-gap convention — rather than an empty/NaN column
         // (proposal 2026-08-17).
-        if eval.references_last_obs() {
+        if eval.references_obs_anchor() {
             return Err(format!(
-                "quantity `{}` reads `value_at(..., last_obs)`, but a forward \
-                 simulation has no observed data to anchor to. Evaluate it via \
-                 `fit predict` (where the fit's data supplies last_obs), or use \
-                 a literal time: `value_at(expr, date(\"...\"))`.",
-                eval.last_obs_quantity_names().join("`, `"),
+                "quantity `{}` reads `value_at` at an observation anchor \
+                 (`last_obs` / `first_obs`, with or without an offset), but a \
+                 forward simulation has no observed data to anchor to. Evaluate \
+                 it via `fit predict` (where the fit's data supplies the \
+                 observation times), or use a literal time: \
+                 `value_at(expr, date(\"...\"))`.",
+                eval.obs_anchor_quantity_names().join("`, `"),
             ));
         }
         // `observations.<stream>` quantities reduce the per-draw y_sim — sampled
