@@ -545,7 +545,7 @@ Ships before any tightening of observation rules: it is the only thing standing
 between a modeller and an error whose correct fix does not compile.
 
 **B1. Lowering.** `Projection::WeightedFlowSum(Vec<(Expr, String)>)` — the sum
-of weight × flow — appended at hash index 5. `ir/VERSION` 0.30 → 0.31.
+of weight × flow — appended at hash index 5. `ir/VERSION` 0.31 → 0.32.
 
 This is deliberately **not** a new `Expr` constructor. A flow-read node in
 `Expr` would make `temporal_kind()` (`rust/crates/ir/src/observation.rs:47`)
@@ -599,10 +599,10 @@ examine a new `WeightedFlowSum` variant at all. **Extend that gate to the new
 variant** as part of B, or a state-dependent weight silently drops its term from
 the ODE-NUTS gradient.
 
-**B5. Delete `explicit_incidence_sum`** (`expander.ml:7058-7080`) rather than
-extend it. It is the syntactic walker that accumulated the four silent-wrongs in
-§4.3; "reach for the existing seam" cuts the other way when the seam is the
-defect.
+**B5. Delete `explicit_incidence_sum`** (`expander.ml:7800`, dispatched at
+`:7978`) rather than extend it. It is the syntactic walker that accumulated the
+four silent-wrongs in §4.3; "reach for the existing seam" cuts the other way
+when the seam is the defect.
 
 **B6. Acceptance matrix.**
 
@@ -617,7 +617,7 @@ defect.
 
 **B7. The `ir/VERSION` bump re-keys every cached run, for every model.**
 `ir_version` is a hashed field of `ModelDigest` (`runid/src/inputs.rs:174-182`),
-so 0.30 → 0.31 invalidates every stored fit and simulate — not only models using
+so 0.31 → 0.32 invalidates every stored fit and simulate — not only models using
 `incidence`. Unavoidable if B ships; it belongs in the release notes, not only
 here.
 
