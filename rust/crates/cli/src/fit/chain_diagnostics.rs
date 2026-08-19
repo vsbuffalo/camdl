@@ -268,6 +268,15 @@ fn discover_chain_dirs(stage_dir: &Path) -> Vec<(usize, std::path::PathBuf)> {
 /// `trace.tsv`. Empty when the file is missing/unreadable or the header doesn't
 /// look like a `TraceWriter` trace (column 2 must be `log_posterior`).
 fn read_trace_logliks(trace_path: &Path) -> Vec<f64> {
+    // Column 1 is the loglik regardless of the sampler's name for it.
+    read_trace_col(trace_path, 1)
+}
+
+/// Column `col` of a per-chain trace, parsed as f64 rows. Shares the
+/// structural guard (`<index> <loglik> log_posterior …`) with
+/// [`read_trace_logliks`]; column 2 is the CURRENT STATE's log-posterior —
+/// the column the degeneracy screen reads (gh#608).
+fn read_trace_col(trace_path: &Path, col: usize) -> Vec<f64> {
     let Ok(contents) = std::fs::read_to_string(trace_path) else {
         return Vec::new();
     };
@@ -286,12 +295,54 @@ fn read_trace_logliks(trace_path: &Path) -> Vec<f64> {
             continue;
         }
         let mut fields = line.split('\t');
-        // Column 1 is the loglik regardless of the sampler's name for it.
-        if let Some(v) = fields.nth(1).and_then(|s| s.parse::<f64>().ok()) {
+        if let Some(v) = fields.nth(col).and_then(|s| s.parse::<f64>().ok()) {
             out.push(v);
         }
     }
     out
+}
+
+/// One chain's stuck-state screen (gh#608, ebola F8): over the RETAINED
+/// draws (the same last-K_c rule as [`read_chain_mean_logliks`]), how many
+/// rows record a non-finite log-posterior as the chain's CURRENT state. A
+/// Metropolis-within-Gibbs chain whose current state has zero posterior
+/// density is incoherent (gh#607) — ANY such retained row marks the chain
+/// degenerate, and its draws contaminate `draws.tsv` and every pooled
+/// number. Exclusion stays explicit (gh#419): this screen only makes the
+/// contamination impossible to miss.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChainNegInf {
+    /// 1-based display index, aligned with the per-chain loglik table.
+    pub chain: usize,
+    /// Retained rows whose log-posterior is non-finite.
+    pub n_neginf: usize,
+    /// Retained rows for this chain.
+    pub n_retained: usize,
+}
+
+/// Per-chain [`ChainNegInf`] screen over the retained trace rows. `None`
+/// when no chain traces exist (same discovery as the mean-loglik reader).
+pub fn read_chain_neginf(stage_dir: &Path) -> Option<Vec<ChainNegInf>> {
+    let mut chain_dirs = discover_chain_dirs(stage_dir);
+    if chain_dirs.is_empty() {
+        return None;
+    }
+    chain_dirs.sort_by_key(|(n, _)| *n);
+    let draw_counts = read_draw_counts(&stage_dir.join("draws.tsv"));
+    let mut out = Vec::with_capacity(chain_dirs.len());
+    for (i, (_, dir)) in chain_dirs.iter().enumerate() {
+        let all = read_trace_col(&dir.join("trace.tsv"), 2);
+        let selected: &[f64] = match draw_counts.get(i).copied() {
+            Some(k) if k > 0 && k <= all.len() => &all[all.len() - k..],
+            _ => &all,
+        };
+        out.push(ChainNegInf {
+            chain: i + 1,
+            n_neginf: selected.iter().filter(|v| !v.is_finite()).count(),
+            n_retained: selected.len(),
+        });
+    }
+    Some(out)
 }
 
 /// Read `draws.tsv` and return the per-chain kept-draw count, ordered by

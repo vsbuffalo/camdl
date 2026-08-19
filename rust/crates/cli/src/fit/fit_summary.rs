@@ -1141,8 +1141,13 @@ impl Formatter {
             } else {
                 String::new()
             };
+            // gh#608: distinguish "stuck at -inf" (a degenerate chain whose
+            // draws contaminate the pooled numbers) from "no readable trace"
+            // (—). The old rendering softened the one signal that existed.
             let ll = if sc.mean_loglik.is_finite() {
                 format!("{:>14.2}", sc.mean_loglik)
+            } else if sc.mean_loglik == f64::NEG_INFINITY {
+                format!("{:>14}", self.err("-inf"))
             } else {
                 format!("{:>14}", "—")
             };
@@ -1153,6 +1158,26 @@ impl Formatter {
                 format!("{:>7}", "—")
             };
             s.push_str(&format!("    {:6} {}  {}   {}\n", sc.chain, ll, z, flag));
+        }
+
+        // gh#608 (ebola F8): the stuck-state screen. A chain recording a
+        // non-finite log-posterior as its CURRENT state is degenerate
+        // (gh#607); the robust mod-z above cannot flag it (a -inf mean is
+        // excluded from the centre/scale), so it gets its own loud line,
+        // right where the reader is told the pooled numbers include it.
+        if let Some(neginf) = cd::read_chain_neginf(stage_dir) {
+            for d in neginf.iter().filter(|d| d.n_neginf > 0 && d.n_retained > 0) {
+                s.push_str(&format!("    {}\n", self.err(&format!(
+                    "⚠ chain {}: log-posterior -inf on {:.1}% of retained draws \
+                     ({}/{}) — a DEGENERATE chain; its draws are in draws.tsv \
+                     and every pooled number in this block. View without it: \
+                     --exclude-chains <stage>:{} (exclusion stays explicit — \
+                     gh#419).",
+                    d.chain,
+                    100.0 * d.n_neginf as f64 / d.n_retained as f64,
+                    d.n_neginf, d.n_retained, d.chain,
+                ))));
+            }
         }
 
         let flagged = cd::outlier_labels(&scores);
@@ -2513,6 +2538,71 @@ mod tests {
         // The stuck chain's mean must reflect the post-burn-in draws (≈ -300),
         // not the stripped warm-up (≈ -900).
         assert!(table.contains("-300.00"), "chain 6 mean ≈ -300 (warm-up stripped):\n{table}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#608: a chain recording -inf log-posterior as its current state is
+    /// flagged DEGENERATE next to the per-chain table — with the count, the
+    /// contamination statement, and the explicit exclusion fix — and its mean
+    /// renders as -inf, never the "missing data" em-dash.
+    #[test]
+    fn bayesian_chain_table_flags_neginf_chain_loudly() {
+        let dir = crate::test_support::unique_temp_dir("summary_neginf_chain");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write_trace = |c: usize, kept: &str| {
+            let cd = dir.join(format!("chain_{c}"));
+            std::fs::create_dir_all(&cd).unwrap();
+            let body = format!(
+                "step\tlog_likelihood\tlog_posterior\n1\t-900.0\t-905.0\n{kept}");
+            std::fs::write(cd.join("trace.tsv"), body).unwrap();
+        };
+        write_trace(1, "2\t-50.0\t-52.0\n3\t-50.5\t-52.5\n4\t-49.5\t-51.5\n");
+        write_trace(2, "2\t-50.2\t-52.2\n3\t-50.1\t-52.1\n4\t-49.9\t-51.9\n");
+        // Chain 3: stuck — two of three retained rows carry -inf as the
+        // CURRENT state (the gh#607 shape).
+        write_trace(3, "2\t-inf\t-inf\n3\t-inf\t-inf\n4\t-60.0\t-62.0\n");
+        let mut draws = String::from("chain\tdraw\tbeta\n");
+        for c in 0..3 {
+            for d in 0..3 {
+                draws.push_str(&format!("{c}\t{d}\t0.5\n"));
+            }
+        }
+        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.bayesian_chain_loglik_table(&dir, 3);
+        assert!(table.contains("-inf"),
+            "the stuck chain's mean renders -inf, not the missing-data dash:\n{table}");
+        assert!(table.contains("DEGENERATE"),
+            "the stuck chain gets the loud flag:\n{table}");
+        assert!(table.contains("chain 3") && table.contains("66.7%")
+                && table.contains("(2/3)"),
+            "the flag names the chain and the -inf fraction:\n{table}");
+        assert!(table.contains("--exclude-chains"),
+            "the flag names the explicit exclusion fix:\n{table}");
+        assert!(table.contains("draws.tsv"),
+            "the flag states the contamination (draws are pooled):\n{table}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#608 negative control: healthy chains draw no DEGENERATE flag.
+    #[test]
+    fn bayesian_chain_table_no_degenerate_flag_when_healthy() {
+        let dir = crate::test_support::unique_temp_dir("summary_no_neginf");
+        std::fs::create_dir_all(&dir).unwrap();
+        for c in 1..=3 {
+            let cd = dir.join(format!("chain_{c}"));
+            std::fs::create_dir_all(&cd).unwrap();
+            std::fs::write(cd.join("trace.tsv"), format!(
+                "step\tlog_likelihood\tlog_posterior\n1\t-5{c}.0\t-5{c}.5\n2\t-5{c}.1\t-5{c}.6\n"))
+                .unwrap();
+        }
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.bayesian_chain_loglik_table(&dir, 3);
+        assert!(!table.contains("DEGENERATE"),
+            "healthy chains must not be flagged:\n{table}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
