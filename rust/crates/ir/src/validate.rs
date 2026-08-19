@@ -85,6 +85,14 @@ pub enum ValidationError {
              output cadence over a finished trajectory). Reachable directly or via a \
              referenced binding; remove it from the quantity (and any binding it reaches)")]
     QuantityForbiddenLeaf { quantity: String, leaf: String },
+
+    #[error("simulation horizon is not a forward interval: t_start = {t_start}, \
+             t_end = {t_end}. Both must be finite and t_end strictly greater than \
+             t_start. A non-advancing or inverted horizon is not an empty run — it \
+             produces a header-only output file at exit 0, which reads as a \
+             successful simulation. Fix `simulate {{ from = … to = … }}` in the model \
+             (or the scenario / `--to` override that set it)")]
+    InvalidHorizon { t_start: f64, t_end: f64 },
 }
 
 pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
@@ -373,6 +381,23 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
                 let mut seen: HashSet<&str> = HashSet::new();
                 check_quantity_legal(e, &bindings_map, &q.name, &mut errors, &mut seen);
             }
+        }
+    }
+
+    // ── Simulation horizon ordering ───────────────────────────────────────────
+    //
+    // Nothing else in the pipeline checks this. An inverted or degenerate
+    // horizon (`t_end <= t_start`) is not caught by the backends: the output
+    // grid comes out empty, every stepper's loop body never executes, and the
+    // run exits 0 with a header-only TSV — a silent wrong answer that reads as
+    // "the model produced nothing". Non-finite bounds are the same class
+    // (NaN/inf propagate into the grid). Checked here, at the single load
+    // boundary every command goes through.
+    {
+        let t_start = model.simulation.t_start;
+        let t_end   = model.simulation.t_end;
+        if !(t_start.is_finite() && t_end.is_finite() && t_end > t_start) {
+            errors.push(ValidationError::InvalidHorizon { t_start, t_end });
         }
     }
 
@@ -1297,5 +1322,61 @@ mod tests {
         assert!(errs.iter().any(|e| matches!(e,
             ValidationError::UnknownCompartment(c) if c == "Q")),
             "expected UnknownCompartment(Q), got: {:?}", errs);
+    }
+
+    // ── Simulation horizon ordering ───────────────────────────────────────────
+
+    /// The golden model's own horizon must keep validating — this check is a
+    /// tripwire on malformed IR, not a new constraint on well-formed models.
+    #[test]
+    fn forward_horizon_validates() {
+        let m = load_sir();
+        assert!(m.simulation.t_end > m.simulation.t_start, "fixture precondition");
+        validate(&m).expect("a forward horizon must validate");
+    }
+
+    /// `t_end == t_start` — the degenerate case. Before this check the run
+    /// exited 0 with a header-only TSV.
+    #[test]
+    fn degenerate_horizon_is_rejected() {
+        let mut m = load_sir();
+        m.simulation.t_end = m.simulation.t_start;
+        let errs = validate(&m).expect_err("t_end == t_start must be rejected");
+        assert!(errs.iter().any(|e| matches!(e, ValidationError::InvalidHorizon { .. })),
+            "expected InvalidHorizon, got: {errs:?}");
+    }
+
+    /// `t_end < t_start` — inverted.
+    #[test]
+    fn inverted_horizon_is_rejected() {
+        let mut m = load_sir();
+        m.simulation.t_start = 10.0;
+        m.simulation.t_end   = 5.0;
+        let errs = validate(&m).expect_err("t_end < t_start must be rejected");
+        assert!(errs.iter().any(|e| matches!(e,
+            ValidationError::InvalidHorizon { t_start, t_end }
+                if *t_start == 10.0 && *t_end == 5.0)),
+            "expected InvalidHorizon(10, 5), got: {errs:?}");
+    }
+
+    /// Non-finite bounds are rejected on either side. A bare `t_end > t_start`
+    /// ordering test would pass `t_start = -inf` and `t_end = -inf`-adjacent
+    /// cases, and NaN silently compares false everywhere — so the check tests
+    /// finiteness explicitly and this test pins all four corners.
+    #[test]
+    fn non_finite_horizon_is_rejected() {
+        for (t_start, t_end) in [
+            (0.0, f64::NAN),
+            (f64::NAN, 100.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 100.0),
+        ] {
+            let mut m = load_sir();
+            m.simulation.t_start = t_start;
+            m.simulation.t_end   = t_end;
+            let errs = validate(&m).unwrap_err();
+            assert!(errs.iter().any(|e| matches!(e, ValidationError::InvalidHorizon { .. })),
+                "expected InvalidHorizon for ({t_start}, {t_end}), got: {errs:?}");
+        }
     }
 }
