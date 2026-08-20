@@ -44,6 +44,23 @@ Read the result this way:
 This test belongs **early**, before any sampler tuning — it flips the entire
 diagnosis and costs one simulate-plus-fit.
 
+**Its blind spot: a defect shared by the generator and the scorer.** The test
+compares one code path against another, so it can only see a defect that one of
+them has and the other does not. When the same wrong behaviour sits on both
+sides, simulate-then-refit recovers θ cleanly from data that was never right.
+Concretely (gh#681): a real-valued compartment referenced in an observation
+evaluates as zero on **both** the forward emitter and the value-path scorer, so
+a model whose observation adds an environmental reservoir generates data with
+the reservoir dropped, scores it with the reservoir dropped, and returns θ to
+three digits. Green test, wrong model.
+
+The general rule: **a self-consistency test cannot see a defect its two halves
+share; a cross-path comparison can.** Two paths that are supposed to compute the
+same quantity — `mh` and `nuts` on one model and one dataset — disagree when one
+of them is wrong, and that disagreement is the only signal a shared defect
+leaves. Keep running the self-consistency test first; reach for the cross-path
+check when it passes and you still do not believe the fit.
+
 ## 2. "Looks fittable" ≠ "is fittable"
 
 A likelihood landscape that looks smooth and peaked can still be unfittable, for
@@ -76,10 +93,29 @@ by Latin-hypercube over the declared `[estimate]` bounds. Two things to know:
 If §1 pointed at the inference, separate these two, because their fixes are
 unrelated.
 
-**(a) Particle-filter marginal noise (ESS collapse).** Methods that feed on the
-_marginal_ likelihood — PMMH, and IF2's particle ranking — break when the
-filter's log-likelihood estimate is too noisy. First ask whether it is even
-fixable: scale particles at one fixed θ and watch the loglik standard deviation.
+**(a) An under-resourced particle filter — PMMH, IF2 _and_ PGAS.** Every
+particle method degrades when the filter has too few particles. The **lever is
+the same in all of them (more particles)**, but the **symptom differs by
+method**, and reading the wrong symptom sends you to the wrong fix.
+
+- **PMMH and IF2 consume the _marginal_ likelihood**, so their symptom is
+  _noise_: the filter's log-likelihood estimate is too variable, acceptance
+  collapses, and IF2's particle ranking becomes arbitrary.
+- **PGAS conditions on a sampled latent path instead of marginalizing it out, so
+  its symptom is _mixing_, not noise.** The conditional sequential Monte Carlo
+  (CSMC) step has to renew the reference trajectory; with too few particles it
+  rarely does, the chain barely moves in latent space, and what you see is
+  **poor R̂ and low `trajectory_renewal`** — never a noisy loglik. Read
+  `trajectory_renewal` in `camdl fit summary` (the `LowTrajectoryRenewal` and
+  `DegenerateAncestorSampling` diagnostics fire on it); gh#685 will add
+  per-chain filter ESS next to it, which is the direct reading.
+
+**If you are running PGAS, this is your bullet — do not read past it into (b).**
+The fix for a starved CSMC is particles, and it looks nothing like the fix for
+geometry.
+
+For PMMH and IF2, first ask whether the noise is even fixable: scale particles
+at one fixed θ and watch the loglik standard deviation.
 
 ```bash
 camdl pfilter model.camdl --params theta.toml --data cases.tsv \
@@ -95,9 +131,31 @@ measures this directly (the Snyder et al. 2008 $\exp(\tau^2/2)$ implied-N
 estimate); see [`camdl docs inference`](inference.md) (the `--pf-health`
 section). The fix there is a different method, not brute-force N.
 
+For PGAS the equivalent probe is one re-run at roughly 4× the particles,
+comparing R̂ and `trajectory_renewal`. Measured on a national Ebola PGAS fit —
+same model, same data, same config, same 8,000 sweeps, **only `particles`
+differs** — with per-parameter R̂:
+
+| `particles` | chains | `trajectory_renewal` | `r_eff` | `tau` | `q_comm` | `gamma` | `rho` | `rho_lab` |
+| ----------- | ------ | -------------------- | ------- | ----- | -------- | ------- | ----- | --------- |
+| 1,200       | 6      | 0.591                | 1.33    | 2.52  | 2.64     | 1.81    | 1.18  | 1.19      |
+| 4,800       | 7      | 0.707                | 1.02    | 1.45  | 1.32     | 1.37    | 1.03  | 1.03      |
+
+Every parameter improved, acceptance and divergence counts became healthy, and
+one further chain cleared the initialisation check (hence 6 → 7 from an
+unchanged config). Nothing about the model changed. Before that re-run the team
+had spent a day reading these R̂ values as (b) and was about to reparameterise.
+
+**The ordering lesson, which is the generalisable part: establish that the
+instrument is adequate before concluding anything about the model or its
+geometry.** An under-resourced filter produces symptoms that mimic
+non-identifiability — poor R̂ on exactly the parameters a weakly-identified
+direction would spoil. Rule out (a) first; it costs one re-run.
+
 **(b) Geometry (ridges, flat or stiff directions)** stalls gradient-based
 PGAS-NUTS, which is a different problem with a different fix (reparameterize,
-tighten priors, or add identifying data).
+tighten priors, or add identifying data). Conclude (b) only once (a) is ruled
+out.
 
 **Crucially: PGAS-NUTS is immune to the PF marginal noise of (a).** It runs on
 the _smooth complete-data conditional_ likelihood — it conditions on a sampled
@@ -105,6 +163,12 @@ latent trajectory rather than marginalizing it out with a noisy filter — so
 "PMMH is dead on this problem" does **not** imply "PGAS is dead." If marginal
 noise is killing PMMH/IF2, PGAS is often still viable. (See the
 marginalize-vs-condition contrast in [`camdl docs inference`](inference.md).)
+
+**Immune to the noise is not immune to the particle count.** PGAS still runs a
+CSMC sweep, and that sweep still needs particles to renew the reference
+trajectory — the mixing bullet in (a). "PGAS does not eat the marginal
+likelihood" is a reason not to fear `loglik_se`; it is not a reason to run PGAS
+at a particle count chosen for a cheap smoke test.
 
 **(c) When the filter can't be rescued in place — scaffold with `ode + mh`, and
 read the dying filter as a signal.** If the particle filter is dying (ESS
@@ -151,14 +215,30 @@ the backend to the regime before you start:
 
 When PGAS-NUTS stalls on geometry rather than noise, three moves, in order.
 
+**First, know what R̂ can and cannot answer.** R̂ measures whether the chains
+_agree_; it does not measure whether the data _determine_ a parameter. On a
+genuinely flat direction, better mixing improves R̂ too — the chains explore the
+flat direction more fully and agree on the same wide distribution — so a falling
+R̂ is not evidence of identification, and a high R̂ is not proof of
+non-identification. The instrument for identifiability is **prior-to-posterior
+shrinkage**: posterior width divided by prior width, which does not depend on
+mixing. In the Ebola fit of §3(a), raising the particle count roughly halved
+`tau`'s R̂ while its 90% posterior width moved 9% — 0.224 → 0.204, against a
+prior 90% width of 0.371, so 60% of prior before and 55% after. The mixing
+improved; the constraint did not. Compute the shrinkage before calling anything
+non-identified, and re-read §3(a) before calling it geometry.
+
 **Name the bad direction with R̂.** If one parameter's R̂ won't converge but the
 fit reproduces the data fine, suspect a _non-identified combination_, not a bad
 parameter. Look at the posterior correlation matrix; if two parameters are ≈ ±1
 correlated, compute R̂ on the **identified combination** (e.g. the product
 $\rho \cdot D_{50}$) versus the **orthogonal** direction (the ratio): the
 combination converges (R̂ ≈ 1), the sloppy direction does not. That decomposition
-names the non-identifiability in one line. (A sloppy ridge in the sense of
-Gutenkunst et al. 2007; gh#263 proposes to automate this as a post-fit report.)
+names the direction the chains disagree on, in one line. Confirm it with
+shrinkage before reporting it as non-identifiability — an R̂ contrast on its own
+can be nothing more than a contrast between a quantity the sampler happened to
+mix on and one it did not. (A sloppy ridge in the sense of Gutenkunst et al.
+2007; gh#263 proposes to automate this as a post-fit report.)
 
 **Don't be fooled by warm-up.** R̂ ≈ 1.1 with a tail that _looks_ converged is
 usually just too-short burn-in inflating the statistic. Recompute split-R̂
@@ -186,10 +266,10 @@ extended to the deterministic backends.)
 
 Fixing or pinning parameters (`--fixed name=value`) reduces dimension and can
 unstick the **geometry** problem (b) — fewer ridges to climb. It does
-**nothing** for the per-evaluation PF noise of (a): the ESS at a given θ does
-not depend on how many parameters are free. If your problem is marginal noise,
-pinning parameters will feel like it should help and won't. Attack the problem
-you actually have.
+**nothing** for the under-resourced filter of (a): the ESS at a given θ does not
+depend on how many parameters are free, and neither does whether CSMC renews the
+reference trajectory. If your problem is the filter, pinning parameters will
+feel like it should help and won't. Attack the problem you actually have.
 
 ## 5. Use the right "predicted value" for the diagnostic
 
