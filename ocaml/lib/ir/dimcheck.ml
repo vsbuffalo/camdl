@@ -936,9 +936,9 @@ let check_contrasts st (m : model)
    shapes, each emitting E304 with a per-argument [msg] (the messages differ, so
    they are passed in):
    - [require_count]: the argument is an external count denominator or expected
-     count (Binomial/BetaBinomial `n`, Poisson `rate`). A bare numeric literal
-     is a count by context and exempt; otherwise its inferred dim must be a
-     [population].
+     count (Binomial/BetaBinomial `n`, Poisson `rate`, NegBinomial `mean`,
+     zero-inflated NegBinomial `mean`). A bare numeric literal is a count by
+     context and exempt; otherwise its inferred dim must be a [population].
    - [require_dimensionless]: the argument is a probability or shape parameter
      (Binomial/Bernoulli `p`, BetaBinomial `alpha`/`beta`) — its inferred dim
      must be dimensionless. *)
@@ -1085,7 +1085,21 @@ let check_model (m : model) : result =
           Known population);
       (match obs.likelihood with
        | NegBinomial nb ->
-         ignore (infer st ~ctx nb.mean.expr);
+         (* The NegBinomial `mean` is the same object as the Poisson `rate`:
+            the expected COUNT of events over the reporting interval,
+            dimension [population] — not a per-time rate. Previously
+            inferred-and-discarded while `dispersion` right below it was
+            constrained, so a `projected` that is a transition rate
+            (`gamma * I`, [P·T^-1]) reached the likelihood undiagnosed; at a
+            one-day reporting step the wrong value is numerically close, at a
+            weekly step it is off by roughly the window length. A bare numeric
+            literal (`mean = 100`) is a count by context and exempt, as for the
+            Poisson rate. *)
+         require_count st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: NegBinomial `mean` must have the dimension of a count \
+              (expected events over the reporting interval)" ctx)
+           nb.mean.expr;
          let disp_dim = infer st ~ctx nb.dispersion.expr in
          (* Pre-existing constraint, kept for symmetry with the new
             checks below. propagate handles Unknown binding;
@@ -1170,7 +1184,11 @@ let check_model (m : model) : result =
          (* Same contract as the NegBinomial base: `mean` is the expected count,
             `dispersion` is dimensionless. Plus `pi` is the structural-zero
             probability — dimensionless on [0, 1]. *)
-         ignore (infer st ~ctx zi.mean);
+         require_count st ~ctx
+           ~msg:(Printf.sprintf
+             "%s: zero-inflated NegBinomial `mean` must have the dimension of \
+              a count (expected events over the reporting interval)" ctx)
+           zi.mean;
          let disp_dim = infer st ~ctx zi.dispersion in
          propagate st ~ctx zi.dispersion dimensionless;
          constrain_known st ~code:"E304"

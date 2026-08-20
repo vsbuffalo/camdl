@@ -13,6 +13,52 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-20 — `neg_binomial(mean = …)` must be a count, not a rate
+
+**What.** The `mean` of `neg_binomial(...)` — and of the same family reached
+through `zero_inflated(base = neg_binomial(...), pi = ...)` — is now dimension-
+checked as a **count** (`[P]`): the expected number of events over the reporting
+interval, exactly like `poisson(rate = …)` and `binomial(n = …)`. It was
+previously inferred and discarded, while the `r`/`dispersion` argument beside it
+was checked, so a `projected` holding a transition **rate** (`P·T⁻¹`) reached
+the likelihood with no diagnostic. `projected` accepts an arbitrary expression
+whose dimension is inferred, so nothing upstream objected either.
+
+Why it matters: at a one-day reporting step a per-day rate and a one-day
+accumulated count coincide numerically, so the wrong likelihood is close enough
+to look like a refactor; at a weekly step it is wrong by roughly the window
+length.
+
+**Migration.** Accumulate the flow over the reporting interval instead of
+evaluating its instantaneous rate.
+
+```camdl
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected  = gamma * I                  # old: a rate, P·T⁻¹ — now E304
+    projected  = incidence(recovery)        # new: the count over the interval
+    emit_schedule = every 7 'days
+    weekly_cases ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+```
+
+Scaling the projection by dimensionless factors is unaffected —
+`mean = rho * (1.0 + gamma * q / tau) * projected` is still `[P]` and still
+compiles. A bare numeric literal (`mean = 100`) is a count by context and is
+exempt, as it already was for `poisson`'s `rate` and `binomial`'s `n`.
+
+**Diagnostic.**
+
+```text
+error[E304]: observation 'weekly_cases': NegBinomial `mean` must have the
+             dimension of a count (expected events over the reporting interval)
+  = note: expected dimension P (population count), got P*T^-1 (population-level rate)
+```
+
+---
+
 ## 2026-08-13 — a scenario's `simulate {}` must set `to`, and only `to`
 
 **What.** Inside `scenarios { … }`, a `simulate {}` block overrides the end time

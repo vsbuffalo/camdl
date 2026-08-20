@@ -2861,6 +2861,16 @@ parameterization: the mean is `μ` and the variance is `μ + μ²/r`, so a small
 `r` means more overdispersion and `r → ∞` recovers `poisson(μ)`. A prior on `r`
 is therefore a prior on the quadratic excess variance — pin it deliberately.
 
+**Count arguments carry the count dimension `[P]`.** `neg_binomial`'s `mean`,
+`poisson`'s `rate`, and `binomial`/`beta_binomial`'s `n` are all *expected
+counts over the reporting interval*, not per-time rates. Writing a transition
+rate there (`projected = gamma * I`, dimension `P·T⁻¹`) is **E304**. The
+distinction is invisible at a one-day reporting step, where a per-day rate and a
+one-day accumulated count coincide numerically; at a weekly step the likelihood
+is wrong by roughly the window length. Use `incidence(<transition>)`, which
+accumulates the flow over the interval. A bare numeric literal (`mean = 100`) is
+a count by context and is exempt.
+
 The two `beta_binomial` spellings are equivalent: `mean`/`concentration` lowers to
 `alpha = mean · concentration`, `beta = (1 − mean) · concentration`. Use whichever
 reads better; mixing the two forms in one call is an error (E252). For a

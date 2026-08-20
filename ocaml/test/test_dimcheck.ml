@@ -1027,6 +1027,99 @@ observations {
   Alcotest.(check bool) "probability column feeding poisson rate must E304"
     true (has_e304_in src)
 
+(* ── NegBinomial / zero-inflated NegBinomial `mean` is a count ─────────── *)
+
+(* The NegBinomial `mean` is the same object as the Poisson `rate`: the expected
+   COUNT of events over the reporting interval, dimension [P] — not a per-time
+   rate. It was inferred-and-discarded while the `dispersion` immediately below
+   it was constrained, so a `projected` that is a transition RATE (`gamma * I`,
+   dimension [P·T^-1]) reached the likelihood with no diagnostic. `projected`
+   takes a DerivedExpr whose dimension is *inferred*, so nothing upstream
+   objected either. At a one-day reporting step a per-day rate and a one-day
+   accumulated count coincide numerically, so the resulting likelihood is only
+   slightly wrong; at a weekly step it is wrong by roughly the window length.
+   The zero-inflated variant carries the identical contract. *)
+
+let e304_diags_in src =
+  Compiler.collect_diagnostics ~filename:"<nb-mean>" src
+  |> List.filter (fun (d : Diagnostics.diagnostic) -> d.code = "E304")
+
+let nb_mean_src ~projected ~likelihood = Printf.sprintf {camdl|
+compartments { S, I, R }
+parameters {
+  beta    : rate
+  gamma   : rate
+  rho     : probability
+  q_comm  : probability
+  tau     : rate
+  k       : positive
+  pi_zero : probability
+}
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected  = %s
+    emit_schedule = every 7 'days
+    weekly_cases ~ %s
+  }
+}
+|camdl} projected likelihood
+
+let no_e304 ~projected ~likelihood =
+  e304_diags_in (nb_mean_src ~projected ~likelihood) = []
+
+let located_e304 ~projected ~likelihood =
+  let diags = e304_diags_in (nb_mean_src ~projected ~likelihood) in
+  List.exists (fun (d : Diagnostics.diagnostic) ->
+    d.Diagnostics.loc.Diagnostics.line > 0) diags
+
+(* RED case: `projected = gamma * I` is a rate ([P·T^-1]) where a windowed count
+   is expected, and it feeds the NegBinomial `mean` directly. *)
+let test_e304_neg_binomial_mean_is_rate_rejected () =
+  Alcotest.(check bool) "rate-dimensioned neg_binomial mean must be a located E304"
+    true (located_e304 ~projected:"gamma * I"
+            ~likelihood:"neg_binomial(mean = projected, r = k)")
+
+(* Same contract through the `zero_inflated(base = neg_binomial(...))` wrapper,
+   whose `mean` is a bare expr rather than a diffable. *)
+let test_e304_zinb_mean_is_rate_rejected () =
+  Alcotest.(check bool) "rate-dimensioned zero-inflated mean must be a located E304"
+    true (located_e304 ~projected:"gamma * I"
+            ~likelihood:"zero_inflated(base = neg_binomial(mean = projected, r = k), \
+                         pi = pi_zero)")
+
+(* Negative control (a): the legitimate shape — a CumulativeFlow projection
+   (`incidence(...)`, a windowed count) straight into the mean. *)
+let test_neg_binomial_mean_incidence_ok () =
+  Alcotest.(check bool) "incidence() projection as neg_binomial mean must not E304"
+    true (no_e304 ~projected:"incidence(infection)"
+            ~likelihood:"neg_binomial(mean = projected, r = k)");
+  Alcotest.(check bool) "incidence() projection as zero-inflated mean must not E304"
+    true (no_e304 ~projected:"incidence(infection)"
+            ~likelihood:"zero_inflated(base = neg_binomial(mean = rho * projected, \
+                         r = k), pi = pi_zero)")
+
+(* Negative control (b): a bare numeric literal mean is a count by context —
+   [is_bare_const] exempts it, as it does for Poisson `rate` and Binomial `n`. *)
+let test_neg_binomial_mean_literal_ok () =
+  Alcotest.(check bool) "literal neg_binomial mean must not E304"
+    true (no_e304 ~projected:"incidence(infection)"
+            ~likelihood:"neg_binomial(mean = 100, r = k)")
+
+(* Negative control (c): the real reporting shape — the count projection scaled
+   by dimensionless factors (`rho`, and a dimensionless ratio of two rates).
+   The product is still [P], so it must pass. *)
+let test_neg_binomial_mean_scaled_projection_ok () =
+  Alcotest.(check bool) "dimensionless-scaled projection as mean must not E304"
+    true (no_e304 ~projected:"incidence(infection)"
+            ~likelihood:"neg_binomial(mean = rho * (1.0 + gamma * q_comm / tau) \
+                         * projected, r = k)")
+
 (* ── Tier-3 unit literal on positive/real param kinds (gh#60) ──────────── *)
 
 (* `positive`/`real` may carry an optional tier-3 unit literal that supplies the
@@ -1356,6 +1449,18 @@ let () =
         test_binomial_n_literal_ok;
       Alcotest.test_case "poisson rate = probability column → E304"  `Quick
         test_poisson_rate_probability_rejected;
+      (* NegBinomial / zero-inflated NegBinomial `mean` is the expected count
+         over the reporting interval — the Poisson `rate`'s twin. *)
+      Alcotest.test_case "neg_binomial mean = rate → E304"  `Quick
+        test_e304_neg_binomial_mean_is_rate_rejected;
+      Alcotest.test_case "zero-inflated mean = rate → E304"  `Quick
+        test_e304_zinb_mean_is_rate_rejected;
+      Alcotest.test_case "neg_binomial mean = incidence() ok"  `Quick
+        test_neg_binomial_mean_incidence_ok;
+      Alcotest.test_case "neg_binomial mean = literal ok"  `Quick
+        test_neg_binomial_mean_literal_ok;
+      Alcotest.test_case "neg_binomial mean = scaled projection ok"  `Quick
+        test_neg_binomial_mean_scaled_projection_ok;
     ];
 
     (* ── Property-based tests (QCheck) ─────────────────────────────── *)
