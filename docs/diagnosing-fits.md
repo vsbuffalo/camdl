@@ -139,7 +139,7 @@ differs** — with per-parameter R̂:
 | `particles` | chains | `trajectory_renewal` | `r_eff` | `tau` | `q_comm` | `gamma` | `rho` | `rho_lab` |
 | ----------- | ------ | -------------------- | ------- | ----- | -------- | ------- | ----- | --------- |
 | 1,200       | 6      | 0.591                | 1.33    | 2.52  | 2.64     | 1.81    | 1.18  | 1.19      |
-| 4,800       | 7      | 0.707                | 1.02    | 1.45  | 1.32     | 1.37    | 1.03  | 1.03      |
+| 4,800       | 7      | 0.707                | 1.02    | 1.46  | 1.32     | 1.37    | 1.03  | 1.03      |
 
 Every parameter improved, acceptance and divergence counts became healthy, and
 one further chain cleared the initialisation check (hence 6 → 7 from an
@@ -221,12 +221,20 @@ genuinely flat direction, better mixing improves R̂ too — the chains explore 
 flat direction more fully and agree on the same wide distribution — so a falling
 R̂ is not evidence of identification, and a high R̂ is not proof of
 non-identification. The instrument for identifiability is **prior-to-posterior
-shrinkage**: posterior width divided by prior width, which does not depend on
-mixing. In the Ebola fit of §3(a), raising the particle count roughly halved
-`tau`'s R̂ while its 90% posterior width moved 9% — 0.224 → 0.204, against a
-prior 90% width of 0.371, so 60% of prior before and 55% after. The mixing
-improved; the constraint did not. Compute the shrinkage before calling anything
-non-identified, and re-read §3(a) before calling it geometry.
+shrinkage** — posterior width divided by prior width — because unlike R̂ it does
+not route through between-chain agreement at all.
+
+**But shrinkage still has to be _estimated_, and that needs adequate ESS.** A
+pooled 90% interval computed from badly-mixed chains describes where the chains
+happened to sit, not the posterior: it inflates when mixing is poor and tightens
+when mixing improves, exactly as R̂ does. Both statistics moved together in the
+Ebola fit of §3(a) when the particle count rose — `tau`'s R̂ went 2.52 → 1.46 and
+its 90% posterior width 0.294 → 0.204, from 79% to 55% of the prior's 90% width
+of 0.371. At the per-chain effective sample sizes those runs delivered (order
+5), neither number is trustworthy; 55% of prior is the best available reading of
+how much the data constrain `tau`, and it is still not a reliable one. So: reach
+for shrinkage rather than an R̂ contrast when the question is identifiability,
+quote the ESS beside it, and re-read §3(a) before calling anything geometry.
 
 **Name the bad direction with R̂.** If one parameter's R̂ won't converge but the
 fit reproduces the data fine, suspect a _non-identified combination_, not a bad
