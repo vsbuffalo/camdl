@@ -98,26 +98,27 @@ project measured **0.884 → 0.605** on their model family at 40,000 sweeps, and
 it shows up where it matters — worst-parameter R̂ went from 1.22 pre-fix to 1.91
 (`tau`) and 2.04 (`q_comm`) post-fix **at the same budget**.
 
-**Caveat on those R̂ figures, and it cuts the other way: they are confounded and
-should not be quoted as the mixing cost alone.** The post-fix run pooled a chain
-that was seeded at `-inf` and never reached finite density — one distinct
-parameter vector across 7,600 retained draws. A chain like that inflates
-between-chain variance directly, which is exactly what R̂ measures, so an unknown
-fraction of 1.22 → 1.91/2.04 is the frozen chain rather than the sampler needing
-more sweeps. Under the chain-start refusal shipped since (gh#660) that chain
-would have been skipped and never pooled, so the same run today would report a
-different, lower figure. The renewal numbers (0.884 → 0.605) are unaffected —
-they are per-chain and do not pool.
+**On those R̂ figures, corrected twice and now settled by measurement.** They
+were computed on the SEVEN sampling chains only — the chain seeded at `-inf` was
+dropped by the downstream loader — so they are NOT inflated by it. (This
+incident previously carried a caveat claiming otherwise; the downstream team
+recomputed both ways and refuted it.) The like-for-like comparison stands:
+`labruns_full` had eight finite chains with worst-parameter R̂ 1.22; this run has
+seven finite chains with `q_comm` 2.04 and `tau` 1.91. Two caveats they raised
+and worth keeping: the runs differ in chain count (7 vs 8) and R̂ is mildly
+chain-count sensitive, and equal sweeps is not equal effective samples — which
+is the whole point of the renewal figure.
 
-Settling it costs nothing new: recompute R̂ on the stored run with
-`--exclude-chains` naming the frozen chain (the per-fit `@fit:ids` syntax,
-gh#417/418) and compare against 1.91/2.04. Until someone does, treat the renewal
-figures as the measured mixing cost and the R̂ pair as an upper bound. The old
-renewal figure was inflated by counting splices that were off the target's
-support, so this is an honest cost rather than a regression: the sampler now
-declines moves it should never have made, and needs more sweeps to cover the
-same ground. Anyone sizing a run should plan from the field number, not the
-synthetic one.
+**The general hazard is real and their data demonstrates it**, separately from
+this incident: pooling the degenerate chain moves `rho` 1.08 → 1.43 and `tau`
+1.91 → 2.17. And `camdl fit summary` reported **max R̂ 9.497** on the pooled
+cloud for this run — dominated by a chain the same summary flags as degenerate.
+Both figures are correct for what they are, but the actionable one requires the
+reader to recompute. Filed separately. The old renewal figure was inflated by
+counting splices that were off the target's support, so this is an honest cost
+rather than a regression: the sampler now declines moves it should never have
+made, and needs more sweeps to cover the same ground. Anyone sizing a run should
+plan from the field number, not the synthetic one.
 
 The trajectory loss deserves its own line: `coherent_counts_after` refused
 discontinuous paths on its negative-count guard, so the splice defect surfaced
