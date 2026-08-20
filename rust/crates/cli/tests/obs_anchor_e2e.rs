@@ -29,9 +29,9 @@ fn bin() -> PathBuf {
 }
 
 /// The same model with a LITERAL fork and horizon — no anchors anywhere. Used
-/// only to produce a filtered-state file, since `pfilter` does not resolve
-/// anchors. Same compartments and observation block, so the state file's
-/// columns line up with the anchored twin.
+/// to produce a filtered-state file whose window is fixed independently of the
+/// anchored twin under test. Same compartments and observation block, so the
+/// state file's columns line up with that twin.
 fn write_plain_model(dir: &Path) -> PathBuf {
     // Built from the shared body, NOT by calling `write_model` — that writes
     // `anchored.camdl`, which the caller has already populated with the model
@@ -51,6 +51,21 @@ fn write_model_with_scenario(dir: &Path, sim_to: &str, scenario_to: &str) -> Pat
     let body = format!(
         "{base}\nscenarios {{\n  forecast {{\n    label = \"forecast\"\n    \
          simulate {{ to = {scenario_to} }}\n    set = {{ beta = 0.35 }}\n  }}\n}}\n"
+    );
+    let p = dir.join("anchored.camdl");
+    std::fs::write(&p, body).unwrap();
+    p
+}
+
+/// As [`write_model_with_scenario`], but the scenario pins EVERY parameter.
+/// `--scenario` and `--params` are mutually exclusive on `pfilter`, so a
+/// scenario run has to carry the whole parameter vector itself.
+fn write_model_with_full_scenario(dir: &Path, sim_to: &str, scenario_to: &str) -> PathBuf {
+    let base = model_body(sim_to);
+    let body = format!(
+        "{base}\nscenarios {{\n  forecast {{\n    label = \"forecast\"\n    \
+         simulate {{ to = {scenario_to} }}\n    set = {{\n      beta = 0.12\n      \
+         gamma = 0.1\n      rho = 0.6\n    }}\n  }}\n}}\n"
     );
     let p = dir.join("anchored.camdl");
     std::fs::write(&p, body).unwrap();
@@ -673,4 +688,157 @@ fn an_anchored_horizon_can_write_observations() {
         .filter_map(|l| l.split('\t').next().and_then(|t| t.parse::<f64>().ok()))
         .fold(f64::NEG_INFINITY, f64::max);
     assert_eq!(max_t, 42.0, "obs axis reaches the resolved horizon:\n{txt}");
+}
+
+// ── The three fixed-θ commands that bind data ────────────────────────────────
+//
+// `pfilter`, `profile` and `survey` all bind observation streams before they
+// score anything, so each resolves a model's anchors from its own bindings
+// rather than refusing at `CompiledModel::new`. `pfilter --fit` is the cheapest
+// probe of a fitted model at fixed θ, and without this an anchored model could
+// be neither probed nor gated — the two things you reach for first when a fit
+// looks wrong.
+
+/// Every line the anchor resolver prints for the shared fixture, given data
+/// ending at t = 28 and a horizon of `last_obs + 4 'weeks`.
+fn assert_both_anchors_announced(stderr: &str, via: &str) {
+    assert!(
+        stderr.contains("simulate { to }") && stderr.contains("t = 56"),
+        "[{via}] the resolved horizon must be announced on stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("forcing 'ramp'") && stderr.contains("t = 28"),
+        "[{via}] the resolved forcing knot must be announced on stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("NaN"),
+        "[{via}] no horizon check may see the unresolved marker:\n{stderr}"
+    );
+}
+
+/// The reported gap: `pfilter --fit` on an anchored model. It must run and
+/// report a finite log-likelihood, with the resolved window announced.
+#[test]
+fn pfilter_resolves_an_anchored_model_and_reports_a_finite_loglik() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = write_model(tmp.path(), "last_obs + 4 'weeks");
+    let data = tmp.path().join("cases.tsv");
+    write_data(&data, 4); // last_obs = 28
+    let toml = write_fit_toml(tmp.path(), &model, &data);
+    let params = params_file(tmp.path());
+
+    let o = Command::new(&bin)
+        .arg("pfilter")
+        .arg(&model)
+        .args(["--params", params.to_str().unwrap()])
+        .args(["--fit", toml.to_str().unwrap()])
+        .args(["--particles", "50", "--seed", "1"])
+        .arg("--no-save-samples")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .output()
+        .expect("spawn pfilter");
+    let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(o.status.success(), "pfilter must run an anchored model:\n{stderr}");
+    assert_both_anchors_announced(&stderr, "pfilter --fit");
+
+    let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+    let ll: f64 = stdout
+        .lines()
+        .find_map(|l| l.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("pfilter must print a log-likelihood:\n{stdout}"));
+    assert!(ll.is_finite(), "the log-likelihood must be finite, got {ll}");
+}
+
+/// An anchored model with NO data bound is still refused, by name. `--data` was
+/// already required here; what the message must add is that the model cannot
+/// resolve its horizon at all without one, and which construct needs it.
+#[test]
+fn pfilter_refuses_an_anchored_model_with_no_data_bound() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = write_model(tmp.path(), "last_obs + 4 'weeks");
+    let params = params_file(tmp.path());
+
+    let o = Command::new(&bin)
+        .arg("pfilter")
+        .arg(&model)
+        .args(["--params", params.to_str().unwrap()])
+        .args(["--particles", "50", "--seed", "1"])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .output()
+        .expect("spawn pfilter");
+    let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(!o.status.success(), "no bound data must refuse:\n{stderr}");
+    assert!(
+        stderr.contains("anchored to observed data")
+            && stderr.contains("last_obs")
+            && stderr.contains("ramp"),
+        "the refusal must name the anchored constructs:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--data") && stderr.contains("--fit"),
+        "the refusal must name what to supply:\n{stderr}"
+    );
+}
+
+/// The gh#561 refusal survives, and now compares RESOLVED numbers.
+///
+/// Both directions are asserted, because either alone would pass for a broken
+/// guard: refusing everything passes the first, and refusing nothing passes the
+/// second. Before the model was resolved here, the model horizon was NaN and
+/// `h != NaN` held for every scenario — so the guard fired on a scenario whose
+/// window it could in fact honour exactly.
+#[test]
+fn pfilter_scenario_horizon_guard_compares_resolved_numbers() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("cases.tsv");
+    write_data(&data, 4); // last_obs = 28, so the model horizon resolves to 56
+
+    let run = |dir: &Path| -> (bool, String) {
+        let o = Command::new(&bin)
+            .arg("pfilter")
+            .arg(dir.join("anchored.camdl"))
+            .args(["--scenario", "forecast"])
+            .arg(format!("--data={}", data.to_str().unwrap()))
+            .args(["--particles", "50", "--seed", "1"])
+            .arg("--no-save-samples")
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+            .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+            .output()
+            .expect("spawn pfilter");
+        (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+
+    // (a) Genuinely different windows: model +4 'weeks = 56, scenario
+    //     +8 'weeks = 84. Refused, quoting BOTH resolved numbers.
+    let differs = tmp.path().join("differs");
+    std::fs::create_dir_all(&differs).unwrap();
+    write_model_with_full_scenario(&differs, "last_obs + 4 'weeks", "last_obs + 8 'weeks");
+    let (ok, stderr) = run(&differs);
+    assert!(!ok, "a horizon pfilter cannot honour must be refused:\n{stderr}");
+    assert!(
+        stderr.contains("forecast") && stderr.contains("84") && stderr.contains("56"),
+        "the refusal must quote both RESOLVED horizons (56 and 84):\n{stderr}"
+    );
+
+    // (b) The negative control: the SAME two anchors written differently but
+    //     resolving to the SAME time (56). That is the no-op precedent — the
+    //     guard must not fire, and the filter must run.
+    let equal = tmp.path().join("equal");
+    std::fs::create_dir_all(&equal).unwrap();
+    write_model_with_full_scenario(&equal, "last_obs + 4 'weeks", "last_obs + 28 'days");
+    let (ok, stderr) = run(&equal);
+    assert!(
+        ok,
+        "a scenario horizon that RESOLVES equal to the model's is a no-op and \
+         must run, not be refused:\n{stderr}"
+    );
+    assert_both_anchors_announced(&stderr, "pfilter --scenario (equal horizons)");
 }

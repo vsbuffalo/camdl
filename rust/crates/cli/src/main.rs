@@ -2783,8 +2783,8 @@ fn resolve_simulate_obs_anchors(
     obs_anchors_from_config(model, &config, dt)
 }
 
-/// The fold itself, over a config already in hand. Split out so `fit predict`
-/// — which has resolved its config long before it could look up a `--fit` ref —
+/// The fold over a config already in hand. Split out so `fit predict` — which
+/// has resolved its config long before it could look up a `--fit` ref —
 /// resolves anchors through the SAME reader as `simulate`, rather than growing a
 /// second one that could disagree about which rows count as observation times.
 pub(crate) fn obs_anchors_from_config(
@@ -2805,6 +2805,23 @@ pub(crate) fn obs_anchors_from_config(
     let bound: Vec<(String, std::path::PathBuf)> = effective_pairs.iter()
         .map(|(k, v)| (k.clone(), std::path::PathBuf::from(v)))
         .collect();
+    obs_anchors_from_bindings(model, &bound, dt)
+}
+
+/// The fold itself, over `(binding key → file)` pairs a command has ALREADY
+/// resolved. `pfilter` / `profile` / `survey` reach it directly: their bindings
+/// come from `--data` flags as often as from a fit toml, and re-deriving the
+/// window from a config they may not have would be a second reader that could
+/// disagree with the one they score against.
+pub(crate) fn obs_anchors_from_bindings(
+    model: &ir::Model,
+    bound: &[(String, std::path::PathBuf)],
+    dt: f64,
+) -> Result<(f64, f64), String> {
+    if bound.is_empty() {
+        return Err("no observation stream is bound — nothing to anchor \
+                    last_obs/first_obs to.".into());
+    }
     let time_opts = crate::caltime_load::TimeOpts {
         origin: model.origin.as_deref(),
         time_unit: &model.time_unit,
@@ -2818,7 +2835,7 @@ pub(crate) fn obs_anchors_from_config(
     // still anchors. Conditioning is NOT applied (anchors fold over the raw
     // streams), and hole rows count as observation times, both matching
     // `fit predict`'s value_at anchor.
-    let effective = crate::fit::runner::data_bindings_to_effective(model, &bound)?;
+    let effective = crate::fit::runner::data_bindings_to_effective(model, bound)?;
     let mut first = f64::INFINITY;
     let mut last = f64::NEG_INFINITY;
     for obs_model in model.observations.iter().filter(|o| effective.contains_key(&o.source)) {

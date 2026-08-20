@@ -19,7 +19,16 @@
 //! loads of the same IR file (`build_simulate_cas_sink`'s `base_model` and
 //! `resolve_run_model`'s), so both call this function with the same
 //! [`ObsAnchorTimes`] — same input, same output, agreement by construction
-//! rather than by convention.
+//! rather than by convention. `profile` and `survey` key their runs by the IR
+//! **text** instead (`resolve::model_identity_from_ir`), so there the caller
+//! re-emits that text after substituting — the `bool` [`resolve_from_bindings`]
+//! returns is exactly that cue.
+//!
+//! The same rule applies within a single command: EVERY consumer that reads a
+//! horizon must read the substituted model. A second fresh load of the compiled
+//! IR re-introduces the unresolved marker and every horizon read off it is NaN,
+//! which compares equal to nothing — `simulate --obs` shipped exactly that bug
+//! and refused with `baseline -> t = NaN` (fixed in 7af5c9fa).
 //!
 //! # The landmine for `value_at` (F23)
 //!
@@ -55,6 +64,68 @@ pub fn model_is_anchored(model: &ir::Model) -> bool {
         || model.time_functions.iter().any(|tf| {
             forcing_exprs(&tf.kind).into_iter().any(expr_has_anchor)
         })
+}
+
+/// Resolve every observation anchor in `model` against `bound` — the
+/// observation streams the calling command has ALREADY resolved from its
+/// `--data` flags or its `--fit` toml — substituting in place and announcing
+/// each resolved time on stderr.
+///
+/// This is the seam for the three fixed-θ commands (`pfilter`, `profile`,
+/// `survey`). Each of them binds observation data before it scores anything, so
+/// the window it anchors to is by construction the window it scores; folding
+/// from a second, separately-resolved source is how the two would drift apart.
+///
+/// A model with no anchor is left byte-identical, nothing is printed, and
+/// `false` comes back — so a caller may run this unconditionally. `true` means
+/// the model MOVED, which is the caller's cue to re-emit any serialized copy it
+/// keys the run by. When the model IS anchored and the bindings yield no
+/// observation times, the error names each anchored construct — "resolve it" is
+/// not actionable without knowing which construct needs the data.
+pub fn resolve_from_bindings(
+    model: &mut ir::Model,
+    bound: &[(String, std::path::PathBuf)],
+    dt: f64,
+) -> Result<bool, String> {
+    resolve_with(model, |m| crate::obs_anchors_from_bindings(m, bound, dt))
+}
+
+fn resolve_with(
+    model: &mut ir::Model,
+    read_window: impl FnOnce(&ir::Model) -> Result<(f64, f64), String>,
+) -> Result<bool, String> {
+    if !model_is_anchored(model) {
+        return Ok(false);
+    }
+    let (first, last) = read_window(model).map_err(|e| {
+        format!(
+            "this model is anchored to observed data ({}), and the bound \
+             observation data cannot resolve it: {e}",
+            anchored_sites(model).join(", ")
+        )
+    })?;
+    let moved = substitute(model, ObsAnchorTimes { first, last })?;
+    report(&moved, model);
+    Ok(true)
+}
+
+/// The sentence a data-binding command appends to its own "no data bound"
+/// refusal when the model is anchored.
+///
+/// Without it the user is told to pass `--data` but not that the model *cannot
+/// run at all* without it — an anchored construct is unresolvable, not merely
+/// unscored. Empty for an unanchored model, so the existing message is
+/// byte-identical there.
+pub fn unbound_anchor_clause(model: &ir::Model) -> String {
+    if !model_is_anchored(model) {
+        return String::new();
+    }
+    format!(
+        "\n  This model is also anchored to observed data ({}); an observation \
+         anchor resolves only from a bound observation stream, so there is no \
+         horizon to run without one.",
+        anchored_sites(model).join(", ")
+    )
 }
 
 /// Human-readable list of the anchored constructs, for a refusal message.

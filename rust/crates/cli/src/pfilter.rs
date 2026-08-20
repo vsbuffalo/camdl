@@ -43,8 +43,78 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let obs_name = a.stream.obs.clone();
 
     // Load model (supports .camdl via camdlc)
-    let (model_in, _model_json) = crate::util::load_model(&ir_path)
+    let (mut model_in, _model_json) = crate::util::load_model(&ir_path)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+
+    // ── Resolve --data flags (gh#90) ─────────────────────────────────
+    //
+    // Polymorphic `--data` mirrors the existing `--table NAME=FILE`
+    // pattern. Two forms: `--data PATH` (single-stream) and
+    // `--data NAME=PATH` (repeatable, multi-stream). The resolver
+    // returns one (stream_name, path) pair per bound stream.
+    //
+    // fit-toml fallback: when no --data flags supplied AND --fit was,
+    // pull the multi-stream binding from the toml's
+    // `[data.observations]` block. CLI flags always win; we emit an
+    // info line if both forms were supplied.
+    //
+    // This runs BEFORE parameter resolution and before the compile because the
+    // observation anchors below fold over exactly these bindings (gh#616), and
+    // `CompiledModel::new` refuses a model that still carries one. Binding is a
+    // pure read of the args plus `model.observations`, neither of which
+    // parameter resolution touches.
+    let model_obs_names: Vec<String> = model_in.observations.iter()
+        .map(|o| o.name.clone()).collect();
+    let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
+    let bound_streams: Vec<(String, std::path::PathBuf)> = if cli_data_specs.is_empty() {
+        // No CLI --data. Try the fit-toml fallback.
+        if let Some(fit_path) = a.fit.as_ref() {
+            load_data_observations_from_fit_toml(fit_path, &model_obs_names)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: --fit toml fallback for --data: {}", e);
+                    std::process::exit(1);
+                })
+        } else {
+            eprintln!("error: --data is required. Use `--data PATH` for a \
+                single-stream model, `--data NAME=PATH` (repeatable) for a \
+                multi-stream model, or `--fit FOO.toml` with a \
+                [data.observations] section.{}",
+                crate::obs_anchor::unbound_anchor_clause(&model_in));
+            std::process::exit(1);
+        }
+    } else {
+        if a.fit.is_some() {
+            eprintln!("pfilter: --data on CLI overrides --fit toml [data.observations]");
+        }
+        crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name.as_deref())
+            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+    };
+
+    if bound_streams.is_empty() {
+        eprintln!("error: zero streams resolved from --data / --fit toml. \
+                   pfilter requires at least one observation stream.{}",
+                  crate::obs_anchor::unbound_anchor_clause(&model_in));
+        std::process::exit(1);
+    }
+
+    // gh#616: pfilter binds observation data, so it RESOLVES a model's
+    // observation anchors instead of letting `CompiledModel::new` refuse them —
+    // `pfilter --fit` is the cheapest fixed-θ probe there is, and an anchored
+    // model that cannot be probed cannot be diagnosed. The window is folded from
+    // the bindings just resolved above, so it is the same window this run
+    // scores.
+    //
+    // Everything downstream reads the substituted model: there is exactly one
+    // `load_model` and one `CompiledModel::new` on this path, and both the
+    // scenario-horizon guard below and the resolver read `model_in`. A second
+    // fresh load of the compiled IR would re-introduce the unresolved marker
+    // (gh#616 regression, commit 7af5c9fa).
+    if let Err(e) = crate::obs_anchor::resolve_from_bindings(
+        &mut model_in, &bound_streams, dt,
+    ) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
 
     // gh#561: a filter's window is the OBSERVATION times, not the model horizon
     // — `SMCConfig` carries a `t_start` and no `t_end`, and the schedule is
@@ -52,6 +122,11 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // cannot move anything here, including the `--save-paths` grid. Refuse
     // rather than ignore it: silently discarding a declared horizon is the bug
     // gh#561 exists to remove, and the same guard sits on `fit predict`.
+    //
+    // It runs AFTER the substitution above so it compares two RESOLVED numbers:
+    // an anchored model and an anchored scenario that resolve to the same time
+    // are a no-op and must pass, and two that differ must be named with the
+    // times a reader can check against the data.
     if let Err(e) = crate::util::refuse_scenario_horizon(
         &model_in, scenario_name.as_deref(), "pfilter",
         "a particle filter scores at the observation times, so its window comes \
@@ -121,49 +196,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         crate::run_meta::InferenceBackend::ChainBinomial, &compiled,
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     let params = compiled.default_params.clone();
-
-    // ── Resolve --data flags (gh#90) ─────────────────────────────────
-    //
-    // Polymorphic `--data` mirrors the existing `--table NAME=FILE`
-    // pattern. Two forms: `--data PATH` (single-stream) and
-    // `--data NAME=PATH` (repeatable, multi-stream). The resolver
-    // returns one (stream_name, path) pair per bound stream.
-    //
-    // fit-toml fallback: when no --data flags supplied AND --fit was,
-    // pull the multi-stream binding from the toml's
-    // `[data.observations]` block. CLI flags always win; we emit an
-    // info line if both forms were supplied.
-    let model_obs_names: Vec<String> = model.observations.iter()
-        .map(|o| o.name.clone()).collect();
-    let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
-    let bound_streams: Vec<(String, std::path::PathBuf)> = if cli_data_specs.is_empty() {
-        // No CLI --data. Try the fit-toml fallback.
-        if let Some(fit_path) = a.fit.as_ref() {
-            load_data_observations_from_fit_toml(fit_path, &model_obs_names)
-                .unwrap_or_else(|e| {
-                    eprintln!("error: --fit toml fallback for --data: {}", e);
-                    std::process::exit(1);
-                })
-        } else {
-            eprintln!("error: --data is required. Use `--data PATH` for a \
-                single-stream model, `--data NAME=PATH` (repeatable) for a \
-                multi-stream model, or `--fit FOO.toml` with a \
-                [data.observations] section.");
-            std::process::exit(1);
-        }
-    } else {
-        if a.fit.is_some() {
-            eprintln!("pfilter: --data on CLI overrides --fit toml [data.observations]");
-        }
-        crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name.as_deref())
-            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
-    };
-
-    if bound_streams.is_empty() {
-        eprintln!("error: zero streams resolved from --data / --fit toml. \
-                   pfilter requires at least one observation stream.");
-        std::process::exit(1);
-    }
 
     // Load data — route the time column through the calendar-time boundary
     // translator (numeric or dated, per --time-format + the model origin).
