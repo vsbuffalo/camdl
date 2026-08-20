@@ -82,8 +82,14 @@ Branch: `feat/aggregation-remaining` (off `main` @ `9643c246`).
 
   Rewriting a schedule or guard that contains no staged reference is identity,
   so over-applying is safe; under-applying is the bug being fixed.
-- [ ] **4. Increment B** — `ir/VERSION` bump (read it, don't pin it). Land as a
-      stacked sequence behind one bump, each piece green:
+- [x] **4a-early. B1a — `incidence(a) + incidence(b)`** — PR#684. Unit-weighted
+      addition, carved out of B1 and landed ahead of it for a live outbreak
+      model. No IR node, no bump, no golden churn: the flow list lowers to the
+      existing `CumulativeFlowSum`. E341 replaces the E100 fall-through for
+      weighted / subtracted / state-mixed near-misses. Four tests, all
+      mutation-checked; full `make test` green.
+- [ ] **4. Increment B (rest)** — `ir/VERSION` bump (read it, don't pin it).
+      Land as a stacked sequence behind one bump, each piece green:
   - [ ] 4a. typed `dim_name` + goldens regenerated
   - [ ] 4b. `WeightedFlowSum` lowering (B1), per-reference accumulator (B2)
   - [ ] 4c. weight restrictions (B3) + deferral diagnostics (B4) + extend the
