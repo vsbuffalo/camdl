@@ -1443,7 +1443,9 @@ semantics produces new leaves rather than silently reusing old ones.
 
 `--no-flows` / `--columns` re-key the `config` level only. `--output-every`
 rewrites the compiled IR's output schedule, so it re-keys the `model` level as
-well — same model source, different model hash.
+well — same model source, different model hash. `--emit-every` re-keys neither:
+it touches only emitted observations, so it keys the leaf's `obs/` child instead
+(§10.5).
 
 **Ensembles.** `--seeds`, `--replicates`, and `--draws` write one leaf per cell
 plus a single combined `SimEnsemble` artifact under `<output-dir>/ensembles/`:
@@ -1553,6 +1555,11 @@ camdl simulate sir_two_patch_long_obs.camdl --scenario baseline --seed 42 --obs 
 
 # One TSV per observation stream (multi-stream / mixed-cadence models)
 camdl simulate seir_observations.camdl --scenario baseline --seed 42 --obs-dir obs/
+
+# Emit weekly instead of the model's declared cadence — every stream, then one
+# stream by its observation-block label (gh#656, §10.5).
+camdl simulate seir_observations.camdl --seed 42 --emit-every 7 --obs-dir weekly/
+camdl simulate seir_observations.camdl --seed 42 --emit-every cases=7 --obs-dir mixed/
 
 # Independent replicates
 camdl simulate sir_two_patch_long_obs.camdl --scenario baseline --seed 42 \
@@ -3862,6 +3869,7 @@ about the store:
 | `--table` file _contents_             | yes      | params       |
 | `--scenario`, `--enable`, `--disable` | yes      | scenario     |
 | `--seed`, `--seeds`, `--replicates`   | yes      | seed         |
+| `--emit-every`                        | no[^ee]  | obs child    |
 | `--label`                             | no       | provenance   |
 | `-o`, `--obs*`, `--draws-out`         | no       | mirrors only |
 | `--integrator`                        | **no**   | see §9.8     |
@@ -3870,7 +3878,15 @@ about the store:
 [^oe]: `--output-every` re-keys through the _model_ level, not `config`:
     `util::rematerialize_with_output_every` rewrites the compiled IR to a temp
     file that both the engine and the identity resolver then load. This is the
-    pattern a model-mutating CLI flag must follow.
+    pattern a model-mutating CLI flag must follow **when the flag changes the
+    trajectory**.
+
+[^ee]: `--emit-every` deliberately does NOT follow that pattern. It changes only
+    the emitted observations, so it keys the `obs/` child (`obs_hash`, §10.5)
+    and leaves the sim `run_id` alone — two cadences are two obs subtrees under
+    one trajectory leaf. Lowering it into the IR would move the model hash a
+    `fit` against real data shares, re-keying a fit over a change
+    `emit_schedule` cannot make to a likelihood.
 
 ### 9.4 Fit identity and re-running a changed fit
 
@@ -4287,6 +4303,34 @@ share a schedule; a multi-cadence model is a hard error directing the user to
 
 The `obs/` child is keyed on `(trajectory run_id, obs model hash, obs seed)`, so
 observation draws can be iterated without recomputing the trajectory.
+
+**`--emit-every` (gh#656).** A model's `emit_schedule` is the SIMULATE-only
+emission cadence — the fit path reads the data file's own time column and never
+consults it — so one model can serve a daily and a weekly emission without
+editing its source. `--emit-every N` sets every stream, `--emit-every NAME=N`
+one stream by its observation-block label (the IR `source`, so one flag covers a
+stratified family); the two forms are mutually exclusive, `N` is a plain number
+in the model's `time_unit`, and a stream whose schedule is a fixed `at [...]`
+list is refused by name rather than silently converted to a cadence.
+
+The override is applied at the CONSUMPTION sites — the `--obs*` writers, the
+`obs/` child, an obs-sourced quantity, and `[synthetic]` generation — **not** by
+rematerializing the compiled IR the way `--output-every` does. That is
+deliberate: `emit_schedule` never enters a likelihood, so moving the model hash
+for it would re-key a `fit` against real data over a change that fit cannot see,
+orphaning a completed fit. Each path therefore keys what the override actually
+determines:
+
+| path                         | what re-keys                                                                                       |
+| ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| `simulate --obs*` / `obs/`   | the `obs_hash` naming the child, so two cadences are two subtrees under one shared trajectory leaf |
+| `fit run` with `[synthetic]` | the generated data's own bytes, which `FitDigest.data` already hashes — correct, the data changed  |
+| `fit run` on real data       | nothing; the flag is refused there, since it could only do nothing                                 |
+
+Two cadences share one trajectory leaf because the trajectory bytes do not
+depend on the emission cadence. The `obs/` child is a declared boundary in the
+leaf's exact-set (keyed by the directory NAME), so a second subtree beside the
+first is not an orphan.
 
 ### 10.6 Fit sidecars
 
@@ -5353,6 +5397,12 @@ Observation output
   --obs-dir DIR               one TSV per stream
   --obs-only FILE             like --obs, suppress trajectory output
   --obs-only-dir DIR          like --obs-dir, suppress trajectory output
+  --emit-every N | NAME=N     override `emit_schedule`, in model time units, for
+                              every stream or one by its observation-block label
+                              (repeatable; the two forms are exclusive). Only a
+                              recurring `every N` cadence can be overridden; a
+                              stream declaring `at [...]` is refused by name.
+                              Refused outright when the run emits nothing
 
 Other artifacts
   --quantities-out DIR        emit quantities { } as <dir>/quantities/<name>.tsv +
