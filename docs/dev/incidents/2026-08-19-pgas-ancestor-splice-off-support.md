@@ -129,6 +129,28 @@ rather than a regression: the sampler now declines moves it should never have
 made, and needs more sweeps to cover the same ground. Anyone sizing a run should
 plan from the field number, not the synthetic one.
 
+**Where the mixing cost actually comes from, measured (72336e44).** The
+ancestor-sampling step is now instrumented, so `trajectory_renewal` no longer
+has to carry three different diagnoses at once. On the `sir_overdispersion`
+fixture, 16 sweeps / 1280 substeps, 32 particles:
+
+| stream     | proposed | accepted | off-support | coin-rejected | renewal |
+| ---------- | -------- | -------- | ----------- | ------------- | ------- |
+| interval   | 1203     | 26.1%    | 0.0%        | 73.9%         | 0.935   |
+| prevalence | 1216     | 28.5%    | 0.1%        | 71.5%         | 0.942   |
+
+Off-support refusals are ~0 because `SpliceGuard` screens candidates out of the
+proposal weights before the exact ratio sees them. So the cost is NOT this
+incident's refusal of invalid moves — it is the Metropolis correction applied to
+an unchanged Eq.-(17) proposal. And interval streams pay no penalty over
+prevalence, so the accumulator re-sync is not the cost either.
+
+That makes the cost recoverable rather than intrinsic: MH is exact for any
+proposal, so a proposal closer to the true conditional raises acceptance without
+touching the invariant distribution. Filed as gh#665. Earlier wording here
+called the mixing cost "a property of the corrected sampler" — that is true of
+the corrected sampler as it stands, but it should not be read as a floor.
+
 The trajectory loss deserves its own line: `coherent_counts_after` refused
 discontinuous paths on its negative-count guard, so the splice defect surfaced
 as **output silently missing 218 of the saved draws** — on the artifact
