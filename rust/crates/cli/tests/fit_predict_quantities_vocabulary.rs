@@ -320,6 +320,29 @@ fn an_in_place_edit_of_the_vocabulary_rekeys_the_table() {
     }
 }
 
+/// `camdl show` lists the keyed table. Its output envelope used to walk a fixed
+/// `quantities` name; a table that was written but not listed reads as never
+/// generated, which is how someone concludes the flag did nothing.
+#[test]
+fn camdl_show_lists_the_keyed_table() {
+    let f = fitted("show");
+    let va = f.vocab("va.camdl", VOCAB_A);
+    assert_ok(&f.predict(Some(va.to_str().unwrap())), "predict with A");
+
+    let addrs = f.addresses();
+    let dir = addrs.iter().find(|n| !n.ends_with(".json")).unwrap().clone();
+    let manifest = addrs.iter().find(|n| n.ends_with(".json")).unwrap().clone();
+
+    let out = run(&f.root, &["show", f.segment.to_str().unwrap()]);
+    assert_ok(&out, "camdl show");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!("{dir}/attack_rate.tsv")),
+        "show must list the keyed table:\n{text}"
+    );
+    assert!(text.contains(&manifest), "show must list the keyed manifest:\n{text}");
+}
+
 /// The manifest names the vocabulary that produced the table and pins its
 /// digest, so a table can be traced to its formulas.
 #[test]
