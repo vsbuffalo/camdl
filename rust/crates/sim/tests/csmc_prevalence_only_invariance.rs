@@ -187,7 +187,7 @@ fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() 
     const EXPECTED: [u64; 4] = [
         0xf9ca0a01894e9c7d,
         0x7463433398e370e5,
-        0x88c33ccc69df3113,
+        0xbc73cf25769a82f2,
         0x92af74721aa5e3c7,
     ];
     let f = fixture();

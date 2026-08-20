@@ -843,6 +843,28 @@ pub fn log_transition_density_substep(
         for &tr_idx in group { handled[tr_idx] = true; }
     }
 
+    // gh#607: the recorded gamma multipliers are bound POSITIONALLY, in
+    // `step_one`'s push order, and the walk above skips a whole source group
+    // when `counts_before` has emptied it and skips a member whose rate has
+    // fallen to zero — WITHOUT advancing `gamma_idx`. Evaluating this record
+    // against a state that skips differently (an ancestor-sampling candidate,
+    // or the constant offset of a splice) silently pairs every later
+    // overdispersed group with the wrong multiplier, because the read above
+    // falls back to `1.0` past the end of the slice.
+    //
+    // A state that cannot consume exactly the recorded noise is not a state
+    // that could have produced it, so the density is zero. This turns a silent
+    // wrong number into a rejection — the ancestor is not selectable, and a
+    // splice whose shift changes the term set is refused.
+    if gamma_idx != gammas.len() {
+        log::debug!(
+            "log_transition_density_substep: state consumes {gamma_idx} gamma \
+             multipliers but the record holds {} — returning -inf (the recorded \
+             noise is not producible at this state).",
+            gammas.len());
+        return Ok(f64::NEG_INFINITY);
+    }
+
     // Ungrouped / inflow transitions: Poisson density (or deterministic exact-count check).
     for (i, &rate) in propensities.iter().enumerate() {
         if handled[i] || rate <= RATE_EPSILON { continue; }
@@ -859,6 +881,87 @@ pub fn log_transition_density_substep(
     }
 
     Ok(log_p)
+}
+
+/// Log-density of the gamma multipliers recorded at ONE substep, plus how many
+/// of them this state consumes.
+///
+/// `log Gamma(g; dt/σ², σ²/dt)` for each recorded multiplier. Mean
+/// `shape · scale = 1`, so the multiplier is constrained near 1 at high shape
+/// (no overdispersion) and free to vary at low shape (high σ²).
+///
+/// **The term set is state-gated, which is why this is a function and not an
+/// inlined loop.** A multiplier is scored only for a source group with
+/// `n_src > 0` whose member has `rate > RATE_EPSILON` and is a non-deterministic
+/// `overdispersed(...)` draw — every gate evaluated at `counts_before`. σ² itself
+/// may not reference compartment state (a compile-time guard in
+/// `compiled_model.rs` rejects that), so the σ² VALUE is state-independent — but
+/// the SET of terms is not. A state offset that empties a source compartment, or
+/// drives a rate to zero through a frequency-dependent force of infection, adds
+/// or removes a real term of the target. Any consumer comparing two states must
+/// therefore evaluate this at both, never assume it cancels (gh#607).
+///
+/// The return value is the caller's desync check: `gammas` is bound
+/// POSITIONALLY in `step_one`'s push order, so a state that consumes a different
+/// number has not reproduced the walk that recorded them.
+///
+/// σ² is evaluated at `counts_before`, mirroring the three sibling sites —
+/// `step_one` (chain_binomial.rs), [`log_transition_density_substep`], and
+/// `gamma_density_value_and_grad_substep` (pgas_grad.rs).
+///
+/// Each term is LEFT-FOLDED into `acc` rather than pre-summed and added once.
+/// That is load-bearing, not style: the gradient path folds them into its
+/// running energy the same way, and `gh#197`'s spine oracle asserts the two
+/// agree BIT-exactly — pre-summing opens a ~6e-13 nat gap and trips it.
+pub fn fold_gamma_multiplier_log_density_substep(
+    model: &CompiledModel,
+    counts_before: &[i64],
+    gammas: &[f64],
+    params: &[f64],
+    t: f64,
+    dt: f64,
+    per_eval: Option<&[f64]>,
+    acc: &mut f64,
+) -> usize {
+    if gammas.is_empty() {
+        return 0;
+    }
+    let n_tr = model.model.transitions.len();
+    let mut int_s_local = IntState::new(model.int_local_to_global.len());
+    int_s_local.counts.copy_from_slice(counts_before);
+    let real_s_local = RealState::new(model.real_local_to_global.len());
+    let ctx = EvalCtx {
+        model, int_s: &int_s_local, real_s: &real_s_local,
+        params, t, dt,
+        projected: None, aux: None, int_float_override: None, per_eval: None,
+    };
+    let mut consumed = 0usize;
+    for &(src_local, ref group) in &model.source_groups {
+        let n_src = counts_before[src_local].max(0);
+        if n_src == 0 { continue; }
+        // Recompute propensities for the rate gate (same start-of-step state).
+        let mut local_props = vec![0.0; n_tr];
+        let _ = eval_propensities(model, &int_s_local, &real_s_local,
+            params, ctx.t, dt, per_eval, &mut local_props);
+        for &tr_idx in group {
+            let rate = local_props[tr_idx];
+            if rate <= RATE_EPSILON { continue; }
+            if let ir::transition::DrawMethod::Deterministic = model.model.transitions[tr_idx].draw_method {
+                continue;
+            }
+            if let Some(ref resolved_od) = model.resolved.overdispersion[tr_idx] {
+                let sigma_sq = eval_resolved(resolved_od, &ctx);
+                if consumed < gammas.len() && sigma_sq > OVERDISP_SIGMA_SQ_FLOOR {
+                    // Shared with the gradient path's energy via one helper so
+                    // the two agree f64-exactly (gh#197 / the spine oracle).
+                    *acc += crate::inference::obs_loglik::gamma_multiplier_log_density(
+                        dt / sigma_sq, sigma_sq / dt, gammas[consumed]);
+                }
+                consumed += 1;
+            }
+        }
+    }
+    consumed
 }
 
 /// Complete-data log-likelihood: sum of transition densities + observation
@@ -967,74 +1070,21 @@ pub fn complete_data_loglik(
         }
         transition_ll += td;
 
-        // Gamma multiplier density: log Gamma(g; shape, scale) for each
-        // gamma recorded at this substep. The gammas are stored in order
-        // matching step_one's push order (one per overdispersed transition
-        // with rate > 0).
-        //
-        // Shape = dt / σ², Scale = σ² / dt. Mean = shape * scale = 1.
-        // This constrains the gamma multiplier to be near 1 (no overdispersion
-        // at high shape) or allow large variation (low shape = high σ²).
-        if !rec.gammas.is_empty() {
-            // Collect σ² values for overdispersed transitions in source-group order,
-            // matching the order step_one pushes to gamma_used.
-            //
-            // Evaluate σ² at the real start-of-step state (`counts_before`),
-            // mirroring the three sibling sites: step_one (chain_binomial.rs),
-            // log_transition_density_substep (above), and
-            // gamma_density_value_and_grad_substep (pgas_grad.rs). σ² is
-            // state-independent today — a compile-time guard in
-            // compiled_model.rs rejects any overdispersion expression that
-            // references compartment state — so this state choice is currently
-            // a no-op for the σ² value. Using `counts_before` (not a zeroed
-            // scratch) keeps this site byte-identical to its siblings and
-            // defensive against any future relaxation of that guard.
-            let n_int_local = model.int_local_to_global.len();
-            let mut int_s_local = IntState::new(n_int_local);
-            int_s_local.counts.copy_from_slice(&rec.counts_before);
-            let real_s_local = RealState::new(model.real_local_to_global.len());
-            let ctx = EvalCtx {
-                model, int_s: &int_s_local, real_s: &real_s_local,
-                params, t, dt: dt_s,
-                projected: None, aux: None, int_float_override: None, per_eval: None,
-            };
-            let mut gamma_idx_local = 0;
-            for &(src_local, ref group) in &model.source_groups {
-                let n_src = rec.counts_before[src_local].max(0);
-                if n_src == 0 { continue; }
-                // Recompute propensities for rate check (same start-of-step state).
-                let mut local_props = vec![0.0; n_tr];
-                let _ = eval_propensities(model, &int_s_local, &real_s_local,
-                    params, ctx.t, dt_s, per_eval, &mut local_props);
-                for &tr_idx in group {
-                    let rate = local_props[tr_idx];
-                    if rate <= RATE_EPSILON { continue; }
-                    if let ir::transition::DrawMethod::Deterministic = model.model.transitions[tr_idx].draw_method {
-                        continue;
-                    }
-                    if let Some(ref resolved_od) = model.resolved.overdispersion[tr_idx] {
-                        let sigma_sq = eval_resolved(resolved_od, &ctx);
-                        if gamma_idx_local < rec.gammas.len() && sigma_sq > OVERDISP_SIGMA_SQ_FLOOR {
-                            let g = rec.gammas[gamma_idx_local];
-                            let shape = dt_s / sigma_sq;
-                            let scale = sigma_sq / dt_s;
-                            // log Gamma(g; shape, scale). Shared with the gradient
-                            // path's energy via one helper so the two agree
-                            // f64-exactly (gh#197 / the spine oracle).
-                            transition_ll +=
-                                crate::inference::obs_loglik::gamma_multiplier_log_density(
-                                    shape, scale, g);
-                        }
-                        gamma_idx_local += 1;
-                    }
-                }
-            }
-            if gamma_idx_local != rec.gammas.len() {
-                log::warn!(
-                    "gamma index mismatch at substep {}: tracked {} but trajectory recorded {} gammas",
-                    s, gamma_idx_local, rec.gammas.len()
-                );
-            }
+        // Gamma multiplier density for each multiplier recorded at this substep
+        // — a state-gated term set, so it goes through the one shared walk every
+        // consumer uses (see `fold_gamma_multiplier_log_density_substep`).
+        let gamma_consumed = fold_gamma_multiplier_log_density_substep(
+            model, &rec.counts_before, &rec.gammas, params, t, dt_s, per_eval,
+            &mut transition_ll,
+        );
+        if !rec.gammas.is_empty() && gamma_consumed != rec.gammas.len() {
+            // Unreachable via `td` above, which now refuses a state that cannot
+            // consume the record. Kept as the divergence detector between that
+            // walk and this one.
+            log::warn!(
+                "gamma index mismatch at substep {}: tracked {} but trajectory recorded {} gammas",
+                s, gamma_consumed, rec.gammas.len()
+            );
         }
 
         // Accumulate flows
@@ -1445,6 +1495,10 @@ impl SpliceGuard {
 struct ReferenceBaseline {
     /// `log f_θ(u'_t | x'_{t-1})` at each substep `t`.
     td: Vec<f64>,
+    /// The gamma-multiplier log-density at each substep. Scored EXPLICITLY, not
+    /// cancelled: σ² is state-independent but the set of multipliers a state
+    /// consumes is not, so a splice's offset can add or remove a term (gh#607).
+    gamma: Vec<f64>,
     /// `log g_θ(y_t | ·)` at each substep an observation is due, `0.0`
     /// elsewhere. Accumulated over the reference's own flow bins, exactly as
     /// [`complete_data_loglik`] does.
@@ -1455,9 +1509,10 @@ struct ReferenceBaseline {
 /// [`complete_data_loglik`]'s fold/score/reset lifecycle so the baseline and
 /// the spliced walk are the same computation on different states.
 ///
-/// The gamma-multiplier density is deliberately absent: `σ²` may not reference
-/// compartment state (a compile-time guard in `compiled_model.rs`), so that
-/// term is identical for every candidate ancestor and cancels in the ratio.
+/// The gamma-multiplier density is scored here rather than cancelled. σ² may not
+/// reference compartment state, but the SET of multipliers a state consumes is
+/// gated on that state (`n_src > 0`, `rate > RATE_EPSILON`), so an offset can add
+/// or remove a term — see [`fold_gamma_multiplier_log_density_substep`].
 fn reference_baseline(
     model: &CompiledModel,
     reference: &PGASTrajectory,
@@ -1469,6 +1524,7 @@ fn reference_baseline(
     let n_substeps = reference.substeps.len();
     let n_tr = model.model.transitions.len();
     let mut td = vec![0.0; n_substeps];
+    let mut gamma = vec![0.0; n_substeps];
     let mut obs_ll = vec![0.0; n_substeps];
     let mut cum_flows = vec![0u64; n_tr];
     let mut acc = vec![0u64; obs_model.n_interval_streams()];
@@ -1478,6 +1534,10 @@ fn reference_baseline(
             model, &rec.counts_before, &rec.flows, &rec.gammas, params,
             rec.t0, rec.dt_substep, per_eval,
         )?;
+        fold_gamma_multiplier_log_density_substep(
+            model, &rec.counts_before, &rec.gammas, params,
+            rec.t0, rec.dt_substep, per_eval, &mut gamma[t],
+        );
         for (i, &f) in rec.flows.iter().enumerate() {
             cum_flows[i] += f;
         }
@@ -1489,7 +1549,7 @@ fn reference_baseline(
             obs_model.reset_due_acc(obs_idx, &mut acc);
         }
     }
-    Ok(ReferenceBaseline { td, obs_ll })
+    Ok(ReferenceBaseline { td, gamma, obs_ll })
 }
 
 /// `log S_j − log S_ref` for a candidate ancestor whose splice shifts the
@@ -1536,7 +1596,9 @@ fn reference_baseline(
 /// [`SpliceGuard`]). Writing `w̃^j_full = w̃^j_prop · S_j` with
 ///
 /// ```text
-///   S_j = Π_{t>s} f_θ(u'_t | x'_{t-1} + Δ_j) · Π_{obs t ≥ s} g_θ(y_t | ·(Δ_j)),
+///   S_j = Π_{t>s} f_θ(u'_t | x'_{t-1} + Δ_j)
+///       · Π_{t≥s} f_γ(g'_t | x'_{t-1} + Δ_j)
+///       · Π_{obs t ≥ s} g_θ(y_t | ·(Δ_j)),
 /// ```
 ///
 /// Eq. (21) collapses to `α = S_{i'} / S_N`:
@@ -1544,13 +1606,19 @@ fn reference_baseline(
 /// - **`w^j_{s-1}` cancels** — the incoming importance weight appears in both
 ///   `w̃^j_full` and `w̃^j_prop` for the same `j`.
 /// - **The substep-`s` transition factor `f_θ(u'_s | x^j_{s-1})` cancels** —
-///   likewise. This is why the sum below starts at `t = s+1`.
+///   likewise. This is why the transition sum below starts at `t = s+1`.
 /// - **The normalizers of `ρ̂` cancel**, which is what an independence proposal
 ///   buys; nothing here needs `Σ_l w̃^l`.
 /// - **Nothing else cancels.** Every transition factor from `s+1` to `T`
 ///   survives, as does every observation term from `s` on (the proposal carries
 ///   no `g` factor at all), and the observation at `s` is exactly where a
 ///   spliced interval bin's hybrid accumulation is charged.
+/// - **The gamma-multiplier density does NOT cancel, at any `t ≥ s` including
+///   `t = s`.** σ² is state-independent, but the SET of multipliers a state
+///   consumes is gated on that state, so an offset can add or remove a term;
+///   and the proposal weight carries no multiplier density at all, so the
+///   substep-`s` term has nothing to cancel against. See
+///   [`fold_gamma_multiplier_log_density_substep`].
 ///
 /// # Arguments
 ///
@@ -1605,6 +1673,23 @@ fn splice_log_ratio(
             }
             total += td - baseline.td[t];
         }
+
+        // The gamma multipliers, at EVERY t from `substep` on — including
+        // `t == substep`, unlike the transition factor. The proposal weight is
+        // `log_weights[j] + log_transition_density_substep(..)`, and that
+        // function does not carry the multiplier density, so there is nothing
+        // for the substep-`substep` gamma term to cancel against.
+        let mut gamma_ll = 0.0;
+        let gamma_consumed = fold_gamma_multiplier_log_density_substep(
+            model, &shifted_before, &rec.gammas, params,
+            rec.t0, rec.dt_substep, per_eval, &mut gamma_ll,
+        );
+        if gamma_consumed != rec.gammas.len() {
+            // The shifted state skips a source group or a zero-rate member that
+            // the record's positional gamma binding assumed. Unproducible noise.
+            return Ok(f64::NEG_INFINITY);
+        }
+        total += gamma_ll - baseline.gamma[t];
 
         // A `balance {}` model rewrites one compartment from an expression over
         // the others every substep, so the constant offset only survives if the
