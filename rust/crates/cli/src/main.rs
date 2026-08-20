@@ -223,6 +223,7 @@ Common options (all parsed by camdlc):
   --compartments      List compartments (post-stratification)
   --transitions       List transitions with their rate expressions
   --tables            Show loaded table values
+  --forcings          List forcings, and the data file each was read from
   --ascii             Strip ANSI color from output
 
 Examples:
@@ -234,6 +235,11 @@ Examples:
 
   # Transition rates only
   camdl inspect sir.camdl --transitions
+
+  # Which data file did each forcing compile against, and what was in it?
+  # (For the machine-readable set of ALL compile-time reads — forcing data,
+  #  read() tables, read() dimensions — use `camdlc --emit-deps deps.json`.)
+  camdl inspect flu.camdl --forcings
 "))]
     Inspect(Passthrough),
 

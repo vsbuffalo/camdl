@@ -87,6 +87,8 @@ let () =
     let dims      = ref false in
     let do_tables = ref false in
     let tables_pat = ref None in
+    let do_forcings = ref false in
+    let forcings_pat = ref None in
     let do_parameters = ref false in
     let rec parse = function
       | [] -> ()
@@ -113,6 +115,12 @@ let () =
          | s :: tl2 when not (String.length s > 0 && s.[0] = '-') ->
            tables_pat := Some s; parse tl2
          | _ -> parse tl)
+      | "--forcings" :: tl ->
+        do_forcings := true;
+        (match tl with
+         | s :: tl2 when not (String.length s > 0 && s.[0] = '-') ->
+           forcings_pat := Some s; parse tl2
+         | _ -> parse tl)
       | "--ir"       :: tl -> ir_mode   := true; parse tl
       | "--ascii"    :: tl -> ascii     := true; parse tl
       | "--no-color" :: tl -> no_color  := true; parse tl
@@ -136,6 +144,7 @@ let () =
       if !cost_report       then Inspect.CostReport
       else if !dims         then Inspect.Dims
       else if !do_tables    then Inspect.Tables !tables_pat
+      else if !do_forcings  then Inspect.Forcings !forcings_pat
       else if !comps             then Inspect.Compartments
       else if !do_parameters then Inspect.Parameters
       else if !do_transitions then Inspect.Transitions !transitions_pat

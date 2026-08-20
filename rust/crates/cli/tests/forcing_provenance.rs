@@ -249,3 +249,57 @@ fn a_live_compile_records_the_file_and_tracks_its_bytes() {
          model did not change"
     );
 }
+
+/// Recorded provenance nobody can read is not provenance. `camdlc inspect
+/// --forcings` (reached as `camdl inspect … --forcings`, which forwards
+/// verbatim) is the way to ask a model which file each forcing compiled
+/// against — one line per forcing, naming the path and the digest's first 8
+/// hex digits.
+#[test]
+fn inspect_forcings_reports_the_file_and_a_hash_prefix() {
+    let Some(cc) = camdlc() else { return };
+    let root = repo_root();
+
+    let out = Command::new(&cc)
+        .arg("inspect")
+        .arg(root.join("ocaml/golden/flu_data_forcing.camdl"))
+        .arg("--forcings")
+        .arg("--no-color")
+        .output()
+        .expect("failed to run camdlc inspect");
+    assert!(
+        out.status.success(),
+        "camdlc inspect --forcings failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let bytes = std::fs::read(root.join("ocaml/golden/data/flu_forcing.tsv")).unwrap();
+    let prefix = &sha256_hex(&bytes)[..8];
+
+    for needle in ["clim", "data/flu_forcing.tsv", prefix] {
+        assert!(
+            text.contains(needle),
+            "`inspect --forcings` must report {needle:?} so a reader can tell WHICH \
+             file was compiled in and WHETHER it is the one they think.\nGot:\n{text}"
+        );
+    }
+
+    // A forcing that reads no file is still listed — the command answers "what
+    // forcings does this model have", not only "which ones read a file" — but
+    // it must not invent a source for one.
+    let out = Command::new(&cc)
+        .arg("inspect")
+        .arg(root.join("ocaml/golden/seir_seasonal_patch.camdl"))
+        .arg("--forcings")
+        .arg("--no-color")
+        .output()
+        .expect("failed to run camdlc inspect");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("seasonal_urban"), "got:\n{text}");
+    assert!(
+        !text.contains("sha256"),
+        "a forcing that reads no file must show no digest:\n{text}"
+    );
+}

@@ -5654,7 +5654,8 @@ belong to the compiler. `camdlc --help` is authoritative.
 
 ```
 camdl check FILE.camdl [--no-dim-check] [--json-errors]
-camdl inspect FILE.camdl [--summary|--dims|--compartments|--transitions|--tables|--ascii]
+camdl inspect FILE.camdl [--summary|--dims|--compartments|--transitions|--tables|
+                          --forcings|--ascii]
 camdl render FILE.camdl [--format json] [--expand DIM]
 camdl dev compile FILE.camdl [--set NAME=VALUE] [--json-errors] [--no-state-grad]
 camdl dev doctest [--gate] FILE.md …

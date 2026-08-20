@@ -1251,6 +1251,68 @@ let run_tables ppf (model : Ir.model) ctx (pattern : string option) =
     Fmt.pf ppf "@\n"
   ) tables
 
+(* ── Forcings ────────────────────────────────────────────────────────────── *)
+
+(* One line per forcing: its name, its kind, and — for a forcing declared
+   `data = "path"` — the file its knots were read from plus the first 8 hex
+   digits of that file's SHA-256.
+
+   This is the read side of `Ir.time_function.data_source`. The knots are
+   inlined at compile time and the runtime never opens the file again, so
+   without a way to ask, a model's most volatile input is invisible: you
+   cannot tell from a compiled model, or from a fit built on one, which file
+   it compiled against or what was in it.
+
+   The 8-digit prefix is enough to spot "this is not the file I thought";
+   the IR carries the full 64, and `shasum -a 256 <path>` reproduces it. For
+   the machine-readable dependency set across ALL compile-time reads (forcing
+   `data =`, `read()` tables, `read()` dimensions), use
+   `camdlc --emit-deps FILE.json` — that is the depfile, this is the human
+   view. *)
+let run_forcings ppf (model : Ir.model) (pattern : string option) =
+  let faint s = Term_style.dim_style Fmt.string ppf s in
+  let kind_label (tf : Ir.time_function) = match tf.kind with
+    | Ir.Sinusoidal _ -> "sinusoidal"
+    | Ir.Piecewise p  -> Printf.sprintf "piecewise (%d steps)" (List.length p.values)
+    | Ir.Interpolated i -> Printf.sprintf "interpolated (%d knots)" (List.length i.times)
+    | Ir.Periodic p   -> Printf.sprintf "periodic (%d bins)" (List.length p.values)
+    | Ir.Fourier f    -> Printf.sprintf "fourier (%d harmonics)" (List.length f.harmonics)
+    | Ir.PeriodicSpline s -> Printf.sprintf "periodic_spline (n_basis %d, degree %d)"
+                               s.n_basis s.degree
+  in
+  let forcings = match pattern with
+    | None     -> model.time_functions
+    | Some pat -> List.filter (fun (tf : Ir.time_function) -> glob_match pat tf.name)
+                    model.time_functions
+  in
+  if forcings = [] then
+    (match pattern with
+     | None   -> Fmt.pf ppf "  (no forcings defined)@\n"
+     | Some p -> Fmt.pf ppf "  no forcings matching '%s'@\n" p)
+  else begin
+    let w = List.fold_left (fun a (tf : Ir.time_function) ->
+      max a (String.length tf.name)) 0 forcings in
+    List.iter (fun (tf : Ir.time_function) ->
+      Fmt.pf ppf "  ";
+      Term_style.bold (Term_style.table Fmt.string) ppf tf.name;
+      Fmt.pf ppf "%s  " (String.make (w - String.length tf.name) ' ');
+      faint (kind_label tf);
+      (match tf.lag with
+       | None   -> ()
+       | Some _ -> faint "  lag");
+      (match tf.data_source with
+       | None -> ()
+       | Some ds ->
+         Term_style.dim_style Fmt.string ppf "  \xe2\x86\x90 ";   (* ← *)
+         Fmt.pf ppf "%s" ds.path;
+         (* Truncating to 8 is safe on any well-formed digest and total on a
+            malformed one; the full value is in the IR either way. *)
+         let n = min 8 (String.length ds.sha256) in
+         faint (Printf.sprintf "  (sha256 %s)" (String.sub ds.sha256 0 n)));
+      Fmt.pf ppf "@\n"
+    ) forcings
+  end
+
 (* ── Main entry point ────────────────────────────────────────────────────── *)
 
 type inspect_cmd =
@@ -1263,6 +1325,7 @@ type inspect_cmd =
   | LetBinding of string
   | Dims
   | Tables of string option             (* pattern *)
+  | Forcings of string option           (* pattern *)
   | CostReport
 
 type inspect_opts = {
@@ -1313,6 +1376,8 @@ let run_inspect path opts =
        run_dims ppf model ctx
      | Tables pat ->
        run_tables ppf model ctx pat
+     | Forcings pat ->
+       run_forcings ppf model pat
      | CostReport ->
        run_cost_report ppf model ctx)
 
