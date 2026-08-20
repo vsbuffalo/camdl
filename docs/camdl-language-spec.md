@@ -4218,9 +4218,16 @@ from the store for another. The same rules as every other anchor position apply
 `origin`).
 
 Every command that binds observation data resolves anchors this way:
-`camdl simulate --fit <fit.toml | fit run dir>`, `fit run`, and `fit predict`. A
-command with no data cannot resolve one and refuses, naming the anchored
-construct.
+`camdl simulate --fit <fit.toml | fit run dir>`, `fit run`, `fit predict`, and
+the three fixed-parameter commands `pfilter`, `profile` and `survey`, which fold
+the window from whatever they bind through `--data` or `--fit`. A command with no
+data cannot resolve one and refuses, naming the anchored construct.
+
+`pfilter`, `profile` and `survey` score at the observation times rather than over
+the model horizon, so a *scenario's* own `simulate { to }` still cannot be
+honoured there and is refused rather than silently dropped. The comparison is
+made after resolution, so a scenario anchor that resolves to the same time as the
+model's is a no-op and runs.
 
 Because the horizon is now unknown at compile time, three constructs that
 **bake** it are refused rather than left to silently mis-fire:
