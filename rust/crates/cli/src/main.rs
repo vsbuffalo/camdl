@@ -15,6 +15,7 @@ mod quantile; // shared quantile reduction + numeric formatting (proposal 2026-0
 mod quantities_file; // `--quantities FILE`: a separable reporting vocabulary + its artifact key
 mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by fit predict + simulate)
 mod obs_anchor;     // gh#616: runtime resolution of a model's observation anchors
+mod emit_every;     // gh#656: `--emit-every`, the per-stream emission-cadence override
 mod run_paths;      // canonical output-path helpers
 mod cas;
 mod browse;
@@ -698,10 +699,22 @@ fn run_simulate(a: &args::SimulateArgs) {
     // gh#156: resolve + validate the trajectory output view (`--no-flows` /
     // `--columns`) against the compiled model, once. Folded into the CAS
     // identity (`config` level) and used by both trajectory writers.
-    let output_cols = match std::fs::read_to_string(&ir_path_compiled)
+    // gh#656: `--emit-every` is resolved and validated in the same pass, against
+    // the same model — an unknown stream label, a fit-only stream, or an
+    // `at [...]` schedule is refused BEFORE anything runs. The model copy is
+    // scoped to this block so a large stratified IR is not held for the whole
+    // command.
+    let (output_cols, emit_every) = match std::fs::read_to_string(&ir_path_compiled)
         .map_err(|e| format!("cannot read {}: {}", ir_path_compiled, e))
         .and_then(|s| ir::from_str(&s).map_err(|e| format!("IR load error: {}", e)))
-        .and_then(|m| util::OutputColumns::resolve(&a.output_view, &m))
+        .and_then(|m| {
+            let cols = util::OutputColumns::resolve(&a.output_view, &m)?;
+            let emit = crate::emit_every::EmitEvery::from_cli_specs(&a.emit_every)?;
+            if let Some(e) = &emit {
+                e.validate(&m.observations)?;
+            }
+            Ok((cols, emit))
+        })
     {
         Ok(c) => c,
         Err(e) => {
@@ -790,6 +803,20 @@ fn run_simulate(a: &args::SimulateArgs) {
     }
 
     let want_obs = obs_path.is_some() || obs_dir.is_some();
+
+    // gh#656: `--emit-every` only reaches emitted synthetic observations — the
+    // `--obs*` writers, the CAS obs subtree they enable, and an obs-sourced
+    // quantity. A run that emits none would silently ignore it, so refuse and
+    // name what would make it do something.
+    if emit_every.is_some() && !want_obs && a.quantities_out.is_none() {
+        eprintln!(
+            "error: --emit-every sets the cadence of EMITTED synthetic \
+             observations, but this run emits none.\n  \
+             Add --obs/--obs-dir/--obs-only/--obs-only-dir to write them, or \
+             --quantities-out for an `observations.<stream>` quantity."
+        );
+        std::process::exit(1);
+    }
 
     if seeds_spec_given && replicates > 1 {
         eprintln!("error: --seeds and --replicates are mutually exclusive.\n  \
@@ -1199,15 +1226,23 @@ fn run_simulate(a: &args::SimulateArgs) {
             // for every ordinary run, which keeps this check exactly as it was.
             let obs_origin = init_state_source.as_ref().map(|s| s.origin_t);
             let schedules: Vec<_> = model_check.observations.iter()
-                .map(|o| obs_emit_schedule_times(o, obs_origin, obs_end).unwrap_or_else(|e| {
+                .map(|o| obs_emit_schedule_times(
+                    o, obs_origin, obs_end, emit_every.as_ref(),
+                ).unwrap_or_else(|e| {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
                 }))
                 .collect();
             let all_same = schedules.windows(2).all(|w| w[0] == w[1]);
             if !all_same {
+                // The EFFECTIVE schedules (post `--emit-every`), not the
+                // declared ones — a diagnostic naming cadences the run does not
+                // use would send the reader to the model file for a mismatch
+                // the flag created.
                 let descs: Vec<String> = model_check.observations.iter()
-                    .map(|o| format!("{}: {:?}", o.name, o.emit_schedule))
+                    .zip(&schedules)
+                    .map(|(o, times)| format!(
+                        "{}: {:?} ({} emit times)", o.name, o.emit_schedule, times.len()))
                     .collect();
                 eprintln!("error: observation streams have different schedules ({}).\n\
                            A single wide TSV cannot hold multi-cadence streams.\n\
@@ -1539,6 +1574,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         fit_dep,
         a.allow_degenerate_rates,
         output_cols.clone(),
+        emit_every.clone(),
         total_runs,
     ) {
         Ok(s) => s,
@@ -1573,6 +1609,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         obs_data: Vec::new(),
         obs_stream_names: Vec::new(),
         obs_times_cache: Vec::new(),
+        emit_every: emit_every.clone(),
         total_runs: 1,
         n_scenarios: 1,
         n_draws: 1,
@@ -1619,6 +1656,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 eval: None,
                 by_scenario: indexmap::IndexMap::new(),
                 calendar: io::CalendarMeta::from_model(&q_model),
+                emit_every: emit_every.clone(),
             })
         } else {
             let n = q_model.quantities.len();
@@ -1915,6 +1953,9 @@ struct SimQuantities {
     /// Calendar semantics for the `time` axis, stamped into `quantities.json` so
     /// a consumer maps `time → Date` without re-deriving `origin`/`time_unit`.
     calendar: io::CalendarMeta,
+    /// gh#656: the `--emit-every` override, so an `observations.<stream>`
+    /// quantity reduces the same y_sim series `--obs` emits under the same flags.
+    emit_every: Option<crate::emit_every::EmitEvery>,
 }
 
 /// One scenario's accumulated quantity draws and the time axis they were
@@ -1958,6 +1999,9 @@ fn materialize_obs_for_quantities(
     // `T`. Threaded rather than defaulted so an obs-sourced quantity reduces
     // over exactly the series `--obs` emits for the same cell.
     restart_origin: Option<f64>,
+    // gh#656: the `--emit-every` override, for the same reason — the quantity
+    // must reduce over the series `--obs` would emit under the same flags.
+    emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<sim::quantity::ObsSeriesSet, String> {
     let mut obs_rng = sim::rng::StatefulRng::new(obs_seed);
     let mut out: std::collections::HashMap<String, (Vec<f64>, Vec<f64>)> =
@@ -1968,7 +2012,10 @@ fn materialize_obs_for_quantities(
             // a scenario `simulate { to }` has already moved it) — never the
             // schedule's baked `end`, which would reduce an obs-sourced quantity
             // over fabricated tail values (gh#561).
-            Some(s) => obs_schedule_times(s, restart_origin, model.simulation.t_end),
+            Some(s) => {
+                let s = crate::emit_every::apply_override(emit, obs_ir, s)?;
+                obs_schedule_times(&s, restart_origin, model.simulation.t_end)
+            }
             None => continue, // fit-only — consumes no RNG, mirroring `--obs`
         };
         let sampler =
@@ -2058,6 +2105,7 @@ impl SimQuantities {
                 &params,
                 cell.spec.obs_seed,
                 cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t),
+                self.emit_every.as_ref(),
             )?)
         };
         let results = eval.eval_draw(&params, &cell.traj, compiled, obs_set.as_ref(), None);
@@ -2139,6 +2187,11 @@ fn build_simulate_cas_sink(
     fit_dep: Vec<runid::inputs::ArtifactRef>,
     allow_degenerate_rates: bool,
     output_cols: crate::util::OutputColumns,
+    // gh#656: `--emit-every`. It names the obs subtree (`obs_subtree_hash`) as
+    // well as setting the emitted times, so two cadences are two addressable
+    // artifacts under one shared trajectory leaf — the leaf itself does NOT
+    // re-key, because its bytes do not depend on the emission cadence.
+    emit_every: Option<crate::emit_every::EmitEvery>,
     total_runs: usize,
 ) -> Result<crate::batch::CasSink, String> {
     // Parse the raw IR (envelope-aware) — params NOT applied (batch parity).
@@ -2253,6 +2306,7 @@ fn build_simulate_cas_sink(
         output_cols,
         runs_dir,
         obs_enabled,
+        emit_every,
         force,
         total: total_runs,
         counter: 0,
@@ -2436,6 +2490,9 @@ struct StreamSink {
     obs_data: Vec<Vec<ObsRow>>,
     obs_stream_names: Vec<String>,
     obs_times_cache: Vec<Vec<f64>>,
+    /// gh#656: the `--emit-every` override for this run's emitted observations.
+    /// `None` for every run without the flag.
+    emit_every: Option<crate::emit_every::EmitEvery>,
     // Grid shape, captured in `on_start`, used by the column-gating logic
     // and the post-loop combined-obs writer.
     total_runs: usize,
@@ -2552,6 +2609,7 @@ impl engine::RunSink for StreamSink {
                         obs_model,
                         cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t),
                         model.simulation.t_end,
+                        self.emit_every.as_ref(),
                     )?;
                     self.obs_times_cache.push(times);
                 }
@@ -2849,13 +2907,24 @@ pub(crate) fn obs_schedule_times(
 /// observation axis honour `simulation.t_end` as the sole horizon authority too
 /// (gh#143). Byte-identical whenever the run uses the model horizon, since the
 /// baked `end` is then the same number.
+///
+/// **`emit` is the `--emit-every` override** (gh#656), applied HERE rather than
+/// by rewriting the compiled IR: `emit_schedule` never enters the likelihood, so
+/// moving the model hash for it would re-key a fit against real data over a
+/// change that fit cannot see. `None` for every run without the flag, which
+/// leaves the emitted times, and every artifact address derived from them,
+/// exactly as they were.
 pub(crate) fn obs_emit_schedule_times(
     obs: &ir::observation::ObservationModel,
     restart_origin: Option<f64>,
     t_end: f64,
+    emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<Vec<f64>, String> {
     match &obs.emit_schedule {
-        Some(s) => Ok(obs_schedule_times(s, restart_origin, t_end)),
+        Some(s) => {
+            let s = crate::emit_every::apply_override(emit, obs, s)?;
+            Ok(obs_schedule_times(&s, restart_origin, t_end))
+        }
         None => Err(format!(
             "observation stream '{}' has no `emit_schedule` — it is fit-only \
              and cannot generate synthetic data. Add `emit_schedule = every N 'unit` \

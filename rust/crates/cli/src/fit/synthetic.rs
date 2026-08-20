@@ -152,7 +152,7 @@ fn generate_one_dataset(
         // beside it was run over — under `[synthetic] scenario = "X"` with a
         // shortened horizon the surplus rows are fabricated, and a recovery
         // study would then fit invented data (gh#561).
-        let times = crate::obs_emit_schedule_times(obs_ir, None, model.simulation.t_end)?;
+        let times = crate::obs_emit_schedule_times(obs_ir, None, model.simulation.t_end, None)?;
         let projected = crate::project_all_obs_times(&traj, obs_ir, &model, &times)?;
 
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(

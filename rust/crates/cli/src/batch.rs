@@ -764,6 +764,10 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         output_cols: output_cols.clone(),
         runs_dir: runs_dir.clone(),
         obs_enabled,
+        // `batch run` has no `--emit-every` surface (gh#656 is scoped to
+        // `simulate` and `fit run`); an experiment TOML declares its own
+        // cadence in the model.
+        emit_every: None,
         force: a.force,
         total,
         counter: 0,
@@ -833,6 +837,12 @@ pub(crate) struct CasSink {
     /// Absolute `<output>/sims` subtree.
     pub(crate) runs_dir: String,
     pub(crate) obs_enabled: bool,
+    /// gh#656: `simulate --emit-every`, the per-stream emission-cadence
+    /// override. It sets the emitted times AND (via [`obs_subtree_hash`]) the
+    /// obs subtree's address, so two cadences are two artifacts under one
+    /// trajectory leaf. `None` for `batch run`, which has no such key, and for
+    /// every `simulate` without the flag — those key exactly as they always did.
+    pub(crate) emit_every: Option<crate::emit_every::EmitEvery>,
     pub(crate) force: bool,
     pub(crate) total: usize,
     pub(crate) counter: usize,
@@ -1031,6 +1041,7 @@ impl CasSink {
             output_cols: output_cols.clone(),
             runs_dir: runs_dir.to_string(),
             obs_enabled: false,
+            emit_every: None,
             force,
             total: 0,
             counter: 0,
@@ -1264,8 +1275,20 @@ impl crate::engine::RunSink for CasSink {
         let has_obs = self.obs_enabled && !cell.model.observations.is_empty();
         if has_obs {
             let obs_seed = spec.process_seed ^ crate::util::SEED_MIX_OBS;
-            let obs_json = serde_json::to_string(&cell.model.observations).unwrap_or_default();
-            let obs_hash = crate::hashing::sha256_hex(obs_json.as_bytes());
+            // The SAME hash `write_obs_into_cas` names the subtree with — a
+            // declared child that did not match the directory written beside it
+            // would be provenance pointing at nothing.
+            let obs_hash = match obs_subtree_hash(
+                &cell.model.observations, self.emit_every.as_ref(),
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    self.counter += 1;
+                    self.errors.push(format!("scenario={} seed={}: {}",
+                        name, spec.process_seed, e));
+                    return Ok(());
+                }
+            };
             let obs_id = runid::ContentHash::digest_bytes(
                 format!("{}:{}:{}", rt.run_id.to_hex(), obs_seed, obs_hash).as_bytes(),
             );
@@ -1352,6 +1375,7 @@ impl crate::engine::RunSink for CasSink {
             let restart_origin = spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
             if let Err(e) = write_obs_into_cas(
                 &dest, &cell.model, &cell.traj, spec.process_seed, restart_origin,
+                self.emit_every.as_ref(),
             ) {
                 self.errors.push(format!("scenario={} seed={}: obs ensemble: {}",
                     name, spec.process_seed, e));
@@ -1607,6 +1631,7 @@ fn run_design_experiment(
             output_cols: output_cols.clone(),
             runs_dir: runs_dir.clone(),
             obs_enabled,
+            emit_every: None,
             force,
             total,
             counter: 0,
@@ -1725,6 +1750,32 @@ fn build_priors_txt(params: &[(String, DesignParam)]) -> Option<String> {
 /// path it *is* the `obs_seed` recorded in the directory name (run-spec
 /// §"Gating risk": a future `[obs] replicates = K` fans the obs layer by
 /// mixing K distinct obs seeds, leaving the trajectory RNG untouched).
+/// The obs subtree's identity component.
+///
+/// A hash of the resolved observation blocks (run-spec: changing a reporting
+/// parameter re-samples obs without invalidating the cached trajectory), plus
+/// any `--emit-every` override (gh#656) — which changes WHICH times the subtree
+/// carries, so two cadences must not address the same directory (the
+/// count-in-the-key rule).
+///
+/// One function, because the hash is computed twice for every cell — once to
+/// declare the `obs` child in `run.json`, once to name the subtree directory —
+/// and a disagreement between the two would declare one child while writing
+/// another. Byte-identical to the historical `sha256(json(observations))`
+/// whenever no override is in play, so an unflagged run addresses exactly the
+/// subtree it always did.
+pub(crate) fn obs_subtree_hash(
+    observations: &[ir::observation::ObservationModel],
+    emit: Option<&crate::emit_every::EmitEvery>,
+) -> Result<String, String> {
+    let mut buf = serde_json::to_string(observations)
+        .map_err(|e| format!("cannot serialize observations for hashing: {}", e))?;
+    if let Some(e) = emit {
+        buf.push_str(&e.identity_repr());
+    }
+    Ok(crate::hashing::sha256_hex(buf.as_bytes()))
+}
+
 fn write_obs_into_cas(
     run_dir: &std::path::Path,
     model: &ir::Model,
@@ -1735,6 +1786,10 @@ fn write_obs_into_cas(
     // for every ordinary cell. NOTE this function serves `simulate` cells as
     // well as `batch run` ones — the obs subtree is written for both.
     restart_origin: Option<f64>,
+    // gh#656: the `--emit-every` override — it sets the emitted times AND names
+    // the subtree (via `obs_subtree_hash`), so the two cadences coexist under one
+    // trajectory leaf instead of one overwriting the other.
+    emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<(), String> {
     use std::io::Write;
 
@@ -1742,12 +1797,7 @@ fn write_obs_into_cas(
         return Ok(());
     }
 
-    // obs_hash = hash of the resolved observation blocks only (run-spec:
-    // changing a reporting parameter re-samples obs without invalidating
-    // the cached trajectory). Canonical JSON of model.observations.
-    let obs_json = serde_json::to_string(&model.observations)
-        .map_err(|e| format!("cannot serialize observations for hashing: {}", e))?;
-    let obs_hash = crate::hashing::sha256_hex(obs_json.as_bytes());
+    let obs_hash = obs_subtree_hash(&model.observations, emit)?;
     let obs_seed = process_seed ^ crate::util::SEED_MIX_OBS;
 
     // Preflight EVERY stream before creating any file (gh#589 review).
@@ -1763,7 +1813,7 @@ fn write_obs_into_cas(
         // validates a different set of times than gets written is worse than no
         // preflight (gh#561 + gh#589).
         let times =
-            crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end)?;
+            crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end, emit)?;
         crate::project_all_obs_times(traj, obs_ir, model, &times)?;
     }
 
@@ -1791,7 +1841,7 @@ fn write_obs_into_cas(
         // moved `model.simulation.t_end`), so the CAS `obs/` subtree never
         // carries rows past the end of the trajectory beside it (gh#561).
         let obs_times =
-            crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end)?;
+            crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end, emit)?;
         let projected = crate::project_all_obs_times(traj, obs_ir, model, &obs_times)?;
 
         let path = obs_dir.join(format!("{}.tsv", obs_ir.name));
@@ -2314,6 +2364,7 @@ mod tests {
             output_cols: crate::util::OutputColumns::default(),
             runs_dir: runs_dir.to_string(),
             obs_enabled: false,
+            emit_every: None,
             force: false,
             total: 1,
             counter: 0,

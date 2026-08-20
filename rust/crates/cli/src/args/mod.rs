@@ -605,6 +605,19 @@ pub struct SimulateArgs {
     ])]
     pub stdout: bool,
 
+    /// Override the cadence at which synthetic observations are EMITTED
+    /// (`emit_schedule`), gh#656 — so one model serves a daily and a weekly
+    /// emission without editing its source. N is a plain number in the model's
+    /// own `time_unit` (not the DSL `8 'weeks` spelling, which is a
+    /// shell-quoting hazard): `--emit-every 7` sets every stream, and
+    /// `--emit-every NAME=7` (repeatable) sets the stream with that
+    /// observation-block label. The two forms are mutually exclusive. Only a
+    /// recurring (`every N`) schedule can be overridden — a stream declaring
+    /// `emit_schedule = at [...]` is refused by name. This changes emitted
+    /// output only; it never enters a likelihood.
+    #[arg(long = "emit-every", value_name = "N | NAME=N")]
+    pub emit_every: Vec<String>,
+
     /// Write synthetic observations to a single TSV (all streams)
     #[arg(long, conflicts_with_all = ["obs_dir", "obs_only"])]
     pub obs: Option<PathBuf>,
