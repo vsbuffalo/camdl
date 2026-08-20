@@ -1432,6 +1432,218 @@ impl SpliceGuard {
     }
 }
 
+/// The reference trajectory's OWN per-substep log-densities — the baseline the
+/// ancestor-sampling accept/reject ratio is centred on (gh#607).
+///
+/// Centring matters numerically, not mathematically: the ratio subtracts two
+/// suffix sums of `T − s` terms each, and differencing them term-by-term
+/// against a common baseline keeps the answer in single-digit magnitudes
+/// instead of cancelling two large negatives. The baseline cancels exactly, so
+/// any finite common reference would do; the reference's own densities are the
+/// natural choice because they make the "keep the current ancestry" branch
+/// evaluate to zero without any arithmetic at all.
+struct ReferenceBaseline {
+    /// `log f_θ(u'_t | x'_{t-1})` at each substep `t`.
+    td: Vec<f64>,
+    /// `log g_θ(y_t | ·)` at each substep an observation is due, `0.0`
+    /// elsewhere. Accumulated over the reference's own flow bins, exactly as
+    /// [`complete_data_loglik`] does.
+    obs_ll: Vec<f64>,
+}
+
+/// One forward pass over the reference trajectory, mirroring
+/// [`complete_data_loglik`]'s fold/score/reset lifecycle so the baseline and
+/// the spliced walk are the same computation on different states.
+///
+/// The gamma-multiplier density is deliberately absent: `σ²` may not reference
+/// compartment state (a compile-time guard in `compiled_model.rs`), so that
+/// term is identical for every candidate ancestor and cancels in the ratio.
+fn reference_baseline(
+    model: &CompiledModel,
+    reference: &PGASTrajectory,
+    params: &[f64],
+    obs_model: &super::multi_stream_obs::MultiStreamObsModel,
+    obs_at_substep: &ObsAtSubstep,
+    per_eval: Option<&[f64]>,
+) -> Result<ReferenceBaseline, SimError> {
+    let n_substeps = reference.substeps.len();
+    let n_tr = model.model.transitions.len();
+    let mut td = vec![0.0; n_substeps];
+    let mut obs_ll = vec![0.0; n_substeps];
+    let mut cum_flows = vec![0u64; n_tr];
+    let mut acc = vec![0u64; obs_model.n_interval_streams()];
+
+    for (t, rec) in reference.substeps.iter().enumerate() {
+        td[t] = log_transition_density_substep(
+            model, &rec.counts_before, &rec.flows, &rec.gammas, params,
+            rec.t0, rec.dt_substep, per_eval,
+        )?;
+        for (i, &f) in rec.flows.iter().enumerate() {
+            cum_flows[i] += f;
+        }
+        if let Some(&obs_idx) = obs_at_substep.get(&t) {
+            obs_model.fold_into_acc(&cum_flows, &mut acc);
+            obs_ll[t] = obs_model.log_likelihood_from_flows_and_counts(
+                &acc, &rec.counts_after, obs_idx, params);
+            cum_flows.fill(0);
+            obs_model.reset_due_acc(obs_idx, &mut acc);
+        }
+    }
+    Ok(ReferenceBaseline { td, obs_ll })
+}
+
+/// `log S_j − log S_ref` for a candidate ancestor whose splice shifts the
+/// reference's remaining trajectory by the constant `offset` (gh#607).
+///
+/// # The ratio this feeds, and what cancels
+///
+/// Lindsten, Jordan & Schön (2014), JMLR 15:2145–2184. The EXACT
+/// ancestor-sampling weight for a non-Markovian model is their Eq. (3),
+///
+/// ```text
+///   w̃^j_{s-1|T} = w^j_{s-1} · γ_T((x^j_{1:s-1}, x'_{s:T})) / γ_{s-1}(x^j_{1:s-1}),
+/// ```
+///
+/// whose ratio expands (their Eq. 22) to the FULL remaining path,
+///
+/// ```text
+///   γ_T/γ_{s-1} = Π_{t=s}^{T} g_θ(y_t | x_{1:t}) f_θ(x_t | x_{1:t-1}).
+/// ```
+///
+/// camdl is non-Markovian in exactly this sense. The reference's suffix is a
+/// sequence of realized integer FLOWS, not of states; grafting it onto
+/// candidate `j` shifts every subsequent state by `Δ_j`, and the chain-binomial
+/// flow density `f_θ(u'_t | x_{t-1})` depends on the state it was drawn from.
+/// So the suffix does NOT cancel across candidates, and Eq. (17) — the
+/// Markovian collapse to `w^j_{s-1} f_θ(x'_s | x^j_{s-1})` that `csmc_as` draws
+/// from — is a proposal, not the target. (Contrast a model whose innovations
+/// are state-independent: there the suffix factors are common to all `j` and
+/// Eq. (17) is exact.)
+///
+/// LJS §6.1 sanctions the remedy directly: use the cheap distribution as an MH
+/// proposal and let Eq. (21),
+///
+/// ```text
+///   1 ∧ [ w̃^{i'}_{s-1|T} q(N | i') ] / [ w̃^N_{s-1|T} q(i' | N) ],
+/// ```
+///
+/// carry the correction — "The MH accept/reject decision will then compensate
+/// for the approximation error caused by the truncation" (§6.2, p. 2166,
+/// describing precisely this pairing, at their stated `O(NTℓ + T²)` cost).
+///
+/// The proposal here is the *independence* kernel `q(· | i) = ρ̂(·)`, the
+/// normalized Eq.-(17) weights `csmc_as` already computes (screened by
+/// [`SpliceGuard`]). Writing `w̃^j_full = w̃^j_prop · S_j` with
+///
+/// ```text
+///   S_j = Π_{t>s} f_θ(u'_t | x'_{t-1} + Δ_j) · Π_{obs t ≥ s} g_θ(y_t | ·(Δ_j)),
+/// ```
+///
+/// Eq. (21) collapses to `α = S_{i'} / S_N`:
+///
+/// - **`w^j_{s-1}` cancels** — the incoming importance weight appears in both
+///   `w̃^j_full` and `w̃^j_prop` for the same `j`.
+/// - **The substep-`s` transition factor `f_θ(u'_s | x^j_{s-1})` cancels** —
+///   likewise. This is why the sum below starts at `t = s+1`.
+/// - **The normalizers of `ρ̂` cancel**, which is what an independence proposal
+///   buys; nothing here needs `Σ_l w̃^l`.
+/// - **Nothing else cancels.** Every transition factor from `s+1` to `T`
+///   survives, as does every observation term from `s` on (the proposal carries
+///   no `g` factor at all), and the observation at `s` is exactly where a
+///   spliced interval bin's hybrid accumulation is charged.
+///
+/// # Arguments
+///
+/// `cum_seed`/`acc_seed` are the candidate's own partial flow accumulation
+/// carried into substep `s` — the prefix half of the first observation bin the
+/// splice straddles. `Ok(NEG_INFINITY)` means the splice is impossible (a
+/// recorded flow cannot be produced at the shifted state, an observation has
+/// zero density, or the `balance {}` rewrite does not transport the offset);
+/// the walk stops at the first such term.
+#[allow(clippy::too_many_arguments)]
+fn splice_log_ratio(
+    model: &CompiledModel,
+    reference: &PGASTrajectory,
+    params: &[f64],
+    obs_model: &super::multi_stream_obs::MultiStreamObsModel,
+    obs_at_substep: &ObsAtSubstep,
+    per_eval: Option<&[f64]>,
+    baseline: &ReferenceBaseline,
+    substep: usize,
+    offset: &[i64],
+    cum_seed: &[u64],
+    acc_seed: &[u64],
+) -> Result<f64, SimError> {
+    // Keeping the current ancestry is the identity move: every term is its own
+    // baseline. Short-circuit it exactly, without arithmetic.
+    if offset.iter().all(|&d| d == 0) {
+        return Ok(0.0);
+    }
+
+    let n_comp = offset.len();
+    let mut cum_flows = cum_seed.to_vec();
+    let mut acc = acc_seed.to_vec();
+    let mut shifted_before = vec![0i64; n_comp];
+    let mut shifted_after = vec![0i64; n_comp];
+    let real_s = RealState::new(model.real_local_to_global.len());
+    let mut total = 0.0;
+
+    for t in substep..reference.substeps.len() {
+        let rec = &reference.substeps[t];
+        for i in 0..n_comp {
+            shifted_before[i] = rec.counts_before[i] + offset[i];
+            shifted_after[i] = rec.counts_after[i] + offset[i];
+        }
+
+        if t > substep {
+            let td = log_transition_density_substep(
+                model, &shifted_before, &rec.flows, &rec.gammas, params,
+                rec.t0, rec.dt_substep, per_eval,
+            )?;
+            if !td.is_finite() {
+                return Ok(f64::NEG_INFINITY);
+            }
+            total += td - baseline.td[t];
+        }
+
+        // A `balance {}` model rewrites one compartment from an expression over
+        // the others every substep, so the constant offset only survives if the
+        // expression transports it. Verify rather than assume: the recorded
+        // (unshifted) state satisfies this fixed point by construction, so a
+        // failure here means the shift is not a path this model can produce.
+        if let Some(bal) = &model.balance {
+            let mut int_s = IntState::new(n_comp);
+            int_s.counts.copy_from_slice(&shifted_after);
+            let ctx = EvalCtx {
+                model, int_s: &int_s, real_s: &real_s, params,
+                t: rec.t0 + rec.dt_substep, dt: rec.dt_substep,
+                projected: None, aux: None, int_float_override: None, per_eval: None,
+            };
+            if (eval_resolved(&bal.expr, &ctx).round() as i64)
+                != shifted_after[bal.local_int_idx]
+            {
+                return Ok(f64::NEG_INFINITY);
+            }
+        }
+
+        for (i, &f) in rec.flows.iter().enumerate() {
+            cum_flows[i] += f;
+        }
+        if let Some(&obs_idx) = obs_at_substep.get(&t) {
+            obs_model.fold_into_acc(&cum_flows, &mut acc);
+            let ll = obs_model.log_likelihood_from_flows_and_counts(
+                &acc, &shifted_after, obs_idx, params);
+            if !ll.is_finite() {
+                return Ok(f64::NEG_INFINITY);
+            }
+            total += ll - baseline.obs_ll[t];
+            cum_flows.fill(0);
+            obs_model.reset_due_acc(obs_idx, &mut acc);
+        }
+    }
+    Ok(total)
+}
+
 /// Fill `ancestor_log_w` with the reference particle's ancestor-sampling weights.
 ///
 /// Lindsten, Jordan & Schön (2014), "Particle Gibbs with Ancestor Sampling",
@@ -1540,6 +1752,12 @@ pub fn csmc_as(
     // state offset would make one of the reference's own recorded flows
     // impossible further down the trajectory.
     let splice_guard = SpliceGuard::from_reference(model, reference, &fire_steps, dt, firing);
+
+    // gh#607: the reference's own per-substep densities, so the ancestor
+    // accept/reject ratio below is accumulated as a difference against a common
+    // baseline rather than as two large cancelling sums.
+    let baseline =
+        reference_baseline(model, reference, params, obs_model, obs_at_substep, per_eval)?;
 
     // Initialize particles with stochastic initial states for IVP compartments.
     // Each free particle draws S₀ ~ Binom(N₀, s0) independently, giving the
@@ -1667,6 +1885,14 @@ pub fn csmc_as(
         // but the state mismatch persisted. Capturing the pre-resample
         // counts here closes that loop.
         let prev_counts_for_ancestor: Vec<Vec<i64>> = counts.clone();
+        // gh#607: the interval accumulators must be snapshotted HERE, in the
+        // same index space as `prev_counts_for_ancestor`. `ref_ancestor` indexes
+        // the PRE-resample ensemble, while `cum_flows`/`acc` are permuted BY the
+        // resample below — reading `cum_flows[ref_ancestor]` after it would be
+        // an index-space bug that silently pairs one particle's state with
+        // another's accumulated flows.
+        let prev_cum_flows_for_ancestor: Vec<Vec<u64>> = cum_flows.clone();
+        let prev_acc_for_ancestor: Vec<Vec<u64>> = acc.clone();
 
         // ── 1. Resample free particles (ancestor selection from prev weights) ──
         // On non-observation substeps, weights are uniform → systematic
@@ -1793,13 +2019,54 @@ pub fn csmc_as(
                 j_ref,
             );
 
-            // Sample ancestor from categorical(softmax(ancestor_log_w)).
-            // Degenerate case (all -inf): keep reference's own history to
+            // PROPOSE from categorical(softmax(ancestor_log_w)) — the screened
+            // Eq.-(17) weights, used as LJS §6.1's independence proposal `ρ̂`.
+            // Degenerate case (all -inf): keep the reference's own history to
             // maintain internal consistency — the reference's flows at
             // substep s were produced from the reference's state at s-1.
-            let ref_ancestor = match sample_categorical_log(&ancestor_log_w, &mut resample_rng) {
+            let proposed = match sample_categorical_log(&ancestor_log_w, &mut resample_rng) {
                 Some(j) => j,
                 None => { n_degenerate += 1; j_ref }
+            };
+
+            // ACCEPT/REJECT (LJS Eq. 21). Eq. (17) omits the spliced suffix's
+            // dependence on the ancestor, which for camdl's state-dependent flow
+            // densities does NOT cancel; the MH step compensates. Everything but
+            // the suffix ratio cancels — see `splice_log_ratio`.
+            let ref_ancestor = if proposed == j_ref {
+                j_ref
+            } else {
+                let offset_of = |state: &[i64]| -> Vec<i64> {
+                    state.iter().zip(&ref_rec.counts_before).map(|(a, b)| a - b).collect()
+                };
+                let log_s_prop = splice_log_ratio(
+                    model, reference, params, obs_model, obs_at_substep, per_eval,
+                    &baseline, s,
+                    &offset_of(&prev_counts_for_ancestor[proposed]),
+                    &prev_cum_flows_for_ancestor[proposed],
+                    &prev_acc_for_ancestor[proposed],
+                )?;
+                // The current ancestry's own suffix ratio. Exactly zero — and
+                // free — until some earlier splice this sweep has already
+                // offset the reference slot.
+                let log_s_ref = splice_log_ratio(
+                    model, reference, params, obs_model, obs_at_substep, per_eval,
+                    &baseline, s,
+                    &offset_of(&prev_counts[j_ref]),
+                    &cum_flows[j_ref],
+                    &acc[j_ref],
+                )?;
+                let accept = if log_s_prop == f64::NEG_INFINITY {
+                    false
+                } else if log_s_ref == f64::NEG_INFINITY {
+                    // The chain cannot be sitting on a zero-density suffix, but
+                    // if it somehow is, any finite proposal is an improvement.
+                    true
+                } else {
+                    let log_alpha = log_s_prop - log_s_ref;
+                    log_alpha >= 0.0 || resample_rng.uniform().ln() < log_alpha
+                };
+                if accept { proposed } else { j_ref }
             };
 
             // gh#607: RE-ANCHOR. The reference slot descends from `ref_ancestor`
