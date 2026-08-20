@@ -1052,11 +1052,27 @@ impl MultiStreamObsModel {
     /// [`fold_into_acc`] but over `f64` flows (the ODE backend's continuous
     /// `rate·dt` accumulation, never rounded).
     pub fn fold_into_acc_real(&self, flow_accumulators: &[f64], acc: &mut [f64]) {
+        self.fold_into_acc_real_blocks(flow_accumulators, acc, 1);
+    }
+
+    /// Block-strided sibling of [`fold_into_acc_real`]: `src` carries `width`
+    /// consecutive values per transition (`src[i*width + c]`) and `acc` carries
+    /// `width` per Interval slot (`acc[k*width + c]`).
+    ///
+    /// The ODE gradient path folds the forward sensitivity `∂flow/∂θ` this way —
+    /// `d` gradient columns per transition, laid out transition-major, so no
+    /// contiguous `&[f64]` view of one column exists and the scalar signature
+    /// cannot serve. `fold_into_acc_real` IS the `width == 1` case and delegates
+    /// here, so a sensitivity bin is folded by exactly the same slot map, in the
+    /// same order, as the value bin it differentiates — they cannot drift.
+    pub fn fold_into_acc_real_blocks(&self, src: &[f64], acc: &mut [f64], width: usize) {
         for (k, slot) in self.interval_slots.iter().enumerate() {
-            let bin: f64 = slot.flow_indices.iter()
-                .map(|&i| flow_accumulators[i])
-                .sum();
-            acc[k] += bin;
+            for c in 0..width {
+                let bin: f64 = slot.flow_indices.iter()
+                    .map(|&i| src[i * width + c])
+                    .sum();
+                acc[k * width + c] += bin;
+            }
         }
     }
 
@@ -1074,10 +1090,19 @@ impl MultiStreamObsModel {
 
     /// Real-valued sibling of [`reset_due_acc`] for the ODE path.
     pub fn reset_due_acc_real(&self, union_idx: usize, acc: &mut [f64]) {
+        self.reset_due_acc_real_blocks(union_idx, acc, 1);
+    }
+
+    /// Block-strided sibling of [`reset_due_acc_real`], zeroing the whole
+    /// `width`-wide block `acc[k*width .. (k+1)*width]` of each due slot. The
+    /// gradient path's `∂flow/∂θ` accumulator must close on the same schedule as
+    /// the value accumulator; `reset_due_acc_real` is the `width == 1` case and
+    /// delegates here so the due-predicate is evaluated in exactly one place.
+    pub fn reset_due_acc_real_blocks(&self, union_idx: usize, acc: &mut [f64], width: usize) {
         for (k, slot) in self.interval_slots.iter().enumerate() {
             let si = slot.stream_idx;
             if self.streams[si].at_union[union_idx].is_some() {
-                acc[k] = 0.0;
+                acc[k * width..(k + 1) * width].fill(0.0);
             }
         }
     }
@@ -1354,10 +1379,19 @@ impl MultiStreamObsModel {
     /// - `grad += factor1 + factor2`, where **factor 1** is the θ-direct term
     ///   ([`eval_likelihood_resolved_grad`], `projected` held fixed — the same seam
     ///   PGAS uses) and **factor 2** is the trajectory chain
-    ///   `(∂logp/∂projected)·(∂projected/∂θ)`, with `∂projected/∂θ` read off the
-    ///   record: `Σ_selected inc_sens` for an `Interval` (incidence / `FlowSum`)
-    ///   stream, `Σ_selected state_sens` for an `Instant` (prevalence / `IntCompSum`)
-    ///   stream. The `Sensitivity`-kind split is enforced by the projection variant.
+    ///   `(∂logp/∂projected)·(∂projected/∂θ)`: the per-stream sensitivity bin
+    ///   `acc_sens[slot]` for an `Interval` (incidence / `FlowSum`) stream,
+    ///   `Σ_selected state_sens` off the record for an `Instant` (prevalence /
+    ///   `IntCompSum`) stream. The `Sensitivity`-kind split is enforced by the
+    ///   projection variant.
+    ///
+    /// An `Interval` stream is scored against its per-stream bin, not the record's
+    /// `inc` — the record closes on the UNION observation axis, so under
+    /// heterogeneous cadences a stream's own reporting window spans several records
+    /// (gh#680). The bins are folded before scoring and reset only for the streams
+    /// scheduled at that union index, the same two-level structure
+    /// [`compute_ode_loglik`](crate::inference::compute_ode_loglik) uses, and the
+    /// value and sensitivity bins go through the same slot map so they cannot drift.
     ///
     /// Refuses (gh#275 §1h) a `DerivedExpr` prevalence projection and a
     /// `projected`-transforming likelihood argument ([`dlogp_dprojected`]) — v1
@@ -1383,8 +1417,24 @@ impl MultiStreamObsModel {
         }
         let mut total_ll = 0.0;
         let mut grad = vec![0.0; d];
+        // Per-Interval-stream incidence bins, EXACTLY as the value path
+        // (`compute_ode_loglik`) keeps them: the recorder hands us `rec.inc` /
+        // `rec.inc_sens`, the blanket per-transition tally over the interval since
+        // the previous UNION observation time (the recorder's analogue of the value
+        // path's `cum_flows`); the per-stream bin below is what a stream is actually
+        // scored against, and it is zeroed only for the streams scheduled at that
+        // union index. Without it a 14-day stream loses its first week to a sibling's
+        // 7-day observation and is scored against half its window (gh#680).
+        // `acc_sens` is the same bins, `d` gradient columns wide, folded and reset by
+        // the block-strided siblings so the sensitivity cannot bin differently from
+        // the value it differentiates.
+        let mut acc: Vec<f64> = vec![0.0; self.n_interval_streams()];
+        let mut acc_sens: Vec<f64> = vec![0.0; self.n_interval_streams() * d];
         for (obs_idx, rec) in records.iter().enumerate() {
             let t = self.obs_times[obs_idx];
+            // FOLD, before scoring — mirrors `compute_ode_loglik`'s fold seam.
+            self.fold_into_acc_real(&rec.inc, &mut acc);
+            self.fold_into_acc_real_blocks(&rec.inc_sens, &mut acc_sens, d);
             // The recorder emits one record per obs time, in order; a mismatch means
             // the output grid drifted from the obs grid (a caller bug the recorder's
             // own overshoot check should already have caught).
@@ -1412,14 +1462,16 @@ impl MultiStreamObsModel {
                 };
                 // Continuous `projected` and `∂projected/∂θ`, read off the record.
                 let (projected, dproj): (f64, Vec<f64>) = match &s.projection {
-                    StreamProjection::FlowSum(idxs) => {
-                        let p = idxs.iter().map(|&i| rec.inc[i]).sum();
-                        let mut dp = vec![0.0; d];
-                        for &i in idxs {
-                            for k in 0..d {
-                                dp[k] += rec.inc_sens[i * d + k];
-                            }
-                        }
+                    StreamProjection::FlowSum(_) => {
+                        // Read the per-stream bin, NOT `rec.inc` — the record is the
+                        // blanket union-interval tally, and only `acc` carries this
+                        // stream's own reporting window (gh#680). Every `FlowSum`
+                        // stream owns a slot by construction (`stream_to_slot`).
+                        let slot = self.stream_to_slot[si].expect(
+                            "a FlowSum stream must own an Interval acc slot",
+                        );
+                        let p = acc[slot];
+                        let dp = acc_sens[slot * d..(slot + 1) * d].to_vec();
                         (p, dp)
                     }
                     StreamProjection::IntCompSum(idxs) => {
@@ -1492,6 +1544,12 @@ impl MultiStreamObsModel {
                     grad[k] += dl_dproj * dproj[k];
                 }
             }
+            // RESET, after scoring — only the streams scheduled at THIS union index
+            // close their bin; a stream on a longer cadence keeps accumulating
+            // toward its own next observation. Mirrors the value path's
+            // `reset_due_acc_real`, extended to the sensitivity block.
+            self.reset_due_acc_real(obs_idx, &mut acc);
+            self.reset_due_acc_real_blocks(obs_idx, &mut acc_sens, d);
         }
         Ok((total_ll, grad))
     }

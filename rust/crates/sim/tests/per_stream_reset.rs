@@ -14,10 +14,11 @@
 //! `MultiStreamObsModel::{fold_into_acc, reset_due_acc, n_interval_streams}` —
 //! plus an end-to-end filter smoke test.
 //!
-//! The CLI still loud-rejects heterogeneous cadences end-to-end (Phase 2b
-//! opens them); this test bypasses that by building the obs model DIRECTLY via
-//! `bind` of two `StreamSpec`s on different cadences (`bind` merges them onto
-//! the union axis — the Phase 1 substrate).
+//! Heterogeneous cadences are open end-to-end: the fit loader feeds each stream
+//! its OWN schedule and `bind` re-merges to the union axis
+//! (`cli/src/fit/runner.rs::stream_specs_from_obs_streams`, §3.3). These tests
+//! build the obs model DIRECTLY via `bind` of two `StreamSpec`s on different
+//! cadences, which is the same substrate that loader produces.
 //!
 //! Determinism: a single deterministic `inflow @ deterministic(K)` transition,
 //! so the per-substep flow is exactly `nearbyint(K·dt)` with no particle noise.
@@ -356,4 +357,95 @@ fn bootstrap_filter_runs_multi_cadence() {
     for (i, &inc) in res.ll_increments.iter().enumerate() {
         assert!(inc.is_finite(), "increment {i} must be finite, got {inc}");
     }
+}
+
+/// gh#680: the ODE gradient path carries a SECOND accumulator alongside the
+/// value bin — the forward sensitivity `∂flow/∂θ`, `d` gradient columns per
+/// transition. If it binned differently from the value bin, the returned
+/// gradient would not be the derivative of the returned value, and `nuts` would
+/// sample a posterior nothing else computes.
+///
+/// This pins the identity that rules that out, with no floating-point slack:
+/// one `fold_into_acc_real_blocks(width = d)` + `reset_due_acc_real_blocks` must
+/// produce, column by column, EXACTLY what `d` independent scalar
+/// `fold_into_acc_real` + `reset_due_acc_real` walks produce. Same multi-cadence
+/// schedule as the tests above (AFP 30 d, ES 14 d), so the per-stream reset is
+/// genuinely exercised: AFP's bin must survive two ES-only union times.
+#[test]
+fn real_block_acc_bins_each_column_exactly_like_the_scalar_acc() {
+    let k = 10.0;
+    let compiled = model(k);
+    let afp_times = vec![30.0, 60.0, 90.0];
+    let es_times = vec![14.0, 28.0, 42.0, 56.0, 70.0, 84.0];
+    let obs = multi_cadence_obs(compiled, afp_times.clone(), es_times.clone());
+    let union: Vec<f64> = union_axis(&obs);
+
+    let n_tr = 1usize;
+    let n_slots = obs.n_interval_streams();
+    assert_eq!(n_slots, 2);
+    // Three gradient columns, each with a DIFFERENT per-interval increment, so a
+    // column mix-up (a stride bug) cannot pass by coincidence.
+    let d = 3usize;
+
+    let mut block: Vec<f64> = vec![0.0; n_slots * d];
+    let mut scalar: Vec<Vec<f64>> = vec![vec![0.0; n_slots]; d];
+    // Every scored bin, recorded as (union index, slot, column) -> value, from
+    // both walks; compared bitwise at the end.
+    let mut from_block: Vec<f64> = Vec::new();
+    let mut from_scalar: Vec<f64> = Vec::new();
+    // AFP's scored bins (slot 0), all `d` columns, for the non-vacuity check.
+    let mut afp_block: Vec<f64> = Vec::new();
+
+    let mut prev = 0.0_f64;
+    for (ui, &ut) in union.iter().enumerate() {
+        let width = ut - prev;
+        // src[tr * d + c] — the recorder's transition-major sensitivity layout.
+        let src: Vec<f64> = (0..n_tr * d)
+            .map(|i| width * k * (i % d + 1) as f64)
+            .collect();
+
+        obs.fold_into_acc_real_blocks(&src, &mut block, d);
+        for c in 0..d {
+            let col: Vec<f64> = (0..n_tr).map(|tr| src[tr * d + c]).collect();
+            obs.fold_into_acc_real(&col, &mut scalar[c]);
+        }
+
+        for slot in 0..n_slots {
+            let scheduled = if slot == 0 { afp_times.contains(&ut) } else { es_times.contains(&ut) };
+            if scheduled {
+                for c in 0..d {
+                    from_block.push(block[slot * d + c]);
+                    from_scalar.push(scalar[c][slot]);
+                    if slot == 0 {
+                        afp_block.push(block[slot * d + c]);
+                    }
+                }
+            }
+        }
+
+        obs.reset_due_acc_real_blocks(ui, &mut block, d);
+        for c in 0..d {
+            obs.reset_due_acc_real(ui, &mut scalar[c]);
+        }
+        prev = ut;
+    }
+
+    assert!(!from_block.is_empty(), "the walk must score something");
+    assert_eq!(
+        from_block, from_scalar,
+        "the block-strided sensitivity accumulator must bin each column bitwise \
+         identically to the scalar value accumulator — a divergence here is a \
+         gradient that does not differentiate its own value (gh#680)"
+    );
+
+    // Non-vacuity: AFP's first scored bin spans its FULL 30-day window (30·K =
+    // 300 in column 0, scaled by (c+1) in column c), not the 2-day slice
+    // (28,30] = 20 that a blanket reset at the ES-only union times would leave.
+    assert_eq!(
+        &afp_block[..d],
+        &[300.0, 600.0, 900.0],
+        "AFP's first sensitivity bin must span its own 30-day window in every \
+         column — got {:?}",
+        &afp_block[..d]
+    );
 }

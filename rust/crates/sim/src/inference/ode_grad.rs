@@ -90,7 +90,7 @@ pub fn det_grad(
 mod tests {
     use super::*;
     use crate::inference::multi_stream_obs::{StreamProjection, StreamSpec};
-    use crate::inference::{dense_cells, BoundObs, MultiStreamObsModel};
+    use crate::inference::{compute_ode_loglik, dense_cells, BoundObs, MultiStreamObsModel};
     use ir::deriv::DerivEntry;
     use ir::expr::{BinOp, ConstExpr, Expr, ParamExpr, ProjectedExpr};
     use ir::observation::{Likelihood, PoissonLikelihood};
@@ -654,5 +654,243 @@ mod tests {
         // Non-vacuity: the IC-parameter gradient must be materially nonzero — this
         // is the whole point (a zero seed would make it identically zero).
         assert!(grad[1].abs() > 1e-3, "∂/∂I0 should be materially nonzero (the seed drives it)");
+    }
+
+    // ── gh#680: per-stream incidence binning under heterogeneous cadences ──────
+    //
+    // The value path (`compute_ode_loglik`, used by `mh`) bins incidence in two
+    // levels: a blanket per-transition `cum_flows` tally, plus a per-stream `acc`
+    // that is folded before scoring and zeroed only for the streams scheduled at
+    // THAT union index. The gradient path must bin identically — value AND
+    // sensitivity — or a stream on a longer cadence is scored against a shorter
+    // modelled window.
+    //
+    // `compute_ode_loglik` is the oracle: the two paths target the same posterior,
+    // so their logliks must agree, and the analytic gradient must match a central
+    // finite difference OF THE VALUE PATH. An FD of `det_grad`'s own value cannot
+    // see this bug — a mis-binned value is still smooth in θ, and its own forward
+    // sensitivity is its exact derivative.
+
+    /// Two `FlowSum` (incidence) streams on DIFFERENT transitions, each
+    /// `poisson(rate = projected)`, so the whole gradient is factor 2 — the
+    /// `inc_sens` chain the per-stream binning feeds. Explicit integer initial
+    /// condition so the value path (rounded `initial_state`) and the gradient path
+    /// (`initial_state_continuous`) start from the same state and their flows are
+    /// directly comparable.
+    fn two_incidence_stream_model(t_end: f64) -> ir::Model {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/seir_observations.ir.json");
+        let mut model: ir::Model =
+            ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        model.initial_conditions = ir::model::InitialConditions::Explicit(HashMap::from([
+            ("S".to_string(), 9990.0),
+            ("E".to_string(), 0.0),
+            ("I".to_string(), 10.0),
+            ("R".to_string(), 0.0),
+        ]));
+        model.ic_grad = HashMap::new();
+        model.simulation.t_end = t_end;
+
+        let base = model.observations[0].clone();
+        let mk = |name: &str, transition: &str| {
+            let mut om = base.clone();
+            om.name = name.to_string();
+            om.source = name.to_string();
+            om.projection = ir::observation::Projection::CumulativeFlow(transition.to_string());
+            om.projection_state_grad = Default::default();
+            om.likelihood = Likelihood::Poisson(PoissonLikelihood {
+                rate: Diffable {
+                    expr: projected(),
+                    grad: HashMap::new(),
+                    // rate IS projected → ∂rate/∂projected = 1.
+                    proj_grad: Some(DerivEntry::Grad(Expr::Const(ConstExpr { value: 1.0 }))),
+                },
+            });
+            om
+        };
+        model.observations = vec![mk("cases_a", "infection"), mk("cases_b", "recovery")];
+        model
+    }
+
+    /// Synthetic counts for one stream under the VALUE path's binning: accumulate
+    /// the transition's real flow across snapshots and close the bin at each of
+    /// THIS stream's own observation times (never at a sibling's).
+    fn windowed_counts(traj: &crate::state::Trajectory, tr: usize, times: &[f64]) -> Vec<f64> {
+        let mut out = Vec::with_capacity(times.len());
+        let mut acc = 0.0;
+        let mut next = 0usize;
+        for (i, snap) in traj.snapshots.iter().enumerate() {
+            if i > 0 {
+                acc += snap.flows.as_real()[tr];
+            }
+            if next < times.len() && (snap.t - times[next]).abs() < 1e-9 {
+                out.push(acc.round());
+                acc = 0.0;
+                next += 1;
+            }
+        }
+        assert_eq!(out.len(), times.len(), "every obs time must land on a snapshot");
+        out
+    }
+
+    /// Build the two-stream fixture at `(times_a, times_b)` and return everything
+    /// both paths need. Data is generated at the default θ; the likelihood is then
+    /// evaluated at a DIFFERENT θ so the gradient is materially nonzero and the
+    /// finite difference is well conditioned.
+    #[allow(clippy::type_complexity)]
+    fn two_stream_fixture(
+        times_a: &[f64],
+        times_b: &[f64],
+        dt: f64,
+    ) -> (Arc<CompiledModel>, MultiStreamObsModel, Vec<f64>, Vec<f64>, Vec<usize>) {
+        let t_end = times_a.last().copied().unwrap().max(times_b.last().copied().unwrap());
+        let mut model = two_incidence_stream_model(t_end);
+        set_defaults(&mut model);
+        let compiled = Arc::new(CompiledModel::new(model).unwrap());
+
+        let n = compiled.param_index.len();
+        let mut truth = vec![0.0; n];
+        for p in &compiled.model.parameters {
+            truth[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+        }
+
+        let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end, dt };
+        let traj = crate::ode::run_ode(&compiled, &truth, &cfg, None, None).unwrap();
+        let tr = |name: &str| {
+            compiled.model.transitions.iter().position(|t| t.name == name).unwrap()
+        };
+        let data_a = windowed_counts(&traj, tr("infection"), times_a);
+        let data_b = windowed_counts(&traj, tr("recovery"), times_b);
+        assert!(data_a.iter().sum::<f64>() > 100.0, "cases_a data must be substantial");
+        assert!(data_b.iter().sum::<f64>() > 10.0, "cases_b data must be substantial");
+
+        let specs: Vec<StreamSpec> = compiled
+            .model
+            .observations
+            .iter()
+            .zip([(&data_a, times_a), (&data_b, times_b)])
+            .map(|(om, (data, times))| StreamSpec {
+                projection: StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap(),
+                ir_model: om.clone(),
+                observations: dense_cells(data.clone()),
+                obs_times: times.to_vec(),
+                aux: vec![],
+            })
+            .collect();
+        let obs_model =
+            MultiStreamObsModel::new(BoundObs::bind(specs).unwrap().0, compiled.clone()).unwrap();
+
+        // The UNION axis both paths score on.
+        let mut union: Vec<f64> = times_a.iter().chain(times_b.iter()).copied().collect();
+        union.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        union.dedup();
+
+        // Evaluate away from the data-generating θ: a materially nonzero gradient.
+        let mut params = truth.clone();
+        params[compiled.param_index["beta"]] = 0.66;
+        params[compiled.param_index["gamma"]] = 0.09;
+        let est = vec![compiled.param_index["beta"], compiled.param_index["gamma"]];
+
+        (compiled, obs_model, union, params, est)
+    }
+
+    /// `det_grad` (the `nuts` path) against `compute_ode_loglik` (the `mh` path)
+    /// on a TWO-CADENCE model: the value must agree, and the analytic gradient must
+    /// match a central finite difference of the value path. gh#680: the gradient
+    /// path zeroed its incidence tally at every union observation time, so the
+    /// 14-day stream was scored against a 7-day modelled window.
+    #[test]
+    fn det_grad_bins_multi_cadence_incidence_like_the_value_path() {
+        let dt = 1.0;
+        let times_a: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect(); // 7 d
+        let times_b: Vec<f64> = (1..=4).map(|w| (w * 14) as f64).collect(); // 14 d
+        let (compiled, obs_model, union, params, est) =
+            two_stream_fixture(&times_a, &times_b, dt);
+        assert_eq!(union.len(), 8, "the union axis is the 7-day grid");
+        assert_eq!(obs_model.n_interval_streams(), 2, "both streams are incidence bins");
+
+        let (ll_grad, grad) =
+            det_grad(&compiled, &obs_model, &union, dt, dt, &params, &est).unwrap();
+        let ll_value =
+            compute_ode_loglik(&compiled, &obs_model, &union, dt, &params, dt).unwrap();
+        assert!(ll_grad.is_finite() && ll_value.is_finite());
+        assert!(
+            (ll_grad - ll_value).abs() < 1e-6,
+            "gradient-path loglik {ll_grad} disagrees with value-path loglik {ll_value} \
+             (Δ = {:.6e}) — the two paths must bin multi-cadence incidence identically",
+            ll_grad - ll_value
+        );
+
+        let eps = 1e-6;
+        let names = ["beta", "gamma"];
+        for (i, &midx) in est.iter().enumerate() {
+            let mut pp = params.clone();
+            let mut pm = params.clone();
+            pp[midx] += eps;
+            pm[midx] -= eps;
+            let llp = compute_ode_loglik(&compiled, &obs_model, &union, dt, &pp, dt).unwrap();
+            let llm = compute_ode_loglik(&compiled, &obs_model, &union, dt, &pm, dt).unwrap();
+            let fd = (llp - llm) / (2.0 * eps);
+            let rel = (grad[i] - fd).abs() / fd.abs().max(1e-8);
+            assert!(
+                rel < 1e-4,
+                "det_grad ∂/∂{} = {} vs value-path FD {} (rel err {:.2e})",
+                names[i], grad[i], fd, rel
+            );
+        }
+        // Non-vacuity: both directions must carry real signal, or the agreement
+        // above is agreement about nothing.
+        assert!(grad[0].abs() > 1.0, "∂/∂beta should be materially nonzero, got {}", grad[0]);
+        assert!(grad[1].abs() > 1.0, "∂/∂gamma should be materially nonzero, got {}", grad[1]);
+    }
+
+    /// NEGATIVE CONTROL for gh#680: the same two-stream fixture with ONE cadence.
+    /// Here the union index and every stream's schedule coincide, so per-stream
+    /// binning and a blanket reset are the same operation — the common path. The
+    /// printed full-precision value/gradient must be unchanged by the multi-cadence
+    /// fix (bit-identical), and the value/FD agreement must hold as before.
+    #[test]
+    fn det_grad_single_cadence_is_unchanged() {
+        let dt = 1.0;
+        let times: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect();
+        let (compiled, obs_model, union, params, est) =
+            two_stream_fixture(&times, &times, dt);
+        assert_eq!(union, times, "single cadence: the union axis IS the shared grid");
+
+        let (ll_grad, grad) =
+            det_grad(&compiled, &obs_model, &union, dt, dt, &params, &est).unwrap();
+        let ll_value =
+            compute_ode_loglik(&compiled, &obs_model, &union, dt, &params, dt).unwrap();
+        eprintln!(
+            "gh#680 single-cadence control: ll = {:.17e} grad = [{:.17e}, {:.17e}]",
+            ll_grad, grad[0], grad[1]
+        );
+        assert!(
+            (ll_grad - ll_value).abs() < 1e-6,
+            "single-cadence gradient-path loglik {ll_grad} disagrees with value-path \
+             {ll_value} (Δ = {:.6e})",
+            ll_grad - ll_value
+        );
+
+        let eps = 1e-6;
+        let names = ["beta", "gamma"];
+        for (i, &midx) in est.iter().enumerate() {
+            let mut pp = params.clone();
+            let mut pm = params.clone();
+            pp[midx] += eps;
+            pm[midx] -= eps;
+            let llp = compute_ode_loglik(&compiled, &obs_model, &union, dt, &pp, dt).unwrap();
+            let llm = compute_ode_loglik(&compiled, &obs_model, &union, dt, &pm, dt).unwrap();
+            let fd = (llp - llm) / (2.0 * eps);
+            let rel = (grad[i] - fd).abs() / fd.abs().max(1e-8);
+            assert!(
+                rel < 1e-4,
+                "det_grad ∂/∂{} = {} vs value-path FD {} (rel err {:.2e})",
+                names[i], grad[i], fd, rel
+            );
+        }
+        assert!(grad[0].abs() > 1.0, "∂/∂beta should be materially nonzero, got {}", grad[0]);
+        assert!(grad[1].abs() > 1.0, "∂/∂gamma should be materially nonzero, got {}", grad[1]);
     }
 }

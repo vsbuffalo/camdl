@@ -1152,6 +1152,13 @@ pub(crate) fn integrate_obs_sensitivity(
     // Running incidence (and its sensitivity) accumulated across output snapshots
     // since the previous obs time — reset per obs, exactly as `compute_ode_loglik`
     // bridges a fine output grid to a sparse obs grid.
+    //
+    // This is the BLANKET per-transition tally over each UNION observation interval
+    // — the recorder's analogue of the value path's `cum_flows`. It is deliberately
+    // not per-stream: the integrator knows transitions, not observation streams, and
+    // per-stream binning needs the obs model's slot map and cadence. The consumer
+    // (`MultiStreamObsModel::ode_loglik_and_grad`) folds these into its per-stream
+    // `acc` / `acc_sens` and resets them on each stream's own schedule (gh#680).
     let mut cum_flow = vec![0.0; n_tr];
     let mut cum_flow_sens = vec![0.0; n_tr * d];
     let mut records = Vec::with_capacity(obs_times.len());
@@ -1162,6 +1169,11 @@ pub(crate) fn integrate_obs_sensitivity(
     // running incidence. Returns whether an obs was recorded (for the overshoot
     // check). `t` is the boundary time; `st`/`cum_*` are read at their post-effect,
     // post-output-reset values.
+    //
+    // The blanket zeroing here closes a UNION observation interval, so `rec.inc` is
+    // "flow since the previous union obs time" for every transition. Which of those
+    // intervals a given stream is scored against is the consumer's per-stream `acc`
+    // (gh#680) — do not make this reset stream-aware.
     let try_record = |t: f64,
                           st: &AugState,
                           cum_flow: &mut [f64],
