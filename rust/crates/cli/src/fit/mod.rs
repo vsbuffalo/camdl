@@ -1778,8 +1778,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     });
                     if record_preq {
                         if let Some(ref recorded) = result.prequential {
-                            let y_obs: Vec<f64> = run_config.observations.iter()
-                                .map(|o| o.value).collect();
+                            // gh#268/gh#648: score against the real observed
+                            // values (cross-stream sum on the union axis), the
+                            // same seam `camdl pfilter --save-prequential`
+                            // uses. NOT `run_config.observations[i].value` —
+                            // that is the canonical union TIME axis, whose
+                            // `value` is a never-scored 0.0 placeholder
+                            // (`runner.rs`), so it scored every forecast
+                            // against a vector of zeros.
+                            let y_obs: Vec<f64> = obs_model.joint_observed();
                             // gh#269: per-stream observed values for the
                             // per-district score breakdown.
                             let per_stream_obs = obs_model.per_stream_observed();
