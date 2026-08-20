@@ -268,19 +268,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let (mut model_pre, model_json) = crate::util::load_model(&ir_path)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
 
-    // gh#561: every profile point runs the filter, whose window is the
-    // observation times — the model horizon is never read here. A scenario's
-    // own `simulate { to }` therefore moves nothing, so refuse it rather than
-    // discard it silently (the same guard as `pfilter` and `fit predict`).
-    if let Err(e) = crate::util::refuse_scenario_horizon(
-        &model_pre, scenario_name.as_deref(), "profile",
-        "each profile point scores through a particle filter at the observation \
-         times, so the window comes from the data, not the model horizon",
-    ) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
-
     // ── Optional --fit toml resolution (gh#73) ──────────────────────
     //
     // When `--fit <path.toml>` is supplied, the fit-toml is the source
@@ -370,6 +357,109 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
     }
 
+    // ── Resolve --data and --obs against the IR's observation list ──
+    //
+    // gh#90: polymorphic `--data` is the primary multi-stream surface.
+    //   --data PATH         → single-stream, optionally narrowed by --obs.
+    //   --data NAME=PATH    → multi-stream, joint scoring of every bound
+    //                         stream (repeatable; one flag per stream).
+    //
+    // gh#38 family resolution survives: in the single-PATH form,
+    // `--obs <root>` matches every IR obs whose name starts with
+    // `<root>_`, so a single wide TSV covers an indexed
+    // `cases[s,a]` family with one `--data <file>` flag plus
+    // `--obs cases`.
+    //
+    // fit-toml fallback: when no `--data` flags supplied AND `--fit`
+    // is, read `[data]` / `[data.observations]` from the toml. CLI
+    // flags always win when both are supplied.
+    //
+    // This sits BEFORE the resolver and the compile because the observation
+    // anchors below fold over exactly these bindings (gh#616), and
+    // `CompiledModel::new` refuses a model that still carries one. Binding is a
+    // pure read of the args plus `model.observations`, which neither the
+    // `[estimate].start` seeding above nor the resolver below touches.
+    let obs_name_arg = a.stream.obs.clone();
+    let model_obs_names: Vec<String> = model_pre.observations.iter()
+        .map(|o| o.name.clone()).collect();
+    let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
+    let bound_streams: Vec<(String, std::path::PathBuf)> = if cli_data_specs.is_empty() {
+        if let Some(fit_path) = a.fit.as_ref() {
+            eprintln!("profile: no --data flags supplied, reading bindings \
+                from --fit toml [data.observations]");
+            crate::pfilter::load_data_observations_from_fit_toml(
+                fit_path.as_path(), &model_obs_names,
+            ).unwrap_or_else(|e| {
+                eprintln!("error: --fit toml fallback for --data: {}", e);
+                std::process::exit(1);
+            })
+        } else {
+            eprintln!("error: --data is required. Use `--data PATH` for a \
+                single-stream model, `--data NAME=PATH` (repeatable) for a \
+                multi-stream model, or `--fit FOO.toml` with a \
+                [data.observations] section.{}",
+                crate::obs_anchor::unbound_anchor_clause(&model_pre));
+            std::process::exit(1);
+        }
+    } else {
+        if a.fit.is_some() {
+            eprintln!("profile: --data on CLI overrides --fit toml [data.observations]");
+        }
+        crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name_arg.as_deref())
+            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+    };
+
+    if bound_streams.is_empty() {
+        eprintln!("error: zero streams resolved from --data / --fit toml.{}",
+                  crate::obs_anchor::unbound_anchor_clause(&model_pre));
+        std::process::exit(1);
+    }
+
+    // gh#616: profile binds observation data, so it RESOLVES a model's
+    // observation anchors instead of letting `CompiledModel::new` refuse them.
+    // The window is folded from the bindings just resolved, so it is the same
+    // window every profile point scores.
+    //
+    // Everything downstream reads the substituted model: `model_pre` is the
+    // resolver's input and `resolved.model` is what compiles, and this path has
+    // exactly one `load_model` and one `CompiledModel::new`. A second fresh load
+    // of the compiled IR would re-introduce the unresolved marker (gh#616
+    // regression, commit 7af5c9fa).
+    let moved_any_anchor = crate::obs_anchor::resolve_from_bindings(
+        &mut model_pre, &bound_streams, dt,
+    ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    // The run is content-addressed by the IR TEXT (`model_identity_from_ir`),
+    // not by `model_pre`, so the substitution has to reach the text too — else
+    // two data vintages that fork a forcing differently would share a
+    // `model_identity`. Re-emitted only when something actually moved, so an
+    // unanchored model's bytes are untouched.
+    let model_json = if moved_any_anchor {
+        ir::to_string_pretty(&model_pre).unwrap_or_else(|e| {
+            eprintln!("error: re-emitting the anchor-resolved IR: {e}");
+            std::process::exit(1);
+        })
+    } else {
+        model_json
+    };
+
+    // gh#561: every profile point runs the filter, whose window is the
+    // observation times — the model horizon is never read here. A scenario's
+    // own `simulate { to }` therefore moves nothing, so refuse it rather than
+    // discard it silently (the same guard as `pfilter` and `fit predict`).
+    //
+    // It runs AFTER the substitution above so it compares two RESOLVED numbers:
+    // an anchored model and an anchored scenario that resolve to the same time
+    // are a no-op and must pass, and two that differ must be named with times a
+    // reader can check against the data.
+    if let Err(e) = crate::util::refuse_scenario_horizon(
+        &model_pre, scenario_name.as_deref(), "profile",
+        "each profile point scores through a particle filter at the observation \
+         times, so the window comes from the data, not the model horizon",
+    ) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+
     // Run the unified resolver.
     let fit_toml_estimate: indexmap::IndexSet<String> =
         fit_estimate.keys().cloned().collect();
@@ -410,56 +500,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         method.backend, &compiled,
     ) {
         eprintln!("error: {}", msg);
-        std::process::exit(1);
-    }
-
-    // ── Resolve --data and --obs against the IR's observation list ──
-    //
-    // gh#90: polymorphic `--data` is the primary multi-stream surface.
-    //   --data PATH         → single-stream, optionally narrowed by --obs.
-    //   --data NAME=PATH    → multi-stream, joint scoring of every bound
-    //                         stream (repeatable; one flag per stream).
-    //
-    // gh#38 family resolution survives: in the single-PATH form,
-    // `--obs <root>` matches every IR obs whose name starts with
-    // `<root>_`, so a single wide TSV covers an indexed
-    // `cases[s,a]` family with one `--data <file>` flag plus
-    // `--obs cases`.
-    //
-    // fit-toml fallback: when no `--data` flags supplied AND `--fit`
-    // is, read `[data]` / `[data.observations]` from the toml. CLI
-    // flags always win when both are supplied.
-    let obs_name_arg = a.stream.obs.clone();
-    let model_obs_names: Vec<String> = model.observations.iter()
-        .map(|o| o.name.clone()).collect();
-    let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
-    let bound_streams: Vec<(String, std::path::PathBuf)> = if cli_data_specs.is_empty() {
-        if let Some(fit_path) = a.fit.as_ref() {
-            eprintln!("profile: no --data flags supplied, reading bindings \
-                from --fit toml [data.observations]");
-            crate::pfilter::load_data_observations_from_fit_toml(
-                fit_path.as_path(), &model_obs_names,
-            ).unwrap_or_else(|e| {
-                eprintln!("error: --fit toml fallback for --data: {}", e);
-                std::process::exit(1);
-            })
-        } else {
-            eprintln!("error: --data is required. Use `--data PATH` for a \
-                single-stream model, `--data NAME=PATH` (repeatable) for a \
-                multi-stream model, or `--fit FOO.toml` with a \
-                [data.observations] section.");
-            std::process::exit(1);
-        }
-    } else {
-        if a.fit.is_some() {
-            eprintln!("profile: --data on CLI overrides --fit toml [data.observations]");
-        }
-        crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name_arg.as_deref())
-            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
-    };
-
-    if bound_streams.is_empty() {
-        eprintln!("error: zero streams resolved from --data / --fit toml.");
         std::process::exit(1);
     }
 

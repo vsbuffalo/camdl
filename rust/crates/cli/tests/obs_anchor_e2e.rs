@@ -752,6 +752,38 @@ fn pfilter_resolves_an_anchored_model_and_reports_a_finite_loglik() {
     assert!(ll.is_finite(), "the log-likelihood must be finite, got {ll}");
 }
 
+/// The same for `profile`, whose bindings come from the `--fit` toml's
+/// `[data.observations]` (no `--data` flag) — the form the report used.
+#[test]
+fn profile_resolves_an_anchored_model() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = write_model(tmp.path(), "last_obs + 4 'weeks");
+    let data = tmp.path().join("cases.tsv");
+    write_data(&data, 4);
+    let toml = write_fit_toml(tmp.path(), &model, &data);
+
+    let o = Command::new(&bin)
+        .arg("profile")
+        .arg(&model)
+        .args(["--fit", toml.to_str().unwrap()])
+        .args(["--sweep", "gamma=lin(0.08,0.12,2)"])
+        .args(["--algorithm", "if2", "--particles", "30", "--iterations", "3"])
+        .args(["--starts", "1", "--rw-sd", "auto", "--seed", "1"])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .output()
+        .expect("spawn profile");
+    let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(o.status.success(), "profile must run an anchored model:\n{stderr}");
+    assert_both_anchors_announced(&stderr, "profile --fit");
+    assert!(
+        stderr.contains("cells written"),
+        "profile must have scored its grid:\n{stderr}"
+    );
+}
+
 /// An anchored model with NO data bound is still refused, by name. `--data` was
 /// already required here; what the message must add is that the model cannot
 /// resolve its horizon at all without one, and which construct needs it.
