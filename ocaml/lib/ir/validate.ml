@@ -18,6 +18,7 @@ type error =
   | UnknownTable          of string * site
   | UnknownTimeFunction   of string * site
   | UnknownTransition     of string * site
+  | DuplicateFlowInUnion  of string * site  (* gh#678: a flow union must be disjoint *)
   | RealCompartmentInStoichiometry of string * string  (* transition, compartment *)
   | MissingOdeEquation    of string
   | OdeForNonRealComp     of string
@@ -34,6 +35,10 @@ let error_to_string = function
   | UnknownTable        (s, _) -> Printf.sprintf "unknown table: %s" s
   | UnknownTimeFunction (s, _) -> Printf.sprintf "unknown time_function: %s" s
   | UnknownTransition   (s, _) -> Printf.sprintf "unknown transition: %s" s
+  | DuplicateFlowInUnion (s, _) ->
+    Printf.sprintf
+      "flow '%s' appears twice in a cumulative_flow_sum — a union of flows must \
+       be disjoint, or every event on it is counted twice" s
   | RealCompartmentInStoichiometry (tr, c) ->
     Printf.sprintf "real compartment '%s' in stoichiometry of '%s'" c tr
   | MissingOdeEquation s -> Printf.sprintf "real compartment '%s' has no ODE equation" s
@@ -164,7 +169,14 @@ let validate (m : model) : (unit, error list) result =
      | CumulativeFlowSum tns ->
        List.iter (fun tn ->
          if not (SS.mem tn tr_set) then errors := UnknownTransition (tn, here) :: !errors
-       ) tns
+       ) tns;
+       (* gh#678: covers every producer, including a hand-written or generated
+          IR that never passed through the expander's lowering-site check. *)
+       let seen = Hashtbl.create 8 in
+       List.iter (fun tn ->
+         if Hashtbl.mem seen tn then
+           errors := DuplicateFlowInUnion (tn, here) :: !errors
+         else Hashtbl.add seen tn ()) tns
      | CurrentPop cn ->
        if not (SS.mem cn comp_names) then errors := UnknownCompartment (cn, here) :: !errors
      | CurrentPopSum cns ->

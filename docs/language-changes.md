@@ -13,7 +13,7 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
-## 2026-08-20 — `incidence(...)` takes exactly one transition
+## 2026-08-20 — `incidence(...)` takes exactly one transition; add flows with `+`
 
 **What.** A projection head `incidence(...)` names one flow. Giving it several
 positional arguments is now `E203`, and giving it none is now `E250`. Both used
@@ -24,26 +24,33 @@ internal sentinel name and resurfaced downstream as an `E507` about an unknown
 transition named `'?'`, which is nothing you wrote.
 
 The comma form is reachable because the sibling head does sum:
-`prevalence(X1, X2)` desugars to `X1 + X2` and still does. The two heads differ
-because a compartment population is an expression leaf and a flow is not —
-`incidence(...)` is head-position sugar, so `incidence(a) + incidence(b)` is
-`E100` (undeclared function), not an escape.
+`prevalence(X1, X2)` desugars to `X1 + X2` and still does. `incidence(...)` does
+not, because a comma inside one head reads as "project these together" while
+saying nothing about whether they are disjoint.
 
-**Migration.** If the flows are strata of one transition family, pool them with
-the explicit cross-stratum sum. Otherwise route them through a single junction
-transition and observe that one. Whether `incidence(a, b)` should sum is open on
-gh#669.
+**Migration.** Add the terms explicitly. `incidence(a) + incidence(b)` is a
+supported projection — it lowers to the same `cumulative_flow_sum` the family
+sum produces, and the two compose.
 
 ```camdl
 projected = incidence(die_community, die_facility)   # old: observed only die_community
 
-projected = sum(a in site, incidence(die[a]))        # new, if they are one family
-projected = incidence(die_registered)                # new, via a junction transition
+projected = incidence(die_community) + incidence(die_facility)   # new
+projected = sum(a in site, incidence(die[a]))                    # new, if one family
 ```
+
+The union must be **disjoint** — naming one flow twice counts its events twice
+and is `E342`. Two terms that look different can be the same transition once the
+stream's binder is substituted: inside `cases[a in age]`,
+`incidence(die[a]) + incidence(die[child])` collides on the child row.
+
+A per-stratum **weight** inside the projection
+(`sum(a in age, rho[a] * incidence(die[a]))`) is a different object and is not
+supported yet (`E341`); a single reporting rate belongs in the likelihood.
 
 **Diagnostic.**
 
-```text
+````text
 error[E203]: observation 'deaths': `incidence(...)` projects exactly one flow,
              but 2 were given (die_community, die_facility) — only
              'die_community' would be observed, and 'die_facility' would go
@@ -81,7 +88,7 @@ observations {
     weekly_cases ~ neg_binomial(mean = rho * projected, r = k)
   }
 }
-```
+````
 
 Scaling the projection by dimensionless factors is unaffected —
 `mean = rho * (1.0 + gamma * q / tau) * projected` is still `[P]` and still

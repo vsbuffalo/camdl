@@ -47,6 +47,14 @@ pub enum ValidationError {
     #[error("observation '{obs}' cumulative_flow references unknown transition '{transition}'")]
     UnknownTransitionInObservation { obs: String, transition: String },
 
+    /// gh#678. A `cumulative_flow_sum` is a UNION of flows, so it must be
+    /// disjoint — a repeated transition counts every event on it twice. The
+    /// OCaml expander catches this at the lowering site with a source span
+    /// (E342); this is the backstop for an IR that never passed through it.
+    #[error("observation '{obs}' names flow '{transition}' twice in one flow union — \
+             a union of flows must be disjoint, or every event on it is counted twice")]
+    DuplicateFlowInObservation { obs: String, transition: String },
+
     #[error("intervention '{intervention}' action references unknown compartment '{compartment}'")]
     UnknownCompartmentInIntervention { intervention: String, compartment: String },
 
@@ -210,9 +218,17 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
                 }
             }
             crate::observation::Projection::CumulativeFlowSum(tns) => {
+                let mut seen = std::collections::HashSet::new();
                 for tn in tns {
                     if !tr_names.contains(tn.as_str()) {
                         errors.push(ValidationError::UnknownTransitionInObservation {
+                            obs: obs.name.clone(),
+                            transition: tn.clone(),
+                        });
+                    }
+                    // gh#678: the union must be disjoint.
+                    if !seen.insert(tn.as_str()) {
+                        errors.push(ValidationError::DuplicateFlowInObservation {
                             obs: obs.name.clone(),
                             transition: tn.clone(),
                         });

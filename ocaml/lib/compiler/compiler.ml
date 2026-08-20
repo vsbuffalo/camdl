@@ -396,6 +396,19 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
       Printf.sprintf "unknown time_function referenced: '%s'" s,
       Some "check the `time_functions` block for a matching declaration",
       site_loc site
+    | DuplicateFlowInUnion (s, site) ->
+      (* gh#678. The expander's lowering-site check (E342) catches this on the
+         .camdl path with a located span and a binder-aware hint; E514 is the
+         backstop for an IR that never passed through it — hand-written,
+         generated, or drifted. *)
+      "E514",
+      Printf.sprintf
+        "flow '%s' appears twice in one observation's flow union, so every \
+         event on it would be counted twice" s,
+      Some "a union of flows must be disjoint. From a .camdl this is E342 with \
+            a source span; a bare E514 means the IR was hand-written or has \
+            drifted",
+      site_loc site
     | UnknownTransition (s, site) ->
       "E507",
       Printf.sprintf "unknown transition referenced in observation: '%s'" s,

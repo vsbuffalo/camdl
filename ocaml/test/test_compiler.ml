@@ -95,7 +95,13 @@ let compile_expect_error_code ~code ~contains src =
   | Ok _ -> Alcotest.failf "expected error %s but compile succeeded" code
   | Error e ->
     if String.length e = 0 then Alcotest.failf "error text was empty";
-    if not (contains_substring ~needle:code e) then
+    (* Match the JSON `code` FIELD, not a bare substring of the whole error.
+       A hint that cross-references another code — `E514`'s says "from a .camdl
+       this is E342" — otherwise satisfies `~code:"E342"` and the test passes on
+       the wrong diagnostic. Found by mutation-checking gh#678: disabling the
+       expander check left only E514, and the test still went green. *)
+    let code_field = Printf.sprintf "\"code\":\"%s\"" code in
+    if not (contains_substring ~needle:code_field e) then
       Alcotest.failf "expected error code %s, got: %s" code e;
     if not (contains_substring ~needle:contains e) then
       Alcotest.failf "expected error to contain %S, got: %s" contains e
@@ -6365,6 +6371,68 @@ let test_incidence_addition_flattens_with_family_sum () =
       "family sum flattened, then the extra flow appended"
       ["infection_child"; "infection_adult"; "recovery_child"] names
   | _ -> Alcotest.fail "expected a flattened CumulativeFlowSum"
+
+(* gh#678. A flow union must be DISJOINT. The check runs on CONCRETE names,
+   after the stream's binder is substituted and named indices are normalized,
+   because that is the only point at which two different-LOOKING terms are
+   visibly one transition. The nastiest shape is an indexed stream where one
+   term uses the binder and the other pins a level: the collision lands on ONE
+   row and the others stay correct, so half the fitted series looks fine.
+
+   This is NOT the spec §13 case. §13 preserves multiplicity in a STATE
+   expression — `I[child] + I[child]` is identical source text, visibly
+   deliberate, and doubling a stock is expressible arithmetic. A flow is not a
+   value in the expression language, so a repeated flow in a unit-weighted
+   union has no reading other than a mistake. State keeps multiplicity; flow
+   unions must be disjoint. *)
+let test_flow_union_rejects_binder_collision () =
+  compile_expect_error_code ~code:"E342" ~contains:"twice"
+    (stratified_age_seir_with_obs {|
+      observations {
+        cases[a in age] {
+          columns       { time : time, age : dim, cases : count }
+          projected     = incidence(infection[a]) + incidence(infection[child])
+          emit_schedule = every 7 'days
+          cases ~ neg_binomial(mean = projected, r = k)
+        }
+      }
+    |})
+
+(* The same collision reached by NAMED-INDEX normalization rather than binder
+   substitution: `resolve_index_order` puts named indices into declared order
+   and `index_item_to_str` drops the label, so these are one flow. *)
+let test_flow_union_rejects_named_index_collision () =
+  compile_expect_error_code ~code:"E342" ~contains:"twice"
+    (stratified_age_seir_with_obs {|
+      observations {
+        cases {
+          columns       { time : time, cases : count }
+          projected     = incidence(infection[age = child]) + incidence(infection[child])
+          emit_schedule = every 7 'days
+          cases ~ neg_binomial(mean = projected, r = k)
+        }
+      }
+    |})
+
+(* The disjoint case must keep compiling — the check must not fire on two
+   genuinely different flows that happen to share a stratum. *)
+let test_flow_union_allows_distinct_flows_same_stratum () =
+  let src = stratified_age_seir_with_obs {|
+    observations {
+      cases[a in age] {
+        columns       { time : time, age : dim, cases : count }
+        projected     = incidence(infection[a]) + incidence(recovery[a])
+        emit_schedule = every 7 'days
+        cases ~ neg_binomial(mean = projected, r = k)
+      }
+    }
+  |} in
+  let m = compile_expect_ok src in
+  match (List.hd m.observations).projection with
+  | Ir.CumulativeFlowSum names ->
+    Alcotest.(check (list string)) "both distinct flows on the child row"
+      ["infection_child"; "recovery_child"] names
+  | _ -> Alcotest.fail "expected CumulativeFlowSum"
 
 (* A WEIGHTED term is a different object — it needs `WeightedFlowSum`, which is
    the rest of Increment B and carries the schema bump. Until then it must be
@@ -12883,6 +12951,9 @@ let () =
       Alcotest.test_case "B1a: sum(...) + incidence(...) flattens" `Quick test_incidence_addition_flattens_with_family_sum;
       Alcotest.test_case "B1a: a weighted incidence term is E341, not E100" `Quick test_weighted_incidence_is_named_not_e100;
       Alcotest.test_case "B1a: incidence mixed with state is E341" `Quick test_incidence_mixed_with_state_is_named;
+      Alcotest.test_case "gh#678: binder collision in a flow union is E342" `Quick test_flow_union_rejects_binder_collision;
+      Alcotest.test_case "gh#678: named-index collision is E342" `Quick test_flow_union_rejects_named_index_collision;
+      Alcotest.test_case "gh#678: distinct flows in one stratum still compile" `Quick test_flow_union_allows_distinct_flows_same_stratum;
       Alcotest.test_case "incidence(infection[child]) picks one stratum" `Quick test_incidence_positional_indexed_pins_one_stratum;
       Alcotest.test_case "gh#669: incidence(a, b) is rejected, not silently truncated" `Quick test_gh669_incidence_several_flows_is_rejected;
       Alcotest.test_case "gh#669: the diagnostic names every flow given" `Quick test_gh669_incidence_several_flows_names_every_flow;

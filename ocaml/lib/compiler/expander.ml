@@ -8206,6 +8206,50 @@ let expand_observations ctx =
       ignore e;
       Ir.DerivedExpr (Ir.Const 0.0)
     in
+    (* gh#678. A union of flows must be DISJOINT — each event is counted once.
+       The check runs on CONCRETE transition names, after `resolve_index_order`
+       has normalized named indices to declared order and `index_item_to_str`
+       has substituted the stream's binder, because that is where two
+       different-LOOKING terms become one transition:
+
+         · `die[patch = north, age = child]` and `die[child, north]` normalize
+           to the same `die_child_north`;
+         · inside `cases[a in age]`, `incidence(die[a]) + incidence(die[child])`
+           collides on the CHILD row only — the adult row is correct, so half
+           the series looks fine.
+
+       A syntactic check on what the modeller wrote cannot see either.
+
+       This does NOT contradict spec §13, which preserves multiplicity in a
+       STATE expression: `I[child] + I[child]` is identical source text, visibly
+       deliberate, and doubling a stock is expressible arithmetic. A flow is not
+       a value in the expression language — it is accumulated over the reporting
+       window — so a repeated flow in a unit-weighted union has no reading other
+       than a mistake. The boundary is: state expressions keep multiplicity,
+       flow unions must be disjoint. *)
+    let check_flows_disjoint (flows : string list) =
+      let seen = Hashtbl.create 8 in
+      let dup = List.fold_left (fun acc f ->
+        match acc with
+        | Some _ -> acc
+        | None -> if Hashtbl.mem seen f then Some f
+                  else (Hashtbl.add seen f (); None)) None flows in
+      match dup with
+      | None -> ()
+      | Some f ->
+        Diagnostics.error ctx.diags ~code:"E342" ~loc:od_loc
+          ~message:(Printf.sprintf
+            "observation '%s': the projected flow union names '%s' twice, so \
+             every event on that transition would be counted twice"
+            od.oname f)
+          ~hint:"a union of flows must be disjoint — each event is counted \
+                 once. Two terms that look different can be the same \
+                 transition after the stream's binder is substituted and named \
+                 indices are normalized (inside `cases[a in age]`, `die[a]` and \
+                 `die[child]` are one flow on the child row). Drop one term, or \
+                 index the second by the stream's binder"
+          ()
+    in
     let projection = match proj_v with
       | ProjIncidence (name, idxs) ->
         let idx_vals = List.map (index_item_to_str env) idxs in
@@ -8303,19 +8347,18 @@ let expand_observations ctx =
                (arg_src first)
                (String.concat ", " (List.map (fun e -> "'" ^ arg_src e ^ "'") rest)))
              ~hint:(Printf.sprintf
-               "summing distinct flows is not expressible today (tracked as \
-                gh#669). `incidence(%s) + incidence(%s)` is not an escape \
-                either: a flow is not a value in the expression language — it \
-                is accumulated over the reporting window — so arithmetic over \
-                it is E100.\n\
-               \  • if these are strata of ONE transition family, pool them \
-                  explicitly — this is a real solution:\n\
+               "`incidence(...)` takes ONE flow, but adding incidence terms \
+                IS supported — write the union with `+`:\n\
+               \      projected = incidence(%s) + incidence(%s)\n\
+               \  • if these are strata of ONE transition family, the family \
+                  sum says so more directly:\n\
                \      projected = sum(a in <dim>, incidence(<family>[a]))\n\
-               \  • if they are DISTINCT flows there is no clean form yet. \
-                  Routing both through a junction transition and observing \
-                  that one works, but it is a workaround: the junction is not \
-                  a state of anybody, its rate constant is invisible to every \
-                  parameter table, and it adds a dwell you did not choose.\n\
+               \  • the union must be DISJOINT — naming one flow twice counts \
+                  its events twice, and is E342.\n\
+               \  • a per-stratum WEIGHT inside the projection \
+                  (`rho[a] * incidence(tr[a])`) is not supported yet (E341); \
+                  put a single reporting rate in the likelihood instead \
+                  (`cases ~ poisson(rate = rho * projected)`).\n\
                \  • do NOT write the rates out longhand \
                   (`projected = <rate expr>`). It compiles, and it is a \
                   DIFFERENT quantity — evaluated at an instant rather than \
@@ -8424,7 +8467,7 @@ let expand_observations ctx =
             `resolve_expr` gives for an empty restricted sum. *)
          | Some []       -> Ir.DerivedExpr (Ir.Const 0.0)
          | Some [single] -> Ir.CumulativeFlow single
-         | Some many     -> Ir.CumulativeFlowSum many
+         | Some many     -> check_flows_disjoint many; Ir.CumulativeFlowSum many
          | None when mentions_incidence e -> incidence_misuse e
          | None          -> Ir.DerivedExpr (resolve_expr ctx env e))
     in
