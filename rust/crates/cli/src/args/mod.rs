@@ -3076,9 +3076,14 @@ mod tests {
         ]);
         let refs = a.scenario_refs().expect("repeated --scenario parses");
         let names: Vec<&str> = refs.iter().map(|r| r.name()).collect();
-        assert_eq!(names, vec!["no_sia", "with_sia"]);
-        assert!(refs.iter().all(|r| matches!(r, crate::sim_job::ScenarioRef::Named(_))),
+        // gh#625: the fitted no-overlay arm leads — it is the posterior
+        // predictive every scenario overlays, and dropping it left scenario
+        // deltas with no reference to delta against.
+        assert_eq!(names, vec!["fitted", "no_sia", "with_sia"]);
+        assert!(refs.iter().skip(1).all(|r| matches!(r, crate::sim_job::ScenarioRef::Named(_))),
             "explicit --scenario refs are Named (preset path)");
+        assert!(matches!(refs[0], crate::sim_job::ScenarioRef::Inline { .. }),
+            "the prepended fitted arm is the inline no-overlay ref");
     }
 
     #[test]
@@ -3087,7 +3092,9 @@ mod tests {
         let a = parse_fit_predict(&["--fit", "fit.toml", "--scenario", "no_sia,with_sia"]);
         let refs = a.scenario_refs().unwrap();
         let names: Vec<String> = refs.iter().map(|r| r.name().to_string()).collect();
-        assert_eq!(names, vec!["no_sia".to_string(), "with_sia".to_string()]);
+        // gh#625: fitted leads (see the repeated-`--scenario` test).
+        assert_eq!(names, vec!["fitted".to_string(), "no_sia".to_string(),
+                               "with_sia".to_string()]);
     }
 
     #[test]

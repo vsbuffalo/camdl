@@ -58,11 +58,22 @@ const BASE_PARAMS: &[&str] = &[
 ];
 
 fn pfilter(camdl: &Path, model: &Path, data: &Path) -> std::process::Output {
+    pfilter_with(camdl, model, data, &[])
+}
+
+/// gh#621: pfilter now runs the same W329 wide-first-window enforcer as
+/// `fit run`. The degenerate-origin test below must still reach its OWN
+/// (gh#174) error, so conditioning is opt-in per call rather than baked into
+/// the shared helper.
+fn pfilter_with(camdl: &Path, model: &Path, data: &Path, extra: &[&str])
+    -> std::process::Output
+{
     let mut args = vec![
         "pfilter", model.to_str().unwrap(),
         "--particles", "500", "--dt", "1", "--seed", "5",
         "--data", data.to_str().unwrap(),
     ];
+    args.extend_from_slice(extra);
     args.extend_from_slice(BASE_PARAMS);
     Command::new(camdl)
         .args(&args)
@@ -130,7 +141,9 @@ fn dropping_origin_row_scores_finite() {
     let data = tmp.join("drop0.tsv");
     std::fs::write(&data, "time\tcases\n40\t11\n45\t75\n50\t212\n55\t73\n").unwrap();
 
-    let out = pfilter(&camdl, &model, &data);
+    // The 40-day first window needs a declared conditioning window (gh#621);
+    // the SUBJECT of this test is that dropping the t=0 row scores finite.
+    let out = pfilter_with(&camdl, &model, &data, &["--condition-from", "first_obs - 5 days"]);
     assert!(
         out.status.success(),
         "dropping the t=0 row must score cleanly; stderr:\n{}",

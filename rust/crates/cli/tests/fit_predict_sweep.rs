@@ -216,9 +216,17 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
         cells.contains(&("low_rho".to_string(), "12".to_string())),
         "the (low_rho, k=12) cell is present; saw {cells:?}"
     );
+    // gh#625: the fitted no-overlay arm is ALWAYS emitted (it is the
+    // posterior predictive every scenario overlays); no OTHER scenario leaks
+    // in, which is what this assertion is for.
     assert!(
-        cells.iter().all(|(s, _)| s == "low_rho"),
-        "only the requested scenario is present; saw {cells:?}"
+        cells.iter().all(|(s, _)| s == "low_rho" || s == "fitted"),
+        "only the requested scenario (plus the fitted reference) is present; \
+         saw {cells:?}"
+    );
+    assert!(
+        cells.iter().any(|(s, _)| s == "fitted"),
+        "the fitted reference arm is present (gh#625); saw {cells:?}"
     );
 
     // ── quantities/peak.tsv: the sweep:k column is carried on the quantity too ──

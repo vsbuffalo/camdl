@@ -97,6 +97,15 @@ fn parse_loglik(out: &std::process::Output) -> f64 {
             String::from_utf8_lossy(&out.stderr)))
 }
 
+/// gh#621: pfilter runs the same W329 wide-first-window enforcer as `fit run`,
+/// and this fixture's first window is 40 days against a ~5-day cadence. The
+/// loglik-comparison tests below declare the SAME window on both sides — they
+/// are about dated-vs-numeric equivalence, not conditioning, and this also
+/// pins that the flag treats dated and numeric time columns identically.
+/// Tests whose subject is a DIFFERENT error (empty file, missing origin) must
+/// NOT pass it, or they hit the conditioning resolver first.
+const COND: [&str; 2] = ["--condition-from", "first_obs - 5 days"];
+
 /// §9.4 byte-identity: a dated TSV yields the same pfilter loglik as the same
 /// data hand-converted to day-numbers against the origin.
 #[test]
@@ -125,8 +134,8 @@ fn dated_loglik_matches_numeric() {
     let numeric = tmp.join("numeric.tsv");
     std::fs::write(&numeric, "time\tcases\n40\t11\n45\t75\n50\t212\n55\t73\n").unwrap();
 
-    let ll_dated = parse_loglik(&pfilter_loglik(&camdl, &model, &dated, &[]));
-    let ll_numeric = parse_loglik(&pfilter_loglik(&camdl, &model, &numeric, &[]));
+    let ll_dated = parse_loglik(&pfilter_loglik(&camdl, &model, &dated, &COND));
+    let ll_numeric = parse_loglik(&pfilter_loglik(&camdl, &model, &numeric, &COND));
     assert_eq!(ll_dated, ll_numeric,
         "dated and hand-converted-numeric logliks must be bit-identical");
 
@@ -429,9 +438,9 @@ fn multitz_offsets_collapse_to_civil_date() {
         "time\tcases\n2020-04-07\t4\n2020-04-11\t64\n2020-04-16\t174\n\
          2020-04-21\t144\n2020-04-26\t75\n").unwrap();
 
-    let ll_tz = parse_loglik(&pfilter_loglik(&camdl, &model, &tz, &[]));
-    let ll_naive = parse_loglik(&pfilter_loglik(&camdl, &model, &naive, &[]));
-    let ll_shifted = parse_loglik(&pfilter_loglik(&camdl, &model, &shifted, &[]));
+    let ll_tz = parse_loglik(&pfilter_loglik(&camdl, &model, &tz, &COND));
+    let ll_naive = parse_loglik(&pfilter_loglik(&camdl, &model, &naive, &COND));
+    let ll_shifted = parse_loglik(&pfilter_loglik(&camdl, &model, &shifted, &COND));
 
     // Anti-vacuity guard 1: the loglik must be finite, else the equality
     // below proves nothing (any two -inf are equal).
