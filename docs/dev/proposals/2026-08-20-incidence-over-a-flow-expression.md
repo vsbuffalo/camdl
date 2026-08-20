@@ -216,6 +216,28 @@ because until `70247af6` our own diagnostic _recommended_ the junction — a
 construction that distorts the model, hides a constant from provenance, adds two
 compartments to the sampled latent state, and imposes an unchosen delay.
 
+## If this passes review, it is a language-surface change
+
+It adds an accepted form to the DSL, so per `.claude/rules/dsl-surface.md` it
+does not land without:
+
+- **`docs/camdl-language-spec.md`** — the observation/projection section gains
+  `incidence(a + b)` beside `prevalence(R + D)`, and, more importantly, states
+  the rule that distinguishes them: `prevalence`'s argument is an expression
+  over _state_, `incidence`'s is a union of _flows_, and the two are not
+  interchangeable because a flow is accumulated over the reporting window while
+  state is read at an instant. That paragraph is the one a modeller needs in
+  order not to write the longhand rate expression. **Hand-edit only** — the file
+  embeds `<!-- camdl-doctest-preamble -->` markers and fenced `camdl` snippets
+  that `dprint`'s reflow breaks.
+- **`docs/language-changes.md`** — a dated entry. This one _widens_ what
+  compiles rather than tightening it, so no existing model breaks; the entry is
+  a "you no longer need the junction" note with the before/after.
+- **`docs/dsl-cheatsheet.md`** and **`docs/user-features.md`** — the projection
+  row, wherever `prevalence(R, D)` is already shown.
+- **`docs/dev/warning-catalog.md`** — a row per new emit site in
+  `parse_flow_expr` (non-flow argument, overlap, unsupported arithmetic).
+
 ## Verification
 
 - Red first: `incidence(a + b)` must lower to `CumulativeFlowSum ["a"; "b"]`,
