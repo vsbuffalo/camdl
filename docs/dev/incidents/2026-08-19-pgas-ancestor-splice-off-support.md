@@ -109,6 +109,15 @@ and worth keeping: the runs differ in chain count (7 vs 8) and R̂ is mildly
 chain-count sensitive, and equal sweeps is not equal effective samples — which
 is the whole point of the renewal figure.
 
+**Settled by a 60,000-sweep run: budget is NOT the lever.** Fifty percent more
+sweeps moved `tau` 1.91 → 2.21 and `q_comm` 2.04 → 1.93, with trajectory renewal
+flat at 0.605 → 0.608. So the mixing cost is a property of the corrected
+sampler, not a shortfall a longer run closes — earlier wording here implied
+otherwise and was wrong. The counterpoint worth quoting alongside it: `r_eff`,
+the parameter the data actually constrain, is stable and converged across all
+three runs at R̂ 1.03–1.05 (1.217 / 1.175 / 1.188). The correction did not move
+it.
+
 **The general hazard is real and their data demonstrates it**, separately from
 this incident: pooling the degenerate chain moves `rho` 1.08 → 1.43 and `tau`
 1.91 → 2.17. And `camdl fit summary` reported **max R̂ 9.497** on the pooled
