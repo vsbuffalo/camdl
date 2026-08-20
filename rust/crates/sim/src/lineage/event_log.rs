@@ -43,7 +43,6 @@ use crate::error::SimError;
 use crate::propensity::{eval_expr, EvalCtx};
 use crate::state::{IntState, RealState};
 
-use super::deme::DemeMap;
 use super::{CompartmentId, DemeId, TransitionId, TransitionObserver};
 
 /// Per-transition structural routing, recorded once in the event log so replay
@@ -138,7 +137,9 @@ impl<'m> EventRecorder<'m> {
     /// precomputes per-transition routing, and records the initial pools — but
     /// owns no identity state and no RNG.
     pub fn new(model: &'m CompiledModel, initial_int: &IntState) -> Result<Self, SimError> {
-        let deme_map = DemeMap::build(&model.model, &model.comp_index);
+        // One construction site for the stratum table: the model memoizes it,
+        // so a run that both records a lineage log and fits pays for it once.
+        let deme_map = model.deme_map();
 
         // Resolve tracked-compartment names → global indices.
         let mut tracked: Vec<CompartmentId> = Vec::new();

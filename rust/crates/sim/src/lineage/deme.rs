@@ -26,6 +26,24 @@
 //! dimensions that compartment is stratified by. Compartments sharing a
 //! stratum (`S_a`, `I_a`, `R_a`) share a deme; `S_a` and `S_b` differ.
 //!
+//! ## Two questions, one table
+//!
+//! The primitive is the **dimension-value assignment**: for each compartment,
+//! which value it takes along each declared dimension, or "carries no value
+//! here". The `DemeId` is a mixed-radix digest of that row. [`DemeMap`] stores
+//! the rows and answers both questions from them:
+//!
+//! - [`DemeMap::deme_of`] — the digest, for the lineage pools.
+//! - [`DemeMap::stratum_members`] — the compartments lying in the stratum a
+//!   given compartment names, for the IVP Binomial denominator N₀ (gh#649).
+//!
+//! The two differ where a model is only *partially* stratified
+//! (`stratify(by = latent_stage, only = [E])`): the digest pins a dimension a
+//! compartment does not carry to value 0, which lumps unstratified `S` in with
+//! `E_e1`. That is the right pooling for lineage attribution and the wrong one
+//! for a population denominator, so `stratum_members` reads the row directly
+//! instead of comparing digests.
+//!
 //! Unstratified compartments — and every compartment in a model with no
 //! `model_structure` or no dimensions — map to deme 0. That makes the
 //! single-population slice the `DemeId = 0` special case exactly, so the
@@ -39,7 +57,12 @@ use ir::Model;
 
 use super::{CompartmentId, DemeId};
 
-/// Maps every global compartment id to its deme (stratum index).
+/// A compartment carries no value along this dimension — it is not stratified
+/// by it. Distinct from value index 0, which is a real value.
+const NOT_STRATIFIED: u32 = u32::MAX;
+
+/// Maps every global compartment id to its dimension-value assignment, and to
+/// the deme (stratum index) that assignment encodes.
 ///
 /// Built once per run from the model structure. `deme_of` returns 0 for any
 /// compartment not explicitly stratified, which is the correct single-
@@ -47,6 +70,14 @@ use super::{CompartmentId, DemeId};
 pub struct DemeMap {
     /// Indexed by global compartment id.
     by_comp: Vec<DemeId>,
+    /// Flattened `n_comps × n_dims` table: `assign[c * n_dims + d]` is the
+    /// index of compartment `c`'s value within `ms.dimensions[d].values`, or
+    /// [`NOT_STRATIFIED`] when `c` carries no value along dimension `d`.
+    /// `by_comp` is the mixed-radix digest of this table.
+    assign: Vec<u32>,
+    /// Number of declared dimensions — the row width of `assign`. Zero when
+    /// the model declares none, in which case `assign` is empty.
+    n_dims: usize,
 }
 
 impl DemeMap {
@@ -54,15 +85,18 @@ impl DemeMap {
     /// global id (matches `CompiledModel::comp_index`).
     pub fn build(model: &Model, comp_index: &HashMap<String, usize>) -> Self {
         let n = comp_index.len();
-        let mut by_comp = vec![DemeId(0); n];
+        let unstratified = || DemeMap { by_comp: vec![DemeId(0); n], assign: Vec::new(), n_dims: 0 };
 
         let Some(ms) = &model.model_structure else {
             // No stratification: every compartment is deme 0.
-            return DemeMap { by_comp };
+            return unstratified();
         };
         if ms.dimensions.is_empty() {
-            return DemeMap { by_comp };
+            return unstratified();
         }
+
+        let n_dims = ms.dimensions.len();
+        let mut assign = vec![NOT_STRATIFIED; n * n_dims];
 
         // Ordered (dim name → ordered values) for fast lookup, and a stable
         // global dimension order taken from `ms.dimensions`.
@@ -71,6 +105,10 @@ impl DemeMap {
             .iter()
             .map(|d| (d.name.as_str(), d.values.as_slice()))
             .collect();
+        // Dimension name → its column in `assign` (its position in
+        // `ms.dimensions`, which is also its mixed-radix digit position).
+        let dim_col: HashMap<&str, usize> =
+            ms.dimensions.iter().enumerate().map(|(i, d)| (d.name.as_str(), i)).collect();
 
         // The global stratum enumeration is the cartesian product of *all*
         // dimensions, in `ms.dimensions` order. A compartment stratified by a
@@ -107,19 +145,63 @@ impl DemeMap {
                     .chain(combo.iter().cloned())
                     .collect::<Vec<_>>()
                     .join("_");
-                if let Some(&gid) = comp_index.get(&expanded) {
-                    by_comp[gid] = global_stratum_index(ms, dims, &combo);
+                let Some(&gid) = comp_index.get(&expanded) else { continue };
+                for (dname, val) in dims.iter().zip(combo.iter()) {
+                    let (Some(&col), Some(vals)) =
+                        (dim_col.get(dname.as_str()), dim_values.get(dname.as_str()))
+                    else {
+                        continue;
+                    };
+                    if let Some(pos) = vals.iter().position(|v| v == val) {
+                        assign[gid * n_dims + col] = pos as u32;
+                    }
                 }
             }
         }
 
-        DemeMap { by_comp }
+        let by_comp = (0..n)
+            .map(|c| encode_deme(ms, &assign[c * n_dims..(c + 1) * n_dims]))
+            .collect();
+        DemeMap { by_comp, assign, n_dims }
     }
 
     /// The deme of a global compartment id. Defaults to 0 for unstratified
     /// compartments.
     pub fn deme_of(&self, comp: CompartmentId) -> DemeId {
         self.by_comp.get(comp.0).copied().unwrap_or(DemeId(0))
+    }
+
+    /// The compartments lying in the stratum that `comp` names, `comp`
+    /// included.
+    ///
+    /// A compartment names the stratum given by *its own* dimensions at its
+    /// own values: `S_p1_child` names `(patch = p1, age = child)`. Another
+    /// compartment lies in that stratum when it carries **every one of those
+    /// dimensions with the same value** — `I_p1_child` does; `I_p2_child` and
+    /// `I_p1_adult` do not. A compartment carrying no dimension names no
+    /// constraint, so every compartment lies in its stratum: the whole model.
+    /// That makes the unstratified model the one-stratum case exactly, and
+    /// keeps the answer for the unstratified `S` of a partially stratified
+    /// model (`stratify(by = latent_stage, only = [E])`) the whole population
+    /// rather than whichever cells happen to share its deme digest.
+    ///
+    /// This is the grouping the IVP Binomial denominator N₀ needs (gh#649):
+    /// `S₀ ~ Binom(N₀, s₀)` where N₀ is the population `S₀` is a fraction of.
+    pub fn stratum_members(&self, comp: CompartmentId) -> impl Iterator<Item = CompartmentId> + '_ {
+        let nd = self.n_dims;
+        // An out-of-range compartment (or a model with no dimensions) yields an
+        // empty constraint row, i.e. the whole model.
+        let target: &[u32] = nd
+            .checked_mul(comp.0)
+            .and_then(|start| self.assign.get(start..start + nd))
+            .unwrap_or(&[]);
+        (0..self.by_comp.len())
+            .filter(move |&j| {
+                target.iter().enumerate().all(|(d, &t)| {
+                    t == NOT_STRATIFIED || self.assign[j * nd + d] == t
+                })
+            })
+            .map(CompartmentId)
     }
 
     /// Number of distinct demes (max index + 1). Used by tests/diagnostics.
@@ -129,31 +211,21 @@ impl DemeMap {
 }
 
 /// Index of a compartment's stratum within the cartesian product of ALL model
-/// dimensions (in `ms.dimensions` order). Dimensions the compartment is *not*
-/// stratified by are pinned to value index 0; the referenced dimensions take
-/// the value indices given by `combo`. This yields a consistent global stratum
-/// numbering: compartments carrying the same dimension set with the same
-/// values get the same deme.
-fn global_stratum_index(
-    ms: &ModelStructure,
-    comp_dims: &[String],
-    combo: &[String],
-) -> DemeId {
-    // Map each dimension name → its chosen value index (0 if unreferenced).
-    let mut idx_by_dim: HashMap<&str, usize> = HashMap::new();
-    for (dname, val) in comp_dims.iter().zip(combo.iter()) {
-        if let Some(d) = ms.dimensions.iter().find(|d| &d.name == dname) {
-            if let Some(pos) = d.values.iter().position(|v| v == val) {
-                idx_by_dim.insert(dname.as_str(), pos);
-            }
-        }
-    }
-    // Mixed-radix encode in `ms.dimensions` order (first dimension is the most
-    // significant digit). Radix of each digit is that dimension's cardinality.
+/// dimensions (in `ms.dimensions` order), from its `assign` row. Dimensions the
+/// compartment is *not* stratified by are pinned to value index 0. This yields
+/// a consistent global stratum numbering: compartments carrying the same
+/// dimension set with the same values get the same deme.
+///
+/// Mixed-radix, `ms.dimensions` order — the first dimension is the most
+/// significant digit, each digit's radix that dimension's cardinality.
+fn encode_deme(ms: &ModelStructure, row: &[u32]) -> DemeId {
     let mut deme: u64 = 0;
-    for d in &ms.dimensions {
-        let radix = d.values.len().max(1) as u64;
-        let digit = idx_by_dim.get(d.name.as_str()).copied().unwrap_or(0) as u64;
+    for (d, dim) in ms.dimensions.iter().enumerate() {
+        let radix = dim.values.len().max(1) as u64;
+        let digit = match row.get(d) {
+            Some(&v) if v != NOT_STRATIFIED => v as u64,
+            _ => 0,
+        };
         deme = deme * radix + digit;
     }
     DemeId(deme as u32)
@@ -270,6 +342,86 @@ mod tests {
         assert_eq!(dm.deme_of(CompartmentId(comp_index["I_adult_a"])), DemeId(2)); // 1*2 + 0
         assert_eq!(dm.deme_of(CompartmentId(comp_index["I_adult_b"])), DemeId(3)); // 1*2 + 1
         assert_eq!(dm.n_demes(), 4);
+    }
+
+    /// `stratum_members` groups by the compartment's own dimension values, not
+    /// by the deme digest — so a two-dimensional cell stays a cell.
+    #[test]
+    fn stratum_members_respects_every_dimension() {
+        let structure = ms(
+            vec![("age", vec!["child", "adult"]), ("patch", vec!["a", "b"])],
+            vec![("S", vec!["age", "patch"]), ("I", vec!["age", "patch"])],
+        );
+        let mut model = ir::Model { model_structure: Some(structure), ..minimal_model() };
+        let names = [
+            "S_child_a", "S_child_b", "S_adult_a", "S_adult_b",
+            "I_child_a", "I_child_b", "I_adult_a", "I_adult_b",
+        ];
+        let comp_index: HashMap<String, usize> =
+            names.iter().enumerate().map(|(i, n)| (n.to_string(), i)).collect();
+        model.compartments = names
+            .iter()
+            .map(|n| Compartment { name: n.to_string(), kind: CompartmentKind::Integer })
+            .collect();
+        let dm = DemeMap::build(&model, &comp_index);
+
+        let members: Vec<&str> = dm
+            .stratum_members(CompartmentId(comp_index["S_child_a"]))
+            .map(|c| names[c.0])
+            .collect();
+        assert_eq!(members, vec!["S_child_a", "I_child_a"]);
+    }
+
+    /// Partial stratification (`stratify(by = latent_stage, only = [E])`): the
+    /// unstratified `S` names the whole model, while `E_e1` names only itself.
+    /// The deme digest cannot express this — it puts `S` and `E_e1` both in
+    /// deme 0 — which is why `stratum_members` reads the assignment row.
+    #[test]
+    fn stratum_members_separates_unstratified_from_the_first_cell() {
+        let structure = ms(
+            vec![("latent_stage", vec!["e1", "e2", "e3"])],
+            vec![("S", vec![]), ("I", vec![]), ("E", vec!["latent_stage"])],
+        );
+        let mut model = ir::Model { model_structure: Some(structure), ..minimal_model() };
+        let names = ["S", "I", "E_e1", "E_e2", "E_e3"];
+        let comp_index: HashMap<String, usize> =
+            names.iter().enumerate().map(|(i, n)| (n.to_string(), i)).collect();
+        model.compartments = names
+            .iter()
+            .map(|n| Compartment { name: n.to_string(), kind: CompartmentKind::Integer })
+            .collect();
+        let dm = DemeMap::build(&model, &comp_index);
+
+        // The digest lumps them together …
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["S"])), DemeId(0));
+        assert_eq!(dm.deme_of(CompartmentId(comp_index["E_e1"])), DemeId(0));
+        // … the assignment row does not.
+        let s_members: Vec<&str> =
+            dm.stratum_members(CompartmentId(comp_index["S"])).map(|c| names[c.0]).collect();
+        assert_eq!(s_members, vec!["S", "I", "E_e1", "E_e2", "E_e3"]);
+        let e1_members: Vec<&str> =
+            dm.stratum_members(CompartmentId(comp_index["E_e1"])).map(|c| names[c.0]).collect();
+        assert_eq!(e1_members, vec!["E_e1"]);
+    }
+
+    /// A model with no dimensions has one stratum containing everything, even
+    /// when a compartment name contains `_`.
+    #[test]
+    fn stratum_members_of_an_unstratified_model_is_everything() {
+        let mut model = minimal_model();
+        let names = ["S", "I", "n_vax"];
+        let comp_index: HashMap<String, usize> =
+            names.iter().enumerate().map(|(i, n)| (n.to_string(), i)).collect();
+        model.compartments = names
+            .iter()
+            .map(|n| Compartment { name: n.to_string(), kind: CompartmentKind::Integer })
+            .collect();
+        let dm = DemeMap::build(&model, &comp_index);
+        for n in names {
+            let members: Vec<&str> =
+                dm.stratum_members(CompartmentId(comp_index[n])).map(|c| names[c.0]).collect();
+            assert_eq!(members, vec!["S", "I", "n_vax"], "stratum of {n}");
+        }
     }
 
     fn minimal_model() -> ir::Model {

@@ -2392,28 +2392,41 @@ fn sample_categorical_log(log_weights: &[f64], rng: &mut StatefulRng) -> Option<
     Some(weights.len() - 1)
 }
 
-/// Compute the population of the patch containing `compartment_idx`.
+/// Population of the stratum containing `compartment_idx` — the Binomial
+/// denominator N₀ in the IVP initial-value density `Binom(S₀; N₀, s₀)`.
 ///
-/// In a stratified model, compartments in the same patch share a suffix
-/// (e.g., `S_patch1`, `I_patch1`). The patch population is the sum of
-/// initial counts for all compartments with matching suffix.
-/// For unstratified models (no `_` in the name), returns total population.
+/// The stratum comes from the model's *declared* dimensions
+/// (`model_structure.dimensions` / `compartment_dims`, via
+/// [`CompiledModel::deme_map`]), never from the compartment name. A name
+/// suffix identifies the stratum in neither of the two shapes that matter: a
+/// compartment stratified by more than one dimension (`S_p1_child` shares its
+/// suffix with `S_p2_child`, a different patch), and a dimension value that
+/// itself contains `_` (`patch = [north_kivu, south_kivu]` gives every
+/// compartment in the model the suffix `kivu`). Both silently inflate N₀, and
+/// the Binomial MLE of `s₀` is `k/N₀` (gh#649).
+///
+/// For an unstratified model every compartment is in the one stratum, so this
+/// returns the total initial population.
+///
+/// `initial_counts` is indexed by *global* compartment index. PGAS runs the
+/// chain-binomial backend, which admits integer compartments only, so the
+/// local-integer and global indexings coincide — the same assumption the three
+/// callers make when they pass `ivp.compartment_idx` here.
 pub fn patch_population(
     model: &CompiledModel,
     initial_counts: &[i64],
     compartment_idx: usize,
 ) -> i64 {
-    let total: i64 = initial_counts.iter().sum();
-    let comp_name = &model.model.compartments[compartment_idx].name;
-    let patch_suffix = comp_name.rsplit('_').next().unwrap_or("");
-    if patch_suffix.is_empty() || !comp_name.contains('_') {
-        total
-    } else {
-        model.model.compartments.iter().enumerate()
-            .filter(|(_, c)| c.name.ends_with(&format!("_{}", patch_suffix)))
-            .map(|(i, _)| initial_counts[i])
-            .sum()
-    }
+    debug_assert_eq!(
+        initial_counts.len(),
+        model.model.compartments.len(),
+        "patch_population indexes initial_counts by GLOBAL compartment index"
+    );
+    model
+        .deme_map()
+        .stratum_members(crate::lineage::CompartmentId(compartment_idx))
+        .map(|c| initial_counts[c.0])
+        .sum()
 }
 
 /// Prior log-density AND its gradient on the z (unconstrained) scale.

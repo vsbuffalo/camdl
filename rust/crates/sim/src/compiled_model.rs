@@ -665,6 +665,17 @@ pub struct CompiledModel {
     /// recompute every propensity each step and never touch it.
     comp_to_transitions_cache: std::sync::OnceLock<Vec<Vec<usize>>>,
 
+    /// Per-compartment stratum assignment, the authority on "which patch /
+    /// age class / stage is this compartment in" (see
+    /// [`crate::lineage::DemeMap`]). Built lazily via
+    /// [`CompiledModel::deme_map`] because building it reconstructs every
+    /// expanded compartment name — 4.2 ms on a 774-patch × 5-compartment
+    /// model, versus 1.5 µs to answer a query once built. The IVP Binomial
+    /// denominator reads it inside the complete-data log-likelihood, which
+    /// runs once per NUTS leapfrog step, so per-call construction is not an
+    /// option (gh#649).
+    deme_map_cache: std::sync::OnceLock<crate::lineage::DemeMap>,
+
     /// Indices of transitions whose rate expression contains a time function.
     /// These must be re-evaluated whenever simulation time advances.
     pub time_dep_transitions: Vec<usize>,
@@ -1149,6 +1160,17 @@ impl CompiledModel {
             }
             ctt
         })
+    }
+
+    /// The model's per-compartment stratum assignment, built once and reused.
+    ///
+    /// One authority for "which stratum is this compartment in", derived from
+    /// the declared `model_structure.dimensions` / `compartment_dims` — never
+    /// from the compartment name, because a dimension value may itself contain
+    /// `_` (`patch = [north_kivu, south_kivu]`).
+    pub fn deme_map(&self) -> &crate::lineage::DemeMap {
+        self.deme_map_cache
+            .get_or_init(|| crate::lineage::DemeMap::build(&self.model, &self.comp_index))
     }
 
     pub fn new(model: Model) -> Result<Self, SimError> {
@@ -1812,6 +1834,7 @@ impl CompiledModel {
             time_func_cache,
             source_groups,
             comp_to_transitions_cache: std::sync::OnceLock::new(),
+            deme_map_cache: std::sync::OnceLock::new(),
             time_dep_transitions,
             balance,
             fire_times,
