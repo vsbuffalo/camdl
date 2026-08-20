@@ -88,13 +88,23 @@ fn build_parametric_derived_proj_block(scale_param: &str) -> ir::observation::Ob
     use ir::expr::*;
     use ir::observation::*;
 
-    // projection = scale_param * projected — a DerivedExpr that depends on a
-    // parameter; ∂(projected)/∂(scale) ≠ 0 and IS propagated (the fix).
+    // projection = scale_param * I — a DerivedExpr that depends on a parameter;
+    // ∂(projected)/∂(scale) ≠ 0 and IS propagated (the fix).
+    //
+    // The state term is a compartment reference, NOT `Expr::Projected`. A
+    // projection has nothing to project from — `ResolveCtx` supplies
+    // `projected` only inside a LIKELIHOOD — so `ResolvedExpr::Projected`
+    // floors to 0.0 there (`resolved_expr.rs`), and a `scale · projected`
+    // projection is identically zero. That made `Poisson(rate = 0)` score
+    // `-inf` against every positive observation: the fit this fixture claims
+    // to run never had a finite likelihood. It is also IR the compiler cannot
+    // emit — `projected = scale * prevalence(I)` inlines the compartment,
+    // which is what this now mirrors.
     let projection_expr = Expr::BinOp(BinOpWrap {
         bin_op: BinOpExpr {
             op: BinOp::Mul,
             left: Box::new(Expr::Param(ParamExpr { param: scale_param.into() })),
-            right: Box::new(Expr::Projected(ProjectedExpr { projected: () })),
+            right: Box::new(Expr::pop("I")),
         },
     });
 
@@ -104,11 +114,13 @@ fn build_parametric_derived_proj_block(scale_param: &str) -> ir::observation::Ob
     let rate = Expr::Projected(ProjectedExpr { projected: () });
 
     // Compiler-mirroring emitted gradient: inlining the projection gives
-    // `rate = scale · projected`, so `∂rate/∂scale = projected` — a real
-    // `Grad`, NOT an `Unsupported`. The preflight admits a `Grad`.
+    // `rate = scale · I`, so `∂rate/∂scale = I` — a real `Grad`, NOT an
+    // `Unsupported`. The preflight admits a `Grad`. (`projected` would be
+    // `scale · I`, an off-by-`scale` gradient, and it is the LIKELIHOOD's
+    // `projected` — the very value being differentiated.)
     let rate_grad = std::collections::HashMap::from([(
         scale_param.to_string(),
-        ir::deriv::DerivEntry::Grad(Expr::Projected(ProjectedExpr { projected: () })),
+        ir::deriv::DerivEntry::Grad(Expr::pop("I")),
     )]);
 
     ObservationModel {
@@ -261,18 +273,26 @@ fn gh180_pgas_admits_parametric_derived_projection_param() {
     let t_end = compiled.model.simulation.t_end;
     let truth_traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
 
-    let mut cum_infection: u64 = 0;
+    // The projection is `scale · I` — a state snapshot, so the observations are
+    // weekly PREVALENCE, read off the truth trajectory at the observation
+    // instant. (A flow sum would be scored against a quantity the projection
+    // never computes.) The window stops at day 42, while the epidemic is still
+    // large: past the peak `I` decays toward 0, and a week where the reference
+    // draw reaches I = 0 against a positive observation is `Poisson(rate = 0)`
+    // — a `-inf` no trajectory at these parameters can repair.
+    let i_global = compiled.model.compartments.iter().position(|c| c.name == "I")
+        .expect("host model has an I compartment");
+    let i_local = compiled.global_to_int[i_global]
+        .expect("I is an integer compartment");
     let mut obs: Vec<Observation> = Vec::new();
     for (s, rec) in truth_traj.substeps.iter().enumerate() {
-        cum_infection += rec.flows[0];
         let t = ((s + 1) as f64) * dt;
-        if (t.round() as i64) % 7 == 0 {
-            obs.push(Observation { time: t, value: cum_infection as f64 });
-            cum_infection = 0;
+        if (t.round() as i64) % 7 == 0 && t <= 42.0 {
+            obs.push(Observation { time: t, value: rec.counts_after[i_local] as f64 });
         }
     }
 
-    // The stream projection is the resolved DerivedExpr (scale * flow).
+    // The stream projection is the resolved DerivedExpr (scale * I).
     let stream_proj = StreamProjection::from_ir(
         &compiled.model.observations[0].projection, &compiled, "weekly_cases",
     ).unwrap();
