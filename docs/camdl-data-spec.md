@@ -592,6 +592,46 @@ with `dims → scalar` tables, the `dimensions {}` block, and the existing
 
 ---
 
+## Missing observations: `NA` is a hole, not a zero
+
+In an **observation** file, the token `NA` in a value column marks a **hole**: a
+time at which the stream was scheduled but no value was observed.
+
+A hole is not an observed zero, and the difference is load-bearing:
+
+- **A hole contributes no likelihood term.** It is marginalised out — the filter
+  neither rewards nor penalises the model for what it did not see. An observed
+  `0`, by contrast, is a real datum saying "we looked and counted none," and the
+  model is scored against it.
+- **A hole still closes an incidence bin.** For a stream whose `projected` is an
+  `incidence(...)`, the accumulator resets on the observation SCHEDULE, not on
+  value presence (the same convention as pomp's `accumvars`). So a row with `NA`
+  ends the interval at its own time, and the NEXT row is scored over the span
+  since that hole — not since the last row carrying a number.
+
+That second property is the reason to write `NA` rather than delete a row. If a
+row is dropped from the file entirely, the following row's exposure window
+silently widens to span the gap, and its count is then compared against more
+modelled flow than it represents. Keeping the row as `NA` preserves the window;
+deleting it changes the meaning of the row after it.
+
+Both forms are therefore legitimate and mean different things:
+
+| you write              | the model sees                                   |
+| ---------------------- | ------------------------------------------------ |
+| `2026-07-14  NA`       | scheduled, unobserved — no term, interval closes |
+| `2026-07-14  0`        | observed zero — scored as a zero count           |
+| (no row at 2026-07-14) | not scheduled — the next row's interval spans it |
+
+**A warning for downstream consumers.** `NA` is not a null token in every tool.
+In polars it does not parse as null by default, so one `NA` turns a numeric
+value column into a string column; a plotting library then treats those strings
+as categorical and can draw them at the axis baseline — holes rendering as
+_observed zeros_ in a figure that looks entirely plausible. Read observation
+files with `NA` declared as the null value (in polars, `null_values="NA"`).
+
+---
+
 ## Complete Nigeria model with data model
 
 ```camdl
