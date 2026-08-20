@@ -633,14 +633,28 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         }
     }
 
-    // Save final particle states
+    // Save final particle states — an unweighted sample from p(x_T | y_{1:T})
+    // at this θ. `origin_t` is the LAST observation time on the union grid: the
+    // swarm was resampled after scoring it, so that is the model time the saved
+    // states sit at. It rides in the file header because `simulate --init-state`
+    // (gh#641) has no other way to learn where the forecast origin is.
     if let Some(ref path) = save_final_state {
         if let Some(ref states) = result.final_states {
-            write_final_states(path, states, &model).unwrap_or_else(|e| {
+            let origin_t = observations.last().map(|o| o.time).unwrap_or_else(|| {
+                // Unreachable in practice: a filter with no observations exits
+                // long before here. Fall back to the model start rather than
+                // inventing an origin.
+                model.simulation.t_start
+            });
+            let columns = io::trajectories::TrajColumnSpec::from_model(&model, &[]);
+            io::write_final_states(
+                std::path::Path::new(path), states, &columns, origin_t,
+            ).unwrap_or_else(|e| {
                 eprintln!("error writing final states: {}", e);
                 std::process::exit(1);
             });
-            eprintln!("final particle states ({} particles) written to {}", states.len(), path);
+            eprintln!("final particle states ({} particles) at t={} written to {}",
+                states.len(), origin_t, path);
         }
     }
 
@@ -1339,43 +1353,6 @@ fn write_prequential_outputs(
     let json = serde_json::to_string_pretty(trace)
         .map_err(std::io::Error::other)?;
     std::fs::write(&json_path, json)?;
-    Ok(())
-}
-
-/// Write final particle states to a TSV file.
-/// Columns: particle_id, then one column per compartment, then flow_<transition>.
-fn write_final_states(
-    path: &str,
-    states: &[sim::inference::ParticleState],
-    model: &ir::Model,
-) -> Result<(), String> {
-    let mut f = std::fs::File::create(path)
-        .map_err(|e| format!("cannot create {}: {}", path, e))?;
-
-    // Header
-    write!(f, "particle").unwrap();
-    for c in &model.compartments {
-        if c.kind == ir::model::CompartmentKind::Integer {
-            write!(f, "\t{}", c.name).unwrap();
-        }
-    }
-    for tr in &model.transitions {
-        write!(f, "\tflow_{}", tr.name).unwrap();
-    }
-    writeln!(f).unwrap();
-
-    // Rows
-    for (i, state) in states.iter().enumerate() {
-        write!(f, "{}", i).unwrap();
-        for &c in &state.counts {
-            write!(f, "\t{}", c).unwrap();
-        }
-        for &fl in &state.flow_accumulators {
-            write!(f, "\t{}", fl).unwrap();
-        }
-        writeln!(f).unwrap();
-    }
-
     Ok(())
 }
 
