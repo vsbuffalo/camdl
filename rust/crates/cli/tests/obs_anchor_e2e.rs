@@ -28,10 +28,26 @@ fn bin() -> PathBuf {
     p
 }
 
+/// The same model with a LITERAL fork and horizon — no anchors anywhere. Used
+/// only to produce a filtered-state file, since `pfilter` does not resolve
+/// anchors. Same compartments and observation block, so the state file's
+/// columns line up with the anchored twin.
+fn write_plain_model(dir: &Path) -> PathBuf {
+    // Built from the shared body, NOT by calling `write_model` — that writes
+    // `anchored.camdl`, which the caller has already populated with the model
+    // under test.
+    let body =
+        model_body("120 'days").replace("breakpoints = [last_obs]", "breakpoints = [60 'days]");
+    assert!(!body.contains("last_obs"), "the plain twin must carry no anchor");
+    let p = dir.join("plain.camdl");
+    std::fs::write(&p, body).unwrap();
+    p
+}
+
 /// As [`write_model`], plus a scenario carrying its OWN horizon. Used for the
 /// model-vs-scenario horizon conflict.
 fn write_model_with_scenario(dir: &Path, sim_to: &str, scenario_to: &str) -> PathBuf {
-    let base = std::fs::read_to_string(write_model(dir, sim_to)).unwrap();
+    let base = model_body(sim_to);
     let body = format!(
         "{base}\nscenarios {{\n  forecast {{\n    label = \"forecast\"\n    \
          simulate {{ to = {scenario_to} }}\n    set = {{ beta = 0.35 }}\n  }}\n}}\n"
@@ -43,8 +59,8 @@ fn write_model_with_scenario(dir: &Path, sim_to: &str, scenario_to: &str) -> Pat
 
 /// SIR whose transmission is scaled by a piecewise forcing forked at the end of
 /// the observed record. `simulate { to }` is a LITERAL — see the module doc.
-fn write_model(dir: &Path, sim_to: &str) -> PathBuf {
-    let body = format!(
+fn model_body(sim_to: &str) -> String {
+    format!(
         r#"time_unit = 'days
 
 compartments {{ S, I, R }}
@@ -82,9 +98,14 @@ observations {{
 
 simulate {{ from = 0 'days  to = {sim_to} }}
 "#
-    );
+    )
+}
+
+/// Write the model to `anchored.camdl` — the path every anchored-model test
+/// uses.
+fn write_model(dir: &Path, sim_to: &str) -> PathBuf {
     let p = dir.join("anchored.camdl");
-    std::fs::write(&p, body).unwrap();
+    std::fs::write(&p, model_body(sim_to)).unwrap();
     p
 }
 
@@ -140,7 +161,7 @@ thin       = 1
 
 fn params_file(dir: &Path) -> PathBuf {
     let p = dir.join("params.toml");
-    std::fs::write(&p, "beta = 0.3\ngamma = 0.1\nrho = 0.6\n").unwrap();
+    std::fs::write(&p, "beta = 0.12\ngamma = 0.1\nrho = 0.6\n").unwrap();
     p
 }
 
@@ -447,4 +468,155 @@ fn predict_refuses_a_scenario_horizon_that_differs_after_resolution() {
     std::fs::remove_file(segment.join("model.ir.json")).expect("archived IR present to remove");
     let (ok, stderr) = predict();
     check(ok, stderr, "recompiled from model.camdl");
+}
+
+/// gh#616 × gh#641: an anchored model forecast from a saved filtered state.
+///
+/// This is the combination someone will actually reach for — "forecast eight
+/// weeks past the data, starting from where the filter left off" — and the two
+/// features touch the same two fields. `resolve_run_model` substitutes the
+/// anchors FIRST (a preset's `t_end` is NaN until it does, and
+/// `apply_scenario_horizon` reads it), then `--init-state` moves `t_start`
+/// forward to the state file's origin.
+///
+/// The ordering matters for one check in particular. The resolver refuses a
+/// forcing knot at or before `t_start`, and it deliberately asks that of the
+/// MODEL's window, not of the forecast origin: the natural setup here has the
+/// fork AT `last_obs` and the filter's final state also at `last_obs`, so knot
+/// == forecast origin. Validating knots against the moved `t_start` would
+/// refuse the single most obvious use of the pair. Nothing is lost by allowing
+/// it — a forecast that begins at the fork simply runs with the post-fork
+/// forcing throughout, which is what it should do.
+#[test]
+fn an_anchored_model_forecasts_from_a_filtered_state() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let anchored = write_model(tmp.path(), "last_obs + 4 'weeks");
+    let plain = write_plain_model(tmp.path());
+    let params = params_file(tmp.path());
+    let data = tmp.path().join("cases.tsv");
+    write_data(&data, 4); // observations at t = 7, 14, 21, 28 -> last_obs = 28
+    let toml = write_fit_toml(tmp.path(), &anchored, &data);
+    let state = tmp.path().join("final.tsv");
+
+    // The state file comes from the UNANCHORED twin (pfilter resolves no
+    // anchors); it records counts plus the origin, not the model that made it.
+    let pf = Command::new(&bin)
+        .arg("pfilter")
+        .arg(&plain)
+        .args(["--params", params.to_str().unwrap()])
+        .arg(format!("--data={}", data.to_str().unwrap()))
+        .args(["--particles", "50", "--seed", "1"])
+        .args(["--save-final-state", state.to_str().unwrap()])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .output()
+        .expect("spawn pfilter");
+    assert!(
+        pf.status.success(),
+        "pfilter --save-final-state must succeed:\n{}",
+        String::from_utf8_lossy(&pf.stderr)
+    );
+
+    let out = tmp.path().join("forecast.tsv");
+    let o = Command::new(&bin)
+        .arg("simulate")
+        .arg(&anchored)
+        .args(["--backend", "chain_binomial", "--seed", "3", "--dt", "1"])
+        .args(["--params", params.to_str().unwrap()])
+        .args(["--fit", toml.to_str().unwrap()])
+        .args(["--init-state", state.to_str().unwrap()])
+        .args(["--replicates", "50"])
+        .args(["-o", out.to_str().unwrap()])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .output()
+        .expect("spawn simulate");
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        o.status.success(),
+        "an anchored model forecast from a filtered state must run:\n{stderr}"
+    );
+    // Both features announced their resolution, and neither swallowed the other.
+    assert!(
+        stderr.contains("simulate { to }") && stderr.contains("t = 56"),
+        "the anchored horizon must resolve to last_obs(28) + 4 'weeks:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("forcing 'ramp'") && stderr.contains("t = 28"),
+        "the anchored fork must resolve to last_obs:\n{stderr}"
+    );
+
+    // The window is [forecast origin, resolved horizon] = [28, 56]: `t_start`
+    // came from the state file and `t_end` from the anchor.
+    let tsv = std::fs::read_to_string(&out).unwrap();
+    let mut lines = tsv.lines().filter(|l| !l.trim_start().starts_with('#'));
+    let header = lines.next().expect("header");
+    let ti = header
+        .split('\t')
+        .position(|c| c == "time" || c == "t")
+        .unwrap_or_else(|| panic!("time column in {header:?}"));
+    let times: Vec<f64> = lines
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.split('\t').nth(ti).unwrap().parse::<f64>().unwrap())
+        .collect();
+    let tmin = times.iter().cloned().fold(f64::INFINITY, f64::min);
+    let tmax = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    assert_eq!(tmin, 28.0, "the forecast starts at the state file's origin");
+    assert_eq!(tmax, 56.0, "and ends at the anchored horizon");
+}
+
+/// The other side of the same interaction: an anchor that resolves BEHIND the
+/// forecast origin is refused, not run backwards. gh#641 owns this check
+/// (`origin >= t_end`), and it works here only because the anchor was resolved
+/// to a real number before it ran — against NaN the comparison is false and the
+/// run would have proceeded with an inverted window.
+#[test]
+fn an_anchor_resolving_before_the_forecast_origin_is_refused() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    // Horizon `last_obs - 1 'weeks` = 21, which is BEHIND the origin (28).
+    let anchored = write_model(tmp.path(), "last_obs - 1 'weeks");
+    let plain = write_plain_model(tmp.path());
+    let params = params_file(tmp.path());
+    let data = tmp.path().join("cases.tsv");
+    write_data(&data, 4);
+    let toml = write_fit_toml(tmp.path(), &anchored, &data);
+    let state = tmp.path().join("final.tsv");
+
+    let pf = Command::new(&bin)
+        .arg("pfilter")
+        .arg(&plain)
+        .args(["--params", params.to_str().unwrap()])
+        .arg(format!("--data={}", data.to_str().unwrap()))
+        .args(["--particles", "50", "--seed", "1"])
+        .args(["--save-final-state", state.to_str().unwrap()])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .output()
+        .expect("spawn pfilter");
+    assert!(pf.status.success(), "{}", String::from_utf8_lossy(&pf.stderr));
+
+    let o = Command::new(&bin)
+        .arg("simulate")
+        .arg(&anchored)
+        .args(["--backend", "chain_binomial", "--seed", "3", "--dt", "1"])
+        .args(["--params", params.to_str().unwrap()])
+        .args(["--fit", toml.to_str().unwrap()])
+        .args(["--init-state", state.to_str().unwrap()])
+        .args(["--replicates", "50"])
+        .args(["-o", tmp.path().join("f.tsv").to_str().unwrap()])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .output()
+        .expect("spawn simulate");
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "a backwards forecast window must be refused:\n{stderr}");
+    assert!(
+        stderr.contains("28") && stderr.contains("21"),
+        "the refusal must quote BOTH resolved numbers — the origin and the \
+         resolved horizon — or the anchor was still NaN when it fired:\n{stderr}"
+    );
 }
