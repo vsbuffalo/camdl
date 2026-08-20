@@ -5295,6 +5295,19 @@ Engine
                               `simulate { integrator = rk45 { atol, rtol } }`
   --allow-degenerate-rates    restore legacy silent-zero on numerical collapse
 
+Run window
+  --to SPEC                   override the horizon (simulation.t_end). SPEC = a
+                              model-time number, a date (date("YYYY-MM-DD") or bare
+                              YYYY-MM-DD), or an observation anchor with an optional
+                              offset ("last_obs + 8 weeks"). Anchored forms need
+                              --fit for the observed times. A scenario declaring a
+                              different horizon is an error
+  --init-state FILE           start from a `pfilter --save-final-state` particle
+                              ensemble instead of init { }. The file's header carries
+                              the forecast origin, which becomes t_start; replicate i
+                              restores particle row i, so --replicates must equal the
+                              row count. chain_binomial only; conflicts with --draws
+
 Ensemble
   --seed N                    single seed (default 1; env CAMDL_SEED)
   --seeds SPEC                range "1:100" or list "1,2,42"; conflicts with --replicates

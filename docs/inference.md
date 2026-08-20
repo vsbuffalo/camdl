@@ -1571,16 +1571,66 @@ Runs N independent particle filters at different seeds. Reports
 
 See `docs/camdl-inference-spec.md` for the full specification.
 
-### Saving final particle states
+### Forecasting from the filtered state
 
-For prediction workflows, `camdl pfilter --save-final-state` writes the particle
-ensemble at the last observation time:
+`camdl pfilter --save-final-state` writes the particle ensemble at the last
+observation time — an unweighted sample from p(x_T | y_{1:T}) at the parameter
+vector the filter ran at. `camdl simulate --init-state` reads it back and runs
+forward from those states instead of the model's `init {}` block, so a forecast
+does not re-run the filter:
 
 ```bash
+# Filter the observed period, saving the state at the last observation.
 camdl pfilter model.camdl --data train.tsv --params mle.toml \
-    --particles 5000 --save-final-state final_particles.tsv
+    --particles 1000 --save-final-state final_particles.tsv
+
+# Forecast eight weeks past the last observation, one replicate per particle.
+camdl simulate model.camdl --params mle.toml \
+    --init-state final_particles.tsv --replicates 1000 \
+    --to "last_obs + 8 weeks" --fit fit.toml
 ```
 
-Output is a TSV with one row per particle, columns for each compartment and flow
-accumulator. This enables forward simulation from the filtered state without
-re-running the particle filter.
+The file is a TSV with a `# camdl-final-state v1  t=<time>` header, then one row
+per particle and one column per integer compartment — nothing else. The header's
+`t` is the forecast origin and becomes the run's `t_start`; `--to` sets the
+horizon (`camdl simulate --help` documents its anchored, absolute and calendar
+forms).
+
+**What a restart does and does not carry.** Compartment counts are restored, by
+name. Interval accumulators start fresh at the origin: the forecast opens a new
+accumulation window, so the origin row carries zero flow, exactly as `t_start`
+does on an ordinary run.
+
+That has one consequence worth expecting in the output. **For an incidence
+stream, the observation at the forecast origin is a structural zero** — its
+interval has zero length, so there is nothing yet to count. It is not a
+prediction that cases stop; read the forecast from the first row _after_ the
+origin, or drop the origin row before plotting.
+
+Everything that cannot be restored faithfully is refused rather than quietly
+defaulted:
+
+| Situation                      | Why it is refused                                                                                                                         |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| a real-valued compartment      | the filter's state is integer counts only, so the reservoir's value at the origin is recorded nowhere                                     |
+| a reactive intervention        | the policy's observation history, once/cooldown gating, pending-effect queue and surveillance RNG stream are not in the file              |
+| `--backend gillespie` / `ode`  | neither has a start-from-state seam, and the states came from the chain-binomial filter                                                   |
+| `--draws`                      | the states belong to one θ; pairing them with unrelated posterior draws forecasts a state and a parameter vector that never went together |
+| `--replicates` ≠ the row count | replicate _i_ restores row _i_, and a prefix of a post-resampling swarm is not an exchangeable subsample                                  |
+
+The origin must coincide with an output-emit time — a time between snapshots is
+an error, never snapped to a neighbour.
+
+Parameter uncertainty is **not** propagated: every replicate runs at the
+filter's θ, so the spread is process noise plus filtering uncertainty in x_T,
+not posterior uncertainty in θ.
+
+**What that costs: the intervals are too narrow.** Conditioning on a single θ̂
+discards a variance component the forecast genuinely has, so a 90% band from
+this workflow will cover the truth less than 90% of the time, and increasingly
+so the further out you forecast (parameter error compounds over the horizon
+while process noise averages). Treat these bands as a lower bound on
+uncertainty, and do not report them as calibrated predictive intervals. Pairing
+each latent state with its own posterior draw is what fixes it, and needs the
+(θ, X) source that `camdl fit` writes as `trajectories.tsv` — not yet accepted
+here, see gh#607.
