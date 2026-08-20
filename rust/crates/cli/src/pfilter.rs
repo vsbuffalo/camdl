@@ -211,10 +211,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // The missing-data refusal, reported here rather than where the binding was
     // resolved, so every gate above keeps first say (see the binding block).
     let bound_streams = bound_streams.unwrap_or_else(|| {
-        eprintln!("error: --data is required. Use `--data PATH` for a \
-            single-stream model, `--data NAME=PATH` (repeatable) for a \
-            multi-stream model, or `--fit FOO.toml` with a \
-            [data.observations] section.");
+        eprintln!("error: pfilter needs observation data to score: {PFILTER_SUPPLY}");
         std::process::exit(1);
     });
     if bound_streams.is_empty() {
