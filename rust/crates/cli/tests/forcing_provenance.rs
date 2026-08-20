@@ -122,7 +122,9 @@ fn a_forcing_with_no_data_file_records_nothing() {
     }
 }
 
-const MODEL: &str = r#"
+/// The fixture model, with `{DATA}` standing in for the forcing's `data =`
+/// path so a test can move the file without changing anything else.
+const MODEL_TEMPLATE: &str = r#"
 time_unit = 'days
 
 compartments { S, I, R }
@@ -138,7 +140,7 @@ parameters {
 
 forcing {
   clim : interpolated 'ratio {
-    data      = "inputs/clim.tsv"
+    data      = "{DATA}"
     time_col  = "t"
     value_col = "force"
     method    = linear
@@ -174,15 +176,16 @@ scenarios {
 
 const DATA_ROWS: &str = "t\tforce\n0\t1.0\n30\t1.4\n60\t0.8\n90\t1.1\n";
 
-/// Compile `MODEL` against a data file whose leading comment block is
-/// `header`, returning the compiled model plus the data file's bytes.
-fn compile_with_header(cc: &Path, dir: &Path, header: &str) -> (ir::Model, Vec<u8>) {
-    std::fs::create_dir_all(dir.join("inputs")).unwrap();
-    let data_path = dir.join("inputs/clim.tsv");
+/// Compile the fixture in `dir`, with the data file at the relative path
+/// `rel` and its leading comment block set to `header`. Returns the compiled
+/// model plus the data file's bytes.
+fn compile_at(cc: &Path, dir: &Path, rel: &str, header: &str) -> (ir::Model, Vec<u8>) {
+    let data_path = dir.join(rel);
+    std::fs::create_dir_all(data_path.parent().unwrap()).unwrap();
     let contents = format!("{header}{DATA_ROWS}");
     std::fs::write(&data_path, &contents).unwrap();
     let model_path = dir.join("m.camdl");
-    std::fs::write(&model_path, MODEL).unwrap();
+    std::fs::write(&model_path, MODEL_TEMPLATE.replace("{DATA}", rel)).unwrap();
     let out = dir.join("m.ir.json");
 
     let status = Command::new(cc)
@@ -198,6 +201,10 @@ fn compile_with_header(cc: &Path, dir: &Path, header: &str) -> (ir::Model, Vec<u
     );
 
     (load(&out), contents.into_bytes())
+}
+
+fn compile_with_header(cc: &Path, dir: &Path, header: &str) -> (ir::Model, Vec<u8>) {
+    compile_at(cc, dir, "inputs/clim.tsv", header)
 }
 
 /// (2) and (3). A live compile names the file and hashes its bytes; and a byte
@@ -247,6 +254,48 @@ fn a_live_compile_records_the_file_and_tracks_its_bytes() {
         "…while the inlined knots are identical, which is precisely why the hash \
          is NOT folded into run identity: folding it would re-key a fit whose \
          model did not change"
+    );
+}
+
+/// The identity claim end to end, through the real compiler rather than a
+/// hand-built `DataSource`: two models whose ONLY difference is where the
+/// forcing file sits — same bytes, different `data =` path, different absolute
+/// location — must produce the SAME model content hash. Someone who moves a
+/// data directory, or copies a model into a second checkout, must keep their
+/// cached fits.
+///
+/// The two `data =` paths have to DIFFER for this to assert anything. With the
+/// same relative path in both places the recorded provenance is identical, so
+/// the hashes would match even if `data_source` were folded into identity, and
+/// the test would pass for a reason unrelated to its claim.
+#[test]
+fn the_same_data_at_a_different_path_keeps_one_identity() {
+    use runid::hash::ContentAddressed;
+    let Some(cc) = camdlc() else { return };
+
+    let here = tempfile::tempdir().unwrap();
+    let there = tempfile::tempdir().unwrap();
+    let (a, a_bytes) = compile_at(&cc, here.path(), "inputs/clim.tsv", "");
+    let (b, b_bytes) = compile_at(&cc, there.path(), "shared/data/climate.tsv", "");
+
+    assert_eq!(a_bytes, b_bytes, "the fixture must write identical bytes in both places");
+    assert_ne!(
+        forcing(&a, "clim").data_source.as_ref().unwrap().path,
+        forcing(&b, "clim").data_source.as_ref().unwrap().path,
+        "the two compiles must genuinely record different paths, or this test \
+         asserts nothing"
+    );
+    assert_eq!(
+        forcing(&a, "clim").data_source.as_ref().unwrap().sha256,
+        forcing(&b, "clim").data_source.as_ref().unwrap().sha256,
+        "…and the same digest, since the bytes are the same"
+    );
+    assert_eq!(
+        a.content_hash().to_hex(),
+        b.content_hash().to_hex(),
+        "the same bytes read from a different path are the SAME model — if this \
+         ever differs, a path has leaked into run identity and every relocated \
+         model silently re-runs its fits"
     );
 }
 
