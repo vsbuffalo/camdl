@@ -104,6 +104,7 @@ fn generate_one_dataset(
         table_files: Default::default(),
         scenario_name: spec.scenario.clone(),
         t_end_override: None, // fit refuses horizons (gh#561)
+        init_state: None, // synthetic data-gen starts from the model's init {}
         adhoc_enable: vec![],
         adhoc_disable: vec![],
         scenario_inline_name: None,
@@ -147,7 +148,7 @@ fn generate_one_dataset(
         // beside it was run over — under `[synthetic] scenario = "X"` with a
         // shortened horizon the surplus rows are fabricated, and a recovery
         // study would then fit invented data (gh#561).
-        let times = crate::obs_emit_schedule_times(obs_ir, model.simulation.t_end)?;
+        let times = crate::obs_emit_schedule_times(obs_ir, None, model.simulation.t_end)?;
         let projected = crate::project_all_obs_times(&traj, obs_ir, &model, &times)?;
 
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(

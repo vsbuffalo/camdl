@@ -949,6 +949,9 @@ fn run_simulate(a: &args::SimulateArgs) {
         table_files,
         scenario_name: None, // set per-scenario in the loop
         t_end_override, // gh#626: keys the CAS identity below; cells get it via the job
+        // gh#641: assigned PER CELL by `engine::build_cell_sim_run` (replicate i
+        // restores particle row i); the base run carries none.
+        init_state: None,
         adhoc_enable,
         adhoc_disable,
         scenario_inline_name: None,
@@ -958,6 +961,96 @@ fn run_simulate(a: &args::SimulateArgs) {
         dt,
         seed, // overridden per-replicate below
         integrator: a.backend.integrator, // gh#166: CLI --integrator override
+    };
+
+    // ── gh#641: load `--init-state` (forecast from a filtered state) ────────
+    //
+    // Resolved once, up front, like `--to`: every cell shares one ensemble of
+    // particle states and the origin they sit at, and the replicate index picks
+    // the row. The reader owns the structural checks (compartments by name, a
+    // real-compartment model, the header's origin time); the checks HERE are
+    // the ones that need the rest of the invocation to be known.
+    let init_state_source = match a.init_state.as_deref() {
+        None => None,
+        Some(path) => {
+            let (model_is, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            });
+            let columns = io::trajectories::TrajColumnSpec::from_model(&model_is, &[]);
+            let bytes = std::fs::read(path).unwrap_or_else(|e| {
+                eprintln!("error: cannot read --init-state {}: {e}", path.display());
+                std::process::exit(1);
+            });
+            let states = io::read_final_states(path, &columns).unwrap_or_else(|e| {
+                eprintln!("error: --init-state: {e}");
+                std::process::exit(1);
+            });
+
+            // The seam refuses a reactive model too (`chain_binomial.rs`), but
+            // by then the user has waited for a compile; name the policy here.
+            let reactive: Vec<&str> = model_is.interventions.iter()
+                .filter(|iv| iv.fire.is_reactive())
+                .map(|iv| iv.name.as_str())
+                .collect();
+            if !reactive.is_empty() {
+                eprintln!(
+                    "error: --init-state cannot restart a model with reactive \
+                     intervention(s) [{}]. A reactive policy carries mid-run state \
+                     the file does not hold — the observation history its trigger \
+                     reads, its once/cooldown gating, the queue of effects already \
+                     scheduled, and its own surveillance RNG stream — so the \
+                     forecast would silently begin with an empty agenda.\n  Fix: \
+                     run the scenario without the reactive policy, or simulate \
+                     continuously from the model's own t_start.",
+                    reactive.join(", ")
+                );
+                std::process::exit(1);
+            }
+            if !matches!(backend, crate::args::types::ForwardBackend::ChainBinomial) {
+                eprintln!("error: {}", util::unseamed_backend_msg(backend.as_str()));
+                std::process::exit(1);
+            }
+            // `--save-final-state` is p(x_T | y_{1:T}) at ONE θ. Pairing those
+            // rows with unrelated posterior draws would form an incoherent
+            // (θ, x_T) product and read as a legitimate forecast cloud.
+            if draws_path.is_some() {
+                eprintln!(
+                    "error: --init-state cannot be combined with --draws. The saved \
+                     particle states are the filtering distribution at the ONE θ the \
+                     filter ran at, so pairing row i with an unrelated posterior draw \
+                     would forecast a state and a parameter vector that never went \
+                     together.\n  Fix: run --init-state at that same θ (--params), or \
+                     wait for the paired (θ, X) source — PGAS trajectories, blocked on \
+                     gh#607."
+                );
+                std::process::exit(1);
+            }
+            // Replicate i restores row i. Not "the first N rows": a
+            // post-resampling swarm is ancestor-ordered, so a prefix is not an
+            // exchangeable subsample of the filtering distribution.
+            let want = if seeds_spec_given { seeds.len() } else { replicates };
+            if want != states.len() {
+                eprintln!(
+                    "error: --init-state {} holds {} particle rows but this run has {} \
+                     replicate(s). Each replicate restores its own row, and a prefix of \
+                     a post-resampling swarm is not an exchangeable subsample of the \
+                     filtering distribution — so the counts must match.\n  Fix: pass \
+                     --replicates {}, or re-run the filter with --particles {}.",
+                    path.display(), states.len(), want, states.len(), want
+                );
+                std::process::exit(1);
+            }
+            eprintln!(
+                "simulate: --init-state {} → {} particle states at t = {}",
+                path.display(), states.len(), states.origin_t
+            );
+            Some(std::sync::Arc::new(crate::sim_job::InitStateSource {
+                origin_t: states.origin_t,
+                counts: states.counts,
+                file_digest: runid::ContentHash::digest_bytes(&bytes),
+            }))
+        }
     };
 
     // ── Pre-flight: validate obs model availability ─────────────────────────
@@ -1041,8 +1134,13 @@ fn run_simulate(a: &args::SimulateArgs) {
         // stream's late draws with the other's times.
         if obs_path.is_some() && model_check.observations.len() > 1 {
             let obs_end = horizons[0].1;
+            // gh#641: and from the cells' shared ORIGIN when `--init-state`
+            // restarts them. Two `at`-list schedules can agree over the model
+            // window and diverge over the forecast one at either end. `None`
+            // for every ordinary run, which keeps this check exactly as it was.
+            let obs_origin = init_state_source.as_ref().map(|s| s.origin_t);
             let schedules: Vec<_> = model_check.observations.iter()
-                .map(|o| obs_emit_schedule_times(o, obs_end).unwrap_or_else(|e| {
+                .map(|o| obs_emit_schedule_times(o, obs_origin, obs_end).unwrap_or_else(|e| {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
                 }))
@@ -1348,6 +1446,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         source,
         scenarios,
         t_end_override,
+        init_state: init_state_source,
         seeds: job_seeds,
         cli_overrides: base_sim_run.overrides.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         set_vec_entries: base_sim_run.set_vec_entries.clone(),
@@ -1765,6 +1864,7 @@ fn time_grids_match(a: &[f64], b: &[f64]) -> bool {
 /// with the cell's `obs_seed` — the same RNG walk `simulate --obs` performs — so
 /// the quantity reduces exactly the draws `--obs` would emit (no redraw). A
 /// referenced stream that is fit-only (no `emit_schedule`) is a hard error.
+#[allow(clippy::too_many_arguments)]
 fn materialize_obs_for_quantities(
     referenced: &[&str],
     model: &ir::Model,
@@ -1772,6 +1872,10 @@ fn materialize_obs_for_quantities(
     compiled: &std::sync::Arc<sim::CompiledModel>,
     params: &[f64],
     obs_seed: u64,
+    // gh#641: `Some(T)` when the cell was restarted from a filtered state at
+    // `T`. Threaded rather than defaulted so an obs-sourced quantity reduces
+    // over exactly the series `--obs` emits for the same cell.
+    restart_origin: Option<f64>,
 ) -> Result<sim::quantity::ObsSeriesSet, String> {
     let mut obs_rng = sim::rng::StatefulRng::new(obs_seed);
     let mut out: std::collections::HashMap<String, (Vec<f64>, Vec<f64>)> =
@@ -1782,7 +1886,7 @@ fn materialize_obs_for_quantities(
             // a scenario `simulate { to }` has already moved it) — never the
             // schedule's baked `end`, which would reduce an obs-sourced quantity
             // over fabricated tail values (gh#561).
-            Some(s) => obs_schedule_times(s, model.simulation.t_end),
+            Some(s) => obs_schedule_times(s, restart_origin, model.simulation.t_end),
             None => continue, // fit-only — consumes no RNG, mirroring `--obs`
         };
         let sampler =
@@ -1869,6 +1973,7 @@ impl SimQuantities {
                 compiled,
                 &params,
                 cell.spec.obs_seed,
+                cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t),
             )?)
         };
         let results = eval.eval_draw(&params, &cell.traj, compiled, obs_set.as_ref(), None);
@@ -2336,9 +2441,16 @@ impl engine::RunSink for StreamSink {
                     self.obs_stream_names.push(obs_model.name.clone());
                     self.obs_data.push(Vec::new());
                     // `model` is the cell's resolved model, so this is the
-                    // cell's own horizon under a per-scenario `to` (gh#561).
-                    let times =
-                        obs_emit_schedule_times(obs_model, model.simulation.t_end)?;
+                    // cell's own horizon under a per-scenario `to` (gh#561),
+                    // and its forecast origin under `--init-state` (gh#641 —
+                    // `None` for every ordinary run). The cells share one obs
+                    // axis, and the pre-flight has already refused a grid whose
+                    // cells disagree about it.
+                    let times = obs_emit_schedule_times(
+                        obs_model,
+                        cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t),
+                        model.simulation.t_end,
+                    )?;
                     self.obs_times_cache.push(times);
                 }
             }
@@ -2553,31 +2665,61 @@ fn resolve_simulate_obs_anchors(
     Ok((first, last))
 }
 
-/// Generate observation times from an IR schedule.
+/// Generate observation times from an IR schedule, confined to `t_end`.
+///
+/// `restart_origin` is `Some(T)` **only** when the run was restarted from a
+/// filtered state at `T` (`simulate --init-state`, gh#641); then times before
+/// `T` are dropped, because the run has no trajectory there at all. `None` — the
+/// default, and every path that does not restart — leaves the lower end alone
+/// and is byte-identical to not having this parameter.
+///
+/// It is deliberately an `Option<f64>` rather than the run's `t_start`. Those
+/// two look interchangeable and are not: dropping times below a plain `t_start`
+/// would convert the gh#589 fail-closed guard into silent truncation for a model
+/// whose author listed `emit_schedule = at [...]` times outside its own window.
+/// The guard is right to reject that — the author declared observations the run
+/// cannot produce — and only a restart has a reason to prefer dropping, since
+/// there the pre-origin times are historical and the data already covers them.
+///
+/// The cadence is always anchored to the schedule's own `start`, never re-based
+/// on the origin: a restarted run still emits on the declared grid, just from
+/// its first in-window time onward.
 pub(crate) fn obs_schedule_times(
     schedule: &ir::observation::ObservationSchedule,
+    restart_origin: Option<f64>,
     t_end: f64,
 ) -> Vec<f64> {
+    let after_origin =
+        |t: f64| restart_origin.is_none_or(|origin| t >= origin - OBS_SNAP_EPS);
     match schedule {
         ir::observation::ObservationSchedule::Regular(reg) => {
             let mut times = Vec::new();
             let mut t = reg.start;
             while t <= t_end + 1e-9 {
-                times.push(t);
+                if after_origin(t) {
+                    times.push(t);
+                }
                 t += reg.step;
             }
             times
         }
         ir::observation::ObservationSchedule::AtTimes(times) => {
-            times.iter().copied().filter(|&t| t <= t_end).collect()
+            times.iter().copied().filter(|&t| t <= t_end && after_origin(t)).collect()
         }
     }
 }
 
-/// Emission times for `simulate --obs` on one stream, confined to `t_end`.
+/// Emission times for `simulate --obs` on one stream, confined to `t_end` and —
+/// only for a restarted run — to `restart_origin`.
 /// `emit_schedule` is the SIMULATE-only cadence (proposal §2.5); a model that
 /// only ever fits omits it and so cannot generate synthetic data — a hard error
 /// naming the fix, not a silent empty series.
+///
+/// **`restart_origin` is `Some` only under `--init-state`** (gh#641). A forecast
+/// begins at the filtered state's origin, so an emit time before it has no
+/// snapshot to project from; those times are historical and the observed data
+/// already covers them. See [`obs_schedule_times`] for why this is an `Option`
+/// and not simply the run's `t_start`.
 ///
 /// **`t_end` is the RUN's horizon, not the schedule's baked `end`** (gh#561).
 /// The expander bakes `ObsRegular.end` from the MODEL-level `simulate { to }` at
@@ -2595,10 +2737,11 @@ pub(crate) fn obs_schedule_times(
 /// baked `end` is then the same number.
 pub(crate) fn obs_emit_schedule_times(
     obs: &ir::observation::ObservationModel,
+    restart_origin: Option<f64>,
     t_end: f64,
 ) -> Result<Vec<f64>, String> {
     match &obs.emit_schedule {
-        Some(s) => Ok(obs_schedule_times(s, t_end)),
+        Some(s) => Ok(obs_schedule_times(s, restart_origin, t_end)),
         None => Err(format!(
             "observation stream '{}' has no `emit_schedule` — it is fit-only \
              and cannot generate synthetic data. Add `emit_schedule = every N 'unit` \

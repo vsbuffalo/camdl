@@ -73,6 +73,11 @@ pub struct TrajectoryCtx<'a> {
     /// (the actual trajectory driver, and the only seed value hashed).
     pub base_seed: u64,
     pub process_seed: u64,
+    /// gh#641: the filtered state this cell was seeded from (`simulate
+    /// --init-state`), or `None` when it built its initial state from the
+    /// model's `init {}`. The file's bytes plus the restored row — see
+    /// [`runid::inputs::InitStateDigest`] for why both are identity.
+    pub init_state: Option<runid::inputs::InitStateDigest>,
 }
 
 /// Map a CLI backend to the resolved `runid` backend.
@@ -194,6 +199,7 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
         allow_degenerate_rates: ctx.allow_degenerate_rates,
         no_flows: ctx.no_flows,
         columns: ctx.columns.clone(),
+        init_state: ctx.init_state.clone(),
     };
     let params = resolve_params(ctx.base_params, ctx.table_digests.clone())?;
     let scenario = resolve_scenario(ctx.enable, ctx.disable, ctx.scen_params)?;

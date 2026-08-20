@@ -76,6 +76,11 @@ pub struct SimulateJob {
     /// into run identity via `ResolvedEntry.t_end`. `None` = no override
     /// (batch TOML deliberately has no `to` key).
     pub t_end_override: Option<f64>,
+    /// gh#641: the loaded `--init-state` file. Shared by every cell (it is one
+    /// ensemble of states); the replicate index selects the row. `None` = the
+    /// model's own `init {}` (batch TOML deliberately has no key for this —
+    /// a forecast origin is a CLI-only override, like `to`).
+    pub init_state: Option<std::sync::Arc<InitStateSource>>,
     /// S layer.
     pub seeds: Seeds,
     /// `--param NAME=VALUE` CLI overrides merged on top of every cell
@@ -89,6 +94,26 @@ pub struct SimulateJob {
     pub obs: ObsOutput,
     /// Rayon thread count for the simulation phase (1 = sequential).
     pub parallel: usize,
+}
+
+/// A loaded `--init-state` file (gh#641): the whole particle ensemble, the
+/// forecast origin it sits at, and the file's content digest.
+///
+/// One of these is shared by every cell of a job. Replicate `i` restores row
+/// `i` — deliberately not "the first N rows of a larger file", because a
+/// post-resampling swarm is ancestor-ordered, so a prefix is not an
+/// exchangeable subsample of the filtering distribution.
+#[derive(Debug, Clone)]
+pub struct InitStateSource {
+    /// The model time the states sit at (the filter's last observation time),
+    /// from the file header. Becomes each cell's `simulation.t_start`.
+    pub origin_t: f64,
+    /// `counts[particle][local_int_index]`, in the model's integer-compartment
+    /// order.
+    pub counts: Vec<Vec<i64>>,
+    /// SHA-256 of the file's bytes — the identity input (see
+    /// [`runid::inputs::InitStateDigest`]).
+    pub file_digest: runid::ContentHash,
 }
 
 /// Where parameter vectors come from — run-spec §3.2. Exactly one variant

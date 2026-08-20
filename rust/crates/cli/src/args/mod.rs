@@ -495,6 +495,19 @@ pub struct SimulateArgs {
     #[arg(long, value_name = "SPEC")]
     pub to: Option<String>,
 
+    /// Start the run from a saved filtered state instead of the model's
+    /// `init {}` block (gh#641) — the forecast-from-filtered-state workflow.
+    /// FILE is a `camdl pfilter --save-final-state` TSV: one particle row per
+    /// replicate, drawn from p(x_T | y_{1:T}) at the filter's θ. Its header
+    /// records T, which becomes the run's `t_start`; pair it with
+    /// `--to "last_obs + 8 weeks"` for the forecast horizon. Replicate i
+    /// restores row i, so `--replicates` must equal the row count.
+    /// chain_binomial only, and mutually exclusive with `--draws` (the states
+    /// belong to one θ, so pairing them with unrelated posterior draws would
+    /// be an incoherent (θ, x_T) product).
+    #[arg(long, value_name = "FILE")]
+    pub init_state: Option<PathBuf>,
+
     /// gh#audit-C6 / S1. See InferenceCore.allow_degenerate_rates.
     /// Forward sim is the most likely user of this flag — if a model
     /// has a known empty-stratum-divisor and the user wants to keep

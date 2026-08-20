@@ -173,7 +173,7 @@ pub fn plan_grid(job: &SimulateJob) -> (Vec<CellSpec>, Grid) {
                 );
                 let obs_seed = process_seed ^ SEED_MIX_OBS;
                 let sim_run = build_cell_sim_run(
-                    job, scenario, point_overrides, &table_files, process_seed,
+                    job, scenario, point_overrides, &table_files, process_seed, rep,
                 );
                 specs.push(CellSpec {
                     run_idx,
@@ -423,6 +423,7 @@ pub fn build_cell_sim_run(
     point_overrides: &IndexMap<String, f64>,
     table_files: &HashMap<String, String>,
     process_seed: u64,
+    rep: usize,
 ) -> SimRun {
     // Draw row / sweep point → the draw/sweep tier (below scenario).
     let point_overrides_map: HashMap<String, f64> =
@@ -454,6 +455,19 @@ pub fn build_cell_sim_run(
         ),
     };
 
+    // gh#641: replicate `rep` restores particle row `rep`. The row-count guard
+    // in `run_simulate` has already refused a job whose replicate count exceeds
+    // the file's rows, so this index is in range; a defensive `get` keeps a
+    // future caller that skips the guard from panicking mid-grid.
+    let init_state = job.init_state.as_ref().and_then(|src| {
+        src.counts.get(rep).map(|counts| crate::util::CellInitState {
+            origin_t: src.origin_t,
+            counts: counts.clone(),
+            row: rep as u64,
+            file_digest: src.file_digest,
+        })
+    });
+
     SimRun {
         ir_path: job.model.clone(),
         params_files: job.params_files.clone(),
@@ -463,6 +477,7 @@ pub fn build_cell_sim_run(
         table_files: table_files.clone(),
         scenario_name,
         t_end_override: job.t_end_override,
+        init_state,
         adhoc_enable,
         adhoc_disable,
         scenario_inline_name,

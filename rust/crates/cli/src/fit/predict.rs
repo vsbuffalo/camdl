@@ -1290,6 +1290,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     scenarios: vec![sref.clone()],
                     // gh#626: the predictive window comes from the data.
                     t_end_override: None,
+                    // gh#641: the predictive replays from the model's init {} at
+                    // each posterior draw; a filtered-state restart is a
+                    // `simulate --init-state` surface, not a `fit predict` one.
+                    init_state: None,
                     seeds: crate::sim_job::Seeds::Single(seed),
                     cli_overrides: vec![],
                     set_vec_entries: vec![],

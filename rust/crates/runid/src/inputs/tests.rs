@@ -40,6 +40,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         allow_degenerate_rates: false,
         no_flows: false,
         columns: BTreeSet::new(),
+        init_state: None,
     };
     let mut values: BTreeMap<ParamId, FiniteF64> = BTreeMap::new();
     values.insert(ParamId("beta".into()), fid(2));
@@ -99,12 +100,12 @@ fn canonical_encoding_is_pinned() {
         ("ResolvedObsAlignment::Snap", "c8d06c17fd493405f2f220666705f80193775801258a0be28ae36fb8d475a809"),
         ("Seed", "dd2fb5245233d07fc6a715d0e7683b52767252050a29e5dbbb9921e1ba61397d"),
         ("ModelDigest", "50b2c476d23c4a7923f414bed47b0fc59757e17b18048ba82af36d89267e9447"),
-        ("SimConfig", "0fd1f56b6235252e70b9efbab58fe3433cd36b24d4d579eae2c7fb349c3b7e3d"),
+        ("SimConfig", "2da6a6c529f909dfef38be64e58722ff8d30a8c760ebcf70b5828476f3bb1d6d"),
         ("ResolvedParams", "3cae27d97f964a1a6e654228dcf0ced7407f2937792ea7b2c20b724628d1ec10"),
         ("ResolvedScenario", "bdc6a70dd99429b0adc3646f4f089279a69b6101ece3ab5bb3ebf31b7a32c0ca"),
         ("FitDigest", "a87aad94ad68c799fd558a872ebeb7de8507c3da867c6553ad198af38882d7e7"),
         ("StageConfig", "f6eb2654d2393f1365ba8610b3a80a5a5772e752b54179dc208f82b995f067df"),
-        ("run_id(Sim)", "99820047ed6a83061176e6d86adf3d743773338c4bbf3ddf97cf318a5c2c2c2f"),
+        ("run_id(Sim)", "5ff91d4772e77bd6f896a0e7ff516968219acc1a48f0e75aa176f395f5e1582a"),
         ("run_id(FitStage)", "882fceab6e6120667091cc2f4c02a8a035645e46f4d81b86643ea591ee101836"),
     ];
     let actual = golden_fixtures();
@@ -263,6 +264,7 @@ fn trajectory_input_display_is_provenance() {
         allow_degenerate_rates: false,
         no_flows: false,
         columns: BTreeSet::new(),
+        init_state: None,
     };
     let params = ResolvedParams { values: BTreeMap::new(), tables: vec![] };
     let scenario = ResolvedScenario {
@@ -318,6 +320,7 @@ fn output_view_is_keyed_into_config() {
         allow_degenerate_rates: false,
         no_flows: false,
         columns: BTreeSet::new(),
+        init_state: None,
     };
 
     let mut no_flows = base.clone();
@@ -336,4 +339,51 @@ fn output_view_is_keyed_into_config() {
     cols_rev.columns = ["I".to_string(), "S".to_string()].into_iter().collect();
     assert_eq!(cols.content_hash(), cols_rev.content_hash(),
         "the --columns allow-list is order-invariant");
+}
+
+#[test]
+fn init_state_is_keyed_into_config() {
+    // gh#641: a run seeded from a filtered-state file computes a different
+    // trajectory from the same model at the same θ and seed. If the file's
+    // bytes did not re-key, the store would serve a stale forecast whenever
+    // the state changed under an unchanged model — the exact silent-wrong the
+    // CAS exists to prevent.
+    let base = SimConfig {
+        backend: Backend::ChainBinomial,
+        dt: fid(1),
+        t_start: fid(0),
+        t_end: fid(100),
+        output: ResolvedOutputSchedule::Regular { start: fid(0), step: fid(1) },
+        calendar: CalendarMode::Numeric,
+        allow_degenerate_rates: false,
+        no_flows: false,
+        columns: BTreeSet::new(),
+        init_state: None,
+    };
+    let seeded = |file: u8, row: u64| {
+        let mut c = base.clone();
+        c.init_state = Some(InitStateDigest {
+            file: DataDigest(ContentHash::from_bytes([file; 32])),
+            row,
+        });
+        c
+    };
+
+    // Seeding at all re-keys: `init {}` and a restored state are different runs.
+    assert_ne!(base.content_hash(), seeded(1, 0).content_hash(),
+        "--init-state must re-key the config level");
+
+    // TWO DIFFERENT STATE FILES → DISTINCT IDENTITY. The headline requirement.
+    assert_ne!(seeded(1, 0).content_hash(), seeded(2, 0).content_hash(),
+        "a different state file must produce a distinct config-level hash");
+
+    // Two rows of the SAME file → distinct identity. Needed on top of the seed
+    // level because two replicates can share a process_seed (`--seeds 7,7`)
+    // while restoring different states; without the row in the key those cells
+    // collide and the store serves one trajectory for both.
+    assert_ne!(seeded(1, 0).content_hash(), seeded(1, 1).content_hash(),
+        "a different restored row must produce a distinct config-level hash");
+
+    // Same file, same row → same identity (the cache still works).
+    assert_eq!(seeded(1, 3).content_hash(), seeded(1, 3).content_hash());
 }

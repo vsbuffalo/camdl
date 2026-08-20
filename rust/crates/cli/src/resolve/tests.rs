@@ -88,6 +88,7 @@ fn ctx<'a>(
         scenario_label: "baseline",
         base_seed,
         process_seed,
+        init_state: None,
     }
 }
 
@@ -293,6 +294,15 @@ fn scenario_delta_re_keys_only_the_scenario_level() {
 // sensitivity + inertness — so a future change that leaks a presentation field
 // into identity, or drops a semantic one, fails here, not silently in the field.
 
+/// A stand-in `--init-state` digest: `file` byte-filled from `f`, restoring row
+/// `row`. gh#641.
+fn init_state(f: u8, row: u64) -> runid::inputs::InitStateDigest {
+    runid::inputs::InitStateDigest {
+        file: runid::inputs::DataDigest(ContentHash::from_bytes([f; 32])),
+        row,
+    }
+}
+
 /// All resolved trajectory inputs, owned, so each case clones the base and
 /// mutates exactly one field. `run_id()` resolves through the real
 /// `resolve_trajectory` path.
@@ -316,6 +326,7 @@ struct SimInputs {
     scenario_label: String,
     base_seed: u64,
     process_seed: u64,
+    init_state: Option<runid::inputs::InitStateDigest>,
 }
 
 impl SimInputs {
@@ -339,6 +350,7 @@ impl SimInputs {
             scenario_label: "baseline".into(),
             base_seed: 1,
             process_seed: 1,
+            init_state: None,
         }
     }
 
@@ -365,6 +377,7 @@ impl SimInputs {
             scenario_label: &self.scenario_label,
             base_seed: self.base_seed,
             process_seed: self.process_seed,
+            init_state: self.init_state.clone(),
         })
         .expect("resolve")
         .run_id
@@ -390,6 +403,10 @@ fn differential_semantic_inputs_rekey_the_run_id() {
         ("no_flows",         Box::new(|i| i.no_flows = true)),
         ("columns",          Box::new(|i| { i.columns.insert("S".into()); })),
         ("model_structure",  Box::new(|i| i.model.name = "different".into())),
+        // gh#641: the forecast-origin state. Both components are semantic —
+        // a different state FILE, and a different restored ROW of one file.
+        ("init_state_file",  Box::new(|i| i.init_state = Some(init_state(1, 0)))),
+        ("init_state_row",   Box::new(|i| i.init_state = Some(init_state(1, 7)))),
     ];
     for (name, mutate) in cases {
         let mut i = SimInputs::base();
@@ -645,9 +662,14 @@ fn cas_identity_pins() {
     // A move here is a deliberate, reviewed re-key: say which kinds move and
     // why, then re-pin.
     let expected: &[(&str, &str)] = &[
+        // gh#641 re-keyed `sim` ALONE: `SimConfig` gained `init_state` (schema
+        // version 3 → 4), which contributes bytes at its `None` default, so
+        // every sim leaf moves. No other kind embeds `SimConfig`, which is why
+        // the five below are byte-for-byte their pre-gh#641 values — that is the
+        // scope claim this list exists to make checkable.
+        ("sim", "99e7f1d94ed2ab526c8bdbf8e9833c6d67b909ce9ff19145a8a5cc69424aff11"),
         // Unchanged by gh#442 (verified: this is the value the pre-fix build
         // produced for the same fixture).
-        ("sim", "4893a3eeab75a4216b8a365d8ebb445ee8577d26c31d28514432f6bbdda73342"),
         ("fit", "c2707d3d973cbdaf9c0d5afc553264ca59f6002c60055b5957f31aa2431f673f"),
         // Re-keyed by gh#442: these four hashed the RAW model, so their `model`
         // level folded `output.format = "tsv"` / `time_semantics = "continuous"`.

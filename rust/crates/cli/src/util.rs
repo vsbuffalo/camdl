@@ -2638,6 +2638,11 @@ pub struct SimRun {
     /// differing from both the model's and this value is refused up front in
     /// `run_simulate`) keeps the baked-end guard's `old_end` meaningful.
     pub t_end_override: Option<f64>,
+    /// gh#641: the one particle row this cell restores instead of building its
+    /// initial state from `init {}`. Applied at two seams — `resolve_run_model`
+    /// moves `simulation.t_start` to the origin, and `simulate_compiled` hands
+    /// the counts to the chain-binomial resume seam.
+    pub init_state: Option<CellInitState>,
     pub adhoc_enable: Vec<String>,
     pub adhoc_disable: Vec<String>,
     /// An INLINE ad-hoc scenario's display name + `set`/`scale`. Distinct
@@ -2656,6 +2661,42 @@ pub struct SimRun {
     /// applied to the model's simulation config before compile. `None` → use the
     /// model's declared integrator.
     pub integrator: Option<crate::args::types::IntegratorArg>,
+}
+
+/// The forecast origin one cell starts from (gh#641): one particle row of a
+/// `pfilter --save-final-state` file, resolved against the model's compartments.
+///
+/// ## What this restores, and what it does not
+///
+/// **Restored:** the integer compartment counts, and the run's start time.
+///
+/// **Reset at the origin by construction:** interval accumulators. The forecast
+/// window begins a fresh accumulation — the resume seam drains the output
+/// cursor to the origin and emits that row with zeroed flows, so post-origin
+/// incidence starts at 0. The `flow_*` columns in the file are consequently not
+/// read: they tally a partial interval under the *filter's* observation
+/// cadence, which a new window cannot inherit.
+///
+/// **Refused rather than defaulted** (checked before the run, in `run_simulate`,
+/// and again at the seam): a model with real-valued compartments (the filter
+/// saves no reservoir value, so `init {}` would silently supply one while the
+/// counts came from the filter), a model with reactive interventions (the
+/// agenda's observation history, once/cooldown gating, pending-effect heap and
+/// surveillance RNG stream are not reconstructible from counts alone), and any
+/// backend other than chain-binomial (which is the only one with a
+/// start-from-state seam, and the only one the states could have come from).
+#[derive(Clone, Debug)]
+pub struct CellInitState {
+    /// The model time the state sits at; becomes `simulation.t_start`.
+    pub origin_t: f64,
+    /// Integer compartment counts, in the model's integer-compartment order
+    /// (i.e. indexed like `sim::IntState::counts`).
+    pub counts: Vec<i64>,
+    /// Which particle row this is. Identity, not provenance — two replicates
+    /// can share a `process_seed` and still restore different rows.
+    pub row: u64,
+    /// SHA-256 of the state file's bytes. Identity.
+    pub file_digest: runid::ContentHash,
 }
 
 /// Apply a CLI integrator-method override (gh#166) to the model in place.
@@ -2885,6 +2926,7 @@ impl Default for SimRun {
             table_files: HashMap::new(),
             scenario_name: None,
             t_end_override: None,
+            init_state: None,
             adhoc_enable: Vec::new(),
             adhoc_disable: Vec::new(),
             scenario_inline_name: None,
@@ -2938,6 +2980,25 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     // already refused.
     if let Some(t_end) = run.t_end_override {
         model.simulation.t_end = t_end;
+    }
+    // gh#641: a run seeded from a filtered state starts at the origin the state
+    // file records, not at the model's own `t_start` — the restored counts are
+    // the state AT that time, so replaying the model's pre-origin window from
+    // them would be dynamics the data already explained. Applied here, before
+    // validate/compile, for the same reason the horizon override is: `t_start`
+    // feeds the schedule every backend builds through, so the substep clock,
+    // the boundary cursor and the output drain all follow with no threading.
+    if let Some(ref init) = run.init_state {
+        model.simulation.t_start = init.origin_t;
+        if init.origin_t >= model.simulation.t_end {
+            return Err(format!(
+                "--init-state carries a forecast origin t = {} at or after the run's \
+                 horizon t_end = {}, so there is nothing to forecast.\n  Fix: extend \
+                 the horizon (--to \"last_obs + 8 weeks\", or the model's own \
+                 `simulate {{ to }}`) past the origin.",
+                init.origin_t, model.simulation.t_end
+            ));
+        }
     }
     // RC1 in 2026-04-19 engine review.
     ir::validate::validate(&model).map_err(|errs| {
@@ -3168,8 +3229,24 @@ pub fn simulate_compiled(
     let mut tick_opt: Option<&mut dyn FnMut(f64)> =
         if progress.is_some() { Some(&mut tick) } else { None };
 
+    // gh#641: the forecast-origin state, in the shape the resume seam takes.
+    // Real compartments are refused by the reader (the filter saves none), so
+    // the injected real state is empty; `RealState::new(0)` is what a model with
+    // no real compartments builds anyway.
+    let start_state = run.init_state.as_ref().map(|init| sim::chain_binomial::StartState {
+        int_s: sim::IntState::from_vec(init.counts.clone()),
+        real_s: sim::RealState::new(0),
+        // Fresh RNG from this cell's process seed. The seam's RNG-restore path
+        // is test-only (it exists to prove splice byte-identity); a forecast
+        // re-rolls its forward noise, which is the point of the replicates.
+        rng: None,
+    });
+
     let traj = match run.backend {
         ForwardBackend::Gillespie => {
+            if start_state.is_some() {
+                return Err(unseamed_backend_msg("gillespie"));
+            }
             let cfg = GillespieConfig { t_start, t_end, output_dt: None };
             sim::gillespie::run_gillespie_with_observer(
                 compiled, &params, run.seed, &cfg, None, tick_opt.as_deref_mut(),
@@ -3179,10 +3256,16 @@ pub fn simulate_compiled(
             let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 compiled, &params, run.seed, &cfg, None, tick_opt.as_deref_mut(),
-                sim::chain_binomial::Resume::default(),
+                sim::chain_binomial::Resume {
+                    start: start_state.as_ref(),
+                    capture_final_rng: None,
+                },
             )
         }
         ForwardBackend::Ode => {
+            if start_state.is_some() {
+                return Err(unseamed_backend_msg("ode"));
+            }
             let cfg = OdeConfig { t_start, t_end, dt: run.dt };
             // Forward simulate never coarsens — coarse burn-in is a fit-time
             // likelihood option (see `compute_ode_loglik`), not a simulate surface.
@@ -3197,6 +3280,36 @@ pub fn simulate_compiled(
 
     Ok(traj)
 }
+/// The refusal for `--init-state` on a backend with no start-from-state seam
+/// (gh#641). Gillespie (`gillespie.rs`) and ODE (`ode.rs`) call
+/// `CompiledModel::initial_state` unconditionally; there is no injection point,
+/// so the alternative to this error is silently starting from `init {}` — a
+/// forecast that looks like a forecast and is the model's epidemic from t=0.
+///
+/// Also the honest answer scientifically: the states come from the bootstrap
+/// particle filter, whose process model is chain-binomial. Propagating them
+/// under a different dynamical model is the mismatch the backend-provenance
+/// guardrail already warns about, here with no filter of its own to warn from.
+///
+/// Reached both from the up-front CLI guard (which is what a user normally
+/// sees) and from `simulate_compiled` itself.
+///
+/// **That covers `simulate_compiled`'s callers and no others.** `run_simulate`
+/// has a second consumer of the cell spec — the `--event-log` branch, which goes
+/// through [`run_simulation_event_log`] and never reaches `simulate_compiled`.
+/// That path carries its own refusal; see the note there. Any third consumer
+/// added later needs one too, because `resolve_run_model` moving `t_start` is
+/// only half of honouring `--init-state`.
+pub fn unseamed_backend_msg(backend: &str) -> String {
+    format!(
+        "--init-state is not supported on the {backend} backend: it has no \
+         start-from-state seam, so the run would silently start from the model's \
+         `init {{}}` instead of the filtered state.\n  \
+         Fix: use --backend chain_binomial, which is also the process model the \
+         saved particle states came from."
+    )
+}
+
 /// Run a simulation with the Layer-1 lineage **event recorder** attached, and
 /// return the count trajectory, resolved model, the recorded [`EventLog`], and
 /// whether the backend was exact (Gillespie). The recorder draws no identities;
@@ -3215,6 +3328,35 @@ pub fn run_simulation_event_log(
 ) -> Result<(Trajectory, ir::Model, sim::lineage::EventLog, bool), String> {
     use crate::args::types::ForwardBackend;
     use sim::lineage::EventRecorder;
+
+    // gh#641. This function shares `resolve_run_model` with the ordinary
+    // simulate path, so an `--init-state` run arrives here with
+    // `simulation.t_start` ALREADY moved to the forecast origin — but it builds
+    // its state from `initial_state` below and passes `Resume::default()`, so
+    // the state itself is never restored. Unguarded that is the worst outcome
+    // available: the trajectory starts from `init {}` while its leaf commits
+    // under the run_id that says the state WAS restored, so two different
+    // trajectories share one content address and whichever ran first wins the
+    // cache.
+    //
+    // The refusal is not a gap to close later — it is the engine's own answer.
+    // `chain_binomial`'s resume seam rejects a resume with an attached observer
+    // (the recorder is one): an observer carries mid-run state that an injected
+    // `(state)` cannot reconstruct. This surfaces that at the CLI rather than
+    // letting the event-log path walk around it.
+    if run.init_state.is_some() {
+        return Err(
+            "--event-log cannot be combined with --init-state. The lineage \
+             recorder is an observer attached to the run, and an observer \
+             carries mid-run state — the individual pools it has been tracking \
+             since the run began — that a restored `(state)` cannot \
+             reconstruct; the engine's resume seam refuses such a run for the \
+             same reason.\n  \
+             Fix: record the event log on a continuous run from the model's own \
+             t_start, or forecast without --event-log."
+                .to_string(),
+        );
+    }
 
     // Event-log recording is meaningful only for backends with the LINEAGES
     // capability. ODE is the lone incompatible backend (continuous densities,

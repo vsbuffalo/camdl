@@ -733,6 +733,8 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         scenarios: job_scenarios,
         // gh#626: batch TOML has no `to` key (deliberate; CLI-only override).
         t_end_override: None,
+        // gh#641: nor an `init_state` key, for the same reason.
+        init_state: None,
         // Batch seeds are always explicit (range / count / list).
         seeds: Seeds::Explicit(seeds.clone()),
         cli_overrides: Vec::new(),
@@ -941,7 +943,16 @@ impl CasSink {
             engine_version: version::VERSION_SHORT,
             backend: self.backend,
             dt: self.dt,
-            t_start: self.base_model.simulation.t_start,
+            // gh#641: the cell's EFFECTIVE start, not the base model's. A run
+            // seeded from a filtered state begins at that state's origin and
+            // therefore covers a different window — the same argument the
+            // horizon override makes below, from the other end.
+            t_start: spec
+                .sim_run
+                .init_state
+                .as_ref()
+                .map(|i| i.origin_t)
+                .unwrap_or(self.base_model.simulation.t_start),
             // gh#561: the cell's EFFECTIVE horizon, not the base model's. A
             // scenario declaring its own `simulate { to }` produces a different
             // trajectory, so it must re-key (`feedback: count-in-the-key`) —
@@ -967,6 +978,18 @@ impl CasSink {
             scenario_label,
             base_seed: spec.process_seed,
             process_seed: spec.process_seed,
+            // gh#641: the state this cell restored. The FILE's bytes and the
+            // restored ROW both key the run — a re-filtered ensemble under an
+            // unchanged model must not serve the cached forecast, and two
+            // replicates sharing a `process_seed` (`--seeds 7,7`) must not
+            // collide while starting from different rows. `None` for every
+            // `batch run` cell (no `init_state` key — CLI-only, like `to`).
+            init_state: spec.sim_run.init_state.as_ref().map(|i| {
+                runid::inputs::InitStateDigest {
+                    file: runid::inputs::DataDigest(i.file_digest),
+                    row: i.row,
+                }
+            }),
         };
         let rt = crate::resolve::resolve_trajectory(&ctx).map_err(|e| format!("resolve error: {e}"))?;
         let root = self.root();
@@ -1319,7 +1342,14 @@ impl crate::engine::RunSink for CasSink {
         // failure here is non-fatal — children are independent, so a missing
         // obs child never staleens the parent trajectory.
         if has_obs {
-            if let Err(e) = write_obs_into_cas(&dest, &cell.model, &cell.traj, spec.process_seed) {
+            // gh#641: a restarted cell's obs axis begins at the forecast
+            // origin, exactly as the `-o`/`--obs` mirror's does. `None` for
+            // every ordinary cell — and for every `batch run` cell, which has
+            // no `init_state` key.
+            let restart_origin = spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
+            if let Err(e) = write_obs_into_cas(
+                &dest, &cell.model, &cell.traj, spec.process_seed, restart_origin,
+            ) {
                 self.errors.push(format!("scenario={} seed={}: obs ensemble: {}",
                     name, spec.process_seed, e));
             }
@@ -1548,6 +1578,8 @@ fn run_design_experiment(
             scenarios: job_scenarios.clone(),
         // gh#626: batch TOML has no `to` key (deliberate; CLI-only override).
         t_end_override: None,
+        // gh#641: nor an `init_state` key, for the same reason.
+        init_state: None,
             seeds: Seeds::Explicit(seeds.to_vec()),
             cli_overrides: Vec::new(),
             set_vec_entries: Vec::new(),
@@ -1692,6 +1724,11 @@ fn write_obs_into_cas(
     model: &ir::Model,
     traj: &sim::Trajectory,
     process_seed: u64,
+    // gh#641: `Some(T)` when this cell was restarted from a filtered state at
+    // `T`; the obs axis then begins there, because the trajectory does. `None`
+    // for every ordinary cell. NOTE this function serves `simulate` cells as
+    // well as `batch run` ones — the obs subtree is written for both.
+    restart_origin: Option<f64>,
 ) -> Result<(), String> {
     use std::io::Write;
 
@@ -1719,7 +1756,8 @@ fn write_obs_into_cas(
         // Must use the SAME horizon the write loop below uses — a preflight that
         // validates a different set of times than gets written is worse than no
         // preflight (gh#561 + gh#589).
-        let times = crate::obs_emit_schedule_times(obs_ir, model.simulation.t_end)?;
+        let times =
+            crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end)?;
         crate::project_all_obs_times(traj, obs_ir, model, &times)?;
     }
 
@@ -1746,7 +1784,8 @@ fn write_obs_into_cas(
         // The cell's own horizon (a per-scenario `simulate { to }` has already
         // moved `model.simulation.t_end`), so the CAS `obs/` subtree never
         // carries rows past the end of the trajectory beside it (gh#561).
-        let obs_times = crate::obs_emit_schedule_times(obs_ir, model.simulation.t_end)?;
+        let obs_times =
+            crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end)?;
         let projected = crate::project_all_obs_times(traj, obs_ir, model, &obs_times)?;
 
         let path = obs_dir.join(format!("{}.tsv", obs_ir.name));

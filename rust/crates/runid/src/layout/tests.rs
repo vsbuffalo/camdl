@@ -32,6 +32,7 @@ fn config(t_end: f64) -> SimConfig {
         allow_degenerate_rates: false,
         no_flows: false,
         columns: std::collections::BTreeSet::new(),
+        init_state: None,
     }
 }
 

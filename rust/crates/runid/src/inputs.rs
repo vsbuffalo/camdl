@@ -88,6 +88,29 @@ pub struct InterventionId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
 pub struct DataDigest(pub ContentHash);
 
+/// The forecast origin state a run was seeded from (`simulate --init-state`,
+/// gh#641), when it did not build its initial state from the model's `init {}`
+/// block.
+///
+/// Both fields are identity, for different reasons:
+///
+/// - `file` is the content digest of the state file's **bytes**, never its
+///   path. A re-filtered ensemble under an unchanged model must re-key, or the
+///   store serves yesterday's forecast for today's data.
+/// - `row` is which particle row this cell restored. It is needed *in addition*
+///   to the seed level because two replicates can share a `process_seed`
+///   (`--seeds 7,7`) while starting from different states; without it those two
+///   cells would collide on one `run_id` and the store would serve one
+///   trajectory for both (the count-in-the-key rule).
+///
+/// The origin *time* is not here: it rides in [`SimConfig::t_start`], which the
+/// run already keys on.
+#[derive(Debug, Clone, PartialEq, Eq, RunInput)]
+pub struct InitStateDigest {
+    pub file: DataDigest,
+    pub row: u64,
+}
+
 /// The runtime engine version string (e.g. `"0.3.0+abc1234"`), folded into
 /// the model level. Distinct from the *compiler* version that keys the
 /// compile cache — a runtime-only engine change re-keys run identity without
@@ -143,8 +166,14 @@ pub struct ResolvedScenario {
 /// `end` field — the output horizon collapsed onto `simulation.t_end` (still
 /// hashed here as `t_end`), so no identity is lost, only re-keyed. Another
 /// deliberate, versioned turnover.
+///
+/// `schema_version = 4` (gh#641): added `init_state`. A run seeded from a
+/// filtered-state file computes a different trajectory from the same model, so
+/// the file's bytes and the restored row must re-key; the field contributes
+/// bytes at its `None` default too, which re-keys every existing sim leaf.
+/// Deliberate, versioned turnover, in the gh#156 / gh#143 line.
 #[derive(Debug, Clone, PartialEq, RunInput)]
-#[run_input(schema_version = 3)]
+#[run_input(schema_version = 4)]
 pub struct SimConfig {
     pub backend: Backend,
     pub dt: FiniteF64,
@@ -167,6 +196,11 @@ pub struct SimConfig {
     /// `--columns` allow-list of output column names, normalized to a set
     /// (order-invariant — emitted order follows the model). Empty = all.
     pub columns: BTreeSet<String>,
+    /// gh#641: the filtered state this run started from, when it did not start
+    /// from the model's `init {}`. `None` = the model's own initial conditions
+    /// (every run before `--init-state` existed). See [`InitStateDigest`] for
+    /// why both the file digest and the row index are identity.
+    pub init_state: Option<InitStateDigest>,
 }
 
 /// The model-level digest. **M2 interim:** the whole canonical IR. M2.5
