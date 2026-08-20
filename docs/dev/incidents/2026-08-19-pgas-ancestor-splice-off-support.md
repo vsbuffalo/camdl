@@ -126,8 +126,14 @@ as **output silently missing 218 of the saved draws** — on the artifact
 
 ## Follow-ups
 
-- Chain-start validation is still warn-and-continue: a chain seeded in a bad
-  basin runs to completion. The residual 143 non-finite sweeps are this.
+- ~~Chain-start validation is still warn-and-continue: a chain seeded in a bad
+  basin runs to completion. The residual 143 non-finite sweeps are this.~~ Done
+  (gh#607): a chain whose complete-data log-posterior is non-finite at its start
+  AND still non-finite after its first Gibbs sweep is refused, skipped with a
+  `BadInit` diagnostic, and excluded from `draws.tsv`, R̂ and every pooled
+  number; the run errors only if every chain is refused. The second half of the
+  test matters — the `X|θ,y` move rescues an unlucky reference draw at the same
+  θ, and does so in three of this repository's own PGAS fixtures.
 - The NUTS `−inf` absorption has no escape analogue to gh#471.
 - gh#658 / gh#659: a chain can also stop sampling mid-run when its frozen step
   size no longer suits the region it wandered into — a different failure with a
