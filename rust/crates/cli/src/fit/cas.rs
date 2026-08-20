@@ -314,6 +314,44 @@ fn fit_config_blob_hash(config: &FitConfigV2) -> Result<ContentHash, String> {
     Ok(digest_value(&v))
 }
 
+/// The config-MEANING hash: what a `fit.toml` handle is looked up by (gh#653).
+///
+/// **Not run identity.** Nothing here feeds a `run_id`; this answers a question
+/// the store asks on the way in — "which stored fit did THIS config produce?" —
+/// and the caller is [`crate::fit::handle`], never a level constructor.
+///
+/// It hashes the config as camdl *reads* it: the parsed value tree, canonical
+/// JSON (object keys sorted). Two facts drop out of the parse, and both should:
+/// comments and whitespace, which the parser never sees, and the spelling of a
+/// number, since `1.0` and `1.00` parse to the same `f64`. A hash over the raw
+/// bytes kept all three, so reflowing a comment orphaned a completed multi-hour
+/// fit — the run store held it, and `compare` reported "no completed fit found".
+///
+/// One thing the canonical form would discard that must not be: `digest_value`
+/// sorts object keys, and `[stages.*]` is an ordered map — stages execute in
+/// declaration order, so a scout→posterior pipeline and a posterior→scout one
+/// are different fits that the sorted tree cannot tell apart. The stage names
+/// are therefore folded in a second time, as an ordered array. The other ordered
+/// maps (`[estimate]`, `[data.observations]`) get no such treatment on purpose:
+/// [`fit_config_blob_hash`] sorts them too, so two configs differing only in
+/// their order resolve to the same stored fit *because it is the same stored
+/// fit*. Lookup insensitivity is kept aligned with store insensitivity.
+///
+/// Every field is included, including the `[stages.*]` blocks
+/// [`fit_config_blob_hash`] strips for the fit level: a lookup asks about the
+/// whole config, so a changed particle count must not resolve to the old run.
+pub fn config_identity_hash(config: &FitConfigV2) -> Result<String, String> {
+    ensure_finite(config)?;
+    let v = serde_json::to_value(config)
+        .map_err(|e| format!("cannot serialize fit config for hashing: {}", e))?;
+    let stage_order: Vec<&str> = config.stages.keys().map(|s| s.as_str()).collect();
+    Ok(digest_value(&serde_json::json!({
+        "config": v,
+        "stage_order": stage_order,
+    }))
+    .to_hex())
+}
+
 /// The stage-level config hash: the stage's `identity_payload` (which omits
 /// the extension dim + `n_trajectories`) re-augmented with `n_trajectories`,
 /// which is count-in-the-key (see the module note and

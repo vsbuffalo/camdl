@@ -359,15 +359,18 @@ is meaningful.
 
 Fields: `label` (the sticky user `--label`; a later stage-only re-run that
 passes no label preserves the one already on disk), `model_path`,
-`model_identity` (the hex structural model hash), `fit_toml_path`,
-`fit_toml_hash` (SHA-256 of the producing config's bytes — this is what
-`camdl fit predict fit.toml` matches against to find the run), `data_hashes`,
-`estimated`, `fixed`, `resolved_priors` (one `{param, source}` entry per
-estimated parameter, `source ∈ {fit_toml,
-model_ir, flat_explicit}`, emitted
-only when the fit has a Bayesian stage), `schema` (the observation/dimension
-schema below), and `docs` (the model's `#'` documentation dictionary, keyed by
-declaration name, so a consumer can label any output column).
+`model_identity` (the hex structural model hash), `fit_toml_path` (where the
+producing config lived — the directory its relative `[model]` / `[data]` paths
+resolve against when the config is recovered from the segment), `fit_toml_hash`
+(SHA-256 of the producing config's raw bytes — provenance, i.e. which exact
+bytes produced this fit; a `fit.toml` handle is NOT looked up by it, see below),
+`data_hashes`, `estimated`, `fixed`, `resolved_priors` (one `{param, source}`
+entry per estimated parameter, `source ∈ {fit_toml,
+model_ir, flat_explicit}`,
+emitted only when the fit has a Bayesian stage), `schema` (the
+observation/dimension schema below), and `docs` (the model's `#'` documentation
+dictionary, keyed by declaration name, so a consumer can label any output
+column).
 
 Two caveats a consumer must know. `data_hashes` is built from the explicit
 `[data.observations]` map only, so a fit that uses the `[data] file = "..."`
@@ -377,6 +380,21 @@ expanded per-stream set — read the leaf's identity, not this field, to answer
 `fit run --sweep` every swept segment records the _unswept_ value of the swept
 parameter; the segment's fit-level hash, not this field, distinguishes the sweep
 points. `parameters_provenance` is reserved and always empty.
+
+A third thing to know, because it is the one field whose name invites the wrong
+inference. `fit_toml_hash` answers _provenance_ — which exact bytes produced
+this fit — and nothing resolves a handle by it. Handing a config to a verb
+(`camdl compare fit.toml`, `camdl fit summary fit.toml`) asks a different
+question: does this config MEAN what the stored fit was run from? That is
+answered by canonicalising the parsed value tree — comments, whitespace, table
+order, and the spelling of a float all discarded, `[stages.*]` / `[estimate]` /
+`[data.observations]` order preserved because camdl reads those in order — and
+comparing it against the same canonicalisation of the segment's
+`fit.toml.original`. The archive is read at lookup time, so a fit stored before
+this rule existed resolves under it unchanged. Reflowing a comment changes
+`fit_toml_hash` and leaves the lookup identity alone; changing a particle count
+or a data path changes the identity and the config no longer resolves to that
+run.
 
 The `schema` block lets a consumer facet any stream and label panels with no DSL
 parsing:

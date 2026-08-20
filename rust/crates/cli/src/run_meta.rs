@@ -515,8 +515,9 @@ impl ObsSchema {
 /// projection of inputs already hashed into the leaf identity (the `FitDigest`
 /// — different priors already produce a different fit identity). It is written
 /// post-identity and is never fed back into any hash. The producing `fit.toml`
-/// is archived beside it as `fit.toml.original` (the config-diff source for
-/// `fit table`).
+/// is archived beside it as `fit.toml.original`: the config-diff source for
+/// `fit table`, the config a run handle recovers, and — canonicalised at lookup
+/// time — what a `fit.toml` handle is matched against (gh#653).
 ///
 /// Every field except `resolved_priors`-class provenance defaults, so partial
 /// sidecars (test fixtures) round-trip; [`crate::fit::fit_view::FitView`]
@@ -530,8 +531,26 @@ pub struct FitSidecar {
     pub model_path: String,
     #[serde(default)]
     pub model_identity: String,
+    /// Where the producing `fit.toml` lived when the fit ran. Load-bearing, not
+    /// decorative: the archived `fit.toml.original` beside this sidecar carries
+    /// the config's text but not its location, and its relative `[model]` /
+    /// `[data]` paths were written against THIS directory — so recovering the
+    /// config from the segment resolves them here (gh#652,
+    /// [`crate::fit::config_v2::FitConfigV2::load_anchored_at`]). Empty for a
+    /// CLI-only fit, which has no config to archive and no directory to anchor.
     #[serde(default)]
     pub fit_toml_path: String,
+    /// SHA-256 of the producing config's raw bytes — **provenance**: which exact
+    /// bytes produced this fit, down to the whitespace. Nothing looks a fit up
+    /// by it.
+    ///
+    /// The neighbouring question — does a config in hand MEAN what this fit was
+    /// run from? — is a different fact and has a different answer: the canonical
+    /// hash of the parsed value tree ([`crate::fit::cas::config_identity_hash`]),
+    /// computed from `fit.toml.original` when a `fit.toml` handle is resolved.
+    /// Reflowing a comment changes this field and not that one, which is the
+    /// point: it is why the raw hash cannot serve as identity (gh#653) and why
+    /// the canonical hash cannot serve as provenance.
     #[serde(default)]
     pub fit_toml_hash: String,
     // gh#542: the three maps below are `BTreeMap`, not `HashMap`, for the same
