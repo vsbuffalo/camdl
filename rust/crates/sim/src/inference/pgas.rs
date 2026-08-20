@@ -311,6 +311,47 @@ pub struct CSMCDiagnostics {
     pub n_degenerate: usize,
     /// Total substeps.
     pub n_substeps: usize,
+    /// Substeps where the Eq.-(17) proposal named an ancestor OTHER than the
+    /// reference's current one, so the LJS Eq.-(21) Metropolis step actually
+    /// ran. The denominator of the ancestor-sampling acceptance rate.
+    ///
+    /// Distinguishes "ancestor sampling is proposing moves that get rejected"
+    /// from "ancestor sampling never proposes a move at all" — the latter is
+    /// the `SpliceGuard` masking every alternative, which looks identical in
+    /// `trajectory_renewal` but has a completely different cause.
+    pub n_as_proposed: usize,
+    /// Of `n_as_proposed`, how many the Metropolis step accepted. Numerator of
+    /// the ancestor-sampling acceptance rate.
+    pub n_as_accepted: usize,
+    /// Of `n_as_proposed`, how many were rejected because the EXACT suffix
+    /// ratio was zero-density — a candidate the cheap screened weight admitted
+    /// but the full ratio refused.
+    ///
+    /// Separated from the coin-flip rejections because the two say different
+    /// things: an inadmissible rejection is the target's support asserting
+    /// itself (correct, and the whole point of gh#607), whereas a large
+    /// coin-flip rejection rate at finite ratios means the proposal is simply
+    /// badly matched to the target and mixing is paying for it.
+    pub n_as_refused_inadmissible: usize,
+}
+
+impl CSMCDiagnostics {
+    /// Ancestor-sampling Metropolis acceptance rate, or `NaN` when the step
+    /// never ran this sweep.
+    ///
+    /// `NaN` and `0.0` are different diagnoses and must not be collapsed:
+    /// `NaN` means no alternative ancestor was ever proposed (the screened
+    /// weights left only the reference's own lineage admissible), while `0.0`
+    /// means alternatives were proposed every time and the exact ratio refused
+    /// all of them. Both flatten `trajectory_renewal`; only the second implicates
+    /// the acceptance ratio.
+    pub fn as_accept_rate(&self) -> f64 {
+        if self.n_as_proposed == 0 {
+            f64::NAN
+        } else {
+            self.n_as_accepted as f64 / self.n_as_proposed as f64
+        }
+    }
 }
 
 /// Decomposed complete-data log-likelihood components.
@@ -1951,6 +1992,11 @@ pub fn csmc_as(
     // Diagnostic: count substeps where ancestor sampling is degenerate
     // (no particle can reach the reference state → reference stays self-connected)
     let mut n_degenerate: usize = 0;
+    // gh#607 follow-up: ancestor-sampling acceptance accounting. Counters only
+    // — they consume no RNG, so trajectories stay bit-identical.
+    let mut n_as_proposed: usize = 0;
+    let mut n_as_accepted: usize = 0;
+    let mut n_as_refused_inadmissible: usize = 0;
 
     // Pre-allocated buffer for ancestor sampling weights (reused each substep)
     let mut ancestor_log_w = vec![f64::NEG_INFINITY; n_particles];
@@ -2126,6 +2172,7 @@ pub fn csmc_as(
             let ref_ancestor = if proposed == j_ref {
                 j_ref
             } else {
+                n_as_proposed += 1;
                 let offset_of = |state: &[i64]| -> Vec<i64> {
                     state.iter().zip(&ref_rec.counts_before).map(|(a, b)| a - b).collect()
                 };
@@ -2147,6 +2194,7 @@ pub fn csmc_as(
                     &acc[j_ref],
                 )?;
                 let accept = if log_s_prop == f64::NEG_INFINITY {
+                    n_as_refused_inadmissible += 1;
                     false
                 } else if log_s_ref == f64::NEG_INFINITY {
                     // The chain cannot be sitting on a zero-density suffix, but
@@ -2156,7 +2204,12 @@ pub fn csmc_as(
                     let log_alpha = log_s_prop - log_s_ref;
                     log_alpha >= 0.0 || resample_rng.uniform().ln() < log_alpha
                 };
-                if accept { proposed } else { j_ref }
+                if accept {
+                    n_as_accepted += 1;
+                    proposed
+                } else {
+                    j_ref
+                }
             };
 
             // gh#607: RE-ANCHOR. The reference slot descends from `ref_ancestor`
@@ -2304,6 +2357,9 @@ pub fn csmc_as(
         trajectory_renewal,
         n_degenerate,
         n_substeps,
+        n_as_proposed,
+        n_as_accepted,
+        n_as_refused_inadmissible,
     };
 
     Ok((PGASTrajectory {
@@ -3496,6 +3552,7 @@ pub fn run_pgas(
             // on long time series where ancestor sampling is the bottleneck.
             let mut csmc_diag = CSMCDiagnostics {
                 trajectory_renewal: 0.0, n_degenerate: 0, n_substeps: 0,
+                n_as_proposed: 0, n_as_accepted: 0, n_as_refused_inadmissible: 0,
             };
             for csmc_rep in 0..config.csmc_sweeps_per_nuts {
                 let csmc_seed = seed ^ ((sweep as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))

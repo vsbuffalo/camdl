@@ -587,7 +587,7 @@ pub fn run_stage(
                 .map(|s| s.name.clone()).collect();
             let trace_writer = super::trace_writer::TraceWriter::new(
                 &trace_path_str, "sweep", "log_complete_data_ll",
-                &["trajectory_renewal", "transition_ll", "obs_ll",
+                &["trajectory_renewal", "as_accept", "as_proposed", "transition_ll", "obs_ll",
                   "tree_depth", "n_leapfrog", "step_size", "accept_stat",
                   "n_divergent", "energy"],
                 &param_names, is_resuming,
@@ -637,6 +637,17 @@ pub fn run_stage(
                 let param_vals: Vec<f64> = config.estimated_params.iter()
                     .map(|s| result.params[s.index]).collect();
                 let renewal = format!("{:.4}", result.csmc_diag.trajectory_renewal);
+                // gh#607 follow-up: the ancestor-sampling Metropolis acceptance
+                // rate, with its denominator alongside. `NA` means the step
+                // never ran (no alternative ancestor was admissible), which is
+                // a different diagnosis from an acceptance rate of 0.
+                let as_rate = result.csmc_diag.as_accept_rate();
+                let as_accept_str = if as_rate.is_finite() {
+                    format!("{:.4}", as_rate)
+                } else {
+                    "NA".to_string()
+                };
+                let as_proposed_str = result.csmc_diag.n_as_proposed.to_string();
                 let transition_ll_str = format!("{:.4}", result.transition_ll);
                 let obs_ll_str = format!("{:.4}", result.obs_ll);
                 // Per-sweep cold-chain NUTS diagnostics (gh#294).
@@ -649,7 +660,7 @@ pub fn run_stage(
                 let energy_str = format!("{:.4}", nd.energy);
                 trace_writer.write_row(
                     sweep, result.log_complete_data_ll, log_posterior,
-                    &[&renewal, &transition_ll_str, &obs_ll_str,
+                    &[&renewal, &as_accept_str, &as_proposed_str, &transition_ll_str, &obs_ll_str,
                       &tree_depth_str, &n_leapfrog_str, &step_size_str,
                       &accept_stat_str, &n_divergent_str, &energy_str],
                     &param_vals,
