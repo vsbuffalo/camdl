@@ -1143,10 +1143,14 @@ fn run_simulate(a: &args::SimulateArgs) {
     // We need the model to check observation blocks, but we don't want to
     // run simulation twice. Do a dry load to validate, then run in the loop.
     if want_obs {
-        let (model_check, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        });
+        // gh#616 follow-up: use the ANCHOR-SUBSTITUTED model, not a fresh load of
+        // the compiled IR. A fresh load still carries the unresolved-horizon
+        // marker, so every horizon this block reads was NaN for an anchored
+        // model — and the differing-horizons refusal below then fired on a
+        // single scenario (`baseline -> t = NaN`), or on a model with no
+        // `scenarios {}` block at all, blocking `--obs` for every anchored
+        // model. The substitution happened above; this block must see it.
+        let model_check = &model_to;
         if model_check.observations.is_empty() {
             eprintln!("error: --obs/--obs-dir requested but model has no observations blocks");
             std::process::exit(1);

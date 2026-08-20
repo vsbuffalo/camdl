@@ -620,3 +620,57 @@ fn an_anchor_resolving_before_the_forecast_origin_is_refused() {
          resolved horizon — or the anchor was still NaN when it fired:\n{stderr}"
     );
 }
+
+/// gh#616 regression, reported from the ebola project: an anchored
+/// `simulate { to }` resolved and PRINTED correctly, but `--obs` then refused
+/// with `baseline -> t = NaN`. The `--obs` pre-flight did a FRESH load of the
+/// compiled IR, which still carries the unresolved-horizon marker, so every
+/// horizon it read was NaN — and the differing-horizons refusal fired on a
+/// SINGLE scenario, and on a model with no `scenarios {}` block at all. It
+/// blocked the prior-predictive gate for every anchored model, which is
+/// fail-closed in their workflow, so an anchored model could not be fitted.
+///
+/// The same model with a typed date succeeded, which is what localised it to
+/// the pre-flight rather than to anchoring.
+#[test]
+fn an_anchored_horizon_can_write_observations() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let anchored = write_model(tmp.path(), "last_obs + 2 'weeks");
+    let params = params_file(tmp.path());
+    let data = tmp.path().join("cases.tsv");
+    write_data(&data, 4); // t = 7, 14, 21, 28 -> last_obs = 28, horizon 42
+    let toml = write_fit_toml(tmp.path(), &anchored, &data);
+
+    let obs = tmp.path().join("ppc.tsv");
+    let o = Command::new(&bin)
+        .arg("simulate")
+        .arg(&anchored)
+        .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])
+        .args(["--params", params.to_str().unwrap()])
+        .args(["--fit", toml.to_str().unwrap()])
+        .args(["--obs", obs.to_str().unwrap()])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .output()
+        .expect("spawn simulate");
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        o.status.success(),
+        "an anchored horizon must be able to write observations:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("NaN"),
+        "no horizon check may see the unresolved marker:\n{stderr}"
+    );
+    // The emitted axis must reach the RESOLVED horizon (last_obs 28 + 14 = 42),
+    // not the pre-substitution placeholder.
+    let txt = std::fs::read_to_string(&obs).expect("obs file written");
+    let max_t = txt
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .filter_map(|l| l.split('\t').next().and_then(|t| t.parse::<f64>().ok()))
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert_eq!(max_t, 42.0, "obs axis reaches the resolved horizon:\n{txt}");
+}
