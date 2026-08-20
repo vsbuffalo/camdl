@@ -545,7 +545,10 @@ Ships before any tightening of observation rules: it is the only thing standing
 between a modeller and an error whose correct fix does not compile.
 
 **B1. Lowering.** `Projection::WeightedFlowSum(Vec<(Expr, String)>)` — the sum
-of weight × flow — appended at hash index 5. `ir/VERSION` 0.31 → 0.32.
+of weight × flow — appended at hash index 5, with the accompanying `ir/VERSION`
+bump. **Do not pin the target number here**: it has gone 0.30 → 0.31 → 0.32 →
+0.33 while this proposal sat, so a literal is stale on arrival. Read
+`ir/VERSION` and take the next one.
 
 This is deliberately **not** a new `Expr` constructor. A flow-read node in
 `Expr` would make `temporal_kind()` (`rust/crates/ir/src/observation.rs:47`)
@@ -617,7 +620,7 @@ when the seam is the defect.
 
 **B7. The `ir/VERSION` bump re-keys every cached run, for every model.**
 `ir_version` is a hashed field of `ModelDigest` (`runid/src/inputs.rs:174-182`),
-so 0.31 → 0.32 invalidates every stored fit and simulate — not only models using
+so the bump invalidates every stored fit and simulate — not only models using
 `incidence`. Unavoidable if B ships; it belongs in the release notes, not only
 here.
 

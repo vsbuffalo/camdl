@@ -15,7 +15,8 @@ Branch: `feat/aggregation-remaining` (off `main` @ `9643c246`).
   (`generated : bool` becomes redundant).
 - **Re-keying is not a design constraint** (`4833858f`). Land pending re-keying
   changes in one bump rather than dropping any.
-- **`ir/VERSION` 0.31 → 0.32** approved for B.
+- **`ir/VERSION` bump approved for B.** Do not pin the number — it has moved
+  0.30 → 0.33 while this branch sat. Read `ir/VERSION` at implementation time.
 - **Order** below approved.
 
 ## Steps
@@ -81,8 +82,8 @@ Branch: `feat/aggregation-remaining` (off `main` @ `9643c246`).
 
   Rewriting a schedule or guard that contains no staged reference is identity,
   so over-applying is safe; under-applying is the bug being fixed.
-- [ ] **4. Increment B** — `ir/VERSION` 0.31 → 0.32. Land as a stacked sequence
-      behind one bump, each piece green:
+- [ ] **4. Increment B** — `ir/VERSION` bump (read it, don't pin it). Land as a
+      stacked sequence behind one bump, each piece green:
   - [ ] 4a. typed `dim_name` + goldens regenerated
   - [ ] 4b. `WeightedFlowSum` lowering (B1), per-reference accumulator (B2)
   - [ ] 4c. weight restrictions (B3) + deferral diagnostics (B4) + extend the
