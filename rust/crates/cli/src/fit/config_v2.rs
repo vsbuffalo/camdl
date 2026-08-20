@@ -2390,7 +2390,27 @@ impl FitConfigV2 {
     }
 
     pub fn load(path: &str) -> Result<Self, String> {
-        let contents = std::fs::read_to_string(path)
+        Self::load_anchored_at(std::path::Path::new(path), std::path::Path::new(path))
+    }
+
+    /// Load the config stored at `read_path`, but resolve its relative paths as
+    /// if the config file lived at `anchor_toml`.
+    ///
+    /// The two coincide for a config loaded from where the user wrote it — that
+    /// is [`load`](Self::load). They diverge for the copy archived inside a fit
+    /// segment (`fit.toml.original`): its relative `[model] camdl` /
+    /// `[data.observations]` paths were written against the *original* fit.toml
+    /// directory, so anchoring them at the archive's own location resolves
+    /// `../data/x.tsv` to `results/fits/data/x.tsv` — a path that never existed
+    /// (gh#652). The segment's sidecar records `fit_toml_path`, so the original
+    /// directory is known even when that file has moved or changed; pass it here
+    /// and every path resolves exactly as it did at fit time.
+    pub fn load_anchored_at(
+        read_path: &std::path::Path,
+        anchor_toml: &std::path::Path,
+    ) -> Result<Self, String> {
+        let path = read_path.to_string_lossy();
+        let contents = std::fs::read_to_string(read_path)
             .map_err(|e| format!("cannot read {}: {}", path, e))?;
         let mut config = FitConfigV2::from_toml_str(&contents)
             .map_err(|e| format!("error in {}:\n{}", path, e))?;
@@ -2411,7 +2431,7 @@ impl FitConfigV2 {
         // runner's data loaders) sees absolute paths regardless of
         // where the binary was invoked from. Absolute paths in the
         // toml pass through unchanged.
-        let toml_path = std::path::Path::new(path);
+        let toml_path = anchor_toml;
         config.model.camdl = crate::util::resolve_relative_to_toml(
             toml_path, &config.model.camdl);
         // gh#507: `output_dir` anchors here too. It is the one path written in
