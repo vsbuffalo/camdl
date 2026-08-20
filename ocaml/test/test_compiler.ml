@@ -2104,6 +2104,116 @@ let test_anchored_breakpoint_arithmetic_rejected () =
       "        breakpoints = [2 * last_obs]\n\
       \        values      = [1.0, 0.5]")
 
+(* ── gh#616: observation-anchored simulate horizons ──────────────────────── *)
+
+(* `extra` is spliced after the transitions; `sim_to` is the horizon expression. *)
+let anchored_horizon_src ?(extra = "") sim_to = Printf.sprintf {|
+    compartments { S, I }
+    parameters { beta : rate  gamma : rate }
+    transitions {
+      infection : S --> I @ beta * S * I / (S + I)
+      recovery  : I --> S @ gamma * I
+    }
+%s
+    init { S = 990  I = 10 }
+    simulate { from = 0 'days  to = %s }
+  |} extra sim_to
+
+(* The anchor rides in `t_end_anchor`; `t_end` is baked NaN, deliberately. A
+   placeholder NUMBER would compare equal to another placeholder and silently
+   satisfy every equality-based horizon guard downstream (the gh#561 class);
+   NaN makes each of them fail closed. *)
+let test_anchored_horizon_bakes_nan () =
+  let m = compile_expect_ok (anchored_horizon_src "last_obs + 4 'weeks") in
+  (match m.Ir.simulation.Ir.t_end_anchor with
+   | Some { anchor = Ir.AnchorLast; offset } ->
+     Alcotest.(check (float 1e-12)) "4 'weeks folds to 28 days" 28.0 offset
+   | _ -> Alcotest.fail "expected simulation.t_end_anchor = last_obs + 28");
+  Alcotest.(check bool) "the baked t_end is NaN, not a placeholder number"
+    true (Float.is_nan m.Ir.simulation.Ir.t_end)
+
+(* A literal horizon is untouched — the anchor field stays absent. *)
+let test_literal_horizon_carries_no_anchor () =
+  let m = compile_expect_ok (anchored_horizon_src "80 'days") in
+  Alcotest.(check bool) "no anchor" true (m.Ir.simulation.Ir.t_end_anchor = None);
+  Alcotest.(check (float 1e-12)) "t_end is the literal" 80.0 m.Ir.simulation.Ir.t_end
+
+(* A scenario may anchor its own horizon, on the same terms. *)
+let test_anchored_scenario_horizon () =
+  let src = anchored_horizon_src ~extra:{|
+    scenarios {
+      forecast {
+        simulate { to = last_obs + 8 'weeks }
+        set = { beta = 0.3 }
+      }
+    }
+  |} "80 'days" in
+  let m = compile_expect_ok src in
+  let p = List.hd m.Ir.presets in
+  (match p.Ir.preset_t_end_anchor with
+   | Some { anchor = Ir.AnchorLast; offset } ->
+     Alcotest.(check (float 1e-12)) "8 'weeks folds to 56 days" 56.0 offset
+   | _ -> Alcotest.fail "expected preset_t_end_anchor = last_obs + 56");
+  Alcotest.(check bool) "the preset's baked t_end is NaN"
+    true (match p.Ir.preset_t_end with Some v -> Float.is_nan v | None -> false)
+
+(* A recurring schedule with no `to` defaults its end to the model horizon,
+   which an anchored horizon cannot supply. E336 — and it must PRE-EMPT the
+   E241 (`from <= to`) that would otherwise blame the intervention's `from`. *)
+let test_recurring_without_to_under_anchor_rejected () =
+  let src = anchored_horizon_src ~extra:{|
+    interventions {
+      campaign : transfer(fraction = 0.01, from = S, to = I) {
+        every = 30 'days
+      }
+    }
+  |} "last_obs + 4 'weeks" in
+  compile_expect_error_code ~code:"E336" ~contains:"campaign" src
+
+(* Its own end, so nothing is baked from the horizon → accepted. *)
+let test_recurring_with_explicit_to_under_anchor_ok () =
+  let src = anchored_horizon_src ~extra:{|
+    interventions {
+      campaign : transfer(fraction = 0.01, from = S, to = I) {
+        every = 30 'days
+        from  = 0 'days
+        to    = 60 'days
+      }
+    }
+  |} "last_obs + 4 'weeks" in
+  ignore (compile_expect_ok src)
+
+(* `every … at_day …` has no `to` key at all, so E336's advice is unachievable
+   there — it gets its own code and message. *)
+let test_every_at_day_under_anchor_rejected () =
+  let src = anchored_horizon_src ~extra:{|
+    interventions {
+      monthly : add(I, 5) every 30 'days at_day 1
+    }
+  |} "last_obs + 4 'weeks" in
+  compile_expect_error_code ~code:"E337" ~contains:"monthly" src
+
+(* A reactive policy's monitoring window is baked from the horizon, and the
+   runtime guard that would catch an extension compares against that baked end
+   — so under an anchor the policy would silently stop reacting. E338. *)
+let test_reactive_under_anchor_rejected () =
+  let src = anchored_horizon_src ~extra:{|
+    observations {
+      cases {
+        columns       { time : time, cases : count }
+        projected     = incidence(infection)
+        emit_schedule = every 7 'days
+        cases         ~ poisson(rate = projected)
+      }
+    }
+    reactive_interventions {
+      surge : when observed(cases) >= 100 {
+        action = transfer(fraction = 0.01, from = S, to = I)
+      }
+    }
+  |} "last_obs + 4 'weeks" in
+  compile_expect_error_code ~code:"E338" ~contains:"surge" src
+
 let test_indexed_param_arity () =
   let src = {|
     dimensions { patch = [north, south] }
@@ -12206,6 +12316,22 @@ let () =
         `Quick test_indexed_forcing_arity;
       Alcotest.test_case "indexed param over-index rejected (E299)"
         `Quick test_indexed_param_arity;
+    ];
+    "anchored simulate horizon (gh#616)", [
+      Alcotest.test_case "to = last_obs + 4 'weeks bakes NaN + the anchor"
+        `Quick test_anchored_horizon_bakes_nan;
+      Alcotest.test_case "a literal horizon carries no anchor"
+        `Quick test_literal_horizon_carries_no_anchor;
+      Alcotest.test_case "a scenario may anchor its own horizon"
+        `Quick test_anchored_scenario_horizon;
+      Alcotest.test_case "recurring without `to` under an anchor (E336)"
+        `Quick test_recurring_without_to_under_anchor_rejected;
+      Alcotest.test_case "recurring WITH `to` under an anchor is accepted"
+        `Quick test_recurring_with_explicit_to_under_anchor_ok;
+      Alcotest.test_case "`every … at day …` under an anchor (E337)"
+        `Quick test_every_at_day_under_anchor_rejected;
+      Alcotest.test_case "reactive policy under an anchor (E338)"
+        `Quick test_reactive_under_anchor_rejected;
     ];
     "anchored forcing breakpoints (gh#616)", [
       Alcotest.test_case "breakpoints accept last_obs ± a constant duration"

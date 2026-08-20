@@ -4160,6 +4160,42 @@ silently dropped; the accepted keys are `from`, `to`, `dt`, `integrator`.
 
 Seed is always external (CLI `--seed`), never in the model file.
 
+### An observation-anchored horizon
+
+`to` may be an **observation anchor** — `last_obs` or `first_obs`, optionally
+`±` a constant duration — instead of a literal time. A forecasting model whose
+horizon is "eight weeks past the end of the data" then states that, rather than
+carrying a date that has to be re-typed on every data release:
+
+```camdl
+simulate { from = 0 'days  to = last_obs + 8 'weeks }
+```
+
+A scenario may anchor its own horizon the same way
+(`scenarios { forecast { simulate { to = last_obs + 8 'weeks } } }`).
+
+The horizon is resolved once per run, from the observation times the run binds,
+and the resolved value is recorded in the run record and printed on stderr. The
+same rules as every other anchor position apply (whole term, offset carries a
+duration unit, no `'months`/`'years` under an `origin`).
+
+Because the horizon is now unknown at compile time, three constructs that
+**bake** it are refused rather than left to silently mis-fire:
+
+- A recurring intervention or event with no `to` of its own (**E336**) — its
+  window would default to the model horizon. Give the schedule its own `to`.
+- The `every … at_day …` schedule form (**E337**), which has no `to` key at all
+  to override with.
+- A reactive policy (**E338**). Its monitoring window is fixed at compile time
+  from the horizon, so under an anchored `to` the dynamics would run to the
+  resolved end while the policy stopped reacting at the baked one — with no
+  error. Until that is re-derived from the run horizon, an anchored model
+  horizon and a reactive policy cannot be combined.
+
+For the third case, and for any model that must keep a literal horizon, the
+per-run alternative is the CLI: leave `simulate { to }` literal and pass
+`camdl simulate --to "last_obs + 8 weeks"` (note the CLI's bare-word units).
+
 ---
 
 ## 19. Content-Addressable Output

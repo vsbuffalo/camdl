@@ -5352,6 +5352,38 @@ let classify_anchor ctx ~what ~example ~loc (e : expr) : anchor_class =
       ~hint:(Printf.sprintf "write %s" example) ()
   | _ -> AnchorNone
 
+(* Is the MODEL's `simulate { to }` anchored?
+   Every site that bakes the horizon into something else classifies the RAW AST
+   for itself, rather than reading state that `expand_simulate` set: OCaml does
+   not specify the evaluation order of sibling record fields, so a
+   `expand_simulate`-populated flag would be read before or after it is written
+   depending on the compiler's whim. A pure function of `ctx.simulate` has no
+   such hazard.
+
+   `mentions`, not "classifies well-formed": a malformed anchor (`2 * last_obs`)
+   still cannot be baked, and its diagnostic is `expand_simulate`'s to emit — a
+   guard site that re-classified would report the same error five times. *)
+let sim_to_is_anchored ctx =
+  match ctx.simulate with
+  | None -> false
+  | Some sd -> mentions_obs_anchor sd.sim_to
+
+(* The model horizon as a compile-time number, for the sites that BAKE it into
+   something else (a recurring schedule's default end, an emit schedule's end, a
+   scenario's W106 comparison). NaN when the horizon is anchored — nothing may
+   bake an anchored horizon, and NaN makes every downstream equality guard fail
+   closed rather than pass on a coincidence.
+
+   Also the reason this is a function and not `resolve_float_expr ctx sd.sim_to`
+   at each site: resolving an anchored `to` would report the anchor as an
+   undeclared name (E100) once per site, burying the real diagnostic. *)
+let sim_t_end_baked ctx =
+  match ctx.simulate with
+  | None -> 100.0
+  | Some sd ->
+    if mentions_obs_anchor sd.sim_to then Float.nan
+    else resolve_float_expr ctx sd.sim_to
+
 (* Resolve a bound expression to a float. Bounds are compile-time constants —
    a numeric literal or arithmetic of literals, possibly **negative** (e.g. a
    seed time `tau : instant in [-40, 120]` that may fall before the origin).
@@ -6149,7 +6181,26 @@ let expand_simulate ctx =
       Ir.integrator = Ir.Rk4; Ir.t_end_anchor = None }
   | Some sd ->
     let t_start = resolve_float_expr ctx sd.sim_from in
-    let t_end   = resolve_float_expr ctx sd.sim_to   in
+    (* gh#616: `to = last_obs + 4 'weeks`. The anchor field carries the horizon
+       and `t_end` is baked NaN — NOT a placeholder number. Two placeholders
+       would compare EQUAL, which silently defeats every equality-based horizon
+       guard (`refuse_scenario_horizon`, the `--to` conflict rule,
+       `check_baked_recurring_ends`, the `--obs` preflight); NaN makes each of
+       them fail closed. `CompiledModel::new` refuses the model outright until
+       the runtime resolver substitutes and clears the anchor. *)
+    let t_end_anchor =
+      match classify_anchor ctx
+              ~what:"`simulate { to }`"
+              ~example:"`to = last_obs + 4 'weeks`"
+              ~loc:Diagnostics.no_loc sd.sim_to with
+      | AnchorAt a -> Some a
+      | AnchorBad | AnchorNone -> None
+    in
+    let t_end =
+      match t_end_anchor with
+      | Some _ -> Float.nan
+      | None   -> resolve_float_expr ctx sd.sim_to
+    in
     (* gh#161: `dt` is a model knob. It is unit-aware like from/to —
        `dt = 0.05 'months` resolves through resolve_float_expr (EUnit →
        model time units). None when omitted, so the CLI default / --dt
@@ -6197,7 +6248,7 @@ let expand_simulate ctx =
     in
     { Ir.t_start; Ir.t_end;
       Ir.time_semantics = "continuous"; Ir.dt; Ir.rng_seed = None;
-      Ir.integrator; Ir.t_end_anchor = None }
+      Ir.integrator; Ir.t_end_anchor }
 
 let expand_output ctx =
   (* The output window's upper bound is no longer stored on the schedule
@@ -7336,10 +7387,7 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
     | None    -> 0.0
     | Some sd -> resolve_float_expr ctx sd.sim_from
   in
-  let t_end = match ctx.simulate with
-    | None    -> 100.0
-    | Some sd -> resolve_float_expr ctx sd.sim_to
-  in
+  let t_end = sim_t_end_baked ctx in
   List.concat_map (fun iv ->
     let iv_loc = diag_loc_of_ast_ctx ctx iv.ivloc in
     if iv.ivaction = [] then begin
@@ -7403,6 +7451,25 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
             | Some e -> resolve_float_expr ctx e
             | None   -> t_start
           in
+          (* gh#616: a recurring schedule with no explicit `to` DEFAULTS its end
+             to the model horizon — which an anchored horizon cannot supply at
+             compile time. Refused here, and refused BEFORE the E241
+             (`from <= to`) check below: with the baked end at NaN, `start >
+             end_` is false and E241 would not fire at all; were it a number,
+             E241 would fire and blame the intervention's `from`, sending the
+             author to fix a field that is not the problem. *)
+          let anchored_default_end = until_opt = None && sim_to_is_anchored ctx in
+          if anchored_default_end then
+            Diagnostics.error ctx.diags
+              ~code:"E336" ~loc:iv_loc
+              ~message:(Printf.sprintf
+                "intervention '%s' recurs with no `to`, so its window ends at the \
+                 model horizon — but the horizon is anchored to observed data \
+                 (`simulate { to = last_obs … }`) and is not known at compile time"
+                iv.ivname)
+              ~hint:"Give the schedule its own end, e.g. `every = 30 'days  to = \
+                     180 'days`, or state the model horizon as a literal."
+              ();
           let end_   = match until_opt with
             | Some e -> resolve_float_expr ctx e
             | None   -> t_end
@@ -7413,7 +7480,7 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
               ~message:(Printf.sprintf "intervention '%s': 'every' must be positive (got %g)" iv.ivname period)
               ~hint:"Use a positive interval, e.g. every = 30 'days"
               ();
-          if start > end_ then
+          if start > end_ && not anchored_default_end then
             Diagnostics.error ctx.diags
               ~code:"E241" ~loc:iv_loc
               ~message:(Printf.sprintf "intervention '%s': 'from' (%g) must be <= 'to' (%g)" iv.ivname start end_)
@@ -7433,6 +7500,22 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
           end;
           Ir.Recurring { Ir.start; Ir.period; Ir.end_; Ir.at_day = None }
         | SEveryAtDay (every, day) ->
+          (* gh#616: this schedule form has NO `to` key in its grammar, so the
+             general advice ("give the schedule its own end") is unachievable —
+             it gets its own message rather than an E336 the author cannot act
+             on. Its end always comes from the model horizon. *)
+          if sim_to_is_anchored ctx then
+            Diagnostics.error ctx.diags
+              ~code:"E337" ~loc:iv_loc
+              ~message:(Printf.sprintf
+                "intervention '%s' uses the `every … at day …` schedule, whose \
+                 window always ends at the model horizon — and the horizon is \
+                 anchored to observed data, so it is not known at compile time. \
+                 This schedule form has no `to` key to override it with"
+                iv.ivname)
+              ~hint:"State the model horizon as a literal `simulate { to = … }`, \
+                     or write the schedule as `every = … from = … to = …`."
+              ();
           let period = resolve_float_expr ctx every in
           let at_day = resolve_float_expr ctx day in
           Ir.Recurring { Ir.start = t_start; Ir.period; Ir.end_ = t_end; Ir.at_day = Some at_day }
@@ -7598,6 +7681,28 @@ let rec lower_trigger ctx env ~name ~loc (p : trig_pred) : Ir.trigger_expr =
 let expand_reactive ctx decls =
   List.concat_map (fun (rx : reactive_decl) ->
     let rx_loc = diag_loc_of_ast_ctx ctx rx.rxloc in
+    (* gh#616: a reactive policy's monitoring walk is bounded by the emit
+       schedule's COMPILER-BAKED end (reactive.rs:111-117), not by the run
+       horizon. The runtime's extension guard recognises "this end came from the
+       model horizon" by comparing `r.end == old_end`, which goes quiet the
+       moment the baked end is NaN. So under an anchored horizon the dynamics
+       would run to the resolved end while the policy silently stopped reacting
+       — no error, no warning, a plausible trajectory with the intervention
+       missing from its tail. Refused at compile time instead; the deeper fix
+       (the reactive walk takes the RUN horizon, the gh#143 move the observation
+       walk already made) is the follow-up named in the gh#626 proposal. *)
+    if sim_to_is_anchored ctx then
+      Diagnostics.error ctx.diags
+        ~code:"E338" ~loc:rx_loc
+        ~message:(Printf.sprintf
+          "reactive policy '%s' cannot be used with an observation-anchored \
+           model horizon: its monitoring window is fixed at compile time from \
+           the horizon, so under an anchored `simulate { to }` the policy would \
+           stop reacting before the run ends, with no error"
+          rx.rxname)
+        ~hint:"State the model horizon as a literal `simulate { to = … }` and \
+               override it per run with `camdl simulate --to \"last_obs + 8 weeks\"`."
+        ();
     let base_name = if rx.rxindices = [] then None else Some rx.rxname in
     let combos = cartesian_product ~loc:rx_loc rx.rxindices ctx in
     List.filter_map (fun env ->
@@ -7837,10 +7942,7 @@ let expand_observations ctx =
       | None    -> 0.0
       | Some sd -> resolve_float_expr ctx sd.sim_from
     in
-    let t_end = match ctx.simulate with
-      | None    -> 100.0
-      | Some sd -> resolve_float_expr ctx sd.sim_to
-    in
+    let t_end = sim_t_end_baked ctx in
     let emit_schedule = match sched_v with
       | None -> None
       | Some (SchedEvery every) ->
@@ -10051,11 +10153,7 @@ let expand_scenarios ctx : Ir.preset list =
        | _ -> None)
     | _ -> None
   in
-  let t_end =
-    match ctx.simulate with
-    | None    -> 100.0
-    | Some sd -> resolve_float_expr ctx sd.sim_to
-  in
+  let t_end = sim_t_end_baked ctx in
 
   (* Pass 3: for each scenario, resolve parents then emit IR preset. *)
   List.map (fun sd ->
@@ -10106,7 +10204,24 @@ let expand_scenarios ctx : Ir.preset list =
     in
     let set_vals   = resolve_fold resolved.rs_set in
     let scale_vals = resolve_fold resolved.rs_scale in
-    let t_end_val  = Option.map (resolve_float_expr ctx) resolved.rs_t_end in
+    (* gh#616: a scenario may anchor its own horizon
+       (`scenarios { s { simulate { to = last_obs + 8 'weeks } } }`). Same
+       contract as the model's: the anchor field carries it, `preset_t_end` is
+       baked NaN so equality guards fail closed, and the resolver substitutes. *)
+    let t_end_anchor_val =
+      Option.bind resolved.rs_t_end (fun e ->
+        match classify_anchor ctx
+                ~what:(Printf.sprintf "scenario '%s'`s `simulate { to }`" resolved.rs_name)
+                ~example:"`to = last_obs + 8 'weeks`"
+                ~loc:Diagnostics.no_loc e with
+        | AnchorAt a -> Some a
+        | AnchorBad | AnchorNone -> None)
+    in
+    let t_end_val =
+      match t_end_anchor_val with
+      | Some _ -> Some Float.nan
+      | None   -> Option.map (resolve_float_expr ctx) resolved.rs_t_end
+    in
     (* W106: under an explicit `at = [...]` output list, `output_times` emits
        exactly the listed times `<= t_end`. So a scenario's `to` is a NO-OP
        precisely when it selects the same entries the model horizon would —
@@ -10133,8 +10248,15 @@ let expand_scenarios ctx : Ir.preset list =
     let obs_axis_moves =
       List.exists (fun (o : obs_decl) -> o.oschedule <> None) ctx.obs_decls
     in
+    (* gh#616: skipped when EITHER horizon is anchored. W106 asks "does this
+       scenario's `to` select the same `at` entries the model horizon would?",
+       and neither side of that comparison is known at compile time once an
+       anchor is involved — a NaN comparison would answer "differs" and the
+       warning would be noise, or worse, advice to delete a live override. *)
+    let horizon_anchored = sim_to_is_anchored ctx || t_end_anchor_val <> None in
     (match t_end_val, at_list with
-     | Some te, Some ats when te <> t_end && not obs_axis_moves ->
+     | Some te, Some ats when te <> t_end && not obs_axis_moves
+                              && not horizon_anchored ->
        let lo = Float.min te t_end and hi = Float.max te t_end in
        (* Selected sets differ iff some listed time lies in (lo, hi]. *)
        let changes = List.exists (fun a -> a > lo && a <= hi) ats in
@@ -10157,7 +10279,7 @@ let expand_scenarios ctx : Ir.preset list =
       Ir.preset_scale   = scale_vals;
       Ir.preset_compose = resolved.rs_compose;
       Ir.preset_t_end   = t_end_val;
-      Ir.preset_t_end_anchor = None;
+      Ir.preset_t_end_anchor = t_end_anchor_val;
     }
   ) ctx.scenario_decls
 
