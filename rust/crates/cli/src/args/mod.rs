@@ -1241,6 +1241,18 @@ pub struct FitPredictArgs {
     #[arg(long, value_name = "HORIZON")]
     pub horizon: Option<crate::args::types::HorizonArg>,
 
+    /// Report this fit with the `quantities {}` block in FILE instead of the
+    /// model's own. FILE is an ordinary `.camdl` file containing ONLY a
+    /// `quantities {}` block; it is compiled against this fit's model source and
+    /// refused unless that source is still the model the fit ran on. It REPLACES
+    /// the model's block — never merges — and a name the model does not declare
+    /// is an error naming both the name and FILE. The tables land in
+    /// `quantities-<key>/`, keyed by FILE's contents, so two vocabularies over
+    /// one fit produce two tables rather than overwriting each other. The fit's
+    /// own identity is untouched (proposal 2026-08-19).
+    #[arg(long, value_name = "FILE")]
+    pub quantities: Option<PathBuf>,
+
     /// Cap the posterior cloud subsample for BOTH horizons (default 200). Each
     /// horizon pools plenty at a few hundred draws (one-step over
     /// `draws × particles`, free-forward over one forward replay per draw), so a

@@ -935,6 +935,33 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         crate::util::resolve_ir_path(&config.model.camdl, false)?
     };
     let (mut model, _) = crate::util::load_model(&compiled_ir)?;
+
+    // 3a. `--quantities FILE` (proposal 2026-08-19): report this fit with a
+    //     supplied reporting vocabulary in place of the model's own. This is the
+    //     reason the feature exists — the archived IR above is what makes a fit
+    //     self-contained AND what makes correcting a quantity in the source have
+    //     no effect on a fit that already ran.
+    //
+    //     The vocabulary is compiled against the model SOURCE, not the archived
+    //     IR, and the source is required. A `let` that mentions a parameter
+    //     (`let R0 = beta / gamma`) is INLINED at its use sites and appears
+    //     nowhere in the compiled IR, so a vocabulary resolved against the IR
+    //     would reject `R0` as undeclared against a model that plainly declares
+    //     it — a wrong answer of exactly the plausible-looking kind.
+    //
+    //     Safety comes from a hash, not from trust: `model_ir_hash` EXCLUDES
+    //     `quantities` (runid's `ir_quantities_excluded_from_hash`), so the
+    //     recompiled model and the archived one must hash equal. If they do the
+    //     source is the same model that was fit, modulo exactly the reporting
+    //     layer we are replacing, and transplanting its quantities is sound. If
+    //     they differ the source has drifted and we refuse — the alternative is
+    //     reporting a fit through formulas written for a different model.
+    let vocabulary: Option<crate::quantities_file::QuantitiesOverride> =
+        args.quantities.as_deref().map(crate::quantities_file::QuantitiesOverride::load).transpose()?;
+    if let Some(v) = &vocabulary {
+        model.quantities = quantities_from_vocabulary(&model, &config.model.camdl, v)?;
+    }
+
     // gh#616: `fit predict` HAS the fit's data, so it resolves the model's
     // observation anchors rather than refusing them — and it must do so HERE,
     // before the horizon guard below and before any compile. Inheriting an
@@ -1580,12 +1607,23 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // Generated quantities: one sidecar TSV per logical quantity + a manifest.
     // These are NOT in the run_id-keyed CAS leaf — a regenerated sidecar beside
     // `predictive/`/`observed/`, overwritten in place.
+    //
+    // WHICH sidecar, though, is keyed by the reporting vocabulary that produced
+    // it (proposal 2026-08-19): the model's own block keeps writing
+    // `quantities/`, a `--quantities` vocabulary writes `quantities-<key8>/`
+    // with a matching manifest. Two vocabularies applied to one fit are two
+    // different tables; sharing one address would overwrite the first and leave
+    // no way to tell which formulas produced the survivor.
+    let quantities_sub = crate::quantities_file::quantities_dir_name(vocabulary.as_ref());
     for (name, content) in &quantity_outputs {
-        written.push(write_tsv(&segment, "quantities", name, content)?);
+        written.push(write_tsv(&segment, &quantities_sub, name, content)?);
     }
     if let Some(manifest) = &quantity_manifest {
-        let path = segment.join("quantities.json");
-        std::fs::write(&path, manifest)
+        let manifest =
+            crate::quantities_file::stamp_provenance(manifest, vocabulary.as_ref())?;
+        let path = segment
+            .join(crate::quantities_file::quantities_manifest_name(vocabulary.as_ref()));
+        std::fs::write(&path, &manifest)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         written.push(path);
     }
@@ -1625,6 +1663,58 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         posterior.stage,
     );
     Ok(written)
+}
+
+/// Compile `vocabulary` against the fit's model SOURCE and return the quantity
+/// IR to transplant onto `archived` — refusing unless the source is still the
+/// same model the fit ran on.
+///
+/// The equality test is `runid::inputs::model_ir_hash`, which excludes
+/// `quantities` (and `contrasts`). That is what makes it the right test rather
+/// than merely a convenient one: it asks "is this the same model apart from its
+/// reporting layer?", which is exactly the question a reporting-layer swap has
+/// to answer yes to. It is also gradient-independent (runid SV=2), so the lean
+/// recompile here and a full-Jacobian fit compile still agree.
+fn quantities_from_vocabulary(
+    archived: &ir::Model,
+    model_source: &str,
+    vocabulary: &crate::quantities_file::QuantitiesOverride,
+) -> Result<Vec<ir::quantity::Quantity>, String> {
+    if !crate::util::model_is_camdl_source(model_source) {
+        return Err(format!(
+            "--quantities needs this fit's model SOURCE, but the fit records `{model_source}`, \
+             which is compiled IR. A reporting vocabulary is resolved against the model's \
+             symbols at compile time, and a `let` that mentions a parameter is inlined away \
+             in the IR, so it cannot be applied to a compiled model."
+        ));
+    }
+    if !std::path::Path::new(model_source).is_file() {
+        return Err(format!(
+            "--quantities needs this fit's model source `{model_source}`, which is not \
+             readable from here. The fit itself is self-contained (it archived its compiled \
+             IR), but a reporting vocabulary has to be compiled against the model's symbols."
+        ));
+    }
+    // Lean compile: `fit predict` replays forward trajectories and never
+    // recomputes an ODE gradient (gh#439 A2). Identity is gradient-independent,
+    // so this does not disturb the hash comparison below.
+    let (ir_path, _tmp) = crate::util::resolve_ir_path_with_quantities(
+        model_source, false, Some(vocabulary))?;
+    let (recompiled, _) = crate::util::load_model(&ir_path)?;
+    let archived_h = runid::inputs::model_ir_hash(archived);
+    let recompiled_h = runid::inputs::model_ir_hash(&recompiled);
+    if archived_h != recompiled_h {
+        return Err(format!(
+            "this fit's model source `{model_source}` is no longer the model the fit ran on, \
+             so a reporting vocabulary cannot be checked against it (archived {}, source {}). \
+             Quantities are excluded from that hash, so this difference is a real change to \
+             the dynamics, observations, or parameters — not the vocabulary. Re-run the fit \
+             against the current source, or check out the source the fit used.",
+            &archived_h.to_hex()[..8],
+            &recompiled_h.to_hex()[..8],
+        ));
+    }
+    Ok(recompiled.quantities)
 }
 
 /// Whether a model observation leaf corresponds to a loaded `LeafObs` (matched

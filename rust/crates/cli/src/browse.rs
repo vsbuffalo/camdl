@@ -473,7 +473,23 @@ fn show_fit_envelope(segment: &Path, rel_path: &str) {
     // shows fewer outputs).
     println!("{}", "outputs".bright_black());
     let mut any = false;
-    for sub in ["predictive", "observed", "quantities"] {
+    // `quantities` is not one fixed name: a `fit predict --quantities FILE`
+    // writes `quantities-<key8>/` (proposal 2026-08-19), one per reporting
+    // vocabulary applied to this fit. Discover them rather than listing a fixed
+    // name, or a table that was written would read here as never generated.
+    let mut subs: Vec<String> = vec!["predictive".into(), "observed".into()];
+    let mut keyed: Vec<String> = std::fs::read_dir(segment)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n == "quantities" || n.starts_with("quantities-"))
+        .collect();
+    keyed.sort();
+    subs.extend(keyed);
+    for sub in &subs {
+        let sub = sub.as_str();
         if let Ok(entries) = std::fs::read_dir(segment.join(sub)) {
             let mut files: Vec<String> = entries
                 .flatten()
@@ -493,7 +509,18 @@ fn show_fit_envelope(segment: &Path, rel_path: &str) {
             }
         }
     }
-    for manifest in ["predictive.json", "quantities.json", "fit.meta.json"] {
+    let mut manifests: Vec<String> = vec!["predictive.json".into()];
+    let mut keyed_manifests: Vec<String> = std::fs::read_dir(segment)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n == "quantities.json" || (n.starts_with("quantities-") && n.ends_with(".json")))
+        .collect();
+    keyed_manifests.sort();
+    manifests.extend(keyed_manifests);
+    manifests.push("fit.meta.json".into());
+    for manifest in &manifests {
         if segment.join(manifest).exists() {
             println!("  {}", manifest);
             any = true;
