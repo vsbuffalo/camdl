@@ -142,3 +142,13 @@
  (libraries compiler ir alcotest yojson)
  (deps (source_tree lints) (source_tree ../golden)))
 
+
+; SHA-256 conformance for the compiler's hand-written digest (sha256.ml), which
+; content-hashes a model's external data files at compile time. FIPS 180-4
+; vectors + the block-boundary lengths where padding logic breaks. A
+; hand-written hash is only trustworthy pinned to the published vectors, so
+; this suite is the justification for not taking an opam dependency.
+(test
+ (name test_sha256)
+ (modules test_sha256)
+ (libraries compiler alcotest))
