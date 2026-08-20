@@ -578,3 +578,40 @@ type declaration =
   | DBalance      of balance_decl
   | DQuantities   of quantity_decl list   (* proposal 2026-06-25 *)
   | DContrasts    of contrast_decl list   (* counterfactual contrasts, proposal 2026-06-25 *)
+
+(* ── Cross-file locs ─────────────────────────────────────────────────────────
+   A `quantities { }` block can arrive from a SEPARATE compilation unit
+   (`camdlc MODEL.camdl --quantities VOCAB.camdl`), and every diagnostic about
+   it — an undeclared name, a bad reduction — must name that file, not the
+   model. The parser leaves [loc.file] empty and the expander fills it from the
+   context's single filename, so the decls parsed out of the vocabulary file are
+   stamped with their own path here, before they are spliced into the model's
+   declaration list. Only empty [file] fields are filled: a loc that already
+   names a file keeps it. *)
+let stamp_loc_file ~file (l : loc) : loc =
+  if l.file = "" then { l with file } else l
+
+let rec stamp_expr_file ~file (e : expr) : expr =
+  let go = stamp_expr_file ~file in
+  match e with
+  | EConst _ | EUnit _ -> e
+  | EIdent (n, l) -> EIdent (n, stamp_loc_file ~file l)
+  | EIndex (n, items, l) ->
+    EIndex (n, List.map (stamp_index_item_file ~file) items, stamp_loc_file ~file l)
+  | EBinOp (op, a, b) -> EBinOp (op, go a, go b)
+  | EUnOp (op, a) -> EUnOp (op, go a)
+  | ESum (v, d, g, body, l) -> ESum (v, d, g, go body, stamp_loc_file ~file l)
+  | ECond (p, a, b) -> ECond (go p, go a, go b)
+  | EFuncCall (f, kvs) -> EFuncCall (f, List.map (fun (k, v) -> (k, go v)) kvs)
+  | EList xs -> EList (List.map go xs)
+  | ERange (a, b) -> ERange (go a, go b)
+  | EObsAccess (s, l) -> EObsAccess (s, stamp_loc_file ~file l)
+  | ERunMember r -> ERunMember { r with loc = stamp_loc_file ~file r.loc }
+
+and stamp_index_item_file ~file = function
+  | IPosn e -> IPosn (stamp_expr_file ~file e)
+  | INamed (n, e) -> INamed (n, stamp_expr_file ~file e)
+
+let stamp_quantity_decl_file ~file (qd : quantity_decl) : quantity_decl =
+  { qd with qd_body = stamp_expr_file ~file qd.qd_body;
+            qd_loc  = stamp_loc_file ~file qd.qd_loc }

@@ -102,9 +102,126 @@ let bare_duration_word_before (src : string) ~(before : Lexing.position)
   in
   scan false
 
-let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
+(* Parse ONE compilation unit into its declaration list, recording a located
+   lex/parse failure as E001/E115 against [parse_diags] under that unit's own
+   filename. Factored out of [front_end_collect] because a compile can now have
+   two units: the model, and the `--quantities` vocabulary file. *)
+let parse_unit (parse_diags : Diagnostics.t) ~(filename : string) (src : string)
+    : (Ast.declaration list, unit) result =
+  let lexbuf = Lexing.from_string src in
+  Lexing.set_filename lexbuf filename;
+  try Ok (Parser.file Lexer.token lexbuf)
+  with
+  | Lexer.LexError msg ->
+    let pos = lexbuf.Lexing.lex_curr_p in
+    Diagnostics.error parse_diags ~code:"E001"
+      ~loc:(Diagnostics.loc_of_positions ~file:filename pos pos)
+      ~message:(Printf.sprintf "lex error: %s" msg) ();
+    Error ()
+  | Parser.Error ->
+    let pos = lexbuf.Lexing.lex_curr_p in
+    (match bare_duration_word_before src ~before:pos with
+     | Some (w, sp, ep) ->
+       let plural =
+         if w.[String.length w - 1] = 's' then w else w ^ "s" in
+       Diagnostics.error parse_diags ~code:"E115"
+         ~loc:(Diagnostics.loc_of_positions ~file:filename sp ep)
+         ~message:(Printf.sprintf
+           "`%s` is not a unit here: camdl writes durations with a \
+            leading tick" w)
+         ~hint:(Printf.sprintf
+           "write `'%s` — e.g. `to = 80 '%s`, `last_obs + 4 '%s`. \
+            (The CLI's `--to \"last_obs + 8 weeks\"` takes bare words \
+            instead, because a tick is a shell-quoting hazard.)"
+           plural plural plural)
+         ()
+     | None ->
+       Diagnostics.error parse_diags ~code:"E001"
+         ~loc:(Diagnostics.loc_of_positions ~file:filename pos pos)
+         ~message:"syntax error" ());
+    Error ()
+
+(* The English name of a declaration kind, for the E339 message. *)
+let decl_kind_name : Ast.declaration -> string = function
+  | DTimeUnit _     -> "a `time_unit`"
+  | DDescription _  -> "a `description`"
+  | DOrigin _       -> "an `origin`"
+  | DDimensions _   -> "a `dimensions { }` block"
+  | DCompartments _ -> "a `compartments { }` block"
+  | DParameters _   -> "a `parameters { }` block"
+  | DTables _       -> "a `tables { }` block"
+  | DForcing _      -> "a `forcing { }` block"
+  | DTransitions _  -> "a `transitions { }` block"
+  | DObservations _ -> "an `observations { }` block"
+  | DInterventions _ -> "an `interventions { }` block"
+  | DEvents _       -> "an `events { }` block"
+  | DReactiveInterventions _ -> "a `reactive { }` block"
+  | DODE _          -> "an `ode { }` block"
+  | DOutput _       -> "an `output { }` block"
+  | DSimulate _     -> "a `simulate { }` block"
+  | DInit _         -> "an `init { }` block"
+  | DTimepoints _   -> "a `timepoints { }` block"
+  | DStratify _     -> "a `stratify(...)`"
+  | DLet _          -> "a top-level `let`"
+  | DScenarios _    -> "a `scenarios { }` block"
+  | DBalance _      -> "a `balance { }` block"
+  | DQuantities _   -> "a `quantities { }` block"
+  | DContrasts _    -> "a `contrasts { }` block"
+
+(* Splice a vocabulary file's `quantities { }` into the model's declaration
+   list, REPLACING the model's own block wholesale. Replacement, not merge: a
+   merge rule is a silent-precedence surface, and "swap the reporting
+   vocabulary" is what the flag means.
+
+   The vocabulary file is a compilation unit of its own, so its declarations are
+   stamped with its path before the splice — a diagnostic about a name the model
+   does not declare must point at the vocabulary, or the author cannot tell
+   which of the two files is wrong. *)
+let splice_quantities (diags : Diagnostics.t) ~(file : string)
+    (model_decls : Ast.declaration list) (unit_decls : Ast.declaration list)
+    : (Ast.declaration list, unit) result =
+  let file_loc = { Diagnostics.no_loc with Diagnostics.file = file } in
+  match List.find_opt (function Ast.DQuantities _ -> false | _ -> true) unit_decls with
+  | Some other ->
+    Diagnostics.error diags ~code:"E339" ~loc:file_loc
+      ~message:(Printf.sprintf
+        "the quantities file '%s' also declares %s; a file supplied to \
+         --quantities may contain only a `quantities { }` block"
+        file (decl_kind_name other))
+      ~hint:"a quantities file is a reporting vocabulary applied to a model \
+             that already exists — move the model declarations back into the \
+             model file"
+      ();
+    Error ()
+  | None ->
+    let qds =
+      List.concat_map (function Ast.DQuantities qs -> qs | _ -> []) unit_decls in
+    if qds = [] then begin
+      Diagnostics.error diags ~code:"E340" ~loc:file_loc
+        ~message:(Printf.sprintf
+          "the quantities file '%s' declares no quantities" file)
+        ~hint:"--quantities REPLACES the model's own `quantities { }` block, so \
+               an empty vocabulary would report nothing; drop the flag to use \
+               the model's own block"
+        ();
+      Error ()
+    end else
+      let qds = List.map (Ast.stamp_quantity_decl_file ~file) qds in
+      Ok (List.filter (function Ast.DQuantities _ -> false | _ -> true) model_decls
+          @ [Ast.DQuantities qds])
+
+(* [quantities] is an optional SECOND compilation unit — (filename, source) —
+   whose `quantities { }` block replaces the model's own. See
+   [splice_quantities]. *)
+let front_end_collect ?(name = "model") ?(filename = "<input>")
+    ?(quantities : (string * string) option) (src : string)
     : compile_detail option * Diagnostics.t * Source_cache.t =
   let source = Source_cache.of_string ~filename src in
+  let source =
+    match quantities with
+    | Some (qfile, qsrc) -> Source_cache.add_unit source ~filename:qfile qsrc
+    | None -> source
+  in
   (* Drain any stale lex-phase warnings from a previous compilation in the
      same process. pending_warnings is a mutable global ref; clearing it
      here ensures we never replay warnings from a prior run. *)
@@ -113,40 +230,15 @@ let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
   let parse_diags = Diagnostics.create () in
   match
     capture_e001 parse_diags (fun () ->
-       let lexbuf = Lexing.from_string src in
-       Lexing.set_filename lexbuf filename;
        let t_parse = Sys.time () in
        let decls =
-         (try Ok (Parser.file Lexer.token lexbuf)
-          with
-          | Lexer.LexError msg ->
-            let pos = lexbuf.Lexing.lex_curr_p in
-            Diagnostics.error parse_diags ~code:"E001"
-              ~loc:(Diagnostics.loc_of_positions ~file:filename pos pos)
-              ~message:(Printf.sprintf "lex error: %s" msg) ();
-            Error ()
-          | Parser.Error ->
-            let pos = lexbuf.Lexing.lex_curr_p in
-            (match bare_duration_word_before src ~before:pos with
-             | Some (w, sp, ep) ->
-               let plural =
-                 if w.[String.length w - 1] = 's' then w else w ^ "s" in
-               Diagnostics.error parse_diags ~code:"E115"
-                 ~loc:(Diagnostics.loc_of_positions ~file:filename sp ep)
-                 ~message:(Printf.sprintf
-                   "`%s` is not a unit here: camdl writes durations with a \
-                    leading tick" w)
-                 ~hint:(Printf.sprintf
-                   "write `'%s` — e.g. `to = 80 '%s`, `last_obs + 4 '%s`. \
-                    (The CLI's `--to \"last_obs + 8 weeks\"` takes bare words \
-                    instead, because a tick is a shell-quoting hazard.)"
-                   plural plural plural)
-                 ()
-             | None ->
-               Diagnostics.error parse_diags ~code:"E001"
-                 ~loc:(Diagnostics.loc_of_positions ~file:filename pos pos)
-                 ~message:"syntax error" ());
-            Error ())
+         match parse_unit parse_diags ~filename src, quantities with
+         | Error (), _ -> Error ()
+         | Ok decls, None -> Ok decls
+         | Ok decls, Some (qfile, qsrc) ->
+           (match parse_unit parse_diags ~filename:qfile qsrc with
+            | Error () -> Error ()
+            | Ok qdecls -> splice_quantities parse_diags ~file:qfile decls qdecls)
        in
        Passtime.record "parse" (Sys.time () -. t_parse);
        decls)
@@ -163,11 +255,17 @@ let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
      with
      | Error () -> (None, parse_diags, source)
      | Ok (model, ctx, summary) ->
+       (* Both drains attribute a position to the unit it was lexed from: with a
+          `--quantities` vocabulary file there are two units in one compile, and
+          [Lexing.set_filename] stamped each position with its own path. Fall
+          back to the model filename for a position with no stamp. *)
+       let unit_file (sp : Lexing.position) =
+         if sp.Lexing.pos_fname = "" then filename else sp.Lexing.pos_fname in
        (* Drain lex-phase warnings (e.g. inconsistent digit grouping)
           collected before the expander's ctx.diags was available. *)
        List.iter (fun (sp, ep, msg) ->
          Diagnostics.warning ctx.diags ~code:"W100"
-           ~loc:(Diagnostics.loc_of_positions ~file:filename sp ep)
+           ~loc:(Diagnostics.loc_of_positions ~file:(unit_file sp) sp ep)
            ~message:msg ()
        ) (List.rev !Lexer.pending_warnings);
        Lexer.pending_warnings := [];
@@ -175,7 +273,7 @@ let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
           used to `failwith` (n3 in the 2026-04-19 compiler review). *)
        List.iter (fun (sp, ep, code, msg, hint) ->
          Diagnostics.error ctx.diags ~code
-           ~loc:(Diagnostics.loc_of_positions ~file:filename sp ep)
+           ~loc:(Diagnostics.loc_of_positions ~file:(unit_file sp) sp ep)
            ~message:msg ?hint ()
        ) (List.rev !Parser_errors.pending_errors);
        Parser_errors.pending_errors := [];
@@ -192,9 +290,10 @@ let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
     rendered here: callers render once at the end of their pipeline so
     expansion-phase warnings don't print twice when downstream passes
     (dimcheck) also emit diagnostics (M3). *)
-let compile_detail_result ?(name = "model") ?(filename = "<input>") (src : string)
+let compile_detail_result ?(name = "model") ?(filename = "<input>")
+    ?(quantities : (string * string) option) (src : string)
     : (compile_detail, string) result =
-  let (detail, diags, source) = front_end_collect ~name ~filename src in
+  let (detail, diags, source) = front_end_collect ~name ~filename ?quantities src in
   match detail with
   | None ->
     (* Front-end failure (lex/parse/expand): [front_end_collect] captured it
@@ -659,8 +758,10 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
                              Ir.ic_grad } in
     Ok (maybe_licm (maybe_constant_fold m))
 
-let compile ?(name = "model") ?(filename = "<input>") (src : string) : (Ir.model, string) result =
-  match compile_detail_result ~name ~filename src with
+let compile ?(name = "model") ?(filename = "<input>")
+    ?(quantities : (string * string) option) (src : string)
+    : (Ir.model, string) result =
+  match compile_detail_result ~name ~filename ?quantities src with
   | Ok d -> finish_compile d
   | Error e -> Error e
 
@@ -670,9 +771,10 @@ let compile ?(name = "model") ?(filename = "<input>") (src : string) : (Ir.model
    byte-identical to [compile]'s. The reads are populated during expansion
    (before [finish_compile]), so they are read off [d.ctx] on the success
    path. *)
-let compile_with_reads ?(name = "model") ?(filename = "<input>") (src : string)
+let compile_with_reads ?(name = "model") ?(filename = "<input>")
+    ?(quantities : (string * string) option) (src : string)
     : (Ir.model * (string * string) list, string) result =
-  match compile_detail_result ~name ~filename src with
+  match compile_detail_result ~name ~filename ?quantities src with
   | Ok d ->
     (match finish_compile d with
      | Ok m -> Ok (m, Expander.reads d.ctx)

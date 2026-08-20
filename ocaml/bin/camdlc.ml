@@ -16,6 +16,9 @@ Flags (compile):
   --no-state-grad    skip the state-Jacobian (rate_state_grad); smaller IR for
                      forward sim + gradient-free fits (IF2/PMMH/PF/MH), but the
                      IR can't be fit with `nuts` on the ODE backend
+  --quantities FILE  compile with FILE's `quantities { }` block in place of the
+                     model's own (a reporting vocabulary; FILE may contain
+                     nothing else). Replaces, never merges.
   --camdl-version    print the compiler's git hash
 
 To run models — simulate, fit, profile, survey, browse results — use `camdl`,
@@ -161,6 +164,8 @@ let () =
     let set_output p = output_path := p in
     let pretty_output = ref false in  (* false → canonical compact IR JSON *)
     let emit_deps_path = ref "" in    (* "" → don't emit a read-closure depfile *)
+    (* "" → use the model's own `quantities { }` block *)
+    let quantities_path = ref "" in
     let spec = [
       ("--set", Arg.String (fun s ->
         match String.split_on_char '=' s with
@@ -187,6 +192,9 @@ let () =
        " emit indented (human-readable) IR JSON instead of the default compact form");
       ("--emit-deps", Arg.String (fun p -> emit_deps_path := p),
        "FILE  also write the compile's external-data read-closure to FILE (JSON)");
+      ("--quantities", Arg.String (fun p -> quantities_path := p),
+       "FILE  replace the model's `quantities { }` block with FILE's (FILE may \
+              contain only a quantities block)");
     ] in
     Arg.parse_argv (Array.of_list ("camdlc" :: args))
       spec (fun f -> files := f :: !files) usage;
@@ -202,7 +210,21 @@ let () =
          close_in ic;
          Bytes.to_string s
        in
-       match Compiler.compile_with_reads ~name ~filename:path src with
+       (* The reporting vocabulary, as a second compilation unit. Read here so
+          a missing/unreadable file surfaces as the same Sys_error diagnostic a
+          missing model does. *)
+       let quantities =
+         if !quantities_path = "" then None
+         else
+           let qp = !quantities_path in
+           let ic = open_in qp in
+           let n  = in_channel_length ic in
+           let s  = Bytes.create n in
+           really_input ic s 0 n;
+           close_in ic;
+           Some (qp, Bytes.to_string s)
+       in
+       match Compiler.compile_with_reads ~name ~filename:path ?quantities src with
        | Error e when e = "compilation failed"
                    || (String.length e > 0 && e.[0] = '[') ->
          (* Diagnostics already rendered to stderr (text or JSON) by

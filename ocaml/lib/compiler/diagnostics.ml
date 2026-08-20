@@ -87,7 +87,7 @@ let pp_block ppf (cache : Source_cache.t) sev (l : loc) (label : string option) 
       Fmt.pf ppf "  %s@\n" box_v
     ) ppf ();
     (* Source line *)
-    (match Source_cache.get_line cache l.line with
+    (match Source_cache.get_line cache ~file:l.file l.line with
      | None -> ()
      | Some text ->
        let lno  = string_of_int l.line in

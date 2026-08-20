@@ -505,6 +505,86 @@ let test_e289_quantity_let_collision_hint () =
   simulate { from = 0 to = 100 }
 |}
 
+
+(* ── A separate quantities vocabulary file (--quantities) ─────────────────────
+
+   `camdlc MODEL.camdl --quantities VOCAB.camdl` compiles the model with
+   VOCAB's `quantities { }` in place of its own. Proposal
+   2026-08-19-quantities-as-a-separable-layer.md. *)
+
+let vocab_file = "reporting/national.camdl"
+
+let compile_with_vocab ?(file = vocab_file) vocab src =
+  Compiler.compile ~name:"q_vocab" ~quantities:(file, vocab) src
+
+let compile_vocab_error ~code ~contains ?(file = vocab_file) vocab src =
+  Diagnostics.json_errors_mode := true;
+  let result = compile_with_vocab ~file vocab src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.failf "expected error %s but compile succeeded" code
+  | Error e ->
+    if not (contains_substring ~needle:code e) then
+      Alcotest.failf "expected error code %s, got: %s" code e;
+    if not (contains_substring ~needle:contains e) then
+      Alcotest.failf "expected error to contain %S, got: %s" contains e
+
+(* The vocabulary REPLACES the model's own block wholesale: its quantities are
+   present and the model's own are gone (not merged). *)
+let test_vocab_replaces_model_block () =
+  let m =
+    match compile_with_vocab
+            "quantities {\n  attack_rate = final((1000 - S) / 1000)\n}"
+            (model_with "      peak = max(I / N)")
+    with
+    | Ok m -> m
+    | Error e -> Alcotest.failf "compile failed: %s" e
+  in
+  let names = List.map (fun (q : Ir.quantity) -> q.q_name) m.Ir.quantities in
+  Alcotest.(check (list string)) "only the vocabulary's quantities"
+    ["attack_rate"] names
+
+(* A symbol the model does not declare is a HARD error naming BOTH the symbol
+   and the vocabulary file — the author cannot otherwise tell which of the two
+   files is wrong. *)
+let test_vocab_missing_symbol_names_symbol_and_file () =
+  compile_vocab_error ~code:"E100" ~contains:"f_cfr"
+    "quantities {\n  cfr = final(f_cfr)\n}"
+    (model_with "      peak = max(I / N)");
+  compile_vocab_error ~code:"E100" ~contains:vocab_file
+    "quantities {\n  cfr = final(f_cfr)\n}"
+    (model_with "      peak = max(I / N)")
+
+(* The vocabulary file is a reporting layer, not a model: any other declaration
+   in it is E339, naming the file. *)
+let test_vocab_with_model_declaration_rejected () =
+  compile_vocab_error ~code:"E339" ~contains:"compartments"
+    "compartments { X }\nquantities {\n  a = final(S)\n}"
+    (model_with "      peak = max(I / N)")
+
+(* A vocabulary that declares nothing would silently report nothing, because
+   --quantities replaces rather than merges. E340. *)
+let test_vocab_empty_rejected () =
+  compile_vocab_error ~code:"E340" ~contains:vocab_file
+    "# a vocabulary that declares nothing\n"
+    (model_with "      peak = max(I / N)")
+
+(* The model keeps compiling normally in every other respect — the splice
+   touches only the quantities. *)
+let test_vocab_leaves_the_rest_of_the_model_alone () =
+  let base = model_with "      peak = max(I / N)" in
+  let plain = match Compiler.compile ~name:"q_vocab" base with
+    | Ok m -> m | Error e -> Alcotest.failf "compile failed: %s" e in
+  let spliced =
+    match compile_with_vocab "quantities {\n  attack = final(D)\n}" base with
+    | Ok m -> m | Error e -> Alcotest.failf "compile failed: %s" e in
+  Alcotest.(check int) "same transitions"
+    (List.length plain.Ir.transitions) (List.length spliced.Ir.transitions);
+  Alcotest.(check bool) "transitions unchanged" true
+    (plain.Ir.transitions = spliced.Ir.transitions);
+  Alcotest.(check bool) "compartments unchanged" true
+    (plain.Ir.compartments = spliced.Ir.compartments)
+
 let () =
   Alcotest.run "quantities" [
     "series_and_reductions", [
@@ -561,5 +641,17 @@ let () =
       Alcotest.test_case "E289 stratified observation source" `Quick test_e289_obs_stratified;
       Alcotest.test_case "E289 observation source mixed into arithmetic" `Quick test_e289_obs_mixed;
       Alcotest.test_case "E290 observations.afp in a transition rate" `Quick test_e290_obs_in_rate;
+    ];
+    "vocabulary_file", [
+      Alcotest.test_case "--quantities replaces the model's own block" `Quick
+        test_vocab_replaces_model_block;
+      Alcotest.test_case "missing symbol names the symbol AND the file" `Quick
+        test_vocab_missing_symbol_names_symbol_and_file;
+      Alcotest.test_case "E339 a model declaration in a vocabulary file" `Quick
+        test_vocab_with_model_declaration_rejected;
+      Alcotest.test_case "E340 a vocabulary that declares nothing" `Quick
+        test_vocab_empty_rejected;
+      Alcotest.test_case "the splice touches only the quantities" `Quick
+        test_vocab_leaves_the_rest_of_the_model_alone;
     ];
   ]
