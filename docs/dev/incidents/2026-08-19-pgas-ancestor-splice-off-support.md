@@ -91,8 +91,16 @@ Posterior shift among chains that mixed under the defect: β +2.8%, σ +2.7%, γ
 
 Cost: 0.95×–1.13× in `csmc_as`, flat in T — the feasibility walk early-exits at
 the first impossible term, so it is O(T · ~7) typical against O(T²) worst case.
-Mixing: trajectory renewal 0.99 → 0.90 (0.80 with a scheduled intervention), and
-the old figure was inflated by counting invalid splices.
+**Mixing: the in-repo figure UNDERSTATES the cost on a real model, and a budget
+planned from it will be short.** The synthetic measurement was trajectory
+renewal 0.99 → 0.90 (0.80 with a scheduled intervention). The downstream ebola
+project measured **0.884 → 0.605** on their model family at 40,000 sweeps, and
+it shows up where it matters — worst-parameter R̂ went from 1.22 pre-fix to 1.91
+(`tau`) and 2.04 (`q_comm`) post-fix **at the same budget**. The old renewal
+figure was inflated by counting splices that were off the target's support, so
+this is an honest cost rather than a regression: the sampler now declines moves
+it should never have made, and needs more sweeps to cover the same ground.
+Anyone sizing a run should plan from the field number, not the synthetic one.
 
 The trajectory loss deserves its own line: `coherent_counts_after` refused
 discontinuous paths on its negative-count guard, so the splice defect surfaced
