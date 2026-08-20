@@ -75,8 +75,13 @@ pub fn beta_binomial_logpmf_grad(k: f64, n: f64, alpha: f64, beta: f64) -> (f64,
 }
 
 /// Gradient of normal_logpdf w.r.t. (mu, sigma).
+///
+/// Returns `(0.0, 0.0)` for any scale outside `(0, ∞)` — the gradient of the
+/// constant `NEG_INFINITY` floor the value function returns there, as in the
+/// other helpers. `!(sigma > 0.0)` rather than `sigma <= 0.0` so a NaN scale is
+/// caught too (gh#645; a NaN comparison is false, so `<=` let it through).
 pub fn normal_logpdf_grad(y: f64, mu: f64, sigma: f64) -> (f64, f64) {
-    if sigma <= 0.0 { return (0.0, 0.0); }
+    if !(sigma > 0.0) { return (0.0, 0.0); }
     let d_mu = (y - mu) / (sigma * sigma);
     let d_sigma = ((y - mu).powi(2) - sigma * sigma)
                 / (sigma * sigma * sigma);
@@ -103,9 +108,19 @@ pub fn normal_logpdf_grad(y: f64, mu: f64, sigma: f64) -> (f64, f64) {
 /// is a constant in θ, so the gradient is 0. This matches what a clean
 /// FD against the value function would compute, restoring symmetry in the
 /// regime where the value is at the floor.
+///
+/// Domain: `variance` outside `(0, ∞)` returns `(0.0, 0.0)`, the gradient of
+/// the constant `NEG_INFINITY` that [`discretized_normal_logpmf_tol`] returns
+/// there. Without the guard `variance.sqrt().max(1e-10)` swallowed a NaN the
+/// same way the value path's floor did, and the `2·variance` denominator below
+/// then produced a NaN `d_var` for a NaN or zero variance — a NaN entering a
+/// NUTS momentum update while the value path reported a perfect fit (gh#645).
 pub fn discretized_normal_logpmf_grad(
     y: f64, mu: f64, variance: f64, tol: f64,
 ) -> (f64, f64) {
+    if !variance.is_finite() || variance <= 0.0 {
+        return (0.0, 0.0);
+    }
     let sigma = variance.sqrt().max(1e-10);
     let y = y.round().max(0.0);
     let z_hi = (y + 0.5 - mu) / sigma;
@@ -215,8 +230,15 @@ pub fn zi_negbin_logpmf(y: f64, mu: f64, k: f64, pi: f64) -> f64 {
 /// Normal log-PDF.
 ///
 /// log p(y | mu, sigma) = -0.5·((y-mu)/sigma)² - log(sigma) - 0.5·log(2π)
+///
+/// A scale outside `(0, ∞)` is a domain violation and returns `NEG_INFINITY`,
+/// as every other domain violation in this module does. `!(sigma > 0.0)` rather
+/// than `sigma <= 0.0` so a NaN scale is caught: a NaN comparison is false, so
+/// `<=` let NaN fall through to the arithmetic and returned a NaN log-density —
+/// not a score at all, and one that compares false against every threshold
+/// downstream instead of being rejected (gh#645).
 pub fn normal_logpdf(y: f64, mu: f64, sigma: f64) -> f64 {
-    if sigma <= 0.0 { return f64::NEG_INFINITY; }
+    if !(sigma > 0.0) { return f64::NEG_INFINITY; }
     -0.5 * ((y - mu) / sigma).powi(2) - sigma.ln() - 0.5 * (2.0 * PI).ln()
 }
 
@@ -252,7 +274,33 @@ pub fn discretized_normal_logpmf(y: f64, mean: f64, variance: f64) -> f64 {
 /// For large-population models (London measles), 1e-18 is correct.
 /// For small-population models where observing 3 vs 0 is informative,
 /// a tighter tolerance (e.g., 1e-30) preserves that signal.
+///
+/// # Domain
+///
+/// `variance` must be finite and strictly positive. Anything else —
+/// NaN, ±∞, zero, negative — is a domain violation and returns
+/// `NEG_INFINITY`, matching how every other likelihood in this module
+/// treats an out-of-domain parameter (`negbin_logpmf` on `k ≤ 0`,
+/// `beta_binomial_logpmf` on `α ≤ 0`, `beta_logpdf` outside `(0,1)`).
+///
+/// gh#645: this guard replaces a `variance.max(1e-30)` floor that mapped
+/// every invalid variance *into* the domain. `f64::max` returns the
+/// non-NaN operand, so a NaN variance became `sd = 1e-15`, as did zero
+/// and negative ones — a point mass at the mean, scoring log-prob
+/// **exactly 0.0** whenever `|y − mean| < 0.5`. 0.0 is the supremum of a
+/// log-PMF, so the invalid region beat every valid variance and the
+/// likelihood surface rewarded driving the scale out of its domain. Both
+/// shipped heteroscedastic forms reach it: the He et al. variance
+/// documented above is NaN for `rho > 1` (√negative), and an
+/// `sd = sigma_rel · projected` form (`ocaml/golden/surveillance_
+/// likelihoods.camdl`) is exactly zero at zero projected incidence.
 pub fn discretized_normal_logpmf_tol(y: f64, mean: f64, variance: f64, tol: f64) -> f64 {
+    if !variance.is_finite() || variance <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    // Past the guard `variance` is finite and positive, so this floor only
+    // ever clamps a *valid* sub-1e-30 variance — it can no longer swallow a
+    // NaN, and the sd it produces is positive by construction.
     let sd = variance.max(1e-30).sqrt();
     let y = y.round().max(0.0);
 
@@ -617,9 +665,103 @@ mod tests {
 
     #[test]
     fn test_discretized_normal_zero_variance_safe() {
-        // Should not panic or return NaN
+        // Zero variance is outside the domain — the discretized normal has no
+        // scale equal to 0. It must not panic and must not return NaN (this
+        // test's original intent), but it must also not return a *score*,
+        // which is what flooring the variance produced: gh#645, the floor made
+        // this exactly 0.0, the supremum of a log-PMF.
         let ll = discretized_normal_logpmf(5.0, 5.0, 0.0);
-        assert!(ll.is_finite());
+        assert!(!ll.is_nan(), "zero variance must not produce NaN; got {ll}");
+        assert_eq!(ll, f64::NEG_INFINITY, "zero variance must not score");
+    }
+
+    /// gh#645: an invalid variance must NOT score better than a valid one.
+    ///
+    /// `variance.max(1e-30)` returns the non-NaN operand, so a NaN variance
+    /// collapsed to `sd = 1e-15`; zero and negative variances floored to the
+    /// same thing. That is a point mass at the mean, and it scores log-prob
+    /// EXACTLY 0.0 whenever the observation rounds to within ±0.5 of the mean.
+    /// 0.0 is the supremum of a log-PMF, so the out-of-domain region beat every
+    /// valid variance and the likelihood surface rewarded driving the scale out
+    /// of its domain.
+    #[test]
+    fn gh645_invalid_variance_does_not_score_as_perfect_fit() {
+        // |y - mean| < 0.5 — the regime where the collapsed point mass scored 0.0.
+        let (y, mean) = (5.0, 5.2);
+        let valid = discretized_normal_logpmf(y, mean, 4.0);
+        assert!(
+            valid.is_finite() && valid < 0.0,
+            "control: a valid variance must score finitely and below 0; got {valid}"
+        );
+
+        for bad in [f64::NAN, -4.0, 0.0] {
+            let ll = discretized_normal_logpmf(y, mean, bad);
+            assert!(
+                !ll.is_nan(),
+                "variance {bad}: must be -inf, not NaN (NaN compares false against \
+                 every threshold and propagates silently); got {ll}"
+            );
+            assert_eq!(ll, f64::NEG_INFINITY, "variance {bad}: expected NEG_INFINITY, got {ll}");
+            assert!(
+                ll < valid,
+                "variance {bad} scored {ll}, which is not worse than the valid {valid}"
+            );
+        }
+
+        // Negative control: the guard must not disturb a valid variance. Same
+        // scipy anchor as `test_discretized_normal_matches_scipy`.
+        assert!(
+            (discretized_normal_logpmf(100.0, 97.6, 178.1) - (-3.526643)).abs() < 1e-2,
+            "a valid variance must be unchanged by the domain guard"
+        );
+    }
+
+    /// gh#645, gradient side. The value function is a constant `-inf` there, so
+    /// the gradient of that floor is zero — the convention every other helper in
+    /// this module already follows (`negbin_logpmf_grad`, `beta_logpdf_grad`,
+    /// `beta_binomial_logpmf_grad`).
+    ///
+    /// Before the fix `variance.sqrt().max(1e-10)` swallowed the NaN the same
+    /// way the value path did, and `dp_dvar / (2·variance)` then returned NaN
+    /// for a NaN or zero variance: a NaN entering a NUTS momentum update.
+    #[test]
+    fn gh645_invalid_variance_gradient_is_the_floor_gradient() {
+        for bad in [f64::NAN, -4.0, 0.0] {
+            let (d_mu, d_var) = discretized_normal_logpmf_grad(5.0, 5.2, bad, DEFAULT_TOL);
+            assert!(
+                !d_mu.is_nan() && !d_var.is_nan(),
+                "variance {bad}: gradient must not be NaN; got ({d_mu}, {d_var})"
+            );
+            assert_eq!(
+                (d_mu, d_var),
+                (0.0, 0.0),
+                "variance {bad}: expected the -inf floor's zero gradient"
+            );
+        }
+        // Negative control: a valid variance still yields a finite, non-zero
+        // gradient — the guard must not zero out live gradients.
+        let (d_mu, d_var) = discretized_normal_logpmf_grad(15.0, 12.0, 25.0, DEFAULT_TOL);
+        assert!(
+            d_mu.is_finite() && d_var.is_finite() && d_mu != 0.0 && d_var != 0.0,
+            "control gradient at a valid variance: ({d_mu}, {d_var})"
+        );
+    }
+
+    /// gh#645, continuous-normal sibling. `sigma <= 0.0` is false for NaN, so a
+    /// NaN scale fell through to the arithmetic and returned a NaN log-density.
+    /// Every domain violation in this module is `NEG_INFINITY` (negbin `k ≤ 0`,
+    /// beta outside `(0,1)`, beta-binomial `α ≤ 0`); NaN is not a score.
+    #[test]
+    fn gh645_normal_logpdf_rejects_a_non_finite_scale() {
+        for bad in [f64::NAN, 0.0, -2.0] {
+            let ll = normal_logpdf(1.0, 0.0, bad);
+            assert_eq!(ll, f64::NEG_INFINITY, "sd {bad}: expected NEG_INFINITY, got {ll}");
+            assert_eq!(normal_logpdf_grad(1.0, 0.0, bad), (0.0, 0.0), "sd {bad} gradient");
+        }
+        // Negative control: N(0,1) at 0 is still -0.5·log(2π), with a live gradient.
+        assert!((normal_logpdf(0.0, 0.0, 1.0) - (-0.9189385)).abs() < 1e-6);
+        let (d_mu, d_sigma) = normal_logpdf_grad(3.5, 2.0, 1.5);
+        assert!(d_mu.is_finite() && d_sigma.is_finite() && d_mu != 0.0);
     }
 
     #[test]
