@@ -96,11 +96,28 @@ planned from it will be short.** The synthetic measurement was trajectory
 renewal 0.99 → 0.90 (0.80 with a scheduled intervention). The downstream ebola
 project measured **0.884 → 0.605** on their model family at 40,000 sweeps, and
 it shows up where it matters — worst-parameter R̂ went from 1.22 pre-fix to 1.91
-(`tau`) and 2.04 (`q_comm`) post-fix **at the same budget**. The old renewal
-figure was inflated by counting splices that were off the target's support, so
-this is an honest cost rather than a regression: the sampler now declines moves
-it should never have made, and needs more sweeps to cover the same ground.
-Anyone sizing a run should plan from the field number, not the synthetic one.
+(`tau`) and 2.04 (`q_comm`) post-fix **at the same budget**.
+
+**Caveat on those R̂ figures, and it cuts the other way: they are confounded and
+should not be quoted as the mixing cost alone.** The post-fix run pooled a chain
+that was seeded at `-inf` and never reached finite density — one distinct
+parameter vector across 7,600 retained draws. A chain like that inflates
+between-chain variance directly, which is exactly what R̂ measures, so an unknown
+fraction of 1.22 → 1.91/2.04 is the frozen chain rather than the sampler needing
+more sweeps. Under the chain-start refusal shipped since (gh#660) that chain
+would have been skipped and never pooled, so the same run today would report a
+different, lower figure. The renewal numbers (0.884 → 0.605) are unaffected —
+they are per-chain and do not pool.
+
+Settling it costs nothing new: recompute R̂ on the stored run with
+`--exclude-chains` naming the frozen chain (the per-fit `@fit:ids` syntax,
+gh#417/418) and compare against 1.91/2.04. Until someone does, treat the renewal
+figures as the measured mixing cost and the R̂ pair as an upper bound. The old
+renewal figure was inflated by counting splices that were off the target's
+support, so this is an honest cost rather than a regression: the sampler now
+declines moves it should never have made, and needs more sweeps to cover the
+same ground. Anyone sizing a run should plan from the field number, not the
+synthetic one.
 
 The trajectory loss deserves its own line: `coherent_counts_after` refused
 discontinuous paths on its negative-count guard, so the splice defect surfaced
