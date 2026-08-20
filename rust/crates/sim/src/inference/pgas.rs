@@ -1492,7 +1492,12 @@ impl SpliceGuard {
 /// any finite common reference would do; the reference's own densities are the
 /// natural choice because they make the "keep the current ancestry" branch
 /// evaluate to zero without any arithmetic at all.
-struct ReferenceBaseline {
+///
+/// `pub` alongside [`splice_log_ratio`] so the accept/reject ratio — the
+/// quantity the kernel's invariance now hinges on — is testable against
+/// [`complete_data_loglik`] in isolation, the same reason
+/// [`fill_ancestor_log_weights`] is public.
+pub struct ReferenceBaseline {
     /// `log f_θ(u'_t | x'_{t-1})` at each substep `t`.
     td: Vec<f64>,
     /// The gamma-multiplier log-density at each substep. Scored EXPLICITLY, not
@@ -1513,7 +1518,7 @@ struct ReferenceBaseline {
 /// reference compartment state, but the SET of multipliers a state consumes is
 /// gated on that state (`n_src > 0`, `rate > RATE_EPSILON`), so an offset can add
 /// or remove a term — see [`fold_gamma_multiplier_log_density_substep`].
-fn reference_baseline(
+pub fn reference_baseline(
     model: &CompiledModel,
     reference: &PGASTrajectory,
     params: &[f64],
@@ -1629,7 +1634,7 @@ fn reference_baseline(
 /// zero density, or the `balance {}` rewrite does not transport the offset);
 /// the walk stops at the first such term.
 #[allow(clippy::too_many_arguments)]
-fn splice_log_ratio(
+pub fn splice_log_ratio(
     model: &CompiledModel,
     reference: &PGASTrajectory,
     params: &[f64],
