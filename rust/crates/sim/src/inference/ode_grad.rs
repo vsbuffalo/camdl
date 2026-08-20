@@ -671,13 +671,19 @@ mod tests {
     // see this bug — a mis-binned value is still smooth in θ, and its own forward
     // sensitivity is its exact derivative.
 
-    /// Two `FlowSum` (incidence) streams on DIFFERENT transitions, each
+    /// Two `FlowSum` (incidence) streams over DISJOINT transition sets, each
     /// `poisson(rate = projected)`, so the whole gradient is factor 2 — the
     /// `inc_sens` chain the per-stream binning feeds. Explicit integer initial
     /// condition so the value path (rounded `initial_state`) and the gradient path
     /// (`initial_state_continuous`) start from the same state and their flows are
     /// directly comparable.
-    fn two_incidence_stream_model(t_end: f64) -> ir::Model {
+    ///
+    /// `flow_sets` names each stream's transitions. One name lowers to
+    /// `Projection::CumulativeFlow` → a single-index `FlowSum`; two or more lower to
+    /// `Projection::CumulativeFlowSum` → a MULTI-index `FlowSum`, which is what an
+    /// un-indexed `incidence()` over a stratified transition family produces
+    /// (`StreamProjection::from_ir`, §25.4).
+    fn two_incidence_stream_model(t_end: f64, flow_sets: [&[&str]; 2]) -> ir::Model {
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let path = std::path::PathBuf::from(&manifest)
             .join("../../../ocaml/golden/seir_observations.ir.json");
@@ -693,11 +699,16 @@ mod tests {
         model.simulation.t_end = t_end;
 
         let base = model.observations[0].clone();
-        let mk = |name: &str, transition: &str| {
+        let mk = |name: &str, transitions: &[&str]| {
             let mut om = base.clone();
             om.name = name.to_string();
             om.source = name.to_string();
-            om.projection = ir::observation::Projection::CumulativeFlow(transition.to_string());
+            om.projection = match transitions {
+                [one] => ir::observation::Projection::CumulativeFlow(one.to_string()),
+                many => ir::observation::Projection::CumulativeFlowSum(
+                    many.iter().map(|s| s.to_string()).collect(),
+                ),
+            };
             om.projection_state_grad = Default::default();
             om.likelihood = Likelihood::Poisson(PoissonLikelihood {
                 rate: Diffable {
@@ -709,20 +720,22 @@ mod tests {
             });
             om
         };
-        model.observations = vec![mk("cases_a", "infection"), mk("cases_b", "recovery")];
+        model.observations =
+            vec![mk("cases_a", flow_sets[0]), mk("cases_b", flow_sets[1])];
         model
     }
 
     /// Synthetic counts for one stream under the VALUE path's binning: accumulate
-    /// the transition's real flow across snapshots and close the bin at each of
-    /// THIS stream's own observation times (never at a sibling's).
-    fn windowed_counts(traj: &crate::state::Trajectory, tr: usize, times: &[f64]) -> Vec<f64> {
+    /// the stream's real flow — summed over ALL the transitions its projection
+    /// selects — across snapshots, and close the bin at each of THIS stream's own
+    /// observation times (never at a sibling's).
+    fn windowed_counts(traj: &crate::state::Trajectory, trs: &[usize], times: &[f64]) -> Vec<f64> {
         let mut out = Vec::with_capacity(times.len());
         let mut acc = 0.0;
         let mut next = 0usize;
         for (i, snap) in traj.snapshots.iter().enumerate() {
             if i > 0 {
-                acc += snap.flows.as_real()[tr];
+                acc += trs.iter().map(|&tr| snap.flows.as_real()[tr]).sum::<f64>();
             }
             if next < times.len() && (snap.t - times[next]).abs() < 1e-9 {
                 out.push(acc.round());
@@ -743,9 +756,10 @@ mod tests {
         times_a: &[f64],
         times_b: &[f64],
         dt: f64,
+        flow_sets: [&[&str]; 2],
     ) -> (Arc<CompiledModel>, MultiStreamObsModel, Vec<f64>, Vec<f64>, Vec<usize>) {
         let t_end = times_a.last().copied().unwrap().max(times_b.last().copied().unwrap());
-        let mut model = two_incidence_stream_model(t_end);
+        let mut model = two_incidence_stream_model(t_end, flow_sets);
         set_defaults(&mut model);
         let compiled = Arc::new(CompiledModel::new(model).unwrap());
 
@@ -760,8 +774,9 @@ mod tests {
         let tr = |name: &str| {
             compiled.model.transitions.iter().position(|t| t.name == name).unwrap()
         };
-        let data_a = windowed_counts(&traj, tr("infection"), times_a);
-        let data_b = windowed_counts(&traj, tr("recovery"), times_b);
+        let trs = |names: &[&str]| names.iter().map(|n| tr(n)).collect::<Vec<_>>();
+        let data_a = windowed_counts(&traj, &trs(flow_sets[0]), times_a);
+        let data_b = windowed_counts(&traj, &trs(flow_sets[1]), times_b);
         assert!(data_a.iter().sum::<f64>() > 100.0, "cases_a data must be substantial");
         assert!(data_b.iter().sum::<f64>() > 10.0, "cases_b data must be substantial");
 
@@ -806,7 +821,7 @@ mod tests {
         let times_a: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect(); // 7 d
         let times_b: Vec<f64> = (1..=4).map(|w| (w * 14) as f64).collect(); // 14 d
         let (compiled, obs_model, union, params, est) =
-            two_stream_fixture(&times_a, &times_b, dt);
+            two_stream_fixture(&times_a, &times_b, dt, [&["infection"], &["recovery"]]);
         assert_eq!(union.len(), 8, "the union axis is the 7-day grid");
         assert_eq!(obs_model.n_interval_streams(), 2, "both streams are incidence bins");
 
@@ -845,6 +860,93 @@ mod tests {
         assert!(grad[1].abs() > 1.0, "∂/∂gamma should be materially nonzero, got {}", grad[1]);
     }
 
+    /// The multi-index case of the same binning: a stream whose `FlowSum` selects
+    /// TWO transitions, observed on a cadence four times longer than its sibling's.
+    ///
+    /// `Projection::CumulativeFlowSum` — an un-indexed `incidence()` over a
+    /// stratified transition family — lowers to a multi-index `FlowSum`
+    /// (`StreamProjection::from_ir`), and the models that reach for it are exactly
+    /// the several-incidence-stream models this per-stream binning governs. Every
+    /// other case here is single-index, so on its own none of them pins that the bin
+    /// sums the right SET of transitions over the right WINDOW: a fold that took only
+    /// `flow_indices[0]`, or a scorer that re-summed `rec.inc` over `idxs` after
+    /// binning, would pass them all.
+    ///
+    /// `cases_a = incidence(infection) + incidence(progression)` at 28 d against
+    /// `cases_b = incidence(recovery)` at 7 d. The two folded transitions run at
+    /// materially different rates, so dropping or transposing one moves the projected
+    /// value; the 4:1 cadence ratio means a blanket reset would score `cases_a`'s
+    /// four-week count against one week of modelled flow.
+    #[test]
+    fn det_grad_bins_a_multi_index_flowsum_at_a_second_cadence() {
+        let dt = 1.0;
+        let times_a: Vec<f64> = (1..=2).map(|q| (q * 28) as f64).collect(); // 28 d
+        let times_b: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect(); // 7 d
+        let (compiled, obs_model, union, params, est) = two_stream_fixture(
+            &times_a,
+            &times_b,
+            dt,
+            [&["infection", "progression"], &["recovery"]],
+        );
+        assert_eq!(union.len(), 8, "the union axis is the 7-day grid");
+        assert_eq!(obs_model.n_interval_streams(), 2, "both streams are incidence bins");
+        // The slot map really is multi-index, and holds the two named transitions —
+        // `CumulativeFlowSum` resolving to one index, or to the wrong pair, would
+        // make everything below agree about the wrong projection.
+        let tr = |name: &str| {
+            compiled.model.transitions.iter().position(|t| t.name == name).unwrap()
+        };
+        let selected = obs_model.incidence_streams();
+        assert_eq!(
+            selected[0],
+            ("cases_a".to_string(), vec![tr("infection"), tr("progression")]),
+            "cases_a must select BOTH transitions — this test exists for the multi-index \
+             FlowSum that `CumulativeFlowSum` lowers to; got {:?}",
+            selected
+        );
+        assert_eq!(
+            selected[1],
+            ("cases_b".to_string(), vec![tr("recovery")]),
+            "cases_b is the single-index sibling on the shorter cadence; got {:?}",
+            selected
+        );
+
+        let (ll_grad, grad) =
+            det_grad(&compiled, &obs_model, &union, dt, dt, &params, &est).unwrap();
+        let ll_value =
+            compute_ode_loglik(&compiled, &obs_model, &union, dt, &params, dt).unwrap();
+        assert!(ll_grad.is_finite() && ll_value.is_finite());
+        assert!(
+            (ll_grad - ll_value).abs() < 1e-6,
+            "gradient-path loglik {ll_grad} disagrees with value-path loglik {ll_value} \
+             (Δ = {:.6e}) — a multi-index FlowSum must bin the same transition set over \
+             the same per-stream window on both paths",
+            ll_grad - ll_value
+        );
+
+        let eps = 1e-6;
+        let names = ["beta", "gamma"];
+        for (i, &midx) in est.iter().enumerate() {
+            let mut pp = params.clone();
+            let mut pm = params.clone();
+            pp[midx] += eps;
+            pm[midx] -= eps;
+            let llp = compute_ode_loglik(&compiled, &obs_model, &union, dt, &pp, dt).unwrap();
+            let llm = compute_ode_loglik(&compiled, &obs_model, &union, dt, &pm, dt).unwrap();
+            let fd = (llp - llm) / (2.0 * eps);
+            let rel = (grad[i] - fd).abs() / fd.abs().max(1e-8);
+            assert!(
+                rel < 1e-4,
+                "det_grad ∂/∂{} = {} vs value-path FD {} (rel err {:.2e})",
+                names[i], grad[i], fd, rel
+            );
+        }
+        // Non-vacuity: both directions must carry real signal, or the agreement
+        // above is agreement about nothing.
+        assert!(grad[0].abs() > 1.0, "∂/∂beta should be materially nonzero, got {}", grad[0]);
+        assert!(grad[1].abs() > 1.0, "∂/∂gamma should be materially nonzero, got {}", grad[1]);
+    }
+
     /// NEGATIVE CONTROL for gh#680: the same two-stream fixture with ONE cadence.
     /// Here the union index and every stream's schedule coincide, so per-stream
     /// binning and a blanket reset are the same operation — the common path. The
@@ -855,7 +957,7 @@ mod tests {
         let dt = 1.0;
         let times: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect();
         let (compiled, obs_model, union, params, est) =
-            two_stream_fixture(&times, &times, dt);
+            two_stream_fixture(&times, &times, dt, [&["infection"], &["recovery"]]);
         assert_eq!(union, times, "single cadence: the union axis IS the shared grid");
 
         let (ll_grad, grad) =
