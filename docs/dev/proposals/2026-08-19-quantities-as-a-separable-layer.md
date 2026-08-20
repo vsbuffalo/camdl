@@ -1,8 +1,9 @@
 # Quantities as a separable, shareable reporting layer
 
-Status: proposed Issue: gh#618 (identity question, answered here), downstream
-ask in `ebola-bdbv-camdl/agent-channel.md` Scope: CLI + OCaml surface. No IR
-change. No identity change.
+Status: implemented (593f4cac compiler, 05a74243 simulate, f7c9b1cb fit predict)
+Issue: gh#618 (identity question, answered here), downstream ask in
+`ebola-bdbv-camdl/agent-channel.md` Scope: CLI + OCaml surface. No IR change. No
+identity change.
 
 ## Problem
 
@@ -47,6 +48,24 @@ default when no override is given; `--quantities` REPLACES it wholesale (not
 merges — a merge rule is a silent-precedence surface, and replacement is what
 "swap the vocabulary" means).
 
+**The vocabulary is resolved against the model SOURCE, and the source is
+required.** A `quantities {}` body names the model's compartments, parameters
+and `let` bindings, so it cannot compile alone. It is handed to `camdlc` as a
+second compilation unit of that model's compile and resolved by the model's own
+symbol table. The compiled IR is not a substitute: a `let` whose body mentions a
+parameter is inlined at its use sites and appears nowhere in the IR, so a
+vocabulary resolved against IR would reject such a name as undeclared against a
+model that declares it.
+
+For `fit predict` this means the fit's recorded model source must be readable,
+even though the fit itself is self-contained. What makes using it safe is
+`model_ir_hash`, which excludes `quantities`: the recompiled source and the
+archived IR must hash equal before the quantities are transplanted onto the
+archived model. Equal means "the same model apart from its reporting layer" —
+precisely the condition a reporting-layer swap requires — so a reporting-only
+edit to the source is not a mismatch, while a drifted source is refused with
+both hashes named.
+
 **Missing symbols are a hard error** naming the symbol and the file. A shared
 vocabulary will reference `f_cfr`, which exists only in the delay family, or
 `beta`, a parameter in one model and a `let` in another. The alternative — an
@@ -61,16 +80,22 @@ Fit identity: **unchanged**, and must stay unchanged. The likelihood does not
 read quantities.
 
 Artifact identity: **the quantities file's content hash keys any artifact whose
-content it determines** — the predict `quantities/*.tsv` and `quantities.json`,
-and `simulate --quantities-out`. Two vocabularies applied to one fit produce two
+content it determines** — the predict quantity TSVs and their manifest, and
+`simulate --quantities-out`. Two vocabularies applied to one fit produce two
 different tables; without the key they collide at one content address, which is
 the exact class fixed twice this week (gh#626 `--to`, gh#641 `--init-state`).
 Key the file's BYTES, not its path, so an in-place edit re-keys and two copies
-of one file share identity.
+of one file share identity. Concretely: the tables land in
+`quantities-<key8>/<name>.tsv` with a matching `quantities-<key8>.json`, while a
+model's own block keeps the historical `quantities/` and `quantities.json`.
 
-Provenance: the resolved quantities file path + hash is recorded in the
-artifact's run record, so a table can always be traced to the vocabulary that
-produced it.
+The same digest keys the compiled-IR cache. A vocabulary changes the IR camdlc
+emits, so without it in that key two vocabularies over one model share a cache
+entry and the second run is served the first's quantities.
+
+Provenance: the resolved file path + full digest is recorded in the manifest
+beside the tables, where a reader of the table already is, so a table can always
+be traced to the vocabulary that produced it.
 
 ## What this does not do
 

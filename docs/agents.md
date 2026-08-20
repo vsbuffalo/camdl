@@ -360,6 +360,33 @@ the posterior, and has to be rewritten for every run. A reduction (`max`,
 (peak, attack rate, time-to-peak); omit the reduction to keep the full series.
 See `camdl docs user-features` ("Reporting derived quantities").
 
+**A shared reporting vocabulary is a file, not a copy-paste.** When several
+models want the same summaries, put the `quantities {}` block in its own
+`.camdl` file — a file containing nothing else — and apply it at the point of
+use:
+
+```
+camdl simulate model.camdl --quantities reporting/national.camdl --quantities-out out/
+camdl fit predict @jigawa-baseline --quantities reporting/national.camdl
+```
+
+The file REPLACES the model's own block; it never merges. It is compiled against
+the model it is applied to, so a name that model does not declare is an error
+naming both the name and the file — which is the signal that this family of
+models needs its own vocabulary (an Erlang-staged model's `reff` formula is not
+an exponential-dwell model's). The emitted tables land in `quantities-<key>/`,
+keyed by the file's contents, so applying two vocabularies to one run gives you
+two tables rather than overwriting one, and correcting a formula in place
+produces a new table instead of a stale cache hit. Neither the simulation nor
+the fit's identity moves — quantities are derived reports, not inputs, so
+nothing re-runs.
+
+This is also the answer to "I corrected a `quantities {}` formula and
+`fit predict` still reports the old number": `fit predict` reads the model IR
+archived inside the fit, so editing the source does nothing to a fit that
+already ran. Pass the corrected block with `--quantities` instead. It is refused
+if the model source has drifted from the one the fit ran on.
+
 **Don't reach for these escape hatches without understanding them:**
 
 - `--allow-degenerate-rates` — restores legacy silent-zero on `Div by zero` etc.

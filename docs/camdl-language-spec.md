@@ -3894,6 +3894,40 @@ quantity's kind. Because they are _derived reports_ computed from a run rather
 than inputs to it, adding or changing a `quantities {}` block never re-keys a
 model's `run_id`.
 
+**A vocabulary can live in its own file.** A `quantities {}` block is a
+_reporting vocabulary_, and several models often want the same one. Rather than
+copy it into each model — where the copies drift — put it in an ordinary
+`.camdl` file containing **only** a `quantities {}` block, and supply it at the
+point of use:
+
+```
+camdl simulate model.camdl --quantities reporting/national.camdl --quantities-out out/
+camdl fit predict @jigawa-baseline --quantities reporting/national.camdl
+```
+
+The file is compiled as a second compilation unit of that model's compile, so
+its body is resolved against the model's own compartments, parameters and `let`
+bindings, and a name the model does not declare is an error naming both the
+name and the file. It **replaces** the model's own block; it never merges,
+because a merge rule would make the reported table depend on which of two files
+declared a name first. A file that declares anything besides quantities is
+**E339**; one that declares no quantities is **E340** (replacement means an
+empty vocabulary would report nothing).
+
+The emitted tables are keyed by the file's contents:
+`quantities-<key>/<name>.tsv` with a matching `quantities-<key>.json` whose
+`vocabulary` object records the file's path and digest. Two vocabularies applied
+to one run therefore produce two tables rather than overwriting one, and
+correcting a formula in place produces a new table rather than a stale cache
+hit. Run identity is untouched, as above.
+
+`fit predict --quantities` is the only way to change what an EXISTING fit
+reports: `fit predict` reads the model IR archived inside the fit, so editing a
+formula in the model source has no effect on a fit that has already run. The
+vocabulary is compiled against the fit's model source and refused unless that
+source is still the same model the fit ran on — quantities are excluded from
+that comparison, so a reporting-only edit to the source is not a mismatch.
+
 ---
 
 ## 17. Scenarios
