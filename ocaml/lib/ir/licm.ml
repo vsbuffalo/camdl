@@ -55,6 +55,11 @@ let is_invariant (tbls : (string, table) Hashtbl.t) (e : expr) : bool =
     | PerEvalRef _ -> true   (* its body is invariant; never present in LICM input *)
     | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
     | Projected | ObsColumnRef _ -> false
+    (* gh#616: NOT invariant. Its value comes from the run, not from theta, so
+       hoisting it into a theta-stable per-eval binding would cache a value that
+       is not a function of theta. It also never reaches LICM: the resolver
+       substitutes a Const before compile. *)
+    | ObsAnchor _ -> false
     | TableLookup (name, idxs) ->
       List.for_all (go visited) idxs && cells_invariant visited name
     | BinOp { left; right; _ } -> go visited left && go visited right
@@ -91,7 +96,7 @@ let rec contains_expensive (e : expr) : bool =
   | TableLookup (_, idxs) -> List.exists contains_expensive idxs
   | UncheckedDim u -> contains_expensive u.inner
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> false
+  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> false
 
 let binop_tag = function
   | Add -> 0 | Sub -> 1 | Mul -> 2 | Div -> 3 | Pow -> 4 | Mod -> 5
@@ -115,6 +120,12 @@ let rec canon (e : expr) : string =
   | Time -> "t" | Dt -> "d"
   | TimeFunc n -> "F" ^ n ^ ";"
   | Projected -> "@" | ObsColumnRef c -> "O" ^ c ^ ";"
+  (* Anchor and offset both enter the key: two knots that differ only in offset
+     are different subtrees and must never share a per-eval binding. *)
+  | ObsAnchor a ->
+    Printf.sprintf "A%s%Ld;"
+      (match a.anchor with AnchorFirst -> "f" | AnchorLast -> "l")
+      (Int64.bits_of_float a.offset)
   | BindingRef n -> "Bref" ^ n ^ ";"
   | PerEvalRef n -> "Pref" ^ n ^ ";"
   | TableLookup (t, idxs) -> "T" ^ t ^ "(" ^ String.concat "," (List.map canon idxs) ^ ")"
@@ -172,7 +183,7 @@ let rec rw ctx (e : expr) : expr =
     (* Variant leaves (the invariant leaves Const/Param/PerEvalRef are handled in
        the `is_invariant` branch above and never reach here). *)
     | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _ | PerEvalRef _
-    | Projected | ObsColumnRef _ | Const _ | Param _ -> e
+    | Projected | ObsColumnRef _ | ObsAnchor _ | Const _ | Param _ -> e
 
 (* Hoist invariant subexpressions out of the dynamics surfaces. Folding a subset
    is sound (each rewritten expr keeps its value). The per-eval bindings produced

@@ -8,6 +8,27 @@ type bin_op = Add | Sub | Mul | Div | Pow | Mod | Min | Max | Eq | Neq | Lt | Gt
 type un_op = Neg | Exp | Log | Sqrt | Abs | Floor | Ceil
            | Sin | Cos | Tanh                    (* gh#58 *)
 
+(* ── Observation anchors (gh#616) ───────────────────────────────────────────── *)
+
+(* Which end of the observed record an anchor names. Resolved PER RUN from the
+   run's bound observation streams — `AnchorLast` is the maximum observation
+   time over them, `AnchorFirst` the minimum — so it is not a release constant:
+   two fit configs binding different stream sets resolve different values from
+   the same compiled model. *)
+type obs_anchor =
+  | AnchorFirst
+  | AnchorLast
+
+(* An observation anchor plus a constant offset ALREADY FOLDED to model time
+   units at compile time (`1 'weeks` under `time_unit = days` → 7.0). Only the
+   anchor's value binds later, so the compiled model stays data-independent and
+   the offset never needs the observation series to be interpreted.
+   `offset = 0.0` is a bare anchor. *)
+type anchored_time = {
+  anchor: obs_anchor;
+  offset: float;   (* model time units; signed *)
+}
+
 type bin_op_expr = { op: bin_op; left: expr; right: expr }
 and un_op_expr   = { op: un_op;  arg:  expr }
 and cond_expr    = { pred: expr; then_: expr; else_: expr }
@@ -53,6 +74,14 @@ and expr =
      projection. Only valid inside a likelihood argument expression
      (2026-06-10 observation data-entry §3, §6.1). *)
   | ObsColumnRef of string
+  (* An observation anchor ± a compile-folded constant offset (gh#616).
+     UNRESOLVED until a run binds its data: the runtime resolver substitutes a
+     `Const` before anything evaluates, and `CompiledModel::new` refuses a model
+     that still carries one — so this variant never reaches the evaluator, and
+     no backend has a case for it. Emitted ONLY into a forcing `breakpoints`
+     list (the interception is scoped to that key), which is why it is a
+     structural knot rather than a value in the dynamics. *)
+  | ObsAnchor of anchored_time
   (* Per-expression dimensional escape: asserts the wrapped subexpression
      has dimension `(dim_p, dim_t)` without the checker verifying. The
      user-supplied `reason` is retained for audit trails (run.json) and
@@ -681,27 +710,6 @@ type output_config = {
   format:       string;
   trajectory:   bool;
   observations: bool;
-}
-
-(* ── Observation anchors ─────────────────────────────────────────────────────── *)
-
-(* Which end of the observed record an anchor names. Resolved PER RUN from the
-   run's bound observation streams — `AnchorLast` is the maximum observation
-   time over them, `AnchorFirst` the minimum — so it is not a release constant:
-   two fit configs binding different stream sets resolve different values from
-   the same compiled model. *)
-type obs_anchor =
-  | AnchorFirst
-  | AnchorLast
-
-(* An observation anchor plus a constant offset ALREADY FOLDED to model time
-   units at compile time (`1 'weeks` under `time_unit = days` → 7.0). Only the
-   anchor's value binds later, so the compiled model stays data-independent and
-   the offset never needs the observation series to be interpreted.
-   `offset = 0.0` is a bare anchor. *)
-type anchored_time = {
-  anchor: obs_anchor;
-  offset: float;   (* model time units; signed *)
 }
 
 (* ── Simulation config ───────────────────────────────────────────────────────── *)

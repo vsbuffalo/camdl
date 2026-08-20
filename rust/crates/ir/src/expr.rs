@@ -194,6 +194,21 @@ pub struct ObsColumnRefExpr {
     pub obs_column_ref: String,
 }
 
+/// `{"obs_anchor": "last_obs"}` / `{"obs_anchor": {"anchor": …, "offset": …}}` —
+/// an observation anchor ± a compile-folded constant offset (gh#616).
+///
+/// **Unresolved until a run binds its data.** The runtime resolver substitutes a
+/// `Const` for every one of these before compilation, and `CompiledModel::new`
+/// refuses a model that still carries one — so this node never reaches an
+/// evaluator, and no backend needs a case for it. The compiler emits it into a
+/// forcing `breakpoints` list and nowhere else (the DSL interception is scoped
+/// to that key), which is why it is a structural knot rather than a value in the
+/// dynamics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObsAnchorWrap {
+    pub obs_anchor: crate::anchor::AnchoredTime,
+}
+
 /// Per-expression dimensional escape. Asserts that the wrapped
 /// subexpression has dimension `(dim_p, dim_t)` without the
 /// dim-checker verifying — the programmer takes responsibility.
@@ -250,6 +265,7 @@ pub enum Expr {
     BindingRef(BindingRefWrap),
     PerEvalRef(PerEvalRefWrap),
     ObsColumnRef(ObsColumnRefExpr),
+    ObsAnchor(ObsAnchorWrap),
 }
 
 // ── Convenience constructors ──────────────────────────────────────────────────
@@ -294,6 +310,9 @@ impl Expr {
     }
     pub fn obs_column_ref(name: impl Into<String>) -> Self {
         Expr::ObsColumnRef(ObsColumnRefExpr { obs_column_ref: name.into() })
+    }
+    pub fn obs_anchor(a: crate::anchor::AnchoredTime) -> Self {
+        Expr::ObsAnchor(ObsAnchorWrap { obs_anchor: a })
     }
 }
 
@@ -380,12 +399,15 @@ impl<'de> Deserialize<'de> for Expr {
                     "obs_column_ref" => {
                         Expr::ObsColumnRef(ObsColumnRefExpr { obs_column_ref: map.next_value()? })
                     }
+                    "obs_anchor" => {
+                        Expr::ObsAnchor(ObsAnchorWrap { obs_anchor: map.next_value()? })
+                    }
                     other => {
                         return Err(de::Error::custom(format!(
                             "unknown expression node kind '{other}' (expected one of: const, \
                              param, pop, pop_sum, time, dt, bin_op, un_op, cond, time_func, \
                              table_lookup, projected, unchecked_dim, reduce, binding_ref, \
-                             per_eval_ref, obs_column_ref)"
+                             per_eval_ref, obs_column_ref, obs_anchor)"
                         )))
                     }
                 };
@@ -438,6 +460,12 @@ mod deserialize_tests {
             Expr::binding_ref("N_patch1"),
             Expr::obs_column_ref("tested"),
             Expr::per_eval_ref("__licm_0"), // gh#272 LICM variant (gh#284: close the hole)
+            // gh#616 observation anchors, both wire forms.
+            Expr::obs_anchor(crate::anchor::AnchoredTime::bare(crate::anchor::ObsAnchor::Last)),
+            Expr::obs_anchor(crate::anchor::AnchoredTime {
+                anchor: crate::anchor::ObsAnchor::First,
+                offset: -7.0,
+            }),
         ] {
             roundtrip(&e);
         }

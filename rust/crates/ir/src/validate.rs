@@ -462,6 +462,10 @@ fn check_quantity_legal<'a>(
         Expr::Projected(_) => forbid(errors, quantity, "projected"),
         Expr::ObsColumnRef(_) => forbid(errors, quantity, "obs_column_ref"),
         Expr::PerEvalRef(_) => forbid(errors, quantity, "per_eval_ref"),
+        // gh#616: an observation anchor is a forcing knot, not a value a
+        // quantity can read — and a quantity that wants one writes
+        // `value_at(…, last_obs)`, which is a `TimeAnchor`, not this node.
+        Expr::ObsAnchor(_) => forbid(errors, quantity, "obs_anchor"),
         Expr::Const(_) | Expr::Time(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
         | Expr::TimeFunc(_) => {}
         Expr::BinOp(w) => {
@@ -627,6 +631,11 @@ fn check_expr(expr: &Expr, ctx: &RefCtx<'_>, allow_projected: bool, errors: &mut
         // name against the stream's declared aux columns at load. No
         // model-name resolution applies here.
         Expr::ObsColumnRef(_) => {}
+        // gh#616: leaf, and one the resolver has already substituted away by the
+        // time a model is validated on a data-bearing path. Nothing to
+        // name-resolve; `CompiledModel::new` is the guard that refuses a model
+        // still carrying one.
+        Expr::ObsAnchor(_) => {}
     }
 }
 

@@ -286,6 +286,14 @@
             "obs_column_ref": { "type": "string" }
           },
           "additionalProperties": false
+        },
+        {
+          "comment": "gh#616: an UNRESOLVED observation anchor (± a compile-folded constant offset). Emitted only into a `piecewise` forcing's `breakpoints` list — the DSL interception is scoped to that key — and substituted for a `const` by the runtime resolver before compilation; `CompiledModel::new` refuses a model that still carries one, so it never reaches an evaluator.",
+          "required": ["obs_anchor"],
+          "properties": {
+            "obs_anchor": { "$ref": "#/definitions/anchored_time" }
+          },
+          "additionalProperties": false
         }
       ]
     },

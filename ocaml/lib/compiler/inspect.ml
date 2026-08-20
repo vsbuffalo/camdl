@@ -329,7 +329,7 @@ let rec expr_node_count (e : Ir.expr) : int =
   let open Ir in
   match e with
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> 1
+  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 1
   | BinOp b -> 1 + expr_node_count b.left + expr_node_count b.right
   | UnOp u  -> 1 + expr_node_count u.arg
   | Cond c  -> 1 + expr_node_count c.pred + expr_node_count c.then_ + expr_node_count c.else_
@@ -351,7 +351,7 @@ let rec reduce_term_count (e : Ir.expr) : int =
   | TableLookup (_, idxs) -> List.fold_left (fun a i -> a + reduce_term_count i) 0 idxs
   | UncheckedDim u -> reduce_term_count u.inner
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> 0
+  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0
 
 (* Count BindingRefs to [name] within an expr tree. *)
 let rec count_bindingref name (e : Ir.expr) : int =
@@ -365,7 +365,8 @@ let rec count_bindingref name (e : Ir.expr) : int =
   | TableLookup (_, idxs) -> List.fold_left (fun a i -> a + count_bindingref name i) 0 idxs
   | Reduce terms -> List.fold_left (fun a t -> a + count_bindingref name t) 0 terms
   | UncheckedDim u -> count_bindingref name u.inner
-  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | Projected | ObsColumnRef _ -> 0
+  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | Projected
+  | ObsColumnRef _ | ObsAnchor _ -> 0
 
 (* All rate exprs of a model (the cost surface inspect can see — gradients are
    absent in front-end-only compilation, and bindings are counted separately
@@ -394,7 +395,7 @@ let rec count_hazard_idioms (e : Ir.expr) : int =
     | Reduce terms -> List.fold_left (fun a t -> a + count_hazard_idioms t) 0 terms
     | UncheckedDim u -> count_hazard_idioms u.inner
     | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-    | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> 0)
+    | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0)
 
 (* Structural hash of an expr, for detecting duplicated subexpressions. A
    simple recursive polynomial hash over the constructor shape + leaf payloads.
@@ -420,6 +421,7 @@ let rec expr_hash (e : Ir.expr) : int =
   | Reduce terms -> mix 14 (List.map expr_hash terms)
   | UncheckedDim u -> mix 15 [ expr_hash u.inner ]
   | ObsColumnRef c -> mix 16 [ Hashtbl.hash c ]
+  | ObsAnchor a -> mix 18 [ Hashtbl.hash a.anchor; Hashtbl.hash a.offset ]
 
 (* Number of distinct non-trivial subexpressions that recur ≥ [threshold]
    times across all given roots. "Non-trivial" excludes single-node leaves
@@ -440,7 +442,7 @@ let count_duplicated_subexprs ?(threshold = 3) (roots : Ir.expr list) : int =
     | Reduce terms -> List.iter walk terms
     | UncheckedDim u -> walk u.inner
     | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-    | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> ()
+    | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> ()
   in
   List.iter walk roots;
   Hashtbl.fold (fun _ n acc -> if n >= threshold then acc + 1 else acc) counts 0

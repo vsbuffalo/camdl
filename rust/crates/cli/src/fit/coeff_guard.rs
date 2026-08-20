@@ -72,6 +72,8 @@ fn collect(e: &Expr, out: &mut HashSet<String>) {
         | Expr::Dt(_)
         | Expr::TimeFunc(_)
         | Expr::Projected(_)
+        // gh#616: no parameter reference — the value comes from the run's data.
+        | Expr::ObsAnchor(_)
         | Expr::ObsColumnRef(_) => {}
         // A `BindingRef` body is state-only (param-free, enforced at
         // `CompiledModel::new`), so it adds no refs.
@@ -193,6 +195,7 @@ fn collect_forcing_table_refs(e: &Expr, forcings: &mut HashSet<String>, tables: 
         | Expr::Time(_)
         | Expr::Dt(_)
         | Expr::Projected(_)
+        | Expr::ObsAnchor(_)
         | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_) => {}
         // Pre-LICM IR (this guard runs at the CLI fit layer, before hoisting).

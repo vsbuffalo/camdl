@@ -46,6 +46,9 @@ pub(crate) fn collect_param_refs(e: &Expr, out: &mut HashSet<String>) {
             collect_param_refs(&w.cond.else_, out);
         }
         Expr::PopSum(_) | Expr::Pop(_) | Expr::Const(_) | Expr::Time(_) | Expr::Dt(_)
+        // gh#616: an anchor carries no parameter reference (its value comes from
+        // the data), so it contributes nothing to a gradient's param set.
+        | Expr::ObsAnchor(_)
         | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_) => {}
         Expr::TableLookup(w) => {
             for ix in &w.table_lookup.indices {
@@ -108,6 +111,7 @@ pub(crate) fn collect_n_param_refs(
             }
         }
         Expr::PopSum(_) | Expr::Pop(_) | Expr::Const(_) | Expr::Time(_) | Expr::Dt(_)
+        | Expr::ObsAnchor(_)
         | Expr::TimeFunc(_) | Expr::ObsColumnRef(_) | Expr::BindingRef(_) => {}
         Expr::PerEvalRef(_) => {
             unreachable!("PerEvalRef reached collect_n_param_refs: LICM scoping invariant violated")

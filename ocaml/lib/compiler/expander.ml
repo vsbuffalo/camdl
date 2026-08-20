@@ -5626,7 +5626,8 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
                    `%s` is not a declared parameter."
           ~hint:"Check spelling, or declare the hyperparameter first."
           ()
-      | Ir.Param _ | Ir.Const _ | Ir.Projected | Ir.ObsColumnRef _ | Ir.Time | Ir.Dt -> ()
+      | Ir.Param _ | Ir.Const _ | Ir.Projected | Ir.ObsColumnRef _ | Ir.Time
+      | Ir.Dt | Ir.ObsAnchor _ -> ()
       | Ir.BinOp b -> check_refs b.left; check_refs b.right
       | Ir.UnOp  u -> check_refs u.arg
       | Ir.Cond  c -> check_refs c.pred; check_refs c.then_; check_refs c.else_
@@ -6273,6 +6274,7 @@ let resolve_comp_name ctx env e =
       | Ir.Reduce _   -> "a sum (reduce)"
       | Ir.BindingRef _ -> "a binding reference"
       | Ir.PerEvalRef _ -> "a per-eval binding reference"
+      | Ir.ObsAnchor _ -> "an observation anchor"
     in
     Diagnostics.error ctx.diags
       ~code:"E264"
@@ -6420,6 +6422,37 @@ let expand_time_function_one ctx fname (env : (string * string) list)
       | Some (EList es) -> List.map (resolve_expr ctx env) es
       | Some e          -> [resolve_expr ctx env e]
       | None            -> []
+  in
+  (* gh#616: `breakpoints = [last_obs, last_obs + 1 'weeks]`. Deliberately a
+     SEPARATE reader from `get_kw_list`, which six keys share (`values`,
+     `coefs`, `times`, …): an anchor is a TIME, so it belongs in a knot list and
+     nowhere else. Routing it through the shared closure would silently make
+     `values = [last_obs]` legal. *)
+  let get_breakpoints_list () =
+    match List.assoc_opt "breakpoints" fargs with
+    | None ->
+      Diagnostics.error ctx.diags ~code:"E403" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "time function '%s' missing required argument 'breakpoints'" fname)
+        ~hint:"Add 'breakpoints = [<time>, ...]' to the forcing function body."
+        ();
+      []
+    | Some fv ->
+      let one (e : expr) : Ir.expr =
+        match classify_anchor ctx
+                ~what:"a `breakpoints` entry"
+                ~example:"`breakpoints = [last_obs, last_obs + 1 'weeks]`"
+                ~loc:Diagnostics.no_loc e with
+        | AnchorAt a -> Ir.ObsAnchor a
+        (* The classifier already reported; keep expanding so the author sees
+           every error in one pass. *)
+        | AnchorBad -> Ir.Const 0.0
+        | AnchorNone -> resolve_expr ctx env e
+      in
+      (match expr_of_farg "breakpoints" fv with
+       | Some (EList es) -> List.map one es
+       | Some e          -> [one e]
+       | None            -> [])
   in
   (* A file selector (a `data =` path or a `*_col =` file column): REQUIRE a
      quoted string (E410 if bare). A bare identifier here would be
@@ -6634,7 +6667,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
       }
     | "piecewise" ->
       Ir.Piecewise {
-        breakpoints = get_kw_list "breakpoints";
+        breakpoints = get_breakpoints_list ();
         values      = get_kw_list "values";
       }
     | "interpolated" ->
@@ -10214,7 +10247,7 @@ let build_model_structure ctx expanded_trs =
     | Ir.TableLookup (_, args) ->
       List.fold_left collect_numerator_pops acc args
     | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.Projected
-    | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> acc
+    | Ir.ObsColumnRef _ | Ir.ObsAnchor _ | Ir.TimeFunc _ -> acc
     | Ir.UncheckedDim u -> collect_numerator_pops acc u.inner
     (* Every term of a sum is a numerator contribution (like Add). *)
     | Ir.Reduce terms -> List.fold_left collect_numerator_pops acc terms
@@ -10272,7 +10305,8 @@ let rec expr_contains_param_or_pop = function
   | Ir.Reduce terms -> List.exists expr_contains_param_or_pop terms
   | Ir.BindingRef _ -> false
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
-  | Ir.Const _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> false
+  | Ir.Const _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
+  | Ir.ObsAnchor _ | Ir.TimeFunc _ -> false
 
 (* Treat `UncheckedDim { inner = Const c; ... }` (the IR form of unit
    literals like `1 'days`) as a constant for L401 matching. *)
@@ -10342,7 +10376,8 @@ let rec walk_expr_for_l401 ~on_match e =
   | Ir.BindingRef _ -> ()
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
-  | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> ()
+  | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
+  | Ir.TimeFunc _ -> ()
 
 let lint_l401 ctx (expanded_trs : Ir.transition list) =
   (* Avoid duplicate emits when the same expanded transition rate fires
@@ -10471,7 +10506,8 @@ let rec l403_rate_forcing_in is_rate_forcing = function
     List.find_map (l403_rate_forcing_in is_rate_forcing) args
   | Ir.Reduce terms -> List.find_map (l403_rate_forcing_in is_rate_forcing) terms
   | Ir.TimeFunc _ | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
-  | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.BindingRef _ -> None
+  | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
+  | Ir.BindingRef _ -> None
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 (* Detect the L403 shape rooted at [e]. [mags] maps each already-rescaled rate
@@ -10522,7 +10558,7 @@ let rec walk_expr_for_l403 mags ~on_match e =
   | Ir.Reduce terms ->
     List.iter (walk_expr_for_l403 mags ~on_match) terms
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
-  | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
+  | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
   | Ir.TimeFunc _ | Ir.BindingRef _ -> ()
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 

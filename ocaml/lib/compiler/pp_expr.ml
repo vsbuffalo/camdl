@@ -27,6 +27,7 @@ let prec_expr : Ir.expr -> int = function
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.TableLookup _ | Ir.Projected
   | Ir.ObsColumnRef _ -> 10
+  | Ir.ObsAnchor _ -> 10      (* a name (± a number), atomic *)
   | Ir.UncheckedDim _ -> 10   (* function-call-like, atomic *)
   | Ir.Reduce _ -> 10         (* rendered self-parenthesized, atomic *)
   | Ir.BindingRef _ -> 10     (* a name, atomic *)
@@ -176,6 +177,14 @@ and pp_inner ~mode ~split ~ascii ppf = function
     Term_style.param Fmt.string ppf n
   | Ir.PerEvalRef n ->
     Term_style.param Fmt.string ppf n
+  | Ir.ObsAnchor a ->
+    (* Render as the modeller wrote it, in MODEL time units (the offset was
+       folded at compile time, so the original unit is gone). *)
+    let name = match a.Ir.anchor with
+      | Ir.AnchorFirst -> "first_obs" | Ir.AnchorLast -> "last_obs" in
+    Term_style.param Fmt.string ppf name;
+    if a.Ir.offset > 0.0 then Fmt.pf ppf " + %g" a.Ir.offset
+    else if a.Ir.offset < 0.0 then Fmt.pf ppf " - %g" (-. a.Ir.offset)
 
 (** Render an IR expression to a plain (ASCII, IR-name) string. Used by
     diagnostics that need to quote a sub-expression in error text. *)

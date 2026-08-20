@@ -122,6 +122,8 @@ fn collect_obs_column_refs(e: &ir::expr::Expr, out: &mut Vec<String>) {
         }
         Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
         | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
+        // gh#616: a forcing knot, never an aux data column.
+        | Expr::ObsAnchor(_)
         | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
 }

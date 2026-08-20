@@ -78,7 +78,7 @@ let map2 (da : deriv) (db : deriv) (f : expr -> expr -> expr) : deriv =
 let rec mentions (param : string) (e : expr) : bool =
   match e with
   | Param n -> n = param
-  | Const _ | Pop _ | Time | Dt | Projected | ObsColumnRef _ -> false
+  | Const _ | Pop _ | Time | Dt | Projected | ObsColumnRef _ | ObsAnchor _ -> false
   | PopSum _ -> false
   | BinOp b -> mentions param b.left || mentions param b.right
   | UnOp u -> mentions param u.arg
@@ -98,7 +98,8 @@ let rec mentions (param : string) (e : expr) : bool =
 let rec mentions_projected (e : expr) : bool =
   match e with
   | Projected -> true
-  | Param _ | Const _ | Pop _ | PopSum _ | Time | Dt | ObsColumnRef _ -> false
+  | Param _ | Const _ | Pop _ | PopSum _ | Time | Dt | ObsColumnRef _
+  | ObsAnchor _ -> false
   | BinOp b -> mentions_projected b.left || mentions_projected b.right
   | UnOp u -> mentions_projected u.arg
   | Cond c -> mentions_projected c.pred || mentions_projected c.then_ || mentions_projected c.else_
@@ -138,7 +139,8 @@ let rec mentions_pop (bindings : binding list) (c : string) (e : expr) : bool =
   match e with
   | Pop n -> n = c
   | PopSum members -> List.mem c members
-  | Param _ | Const _ | Time | Dt | Projected | ObsColumnRef _ -> false
+  | Param _ | Const _ | Time | Dt | Projected | ObsColumnRef _
+  | ObsAnchor _ -> false
   | TimeFunc _ -> false   (* forcings are state-free *)
   | BindingRef name ->
     (match List.find_opt (fun (b : binding) -> b.bname = name) bindings with
@@ -261,8 +263,11 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
   in
   let rec d (e : expr) : deriv =
     match e with
-    (* Constant leaves — zero for every target. *)
-    | Const _ | Time | Dt | ObsColumnRef _ -> Known (Const 0.0)
+    (* Constant leaves — zero for every target. `ObsAnchor` (gh#616) is a
+       structural knot in a forcing breakpoint list, resolved to a number
+       before any gradient is evaluated; it depends on the DATA, never on a
+       parameter or a compartment, so its derivative is a genuine zero. *)
+    | Const _ | Time | Dt | ObsColumnRef _ | ObsAnchor _ -> Known (Const 0.0)
 
     (* The projection output. The target leaf under [WrtProjected] (∂projected/∂projected
        = 1, the source of the observation factor-2 chain); constant w.r.t. a
@@ -860,7 +865,7 @@ let rec inline_projected (proj : expr) (e : expr) : expr =
   match e with
   | Projected -> proj
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-  | BindingRef _ | ObsColumnRef _ -> e
+  | BindingRef _ | ObsColumnRef _ | ObsAnchor _ -> e
   | UnOp u -> UnOp { u with arg = inline_projected proj u.arg }
   | BinOp b ->
     BinOp { b with left = inline_projected proj b.left;

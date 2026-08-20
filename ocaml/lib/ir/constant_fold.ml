@@ -63,8 +63,11 @@ let fold_bin_consts op a b : expr option =
 
 let rec fold tbls (e : expr) : expr =
   match e with
+  (* gh#616: `ObsAnchor` is a LEAF here and must stay one — its value is not
+     known until a run binds its data, so folding it to a number at compile time
+     is exactly the data-dependence this design exists to avoid. *)
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
-  | Projected | ObsColumnRef _ ->
+  | Projected | ObsColumnRef _ | ObsAnchor _ ->
       e
   (* LICM runs after constant_fold, so a PerEvalRef cannot appear here. *)
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"

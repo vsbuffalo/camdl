@@ -1423,6 +1423,41 @@ forcing {
 }
 ```
 
+### Anchoring a `piecewise` fork to the data
+
+A `piecewise` forcing's `breakpoints` are usually calendar dates. When the fork
+is *"where the observed record ends"* — the standard shape for a forecast
+scenario — writing that date by hand means re-editing the model on every data
+release. A breakpoint may instead be an **observation anchor**, `last_obs` or
+`first_obs`, each optionally `±` a constant duration:
+
+```camdl
+forcing {
+  ramp_control : piecewise 'ratio {
+    breakpoints = [last_obs, last_obs + 1 'weeks, last_obs + 2 'weeks]
+    values      = [1.0, 0.8, 0.6, 0.4]
+  }
+}
+```
+
+The knots are resolved once per run, from the observation times the run binds,
+and the resolved values are recorded in the run record and printed on stderr.
+Two consequences worth stating plainly, because they are behaviour changes
+relative to a literal date:
+
+- The fork becomes **fit-config-dependent**. Two fit configurations binding
+  different observation streams resolve different knots from the same model
+  file.
+- A command with **no observed data cannot run the model at all** — a plain
+  `simulate` refuses, naming the forcing, unless `--fit` supplies the data.
+
+Anchors are accepted only in `breakpoints`, not in `values` or in any
+coefficient list: an anchor is a time, and the knots are the only times a
+forcing declares. Same grammar as everywhere else — the anchor must be the whole
+entry, the offset must carry a duration unit, and a `'months`/`'years` offset
+under an `origin` is refused (see `value_at` above for the full rules and error
+codes).
+
 The forcing is then used exactly as any other — `C` or `C(t)` — and resolves to
 `C(t − lag)`. `lag` is a property of the forcing as a whole, uniform across all
 kinds (`interpolated`, `piecewise`, `periodic`, `sinusoidal`, `fourier`,

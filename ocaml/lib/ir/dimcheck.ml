@@ -341,6 +341,8 @@ let rec infer st ~ctx (e : expr) : dim =
   | Pop _ | PopSum _ -> Known population
   | Time -> Known (make 0 1)
   | Dt   -> Known (make 0 1)  (* gh#54: dt has dimension T, same as t *)
+  (* gh#616: an observation anchor resolves to a model TIME. *)
+  | ObsAnchor _ -> Known (make 0 1)
   | TimeFunc name ->
     (match Hashtbl.find_opt st.tf_dims name with
      | Some d -> resolve st d
@@ -490,7 +492,7 @@ let rec propagate st ~ctx (e : expr) (expected : dim_vec) : unit =
         | Unknown id -> bind st id expected
         | _ -> ())
      | None -> ())
-  | Pop _ | PopSum _ | Time | Dt | Projected | ObsColumnRef _ -> ()
+  | Pop _ | PopSum _ | Time | Dt | Projected | ObsColumnRef _ | ObsAnchor _ -> ()
   | UncheckedDim _ ->
     (* The escape stops dim-propagation at this boundary — the inner
        is explicitly exempted from checker-driven dimensional
@@ -655,6 +657,7 @@ let rec read_dim st (e : expr) : dim =
   | Pop _ | PopSum _ -> Known population
   | Time -> Known (make 0 1)
   | Dt   -> Known (make 0 1)
+  | ObsAnchor _ -> Known (make 0 1)   (* gh#616: a model time *)
   | TimeFunc name ->
     (match Hashtbl.find_opt st.tf_dims name with
      | Some d -> resolve st d
@@ -752,6 +755,11 @@ let rec expr_to_short_string (e : expr) : string =
   | TableLookup (s, _) -> Printf.sprintf "%s[...]" s
   | Projected -> "projected"
   | ObsColumnRef c -> c
+  | ObsAnchor a ->
+    let name = match a.anchor with AnchorFirst -> "first_obs" | AnchorLast -> "last_obs" in
+    if a.offset = 0.0 then name
+    else if a.offset > 0.0 then Printf.sprintf "%s + %g" name a.offset
+    else Printf.sprintf "%s - %g" name (-. a.offset)
   | UncheckedDim u ->
     Printf.sprintf "unchecked_dim(%s)" (expr_to_short_string u.inner)
   | BinOp b ->

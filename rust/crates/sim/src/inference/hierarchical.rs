@@ -125,6 +125,9 @@ pub fn eval_prior_arg<E: ParamEnv>(expr: &Expr, env: &E) -> f64 {
         // NaN ensures a bogus prior arg propagates to `-∞` log-density
         // rather than undefined behaviour.
         Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_)
+        // gh#616: an anchor is not a valid prior argument either; NaN for the
+        // same defence-in-depth reason as the rest of this group.
+        | Expr::ObsAnchor(_)
         | Expr::TableLookup(_) | Expr::Projected(_) | Expr::ObsColumnRef(_) => f64::NAN,
         // Dimensional escape is transparent — evaluate the inner.
         Expr::UncheckedDim(w) => eval_prior_arg(&w.unchecked_dim.inner, env),

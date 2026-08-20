@@ -313,6 +313,18 @@ pub fn resolve_expr(expr: &Expr, ctx: &ResolveCtx<'_>) -> Result<ResolvedExpr, S
             Ok(ResolvedExpr::ObsColumnRef(w.obs_column_ref.clone()))
         }
 
+        // gh#616: deliberately NOT given a `ResolvedExpr` counterpart. An anchor
+        // has no value until a run binds its data, so the only correct thing to
+        // do at resolution is refuse — giving it a resolved form would create a
+        // second place that could quietly produce a number.
+        Expr::ObsAnchor(w) => Err(SimError::Validation(format!(
+            "an unresolved observation anchor ({}) reached expression resolution. \
+             Anchors are substituted by the runtime resolver before compile, and \
+             CompiledModel::new refuses a model that still carries one — reaching \
+             here means a path built a compiled model without resolving first",
+            w.obs_anchor
+        ))),
+
         Expr::UncheckedDim(w) => {
             let inner = resolve_expr(&w.unchecked_dim.inner, ctx)?;
             Ok(ResolvedExpr::UncheckedDim { inner: Box::new(inner) })

@@ -247,6 +247,14 @@ impl ContentAddressed for Expr {
                 h.write_u32(16);
                 h.write_str(&w.per_eval_ref);
             }
+            // gh#616: fresh index 17, same reason — existing nodes keep their
+            // hash. Anchor and offset both enter, so two forcing forks that
+            // differ only in offset are different content.
+            Expr::ObsAnchor(w) => {
+                h.write_u32(17);
+                h.write_str(w.obs_anchor.anchor.as_str());
+                h.write_f64_bits(w.obs_anchor.offset);
+            }
         }
     }
 }

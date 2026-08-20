@@ -271,6 +271,17 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                 )))
         }
 
+        // gh#616: unreachable by construction — see the arm in `resolve_expr`.
+        // A hard error rather than a fabricated number, because an anchor's
+        // value is the whole point of the construct.
+        Expr::ObsAnchor(w) => Err(SimError::Validation(format!(
+            "an unresolved observation anchor ({}) reached expression evaluation. \
+             Anchors are substituted by the runtime resolver before compile, and \
+             CompiledModel::new refuses a model that still carries one — reaching \
+             here means a path built a compiled model without resolving first",
+            w.obs_anchor
+        ))),
+
         Expr::UncheckedDim(w) => {
             // Dimensional escape is a type-level assertion only; at
             // runtime it's identity semantics — evaluate the inner

@@ -308,6 +308,85 @@ fn expr_is_time_dependent_memo(
 /// defaulting to "no param". Does **not** recurse through `BindingRef`: every
 /// binding is checked independently by the caller, so a `Param` reachable only
 /// via another binding is caught when that binding is itself checked.
+/// gh#616: refuse a model that still carries an unresolved observation anchor.
+///
+/// Two forms, both named in the message with the flag that supplies the data,
+/// because "resolve it" is not actionable on its own — the user has to know
+/// WHICH construct is anchored and WHERE the observation times come from.
+fn refuse_unresolved_anchors(model: &Model) -> Result<(), SimError> {
+    const HOW: &str = "An observation anchor resolves from the run's bound observation \
+                       streams, so the command must have data: pass `--fit <fit.toml | fit \
+                       run dir>` on `simulate`, or run it through a command that binds data \
+                       (`fit run`, `fit predict`, `pfilter`, `profile`).";
+
+    if let Some(a) = &model.simulation.t_end_anchor {
+        return Err(SimError::Validation(format!(
+            "the model's simulation horizon is anchored (`simulate {{ to = {a} }}`) and has \
+             not been resolved. {HOW}"
+        )));
+    }
+    if let Some(p) = model.presets.iter().find(|p| p.t_end_anchor.is_some()) {
+        let a = p.t_end_anchor.as_ref().expect("find matched on is_some");
+        return Err(SimError::Validation(format!(
+            "scenario '{}' declares an anchored horizon (`simulate {{ to = {a} }}`) that has \
+             not been resolved. {HOW}",
+            p.name
+        )));
+    }
+    // Forcing knots. Only `breakpoints` can carry an anchor (the DSL
+    // interception is scoped to that key), but the walk is over every forcing
+    // expression so a future emission site cannot slip past this guard.
+    for tf in &model.time_functions {
+        for e in forcing_exprs(&tf.kind) {
+            if let Some(a) = first_obs_anchor(e) {
+                return Err(SimError::Validation(format!(
+                    "forcing '{}' has an anchored breakpoint (`{a}`) that has not been \
+                     resolved. {HOW}",
+                    tf.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every expression a forcing kind carries (knots, values, coefficients).
+/// Exhaustive over `TimeFuncKind` (no `_` arm) so a new forcing kind has to
+/// declare whether its expressions are walked by the anchor guard.
+fn forcing_exprs(k: &ir::time_func::TimeFuncKind) -> Vec<&Expr> {
+    use ir::time_func::TimeFuncKind as K;
+    match k {
+        K::Sinusoidal(s) => vec![&s.amplitude, &s.period, &s.phase, &s.baseline],
+        K::Piecewise(p) => p.breakpoints.iter().chain(&p.values).collect(),
+        K::Interpolated(i) => i.times.iter().chain(&i.values).collect(),
+        K::Periodic(p) => std::iter::once(&p.period).chain(&p.values).collect(),
+        K::Fourier(f) => std::iter::once(&f.period)
+            .chain(f.harmonics.iter().flat_map(|(a, b)| [a, b]))
+            .collect(),
+        K::PeriodicSpline(s) => std::iter::once(&s.period).chain(&s.coefs).collect(),
+    }
+}
+
+/// The first observation anchor anywhere in an expression tree, if any.
+fn first_obs_anchor(e: &Expr) -> Option<&ir::anchor::AnchoredTime> {
+    match e {
+        Expr::ObsAnchor(w) => Some(&w.obs_anchor),
+        Expr::BinOp(w) => {
+            first_obs_anchor(&w.bin_op.left).or_else(|| first_obs_anchor(&w.bin_op.right))
+        }
+        Expr::UnOp(w) => first_obs_anchor(&w.un_op.arg),
+        Expr::Cond(w) => first_obs_anchor(&w.cond.pred)
+            .or_else(|| first_obs_anchor(&w.cond.then))
+            .or_else(|| first_obs_anchor(&w.cond.else_)),
+        Expr::TableLookup(w) => w.table_lookup.indices.iter().find_map(first_obs_anchor),
+        Expr::Reduce(w) => w.reduce.iter().find_map(first_obs_anchor),
+        Expr::UncheckedDim(w) => first_obs_anchor(&w.unchecked_dim.inner),
+        Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
+        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
+        | Expr::BindingRef(_) | Expr::PerEvalRef(_) => None,
+    }
+}
+
 fn expr_refs_param(expr: &Expr) -> bool {
     match expr {
         Expr::Param(_) => true,
@@ -334,6 +413,10 @@ fn expr_refs_param(expr: &Expr) -> bool {
         | Expr::Projected(_)
         | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_)
+        // gh#616: an unresolved observation anchor is not a param reference —
+        // and it never reaches here, since `CompiledModel::new` refuses a model
+        // that still carries one.
+        | Expr::ObsAnchor(_)
         | Expr::PerEvalRef(_) => false,
     }
 }
@@ -479,6 +562,7 @@ fn collect_param_names(expr: &Expr, out: &mut Vec<String>) {
         Expr::UncheckedDim(w) => collect_param_names(&w.unchecked_dim.inner, out),
         Expr::Const(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_)
         | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
+        | Expr::ObsAnchor(_)
         | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
 }
@@ -701,6 +785,8 @@ fn expr_contains_dt_memo(e: &Expr, bindings: &HashMap<&str, &Expr>, memo: &mut H
         | Expr::Time(_)
         | Expr::Projected(_)
         | Expr::ObsColumnRef(_)
+        // gh#616: a knot, not a step — and refused at CompiledModel::new anyway.
+        | Expr::ObsAnchor(_)
         // gh#272: a per-eval body is param/table-only — `per_eval_staging_violation`
         // (enforced at CompiledModel::new) rejects `Dt` in a per-eval body — so
         // this leaf is provably false without descending into the body.
@@ -1065,6 +1151,20 @@ impl CompiledModel {
     }
 
     pub fn new(model: Model) -> Result<Self, SimError> {
+        // gh#616: refuse an UNRESOLVED observation anchor here, at the one choke
+        // point every path goes through, rather than one guard per entry point.
+        //
+        // There is deliberately no sentinel: the anchor FIELD is the unresolved
+        // marker, and an anchored horizon's `t_end` is NaN. A placeholder value
+        // would be worse than nothing — two placeholders compare EQUAL, which
+        // silently defeats `refuse_scenario_horizon`, the `--to` conflict rule,
+        // `check_baked_recurring_ends`, and the `--obs` preflight (the gh#561
+        // silent-drop class). The runtime resolver substitutes and clears both
+        // forms before reaching here; a model that still carries one has taken a
+        // path that never resolved, and running it would produce a plausible
+        // wrong horizon or a wrong forcing fork.
+        refuse_unresolved_anchors(&model)?;
+
         // gh#257: the output schedule's `t += step` and each recurring
         // intervention's `t += period` are infinite-loop hazards with the same
         // shape as a non-positive integrator `dt` — a non-positive step/period
@@ -2022,6 +2122,64 @@ mod tests {
             }
         }
         model
+    }
+
+    // ── gh#616: unresolved observation anchors are refused at construction ────
+
+    /// The three forms, each at the single choke point, each naming the
+    /// construct and the flag that supplies the data. Without this guard an
+    /// anchored horizon runs with `t_end = NaN` (an empty grid at exit 0) and an
+    /// anchored forcing knot runs with whatever the structural evaluator makes
+    /// of the node — both plausible-looking wrong answers.
+    #[test]
+    fn an_unresolved_anchor_is_refused_at_construction() {
+        use ir::anchor::{AnchoredTime, ObsAnchor};
+        let anchored = AnchoredTime { anchor: ObsAnchor::Last, offset: 28.0 };
+
+        // 1. The model's own horizon.
+        let mut m = load_with_params("sir_basic");
+        m.simulation.t_end = f64::NAN;
+        m.simulation.t_end_anchor = Some(anchored);
+        let err = match CompiledModel::new(m) { Err(e) => e, Ok(_) => panic!("an anchored horizon must be refused") };
+        let msg = err.to_string();
+        assert!(msg.contains("last_obs + 28") && msg.contains("--fit"),
+            "the refusal must name the anchor and where data comes from: {msg}");
+
+        // 2. A preset's horizon.
+        let mut m = load_with_params("sir_basic");
+        assert!(!m.presets.is_empty(), "fixture precondition: sir_basic has scenarios");
+        m.presets[0].t_end = Some(f64::NAN);
+        m.presets[0].t_end_anchor = Some(anchored);
+        let name = m.presets[0].name.clone();
+        let err = match CompiledModel::new(m) { Err(e) => e, Ok(_) => panic!("an anchored preset horizon must be refused") };
+        let msg = err.to_string();
+        assert!(msg.contains(&name) && msg.contains("last_obs + 28"),
+            "the refusal must name the scenario and the anchor: {msg}");
+
+        // 3. A forcing breakpoint.
+        let mut m = load_with_params("sir_basic");
+        m.time_functions.push(ir::time_func::TimeFunction {
+            name: "ramp".into(),
+            kind: ir::time_func::TimeFuncKind::Piecewise(ir::time_func::Piecewise {
+                breakpoints: vec![Expr::obs_anchor(anchored)],
+                values: vec![Expr::const_(1.0), Expr::const_(0.5)],
+            }),
+            dim: (0, 0),
+            lag: None,
+        });
+        let err = match CompiledModel::new(m) { Err(e) => e, Ok(_) => panic!("an anchored breakpoint must be refused") };
+        let msg = err.to_string();
+        assert!(msg.contains("ramp") && msg.contains("last_obs + 28"),
+            "the refusal must name the forcing and the anchor: {msg}");
+    }
+
+    /// Negative control: the unmodified fixture compiles, so the guard above is
+    /// not simply rejecting everything.
+    #[test]
+    fn an_unanchored_model_still_compiles() {
+        let m = load_with_params("sir_basic");
+        assert!(m.simulation.t_end_anchor.is_none());
+        assert!(CompiledModel::new(m).is_ok(), "an unanchored model must compile");
     }
 
     /// Negative control: the unmodified fixture (whose `infection` transition

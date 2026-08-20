@@ -55,7 +55,7 @@ let rec pops_in_expr (acc : string list) (e : expr) : string list =
   | PopSum names -> List.rev_append names acc
   (* Leaves with no compartment reference and no sub-expression. *)
   | Const _ | Param _ | Time | Dt | TimeFunc _ | BindingRef _ | Projected
-  | ObsColumnRef _ ->
+  | ObsColumnRef _ | ObsAnchor _ ->
     acc
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   (* Compound nodes: recurse into every sub-expression. *)

@@ -99,7 +99,10 @@ let classify_parents ~(sources : string list) (rate : expr) : classification =
     | Pop c -> record_pop ~in_denom ~in_nonlinear ~enclosing c
     | PopSum cs ->
       List.iter (record_pop ~in_denom ~in_nonlinear ~enclosing) cs
-    | Const _ | Param _ | Time | Dt | Projected | ObsColumnRef _ | TimeFunc _ -> ()
+    (* gh#616: an anchor is a knot in a forcing breakpoint list, never a
+       compartment reference — nothing to record as a parent pool. *)
+    | Const _ | Param _ | Time | Dt | Projected | ObsColumnRef _ | TimeFunc _
+    | ObsAnchor _ -> ()
     | TableLookup (_, args) ->
       (* Index expressions are evaluated as frozen lookups — a Pop in a
          table index is not a parent pool. Treat as nonlinear context so
@@ -184,7 +187,7 @@ let rec deriv_num_wrt_pop (comp : string) (e : expr) : expr =
   | Pop c        -> if c = comp then Const 1.0 else Const 0.0
   | PopSum cs    -> if List.mem comp cs then Const 1.0 else Const 0.0
   | Const _ | Param _ | Time | Dt | Projected | ObsColumnRef _ | TimeFunc _
-  | TableLookup _ -> Const 0.0
+  | ObsAnchor _ | TableLookup _ -> Const 0.0
   | UncheckedDim u -> deriv_num_wrt_pop comp u.inner
   | BinOp { op = Add; left; right } ->
     BinOp { op = Add; left = deriv_num_wrt_pop comp left;

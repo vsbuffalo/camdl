@@ -83,6 +83,12 @@ let dep_of_expr ~binding_dep (e : Ir.expr) : dep =
        function of simulator state — classify as Data (like a constant-indexed
        table cell). It is differentiated to 0 (a data constant) in autodiff. *)
     | Ir.ObsColumnRef _ -> Data
+    (* gh#616: an observation anchor is external data supplied by the RUN (the
+       observed window), and it is substituted for a `Const` before evaluation,
+       so it classifies as Data — the same class as a table cell. It appears
+       only in a forcing `breakpoints` list, never in a rate, so this arm is
+       reachable only if a future pass walks a forcing body through here. *)
+    | Ir.ObsAnchor _ -> Data
     | Ir.BinOp b -> join (go b.left) (go b.right)
     | Ir.UnOp u  -> go u.arg
     | Ir.Cond c  -> join (go c.pred) (join (go c.then_) (go c.else_))

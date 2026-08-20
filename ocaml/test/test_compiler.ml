@@ -257,7 +257,7 @@ let rec max_reduce_terms (e : Ir.expr) : int =
     List.fold_left (fun acc i -> max acc (max_reduce_terms i)) 0 idxs
   | UncheckedDim { inner; _ } -> max_reduce_terms inner
   | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
-  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ -> 0
+  | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0
 
 let max_foi_reduce_terms (m : Ir.model) : int =
   List.fold_left (fun acc (t : Ir.transition) -> max acc (max_reduce_terms t.rate))
@@ -1681,7 +1681,8 @@ let test_table_cell_type_ir_round_trips_through_serde () =
 
 (** Walk an Ir.expr and collect all Pop compartment names. *)
 let rec collect_pops = function
-  | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ -> []
+  | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
+  | Ir.ObsAnchor _ -> []
   | Ir.Pop name -> [name]
   | Ir.PopSum names -> names
   | Ir.BinOp b -> collect_pops b.left @ collect_pops b.right
@@ -2040,6 +2041,68 @@ let test_indexed_forcing_arity () =
     simulate { from = 0 'days  to = 60 'days }
   |} in
   compile_expect_error_code ~code:"E299" ~contains:"seasonal" src
+
+(* ── gh#616: observation-anchored piecewise breakpoints ──────────────────── *)
+
+let anchored_forcing_src body = Printf.sprintf {|
+    compartments { S, I }
+    parameters { beta : rate  gamma : rate }
+    forcing {
+      ramp : piecewise 'ratio {
+%s
+      }
+    }
+    transitions {
+      infection : S --> I @ beta * ramp * S * I / (S + I)
+      recovery  : I --> S @ gamma * I
+    }
+    init { S = 990  I = 10 }
+    simulate { from = 0 'days  to = 200 'days }
+  |} body
+
+(* A knot list may mix literal times and anchors; each anchor lowers to a
+   symbolic `ObsAnchor` with the offset already folded to model time units, so
+   the compiled model carries no data dependence beyond the anchor itself. *)
+let test_anchored_breakpoints () =
+  let m = compile_expect_ok (anchored_forcing_src
+    "        breakpoints = [30 'days, last_obs, last_obs + 2 'weeks]\n\
+    \        values      = [1.0, 0.8, 0.6, 0.4]") in
+  let tf = List.hd m.Ir.time_functions in
+  match tf.Ir.kind with
+  (* The literal knot keeps its usual lowering (a unit literal wraps in the
+     dimensional escape); only the anchored entries become `ObsAnchor`. *)
+  | Ir.Piecewise { breakpoints = [ Ir.UncheckedDim { inner = Ir.Const 30.0; _ };
+                                   Ir.ObsAnchor { anchor = Ir.AnchorLast; offset = o0 };
+                                   Ir.ObsAnchor { anchor = Ir.AnchorLast; offset = o1 } ]; _ } ->
+    Alcotest.(check (float 1e-12)) "bare last_obs has zero offset" 0.0 o0;
+    Alcotest.(check (float 1e-12)) "last_obs + 2 'weeks folds to 14 days" 14.0 o1
+  | Ir.Piecewise { breakpoints; _ } ->
+    Alcotest.failf "unexpected breakpoints: %s"
+      (String.concat ", " (List.map Pp_expr.to_string breakpoints))
+  | _ -> Alcotest.fail "expected a Piecewise forcing"
+
+(* The interception is scoped to `breakpoints`. `values` shares the reader that
+   six other keys use, and an anchor there is a value, not a time — so it must
+   stay an unknown name (E100), not silently become a knot. *)
+let test_anchor_in_values_is_unknown () =
+  compile_expect_error_code ~code:"E100" ~contains:"last_obs"
+    (anchored_forcing_src
+      "        breakpoints = [30 'days]\n\
+      \        values      = [1.0, last_obs]")
+
+(* Same grammar as every other anchor position: a bare-number offset is E335. *)
+let test_anchored_breakpoint_bare_offset_rejected () =
+  compile_expect_error_code ~code:"E335" ~contains:"duration unit"
+    (anchored_forcing_src
+      "        breakpoints = [last_obs - 7]\n\
+      \        values      = [1.0, 0.5]")
+
+(* And an anchor buried in a larger expression is E335, not a silent literal. *)
+let test_anchored_breakpoint_arithmetic_rejected () =
+  compile_expect_error_code ~code:"E335" ~contains:"whole term"
+    (anchored_forcing_src
+      "        breakpoints = [2 * last_obs]\n\
+      \        values      = [1.0, 0.5]")
 
 let test_indexed_param_arity () =
   let src = {|
@@ -3124,7 +3187,7 @@ let test_l401_no_fire_when_dt_used () =
       | Ir.Reduce terms -> List.exists contains_dt terms
       | Ir.BindingRef _ -> false
       | Ir.PerEvalRef _ -> false
-      | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
+      | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _ | Ir.ObsAnchor _
       | Ir.Time | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> false
     in
     let any_tr_uses_dt = List.exists (fun (t : Ir.transition) ->
@@ -12143,6 +12206,16 @@ let () =
         `Quick test_indexed_forcing_arity;
       Alcotest.test_case "indexed param over-index rejected (E299)"
         `Quick test_indexed_param_arity;
+    ];
+    "anchored forcing breakpoints (gh#616)", [
+      Alcotest.test_case "breakpoints accept last_obs ± a constant duration"
+        `Quick test_anchored_breakpoints;
+      Alcotest.test_case "an anchor in `values` stays an unknown name (E100)"
+        `Quick test_anchor_in_values_is_unknown;
+      Alcotest.test_case "bare-number offset on a breakpoint rejected (E335)"
+        `Quick test_anchored_breakpoint_bare_offset_rejected;
+      Alcotest.test_case "anchor in a larger expression rejected (E335)"
+        `Quick test_anchored_breakpoint_arithmetic_rejected;
     ];
     "declaration name collisions", [
       Alcotest.test_case "stratified compartment base name vs let (E278)"
