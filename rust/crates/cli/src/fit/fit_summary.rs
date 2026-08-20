@@ -26,7 +26,7 @@ use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
 use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
-    If2StageResult, MethodResult, NutsStageResult, PgasStageResult, PmmhStageResult,
+    If2StageResult, MethodResult, MinEss, NutsStageResult, PgasStageResult, PmmhStageResult,
 };
 use crate::fit::state::FitState;
 use crate::fit::table_row::{self, TableRow};
@@ -1040,29 +1040,77 @@ impl Formatter {
         if let Some(acc) = acceptance_summary {
             s.push_str(&format!("    acceptance = {:.3} (mean across chains)\n", acc));
         }
-        let min_ess = diag.min_ess();
-        // ESS/iteration — the ALGORITHM-comparison metric: min-parameter ESS per
-        // raw sampling step. `n_samples` is KEPT (thinned) draws, so `× thin`
-        // recovers the raw iterations, making this invariant to thinning and
-        // iteration count. Hardware-independent: "this sampler mixes N× better per
-        // step" holds on any machine. Min over params — the slowest bounds usable ESS.
-        if let (Some(epi), Some(min_ess)) = (diag.ess_per_iter(), min_ess) {
-            s.push_str(&format!(
-                "    ESS/iter = {:.3}  (min-param ESS {:.0} / {} raw sampling iters)\n",
-                epi, min_ess, diag.raw_iters()
-            ));
-        }
-        // ESS/second — the RUNTIME metric: min-parameter ESS per second of wall-
-        // clock. Also thinning-invariant, but hardware/implementation-dependent, so
-        // it estimates runtime-to-target on THIS machine rather than comparing
-        // algorithms. `None` wall-time (older runs) simply omits it.
-        if let (Some(eps), Some(secs), Some(min_ess)) =
-            (diag.ess_per_sec(), diag.wall_time_secs.filter(|s| *s > 0.0), min_ess)
-        {
-            s.push_str(&format!(
-                "    ESS/sec  = {:.2}  (min-param ESS {:.0} / {:.1}s wall)\n",
-                eps, min_ess, secs
-            ));
+        // Both efficiency lines are the min-parameter ESS over a denominator, so
+        // both stand or fall with that minimum being defined. It is defined only
+        // when every parameter assessed across chains reports a pooled ESS: a
+        // minimum over the reporting subset RISES as a fit gets worse, because
+        // the badly-mixing parameters drop out and the survivors set it (gh#687).
+        // When it is undefined, name the parameters that withhold it — the blank
+        // is then the diagnosis rather than a gap the reader must interpret.
+        match diag.min_ess_status() {
+            MinEss::Reported(min_ess) => {
+                // ESS/iteration — the ALGORITHM-comparison metric: min-parameter
+                // ESS per raw sampling step. `n_samples` is KEPT (thinned) draws,
+                // so `× thin` recovers the raw iterations, making this invariant
+                // to thinning and iteration count. Hardware-independent: "this
+                // sampler mixes N× better per step" holds on any machine.
+                if let Some(epi) = diag.ess_per_iter() {
+                    s.push_str(&format!(
+                        "    ESS/iter = {:.3}  (min-param ESS {:.0} / {} raw sampling iters)\n",
+                        epi, min_ess, diag.raw_iters()
+                    ));
+                }
+                // ESS/second — the RUNTIME metric: min-parameter ESS per second of
+                // wall-clock. Also thinning-invariant, but hardware/implementation-
+                // dependent, so it estimates runtime-to-target on THIS machine
+                // rather than comparing algorithms. `None` wall-time (older runs)
+                // simply omits it.
+                if let (Some(eps), Some(secs)) =
+                    (diag.ess_per_sec(), diag.wall_time_secs.filter(|s| *s > 0.0))
+                {
+                    s.push_str(&format!(
+                        "    ESS/sec  = {:.2}  (min-param ESS {:.0} / {:.1}s wall)\n",
+                        eps, min_ess, secs
+                    ));
+                }
+            }
+            MinEss::Unreportable { missing, n_expected } => {
+                s.push_str("    ESS/iter = —   ESS/sec = —   (efficiency not reportable)\n");
+                s.push_str(&format!(
+                    "      {} of {} parameters have no pooled ESS — their chains disagree\n",
+                    missing.len(),
+                    n_expected
+                ));
+                s.push_str("      (R̂ above the pooling threshold), so per-chain ESS cannot be\n");
+                s.push_str("      summed into an effective N for the joint posterior:\n");
+                // Wrap the names to a readable width. The per-parameter table
+                // below marks them too, but a column of dashes reads as "not
+                // applicable"; the reader should not have to derive the list.
+                let mut line = String::new();
+                for (i, name) in missing.iter().enumerate() {
+                    let piece = if i + 1 == missing.len() {
+                        name.clone()
+                    } else {
+                        format!("{}, ", name)
+                    };
+                    if !line.is_empty() && line.len() + piece.len() > 62 {
+                        s.push_str(&format!("        {}\n", line.trim_end()));
+                        line.clear();
+                    }
+                    line.push_str(&piece);
+                }
+                if !line.is_empty() {
+                    s.push_str(&format!("        {}\n", line.trim_end()));
+                }
+                s.push_str(&format!(
+                    "      A minimum over the {} that did report would rise as the fit got\n",
+                    n_expected - missing.len()
+                ));
+                s.push_str("      worse, so no efficiency headline is given.\n");
+            }
+            // No parameter was assessed across chains — there was never an
+            // efficiency line here, and nothing to explain.
+            MinEss::NoParams => {}
         }
         s.push('\n');
 
@@ -2460,6 +2508,74 @@ mod tests {
             prov.text);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#687: when a parameter's chains disagree its pooled ESS is suppressed,
+    /// and the minimum over the parameters that DID report rises as the fit gets
+    /// worse. The block must print no efficiency number at all in that state,
+    /// and must name the parameters that withhold it — the blank is the
+    /// diagnosis. The control leg (a complete map) proves the withholding is
+    /// conditional, not a renderer that lost its numbers.
+    #[test]
+    fn bayesian_block_withholds_efficiency_and_names_params_without_ess() {
+        use std::collections::BTreeMap;
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let mk = |ess: BTreeMap<String, f64>| PgasStageResult {
+            diagnostics: PosteriorDiagnostics {
+                // Both assessed across chains; `tau`'s R̂ is far above the
+                // pooling threshold, so it carries no pooled ESS.
+                rhat_per_param: BTreeMap::from([("a2".to_string(), 1.01), ("tau".to_string(), 2.639)]),
+                ess_per_param: ess,
+                n_samples: 500,
+                thin: 1,
+                wall_time_secs: Some(11.8),
+                n_chains: 4,
+            },
+            posterior_mean: BTreeMap::from([("a2".to_string(), 0.5), ("tau".to_string(), 1.0)]),
+            posterior_q025: BTreeMap::new(),
+            posterior_q975: BTreeMap::new(),
+            acceptance_per_param: BTreeMap::new(),
+        };
+
+        // `tau` reports no ESS → no efficiency headline, and `tau` is named.
+        let gapped = mk(BTreeMap::from([("a2".to_string(), 145.0)]));
+        let out = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&gapped), None);
+        assert!(
+            !out.contains("min-param ESS"),
+            "no min-param ESS may be printed over the reporting subset: {out}"
+        );
+        assert!(
+            !out.contains("ESS/iter = 0.") && !out.contains("ESS/sec  = "),
+            "neither efficiency ratio may carry a number here: {out}"
+        );
+        assert!(out.contains("ESS/iter = —"), "the withheld metric is shown as a dash: {out}");
+        assert!(
+            out.contains("1 of 2 parameters have no pooled ESS"),
+            "the count of parameters withholding the metric is stated: {out}"
+        );
+        assert!(
+            out.contains("\n        tau\n"),
+            "the withholding parameter is named on its own line, not left to the \
+             table's dashes: {out}"
+        );
+
+        // Control: with `tau`'s ESS present the same block reports both ratios —
+        // 145 / 500 raw iters and 145 / 11.8 s off the slower of the two.
+        let complete = mk(BTreeMap::from([("a2".to_string(), 145.0), ("tau".to_string(), 300.0)]));
+        let ok = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&complete), None);
+        assert!(
+            ok.contains("ESS/iter = 0.290  (min-param ESS 145 / 500 raw sampling iters)"),
+            "a complete map still reports ESS/iter off the slowest param: {ok}"
+        );
+        assert!(
+            ok.contains("ESS/sec  = 12.29"),
+            "a complete map still reports ESS/sec: {ok}"
+        );
+        assert!(
+            !ok.contains("not reportable"),
+            "the withholding branch must not fire on a complete map: {ok}"
+        );
     }
 
     #[test]

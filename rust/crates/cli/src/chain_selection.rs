@@ -262,10 +262,18 @@ pub struct SubsetDiagnostics {
     /// over this map is the max R̂ across the *estimated* params (mirrors
     /// `PosteriorDiagnostics::max_rhat`).
     pub rhat_per_param: BTreeMap<String, f64>,
-    /// Per-param ESS over the retained chains — one entry per scored param. A
-    /// param whose R̂ is non-finite (or > 1.1) carries a non-finite ESS, which
-    /// `f64::min` skips, so a `min` over this map is the min ESS across the
-    /// finite-R̂ params (mirrors `PosteriorDiagnostics::min_ess`).
+    /// Per-param ESS over the retained chains — one entry per scored param,
+    /// **including the non-finite ones**. A param whose R̂ is non-finite carries
+    /// a non-finite ESS because it was never assessable across chains (a
+    /// constant column: a fixed param swept in by the all-columns form); a param
+    /// whose R̂ exceeds 1.1 carries a non-finite ESS because pooling across
+    /// disagreeing chains is not meaningful.
+    ///
+    /// Those two are NOT interchangeable, so a bare `min` over this map is
+    /// wrong: skipping the second kind yields a minimum over the converged
+    /// subset, which *rises* as the fit gets worse (gh#687). Reduce it through
+    /// [`PosteriorDiagnostics::min_ess_status`](crate::fit::method_result::PosteriorDiagnostics::min_ess_status),
+    /// which separates them by consulting [`Self::rhat_per_param`].
     pub ess_per_param: BTreeMap<String, f64>,
     /// Retained draw count (rows kept).
     pub n_samples: usize,

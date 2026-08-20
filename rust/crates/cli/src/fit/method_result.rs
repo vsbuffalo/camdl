@@ -15,7 +15,7 @@
 //! would be reasonable insurance — for now, the type definitions are
 //! the authoritative constraint.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -144,10 +144,51 @@ impl PosteriorDiagnostics {
         self.rhat_per_param.values().copied().fold(0.0_f64, f64::max)
     }
 
-    /// Minimum ESS over estimated params — the slowest param bounds the usable
-    /// ESS. `None` when no params have an ESS.
+    /// Minimum pooled ESS over the assessed params — the slowest param bounds
+    /// the usable ESS — **or the reason there isn't one**. See [`MinEss`].
+    ///
+    /// A param is *assessed* when it has a finite R̂, or already has a finite
+    /// ESS. A param with no finite R̂ was never comparable across chains at all
+    /// (fewer than two usable chains, or a column that does not vary — a fixed
+    /// parameter swept in by `fit predict`'s all-columns subset recompute), so
+    /// it has no pooled ESS to suppress and does not withhold the headline. A
+    /// param *with* a finite R̂ has a pooled ESS iff R̂ ≤ 1.1, so its absence
+    /// (or NaN) means exactly one thing: the chains disagree.
+    pub fn min_ess_status(&self) -> MinEss {
+        let assessed: BTreeSet<&str> = self
+            .rhat_per_param
+            .iter()
+            .chain(self.ess_per_param.iter())
+            .filter(|(_, v)| v.is_finite())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if assessed.is_empty() {
+            return MinEss::NoParams;
+        }
+        let n_expected = assessed.len();
+        let mut missing: Vec<String> = Vec::new();
+        let mut min = f64::INFINITY;
+        for name in assessed {
+            match self.ess_per_param.get(name).copied() {
+                Some(v) if v.is_finite() => min = min.min(v),
+                _ => missing.push(name.to_string()),
+            }
+        }
+        if missing.is_empty() {
+            MinEss::Reported(min)
+        } else {
+            MinEss::Unreportable { missing, n_expected }
+        }
+    }
+
+    /// The min-param ESS as a number, `None` when it is not reportable. Thin
+    /// projection of [`min_ess_status`](Self::min_ess_status) for the two
+    /// efficiency ratios; a renderer wanting the *reason* matches on the status.
     pub fn min_ess(&self) -> Option<f64> {
-        self.ess_per_param.values().copied().reduce(f64::min)
+        match self.min_ess_status() {
+            MinEss::Reported(v) => Some(v),
+            MinEss::Unreportable { .. } | MinEss::NoParams => None,
+        }
     }
 
     /// Raw sampling iterations = `n_samples × thin`. Recovers the raw sampling
@@ -175,6 +216,43 @@ impl PosteriorDiagnostics {
         let secs = self.wall_time_secs.filter(|s| *s > 0.0)?;
         Some(self.min_ess()? / secs)
     }
+}
+
+/// The min-over-parameters ESS, or the reason there isn't one.
+///
+/// Pooled (across-chain) ESS is deliberately suppressed for a parameter whose
+/// chains disagree: [`compute_rhat_ess`](crate::fit::runner::compute_rhat_ess)
+/// sets `ess_total` to NaN when R̂ > 1.1, because under multi-modality the sum
+/// of per-chain ESS overstates the effective N for the *joint* posterior
+/// (IM12). Those parameters then reach [`PosteriorDiagnostics`] in one of two
+/// encodings: **absent** on the loaded path (a NaN serializes to JSON `null`,
+/// which `read_f64_map` drops) or **NaN-valued** on the `--exclude-chains`
+/// recompute path (`chain_selection::recompute_subset_diagnostics`).
+///
+/// Either way, a minimum taken over the parameters that *did* report is a
+/// minimum over a subset — and it RISES as a fit gets worse, because the
+/// badly-mixing parameters leave the map and the well-mixing survivors set the
+/// minimum. Measured (gh#687), two runs of one model differing only in particle
+/// count: N=1200 gave max R̂ 2.639, min-param ESS 559, ESS/iter 0.013; N=4800
+/// gave max R̂ 1.455, min-param ESS 73, ESS/iter 0.001. The better fit's
+/// efficiency headline was 13x worse, purely because it converged four more
+/// parameters into the map. So the minimum is reported only when every
+/// parameter that could carry a pooled ESS carries one, and the blank is
+/// rendered with the names of the ones that do not.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MinEss {
+    /// Every assessed parameter reports a pooled ESS; this is the slowest.
+    Reported(f64),
+    /// At least one assessed parameter has no pooled ESS. `missing` names them
+    /// (ascending); `n_expected` is how many parameters were assessed, so a
+    /// renderer can say "k of n".
+    Unreportable {
+        missing: Vec<String>,
+        n_expected: usize,
+    },
+    /// No parameter was assessed across chains at all — nothing to minimize
+    /// over (an empty diagnostics record, or a single-chain fit).
+    NoParams,
 }
 
 /// PGAS-stage result: posterior approximation. Convergence + efficiency
@@ -1281,8 +1359,171 @@ mod tests {
         let d = diag(&[("R0", 850.0), ("sigma", 145.0)], 500, 1, Some(11.8));
         assert!((d.ess_per_sec().unwrap() - 145.0 / 11.8).abs() < 1e-9);
         // Absent or zero wall-time → None (older runs, or a zero-duration stub).
-        assert!(diag(&[("R0", 145.0)], 500, 1, None).ess_per_sec().is_none());
-        assert!(diag(&[("R0", 145.0)], 500, 1, Some(0.0)).ess_per_sec().is_none());
+        // Both maps stay COMPLETE (every param `diag` gives an R̂ also gets an
+        // ESS) so wall-time is the only thing that can produce the `None` — an
+        // incomplete map would withhold the ratio for the other reason (gh#687)
+        // and the assertion would stop testing what it claims.
+        assert!(diag(&[("R0", 850.0), ("sigma", 145.0)], 500, 1, None).ess_per_sec().is_none());
+        assert!(diag(&[("R0", 850.0), ("sigma", 145.0)], 500, 1, Some(0.0)).ess_per_sec().is_none());
+    }
+
+    /// Build diagnostics with an explicit R̂ map, so a test can express "this
+    /// parameter was assessed across chains (finite R̂) but reports no pooled
+    /// ESS" — the state gh#687 is about.
+    fn diag_rhat(
+        rhat: &[(&str, f64)],
+        ess: &[(&str, f64)],
+        n_samples: usize,
+        wall: Option<f64>,
+    ) -> PosteriorDiagnostics {
+        PosteriorDiagnostics {
+            rhat_per_param: rhat.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            ess_per_param: ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            n_samples,
+            thin: 1,
+            wall_time_secs: wall,
+            n_chains: 4,
+        }
+    }
+
+    /// gh#687: a parameter whose chains disagree has its pooled ESS suppressed
+    /// (`compute_rhat_ess` → NaN → serialized as JSON `null` → dropped by
+    /// `read_f64_map`), so it reaches the map as an ABSENT key. The minimum
+    /// must not be taken over the parameters that survived — that is a minimum
+    /// over a subset, reported as if it bounded the whole posterior.
+    #[test]
+    fn min_ess_is_undefined_when_an_assessed_param_reports_no_ess() {
+        // rho was assessed (R̂ = 2.639) and reports no ESS; the other two did.
+        let d = diag_rhat(
+            &[("I0", 1.02), ("k_cases", 1.03), ("rho", 2.639)],
+            &[("I0", 3913.0), ("k_cases", 559.0)],
+            43_000,
+            Some(3600.0),
+        );
+        assert!(
+            d.min_ess().is_none(),
+            "min ESS must be undefined while rho has none, not 559 over the survivors: {:?}",
+            d.min_ess()
+        );
+        assert!(d.ess_per_iter().is_none(), "ESS/iter inherits the undefined minimum");
+        assert!(d.ess_per_sec().is_none(), "ESS/sec inherits the undefined minimum");
+        match d.min_ess_status() {
+            MinEss::Unreportable { missing, n_expected } => {
+                assert_eq!(missing, vec!["rho".to_string()], "the diagnosis names the parameter");
+                assert_eq!(n_expected, 3, "3 parameters were assessed across chains");
+            }
+            other => panic!("expected Unreportable naming rho, got {other:?}"),
+        }
+    }
+
+    /// The `--exclude-chains` recompute (`chain_selection::recompute_subset_
+    /// diagnostics`) keeps the key and stores the suppressed ESS as NaN rather
+    /// than dropping it. `f64::min` returns the non-NaN operand, so the NaN is
+    /// walked past silently — the same inversion by a different encoding.
+    #[test]
+    fn min_ess_is_undefined_when_an_ess_entry_is_nan() {
+        let d = diag_rhat(
+            &[("I0", 1.02), ("rho", 2.639)],
+            &[("I0", 3913.0), ("rho", f64::NAN)],
+            43_000,
+            Some(3600.0),
+        );
+        assert!(
+            d.min_ess().is_none(),
+            "a NaN ESS entry must not be skipped into a subset minimum: {:?}",
+            d.min_ess()
+        );
+        match d.min_ess_status() {
+            MinEss::Unreportable { missing, .. } => assert_eq!(missing, vec!["rho".to_string()]),
+            other => panic!("expected Unreportable naming rho, got {other:?}"),
+        }
+    }
+
+    /// A parameter with no finite R̂ was never assessable across chains at all
+    /// (a column that does not vary — a fixed parameter caught by the
+    /// all-columns subset recompute, or fewer than two usable chains). It has
+    /// no pooled ESS to suppress, so it must NOT make the headline undefined:
+    /// otherwise every `--exclude-chains` summary loses its efficiency line.
+    #[test]
+    fn structurally_unassessed_params_do_not_withhold_the_headline() {
+        // `rho` / `k` are constant columns: R̂ non-finite (dropped by both
+        // producers), ESS NaN. `beta` / `gamma` were assessed and report.
+        let d = diag_rhat(
+            &[("beta", 1.01), ("gamma", 1.02)],
+            &[("beta", 300.0), ("gamma", 145.0), ("k", f64::NAN), ("rho", f64::NAN)],
+            500,
+            Some(11.8),
+        );
+        assert_eq!(
+            d.min_ess_status(),
+            MinEss::Reported(145.0),
+            "the two assessed parameters both report; the constant columns are not a gap"
+        );
+        assert!((d.ess_per_iter().unwrap() - 145.0 / 500.0).abs() < 1e-12);
+    }
+
+    /// THE property this issue exists for. A strictly better fit — every
+    /// parameter that reported before still reports, at least as well, and MORE
+    /// parameters report — must never carry a WORSE efficiency headline.
+    ///
+    /// Measured inversion (gh#687), two runs of one model differing only in
+    /// particle count: N=1200 reported max R̂ 2.639 / min-param ESS 559 /
+    /// ESS/iter 0.013; N=4800 reported max R̂ 1.455 / min-param ESS 73 /
+    /// ESS/iter 0.001 — 13x worse for the better fit, purely because it
+    /// converged more parameters into the map.
+    #[test]
+    fn efficiency_never_inverts_when_more_params_converge() {
+        fn assert_no_inversion(worse: &PosteriorDiagnostics, better: &PosteriorDiagnostics, case: &str) {
+            match (worse.ess_per_iter(), better.ess_per_iter()) {
+                (Some(w), Some(b)) => assert!(
+                    w <= b,
+                    "{case}: the worse fit reports ESS/iter {w} against the better fit's {b}"
+                ),
+                (Some(w), None) => panic!(
+                    "{case}: the worse fit reports ESS/iter {w} while the better reports nothing"
+                ),
+                (None, _) => {}
+            }
+        }
+
+        // (i) The gh#687 pair: `rho` mixes badly at N=1200 and is absent from
+        //     the map; at N=4800 it converges and reports 73.
+        let n1200 = diag_rhat(
+            &[("I0", 1.02), ("k_cases", 1.03), ("rho", 2.639)],
+            &[("I0", 3913.0), ("k_cases", 559.0)],
+            43_000,
+            Some(3600.0),
+        );
+        let n4800 = diag_rhat(
+            &[("I0", 1.02), ("k_cases", 1.03), ("rho", 1.05)],
+            &[("I0", 3913.0), ("k_cases", 559.0), ("rho", 73.0)],
+            43_000,
+            Some(3600.0),
+        );
+        assert!(
+            n4800.ess_per_iter().is_some(),
+            "the fully-reporting fit must still get a number — withholding both \
+             would satisfy the ordering vacuously"
+        );
+        assert_no_inversion(&n1200, &n4800, "more params converged");
+
+        // (ii) Both fully reporting, the second better on the binding parameter
+        //      — the ordering is compared as two numbers, not short-circuited
+        //      by an undefined side.
+        let slower = diag_rhat(
+            &[("I0", 1.02), ("rho", 1.05)],
+            &[("I0", 3913.0), ("rho", 73.0)],
+            43_000,
+            Some(3600.0),
+        );
+        let faster = diag_rhat(
+            &[("I0", 1.02), ("rho", 1.03)],
+            &[("I0", 3913.0), ("rho", 150.0)],
+            43_000,
+            Some(3600.0),
+        );
+        assert!(slower.ess_per_iter().is_some() && faster.ess_per_iter().is_some());
+        assert_no_inversion(&slower, &faster, "same params, better mixing");
     }
 
     #[test]
