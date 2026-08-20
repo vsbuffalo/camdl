@@ -8194,13 +8194,83 @@ let expand_observations ctx =
            falls back to the observation declaration's. *)
         prevalence_projection ~items:idxs name idx_vals
       | ProjDerived (EFuncCall ("incidence", args)) ->
-        (match List.assoc_opt "" args with
-         | Some (EIdent (n, _))    -> incidence_projection n
-         | Some (EIndex (n, idxs, _)) ->
+        (* `incidence(...)` names exactly ONE flow. Reading its argument with
+           `List.assoc_opt ""` returned the FIRST positional argument and threw
+           the rest away, so `incidence(die_community, die_facility)` compiled
+           clean — exit 0, no diagnostic — to `CumulativeFlow "die_community"`
+           and the model fitted a likelihood against half its death stream
+           (gh#669). The mistake is reachable rather than theoretical: the
+           sibling head `prevalence(R, D)` legitimately sums its positional
+           arguments (2026-04-17 state-snapshot-projections proposal,
+           `docs/camdl-run-spec.md` §14.1), so learning the convention on one
+           head and applying it to the other used to buy silence.
+
+           Collect every positional argument, the way the prevalence arm below
+           does, and accept exactly one. Whether several flows should sum is a
+           DSL surface question still open on gh#669; until it is answered the
+           multi-argument form is rejected, never reinterpreted. *)
+        let positional =
+          List.filter_map (fun (k, e) -> if k = "" then Some e else None) args in
+        (* Render an argument the way the modeller wrote it, so the diagnostics
+           below name the flows rather than describing them. *)
+        let arg_src = function
+          | EIdent (n, _) -> n
+          | EIndex (n, idxs, _) ->
+            Printf.sprintf "%s[%s]" n
+              (String.concat ", " (List.map (index_item_to_str env) idxs))
+          | _ -> "<expression>" in
+        (* A named argument carries its own span; anything else falls back to
+           the observation declaration's, as `ProjPrevalence` does. *)
+        let arg_loc = function
+          | EIdent (_, l) | EIndex (_, _, l) -> diag_loc_of_ast_ctx ctx l
+          | _ -> od_loc in
+        (match positional with
+         | [ EIdent (n, _) ]    -> incidence_projection n
+         | [ EIndex (n, idxs, _) ] ->
            let idxs = resolve_index_order ctx ~loc:od_loc
                         ~what:(Printf.sprintf "transition '%s'" n)
                         ~dims:(transition_dims ctx n) idxs in
            Ir.CumulativeFlow (String.concat "_" (n :: List.map (index_item_to_str env) idxs))
+         | [] ->
+           (* Mirrors the prevalence arm's E250. Without it the projection kept
+              the sentinel name `"?"` and surfaced downstream as
+              `E507: unknown transition referenced in observation: '?'`, keyed
+              to the `observations {` header — a diagnostic naming nothing the
+              modeller wrote. *)
+           Diagnostics.error ctx.diags ~code:"E250" ~loc:od_loc
+             ~message:(Printf.sprintf
+               "observation '%s': `incidence(...)` needs a transition to project"
+               od.oname)
+             ~hint:"give it a transition (`incidence(recovery)`), a cell \
+                    (`incidence(recovery[child])`), or an explicit \
+                    cross-stratum sum (`sum(a in age, incidence(recovery[a]))`)"
+             ();
+           Ir.DerivedExpr (Ir.Const 0.0)
+         | (first :: rest) when rest <> [] ->
+           let named = List.map arg_src (first :: rest) in
+           Diagnostics.error ctx.diags ~code:"E203" ~loc:(arg_loc first)
+             ~message:(Printf.sprintf
+               "observation '%s': `incidence(...)` projects exactly one flow, \
+                but %d were given (%s) — only '%s' would be observed, and %s \
+                would go unobserved"
+               od.oname (List.length named) (String.concat ", " named)
+               (arg_src first)
+               (String.concat ", " (List.map (fun e -> "'" ^ arg_src e ^ "'") rest)))
+             ~hint:(Printf.sprintf
+               "summing distinct flows is not part of the language today \
+                (tracked as gh#669). `incidence(%s) + incidence(%s)` is not an \
+                escape either: `incidence(...)` is head-position sugar, not an \
+                expression function, so arithmetic over it is E100. Two forms \
+                work today:\n\
+               \  • if these are strata of ONE transition family, pool them \
+                  explicitly:\n\
+               \      projected = sum(a in <dim>, incidence(<family>[a]))\n\
+               \  • otherwise route both flows through a single junction \
+                  transition and observe that one:\n\
+               \      projected = incidence(<junction>)"
+               (arg_src first) (arg_src (List.hd rest)))
+             ();
+           Ir.DerivedExpr (Ir.Const 0.0)
          | _ -> Ir.CumulativeFlow "?")
       | ProjDerived (EFuncCall ("prevalence", args)) ->
         (match List.filter_map (fun (k, e) -> if k = "" then Some e else None) args with

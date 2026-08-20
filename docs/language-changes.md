@@ -13,6 +13,45 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-20 — `incidence(...)` takes exactly one transition
+
+**What.** A projection head `incidence(...)` names one flow. Giving it several
+positional arguments is now `E203`, and giving it none is now `E250`. Both used
+to compile. `incidence(a, b)` read only `a` and discarded every later argument
+without a diagnostic, so a model observing two death flows fitted a likelihood
+against one of them, at plausible-looking counts (gh#669). `incidence()` kept an
+internal sentinel name and resurfaced downstream as an `E507` about an unknown
+transition named `'?'`, which is nothing you wrote.
+
+The comma form is reachable because the sibling head does sum:
+`prevalence(X1, X2)` desugars to `X1 + X2` and still does. The two heads differ
+because a compartment population is an expression leaf and a flow is not —
+`incidence(...)` is head-position sugar, so `incidence(a) + incidence(b)` is
+`E100` (undeclared function), not an escape.
+
+**Migration.** If the flows are strata of one transition family, pool them with
+the explicit cross-stratum sum. Otherwise route them through a single junction
+transition and observe that one. Whether `incidence(a, b)` should sum is open on
+gh#669.
+
+```camdl
+projected = incidence(die_community, die_facility)   # old: observed only die_community
+
+projected = sum(a in site, incidence(die[a]))        # new, if they are one family
+projected = incidence(die_registered)                # new, via a junction transition
+```
+
+**Diagnostic.**
+
+```text
+error[E203]: observation 'deaths': `incidence(...)` projects exactly one flow,
+             but 2 were given (die_community, die_facility) — only
+             'die_community' would be observed, and 'die_facility' would go
+             unobserved
+error[E250]: observation 'cases': `incidence(...)` needs a transition to project
+
+---
+
 ## 2026-08-20 — `neg_binomial(mean = …)` must be a count, not a rate
 
 **What.** The `mean` of `neg_binomial(...)` — and of the same family reached

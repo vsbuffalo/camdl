@@ -6703,6 +6703,195 @@ let test_incidence_positional_indexed_pins_one_stratum () =
     Alcotest.failf "expected CumulativeFlow infection_child, got CumulativeFlow %s" other
   | _ -> Alcotest.fail "expected CumulativeFlow projection"
 
+(* ── gh#669: `incidence(a, b)` discarded every argument after the first ──────
+   `incidence(...)` names exactly ONE flow, but the argument was read with
+   `List.assoc_opt ""`, which returns the FIRST positional argument. Every
+   later one vanished: `incidence(die_community, die_facility)` compiled clean
+   (exit 0, no diagnostic) to `CumulativeFlow "die_community"` and the model
+   fitted a likelihood against half its death stream.
+
+   The mistake is reachable rather than theoretical because the sibling head
+   `prevalence(R, D)` legitimately sums its positional arguments
+   (docs/camdl-run-spec.md §14.1), so a modeller who learns the convention on
+   one head and applies it to the other used to get silence.
+
+   Summing several flows is a DSL surface question, still open on gh#669.
+   Until it is answered the multi-argument form is rejected, not reinterpreted. *)
+
+let gh669_two_death_flows_src = {|
+    time_unit = 'days
+    compartments { S, I, C, M }
+    parameters { beta : rate  mu_c : rate  mu_f : rate }
+    transitions {
+      infection     : S --> I @ beta * S
+      die_community : I --> M @ mu_c * I
+      die_facility  : C --> M @ mu_f * C
+    }
+    observations {
+      deaths {
+        columns   { time : time, deaths : count }
+        projected = incidence(die_community, die_facility)
+        deaths ~ poisson(rate = projected)
+      }
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 10 'days }
+  |}
+
+let test_gh669_incidence_several_flows_is_rejected () =
+  compile_expect_error_code ~code:"E203"
+    ~contains:"die_facility" gh669_two_death_flows_src
+
+(* The diagnostic has to name the flows that were being dropped — that is the
+   whole content of the mistake. A message that said only "too many arguments"
+   would leave the modeller to work out which of them the compiler had been
+   reading. *)
+let test_gh669_incidence_several_flows_names_every_flow () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh669_names" gh669_two_death_flows_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E203 but compile succeeded"
+  | Error e ->
+    List.iter (fun needle ->
+      Alcotest.(check bool)
+        (Printf.sprintf "diagnostic names %S, got: %s" needle e)
+        true (contains_substring ~needle e))
+      ["die_community"; "die_facility"]
+
+(* And it points at the projection the modeller wrote (line 13 of the source
+   above), not at the enclosing `observations {` header. *)
+let test_gh669_incidence_several_flows_is_located_at_the_projection () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh669_loc" gh669_two_death_flows_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E203 but compile succeeded"
+  | Error e ->
+    Alcotest.(check (option int))
+      (Printf.sprintf "E203 is located at the projection, got: %s" e)
+      (Some 13) (line_of_code ~code:"E203" e)
+
+(* The hint must name a form that compiles TODAY. `incidence(A) + incidence(B)`
+   does not — `incidence(...)` is head-position sugar, not an expression
+   function, so arithmetic over two of them is E100 — and the multi-argument
+   form is what this test file rejects. What is left is the explicit
+   cross-stratum sum, for flows that are strata of one family, and a junction
+   transition otherwise. *)
+let test_gh669_incidence_several_flows_hint_names_a_working_form () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh669_hint" gh669_two_death_flows_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E203 but compile succeeded"
+  | Error e ->
+    Alcotest.(check bool)
+      (Printf.sprintf "hint offers the explicit cross-stratum sum, got: %s" e)
+      true (contains_substring ~needle:"sum(" e)
+
+(* Zero positional arguments used to produce the sentinel name `"?"`, which
+   surfaced downstream as `E507: unknown transition referenced in observation:
+   '?'` located at the `observations {` header — a diagnostic naming nothing
+   the modeller wrote. It mirrors `prevalence()`, which E250s at the head. *)
+let gh669_no_argument_src = {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    transitions {
+      infection : S --> I @ beta * S
+      recovery  : I --> R @ gamma * I
+    }
+    observations {
+      cases {
+        columns   { time : time, cases : count }
+        projected = incidence()
+        cases ~ poisson(rate = projected)
+      }
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 10 'days }
+  |}
+
+let test_gh669_incidence_with_no_argument_is_rejected () =
+  compile_expect_error_code ~code:"E250"
+    ~contains:"needs a transition" gh669_no_argument_src
+
+let test_gh669_no_argument_diagnostic_does_not_name_the_sentinel () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh669_sentinel" gh669_no_argument_src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E250 but compile succeeded"
+  | Error e ->
+    Alcotest.(check bool)
+      (Printf.sprintf "no diagnostic names the '?' sentinel, got: %s" e)
+      false (contains_substring ~needle:"'?'" e)
+
+(* Negative control, the sibling head: several positional arguments to
+   `prevalence(...)` still desugar to their sum. The gh#669 fix tightens
+   `incidence` only; the two heads differ because a compartment population is
+   an expression leaf and a flow is not. *)
+let test_gh669_prevalence_several_compartments_still_sums () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I, R, D }
+    parameters { beta : rate  gamma : rate  mu : rate }
+    transitions {
+      infection : S --> I @ beta * S
+      recovery  : I --> R @ gamma * I
+      death     : I --> D @ mu * I
+    }
+    observations {
+      ever_left_I {
+        columns   { time : time, ever_left_I : count }
+        projected = prevalence(R, D)
+        ever_left_I ~ poisson(rate = projected)
+      }
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"gh669_prev_sum" src with
+  | Error e -> Alcotest.failf "prevalence(R, D) must still sum: %s" e
+  | Ok m ->
+    (match (List.hd m.Ir.observations).Ir.projection with
+     | Ir.DerivedExpr (Ir.PopSum names) ->
+       Alcotest.(check (list string)) "sums both compartments" ["R"; "D"] names
+     | _ -> Alcotest.fail "expected a DerivedExpr PopSum over R and D")
+
+(* Negative control: a bare, un-indexed `incidence(tr)` naming a STRATIFIED
+   family under an INDEXED stream still lowers to `CumulativeFlowSum` over the
+   family's cells. This pins the lowering only. That it assigns the same pooled
+   total to every row of an indexed stream is a separate defect (gh#478 /
+   2026-07-27 stratum provenance) and this test must not be read as endorsing
+   it. *)
+let test_gh669_bare_incidence_on_family_still_flow_sums () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    parameters { beta : rate  rho : probability }
+    transitions { infection[a in age] : S[a] --> I[a] @ beta * S[a] }
+    observations {
+      cases[a in age] {
+        columns   { time : time, age : dim, cases : count }
+        projected = incidence(infection)
+        cases ~ poisson(rate = rho * projected)
+      }
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  match Compiler.compile ~name:"gh669_bare_family" src with
+  | Error e -> Alcotest.failf "bare incidence on a family must still lower: %s" e
+  | Ok m ->
+    (match (List.hd m.Ir.observations).Ir.projection with
+     | Ir.CumulativeFlowSum names ->
+       Alcotest.(check (list string)) "pools the family's cells"
+         ["infection_child"; "infection_adult"] names
+     | _ -> Alcotest.fail "expected CumulativeFlowSum over the age cells")
+
 (* ── Projection dispatch: every argument shape must lower, or diagnose ──────
    `prevalence(...)` / `incidence(...)` dispatch on the SHAPE of their argument
    (`EIdent` / `EIndex`); every other shape fell to a catch-all that emitted the
@@ -12574,6 +12763,14 @@ let () =
       Alcotest.test_case "indexed-stream prevalence still compiles (gh#478)" `Quick test_prevalence_indexed_stream_still_compiles;
       Alcotest.test_case "explicit sum(a in age, incidence(infection[a])) → flow sum" `Quick test_incidence_explicit_sum_compiles_to_flow_sum;
       Alcotest.test_case "incidence(infection[child]) picks one stratum" `Quick test_incidence_positional_indexed_pins_one_stratum;
+      Alcotest.test_case "gh#669: incidence(a, b) is rejected, not silently truncated" `Quick test_gh669_incidence_several_flows_is_rejected;
+      Alcotest.test_case "gh#669: the diagnostic names every flow given" `Quick test_gh669_incidence_several_flows_names_every_flow;
+      Alcotest.test_case "gh#669: the diagnostic points at the projection" `Quick test_gh669_incidence_several_flows_is_located_at_the_projection;
+      Alcotest.test_case "gh#669: the hint names a form that compiles" `Quick test_gh669_incidence_several_flows_hint_names_a_working_form;
+      Alcotest.test_case "gh#669: incidence() with no transition is rejected" `Quick test_gh669_incidence_with_no_argument_is_rejected;
+      Alcotest.test_case "gh#669: no diagnostic names the '?' sentinel" `Quick test_gh669_no_argument_diagnostic_does_not_name_the_sentinel;
+      Alcotest.test_case "gh#669: prevalence(R, D) still sums" `Quick test_gh669_prevalence_several_compartments_still_sums;
+      Alcotest.test_case "gh#669: bare incidence on a family still flow-sums" `Quick test_gh669_bare_incidence_on_family_still_flow_sums;
       Alcotest.test_case "nested sum over 2 dims → flow sum (E280 pooled form)" `Quick test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum;
       Alcotest.test_case "aggregation sum honours its where guard" `Quick test_incidence_sum_honours_where_guard;
       Alcotest.test_case "E263: unknown dimension in a reduction (gh#488)" `Quick test_unknown_dimension_in_sum_is_rejected;

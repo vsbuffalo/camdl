@@ -5087,6 +5087,12 @@ generated forms for a `via erlang` (an `ESum` over the stage axis) or
 `via hyper_erlang` (an Add-chain over branch-stage cells) compartment all take
 this path.
 
+`incidence` does **not** follow that convention: it projects exactly one flow,
+several arguments is `E203`, and none is `E250` (gh#669). A compartment
+population is an expression leaf, so `prevalence` can sum its arguments as an
+ordinary expression; a flow has no expression leaf naming it, so there is
+nothing for `incidence` to sum into.
+
 `current_pop` / `current_pop_sum` resolve to **integer** compartments
 (`multi_stream_obs.rs:253`). A prevalence projection naming a real-valued
 compartment is refused with a message saying so; use a `derived_expr` (which
