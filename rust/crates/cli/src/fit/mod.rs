@@ -294,6 +294,37 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         config.condition_from = Some(config_v2::ConditionFrom::All(raw.trim().to_string()));
     }
 
+    // gh#656: `--emit-every` reaches exactly one thing on this command — the
+    // `[synthetic]` generator, which is the only fit path where the emission
+    // cadence determines data that is then fitted. A fit against REAL data
+    // scores at its data files' own times and never consults `emit_schedule`,
+    // so the flag would silently do nothing; refuse and say why rather than
+    // leaving the user to wonder which cadence they got.
+    //
+    // Deliberately NOT written into `config`: the fit-identity hash serializes
+    // that document, so parking it there would re-key a real-data fit over a
+    // knob that fit cannot see. The override travels as an argument to
+    // generation, and keys the fit the honest way — through the generated
+    // data's bytes, which `FitDigest.data` already hashes.
+    let emit_every = crate::emit_every::EmitEvery::from_cli_specs(&a.emit_every)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+    if emit_every.is_some() && config.synthetic.is_none() {
+        eprintln!(
+            "error: --emit-every sets the cadence at which SYNTHETIC \
+             observations are generated, and {} declares no `[synthetic]` \
+             block.\n  \
+             A fit against real data scores each stream at its own data file's \
+             times — `emit_schedule` never enters the likelihood — so this flag \
+             would change nothing.\n  \
+             Drop the flag, or add a `[synthetic]` block to generate data.",
+            fit_path
+        );
+        std::process::exit(1);
+    }
+
     // gh#514: the same treatment for the chain-start overrides. `--init`,
     // `--posterior`, `--mle`, `--params`, `--survey-path` and `--survey-top-k`
     // all change where the chains begin, and therefore the stored output — but
@@ -714,6 +745,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             config.compiled_ir.as_deref().unwrap_or(&config.model.camdl),
             &fit_dir,
             config.config.dt,
+            emit_every.as_ref(),
         ).unwrap_or_else(|e| {
             eprintln!("error: synthetic-data generation failed: {}", e);
             std::process::exit(1);

@@ -45,11 +45,18 @@ pub struct SyntheticDataset {
 /// observation block in the model sampled through its declared
 /// likelihood at the declared schedule. The resulting TSV has one
 /// column per observation stream (plus `time`).
+///
+/// `emit` is `fit run --emit-every` (gh#656). This is the one path where the
+/// emission cadence determines data that is then FITTED, so it is
+/// identity-bearing here: it changes the generated TSV's bytes, and the fit
+/// hashes each training stream's bytes (`FitDigest.data`), so the fit re-keys.
+/// Correct — the data changed.
 pub fn generate_synthetic_datasets(
     spec: &SyntheticSpec,
     model_path: &str,
     fit_dir: &Path,
     dt: f64,
+    emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<Vec<SyntheticDataset>, String> {
     let data_dir = fit_dir.join("synthetic").join("data");
     std::fs::create_dir_all(&data_dir)
@@ -66,15 +73,27 @@ pub fn generate_synthetic_datasets(
 
     let seeds = spec.sim_seeds.to_vec()
         .map_err(|e| format!("[synthetic] sim_seeds: {}", e))?;
+    // gh#656: an override changes what is GENERATED, but the fit-level container
+    // this writes into is keyed on model + config before any data exists — so
+    // two cadences would otherwise write the same `ds_NN.tsv` path, the second
+    // silently replacing the first's dataset beside a cell fit still keyed on
+    // the first's bytes. Tagging the filename keeps them side by side. Without
+    // the flag the name is exactly `ds_NN.tsv`, as it has always been.
+    let tag = emit
+        .map(|e| {
+            let h = crate::hashing::sha256_hex(e.identity_repr().as_bytes());
+            format!("-emit{}", &h[..8])
+        })
+        .unwrap_or_default();
     let mut out = Vec::with_capacity(seeds.len());
     for (i, &sim_seed) in seeds.iter().enumerate() {
         let idx = i + 1;
-        let path = data_dir.join(format!("{}.tsv", format_dataset_dir(idx)));
+        let path = data_dir.join(format!("{}{tag}.tsv", format_dataset_dir(idx)));
         // Generate the dataset (returns a content hash but we don't persist
         // it — the per-cell content_hash flow lived in the v1 grid summary
         // path, which has been deleted).
         let _ = generate_one_dataset(
-            spec, model_path, sim_seed, &path, dt,
+            spec, model_path, sim_seed, &path, dt, emit,
         )?;
         out.push(SyntheticDataset { idx, path });
     }
@@ -89,6 +108,7 @@ fn generate_one_dataset(
     sim_seed: u64,
     out_path: &Path,
     dt: f64,
+    emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<String, String> {
     // Build a SimRun matching `simulate --obs` semantics — load the
     // model, apply `true_params` as overrides, apply the synthetic
@@ -126,6 +146,13 @@ fn generate_one_dataset(
              require at least one observation stream in the .camdl file".to_string());
     }
 
+    // gh#656: refuse an override that names no stream, names a fit-only stream,
+    // or targets an `at [...]` list — before any data is written, so a
+    // mis-typed label never yields a silently unchanged dataset.
+    if let Some(e) = emit {
+        e.validate(&model.observations)?;
+    }
+
     // Compile observation samplers once per dataset. The RNG stream
     // uses `sim_seed ^ util::SEED_MIX_OBS` so that observation noise
     // is deterministic from `sim_seed` alone — re-running a dataset
@@ -152,7 +179,7 @@ fn generate_one_dataset(
         // beside it was run over — under `[synthetic] scenario = "X"` with a
         // shortened horizon the surplus rows are fabricated, and a recovery
         // study would then fit invented data (gh#561).
-        let times = crate::obs_emit_schedule_times(obs_ir, None, model.simulation.t_end, None)?;
+        let times = crate::obs_emit_schedule_times(obs_ir, None, model.simulation.t_end, emit)?;
         let projected = crate::project_all_obs_times(&traj, obs_ir, &model, &times)?;
 
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
@@ -347,7 +374,7 @@ simulate { from = 0 'days  to = 10 'days }
         };
         let datasets = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(), &fit_dir,
-            1.0,
+            1.0, None,
         ).expect("generation must succeed on minimal SIR");
 
         assert_eq!(datasets.len(), 3);
@@ -381,11 +408,11 @@ simulate { from = 0 'days  to = 10 'days }
         };
         let a = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("run_a"), 1.0,
+            &tmp.path().join("run_a"), 1.0, None,
         ).unwrap();
         let b = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("run_b"), 1.0,
+            &tmp.path().join("run_b"), 1.0, None,
         ).unwrap();
 
         assert_eq!(std::fs::read(&a[0].path).unwrap(),
@@ -407,7 +434,7 @@ simulate { from = 0 'days  to = 10 'days }
         };
         let ds = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("fit"), 1.0,
+            &tmp.path().join("fit"), 1.0, None,
         ).unwrap();
         assert_ne!(std::fs::read(&ds[0].path).unwrap(),
                    std::fs::read(&ds[1].path).unwrap(),

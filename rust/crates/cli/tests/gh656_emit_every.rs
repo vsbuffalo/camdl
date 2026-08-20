@@ -482,3 +482,268 @@ fn the_flag_does_not_move_the_model_identity_a_real_data_fit_keys_on() {
     // Two cadences, two obs artifacts, one trajectory.
     assert_eq!(obs_subtree_names(&after[0]).len(), 2);
 }
+
+// ── `fit run` ────────────────────────────────────────────────────────────────
+
+fn camdlc() -> Option<PathBuf> {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let p = Path::new(&manifest).join("../../../ocaml/_build/default/bin/camdlc.exe");
+    p.exists().then_some(p)
+}
+
+/// Compile the two-stream model to IR and write a truth file for `[synthetic]`.
+fn fit_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+    let camdlc = camdlc().expect("checked by the caller");
+    let src = dir.join("m.camdl");
+    std::fs::write(&src, MODEL).unwrap();
+    let out = Command::new(&camdlc).arg(&src).output().unwrap();
+    assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
+    let ir = dir.join("m.ir.json");
+    std::fs::write(&ir, &out.stdout).unwrap();
+    let truth = dir.join("truth.toml");
+    std::fs::write(&truth, "beta = 0.5\ngamma = 0.1\n").unwrap();
+    (ir, truth)
+}
+
+const FIT_STAGES: &str = r#"
+[estimate]
+beta = { bounds = [0.01, 2.0], start = 0.5 }
+
+[fixed]
+gamma = 0.1
+
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 50
+iterations = 3
+cooling = 0.7
+"#;
+
+fn run_fit(fit_toml: &Path, extra: &[&str]) -> std::process::Output {
+    Command::new(binary())
+        .arg("fit")
+        .arg("run")
+        .arg(fit_toml)
+        .args(extra)
+        .arg("--no-progress")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output()
+        .expect("camdl fit run")
+}
+
+fn fit_bases(out: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(out.join("fits"))
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// On a fit with no `[synthetic]` block the flag can do nothing — a fit against
+/// real data scores at its data file's own times. Refuse, naming why, rather
+/// than accepting a flag whose effect is nil. And nothing may be created: a
+/// completed real-data fit keeps its identity.
+#[test]
+fn fit_run_without_a_synthetic_block_refuses_the_flag_and_re_keys_nothing() {
+    if skip_if_missing_binary() || camdlc().is_none() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (ir, _truth) = fit_fixture(tmp.path());
+    let out_dir = tmp.path().join("out");
+
+    // A real-data fit: two daily streams over the model window. Times start at
+    // t = 1 — `cases` is an incidence stream, and t = 0 has no preceding
+    // accumulation interval.
+    let mut data = String::from("time\tcases\tprevalent\n");
+    for t in 1..=28 {
+        data.push_str(&format!("{t}\t{}\t{}\n", 5 + t % 4, 10 + t % 7));
+    }
+    let data_path = tmp.path().join("obs.tsv");
+    std::fs::write(&data_path, &data).unwrap();
+
+    let fit_toml = tmp.path().join("fit.toml");
+    std::fs::write(
+        &fit_toml,
+        format!(
+            r#"output_dir = "{out}"
+
+[model]
+camdl = "{ir}"
+
+[data.observations]
+cases = "{data}"
+prevalent = "{data}"
+{stages}
+"#,
+            out = out_dir.display(),
+            ir = ir.display(),
+            data = data_path.display(),
+            stages = FIT_STAGES,
+        ),
+    )
+    .unwrap();
+
+    let plain = run_fit(&fit_toml, &[]);
+    assert!(
+        plain.status.success(),
+        "the real-data fit must run:\nstderr={}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    let bases_before = fit_bases(&out_dir);
+    assert_eq!(bases_before.len(), 1, "one fit base: {bases_before:?}");
+
+    let flagged = run_fit(&fit_toml, &["--emit-every", "7"]);
+    let stderr = String::from_utf8_lossy(&flagged.stderr);
+    assert!(
+        !flagged.status.success(),
+        "--emit-every on a real-data fit must refuse, not silently no-op\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("[synthetic]") && stderr.contains("never enters the likelihood"),
+        "the refusal must say why the flag cannot apply, got:\n{stderr}"
+    );
+    assert_eq!(
+        fit_bases(&out_dir),
+        bases_before,
+        "a real-data fit must not be re-keyed — or even touched — by this flag"
+    );
+}
+
+/// `[synthetic]` is the one fit path the cadence reaches: it changes the data
+/// that is then FITTED. So the generated file's times change, and — because the
+/// fit hashes each training stream's bytes — the fit re-keys onto a new base.
+/// That is correct: the data changed.
+#[test]
+fn a_synthetic_fit_re_keys_because_the_generated_data_changed() {
+    if skip_if_missing_binary() || camdlc().is_none() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (ir, truth) = fit_fixture(tmp.path());
+
+    let fit_for = |tag: &str, out_dir: &Path| -> PathBuf {
+        let p = tmp.path().join(format!("fit_{tag}.toml"));
+        std::fs::write(
+            &p,
+            format!(
+                r#"output_dir = "{out}"
+
+[model]
+camdl = "{ir}"
+
+[synthetic]
+true_params = "{truth}"
+sim_seeds = [1]
+{stages}
+"#,
+                out = out_dir.display(),
+                ir = ir.display(),
+                truth = truth.display(),
+                stages = FIT_STAGES,
+            ),
+        )
+        .unwrap();
+        p
+    };
+
+    // Both cadences into ONE store, so "did it re-key?" is "are there two
+    // dataset-generation segments?" rather than a cross-store comparison.
+    let out_dir = tmp.path().join("out");
+    let toml = fit_for("a", &out_dir);
+
+    for every in ["1", "7"] {
+        let out = run_fit(&toml, &["--emit-every", every]);
+        assert!(
+            out.status.success(),
+            "fit run --emit-every {every} must run:\nstderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // The generated datasets: one per cadence, with the cadence's own times.
+    let mut generated: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![out_dir.clone()];
+    while let Some(d) = stack.pop() {
+        if d.file_name().map(|n| n == "data").unwrap_or(false)
+            && d.parent().map(|p| p.ends_with("synthetic")).unwrap_or(false)
+        {
+            for f in std::fs::read_dir(&d).unwrap().flatten() {
+                if f.path().extension().map(|e| e == "tsv").unwrap_or(false) {
+                    generated.push(f.path());
+                }
+            }
+        }
+        if let Ok(es) = std::fs::read_dir(&d) {
+            for e in es.flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                }
+            }
+        }
+    }
+    let mut row_counts: Vec<usize> =
+        generated.iter().map(|p| obs_times(p).len()).collect();
+    row_counts.sort();
+    assert_eq!(
+        row_counts,
+        vec![5, 29],
+        "each cadence must generate its own dataset (weekly = 5 rows, daily = \
+         29) — got {generated:?}"
+    );
+
+    // …and the fit followed the data onto a distinct base. The fit-level
+    // CONTAINER is keyed on model + config before any data exists, so both
+    // cadences share it (which is why the generated files are tagged, above);
+    // the CELL fits fold the generated bytes, so they are two.
+    let cells = cell_fit_bases(&out_dir);
+    assert_eq!(
+        cells.len(),
+        2,
+        "each cadence's fit must key on its own generated data: {cells:?}"
+    );
+}
+
+/// Fit bases holding at least one `fit_stage` leaf — the cell fits, as opposed
+/// to the dataset-generation container (which carries no stage leaf).
+fn cell_fit_bases(out: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(out.join("fits"))
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && has_stage_leaf(p))
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+fn has_stage_leaf(base: &Path) -> bool {
+    let mut stack = vec![base.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
+        ) {
+            if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+                return true;
+            }
+        }
+        if let Ok(es) = std::fs::read_dir(&d) {
+            for e in es.flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                }
+            }
+        }
+    }
+    false
+}

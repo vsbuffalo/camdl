@@ -882,6 +882,18 @@ pub struct FitRunArgs {
     #[arg(long, value_name = "NAME=SPEC")]
     pub sweep: Vec<SweepSpec>,
 
+    /// Override the cadence at which `[synthetic]` data is GENERATED
+    /// (`emit_schedule`), gh#656. Same grammar as `camdl simulate
+    /// --emit-every`: a plain number in the model's own `time_unit` for every
+    /// stream, or `NAME=N` (repeatable) for one stream by its
+    /// observation-block label. This is the only fit path the emission cadence
+    /// reaches — a fit against real data scores at its data files' own times
+    /// and never consults `emit_schedule` — so the flag is REFUSED on a fit
+    /// with no `[synthetic]` block rather than silently doing nothing. It
+    /// changes the generated data, so the fit re-keys.
+    #[arg(long = "emit-every", value_name = "N | NAME=N")]
+    pub emit_every: Vec<String>,
+
     /// Proceed even if prior scout stage failed convergence gate
     #[arg(long)]
     pub allow_nonconverged_scout: bool,
