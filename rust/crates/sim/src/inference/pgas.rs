@@ -2080,6 +2080,18 @@ pub fn csmc_as(
             // lineage, which is exactly the constant-offset shift.
             if ref_ancestor != j_ref {
                 prev_counts[j_ref].copy_from_slice(&prev_counts_for_ancestor[ref_ancestor]);
+                // gh#607: the flow accumulators are part of the extended state
+                // for an Interval (incidence) stream — the observation closing a
+                // bin scores flows summed since the bin opened. The reference
+                // slot now descends from `ref_ancestor`, so the bin it is
+                // halfway through is that ancestor's, not its own. Without this
+                // re-sync the filter weight the slot receives at the next
+                // observation scores a bin no trajectory in the ensemble ever
+                // walked, and the traceback returns a hybrid interval no weight
+                // ever saw. Both snapshots are in the PRE-resample index space
+                // `ref_ancestor` lives in.
+                cum_flows[j_ref].copy_from_slice(&prev_cum_flows_for_ancestor[ref_ancestor]);
+                acc[j_ref].copy_from_slice(&prev_acc_for_ancestor[ref_ancestor]);
             }
             for i in 0..counts[j_ref].len() {
                 counts[j_ref][i] =
