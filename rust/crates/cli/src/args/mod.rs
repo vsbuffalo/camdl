@@ -641,6 +641,18 @@ pub struct SimulateArgs {
     #[arg(long, value_name = "DIR")]
     pub quantities_out: Option<PathBuf>,
 
+    /// Report with the `quantities {}` block in FILE instead of the model's own.
+    /// FILE is an ordinary `.camdl` file containing ONLY a `quantities {}`
+    /// block; it is compiled against this model, and a name the model does not
+    /// declare is an error naming both the name and FILE. It REPLACES the
+    /// model's block — never merges. The tables land in
+    /// `<dir>/quantities-<key>/`, keyed by FILE's contents, so two vocabularies
+    /// over one model produce two tables rather than overwriting each other.
+    /// The trajectory and the run's identity are unaffected (proposal
+    /// 2026-08-19).
+    #[arg(long, value_name = "FILE", requires = "quantities_out")]
+    pub quantities: Option<PathBuf>,
+
     /// Print resolved run plan without simulating
     #[arg(long)]
     pub dry_run: bool,

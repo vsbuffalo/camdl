@@ -12,6 +12,7 @@ mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Bac
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
 mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
 mod quantile; // shared quantile reduction + numeric formatting (proposal 2026-08-11 §3.6)
+mod quantities_file; // `--quantities FILE`: a separable reporting vocabulary + its artifact key
 mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by fit predict + simulate)
 mod obs_anchor;     // gh#616: runtime resolution of a model's observation anchors
 mod run_paths;      // canonical output-path helpers
@@ -662,10 +663,28 @@ fn run_simulate(a: &args::SimulateArgs) {
     // is the resolved IR used for all compilation.
     // `simulate` never reads the state-Jacobian, so compile lean
     // (`needs_state_grad = false`, gh#439 A2 — `--no-state-grad`).
-    let (ir_path_compiled, _ir_tmp) = util::resolve_ir_path(&ir_path, false).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
+    // `--quantities FILE` (proposal 2026-08-19): a reporting vocabulary compiled
+    // in place of the model's own `quantities {}` block. Loaded here, before the
+    // compile, because it is a COMPILER input — the block is resolved against
+    // this model's symbols, so a name the model does not declare is a compile
+    // error naming FILE. Its bytes also key the IR cache and, below, the emitted
+    // tables. `Model::hash_into` excludes quantities, so the trajectory leaves
+    // and their `run_id`s are unaffected.
+    let quantities_override: Option<crate::quantities_file::QuantitiesOverride> =
+        match a.quantities.as_deref().map(crate::quantities_file::QuantitiesOverride::load) {
+            None => None,
+            Some(Ok(q)) => Some(q),
+            Some(Err(e)) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        };
+    let (ir_path_compiled, _ir_tmp) =
+        util::resolve_ir_path_with_quantities(&ir_path, false, quantities_override.as_ref())
+            .unwrap_or_else(|e| {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            });
     // gh#156: `--output-every` rewrites the compiled IR's output schedule once,
     // so BOTH the engine (loads by path) and the CAS identity (`base_model`,
     // also loaded from this path) see the overridden cadence. `_every_tmp`
@@ -1595,6 +1614,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 mode,
                 scenario_axis: !scenario_names.is_empty(),
                 out_dir,
+                vocabulary: quantities_override.clone(),
                 compiled: None,
                 eval: None,
                 by_scenario: indexmap::IndexMap::new(),
@@ -1753,8 +1773,13 @@ fn run_simulate(a: &args::SimulateArgs) {
                 eprintln!("error: cannot create quantities dir {}: {}", q.out_dir.display(), e);
                 std::process::exit(1);
             });
+            // The vocabulary's content digest keys the artifact (proposal
+            // 2026-08-19): the model's own block keeps writing `quantities/`,
+            // a supplied one writes `quantities-<key8>/`. Two vocabularies over
+            // one run are two tables, not one overwritten twice.
+            let sub_dir = crate::quantities_file::quantities_dir_name(q.vocabulary.as_ref());
             for (name, content) in &outs {
-                match crate::fit::predict::write_tsv(&q.out_dir, "quantities", name, content) {
+                match crate::fit::predict::write_tsv(&q.out_dir, &sub_dir, name, content) {
                     Ok(p) => eprintln!("quantities: wrote {}", p.display()),
                     Err(e) => {
                         eprintln!("error: {}", e);
@@ -1762,7 +1787,17 @@ fn run_simulate(a: &args::SimulateArgs) {
                     }
                 }
             }
-            let manifest_path = q.out_dir.join("quantities.json");
+            let manifest = match crate::quantities_file::stamp_provenance(
+                &manifest, q.vocabulary.as_ref())
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let manifest_path = q.out_dir.join(
+                crate::quantities_file::quantities_manifest_name(q.vocabulary.as_ref()));
             std::fs::write(&manifest_path, &manifest).unwrap_or_else(|e| {
                 eprintln!("error: cannot write {}: {}", manifest_path.display(), e);
                 std::process::exit(1);
@@ -1851,8 +1886,14 @@ struct SimQuantities {
     /// design coordinate to report, and inventing one would name a world the
     /// run did not simulate (proposal §2.4).
     scenario_axis: bool,
-    /// The directory to write `quantities/<name>.tsv` + `quantities.json` into.
+    /// The directory to write the quantity TSVs + manifest into.
     out_dir: std::path::PathBuf,
+    /// The supplied reporting vocabulary, `None` when the model's own
+    /// `quantities {}` block is in force. Its content digest names the
+    /// subdirectory and manifest (`quantities-<key8>/`), so two vocabularies
+    /// over one model land at two addresses instead of overwriting each other;
+    /// its path + digest go into the manifest as provenance.
+    vocabulary: Option<crate::quantities_file::QuantitiesOverride>,
     /// Built lazily on the first `merge_cell` from that cell's resolved model —
     /// the compile happens once per run, never per cell.
     compiled: Option<std::sync::Arc<sim::CompiledModel>>,

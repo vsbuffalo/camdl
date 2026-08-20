@@ -317,7 +317,7 @@ pub(crate) fn run_camdlc(camdl_path: &str) -> Result<String, String> {
     // vs lean compile of the same model share the same digest. The lean opt-out
     // (`--no-state-grad`) lives on the run-producing path (`resolve_ir_path`),
     // which knows the method and so can safely drop the Jacobian.
-    run_camdlc_compile(camdl_path, None, true)
+    run_camdlc_compile(camdl_path, None, true, None)
 }
 
 /// Compile `camdl_path` to IR JSON. When `emit_deps` is `Some(path)`, camdlc
@@ -334,10 +334,17 @@ pub(crate) fn run_camdlc(camdl_path: &str) -> Result<String, String> {
 /// mean-field-coupled models). The IR-cache key folds this bit (`ir_cache_key`),
 /// so a lean-compiled entry is never served to a nuts+ode fit (which needs the
 /// Jacobian) and vice-versa.
+///
+/// `quantities` is an optional vocabulary file whose `quantities { }` block
+/// REPLACES the model's own (proposal 2026-08-19). It is passed to camdlc by
+/// path — the compiler reads it as a second compilation unit and resolves it
+/// against this model's symbols — and its bytes are folded into the IR-cache
+/// key, so two vocabularies over one model never share a cached IR.
 pub(crate) fn run_camdlc_compile(
     camdl_path: &str,
     emit_deps: Option<&std::path::Path>,
     needs_state_grad: bool,
+    quantities: Option<&crate::quantities_file::QuantitiesOverride>,
 ) -> Result<String, String> {
     let camdlc = find_camdlc()?;
 
@@ -392,6 +399,12 @@ pub(crate) fn run_camdlc_compile(
     // recompiles rather than serving the wrong variant.
     if !needs_state_grad {
         cmd.arg("--no-state-grad");
+    }
+    // The reporting vocabulary (proposal 2026-08-19). camdlc parses it as a
+    // second compilation unit and splices its `quantities { }` in place of the
+    // model's, so a missing symbol is reported against THIS path.
+    if let Some(q) = quantities {
+        cmd.arg("--quantities").arg(&q.path);
     }
     let output = cmd.output();
 
@@ -523,6 +536,7 @@ pub(crate) fn ir_cache_key(
     fold_disabled: bool,
     licm_enabled: bool,
     state_grad_emitted: bool,
+    quantities: Option<&[u8]>,
 ) -> String {
     let mut buf = Vec::with_capacity(content.len() + camdlc_ver.len() + ir_ver.len() + 8);
     buf.extend_from_slice(content);
@@ -534,6 +548,20 @@ pub(crate) fn ir_cache_key(
     buf.push(fold_disabled as u8);
     buf.push(licm_enabled as u8);
     buf.push(state_grad_emitted as u8);
+    // The `--quantities` vocabulary (proposal 2026-08-19): a compiler input
+    // that changes the emitted IR, so it belongs here for the same reason
+    // `--no-state-grad` does. Without it, two vocabularies over one model
+    // collide on one cache entry and the second run is served the first's
+    // quantities. Length-prefixed, so no vocabulary's bytes can be confused
+    // with the absence of one.
+    match quantities {
+        None => buf.push(0),
+        Some(q) => {
+            buf.push(1);
+            buf.extend_from_slice(&(q.len() as u64).to_le_bytes());
+            buf.extend_from_slice(q);
+        }
+    }
     crate::hashing::sha256_hex(&buf)
 }
 
@@ -935,7 +963,32 @@ mod single_flight {
 /// the fit path passes `true` iff any stage is nuts+ode. The bit is folded into
 /// the cache key, so a lean entry is never reused for a nuts+ode fit.
 pub fn resolve_ir_path(path: &str, needs_state_grad: bool) -> Result<(String, Option<std::path::PathBuf>), String> {
+    resolve_ir_path_with_quantities(path, needs_state_grad, None)
+}
+
+/// [`resolve_ir_path`], with an optional reporting vocabulary spliced in
+/// (proposal 2026-08-19). `quantities` replaces the model's own `quantities { }`
+/// block; it reaches camdlc as `--quantities <path>` and its bytes key the cache
+/// entry, so a second vocabulary over the same model compiles rather than being
+/// served the first one's IR.
+pub fn resolve_ir_path_with_quantities(
+    path: &str,
+    needs_state_grad: bool,
+    quantities: Option<&crate::quantities_file::QuantitiesOverride>,
+) -> Result<(String, Option<std::path::PathBuf>), String> {
     if !path.ends_with(".camdl") {
+        // A vocabulary can only be applied by the compiler, and a compiled
+        // `.ir.json` has no compiler step left. Refuse rather than return IR
+        // carrying the model's own quantities under a flag that says otherwise.
+        if let Some(q) = quantities {
+            return Err(format!(
+                "--quantities {} needs the model SOURCE, but {} is compiled IR; \
+                 a vocabulary is resolved against the model's symbols at compile \
+                 time, so it cannot be applied to an already-compiled model",
+                q.path.display(),
+                path
+            ));
+        }
         return Ok((path.to_string(), None));
     }
 
@@ -950,7 +1003,7 @@ pub fn resolve_ir_path(path: &str, needs_state_grad: bool) -> Result<(String, Op
                 // change the IR camdlc emits, so both belong in the key — else
                 // flipping one serves the stale variant.
                 let fold_disabled = std::env::var_os("CAMDL_NO_CONSTANT_FOLD").is_some();
-                let key = ir_cache_key(&content, crate::version::GIT_HASH, ir::IR_VERSION.trim(), fold_disabled, licm_enabled(), needs_state_grad);
+                let key = ir_cache_key(&content, crate::version::GIT_HASH, ir::IR_VERSION.trim(), fold_disabled, licm_enabled(), needs_state_grad, quantities.map(|q| q.bytes.as_slice()));
                 Some((dir.join(format!("{}.ir.json", key)), key))
             }
             _ => None,
@@ -999,7 +1052,7 @@ pub fn resolve_ir_path(path: &str, needs_state_grad: bool) -> Result<(String, Op
     let deps_tmp = cache_target.as_ref().map(|(_, key)| {
         std::env::temp_dir().join(format!("camdl_deps_{}_{}.json", std::process::id(), key))
     });
-    let json = run_camdlc_compile(path, deps_tmp.as_deref(), needs_state_grad)?;
+    let json = run_camdlc_compile(path, deps_tmp.as_deref(), needs_state_grad, quantities)?;
     let read_deps = match deps_tmp.as_ref() {
         Some(dp) => {
             let built = build_read_deps(dp);
@@ -1919,39 +1972,60 @@ mod ir_cache_key_tests {
     fn key_is_stable_and_distinguishes_content_compiler_and_schema() {
         // Args: (content, camdlc_ver, ir_ver, fold_disabled, licm_enabled,
         //        state_grad_emitted). `a` = full IR (state-Jacobian emitted).
-        let a = ir_cache_key(b"model A", "git1", "0.7", false, false, true);
+        let a = ir_cache_key(b"model A", "git1", "0.7", false, false, true, None);
         // Same inputs → same key (cache hit).
-        assert_eq!(a, ir_cache_key(b"model A", "git1", "0.7", false, false, true));
+        assert_eq!(a, ir_cache_key(b"model A", "git1", "0.7", false, false, true, None));
         // Different model content → different key (an edit recompiles).
-        assert_ne!(a, ir_cache_key(b"model B", "git1", "0.7", false, false, true));
+        assert_ne!(a, ir_cache_key(b"model B", "git1", "0.7", false, false, true, None));
         // Different compiler version → different key (a camdlc upgrade recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "git2", "0.7", false, false, true));
+        assert_ne!(a, ir_cache_key(b"model A", "git2", "0.7", false, false, true, None));
         // Different IR schema version → different key (a format change recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.8", false, false, true));
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.8", false, false, true, None));
         // Flipping CAMDL_NO_CONSTANT_FOLD changes the emitted IR → different key
         // (must not serve the folded IR when the user asked for unfolded).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", true, false, true));
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", true, false, true, None));
         // gh#272: LICM on vs off (default-on; `--no-licm` / `CAMDL_NO_LICM` forces
         // off) changes the emitted IR (hoisted vs inlined) → different key, so the
         // toggle recompiles rather than serving the stale variant through fit.
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, true, true));
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, true, true, None));
         // gh#439 A2: state-Jacobian emitted (full, nuts+ode) vs skipped (lean,
         // `--no-state-grad`) changes the emitted IR bytes → different key, so a
         // lean simulate/mh entry is never served to a nuts+ode fit that needs the
         // Jacobian (and vice-versa).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, false, false));
+        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, false, false, None));
         // The three switches are independent — none masks the others.
         assert_ne!(
-            ir_cache_key(b"model A", "git1", "0.7", true, false, true),
-            ir_cache_key(b"model A", "git1", "0.7", false, true, true)
+            ir_cache_key(b"model A", "git1", "0.7", true, false, true, None),
+            ir_cache_key(b"model A", "git1", "0.7", false, true, true, None)
         );
         assert_ne!(
-            ir_cache_key(b"model A", "git1", "0.7", false, false, false),
-            ir_cache_key(b"model A", "git1", "0.7", false, true, true)
+            ir_cache_key(b"model A", "git1", "0.7", false, false, false, None),
+            ir_cache_key(b"model A", "git1", "0.7", false, true, true, None)
         );
         // 64-hex sha256.
         assert_eq!(a.len(), 64);
         assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// The `--quantities` vocabulary is a compiler input that changes the
+    /// emitted IR, so it must key the cache entry. Without this, two
+    /// vocabularies over one model collide and the second run is served the
+    /// first's quantities — the same class as the fold/LICM/state-grad
+    /// switches above.
+    #[test]
+    fn key_distinguishes_the_quantities_vocabulary() {
+        let none = ir_cache_key(b"model A", "git1", "0.7", false, false, true, None);
+        let va = ir_cache_key(b"model A", "git1", "0.7", false, false, true, Some(b"quantities { a = final(S) }"));
+        let vb = ir_cache_key(b"model A", "git1", "0.7", false, false, true, Some(b"quantities { b = final(R) }"));
+        assert_ne!(none, va, "a vocabulary must not share the model's own key");
+        assert_ne!(va, vb, "two vocabularies must not collide");
+        assert_eq!(
+            va,
+            ir_cache_key(b"model A", "git1", "0.7", false, false, true, Some(b"quantities { a = final(S) }")),
+            "the same vocabulary is the same entry (a cache hit)"
+        );
+        // Length-prefixed, so an empty vocabulary is distinguishable from none.
+        assert_ne!(none, ir_cache_key(b"model A", "git1", "0.7", false, false, true, Some(b"")));
     }
 }
 
