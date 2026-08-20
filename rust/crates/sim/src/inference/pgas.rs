@@ -135,13 +135,17 @@ impl PGASTrajectory {
     /// at the END of each substep, reconstructed so the path is a single
     /// continuous lineage (gh#264).
     ///
-    /// **Why this is needed.** The CSMC-AS traceback can stitch the reference
-    /// trajectory's suffix onto a *different* ancestor lineage's prefix at an
-    /// ancestor-sampling join. Each `SubstepRecord` is internally consistent
-    /// (`counts_after == step_one(counts_before, flows)`), but across a join
-    /// `counts_after[s] != counts_before[s+1]`: the raw `counts_after` sequence
+    /// **What this defends against.** A `SubstepRecord` sequence in which
+    /// `counts_after[s] != counts_before[s+1]` — the raw `counts_after` sequence
     /// jumps (apparent backflow — e.g. `S` *increasing* in an SEIRD), and the
-    /// jump compounds as a fixed offset over the suffix.
+    /// jump compounds as a fixed offset over the suffix. The CSMC-AS traceback
+    /// used to produce exactly that at an ancestor-sampling join, because the
+    /// reference slot recorded its OWN pre-state rather than the pre-state of
+    /// the ancestor it had been assigned. That is fixed at source (gh#607): the
+    /// reference slot is re-anchored on its sampled ancestor, so `csmc_as`
+    /// returns a continuous path and this method is an identity on it (pinned by
+    /// `tests/csmc_splice_continuity.rs`). It stays as the guard on a corrupt
+    /// record from any other producer, and for its negative-count check.
     ///
     /// **Why the net delta is the fix.** The per-substep net delta
     /// `counts_after[s] - counts_before[s]` is exactly the realized state change
@@ -1273,6 +1277,161 @@ pub fn simulate_reference_on_grid(
 // Conditional SMC with Ancestor Sampling (CSMC-AS)
 // ═══════════════════════════════════════════════════════════════════
 
+/// Whether the reference trajectory's remaining substeps survive a CONSTANT
+/// compartment offset — the shape every ancestor-sampling splice takes (gh#607).
+///
+/// **Why a splice is an offset.** Ancestor sampling replaces the reference
+/// particle's PREFIX with candidate `j`'s while keeping the reference's own
+/// noise — its recorded per-transition `flows` and `gammas` — for substeps
+/// `s..T`. camdl's chain-binomial step is `counts_after = counts_before + A·u`
+/// (`A` the stoichiometry, `u` the realized flows), so holding `u` fixed and
+/// starting from `x_{s-1}^j` instead of the reference's own `x'_{s-1}` shifts
+/// EVERY subsequent recorded state by the single constant vector
+///
+/// ```text
+///   Δ_j = x_{s-1}^j − x'_{s-1}.
+/// ```
+///
+/// No dynamics are re-simulated: the recorded per-substep net delta is reused
+/// verbatim, and `Δ_j` rides through it unchanged.
+///
+/// **Why the offset needs screening.** The recorded flows were drawn from the
+/// reference's own states, so at `x'_{t-1} + Δ_j` they can be IMPOSSIBLE — a
+/// source group whose exits now exceed its (shrunken) occupancy is a
+/// `Binom(k; n, p)` with `k > n`, density exactly zero. Selecting such an
+/// ancestor would return a trajectory outside the target's support. This guard
+/// answers "is `Δ` admissible from substep `s` onward?" in `O(n_compartments)`
+/// after one backward pass over the reference, so every candidate can be
+/// screened at every substep.
+///
+/// **What it does NOT certify.** The offset argument assumes the substep's net
+/// state change is independent of the state it starts from. That holds for the
+/// transition draws (the flows are given) but not for `events {}`, scheduled
+/// compartment interventions, or a `balance {}` constraint, all of which
+/// recompute counts from the state. Substeps at or after any scheduled effect
+/// are therefore refused outright, and under `balance` a population-changing
+/// offset is refused; the exact per-substep verification lives in
+/// [`splice_log_ratio`].
+pub struct SpliceGuard {
+    n_comp: usize,
+    /// Flat `[s * n_comp + i]`: the minimum over substeps `t ≥ s` of how far
+    /// compartment `i` may be shifted DOWN before some recorded flow becomes
+    /// impossible or some recorded count goes negative. A splice at `s` with
+    /// offset `Δ` clears this test iff `Δ[i] + headroom[s][i] ≥ 0` for all `i`.
+    headroom: Vec<i64>,
+    /// `true` at `s` when some event or scheduled intervention fires at a
+    /// substep `t ≥ s` — where the constant-offset argument does not hold.
+    effect_at_or_after: Vec<bool>,
+    /// The model rewrites one compartment from a `balance {}` expression every
+    /// substep. A canonical `N − Σ others` balance transports a constant offset
+    /// only when the offset conserves total population.
+    has_balance: bool,
+}
+
+impl SpliceGuard {
+    /// One backward pass over the reference trajectory. `firing`/`fire_steps`/
+    /// `dt` are the same firing plan the producers use, so "does an effect fire
+    /// at substep `t`" is answered by the one authority that fires them.
+    pub fn from_reference(
+        model: &CompiledModel,
+        reference: &PGASTrajectory,
+        fire_steps: &[std::collections::BTreeSet<i64>],
+        dt: f64,
+        firing: EffectFiring<'_>,
+    ) -> Self {
+        let n_comp = model.int_local_to_global.len();
+        let n_substeps = reference.substeps.len();
+
+        let mut effect_at_or_after = vec![false; n_substeps];
+        let mut batch = crate::schedule::EffectBatch::default();
+        for (s, rec) in reference.substeps.iter().enumerate() {
+            fill_producer_batch(
+                model, fire_steps, rec.t0 + rec.dt_substep, dt, s, firing, &mut batch,
+            );
+            effect_at_or_after[s] = !batch.is_empty();
+        }
+        for s in (0..n_substeps.saturating_sub(1)).rev() {
+            effect_at_or_after[s] = effect_at_or_after[s] || effect_at_or_after[s + 1];
+        }
+
+        let mut headroom = vec![0i64; n_substeps * n_comp];
+        let mut running = vec![i64::MAX; n_comp];
+        for s in (0..n_substeps).rev() {
+            let rec = &reference.substeps[s];
+            // A source group's recorded exits must still fit in its occupancy
+            // after the shift: `n_exit ≤ n_src + Δ[src]`.
+            for &(src_local, ref group) in &model.source_groups {
+                let exits: i64 = group.iter().map(|&tr| rec.flows[tr] as i64).sum();
+                running[src_local] =
+                    running[src_local].min(rec.counts_before[src_local] - exits);
+            }
+            // Every recorded count must stay non-negative after the shift.
+            for i in 0..n_comp {
+                running[i] = running[i].min(rec.counts_before[i]).min(rec.counts_after[i]);
+            }
+            headroom[s * n_comp..(s + 1) * n_comp].copy_from_slice(&running);
+        }
+
+        SpliceGuard {
+            n_comp,
+            headroom,
+            effect_at_or_after,
+            has_balance: model.balance.is_some(),
+        }
+    }
+
+    /// Is splicing the reference's suffix from `substep` onto a prefix whose
+    /// end-state differs from the reference's by `offset` admissible?
+    ///
+    /// A zero offset is the reference keeping its own ancestry — always
+    /// admissible, and the fallback whenever nothing else is.
+    pub fn offset_is_admissible(&self, substep: usize, offset: &[i64]) -> bool {
+        if offset.iter().all(|&d| d == 0) {
+            return true;
+        }
+        if self.effect_at_or_after[substep] {
+            return false;
+        }
+        if self.has_balance && offset.iter().sum::<i64>() != 0 {
+            return false;
+        }
+        let base = substep * self.n_comp;
+        (0..self.n_comp).all(|i| offset[i].saturating_add(self.headroom[base + i]) >= 0)
+    }
+
+    /// Give every candidate whose splice is inadmissible a `−∞` weight, so the
+    /// categorical draw cannot select a trajectory outside the target's
+    /// support. `ref_recorded_before` is the reference trajectory's OWN
+    /// recorded pre-state at this substep — the anchor the offset is measured
+    /// against, NOT the reference slot's realized state (which already carries
+    /// the offset of an earlier accepted splice).
+    ///
+    /// `j_ref` is skipped: keeping the current ancestry is the identity move,
+    /// and its offset was screened when it was accepted — over a suffix that
+    /// starts EARLIER, so its headroom bound is the tighter one.
+    pub fn mask_inadmissible(
+        &self,
+        ancestor_log_w: &mut [f64],
+        substep: usize,
+        candidate_states: &[Vec<i64>],
+        ref_recorded_before: &[i64],
+        j_ref: usize,
+    ) {
+        let mut offset = vec![0i64; self.n_comp];
+        for (j, slot) in ancestor_log_w.iter_mut().enumerate() {
+            if j == j_ref || !slot.is_finite() {
+                continue;
+            }
+            for i in 0..self.n_comp {
+                offset[i] = candidate_states[j][i] - ref_recorded_before[i];
+            }
+            if !self.offset_is_admissible(substep, &offset) {
+                *slot = f64::NEG_INFINITY;
+            }
+        }
+    }
+}
+
 /// Fill `ancestor_log_w` with the reference particle's ancestor-sampling weights.
 ///
 /// Lindsten, Jordan & Schön (2014), "Particle Gibbs with Ancestor Sampling",
@@ -1375,6 +1534,12 @@ pub fn csmc_as(
     // gh#53: resolve fire_steps once at the runtime dt for the
     // free-particle propagation step_one calls below.
     let fire_steps = model.resolve_fire_steps(dt, params);
+
+    // gh#607: one backward pass over the reference, so each ancestor-sampling
+    // draw below can refuse — in O(n_compartments) — a splice whose constant
+    // state offset would make one of the reference's own recorded flows
+    // impossible further down the trajectory.
+    let splice_guard = SpliceGuard::from_reference(model, reference, &fire_steps, dt, firing);
 
     // Initialize particles with stochastic initial states for IVP compartments.
     // Each free particle draws S₀ ~ Binom(N₀, s0) independently, giving the
@@ -1585,18 +1750,16 @@ pub fn csmc_as(
             .collect();
         for r in prop_results { r?; }
 
-        // ── 3. Clamp reference particle ──
+        // ── 3. Clamp the reference particle's NOISE ──
+        // The reference contributes its recorded flows and gamma multipliers;
+        // the STATE they act on is settled in step 4, because ancestor sampling
+        // may re-anchor this slot on a different prefix. `prev_counts[j_ref]`
+        // currently holds the reference slot's own realized end-of-(s−1) state
+        // (saved at step 2 — the resample never reshuffles the reference slot).
         let ref_rec = &reference.substeps[s];
-        counts[j_ref].copy_from_slice(&ref_rec.counts_after);
         substep_flows[j_ref].copy_from_slice(&ref_rec.flows);
         substep_gammas[j_ref].clear();
         substep_gammas[j_ref].extend_from_slice(&ref_rec.gammas);
-        // Fix: prev_counts[j_ref] was saved at step 2 from the post-resample
-        // state (which could be any particle's state). But ref_rec.flows were
-        // drawn from ref_rec.counts_before. The history must pair the correct
-        // counts_before with the reference's flows, otherwise the traceback
-        // produces Binom(k; n, p) with k > n.
-        prev_counts[j_ref].copy_from_slice(&ref_rec.counts_before);
 
         // ── 4. Ancestor sampling for reference particle ──
         // Draw the reference's ancestor a^N_s ∝ w̃_j = w_{s-1}^j · f_θ(x'_s |
@@ -1620,6 +1783,16 @@ pub fn csmc_as(
                 j_ref,
             )?;
 
+            // gh#607: refuse a candidate whose splice would shift the reference's
+            // remaining recorded flows onto states that cannot produce them.
+            splice_guard.mask_inadmissible(
+                &mut ancestor_log_w,
+                s,
+                &prev_counts_for_ancestor,
+                &ref_rec.counts_before,
+                j_ref,
+            );
+
             // Sample ancestor from categorical(softmax(ancestor_log_w)).
             // Degenerate case (all -inf): keep reference's own history to
             // maintain internal consistency — the reference's flows at
@@ -1628,6 +1801,23 @@ pub fn csmc_as(
                 Some(j) => j,
                 None => { n_degenerate += 1; j_ref }
             };
+
+            // gh#607: RE-ANCHOR. The reference slot descends from `ref_ancestor`
+            // now, so its pre-state is that ancestor's end-state — otherwise the
+            // traceback stitches a record whose `counts_before` is the
+            // reference's own and the returned trajectory JUMPS in state at the
+            // splice, a jump `complete_data_loglik` never charges. Applying the
+            // reference's recorded NET DELTA to the new pre-state carries the
+            // substep's realized change (transitions, and — where
+            // `SpliceGuard` admitted the splice — nothing else) onto the new
+            // lineage, which is exactly the constant-offset shift.
+            if ref_ancestor != j_ref {
+                prev_counts[j_ref].copy_from_slice(&prev_counts_for_ancestor[ref_ancestor]);
+            }
+            for i in 0..counts[j_ref].len() {
+                counts[j_ref][i] =
+                    prev_counts[j_ref][i] + (ref_rec.counts_after[i] - ref_rec.counts_before[i]);
+            }
 
             // Record ancestor for reference particle
             let mut step_ancestors = substep_ancestors;

@@ -73,12 +73,11 @@ fn model() -> Arc<CompiledModel> {
     Arc::new(CompiledModel::new(m).expect("compile"))
 }
 
-/// IGNORED because it FAILS: this is the red half of gh#607's red→green, kept
-/// in-tree as the oracle the fix must satisfy rather than deleted. Measured on
-/// 2026-08-19 at b77c47df: 4 discontinuities across 8 CSMC sweeps on a plain
-/// SIR. Remove the `#[ignore]` with the fix; do NOT weaken the assertions.
+/// The oracle for gh#607's red→green. Measured red on 2026-08-19 at b77c47df:
+/// 4 discontinuities across 8 CSMC sweeps on a plain SIR. Green once the
+/// ancestor-sampling splice re-anchors the reference slot on the ancestor it
+/// was assigned.
 #[test]
-#[ignore = "gh#607: csmc_as returns state-discontinuous trajectories; red until the AS splice is fixed"]
 fn csmc_returns_a_continuous_path() {
     let compiled = model();
     let params = compiled.default_params.clone();
