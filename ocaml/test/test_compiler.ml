@@ -6738,6 +6738,35 @@ let gh669_two_death_flows_src = {|
     simulate { from = 0 'days  to = 10 'days }
   |}
 
+(* A keyword argument is dropped as silently as a second positional one was.
+   `incidence` accepts NO keyword arguments, so `incidence(recovery, foo = 1)`
+   both looks like it configures something and configures nothing. Same bug
+   class as the multi-argument drop above: the arity check counts positionals,
+   so a keyword rides along unexamined. E251 is the existing
+   unknown-keyword-argument code. *)
+let gh669_incidence_keyword_src = {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    transitions {
+      infection : S --> I @ beta * S
+      recovery  : I --> R @ gamma * I
+    }
+    observations {
+      cases {
+        columns   { time : time, cases : count }
+        projected = incidence(recovery, foo = 1)
+        cases ~ poisson(rate = projected)
+      }
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 10 'days }
+  |}
+
+let test_gh669_incidence_keyword_argument_is_rejected () =
+  compile_expect_error_code ~code:"E251"
+    ~contains:"foo" gh669_incidence_keyword_src
+
 let test_gh669_incidence_several_flows_is_rejected () =
   compile_expect_error_code ~code:"E203"
     ~contains:"die_facility" gh669_two_death_flows_src
@@ -12768,6 +12797,7 @@ let () =
       Alcotest.test_case "gh#669: the diagnostic points at the projection" `Quick test_gh669_incidence_several_flows_is_located_at_the_projection;
       Alcotest.test_case "gh#669: the hint names a form that compiles" `Quick test_gh669_incidence_several_flows_hint_names_a_working_form;
       Alcotest.test_case "gh#669: incidence() with no transition is rejected" `Quick test_gh669_incidence_with_no_argument_is_rejected;
+      Alcotest.test_case "gh#669: incidence() rejects a keyword argument" `Quick test_gh669_incidence_keyword_argument_is_rejected;
       Alcotest.test_case "gh#669: no diagnostic names the '?' sentinel" `Quick test_gh669_no_argument_diagnostic_does_not_name_the_sentinel;
       Alcotest.test_case "gh#669: prevalence(R, D) still sums" `Quick test_gh669_prevalence_several_compartments_still_sums;
       Alcotest.test_case "gh#669: bare incidence on a family still flow-sums" `Quick test_gh669_bare_incidence_on_family_still_flow_sums;

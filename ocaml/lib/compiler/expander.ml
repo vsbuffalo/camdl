@@ -8224,6 +8224,25 @@ let expand_observations ctx =
         let arg_loc = function
           | EIdent (_, l) | EIndex (_, _, l) -> diag_loc_of_ast_ctx ctx l
           | _ -> od_loc in
+        (* `incidence` accepts NO keyword arguments, and the arity check below
+           counts only positionals — so `incidence(recovery, foo = 1)` used to
+           ride through with the keyword unexamined. That is the same bug class
+           as the multi-argument drop this arm was written to close: a construct
+           that looks like it configures something and configures nothing
+           (gh#669). Reject before the arity match, so the diagnostic names the
+           keyword rather than blaming the flow count, and point at the keyword's own
+           argument rather than the `observations {` header. *)
+        List.iter (fun (k, e) ->
+          if k <> "" then
+            Diagnostics.error ctx.diags ~code:"E251" ~loc:(arg_loc e)
+              ~message:(Printf.sprintf
+                "observation '%s': `incidence(...)` has no argument '%s'"
+                od.oname k)
+              ~hint:"`incidence(...)` takes one transition and nothing else — \
+                     a cell is written `incidence(recovery[child])`, and a \
+                     reporting fraction belongs in the likelihood \
+                     (`mean = rho * projected`)"
+              ()) args;
         (match positional with
          | [ EIdent (n, _) ]    -> incidence_projection n
          | [ EIndex (n, idxs, _) ] ->
@@ -8257,17 +8276,24 @@ let expand_observations ctx =
                (arg_src first)
                (String.concat ", " (List.map (fun e -> "'" ^ arg_src e ^ "'") rest)))
              ~hint:(Printf.sprintf
-               "summing distinct flows is not part of the language today \
-                (tracked as gh#669). `incidence(%s) + incidence(%s)` is not an \
-                escape either: `incidence(...)` is head-position sugar, not an \
-                expression function, so arithmetic over it is E100. Two forms \
-                work today:\n\
+               "summing distinct flows is not expressible today (tracked as \
+                gh#669). `incidence(%s) + incidence(%s)` is not an escape \
+                either: a flow is not a value in the expression language — it \
+                is accumulated over the reporting window — so arithmetic over \
+                it is E100.\n\
                \  • if these are strata of ONE transition family, pool them \
-                  explicitly:\n\
+                  explicitly — this is a real solution:\n\
                \      projected = sum(a in <dim>, incidence(<family>[a]))\n\
-               \  • otherwise route both flows through a single junction \
-                  transition and observe that one:\n\
-               \      projected = incidence(<junction>)"
+               \  • if they are DISTINCT flows there is no clean form yet. \
+                  Routing both through a junction transition and observing \
+                  that one works, but it is a workaround: the junction is not \
+                  a state of anybody, its rate constant is invisible to every \
+                  parameter table, and it adds a dwell you did not choose.\n\
+               \  • do NOT write the rates out longhand \
+                  (`projected = <rate expr>`). It compiles, and it is a \
+                  DIFFERENT quantity — evaluated at an instant rather than \
+                  accumulated over the window — so the likelihood is silently \
+                  wrong by roughly the window length."
                (arg_src first) (arg_src (List.hd rest)))
              ();
            Ir.DerivedExpr (Ir.Const 0.0)
