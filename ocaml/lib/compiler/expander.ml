@@ -52,6 +52,12 @@ type context = {
      reverse (most-recent-first) order. Accumulated at the single read
      chokepoint [read_csv_rows]; surfaced by [reads] and powers
      `camdlc --emit-deps`. Never affects the IR. *)
+  file_sha256             : (string, string) Hashtbl.t;
+  (* Memo: resolved path → SHA-256 hex of its bytes, for the forcing
+     provenance recorded in `Ir.time_function.data_source`. An indexed
+     file-backed forcing re-reads the same file once per stratum level (774
+     levels on the national-scale models), and hashing it 774 times would be
+     774 extra full passes over the file for one answer that cannot differ. *)
   mutable source_dir      : string;         (* directory of the source file *)
   mutable filename        : string;         (* source filename for diagnostic locs *)
   mutable expanded_comp_cache : string list;
@@ -159,6 +165,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   contrast_decls       = [];
   diags                = Diagnostics.create ();
   reads                = [];
+  file_sha256          = Hashtbl.create 8;
   source_dir;
   filename;
   expanded_comp_cache  = [];
@@ -839,6 +846,20 @@ let reads ctx =
     if Hashtbl.mem seen resolved then false
     else (Hashtbl.add seen resolved (); true))
     (List.rev ctx.reads)
+
+(* SHA-256 of an already-read data file's bytes, memoised on the resolved path
+   ([ctx.file_sha256]). Returns [None] only if the file cannot be re-opened
+   between the read and this call — a race, not a modelling error, so it
+   degrades to "no provenance recorded" rather than failing the compile:
+   losing the path/hash must never cost a user a model that otherwise
+   compiles. *)
+let file_sha256 ctx ~resolved =
+  match Hashtbl.find_opt ctx.file_sha256 resolved with
+  | Some h -> Some h
+  | None ->
+    (match Sha256.hex_of_file resolved with
+     | h -> Hashtbl.add ctx.file_sha256 resolved h; Some h
+     | exception Sys_error _ -> None)
 
 let reserved_time_names = ["t"; "t_start"; "t_end"; "dt"]
 let reserved_math_names = ["pi"; "e"]                       (* gh#58 *)
@@ -6708,6 +6729,12 @@ let expand_time_function_one ctx fname (env : (string * string) list)
            ~hint:(Printf.sprintf "accepted arguments: %s, lag"
                     (String.concat ", " keys))
            ()) fargs);
+  (* Compile-time provenance for the file-backed `interpolated` form. Set by
+     the one branch below that opens a file; stays [None] for every other
+     forcing kind. It is threaded out through a ref rather than a second
+     return value because the branch that knows the path is four levels inside
+     a match whose only job is to produce a [time_func_kind]. *)
+  let data_source = ref None in
   let kind = match fkind with
     | "sinusoidal" ->
       Ir.Sinusoidal {
@@ -6752,6 +6779,18 @@ let expand_time_function_one ctx fname (env : (string * string) list)
          let (times, values) =
            load_interpolated_for_level ctx path ~key_col ~key_val ~time_col ~value_col
          in
+         (* Record WHICH file these knots came from and WHAT was in it. The
+            values are inlined below, so the runtime never opens the file
+            again — without this the compiled model, and every fit built on
+            it, is silently mute about its most volatile input. [path] is the
+            as-written string (portable, comparable), the hash is over the
+            file's raw bytes. Recorded only when the file was actually
+            opened: a missing file already fired E200 and is not provenance. *)
+         let resolved = resolve_data_path ctx path in
+         (if Sys.file_exists resolved then
+            match file_sha256 ctx ~resolved with
+            | Some sha256 -> data_source := Some { Ir.path; Ir.sha256 }
+            | None        -> ());
          (* An interpolated forcing with no knots silently interpolates to 0
             everywhere (gh#308). For an indexed forcing that almost always means
             the key filter matched nothing — fail here, naming the stratum, so
@@ -7069,7 +7108,8 @@ let expand_time_function_one ctx fname (env : (string * string) list)
      it is the single source of the per-forcing scale (L403 gh#13 needs it to
      tell an actually-rescaled forcing from a same-unit one, and cannot recover
      it from [Ir.time_function], which retains only [dim]). *)
-  ({ Ir.name = fname; Ir.kind; Ir.dim; Ir.lag }, scale)
+  ({ Ir.name = fname; Ir.kind; Ir.dim; Ir.lag;
+     Ir.data_source = !data_source }, scale)
 
 (** Expand ODE equations from the DSL's `ode { X = expr }` blocks into
     IR `ode_equation` records.

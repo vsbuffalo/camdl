@@ -495,7 +495,8 @@ let lag_forcing lag : time_function =
       amplitude = const 1.0; period = const 365.0;
       phase = const 0.0; baseline = const 1.0 };
     dim = (0, 0);   (* 'ratio *)
-    lag }
+    lag;
+    data_source = None }
 
 let test_lag_duration_param_ok () =
   (* lag = tau, tau : duration → dimension T → no E309 *)

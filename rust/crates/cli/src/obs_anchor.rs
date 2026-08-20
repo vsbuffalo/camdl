@@ -453,6 +453,7 @@ mod tests {
             }),
             dim: (0, 0),
             lag: None,
+            data_source: None,
         }
     }
 

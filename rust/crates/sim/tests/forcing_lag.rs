@@ -68,6 +68,7 @@ fn model_with_lag(lag: Option<Expr>, params: Vec<Parameter>) -> Model {
             kind: interpolated_kind(),
             dim: (0, 0), // 'ratio
             lag,
+            data_source: None,
         }],
         tables: vec![],
         interventions: vec![],

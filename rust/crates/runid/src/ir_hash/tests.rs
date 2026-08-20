@@ -98,6 +98,7 @@ fn representative_model() -> Model {
             }),
             dim: (0, 0),
             lag: None,
+            data_source: None,
         }],
         tables: vec![Table {
             name: "contact".into(),
@@ -673,6 +674,82 @@ fn ir_forcing_lag_changes_hash() {
         m_lag.content_hash(),
         m_lag2.content_hash(),
         "two distinct lag values must hash distinctly"
+    );
+}
+
+/// ir/VERSION 0.33: a forcing's `data_source` is provenance, NOT run identity.
+/// Symmetric with `ir_quantities_excluded_from_hash` — it pins that the field
+/// is genuinely absent from `TimeFunction::hash_into`, which a bare struct
+/// field is otherwise invisible about (an absent-vs-present `Option` hashes
+/// the same whether or not the field is folded, so only a test can tell).
+///
+/// Three claims, and the second and third are the ones that would bite:
+///
+/// - recording provenance at all must not re-key a model that already
+///   compiles today;
+/// - **the same file read from a second path is the same model.** A copy, or
+///   a checkout at a different relative prefix, must reuse the cached fit;
+/// - **a byte change that moves no compiled value must not re-key.** A
+///   comment line, a trailing newline, CRLF, a reordered column, rows for a
+///   stratum this model does not read — all change the file's SHA-256 while
+///   leaving the inlined knots identical, i.e. leaving the model identical.
+///
+/// What still re-keys on a changed file is pinned next door by
+/// `ir_forcing_knots_change_hash`.
+#[test]
+fn ir_forcing_data_source_excluded_from_hash() {
+    use ir::time_func::DataSource;
+    let with_source = |path: &str, sha: &str| {
+        let mut m = representative_model();
+        m.time_functions[0].data_source = Some(DataSource {
+            path: path.into(),
+            sha256: sha.into(),
+        });
+        m.content_hash()
+    };
+    let none = representative_model().content_hash();
+    let a = with_source("data/forcing.tsv", "a".repeat(64).as_str());
+    let b = with_source("copies/forcing.tsv", "a".repeat(64).as_str());
+    let c = with_source("data/forcing.tsv", "b".repeat(64).as_str());
+
+    assert_eq!(
+        none, a,
+        "recording a forcing's data_source must NOT change the model hash \
+         (it is compile-time provenance, not identity)"
+    );
+    assert_eq!(
+        a, b,
+        "the SAME file bytes read from a DIFFERENT path are the same model — \
+         a copy or a different checkout prefix must not re-key the fit"
+    );
+    assert_eq!(
+        a, c,
+        "a file byte-change that moves no compiled value must not re-key — \
+         the knots are what identity is built from, and they are unchanged"
+    );
+}
+
+/// The other half of the `data_source` identity argument: a changed forcing
+/// FILE still re-keys, because its knots are inlined into `TimeFuncKind` and
+/// those *are* hashed. This is why folding the content hash in as well would
+/// be redundant — and it is asserted rather than assumed, because the whole
+/// case for excluding `data_source` rests on it.
+#[test]
+fn ir_forcing_knots_change_hash() {
+    let knots = |v: f64| {
+        let mut m = representative_model();
+        m.time_functions[0].kind = TimeFuncKind::Interpolated(ir::time_func::Interpolated {
+            times: vec![Expr::const_(0.0), Expr::const_(30.0)],
+            values: vec![Expr::const_(1.4), Expr::const_(v)],
+            method: ir::time_func::InterpMethod::Linear,
+        });
+        m.content_hash()
+    };
+    assert_ne!(
+        knots(1.3),
+        knots(1.31),
+        "a forcing value read out of the data file is run identity — editing \
+         the file so a knot moves MUST re-key the fit"
     );
 }
 

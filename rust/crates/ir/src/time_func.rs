@@ -72,6 +72,38 @@ pub enum TimeFuncKind {
     PeriodicSpline(PeriodicSpline),    // gh#59
 }
 
+/// Compile-time provenance for a forcing declared `data = "path"`.
+///
+/// The knots are read from the file and *inlined* into [`Interpolated`] by
+/// `camdlc`, so the runtime never opens it — which is exactly why the file has
+/// to be recorded. Without this, a completed fit's provenance is silently
+/// incomplete on the one input most likely to change underneath it: the file
+/// is not named in the IR, not named in the run record, and not recoverable
+/// from the baked values.
+///
+/// # Not run identity
+///
+/// Neither field is folded into `Model::hash_into` (`runid::ir_hash`), and two
+/// tests there pin that:
+///
+/// - `sha256` is redundant with the inlined knots, which *are* hashed. A file
+///   edit that changes a value already re-keys through the values. Folding the
+///   byte hash in as well would *additionally* re-key on edits that change no
+///   compiled value — a comment line, a trailing newline, CRLF, a column
+///   reorder, rows for a stratum this model does not read — invalidating the
+///   cache for a model that is bit-for-bit the same model.
+/// - `path` must not re-key: the same bytes read from a second location (a
+///   copy, a checkout at a different relative prefix) are the same model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataSource {
+    /// The path **as written in the model**, not the resolved absolute one, so
+    /// it stays portable and comparable across machines and checkouts.
+    pub path: String,
+    /// Lowercase 64-char SHA-256 of the file's raw bytes — reproducible with
+    /// `shasum -a 256 <path>` from the model's directory.
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimeFunction {
     pub name: String,
@@ -91,4 +123,11 @@ pub struct TimeFunction {
     /// byte-identical to a forcing declared without `lag`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lag: Option<Expr>,
+    /// The external file this forcing's knots were read from, when it declared
+    /// `data = "path"`. `None` for every other forcing kind (and for the
+    /// `table =` / inline `times`/`values` forms of `interpolated`), which is
+    /// why it appends only when present (the `integrator` idiom): a model with
+    /// no file-backed forcing keeps its exact pre-0.33 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source: Option<DataSource>,
 }

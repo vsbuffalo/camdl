@@ -478,6 +478,83 @@ let no_anchor_wire_is_byte_identical_test () =
   Alcotest.(check bool) "the anchored horizon reads back as NaN" true (Float.is_nan back.t_end);
   Alcotest.(check bool) "and keeps its anchor" true (back.t_end_anchor = anchored.t_end_anchor)
 
+(* ir/VERSION 0.33: forcing data provenance. Same two things to pin as the
+   0.32 anchor, and again the second is the one that matters for the bump.
+
+   1. The codec — a `data = "path"` forcing carries the path as written plus
+      the SHA-256 of the file's bytes, and both survive the round-trip.
+
+   2. **A forcing that is not file-backed must serialise byte-identically to
+      its pre-0.33 form.** `data_source` uses the append-when-present idiom
+      (the `integrator` one, NOT the adjacent null-emitting `dt`/`rng_seed`
+      one) — had it been written the null way, every forcing in the 108
+      committed IR files would have gained a `"data_source": null` and the
+      golden diff for this bump would have been noise hiding the one real
+      change. This is what makes that claim checkable rather than asserted. *)
+
+let data_source_serde_test () =
+  let open Ir in
+  let sha = "908fb5d7e89d7140b1858bd0c83773e14b3b5c40ff397d04c4031e217249f030" in
+  let tf_plain = { name = "clim";
+                   kind = Interpolated { times  = [Const 0.0; Const 30.0];
+                                         values = [Const 1.4; Const 1.3];
+                                         method_ = "linear" };
+                   dim  = (0, 0);
+                   lag  = None;
+                   data_source = None } in
+  let tf_file = { tf_plain with
+                  data_source = Some { path = "data/flu_forcing.tsv"; sha256 = sha } } in
+  (* The pre-0.33 bytes, exactly: no key appears for a forcing with no file. *)
+  Alcotest.(check string) "a non-file-backed forcing is unchanged from 0.32"
+    {|{"name":"clim","kind":{"interpolated":{"times":[{"const":0.0},{"const":30.0}],"values":[{"const":1.4},{"const":1.3}],"method":"linear"}},"dim":[0,0]}|}
+    (Yojson.Safe.to_string (Serde.time_function_to_json tf_plain));
+  (* And the file-backed form APPENDS exactly one key, at the end. *)
+  Alcotest.(check string) "a file-backed forcing appends one key"
+    ({|{"name":"clim","kind":{"interpolated":{"times":[{"const":0.0},{"const":30.0}],"values":[{"const":1.4},{"const":1.3}],"method":"linear"}},"dim":[0,0],|}
+     ^ {|"data_source":{"path":"data/flu_forcing.tsv","sha256":"|} ^ sha ^ {|"}}|})
+    (Yojson.Safe.to_string (Serde.time_function_to_json tf_file));
+  (* Round-trip: both fields come back, and absence stays absence. *)
+  let rt tf = Serde.time_function_of_json (Serde.time_function_to_json tf) in
+  Alcotest.(check bool) "file-backed forcing round-trips" true (rt tf_file = tf_file);
+  Alcotest.(check bool) "no-provenance forcing round-trips" true (rt tf_plain = tf_plain);
+  (* `lag` and `data_source` are independent appends, in that order. *)
+  let tf_both = { tf_file with lag = Some (Const 10.0) } in
+  Alcotest.(check bool) "lag + data_source round-trip together" true (rt tf_both = tf_both);
+  Alcotest.(check bool) "lag is emitted before data_source" true
+    (contains (Yojson.Safe.to_string (Serde.time_function_to_json tf_both))
+       {|"lag":{"const":10.0},"data_source":|})
+
+(* (2): the byte-identity claim, per golden. These goldens declare forcings but
+   no `data = "..."` file, so not one byte of `data_source` may appear anywhere
+   in what they emit — which is what fails if the field is ever switched to the
+   null-emitting idiom.
+
+   The corpus is deliberately NOT [golden_cases]: not one of those eight models
+   declares a forcing at all, so the assertion would hold trivially and the
+   test would pass whatever the serializer did. The first guard below is what
+   keeps that from happening again silently — a model that lost its forcing
+   fails here rather than quietly making the second guard vacuous. *)
+let forcing_bearing_cases =
+  [ "seir_seasonal_patch";       (* two sinusoidals *)
+    "seir_vaccine_seasonal";     (* one sinusoidal *)
+    "seir_spatial_5_inference";  (* a periodic *)
+    "sirv_anchored_calendar";    (* a periodic, under a calendar origin *)
+  ]
+
+let no_data_source_bytes_unchanged_test name () =
+  let m = match Serde.model_of_string (read_golden name) with
+    | Ok m -> m
+    | Error e -> Alcotest.failf "deserialise failed for %s: %s" name e
+  in
+  Alcotest.(check bool)
+    (name ^ ": carries a forcing (else this test asserts nothing)") true
+    (m.time_functions <> []);
+  Alcotest.(check bool) (name ^ ": golden declares no file-backed forcing") true
+    (List.for_all (fun (tf : Ir.time_function) -> tf.data_source = None)
+       m.time_functions);
+  Alcotest.(check bool) (name ^ ": no data_source key is emitted") true
+    (not (contains (Serde.model_to_string m) "data_source"))
+
 let () =
   let tests =
     List.map (fun name ->
@@ -496,11 +573,16 @@ let () =
   in
   let byte_identity_tests =
     byte_identity_tests
+    @ List.map (fun name ->
+        Alcotest.test_case (name ^ " (no data_source)") `Quick
+          (no_data_source_bytes_unchanged_test name)) forcing_bearing_cases
     @ [ Alcotest.test_case "sir_basic simulation + preset wire" `Quick
           no_anchor_wire_is_byte_identical_test ]
   in
   let invariant_tests = [
     Alcotest.test_case "anchor serde (round-trip + pinned wire)" `Quick anchor_serde_test;
+    Alcotest.test_case "forcing data_source serde (round-trip + pinned wire)" `Quick
+      data_source_serde_test;
     Alcotest.test_case "prior_spec single slot" `Quick prior_spec_single_slot_test;
     Alcotest.test_case "integrator serde (rk45 round-trip + strict)" `Quick integrator_serde_test;
     Alcotest.test_case "expr serde (PerEvalRef round-trips)" `Quick expr_serde_test;

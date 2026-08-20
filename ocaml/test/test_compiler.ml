@@ -4087,7 +4087,7 @@ let test_fourier_autodiff_emitted () =
      cos term, so a nonzero entry must be emitted. *)
   let f : Ir.fourier =
     { period = Ir.Const 365.0; harmonics = [ (Ir.Param "a1", Ir.Const 0.0) ] } in
-  let tf : Ir.time_function = { name = "f"; kind = Ir.Fourier f; dim = (0, 0); lag = None } in
+  let tf : Ir.time_function = { name = "f"; kind = Ir.Fourier f; dim = (0, 0); lag = None; data_source = None } in
   let rate = Ir.TimeFunc "f" in
   match Autodiff.differentiate_rate rate [ "a1" ] [ tf ] [] with
   | Error msg -> Alcotest.failf "Fourier differentiate errored: %s" msg
@@ -4106,7 +4106,7 @@ let test_periodic_forcing_coeff_omitted () =
      a hard compile error (that would break forward sim / IF2 / PF too). *)
   let p : Ir.periodic =
     { period = Ir.Const 7.0; values = [ Ir.Param "v0"; Ir.Const 1.0 ] } in
-  let tf : Ir.time_function = { name = "g"; kind = Ir.Periodic p; dim = (0, 0); lag = None } in
+  let tf : Ir.time_function = { name = "g"; kind = Ir.Periodic p; dim = (0, 0); lag = None; data_source = None } in
   let rate = Ir.TimeFunc "g" in
   match Autodiff.differentiate_rate rate [ "v0" ] [ tf ] [] with
   | Error msg -> Alcotest.failf
@@ -4128,7 +4128,7 @@ let test_structural_forcing_coeff_errors () =
   let i : Ir.interpolated =
     { times = [ Ir.Const 0.0; Ir.Const 1.0 ];
       values = [ Ir.Param "knot0"; Ir.Const 1.0 ]; method_ = "linear" } in
-  let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0); lag = None } in
+  let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0); lag = None; data_source = None } in
   let rate = Ir.TimeFunc "g" in
   match Autodiff.differentiate_rate rate [ "knot0" ] [ tf ] [] with
   | Ok _ -> Alcotest.failf "expected a structural compile error for a param in an interpolation knot"
@@ -4230,7 +4230,7 @@ let test_obs_grad_structural_forcing_is_coded_refusal () =
   let i : Ir.interpolated =
     { times = [ Ir.Const 0.0; Ir.Const 1.0 ];
       values = [ Ir.Param "knot0"; Ir.Const 1.0 ]; method_ = "linear" } in
-  let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0); lag = None } in
+  let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0); lag = None; data_source = None } in
   let lik = Ir.Poisson { rate = { Ir.expr = Ir.TimeFunc "g"; Ir.grad = []; Ir.proj_grad = None } } in
   match Autodiff.differentiate_likelihood (Ir.CumulativeFlow "inc") lik [ "knot0" ] [ tf ] [] with
   | Ir.Poisson pl ->

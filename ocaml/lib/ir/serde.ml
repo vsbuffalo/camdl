@@ -557,15 +557,27 @@ let time_func_kind_of_json j =
   )
   | _ -> fail "time_func_kind must be a single-key object"
 
+let data_source_to_json (d : data_source) : Yojson.Safe.t =
+  obj [ ("path", str d.path); ("sha256", str d.sha256) ]
+
+let data_source_of_json j =
+  { path   = as_string (member "path" j);
+    sha256 = as_string (member "sha256" j) }
+
 let time_function_to_json (tf : time_function) : Yojson.Safe.t =
   let (p, t) = tf.dim in
   (* gh#314: [lag] is omitted when [None] so a forcing without a lag
-     serializes byte-identically to the pre-gh#314 wire format. *)
+     serializes byte-identically to the pre-gh#314 wire format. [data_source]
+     follows the same append-when-present idiom (the `integrator` one, NOT the
+     adjacent null-emitting `dt`/`rng_seed` one) — every forcing that is not
+     file-backed, which is nearly all of them, keeps its exact pre-0.33
+     bytes. *)
   obj (
     [ ("name", str tf.name);
       ("kind", time_func_kind_to_json tf.kind);
       ("dim",  arr [int p; int t]); ]
-    @ opt_field "lag" expr_to_json tf.lag)
+    @ opt_field "lag"         expr_to_json        tf.lag
+    @ opt_field "data_source" data_source_to_json tf.data_source)
 
 let time_function_of_json j =
   { name = as_string (member "name" j);
@@ -575,7 +587,10 @@ let time_function_of_json j =
             | _ -> fail "time_function.dim must be a two-element [P, T] array");
     lag  = (match member_opt "lag" j with
             | Some `Null | None -> None
-            | Some v            -> Some (expr_of_json v)); }
+            | Some v            -> Some (expr_of_json v));
+    data_source = (match member_opt "data_source" j with
+                   | Some `Null | None -> None
+                   | Some v            -> Some (data_source_of_json v)); }
 
 (* ── Table ───────────────────────────────────────────────────────────────── *)
 

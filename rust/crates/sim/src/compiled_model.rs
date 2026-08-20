@@ -2167,6 +2167,7 @@ mod tests {
             }),
             dim: (0, 0),
             lag: None,
+            data_source: None,
         });
         let err = match CompiledModel::new(m) { Err(e) => e, Ok(_) => panic!("an anchored breakpoint must be refused") };
         let msg = err.to_string();
@@ -2226,6 +2227,7 @@ mod tests {
             }),
             dim: (1, 0),
             lag: None,
+            data_source: None,
         });
         let msg = match CompiledModel::new(model) {
             Ok(_) => panic!("mismatched interpolation knots must be rejected"),
@@ -2256,6 +2258,7 @@ mod tests {
             }),
             dim: (1, 0),
             lag: None,
+            data_source: None,
         });
         let msg = match CompiledModel::new(model) {
             Ok(_) => panic!("non-monotone interpolation knots must be rejected"),
@@ -2284,6 +2287,7 @@ mod tests {
             }),
             dim: (1, 0),
             lag: None,
+            data_source: None,
         });
         let msg = match CompiledModel::new(model) {
             Ok(_) => panic!("empty interpolation knots must be rejected"),

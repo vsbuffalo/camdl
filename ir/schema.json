@@ -445,6 +445,27 @@
         "lag": {
           "$ref": "#/definitions/expr",
           "description": "Optional gh#314 evaluation-time shift: the forcing is evaluated at t − lag instead of t. A duration expression in the model's time_unit (a literal like 10 'days, or a parameter reference). Absent ⇒ no shift (identity)."
+        },
+        "data_source": {
+          "$ref": "#/definitions/data_source",
+          "description": "Compile-time provenance for a forcing declared `data = \"path\"`. Absent for every other forcing (and for the `table =` / inline `times`/`values` forms of `interpolated`) — it appends only when present, so a model with no file-backed forcing is byte-identical to its pre-0.33 form."
+        }
+      }
+    },
+
+    "data_source": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "description": "The external data file a forcing's knots were read from at compile time. The knots are inlined into the IR, so the runtime never opens this file — the record exists so a completed run can name the input it compiled against. NOT run identity: the file's CONTENT already re-keys through the inlined values, so folding the hash in as well would re-key on byte edits that change no value, and a path change must not re-key at all.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The path AS WRITTEN in the model (relative to the .camdl file), not the resolved absolute one, so it stays portable and comparable across machines and checkouts."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 of the file's raw bytes — reproducible with `shasum -a 256 <path>` from the model's directory."
         }
       }
     },

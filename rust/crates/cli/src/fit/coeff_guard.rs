@@ -550,6 +550,7 @@ mod tests {
             }),
             dim: (0, 0),
             lag: None,
+            data_source: None,
         }
     }
 
@@ -643,6 +644,7 @@ mod tests {
             }),
             dim: (0, 0),
             lag: None,
+            data_source: None,
         }];
         ic_referencing(&mut m, time_func_ref("weekly"));
         let estimated: HashSet<String> = ["wpeak".to_string()].into_iter().collect();

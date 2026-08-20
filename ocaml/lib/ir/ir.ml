@@ -251,6 +251,37 @@ type time_func_kind =
   | Fourier       of fourier            (* gh#59 *)
   | PeriodicSpline of periodic_spline   (* gh#59 *)
 
+(* Compile-time provenance for a forcing declared `data = "path"`. The knots
+   are read from the file and INLINED into [Interpolated] at compile time, so
+   the runtime never opens it — which is exactly why the file has to be
+   recorded here. Without this, a completed fit's provenance is silently
+   incomplete on the one input most likely to change underneath it: the file
+   is not named in the IR, not named in the run record, and not recoverable
+   from the baked values.
+
+   NEITHER FIELD IS RUN IDENTITY (see `Model::hash_into` in
+   `rust/crates/runid/src/ir_hash.rs`, and the two exclusion tests beside it):
+
+   - [sha256] is redundant with the inlined knots, which ARE hashed. A file
+     edit that changes a value already re-keys through the values. Folding
+     the byte hash in as well would additionally re-key on edits that change
+     no compiled value — a comment line, a trailing newline, CRLF, a column
+     reorder, rows for a stratum this model does not read — i.e. it would
+     invalidate the cache for a model that is bit-for-bit the same model.
+   - [path] must not re-key: the SAME bytes read from a second location (a
+     copy, a checkout at a different relative prefix) are the same model.
+
+   Both are therefore provenance in the `#[run_input(provenance)]` sense:
+   recorded and displayed, never hashed. *)
+type data_source = {
+  (* The path AS WRITTEN in the model, not the resolved absolute one, so it
+     stays portable and comparable across machines and checkouts. *)
+  path:   string;
+  (* Lowercase 64-char SHA-256 of the file's raw bytes — reproducible with
+     `shasum -a 256 <path>` from the model's directory. *)
+  sha256: string;
+}
+
 type time_function = {
   name: string;
   kind: time_func_kind;
@@ -267,6 +298,11 @@ type time_function = {
      lag-as-parameter case is a primary motivation). [None] ⇒ no shift,
      byte-identical to a forcing declared without `lag`. *)
   lag:  expr option;
+  (* The external file this forcing's knots were read from, when it declared
+     `data = "path"`. [None] for every other forcing kind (and for the
+     `table =` / inline `times`/`values` forms of `interpolated`), which is
+     why it serializes only when present. *)
+  data_source: data_source option;
 }
 
 (* ── Tables ──────────────────────────────────────────────────────────────────── *)

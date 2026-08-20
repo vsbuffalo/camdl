@@ -773,6 +773,26 @@ impl ContentAddressed for TimeFunction {
         // The Option impl tags presence, so `None` (no lag) stays distinct from
         // any `Some(lag)`.
         self.lag.hash_into(h);
+        // `data_source` (ir/VERSION 0.33) is DELIBERATELY NOT FOLDED. It is the
+        // compile-time provenance of a `data = "path"` forcing — the path as
+        // written plus the SHA-256 of the file's bytes — and neither can change
+        // a trajectory, because `kind` already carries the knots that were read
+        // out of that file and IS hashed, two lines up.
+        //
+        // The content hash is therefore redundant with what is already hashed:
+        // a file edit that moves a compiled value re-keys through the value.
+        // Folding the byte hash in as well would ADD re-keys that no value
+        // justifies — a comment line, a trailing newline, CRLF, a reordered
+        // column, rows for a stratum this model does not read — invalidating
+        // the cache for a model that is bit-for-bit the same model. And the
+        // path must not re-key at all: the same bytes read from a copy, or from
+        // a checkout at a different relative prefix, are the same model.
+        //
+        // Pinned by `ir_forcing_data_source_excluded_from_hash` (both fields
+        // are inert) and `ir_forcing_knots_change_hash` (the file's CONTENT
+        // still re-keys, via the values) in ir_hash/tests.rs. Adding the field
+        // here without a version bump would silently re-key every file-backed
+        // forcing's fits.
     }
 }
 
