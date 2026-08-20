@@ -442,6 +442,119 @@ with the source can reproduce the result bit-for-bit.
 
 ---
 
+## Project layout, the run store, and tooling
+
+### The layout the tools expect
+
+| Path        | What                                                                                          |
+| ----------- | --------------------------------------------------------------------------------------------- |
+| `models/`   | `.camdl` model files and their `fit.toml` configs, side by side                               |
+| `data/`     | committed input streams plus the lock/manifest pinning their provenance                       |
+| `results/`  | the content-addressed run store — `results/fits/`, `results/sims/`, `results/pfilters/`, …    |
+| `scripts/`  | everything the Makefile or workflow calls; no logic inline in a rule                          |
+| `workflow/` | the fit DAG (`*.smk`), once the project has enough fan-out to need one                        |
+| `tests/`    | offline contract tests — do the data's columns match what the model's `observations` declare? |
+| `notes/`    | dated working notes                                                                           |
+| `Makefile`  | the named entry points, including the networked/offline split                                 |
+
+`results/` is the one that is not a matter of taste. Every run is
+content-addressed on the tuple above, so keeping them all under one root is what
+makes a run **addressable**: `camdl list`, `camdl show <run>` and
+`camdl fit table results/fits/` work off it, an identical re-run is a cache hit
+rather than a recompute, and a refit on updated data forks a new leaf beside the
+old one instead of overwriting it. Scatter fits into per-experiment directories
+and all three are lost. A leaf belongs to camdl — never write a derived summary
+into one.
+
+### camdl 'scope — read a fit store in a browser
+
+**camdl 'scope** is a browser-based viewer and live monitor for a fit store. Per
+fit it shows a doc-labelled forest of marginal posteriors (median [90%], R̂ /
+ESS), a pair/corner plot with a prior overlay, posterior-predictive ribbons
+against the observed series, generated quantities, per-parameter and
+log-posterior traces, camdl's own convergence verdict, and the
+syntax-highlighted `.camdl` + `fit.toml`. Across fits it runs the authoritative
+`camdl compare` on any that carry a `prequential.json` (elpd, Δelpd ± paired SE,
+CRPS, PIT). It is read-only on the store, auto-discovers concurrent runs, and
+refreshes a run that is still sampling — so diagnostics are readable _during_ a
+long fit rather than only after it.
+
+It is a separate package; install its `camdl-watch` command with `uv`. The
+install builds the browser UI from source, so Node.js (for `npm`) must be on the
+PATH alongside `uv` — without it the install fails rather than leaving a server
+with no UI:
+
+```sh
+uv tool install git+https://github.com/vsbuffalo/camdl-scope
+# or, without installing:
+uvx --from git+https://github.com/vsbuffalo/camdl-scope camdl-watch --port 8800
+```
+
+Run it from the project root. `--store` defaults to `results/fits` under the
+current directory — which is precisely why the layout above needs no
+configuration:
+
+```sh
+camdl-watch --port 8800                  # http://127.0.0.1:8800
+camdl-watch --port 8800 --host 0.0.0.0   # reachable from a phone over the LAN
+```
+
+Hand the human the URL and let them read the plots. Agent vision on scatter and
+ribbon geometry is unreliable — the same caution as `camdl survey` above.
+
+### Reading camdl outputs correctly
+
+This matters more than any tool recommendation: the store is only as useful as
+your ability to read what it wrote.
+
+**Chain ids are 1-based everywhere you type them and 0-based inside
+`draws.tsv`.** The `chain_N/` directories, the per-chain table in
+`camdl fit summary`, and `--exclude-chains 3,5` are all **1-based**. The `chain`
+column _inside_ `draws.tsv` is **0-based**, because it is the join key to
+`trajectories.tsv`. User chain `k` is the rows whose `chain` field is `k - 1`.
+Get this wrong and you drop the wrong chain or mislabel a trace, and **nothing
+errors** — the numbers quietly describe a different chain. (Spec:
+`docs/camdl-run-spec.md` §10.3; gh#666 is open on surfacing it to someone who
+only ever opens the TSV.)
+
+**Read `run.json`'s `output_schema` rather than reverse-engineering a header.**
+Each leaf's `run.json` declares, for every tabular file that leaf wrote, which
+column is the time or iteration axis, which are grouping keys (`chain`,
+`replicate`, `scenario`), which are model quantities, and which are sampler
+diagnostics. It is built by classifying each file's **actual** header, so it
+cannot disagree with the file it describes. Consume the _role_, never the name —
+the iteration column is spelled `sweep`, `step`, `draw` or `iteration` depending
+on the method, and `time` (physical) and `iteration` (a sampler index) are
+deliberately distinct roles. Not every producer declares one: `sim` leaves and
+completed fit stages do; `pfilter`, `survey`, `profile` and the `fit predict`
+outputs do not.
+
+### Workflow tooling — the principle, not a mandated tool
+
+**Every artifact is a named, re-runnable target.** Nothing that feeds a model, a
+figure, or a fit is generated ad hoc from a shell one-liner or a notebook cell;
+a file under a build directory with no rule that regenerates it is a bug, not
+furniture. Two reasons specific to camdl, beyond ordinary hygiene:
+
+- **The run store is already content-addressed caching, so a workflow that
+  re-runs unconditionally fights it.** Declare the artifact you want and let
+  camdl's hashing decide whether sampling has to happen at all. A rule that
+  shells out into a fresh output directory every time throws the cache away and
+  hides the fact that an input changed.
+- **Target the thing you actually want to look at.** Asking the workflow for the
+  fit alone stops at the end of sampling with no posterior predictive written,
+  so the viewer has no ribbons; targeting the predictive runs
+  `fit run → fit predict` as one chain.
+
+`make` for light pipelines and for the networked/offline seam — a networked
+target refreshes a **committed** reference copy of the data, every other target
+is offline and deterministic, so a fit can never silently acquire different
+inputs. Snakemake once the DAG, or the fan-out over models × configs, warrants
+it. A real project uses both, split exactly that way: `make` for the data seam,
+Snakemake for the fit DAG.
+
+---
+
 ## Where the docs live
 
 **Run `camdl docs`.** The guides are embedded in the binary — offline, and
