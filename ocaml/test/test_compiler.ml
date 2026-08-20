@@ -6313,6 +6313,94 @@ let test_incidence_explicit_sum_compiles_to_flow_sum () =
      | _ -> Alcotest.fail "expected CumulativeFlowSum projection")
   | _ -> Alcotest.fail "expected exactly one observation block"
 
+(* ── B1a: adding incidence terms into one column ──────────────────────────
+   Proposal 2026-07-31-aggregation-semantics, the unit-weighted slice of B1.
+   Two flows reported as one observed column — a national notification series
+   that counts two routes, say. Unit-weighted addition needs no new IR node:
+   the concatenated flow list lowers to the `CumulativeFlowSum` that already
+   exists, so this carries no `ir/VERSION` bump and moves no golden.
+
+   Asserted on the lowered projection, not on "it compiled": a walker that
+   returned only the first term, or that silently dropped one, still compiles. *)
+let test_incidence_addition_lowers_to_flow_sum () =
+  let src = stratified_age_seir_with_obs {|
+    observations {
+      weekly_cases {
+        columns       { time : time, weekly_cases : count }
+        projected     = incidence(infection[child]) + incidence(infection[adult])
+        emit_schedule = every 7 'days
+        weekly_cases ~ neg_binomial(mean = projected, r = k)
+      }
+    }
+  |} in
+  let m = compile_expect_ok src in
+  match (List.hd m.observations).projection with
+  | Ir.CumulativeFlowSum names ->
+    Alcotest.(check (list string))
+      "both addends, in source order"
+      ["infection_child"; "infection_adult"] names
+  | Ir.CumulativeFlow name ->
+    Alcotest.failf "expected CumulativeFlowSum over both addends; \
+                    got CumulativeFlow(%s) — a term was dropped" name
+  | _ -> Alcotest.fail "expected CumulativeFlowSum projection"
+
+(* Addition composes with the family sum: `sum(...) + incidence(...)` flattens
+   into ONE flow list rather than nesting, because the two spellings are the
+   same object — a set of flows accumulated over the stream's interval. *)
+let test_incidence_addition_flattens_with_family_sum () =
+  let src = stratified_age_seir_with_obs {|
+    observations {
+      weekly_cases {
+        columns       { time : time, weekly_cases : count }
+        projected     = sum(a in age, incidence(infection[a])) + incidence(recovery[child])
+        emit_schedule = every 7 'days
+        weekly_cases ~ neg_binomial(mean = projected, r = k)
+      }
+    }
+  |} in
+  let m = compile_expect_ok src in
+  match (List.hd m.observations).projection with
+  | Ir.CumulativeFlowSum names ->
+    Alcotest.(check (list string))
+      "family sum flattened, then the extra flow appended"
+      ["infection_child"; "infection_adult"; "recovery_child"] names
+  | _ -> Alcotest.fail "expected a flattened CumulativeFlowSum"
+
+(* A WEIGHTED term is a different object — it needs `WeightedFlowSum`, which is
+   the rest of Increment B and carries the schema bump. Until then it must be
+   refused by NAME. Before B1a it fell through to the generic expression
+   resolver and surfaced as `E100: undeclared function 'incidence'`, whose hint
+   told the reader to declare it in `forcing { }` — advice that cannot work for
+   a construct they were using correctly two lines above. *)
+let test_weighted_incidence_is_named_not_e100 () =
+  compile_expect_error_code ~code:"E341" ~contains:"not a sum of flows"
+    (stratified_age_seir_with_obs {|
+      observations {
+        weekly_cases {
+          columns       { time : time, weekly_cases : count }
+          projected     = rho_a[child] * incidence(infection[child])
+          emit_schedule = every 7 'days
+          weekly_cases ~ neg_binomial(mean = projected, r = k)
+        }
+      }
+    |})
+
+(* Mixing a flow with an instant state read has no single temporal kind — the
+   flow accumulates over the interval and the state read is sampled at the
+   instant — so it is refused rather than silently picking one. *)
+let test_incidence_mixed_with_state_is_named () =
+  compile_expect_error_code ~code:"E341" ~contains:"not a sum of flows"
+    (stratified_age_seir_with_obs {|
+      observations {
+        weekly_cases {
+          columns       { time : time, weekly_cases : count }
+          projected     = incidence(infection[child]) + I[child]
+          emit_schedule = every 7 'days
+          weekly_cases ~ neg_binomial(mean = projected, r = k)
+        }
+      }
+    |})
+
 (* The pooled-column form the E280 hint directs the modeller to must compile on
    a family stratified over 2+ dimensions, which needs NESTED sums:
    `sum(a in age, sum(p in patch, incidence(tr[a, p])))`. The explicit-sum arm
@@ -12791,6 +12879,10 @@ let () =
       Alcotest.test_case "bare prevalence on unstratified still compiles (gh#478)" `Quick test_prevalence_bare_unstratified_still_compiles;
       Alcotest.test_case "indexed-stream prevalence still compiles (gh#478)" `Quick test_prevalence_indexed_stream_still_compiles;
       Alcotest.test_case "explicit sum(a in age, incidence(infection[a])) → flow sum" `Quick test_incidence_explicit_sum_compiles_to_flow_sum;
+      Alcotest.test_case "B1a: incidence(a) + incidence(b) → flow sum" `Quick test_incidence_addition_lowers_to_flow_sum;
+      Alcotest.test_case "B1a: sum(...) + incidence(...) flattens" `Quick test_incidence_addition_flattens_with_family_sum;
+      Alcotest.test_case "B1a: a weighted incidence term is E341, not E100" `Quick test_weighted_incidence_is_named_not_e100;
+      Alcotest.test_case "B1a: incidence mixed with state is E341" `Quick test_incidence_mixed_with_state_is_named;
       Alcotest.test_case "incidence(infection[child]) picks one stratum" `Quick test_incidence_positional_indexed_pins_one_stratum;
       Alcotest.test_case "gh#669: incidence(a, b) is rejected, not silently truncated" `Quick test_gh669_incidence_several_flows_is_rejected;
       Alcotest.test_case "gh#669: the diagnostic names every flow given" `Quick test_gh669_incidence_several_flows_names_every_flow;

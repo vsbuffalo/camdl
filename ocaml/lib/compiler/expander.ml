@@ -8134,6 +8134,16 @@ let expand_observations ctx =
             match acc, go body ((v, vv) :: local_env) with
             | Some rest, Some fs -> Some (fs @ rest)
             | _ -> None) vals (Some [])
+        (* B1a: `incidence(a) + incidence(b)` — two flows reported as one
+           column. Unit-weighted addition needs no new IR: the concatenated
+           flow list lowers to the `CumulativeFlowSum` node that already
+           exists, so this is a frontend change with no schema bump. A WEIGHTED
+           term (`rho * incidence(a)`) is a different object — it needs
+           `WeightedFlowSum` — and stays refused by [incidence_misuse] below. *)
+        | EBinOp (Add, l, r) ->
+          (match go l local_env, go r local_env with
+           | Some ls, Some rs -> Some (ls @ rs)
+           | _ -> None)
         | EFuncCall ("incidence", iargs) ->
           (match List.filter_map
                    (fun (k, e) -> if k = "" then Some e else None) iargs with
@@ -8143,10 +8153,58 @@ let expand_observations ctx =
                           ~dims:(transition_dims ctx tr) idxs in
              Some [ String.concat "_"
                       (tr :: List.map (index_item_to_str local_env) idxs) ]
+           (* A bare transition name is admissible only when it names ONE flow.
+              A stratified family reached bare would silently pool its strata —
+              the very thing E280 exists to refuse — so it is left to
+              [incidence_misuse], which names both explicit spellings. *)
+           | [ EIdent (tr, _) ] ->
+             (match expand_transition_name ctx tr with
+              | None | Some []  -> Some [ tr ]
+              | Some [ single ] -> Some [ single ]
+              | Some _          -> None)
            | _ -> None)
         | _ -> None
       in
-      match top with ESum _ -> go top env | _ -> None
+      match top with
+      | ESum _ | EBinOp (Add, _, _) -> go top env
+      | _ -> None
+    in
+    (* Does this expression mention `incidence` anywhere? Used to tell a
+       near-miss apart from an ordinary state expression: `incidence` is not a
+       declared function, so anything mentioning it that [explicit_incidence_sum]
+       could not resolve would otherwise reach `resolve_expr` and surface as
+       `E100: undeclared function 'incidence'` — whose hint tells the reader to
+       declare it in `forcing { }`, which is not a thing that works. *)
+    let rec mentions_incidence = function
+      | EFuncCall ("incidence", _) -> true
+      | EFuncCall (_, args)   -> List.exists (fun (_, e) -> mentions_incidence e) args
+      | EBinOp (_, l, r)      -> mentions_incidence l || mentions_incidence r
+      | EUnOp (_, e)          -> mentions_incidence e
+      | ECond (p, t, f)       -> mentions_incidence p || mentions_incidence t
+                                 || mentions_incidence f
+      | ESum (_, _, _, b, _)  -> mentions_incidence b
+      | EList es              -> List.exists mentions_incidence es
+      | ERange (a, b)         -> mentions_incidence a || mentions_incidence b
+      | _                     -> false
+    in
+    (* An expression that mentions `incidence` but is not a unit-weighted sum of
+       flows. Names what IS supported and both workarounds, rather than letting
+       it fall through to E100. *)
+    let incidence_misuse e =
+      Diagnostics.error ctx.diags ~code:"E341" ~loc:od_loc
+        ~message:(Printf.sprintf
+          "observation '%s': `incidence(...)` here is not a sum of flows. A \
+           projection may add incidence terms (`incidence(a) + incidence(b)`) \
+           or sum a family (`sum(p in patch, incidence(tr[p]))`), but it may \
+           not weight them, subtract them, or mix them with a state read"
+          od.oname)
+        ~hint:"put a per-stream coefficient in the LIKELIHOOD instead \
+               (`cases ~ poisson(rate = rho * projected)`); index a stratified \
+               family (`incidence(tr[p])`) or sum it explicitly; a per-stratum \
+               weight inside the projection is not yet supported"
+        ();
+      ignore e;
+      Ir.DerivedExpr (Ir.Const 0.0)
     in
     let projection = match proj_v with
       | ProjIncidence (name, idxs) ->
@@ -8367,6 +8425,7 @@ let expand_observations ctx =
          | Some []       -> Ir.DerivedExpr (Ir.Const 0.0)
          | Some [single] -> Ir.CumulativeFlow single
          | Some many     -> Ir.CumulativeFlowSum many
+         | None when mentions_incidence e -> incidence_misuse e
          | None          -> Ir.DerivedExpr (resolve_expr ctx env e))
     in
     (* Likelihood kwarg resolution with strict diagnostics. Unlike the

@@ -563,6 +563,24 @@ expression. The variant form keeps `temporal_kind` total (`WeightedFlowSum` is
 byte-identical. That is a one-line implementation rule with an 18-golden blast
 radius if violated.
 
+**B1a. Unit-weighted addition ships ahead of the bump.** _Shipped._
+`incidence(a)
+
+- incidence(b)`— distinct flows reported as one column — needs no new IR node:
+the concatenated flow list lowers to the`CumulativeFlowSum`that already
+exists, so it carries **no`ir/VERSION`bump and moves no golden**, and it
+composes with the family sum (`sum(...) +
+  incidence(...)` flattens into one list). Carved out of B1 and landed early
+  against a live outbreak model.
+
+The rest of B1 — a per-stratum WEIGHT (`rho_a[a] * incidence(...)`) — still
+needs `WeightedFlowSum` and the bump; that is a different object, and B1a
+refuses it by name (E341) rather than letting it fall through to
+`E100:
+undeclared function 'incidence'`, whose hint pointed at `forcing { }`.
+E341 also covers subtraction and mixing a flow with an instant state read, which
+is B4's deferral surfacing early.
+
 **B2. The accumulator becomes per-reference.** `acc` is a per-stream scalar
 today (`types.rs:320`), and an Interval stream never evaluates a projection
 expression at all — `project_stream_from_acc` short-circuits

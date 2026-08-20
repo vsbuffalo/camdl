@@ -5362,6 +5362,22 @@ sum(a in age, incidence(infection[a]))
 # IR:
 CumulativeFlowSum(["infection_child", "infection_adult"])
 
+# DSL: adding distinct flows into one reported column (two routes into the
+# same notification series). Addition and the family sum are the same object —
+# a set of flows accumulated over the stream's interval — so they compose and
+# flatten into one list:
+incidence(infection[child]) + incidence(infection[adult])
+sum(a in age, incidence(infection[a])) + incidence(importation)
+
+# IR:
+CumulativeFlowSum(["infection_child", "infection_adult"])
+CumulativeFlowSum(["infection_child", "infection_adult", "importation"])
+
+# A projection may ADD incidence terms; it may not weight, subtract, or mix
+# them with an instant state read (E341). A per-stream reporting rate goes in
+# the LIKELIHOOD (`cases ~ poisson(rate = rho * projected)`); a PER-STRATUM
+# weight inside the projection is not yet supported.
+
 # DSL:
 incidence(infection[child])    # indexed: specific stratum
 
