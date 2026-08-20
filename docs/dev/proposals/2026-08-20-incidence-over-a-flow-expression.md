@@ -1,6 +1,64 @@
 # `incidence()` should take a flow expression, parsed into a type that cannot hold anything else
 
-Date: 2026-08-20 Status: proposed Issue: gh#669
+Date: 2026-08-20 Status: SUPERSEDED — do not implement Issue: gh#669
+
+> **Superseded before implementation.** Three adversarial reviews established
+> that this question was already decided, in the opposite direction, by
+> [`2026-07-31-aggregation-semantics.md`](2026-07-31-aggregation-semantics.md)
+> **Decision 8 — "`incidence` becomes composable"** — whose Increment B lowers
+> `incidence(a) + incidence(b)` to a new `WeightedFlowSum` variant while
+> **unit-weight forms keep their existing `CumulativeFlowSum` lowering**, i.e.
+> exactly the node this document targets, from exactly the surface the
+> downstream reached for first.
+>
+> B1 also rebuts this document's central objection in advance: it is
+> deliberately _not_ a new `Expr` constructor, which is what keeps
+> `temporal_kind()` total and stops a flow read being representable inside a
+> rate expression. That is a better answer than forbidding composition. Decision
+> 5 additionally _removes_ prevalence's multi-argument form — the precedent this
+> document's justification rests on.
+>
+> **The right move is to fold the flow-union case into Increment B as an
+> unblocking slice, or to reopen Decision 8 head-on with the comparison
+> argued.** The two cannot coexist: they leave `2 * incidence(a)` legal and
+> `incidence(2 * a)` an error, for reasons no modeller can derive.
+>
+> Kept for the evidence below, which survives whichever surface wins — and for
+> the record of a proposal that failed review for not reading the repo it was
+> proposing against.
+
+### Corrections to this document, established by review
+
+- **The acceptance test named in "Verification" cannot pass.** A junction model
+  and a direct-sum model do _not_ produce the same log-likelihood: measured
+  −73.37 vs −72.18 at identical parameters, 4000 particles, far outside the
+  ±0.07 Monte-Carlo spread — because of the drain dwell listed as cost #4. The
+  exact equivalence available is `incidence(tr[child] + tr[adult])` against
+  `sum(a in age, incidence(tr[a]))`.
+- **"The runtime path is already exercised" is false.** One model in the repo
+  emits a ≥2-name `CumulativeFlowSum`, and its only Rust consumer excludes
+  observations from its hash — three models differing only in their observations
+  block share one baseline hash. Every `StreamProjection::FlowSum` in the Rust
+  test suite has a single index.
+- **The gradient is fine**, contrary to the suspicion that prompted the review:
+  a two-flow model matches an ODE-identical one-flow model under `nuts` to
+  8.8e-12 across 40 draws.
+- **`parse_flow_expr : expr -> result` cannot perform the overlap check assigned
+  to it.** At least four spellings collapse to one post-expansion name — the
+  mangled form (`infection_child`, legal today and used in the committed test
+  suite), branch suffixes (`outcome_R`), named-index reordering, and a per-cell
+  diagonal collision that is not a property of the expression at all. The check
+  belongs after expansion _and_ in both IR validators, since `camdl simulate`
+  accepts raw IR.
+- **Cost #1 overstates by one compartment**: the junction adds `P`, not `P` and
+  `M`.
+- **E280's behaviour for a stratified family inside a union was left
+  undecided**, which `.claude/rules/proposals.md` forbids in a shipped proposal.
+
+Bugs found while reviewing this document, none of which depend on it: gh#677
+(indexed stream scored against the pooled total), gh#678 (duplicate and empty
+flow lists), gh#679 (E304's missing hint), gh#680 (`nuts` × `ode` multi-cadence
+mis-binning).
 
 ## The problem, as a modeller hits it
 
