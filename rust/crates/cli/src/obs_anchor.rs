@@ -122,23 +122,27 @@ fn resolve_with(
     Ok(true)
 }
 
-/// The sentence a data-binding command appends to its own "no data bound"
-/// refusal when the model is anchored.
+/// The refusal an ANCHORED model earns from a data-binding command that was
+/// given nothing to bind. `None` for an unanchored model, whose command is then
+/// free to report its own missing-data error wherever it always did.
 ///
-/// Without it the user is told to pass `--data` but not that the model *cannot
-/// run at all* without it — an anchored construct is unresolvable, not merely
-/// unscored. Empty for an unanchored model, so the existing message is
-/// byte-identical there.
-pub fn unbound_anchor_clause(model: &ir::Model) -> String {
+/// The distinction is not cosmetic. A command that binds no data usually still
+/// has something better to say first — `pfilter`'s capability gates report
+/// "this model has real compartments the filter cannot advance" (gh#191) rather
+/// than "--data is required", and that ordering is pinned by test. But an
+/// anchored model has no horizon until a stream resolves one, so it cannot
+/// reach those gates at all: `CompiledModel::new` refuses it. Hence a refusal
+/// here, naming the constructs that need the data and what to supply.
+pub fn refuse_without_data(model: &ir::Model, supply: &str) -> Option<String> {
     if !model_is_anchored(model) {
-        return String::new();
+        return None;
     }
-    format!(
-        "\n  This model is also anchored to observed data ({}); an observation \
-         anchor resolves only from a bound observation stream, so there is no \
-         horizon to run without one.",
+    Some(format!(
+        "this model is anchored to observed data ({}), but no observation \
+         stream is bound. An observation anchor resolves only from bound \
+         data, so the model has no horizon to run.\n  Fix: {supply}",
         anchored_sites(model).join(", ")
-    )
+    ))
 }
 
 /// Human-readable list of the anchored constructs, for a refusal message.

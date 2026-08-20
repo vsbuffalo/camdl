@@ -21,6 +21,12 @@ use sim::{
 };
 use std::collections::HashMap;
 
+/// What to pass when `pfilter` has no observation data bound. Named once so the
+/// anchored refusal and the ordinary missing-data refusal cannot drift apart.
+const PFILTER_SUPPLY: &str = "pass `--data PATH` (single-stream), \
+    `--data NAME=PATH` (repeatable, multi-stream), or `--fit FOO.toml` with a \
+    [data.observations] section.";
+
 pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
     sim::eval_stats::set_allow_degenerate_rates(a.inference.allow_degenerate_rates);  // gh#audit-C6
@@ -63,39 +69,32 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // `CompiledModel::new` refuses a model that still carries one. Binding is a
     // pure read of the args plus `model.observations`, neither of which
     // parameter resolution touches.
+    //
+    // `None` means the invocation bound nothing at all (no `--data`, no
+    // `--fit`). That is reported LATER, at the point it always was — after the
+    // compile — so the capability gates keep first say on a params-only
+    // invocation. gh#191's is the one that matters: "this model has real
+    // compartments the filter cannot advance" is a far better answer than
+    // "--data is required", and `gh191_pfilter_real_compartments` pins it.
     let model_obs_names: Vec<String> = model_in.observations.iter()
         .map(|o| o.name.clone()).collect();
     let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
-    let bound_streams: Vec<(String, std::path::PathBuf)> = if cli_data_specs.is_empty() {
+    let bound_streams: Option<Vec<(String, std::path::PathBuf)>> = if cli_data_specs.is_empty() {
         // No CLI --data. Try the fit-toml fallback.
-        if let Some(fit_path) = a.fit.as_ref() {
+        a.fit.as_ref().map(|fit_path| {
             load_data_observations_from_fit_toml(fit_path, &model_obs_names)
                 .unwrap_or_else(|e| {
                     eprintln!("error: --fit toml fallback for --data: {}", e);
                     std::process::exit(1);
                 })
-        } else {
-            eprintln!("error: --data is required. Use `--data PATH` for a \
-                single-stream model, `--data NAME=PATH` (repeatable) for a \
-                multi-stream model, or `--fit FOO.toml` with a \
-                [data.observations] section.{}",
-                crate::obs_anchor::unbound_anchor_clause(&model_in));
-            std::process::exit(1);
-        }
+        })
     } else {
         if a.fit.is_some() {
             eprintln!("pfilter: --data on CLI overrides --fit toml [data.observations]");
         }
-        crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name.as_deref())
-            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+        Some(crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name.as_deref())
+            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); }))
     };
-
-    if bound_streams.is_empty() {
-        eprintln!("error: zero streams resolved from --data / --fit toml. \
-                   pfilter requires at least one observation stream.{}",
-                  crate::obs_anchor::unbound_anchor_clause(&model_in));
-        std::process::exit(1);
-    }
 
     // gh#616: pfilter binds observation data, so it RESOLVES a model's
     // observation anchors instead of letting `CompiledModel::new` refuse them —
@@ -109,11 +108,23 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // scenario-horizon guard below and the resolver read `model_in`. A second
     // fresh load of the compiled IR would re-introduce the unresolved marker
     // (gh#616 regression, commit 7af5c9fa).
-    if let Err(e) = crate::obs_anchor::resolve_from_bindings(
-        &mut model_in, &bound_streams, dt,
-    ) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+    //
+    // With nothing bound, an ANCHORED model is refused here rather than
+    // deferred: it has no horizon at all, so no later diagnostic can be
+    // computed from it. An unanchored model falls through untouched.
+    match &bound_streams {
+        Some(bound) => {
+            if let Err(e) = crate::obs_anchor::resolve_from_bindings(&mut model_in, bound, dt) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        None => {
+            if let Some(msg) = crate::obs_anchor::refuse_without_data(&model_in, PFILTER_SUPPLY) {
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // gh#561: a filter's window is the OBSERVATION times, not the model horizon
@@ -196,6 +207,21 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         crate::run_meta::InferenceBackend::ChainBinomial, &compiled,
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     let params = compiled.default_params.clone();
+
+    // The missing-data refusal, reported here rather than where the binding was
+    // resolved, so every gate above keeps first say (see the binding block).
+    let bound_streams = bound_streams.unwrap_or_else(|| {
+        eprintln!("error: --data is required. Use `--data PATH` for a \
+            single-stream model, `--data NAME=PATH` (repeatable) for a \
+            multi-stream model, or `--fit FOO.toml` with a \
+            [data.observations] section.");
+        std::process::exit(1);
+    });
+    if bound_streams.is_empty() {
+        eprintln!("error: zero streams resolved from --data / --fit toml. \
+                   pfilter requires at least one observation stream.");
+        std::process::exit(1);
+    }
 
     // Load data — route the time column through the calendar-time boundary
     // translator (numeric or dated, per --time-format + the model origin).

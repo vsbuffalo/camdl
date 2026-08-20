@@ -122,6 +122,12 @@ fn profile_cell_dist2(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
+/// What to pass when `profile` has no observation data bound. Named once so the
+/// anchored refusal and the ordinary missing-data refusal cannot drift apart.
+const PROFILE_SUPPLY: &str = "pass `--data PATH` (single-stream), \
+    `--data NAME=PATH` (repeatable, multi-stream), or `--fit FOO.toml` with a \
+    [data.observations] section.";
+
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // Parse the CLI strings into the typed registry entry (the string boundary);
     // all downstream dispatch reads the typed FitAlgorithm / InferenceBackend.
@@ -379,12 +385,17 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `CompiledModel::new` refuses a model that still carries one. Binding is a
     // pure read of the args plus `model.observations`, which neither the
     // `[estimate].start` seeding above nor the resolver below touches.
+    //
+    // `None` means nothing was bound at all (no `--data`, no `--fit`). That is
+    // reported LATER, where it always was — after the compile — so the
+    // capability gate keeps first say on an invocation that has a more specific
+    // problem than a missing flag.
     let obs_name_arg = a.stream.obs.clone();
     let model_obs_names: Vec<String> = model_pre.observations.iter()
         .map(|o| o.name.clone()).collect();
     let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
-    let bound_streams: Vec<(String, std::path::PathBuf)> = if cli_data_specs.is_empty() {
-        if let Some(fit_path) = a.fit.as_ref() {
+    let bound_streams: Option<Vec<(String, std::path::PathBuf)>> = if cli_data_specs.is_empty() {
+        a.fit.as_ref().map(|fit_path| {
             eprintln!("profile: no --data flags supplied, reading bindings \
                 from --fit toml [data.observations]");
             crate::pfilter::load_data_observations_from_fit_toml(
@@ -393,27 +404,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 eprintln!("error: --fit toml fallback for --data: {}", e);
                 std::process::exit(1);
             })
-        } else {
-            eprintln!("error: --data is required. Use `--data PATH` for a \
-                single-stream model, `--data NAME=PATH` (repeatable) for a \
-                multi-stream model, or `--fit FOO.toml` with a \
-                [data.observations] section.{}",
-                crate::obs_anchor::unbound_anchor_clause(&model_pre));
-            std::process::exit(1);
-        }
+        })
     } else {
         if a.fit.is_some() {
             eprintln!("profile: --data on CLI overrides --fit toml [data.observations]");
         }
-        crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name_arg.as_deref())
-            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+        Some(crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name_arg.as_deref())
+            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); }))
     };
-
-    if bound_streams.is_empty() {
-        eprintln!("error: zero streams resolved from --data / --fit toml.{}",
-                  crate::obs_anchor::unbound_anchor_clause(&model_pre));
-        std::process::exit(1);
-    }
 
     // gh#616: profile binds observation data, so it RESOLVES a model's
     // observation anchors instead of letting `CompiledModel::new` refuse them.
@@ -425,9 +423,23 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // exactly one `load_model` and one `CompiledModel::new`. A second fresh load
     // of the compiled IR would re-introduce the unresolved marker (gh#616
     // regression, commit 7af5c9fa).
-    let moved_any_anchor = crate::obs_anchor::resolve_from_bindings(
-        &mut model_pre, &bound_streams, dt,
-    ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    //
+    // With nothing bound, an ANCHORED model is refused here rather than
+    // deferred: it has no horizon at all, so nothing later can be computed from
+    // it. An unanchored model falls through untouched.
+    let moved_any_anchor = match &bound_streams {
+        Some(bound) => crate::obs_anchor::resolve_from_bindings(&mut model_pre, bound, dt)
+            .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); }),
+        None => {
+            if let Some(msg) =
+                crate::obs_anchor::refuse_without_data(&model_pre, PROFILE_SUPPLY)
+            {
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+            false
+        }
+    };
     // The run is content-addressed by the IR TEXT (`model_identity_from_ir`),
     // not by `model_pre`, so the substitution has to reach the text too — else
     // two data vintages that fork a forcing differently would share a
@@ -500,6 +512,20 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         method.backend, &compiled,
     ) {
         eprintln!("error: {}", msg);
+        std::process::exit(1);
+    }
+
+    // The missing-data refusal, reported here rather than where the binding was
+    // resolved, so every gate above keeps first say (see the binding block).
+    let bound_streams = bound_streams.unwrap_or_else(|| {
+        eprintln!("error: --data is required. Use `--data PATH` for a \
+            single-stream model, `--data NAME=PATH` (repeatable) for a \
+            multi-stream model, or `--fit FOO.toml` with a \
+            [data.observations] section.");
+        std::process::exit(1);
+    });
+    if bound_streams.is_empty() {
+        eprintln!("error: zero streams resolved from --data / --fit toml.");
         std::process::exit(1);
     }
 
