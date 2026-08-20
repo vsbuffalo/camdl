@@ -90,6 +90,19 @@ pub fn resolve_from_bindings(
     resolve_with(model, |m| crate::obs_anchors_from_bindings(m, bound, dt))
 }
 
+/// As [`resolve_from_bindings`], for a command holding a fit config rather than
+/// a list of bindings (`survey --fit`). The two differ ONLY in where the
+/// observed window is read from; the substitution, the stderr report and the
+/// refusal wording are shared, so the two commands cannot drift on what a
+/// resolved anchor means or on what an unresolvable one says.
+pub fn resolve_from_config(
+    model: &mut ir::Model,
+    config: &crate::fit::config_v2::FitConfigV2,
+    dt: f64,
+) -> Result<bool, String> {
+    resolve_with(model, |m| crate::obs_anchors_from_config(m, config, dt))
+}
+
 fn resolve_with(
     model: &mut ir::Model,
     read_window: impl FnOnce(&ir::Model) -> Result<(f64, f64), String>,

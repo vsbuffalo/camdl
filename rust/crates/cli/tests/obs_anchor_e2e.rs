@@ -784,6 +784,55 @@ fn profile_resolves_an_anchored_model() {
     );
 }
 
+/// And `survey`, in both of its input modes: `--fit` reads the toml's
+/// `[data.observations]`, inline reads a single `--data` file. Both bind data,
+/// so neither may refuse.
+#[test]
+fn survey_resolves_an_anchored_model_in_both_input_modes() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = write_model(tmp.path(), "last_obs + 4 'weeks");
+    let data = tmp.path().join("cases.tsv");
+    write_data(&data, 4);
+    let toml = write_fit_toml(tmp.path(), &model, &data);
+
+    let run = |args: Vec<&str>, out: &str| -> String {
+        let o = Command::new(&bin)
+            .arg("survey")
+            .arg(&model)
+            .args(args)
+            .args(["--eval", "simulate", "--n-points", "4", "--seed", "1"])
+            .args(["--output", tmp.path().join(out).to_str().unwrap()])
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+            .output()
+            .expect("spawn survey");
+        let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+        assert!(o.status.success(), "survey must run an anchored model:\n{stderr}");
+        stderr
+    };
+
+    let s = run(vec!["--fit", toml.to_str().unwrap()], "cas_fit");
+    assert_both_anchors_announced(&s, "survey --fit");
+    assert!(s.contains("landscape.tsv"), "survey --fit wrote no landscape:\n{s}");
+
+    let s = run(
+        vec![
+            "--data",
+            data.to_str().unwrap(),
+            "--estimate",
+            "gamma=0.01:1.0",
+            "--fixed",
+            "beta=0.12",
+            "--fixed",
+            "rho=0.6",
+        ],
+        "cas_inline",
+    );
+    assert_both_anchors_announced(&s, "survey --data");
+    assert!(s.contains("landscape.tsv"), "survey --data wrote no landscape:\n{s}");
+}
+
 /// An anchored model with NO data bound is still refused, by name. `--data` was
 /// already required here; what the message must add is that the model cannot
 /// resolve its horizon at all without one, and which construct needs it.
@@ -873,4 +922,74 @@ fn pfilter_scenario_horizon_guard_compares_resolved_numbers() {
          must run, not be refused:\n{stderr}"
     );
     assert_both_anchors_announced(&stderr, "pfilter --scenario (equal horizons)");
+}
+
+/// A resolved anchor re-keys a `survey` too, and it must reach the recorded
+/// `model_identity` as well as the run key. Survey keys its run off the
+/// substituted `ir::Model`, but records provenance from the IR TEXT — so a
+/// substitution that never reaches the text leaves two data vintages sharing an
+/// identity string that says they are the same model, while their forcing forks
+/// differ by four weeks.
+#[test]
+fn survey_records_a_distinct_model_identity_per_data_vintage() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = write_model(tmp.path(), "120 'days"); // LITERAL horizon: only the fork moves
+    let data = tmp.path().join("cases.tsv");
+    let toml = write_fit_toml(tmp.path(), &model, &data);
+    let root = tmp.path().join("cas");
+
+    let run = |rows: usize| {
+        write_data(&data, rows);
+        let o = Command::new(&bin)
+            .arg("survey")
+            .arg(&model)
+            .args(["--fit", toml.to_str().unwrap()])
+            .args(["--eval", "simulate", "--n-points", "4", "--seed", "1"])
+            .args(["--output", root.to_str().unwrap()])
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+            .output()
+            .expect("spawn survey");
+        assert!(
+            o.status.success(),
+            "survey must run:\n{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    };
+    run(4); // fork at t = 28
+    run(8); // fork at t = 56
+
+    let mut identities: Vec<String> = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let rj = p.join("run.json");
+            if rj.is_file() {
+                let v: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&rj).unwrap()).unwrap();
+                if let Some(id) = v
+                    .get("inputs")
+                    .and_then(|i| i.get("model_identity"))
+                    .and_then(|x| x.as_str())
+                {
+                    identities.push(id.to_string());
+                }
+            }
+            stack.push(p);
+        }
+    }
+    identities.sort();
+    identities.dedup();
+    assert_eq!(
+        identities.len(),
+        2,
+        "two data vintages fork the forcing differently, so the recorded \
+         model_identity must differ: {identities:?}"
+    );
 }

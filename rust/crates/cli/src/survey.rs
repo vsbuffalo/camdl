@@ -44,6 +44,13 @@ use sim::{
 
 use crate::run_meta::SurveyEvalMethod;
 
+/// The integration step every survey runs at. `survey` exposes no `dt` knob, so
+/// this one value is the filter's `SMCConfig.dt`, the dated-loader's substep
+/// grid, and the step an observation anchor's window is snapped to. Named once
+/// because the three must agree: a loader reading times on a different grid from
+/// the filter that scores them is a silent-wrong answer, not a mismatch anyone
+/// would notice.
+const SURVEY_DT: f64 = 1.0;
 
 // ─── Resolved input payload ──────────────────────────────────────────────────
 //
@@ -414,10 +421,9 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     });
 
     // ── Parallel evaluation loop ────────────────────────────────────
-    // Survey hardcodes dt=1.0 for the SMCConfig (it doesn't expose a
-    // user-tunable dt knob). gh#53: process must be built at the same
-    // dt so its internal fire_steps resolves correctly.
-    let smc_dt = 1.0_f64;
+    // gh#53: the process must be built at the same dt as the filter so its
+    // internal fire_steps resolves correctly — hence the single `SURVEY_DT`.
+    let smc_dt = SURVEY_DT;
     let process = Arc::new(ChainBinomialProcess::new(resolved.compiled.clone()));
     let t_start = resolved.compiled.model.simulation.t_start;
 
@@ -623,6 +629,32 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // `model_pre.parameters[i].value` before the resolver call.
         let (mut model_pre, model_ir_json) = crate::util::load_model(&config.model.camdl)?;
 
+        // gh#616: survey binds the fit config's `[data.observations]`, so it
+        // RESOLVES a model's observation anchors instead of letting
+        // `CompiledModel::new` refuse them. Same reader as `fit run` reading the
+        // same toml, so the window a survey scores over is the window the fit
+        // will anchor to.
+        //
+        // Ordering: before the scenario-horizon guard (which must compare
+        // RESOLVED numbers) and before the single `CompiledModel::new` on this
+        // path. There is exactly one `load_model` here; a second fresh load of
+        // the compiled IR would re-introduce the unresolved marker (gh#616
+        // regression, commit 7af5c9fa).
+        let moved_any_anchor =
+            crate::obs_anchor::resolve_from_config(&mut model_pre, &config, SURVEY_DT)?;
+        // The run is content-addressed by the IR TEXT
+        // (`resolve::model_identity_from_ir`), not by `model_pre`, so the
+        // substitution has to reach the text too — else two data vintages that
+        // fork a forcing differently would share a `model_identity`. Re-emitted
+        // only when something moved, so an unanchored model's bytes are
+        // untouched.
+        let model_ir_json = if moved_any_anchor {
+            ir::to_string_pretty(&model_pre)
+                .map_err(|e| format!("re-emitting the anchor-resolved IR: {e}"))?
+        } else {
+            model_ir_json
+        };
+
         // gh#92: [estimate].start fall-back for survey, matching the
         // gh#34 pattern applied to `camdl profile` (commit 796bfbe)
         // and `camdl fit run` (commit 19ae908). Survey's whole job is
@@ -792,12 +824,10 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         let mut per_stream_obs = Vec::new();
         let mut data_hashes: HashMap<String, String> = HashMap::new();
         let mut canonical_times: Option<Vec<f64>> = None;
-        // Survey hardcodes dt=1.0 (see cmd_survey); reuse it for the dated-
-        // loader's substep/grid checks.
         let time_opts = crate::caltime_load::TimeOpts {
             origin: model.origin.as_deref(),
             time_unit: &model.time_unit,
-            dt: 1.0,
+            dt: SURVEY_DT,
             t_start: compiled.model.simulation.t_start,
             format: crate::caltime_load::TimeFormat::Auto,
         };
@@ -851,6 +881,26 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // Inline mode: --estimate flags + --data (already validated).
         let data_path = a.data.as_ref().unwrap().to_string_lossy().into_owned();
         let (mut model_pre, model_ir_json) = crate::util::load_model(&model_path)?;
+
+        // gh#616, inline counterpart of the fit-toml branch above. Inline mode
+        // binds ONE file that carries a column per declared stream, so every
+        // observation is bound to it; `data_bindings_to_effective` dedups those
+        // to one entry per source and the shared fold reads the same time column
+        // this branch scores against.
+        let inline_bindings: Vec<(String, std::path::PathBuf)> = model_pre
+            .observations
+            .iter()
+            .map(|o| (o.name.clone(), std::path::PathBuf::from(&data_path)))
+            .collect();
+        let moved_any_anchor = crate::obs_anchor::resolve_from_bindings(
+            &mut model_pre, &inline_bindings, SURVEY_DT,
+        )?;
+        let model_ir_json = if moved_any_anchor {
+            ir::to_string_pretty(&model_pre)
+                .map_err(|e| format!("re-emitting the anchor-resolved IR: {e}"))?
+        } else {
+            model_ir_json
+        };
 
         // gh#92 inline-mode counterpart of the fit-aware fall-back
         // above: parameters named in `--estimate NAME=LO:HI` flags
@@ -946,7 +996,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         let time_opts = crate::caltime_load::TimeOpts {
             origin: model.origin.as_deref(),
             time_unit: &model.time_unit,
-            dt: 1.0,
+            dt: SURVEY_DT,
             t_start: compiled.model.simulation.t_start,
             format: crate::caltime_load::TimeFormat::Auto,
         };
