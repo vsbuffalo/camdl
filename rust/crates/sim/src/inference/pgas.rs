@@ -2667,6 +2667,15 @@ pub fn nuts_active(use_nuts: bool, model: &CompiledModel) -> bool {
 /// The surface is sharp (46K transition terms), so proposals are small, but
 /// the CSMC-AS in Step 2 shifts the mode by renewing the trajectory X. The
 /// Gibbs alternation provides mixing: small θ steps track the shifting mode.
+///
+/// # Errors
+///
+/// `SimError::NonFiniteChainStart` (gh#607) when the chain's starting
+/// (θ₀, X₀) has zero posterior density AND is still at zero density after the
+/// first Gibbs sweep — a chain that cannot move, refused instead of sampled.
+/// Callers running several chains should treat it as skip-this-chain, not as a
+/// failed fit; `cli/src/fit/pgas.rs` is the reference handling. Everything else
+/// is structural or a `Validation` refusal from the preflights above.
 pub fn run_pgas(
     model: &CompiledModel,
     if2_params: &[EstimatedParam],

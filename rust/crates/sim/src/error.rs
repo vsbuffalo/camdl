@@ -540,7 +540,7 @@ mod tests {
     /// classified like `PFDegenerate`: NOT structural (the fit's other chains
     /// are fine, so the driver skips this one and continues) and NOT
     /// per-particle recoverable (there is no particle to kill — the whole
-    /// chain is refused before sweep 0).
+    /// chain is refused, at the end of its first sweep).
     ///
     /// Classifying it structural would abort a multi-chain fit on one bad
     /// start, which is the failure the skip exists to prevent.
