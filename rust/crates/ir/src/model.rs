@@ -92,6 +92,11 @@ pub struct OutputConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationConfig {
     pub t_start:        f64,
+    /// The simulation horizon. Encoded through `null_as_nan` because an
+    /// unresolved anchored horizon travels as JSON `null` (gh#616) — JSON has
+    /// no NaN literal, and a sentinel NUMBER is exactly what this design
+    /// refuses (two sentinels compare equal).
+    #[serde(with = "crate::anchor::null_as_nan")]
     pub t_end:          f64,
     pub time_semantics: String,
     pub dt:             Option<f64>,
@@ -117,6 +122,20 @@ pub struct SimulationConfig {
     pub t_end_anchor:   Option<crate::anchor::AnchoredTime>,
 }
 
+impl SimulationConfig {
+    /// gh#616: restore the "unresolved means not a usable number" invariant
+    /// after decoding. JSON has no NaN literal, so an anchored horizon travels
+    /// as `null` (see `serde.ml`); this turns it back into NaN, from the
+    /// ANCHOR's presence rather than from whatever the file happened to say.
+    /// Enforcing it here means a hand-edited or third-party IR cannot present a
+    /// usable horizon alongside an unresolved anchor.
+    fn restore_unresolved_horizon(&mut self) {
+        if self.t_end_anchor.is_some() {
+            self.t_end = f64::NAN;
+        }
+    }
+}
+
 // ── Presets ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,6 +158,17 @@ pub struct Preset {
     /// `Some(NAN)`, and the resolver clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t_end_anchor: Option<crate::anchor::AnchoredTime>,
+}
+
+impl Preset {
+    /// See [`SimulationConfig::restore_unresolved_horizon`]. A preset's `t_end`
+    /// is optional, so `null` is ambiguous on its own — an anchored horizon and
+    /// "declares no horizon" both write it. The anchor field disambiguates.
+    fn restore_unresolved_horizon(&mut self) {
+        if self.t_end_anchor.is_some() {
+            self.t_end = Some(f64::NAN);
+        }
+    }
 }
 
 // ── Model structure ───────────────────────────────────────────────────────────
@@ -252,6 +282,18 @@ pub struct Model {
     /// `contrasts {}` block is byte-identical (the field is omitted).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contrasts: Vec<Contrast>,
+}
+
+impl Model {
+    /// gh#616: the post-decode normalisation every IR load applies (see
+    /// [`SimulationConfig::restore_unresolved_horizon`]). Idempotent, and a
+    /// no-op for a model that declares no anchor.
+    pub fn restore_unresolved_horizons(&mut self) {
+        self.simulation.restore_unresolved_horizon();
+        for p in &mut self.presets {
+            p.restore_unresolved_horizon();
+        }
+    }
 }
 
 /// A model-level shared binding (Fix B): a named value (e.g. N[l], I_agg[l],

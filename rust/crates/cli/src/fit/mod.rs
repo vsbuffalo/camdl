@@ -5,6 +5,54 @@
 //! inline; the runner walks them in order. See
 //! `docs/dev/proposals/2026-04-15-fit-run-spec-v0.4.md`.
 
+/// gh#616: resolve a model's observation anchors against this fit's `[data]`
+/// and re-emit the compiled IR with them substituted, returning the path every
+/// downstream loader should use.
+///
+/// Returns `ir_path` UNCHANGED when the model declares no anchor — the common
+/// case, and then not a byte is written or copied.
+///
+/// The envelope is re-emitted whole (not just the model) so the `#'`
+/// documentation dictionary survives; a fit sidecar's parameter legend reads it
+/// back off this path.
+fn resolve_anchors_into_temp_ir(
+    ir_path: &str,
+    config: &config_v2::FitConfigV2,
+) -> Result<String, String> {
+    let src = std::fs::read_to_string(ir_path)
+        .map_err(|e| format!("cannot read compiled IR {ir_path}: {e}"))?;
+    let mut env = ir::envelope_from_str(&src)
+        .map_err(|e| format!("IR load error from {ir_path}: {e}"))?;
+    if !crate::obs_anchor::model_is_anchored(&env.model) {
+        return Ok(ir_path.to_string());
+    }
+    let dt0 = env.model.simulation.dt.unwrap_or(1.0);
+    let (first, last) = crate::obs_anchors_from_config(&env.model, config, dt0)
+        .map_err(|e| format!("resolving this model's observation anchors from [data]: {e}"))?;
+    let moved = crate::obs_anchor::substitute(
+        &mut env.model,
+        ir::anchor::ObsAnchorTimes { first, last },
+    )?;
+    crate::obs_anchor::report(&moved, &env.model);
+
+    // A fresh temp, never the input path: `resolve_ir_path` returns a
+    // user-supplied `.ir.json` unchanged, and a command must not rewrite the
+    // user's file. Persists for the process, like the compiled-IR temp itself.
+    let out = std::env::temp_dir().join(format!(
+        "camdl_anchored_{}_{}.ir.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let json = serde_json::to_string(&env)
+        .map_err(|e| format!("re-emitting the resolved IR: {e}"))?;
+    std::fs::write(&out, json)
+        .map_err(|e| format!("writing the resolved IR to {}: {e}", out.display()))?;
+    Ok(out.to_string_lossy().into_owned())
+}
+
 pub mod cas;  // gh#147 M3.2: fit-stage CAS identity (resolve_fit_stage)
 pub mod coeff_guard;  // gh#342 P4: NUTS guard — param reaching a coefficient only via an init
 pub mod config_v2;
@@ -294,6 +342,28 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // lean vs full share the same model digest).
     let needs_state_grad = config.needs_state_grad();
     let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.model.camdl, needs_state_grad)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+    config.compiled_ir = Some(compiled_ir.clone());
+
+    // gh#616: if the model declares observation anchors, resolve them ONCE here
+    // — from this fit's own `[data]` — and re-emit the compiled IR with the
+    // anchors substituted, so every downstream loader (the runner, each sweep
+    // point, each stage, the archived copy) reads the SAME resolved model.
+    //
+    // The alternative, substituting in memory at each of those loads, would put
+    // the resolution in half a dozen places that must agree; this puts it in
+    // one. A FRESH temp is written rather than mutating `compiled_ir` in place,
+    // because that path can be a user-supplied `.ir.json` (`resolve_ir_path`
+    // returns it unchanged) and a command must never rewrite the user's file.
+    //
+    // Fit identity is unaffected and already correct: it hashes the original
+    // `.camdl` source plus the data digests, so two data vintages against one
+    // anchored model key differently through the data, exactly as two vintages
+    // of any fit do.
+    let compiled_ir = resolve_anchors_into_temp_ir(&compiled_ir, &config)
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
             std::process::exit(1);

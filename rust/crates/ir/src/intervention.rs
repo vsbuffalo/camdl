@@ -7,6 +7,10 @@ use crate::expr::Expr;
 pub struct RecurringSchedule {
     pub start:  f64,
     pub period: f64,
+    /// The window end. Compiler-baked from the model horizon when the schedule
+    /// declares no `to`, so it is NaN while that horizon is an unresolved
+    /// anchor — see [`crate::anchor::null_as_nan`].
+    #[serde(with = "crate::anchor::null_as_nan")]
     pub end:    f64,
     /// Day within each period when the event fires. Fire times are
     /// `at_day + k * period` for the smallest k where target >= start.

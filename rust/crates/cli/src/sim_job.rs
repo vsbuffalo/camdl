@@ -81,6 +81,10 @@ pub struct SimulateJob {
     /// model's own `init {}` (batch TOML deliberately has no key for this —
     /// a forecast origin is a CLI-only override, like `to`).
     pub init_state: Option<std::sync::Arc<InitStateSource>>,
+    /// gh#616: the run's resolved observation window, folded ONCE for the
+    /// whole job and copied to every cell, so a sweep cannot resolve a
+    /// different `last_obs` per cell.
+    pub obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
     /// S layer.
     pub seeds: Seeds,
     /// `--param NAME=VALUE` CLI overrides merged on top of every cell

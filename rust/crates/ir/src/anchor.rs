@@ -124,6 +124,62 @@ impl From<AnchoredTime> for AnchoredTimeWire {
     }
 }
 
+/// A run's RESOLVED observation window: the min and max observation time over
+/// the run's bound streams. The resolved counterpart of [`AnchoredTime`], and
+/// the single input every anchor resolution takes — the CLI's model-level
+/// resolver (horizon, preset horizon, forcing knots) and `sim`'s quantity
+/// evaluator (`value_at`) both fold through it, so they cannot disagree about
+/// what `last_obs` meant for a given run.
+///
+/// Both ends are carried even when a model uses only one, so no caller has to
+/// answer "which anchor did you mean" at the call site.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObsAnchorTimes {
+    pub first: f64,
+    pub last: f64,
+}
+
+impl ObsAnchorTimes {
+    /// Fold a run's observation times into the pair. `None` when there are no
+    /// observation times at all — the caller then has nothing to anchor to and
+    /// must refuse rather than pass a fabricated value.
+    pub fn of_times(times: impl IntoIterator<Item = f64>) -> Option<Self> {
+        let mut it = times.into_iter();
+        let t0 = it.next()?;
+        let (first, last) = it.fold((t0, t0), |(lo, hi), t| (lo.min(t), hi.max(t)));
+        Some(ObsAnchorTimes { first, last })
+    }
+
+    /// The model time an anchored expression resolves to in this window.
+    pub fn at(&self, a: AnchoredTime) -> f64 {
+        a.resolve(match a.anchor {
+            ObsAnchor::First => self.first,
+            ObsAnchor::Last => self.last,
+        })
+    }
+}
+
+/// `f64` to/from JSON, mapping a non-finite value to `null` in both directions.
+///
+/// Every horizon the compiler BAKES from `simulate { to }` — the model's own
+/// `t_end`, a preset's, a recurring schedule's `end`, an observation emit
+/// schedule's `end` — is NaN while the horizon is an unresolved anchor
+/// (gh#616). JSON has no NaN literal, so without this the emitted IR carries a
+/// bare `NaN` token that no conforming reader accepts and the model cannot be
+/// loaded at all. A sentinel NUMBER is not an option: two sentinels compare
+/// equal, which is precisely the failure this design exists to avoid.
+pub mod null_as_nan {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+        if v.is_finite() { s.serialize_f64(*v) } else { s.serialize_none() }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
+    }
+}
+
 impl std::str::FromStr for ObsAnchor {
     type Err = ();
     /// The single place a string becomes an anchor — shared by the IR decoder
@@ -186,6 +242,26 @@ mod tests {
     fn unknown_anchor_is_rejected() {
         assert!(serde_json::from_str::<AnchoredTime>(r#""mid_obs""#).is_err());
         assert!(serde_json::from_str::<AnchoredTime>(r#"{"anchor":"mid_obs"}"#).is_err());
+    }
+
+    /// The window folds a run's observation times, and the offset applies on
+    /// top of whichever END the anchor names. An offset applied to the wrong end
+    /// still produces a plausible in-window time, so pin both.
+    #[test]
+    fn obs_anchor_times_fold_and_resolve() {
+        let t = ObsAnchorTimes::of_times([21.0, 0.0, 14.0, 7.0]).expect("non-empty");
+        assert_eq!(t, ObsAnchorTimes { first: 0.0, last: 21.0 });
+        assert_eq!(t.at(AnchoredTime::bare(ObsAnchor::Last)), 21.0);
+        assert_eq!(t.at(AnchoredTime::bare(ObsAnchor::First)), 0.0);
+        assert_eq!(t.at(AnchoredTime { anchor: ObsAnchor::Last, offset: 28.0 }), 49.0);
+        assert_eq!(t.at(AnchoredTime { anchor: ObsAnchor::First, offset: -7.0 }), -7.0);
+    }
+
+    /// No observation times at all → `None`, so a caller cannot mistake an empty
+    /// stream set for an anchor at t = 0.
+    #[test]
+    fn obs_anchor_times_of_empty_is_none() {
+        assert_eq!(ObsAnchorTimes::of_times([]), None);
     }
 
     #[test]

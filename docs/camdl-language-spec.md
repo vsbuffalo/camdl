@@ -1441,7 +1441,9 @@ forcing {
 ```
 
 The knots are resolved once per run, from the observation times the run binds,
-and the resolved values are recorded in the run record and printed on stderr.
+and each resolved value is printed on stderr. The resolved knots are substituted
+into the model the run is content-addressed by, so two data vintages key to
+different runs and the store cannot serve one in place of the other.
 Two consequences worth stating plainly, because they are behaviour changes
 relative to a literal date:
 
@@ -4175,9 +4177,16 @@ A scenario may anchor its own horizon the same way
 (`scenarios { forecast { simulate { to = last_obs + 8 'weeks } } }`).
 
 The horizon is resolved once per run, from the observation times the run binds,
-and the resolved value is recorded in the run record and printed on stderr. The
-same rules as every other anchor position apply (whole term, offset carries a
-duration unit, no `'months`/`'years` under an `origin`).
+and the resolved value is printed on stderr and substituted into the model the
+run is content-addressed by — so a run under one data vintage is never served
+from the store for another. The same rules as every other anchor position apply
+(whole term, offset carries a duration unit, no `'months`/`'years` under an
+`origin`).
+
+Every command that binds observation data resolves anchors this way:
+`camdl simulate --fit <fit.toml | fit run dir>`, `fit run`, and `fit predict`. A
+command with no data cannot resolve one and refuses, naming the anchored
+construct.
 
 Because the horizon is now unknown at compile time, three constructs that
 **bake** it are refused rather than left to silently mis-fire:

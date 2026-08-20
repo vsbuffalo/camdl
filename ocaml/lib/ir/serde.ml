@@ -633,7 +633,9 @@ let intervention_schedule_to_json (s : intervention_schedule) : Yojson.Safe.t =
     obj [("recurring", obj (
       [("start",  flt r.start);
        ("period", flt r.period);
-       ("end",    flt r.end_)]
+       (* gh#616: a baked end taken from an ANCHORED horizon is NaN, and JSON
+          has no NaN literal — emit null (see simulation_config_to_json). *)
+       ("end",    if Float.is_nan r.end_ then null else flt r.end_)]
       @ (match r.at_day with None -> [] | Some d -> [("at_day", flt d)])
     ))]
 
@@ -647,7 +649,7 @@ let intervention_schedule_of_json j =
       Recurring {
         start  = as_float (member "start"  v);
         period = as_float (member "period" v);
-        end_   = as_float (member "end"    v);
+        end_   = (match member "end" v with `Null -> Float.nan | x -> as_float x);
         at_day = (match member_opt "at_day" v with
                   | Some n -> Some (as_float n) | None -> None);
       }
@@ -950,7 +952,7 @@ let obs_schedule_to_json (s : observation_schedule) : Yojson.Safe.t =
     obj [("regular", obj [
       ("start", flt r.start);
       ("step",  flt r.step);
-      ("end",   flt r.end_);
+      ("end",   if Float.is_nan r.end_ then null else flt r.end_);
     ])]
 
 let obs_schedule_of_json j =
@@ -962,7 +964,7 @@ let obs_schedule_of_json j =
       ObsRegular {
         start = as_float (member "start" v);
         step  = as_float (member "step"  v);
-        end_  = as_float (member "end"   v);
+        end_  = (match member "end" v with `Null -> Float.nan | x -> as_float x);
       }
     | k -> fail "unknown observation_schedule '%s'" k
   )
@@ -1570,7 +1572,13 @@ let simulation_config_to_json (s : simulation_config) : Yojson.Safe.t =
      (only the version string moves). *)
   obj (
     [ ("t_start",        flt s.t_start);
-      ("t_end",          flt s.t_end);
+      (* gh#616: an UNRESOLVED anchored horizon bakes NaN, and JSON has no NaN
+         literal — Yojson emits a bare `NaN` token that no conforming reader
+         accepts, so the IR could not be loaded at all. Emit `null` instead: the
+         anchor field beside it says what the horizon IS, and the reader restores
+         the NaN from that. Nothing on the wire can be mistaken for a real
+         horizon. *)
+      ("t_end",          if Float.is_nan s.t_end then null else flt s.t_end);
       ("time_semantics", str s.time_semantics);
       ("dt",             match s.dt       with None -> null | Some v -> flt v);
       ("rng_seed",       match s.rng_seed with None -> null | Some n -> int n);
@@ -1585,15 +1593,23 @@ let simulation_config_to_json (s : simulation_config) : Yojson.Safe.t =
   )
 
 let simulation_config_of_json j =
+  let t_end_anchor = match member_opt "t_end_anchor" j with
+    | Some `Null | None -> None
+    | Some v -> Some (anchored_time_of_json v)
+  in
   { t_start        = as_float  (member "t_start"        j);
-    t_end          = as_float  (member "t_end"          j);
+    (* gh#616: a null horizon is the anchored case (see the emitter). The NaN is
+       RESTORED from the anchor's presence rather than round-tripped, so the
+       "unresolved means not a usable number" invariant is enforced at load
+       instead of trusted from the file. *)
+    t_end          = (match member "t_end" j with
+                      | `Null -> Float.nan
+                      | v     -> as_float v);
     time_semantics = as_string (member "time_semantics" j);
     dt             = (match member_opt "dt"       j with Some `Null | None -> None | Some v -> Some (as_float v));
     rng_seed       = (match member_opt "rng_seed" j with Some `Null | None -> None | Some v -> Some (as_int   v));
     integrator     = (match member_opt "integrator" j with Some `Null | None -> Rk4 | Some v -> integrator_of_json v);
-    t_end_anchor   = (match member_opt "t_end_anchor" j with
-                      | Some `Null | None -> None
-                      | Some v -> Some (anchored_time_of_json v));
+    t_end_anchor;
   }
 
 (* ── Presets ─────────────────────────────────────────────────────────────── *)
@@ -1605,7 +1621,12 @@ let preset_to_json (p : preset) : Yojson.Safe.t =
       ("params",  obj (List.map (fun (k, v) -> (k, flt v)) p.preset_params));
       ("enable",  arr (List.map str p.preset_enable));
       ("disable", arr (List.map str p.preset_disable));
-      ("t_end",   match p.preset_t_end with None -> null | Some v -> flt v); ]
+      (* gh#616: `Some NaN` (an unresolved anchored horizon) emits `null`, like
+         `None`; the two are told apart on the way back by `t_end_anchor`. *)
+      ("t_end",   match p.preset_t_end with
+                  | None -> null
+                  | Some v when Float.is_nan v -> null
+                  | Some v -> flt v); ]
     @ (if p.preset_scale = [] then []
        else [("scale", obj (List.map (fun (k, v) -> (k, flt v)) p.preset_scale))])
     @ (if p.preset_compose = [] then []
@@ -1617,6 +1638,10 @@ let preset_to_json (p : preset) : Yojson.Safe.t =
   )
 
 let preset_of_json j =
+  let anchor = match member_opt "t_end_anchor" j with
+    | Some `Null | None -> None
+    | Some v -> Some (anchored_time_of_json v)
+  in
   { preset_name    = as_string (member "name"  j);
     preset_label   = as_string (member "label" j);
     preset_params  = List.map (fun (k, v) -> (k, as_float v)) (as_assoc (member "params" j));
@@ -1626,10 +1651,14 @@ let preset_of_json j =
                       | Some (`Assoc kvs) -> List.map (fun (k, v) -> (k, as_float v)) kvs
                       | _ -> []);
     preset_compose = (match member_opt "compose" j with Some (`List xs) -> List.map as_string xs | _ -> []);
-    preset_t_end   = (match member_opt "t_end" j with Some `Null | None -> None | Some v -> Some (as_float v));
-    preset_t_end_anchor = (match member_opt "t_end_anchor" j with
-                           | Some `Null | None -> None
-                           | Some v -> Some (anchored_time_of_json v));
+    preset_t_end   = (match member_opt "t_end" j with
+                      (* Null WITH an anchor is the unresolved anchored horizon
+                         (`Some nan`); null without one is a scenario that
+                         declares no horizon at all. *)
+                      | Some `Null | None ->
+                        if anchor = None then None else Some Float.nan
+                      | Some v -> Some (as_float v));
+    preset_t_end_anchor = anchor;
   }
 
 (* ── Model structure ─────────────────────────────────────────────────────── *)

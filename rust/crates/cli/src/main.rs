@@ -13,6 +13,7 @@ mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws p
 mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
 mod quantile; // shared quantile reduction + numeric formatting (proposal 2026-08-11 §3.6)
 mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by fit predict + simulate)
+mod obs_anchor;     // gh#616: runtime resolution of a model's observation anchors
 mod run_paths;      // canonical output-path helpers
 mod cas;
 mod browse;
@@ -802,41 +803,79 @@ fn run_simulate(a: &args::SimulateArgs) {
     // resolved value overrides every cell's `simulation.t_end` (applied in
     // `resolve_run_model` after the scenario horizon) and is keyed into run
     // identity via `ResolvedEntry.t_end`.
-    let mut to_was_anchored = false;
+    //
+    // gh#616: the MODEL may also be anchored (`simulate { to = last_obs + 4
+    // 'weeks }`, a scenario's, or a forcing's `breakpoints`). Those resolve from
+    // the same bound data as `--to`, through the same fold, so the observed
+    // window is resolved ONCE here and used for both. The model is then
+    // substituted in place, so every up-front check below (the horizon
+    // ordering, the `--to` conflict rule) reads resolved numbers rather than the
+    // NaN the compiler baked.
+    let (model_raw, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+    let model_is_anchored = crate::obs_anchor::model_is_anchored(&model_raw);
+    let to_is_anchored = matches!(
+        a.to.as_deref().map(|raw| crate::fit::runner::parse_time_spec(
+            "--to", raw, model_raw.origin.as_deref(), &model_raw.time_unit)),
+        Some(Ok(crate::fit::runner::TimeSpec::Anchored(_)))
+    );
+    let obs_anchors: Option<ir::anchor::ObsAnchorTimes> =
+        if model_is_anchored || to_is_anchored {
+            let Some(fit_ref) = a.fit.as_ref() else {
+                let what = if model_is_anchored {
+                    format!("this model is anchored to observed data ({})",
+                            crate::obs_anchor::anchored_sites(&model_raw).join(", "))
+                } else {
+                    "--to is anchored to observed data".to_string()
+                };
+                eprintln!(
+                    "error: {what}, but a forward simulation binds none.\n  \
+                     Fix: pass --fit <fit.toml | fit run dir> — its \
+                     [data.observations] supplies the observed times the anchor \
+                     resolves against."
+                );
+                std::process::exit(1);
+            };
+            let (first, last) = resolve_simulate_obs_anchors(&model_raw, fit_ref, dt)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: resolving observation anchors: {e}");
+                    std::process::exit(1);
+                });
+            Some(ir::anchor::ObsAnchorTimes { first, last })
+        } else {
+            None
+        };
+    // The locally-substituted model the up-front checks read. The RUN and the
+    // CAS `base_model` are substituted separately, at their own loads, with this
+    // same window — see `obs_anchor`'s module doc for why that is the seam.
+    let model_to = {
+        let mut m = model_raw;
+        if let Some(w) = obs_anchors {
+            let moved = crate::obs_anchor::substitute(&mut m, w).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            crate::obs_anchor::report(&moved, &m);
+        }
+        m
+    };
+
+    let to_was_anchored = to_is_anchored;
     let t_end_override: Option<f64> = match a.to.as_deref() {
         None => None,
         Some(raw) => {
-            let (model_to, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            });
             let spec = crate::fit::runner::parse_time_spec(
                 "--to", raw, model_to.origin.as_deref(), &model_to.time_unit,
             ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
             let resolved = match spec {
                 crate::fit::runner::TimeSpec::Absolute(v) => v,
+                // The observed window was folded once above, for the model
+                // and `--to` together, so this arm only applies the offset.
                 crate::fit::runner::TimeSpec::Anchored(anchored) => {
-                    to_was_anchored = true;
-                    let Some(fit_ref) = a.fit.as_ref() else {
-                        eprintln!(
-                            "error: --to \"{raw}\" is anchored to observed data, but a \
-                             forward simulation binds none.\n  Fix: pass --fit \
-                             <fit.toml | fit run dir> — its [data.observations] \
-                             supplies the observed times the anchor resolves against."
-                        );
-                        std::process::exit(1);
-                    };
-                    let (first_obs, last_obs) =
-                        resolve_simulate_obs_anchors(&model_to, fit_ref, dt)
-                            .unwrap_or_else(|e| {
-                                eprintln!("error: --to \"{raw}\": {e}");
-                                std::process::exit(1);
-                            });
-                    let base = match anchored.anchor {
-                        ir::anchor::ObsAnchor::First => first_obs,
-                        ir::anchor::ObsAnchor::Last => last_obs,
-                    };
-                    anchored.resolve(base)
+                    let w = obs_anchors.expect("an anchored --to forced the fold above");
+                    w.at(anchored)
                 }
             };
             // NO existing validator checks horizon ordering (ir::validate never
@@ -873,11 +912,11 @@ fn run_simulate(a: &args::SimulateArgs) {
             Some(resolved)
         }
     };
-    // `--fit` without `--draws` is only meaningful for an anchored `--to`
-    // (the clap `requires = \"draws\"` was relaxed for gh#626 — keep the old
-    // ergonomics otherwise).
-    if a.fit.is_some() && a.draws.is_none() && !to_was_anchored {
-        eprintln!("error: --fit requires --draws (or an anchored --to).");
+    // `--fit` without `--draws` is only meaningful when something needs the
+    // fit's DATA rather than its posterior: an anchored `--to` (gh#626) or an
+    // anchored model (gh#616). Otherwise keep the old ergonomics.
+    if a.fit.is_some() && a.draws.is_none() && !to_was_anchored && !model_is_anchored {
+        eprintln!("error: --fit requires --draws (or an anchored --to, or an anchored model).");
         std::process::exit(1);
     }
 
@@ -952,6 +991,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         // gh#641: assigned PER CELL by `engine::build_cell_sim_run` (replicate i
         // restores particle row i); the base run carries none.
         init_state: None,
+        obs_anchors,    // gh#616: the run's resolved observed window
         adhoc_enable,
         adhoc_disable,
         scenario_inline_name: None,
@@ -1447,6 +1487,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         scenarios,
         t_end_override,
         init_state: init_state_source,
+        obs_anchors,
         seeds: job_seeds,
         cli_overrides: base_sim_run.overrides.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         set_vec_entries: base_sim_run.set_vec_entries.clone(),
@@ -2066,8 +2107,26 @@ fn build_simulate_cas_sink(
     let (ir_path_resolved, _tmp) = util::resolve_ir_path(&run.ir_path, false)?;
     let src = std::fs::read_to_string(&ir_path_resolved)
         .map_err(|e| format!("cannot read {}: {}", ir_path_resolved, e))?;
-    let base_model: ir::Model = ir::from_str(&src)
+    let mut base_model: ir::Model = ir::from_str(&src)
         .map_err(|e| format!("IR load error from {}: {}", ir_path_resolved, e))?;
+
+    // gh#616: substitute the run's observation anchors into the model that is
+    // HASHED, with the same window `resolve_run_model` uses on the model that is
+    // RUN. This is what puts the resolution into run identity: `Model::hash_into`
+    // walks `simulation`, `presets` and `time_functions`, so a data vintage that
+    // moves `last_obs` moves the resolved `t_end` and the resolved forcing knots,
+    // and the two vintages cannot share a `run_id`.
+    //
+    // NOTE for the deferred `value_at`-under-simulate work (F23): that argument
+    // does NOT extend to quantity anchors. `Model::hash_into` deliberately
+    // EXCLUDES `quantities` (and `contrasts`) so reporting can never re-key a
+    // run — so resolving a `value_at(…, last_obs)` here would change no hashed
+    // field, and two vintages would share a `run_id` while reporting different
+    // numbers. Whoever lands F23 must key the resolved anchor EXPLICITLY; no
+    // model field will do it for them.
+    if let Some(w) = run.obs_anchors {
+        crate::obs_anchor::substitute(&mut base_model, w)?;
+    }
 
     // Resolved base params: model defaults overlaid by --params then --param,
     // filtered to the params that resolved to a value (a param that relies on
@@ -2618,6 +2677,18 @@ fn resolve_simulate_obs_anchors(
             .map_err(|e| e.to_string())?
             .config,
     };
+    obs_anchors_from_config(model, &config, dt)
+}
+
+/// The fold itself, over a config already in hand. Split out so `fit predict`
+/// — which has resolved its config long before it could look up a `--fit` ref —
+/// resolves anchors through the SAME reader as `simulate`, rather than growing a
+/// second one that could disagree about which rows count as observation times.
+pub(crate) fn obs_anchors_from_config(
+    model: &ir::Model,
+    config: &crate::fit::config_v2::FitConfigV2,
+    dt: f64,
+) -> Result<(f64, f64), String> {
     let data = config.data_spec().map_err(|e| format!(
         "the fit config has no [data] block to read observed times from: {e}"))?;
     let model_obs_names: Vec<String> =

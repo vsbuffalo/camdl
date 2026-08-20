@@ -478,6 +478,9 @@ pub fn build_cell_sim_run(
         scenario_name,
         t_end_override: job.t_end_override,
         init_state,
+        // Copied verbatim onto every cell, so a sweep/draw grid resolves
+        // ONE observed window, not one per cell.
+        obs_anchors: job.obs_anchors,
         adhoc_enable,
         adhoc_disable,
         scenario_inline_name,

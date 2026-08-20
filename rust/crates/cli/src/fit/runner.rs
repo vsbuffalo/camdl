@@ -134,6 +134,28 @@ impl FitRunConfig {
         // — the identity path is always `model.camdl`, not this.
         let model_path = fit.compiled_ir.as_deref().unwrap_or(&fit.model.camdl);
         let (mut model_pre, model_ir_json) = crate::util::load_model(model_path)?;
+        // gh#616: resolve the model's observation anchors from THIS fit's bound
+        // data, before anything compiles. Not optional: `ode_grad.rs` takes the
+        // integration window from `simulation.t_end`, so an unresolved horizon
+        // would integrate nothing.
+        //
+        // `run_fit` normally resolves once up front and repoints `compiled_ir`
+        // at the substituted IR, so this is a no-op there. It stays because a
+        // `FitRunConfig` can also be built by entry points that do not go
+        // through `run_fit` — same window, same function, so resolving again is
+        // idempotent rather than a second opinion.
+        if crate::obs_anchor::model_is_anchored(&model_pre) {
+            let dt0 = model_pre.simulation.dt.unwrap_or(1.0);
+            let (first, last) = crate::obs_anchors_from_config(&model_pre, fit, dt0)
+                .map_err(|e| {
+                    format!("resolving this model's observation anchors from [data]: {e}")
+                })?;
+            let moved = crate::obs_anchor::substitute(
+                &mut model_pre,
+                ir::anchor::ObsAnchorTimes { first, last },
+            )?;
+            crate::obs_anchor::report(&moved, &model_pre);
+        }
         // Keep a copy of the unfiltered model so the startup diagnostic
         // can show what was declared vs what's active. Cheap clone — the
         // intervention list is small.

@@ -103,6 +103,10 @@ fn generate_one_dataset(
         set_vec_entries: vec![],
         table_files: Default::default(),
         scenario_name: spec.scenario.clone(),
+        // Synthetic-data generation runs the model forward before any
+        // data exists, so an anchored model has nothing to anchor TO;
+        // `CompiledModel::new` refuses it by name.
+        obs_anchors: None,
         t_end_override: None, // fit refuses horizons (gh#561)
         init_state: None, // synthetic data-gen starts from the model's init {}
         adhoc_enable: vec![],

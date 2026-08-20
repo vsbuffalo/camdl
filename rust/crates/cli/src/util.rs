@@ -2643,6 +2643,14 @@ pub struct SimRun {
     /// moves `simulation.t_start` to the origin, and `simulate_compiled` hands
     /// the counts to the chain-binomial resume seam.
     pub init_state: Option<CellInitState>,
+    /// gh#616: the run's RESOLVED observation window, when the model declares
+    /// any observation anchor. Threaded (rather than resolved at each load)
+    /// because the CAS `base_model` and the model actually run are two separate
+    /// loads of the same IR: giving both the same window makes them agree by
+    /// construction, so the digest cannot describe a different horizon or a
+    /// different forcing fork from the one that ran. `None` for an unanchored
+    /// model, and then the substitution is a no-op.
+    pub obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
     pub adhoc_enable: Vec<String>,
     pub adhoc_disable: Vec<String>,
     /// An INLINE ad-hoc scenario's display name + `set`/`scale`. Distinct
@@ -2927,6 +2935,7 @@ impl Default for SimRun {
             scenario_name: None,
             t_end_override: None,
             init_state: None,
+            obs_anchors: None,
             adhoc_enable: Vec::new(),
             adhoc_disable: Vec::new(),
             scenario_inline_name: None,
@@ -2957,6 +2966,16 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     // gh#audit-C8. Envelope-aware load (see load_model above).
     let mut model: ir::Model = ir::from_str(&src)
         .map_err(|e| format!("IR load error from {}: {}", ir_path_resolved, e))?;
+    // gh#616: substitute the run's observation anchors FIRST — before the
+    // scenario horizon (which reads a preset's `t_end`, NaN until substituted),
+    // before the `--to` override, and before validate/compile. The window comes
+    // from the run rather than being re-derived here, so this model and the CAS
+    // `base_model` (substituted at its own load in `build_simulate_cas_sink`)
+    // are the same model by construction: the digest cannot describe a
+    // different horizon or forcing fork from the one that runs.
+    if let Some(w) = run.obs_anchors {
+        crate::obs_anchor::substitute(&mut model, w)?;
+    }
     // gh#166: CLI `--integrator` override (method only), before validate/compile.
     apply_integrator_override(&mut model, run.integrator);
     // gh#561: a named scenario may declare its own horizon (`scenarios { x {
@@ -3679,6 +3698,115 @@ pub fn fmt_relative_time(from: std::time::SystemTime, now: std::time::SystemTime
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod anchored_horizon_guard_tests {
+    //! gh#616: the horizon guards, driven with the NaN an UNRESOLVED anchored
+    //! horizon bakes.
+    //!
+    //! The whole argument for replacing the first draft's placeholder `t_end`
+    //! with NaN rests on these two functions failing CLOSED — a placeholder
+    //! NUMBER would compare equal to another placeholder and quietly satisfy
+    //! them. That is an argument about `==` on NaN, so it is asserted here
+    //! rather than reasoned about.
+    //!
+    //! Note what this does NOT claim: on a path that actually runs, no guard
+    //! ever sees NaN, because the resolver substitutes before `resolve_run_model`
+    //! captures `pre_scenario_end`, and any path that reaches a compile without
+    //! resolving is refused at `CompiledModel::new`. These tests pin the
+    //! second line of defence, so a future reordering that lets a NaN through
+    //! degrades to a refusal rather than to a wrong window.
+
+    use super::{check_baked_recurring_ends, refuse_scenario_horizon};
+
+    fn sir_with_scenario_horizon(model_t_end: f64, scenario_t_end: Option<f64>) -> ir::Model {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/sir_basic.ir.json");
+        let mut m: ir::Model =
+            ir::from_str(&std::fs::read_to_string(&path).expect("read sir_basic"))
+                .expect("parse sir_basic");
+        m.simulation.t_end = model_t_end;
+        m.presets[0].t_end = scenario_t_end;
+        m
+    }
+
+    /// A scenario horizon that the command cannot honour must be REFUSED. With
+    /// an unresolved anchor on either side the comparison is against NaN, and
+    /// `NaN == NaN` is false — so the "equal, therefore a harmless no-op" arm is
+    /// unreachable and the guard refuses. The dangerous case is both sides
+    /// anchored: a placeholder number would have made them compare EQUAL and the
+    /// scenario's window would have been silently dropped.
+    #[test]
+    fn refuse_scenario_horizon_fails_closed_on_nan() {
+        let name = {
+            let m = sir_with_scenario_horizon(80.0, None);
+            m.presets[0].name.clone()
+        };
+
+        // Both anchored (model +4 'weeks, scenario +8 'weeks): both NaN.
+        let m = sir_with_scenario_horizon(f64::NAN, Some(f64::NAN));
+        assert!(
+            refuse_scenario_horizon(&m, Some(&name), "fit predict", "why").is_err(),
+            "two DIFFERENT anchored horizons must not compare equal and be dropped"
+        );
+
+        // Model anchored, scenario literal.
+        let m = sir_with_scenario_horizon(f64::NAN, Some(200.0));
+        assert!(refuse_scenario_horizon(&m, Some(&name), "fit predict", "why").is_err());
+
+        // Model literal, scenario anchored.
+        let m = sir_with_scenario_horizon(80.0, Some(f64::NAN));
+        assert!(refuse_scenario_horizon(&m, Some(&name), "fit predict", "why").is_err());
+
+        // Negative control: the same guard still ACCEPTS a scenario that
+        // restates the model horizon, so the tests above are not passing merely
+        // because the guard refuses everything.
+        let m = sir_with_scenario_horizon(80.0, Some(80.0));
+        assert!(
+            refuse_scenario_horizon(&m, Some(&name), "fit predict", "why").is_ok(),
+            "a scenario restating the model horizon is a no-op and must be allowed"
+        );
+    }
+
+    /// The baked-end guard asks "did this recurring schedule's end come from the
+    /// model horizon?" via `rs.end == old_end`. With an unresolved horizon both
+    /// are NaN and the answer is "no" — which is the SAFE answer here, because
+    /// the guard exists to refuse an EXTENSION and an unresolved horizon cannot
+    /// be extended past. What must not happen is the opposite: a placeholder
+    /// number matching a baked end and reporting a spurious extension.
+    #[test]
+    fn check_baked_recurring_ends_does_not_fabricate_a_match_on_nan() {
+        let m = sir_with_scenario_horizon(f64::NAN, None);
+        assert!(
+            check_baked_recurring_ends(&m, None, f64::NAN, false).is_ok(),
+            "NaN must not be reported as a baked-end match"
+        );
+        // And a real extension of a RESOLVED horizon is still caught — the
+        // negative control that keeps the assertion above honest.
+        let mut m = sir_with_scenario_horizon(200.0, None);
+        m.interventions.push(ir::intervention::Intervention {
+            name: "campaign".into(),
+            base_name: None,
+            fire: ir::intervention::FireSource::Scheduled(
+                ir::intervention::InterventionSchedule::Recurring(
+                    ir::intervention::RecurringSchedule {
+                        start: 0.0,
+                        period: 30.0,
+                        end: 80.0, // == the pre-extension horizon: baked
+                        at_day: None,
+                    },
+                ),
+            ),
+            actions: vec![],
+            kind: ir::intervention::InterventionKind::Scenario,
+        });
+        assert!(
+            check_baked_recurring_ends(&m, None, 80.0, true).is_err(),
+            "extending past a baked recurring end must still be refused"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

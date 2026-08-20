@@ -35,7 +35,7 @@ pub fn from_str(s: &str) -> Result<Model, IrError> {
 /// when you need `#'` documentation (e.g. building the fit sidecar or labelling
 /// plot axes); most callers want [`from_str`], which discards `docs`.
 pub fn envelope_from_str(s: &str) -> Result<IrEnvelope, IrError> {
-    let env: IrEnvelope = serde_json::from_str(s)
+    let mut env: IrEnvelope = serde_json::from_str(s)
         .map_err(|e| IrError::Parse(e.to_string()))?;
     let expected = IR_VERSION.trim();
     if env.ir_version != expected {
@@ -44,6 +44,8 @@ pub fn envelope_from_str(s: &str) -> Result<IrEnvelope, IrError> {
             found:    env.ir_version,
         });
     }
+    // gh#616: the same post-decode normalisation `into_model_checked` applies.
+    env.model.restore_unresolved_horizons();
     Ok(env)
 }
 

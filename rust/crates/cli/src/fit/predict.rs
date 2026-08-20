@@ -934,7 +934,34 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         // gh#439 A2).
         crate::util::resolve_ir_path(&config.model.camdl, false)?
     };
-    let (model, _) = crate::util::load_model(&compiled_ir)?;
+    let (mut model, _) = crate::util::load_model(&compiled_ir)?;
+    // gh#616: `fit predict` HAS the fit's data, so it resolves the model's
+    // observation anchors rather than refusing them — and it must do so HERE,
+    // before the horizon guard below and before any compile. Inheriting an
+    // unresolved horizon would emit a single-snapshot "forecast" that reads as a
+    // plausible plateau at exit 0.
+    //
+    // Resolving before `refuse_scenario_horizon` is also what makes that guard
+    // meaningful: with a model horizon of `last_obs + 4 'weeks` and a scenario's
+    // of `last_obs + 8 'weeks`, the comparison is between two REAL numbers that
+    // differ, so the scenario's window is refused rather than silently dropped.
+    // Two anchors that resolve to the SAME time still compare equal and are
+    // allowed, which is the existing no-op precedent.
+    let resolved_obs_anchors: Option<ir::anchor::ObsAnchorTimes> =
+        if crate::obs_anchor::model_is_anchored(&model) {
+            let dt0 = model.simulation.dt.unwrap_or(1.0);
+            let (first, last) =
+                crate::obs_anchors_from_config(&model, &config, dt0).map_err(|e| {
+                    format!("resolving this model's observation anchors from the fit's data: {e}")
+                })?;
+            let w = ir::anchor::ObsAnchorTimes { first, last };
+            let moved = crate::obs_anchor::substitute(&mut model, w)?;
+            crate::obs_anchor::report(&moved, &model);
+            Some(w)
+        } else {
+            None
+        };
+    let model = model;
     // One calendar block for every sidecar manifest this run writes
     // (predictive / observed / quantities), read once off the model.
     let calendar = io::CalendarMeta::from_model(&model);
@@ -1292,6 +1319,13 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     // each posterior draw; a filtered-state restart is a
                     // `simulate --init-state` surface, not a `fit predict` one.
                     init_state: None,
+                    // gh#616: the engine re-loads the model from the ARCHIVED IR
+                    // path per cell, which still carries the unresolved anchors —
+                    // so the resolved window has to travel with the job, not just
+                    // live in the copy predict substituted above. Same window,
+                    // so the per-cell model matches the one this command
+                    // validated.
+                    obs_anchors: resolved_obs_anchors,
                     seeds: crate::sim_job::Seeds::Single(seed),
                     cli_overrides: vec![],
                     set_vec_entries: vec![],

@@ -115,7 +115,11 @@ impl IrEnvelope {
                 found:    self.ir_version,
             });
         }
-        Ok(self.model)
+        let mut model = self.model;
+        // gh#616: restore the NaN horizon an unresolved anchor implies (JSON has
+        // no NaN literal, so it travelled as `null`).
+        model.restore_unresolved_horizons();
+        Ok(model)
     }
 }
 

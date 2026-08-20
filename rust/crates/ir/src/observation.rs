@@ -179,6 +179,12 @@ impl Likelihood {
 pub struct RegularSchedule {
     pub start: f64,
     pub step:  f64,
+    /// The emit window's end, baked from the model horizon — NaN while that
+    /// horizon is an unresolved anchor (see [`crate::anchor::null_as_nan`]).
+    /// Since gh#143/gh#561 the runtime derives emission from the RUN horizon
+    /// and ignores this value, and the gh#616 resolver overwrites it with the
+    /// resolved horizon so it never stays NaN on a model that runs.
+    #[serde(with = "crate::anchor::null_as_nan")]
     pub end:   f64,
 }
 

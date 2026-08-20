@@ -735,6 +735,9 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         t_end_override: None,
         // gh#641: nor an `init_state` key, for the same reason.
         init_state: None,
+        // gh#616: `batch run` has no data-binding surface, so an anchored
+        // model is refused at `CompiledModel::new` rather than resolved.
+        obs_anchors: None,
         // Batch seeds are always explicit (range / count / list).
         seeds: Seeds::Explicit(seeds.clone()),
         cli_overrides: Vec::new(),
@@ -1580,6 +1583,9 @@ fn run_design_experiment(
         t_end_override: None,
         // gh#641: nor an `init_state` key, for the same reason.
         init_state: None,
+        // gh#616: `batch run` has no data-binding surface, so an anchored
+        // model is refused at `CompiledModel::new` rather than resolved.
+        obs_anchors: None,
             seeds: Seeds::Explicit(seeds.to_vec()),
             cli_overrides: Vec::new(),
             set_vec_entries: Vec::new(),

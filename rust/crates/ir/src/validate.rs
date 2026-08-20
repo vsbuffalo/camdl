@@ -393,10 +393,21 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
     // "the model produced nothing". Non-finite bounds are the same class
     // (NaN/inf propagate into the grid). Checked here, at the single load
     // boundary every command goes through.
+    //
+    // SKIPPED while `t_end_anchor` is set (gh#616). An unresolved anchored
+    // horizon bakes `t_end = NaN` on purpose, so this check would fire on every
+    // anchored model at load — before any command has had the chance to bind
+    // data and resolve it — and would report "not a forward interval" for a
+    // model whose horizon is simply not a number yet. The anchored case has its
+    // own guard at the one place it matters: `CompiledModel::new` refuses an
+    // unresolved anchor by name. Once the resolver substitutes, the anchor field
+    // is cleared and this check applies again to the resolved value.
     {
         let t_start = model.simulation.t_start;
         let t_end   = model.simulation.t_end;
-        if !(t_start.is_finite() && t_end.is_finite() && t_end > t_start) {
+        if model.simulation.t_end_anchor.is_none()
+            && !(t_start.is_finite() && t_end.is_finite() && t_end > t_start)
+        {
             errors.push(ValidationError::InvalidHorizon { t_start, t_end });
         }
     }
@@ -1372,6 +1383,26 @@ mod tests {
     /// ordering test would pass `t_start = -inf` and `t_end = -inf`-adjacent
     /// cases, and NaN silently compares false everywhere — so the check tests
     /// finiteness explicitly and this test pins all four corners.
+    /// gh#616: an UNRESOLVED anchored horizon bakes NaN deliberately, so this
+    /// check must not fire on it — `CompiledModel::new` refuses that case by
+    /// name instead. But the skip is keyed on the anchor field, so a resolved
+    /// model (anchor cleared) is checked again like any other.
+    #[test]
+    fn an_unresolved_anchor_suspends_the_horizon_check() {
+        use crate::anchor::{AnchoredTime, ObsAnchor};
+        let mut m = load_sir();
+        m.simulation.t_end = f64::NAN;
+        m.simulation.t_end_anchor = Some(AnchoredTime { anchor: ObsAnchor::Last, offset: 28.0 });
+        validate(&m).expect("an unresolved anchored horizon must not trip this check");
+
+        // Clearing the marker without fixing t_end is exactly the state the
+        // resolver must never leave behind — and it is caught.
+        m.simulation.t_end_anchor = None;
+        let errs = validate(&m).expect_err("a cleared anchor with NaN t_end must be rejected");
+        assert!(errs.iter().any(|e| matches!(e, ValidationError::InvalidHorizon { .. })),
+            "expected InvalidHorizon, got: {errs:?}");
+    }
+
     #[test]
     fn non_finite_horizon_is_rejected() {
         for (t_start, t_end) in [

@@ -95,35 +95,10 @@ enum RAnchor {
     Obs(ir::anchor::AnchoredTime),
 }
 
-/// The run's resolved observation anchors: the min and max observation time
-/// over the run's bound streams. Both are carried because a model may read at
-/// either end, and resolving only the one a given model happens to use would
-/// re-introduce the "which anchor did the caller mean" question at every call
-/// site.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ObsAnchorTimes {
-    pub first: f64,
-    pub last: f64,
-}
-
-impl ObsAnchorTimes {
-    /// Fold a run's observation times into the pair. `None` when there are no
-    /// observation times at all — the caller then has nothing to anchor to and
-    /// must refuse rather than pass a fabricated value.
-    pub fn of_times(times: impl IntoIterator<Item = f64>) -> Option<Self> {
-        let mut it = times.into_iter();
-        let t0 = it.next()?;
-        let (first, last) = it.fold((t0, t0), |(lo, hi), t| (lo.min(t), hi.max(t)));
-        Some(ObsAnchorTimes { first, last })
-    }
-
-    fn at(&self, a: ir::anchor::AnchoredTime) -> f64 {
-        a.resolve(match a.anchor {
-            ir::anchor::ObsAnchor::First => self.first,
-            ir::anchor::ObsAnchor::Last => self.last,
-        })
-    }
-}
+/// The run's resolved observation window. Defined in `ir::anchor` beside
+/// `AnchoredTime` (its unresolved counterpart) because the CLI's model-level
+/// resolver and this evaluator must agree on it exactly.
+pub use ir::anchor::ObsAnchorTimes;
 
 enum RScalar {
     Const(f64),
@@ -689,27 +664,6 @@ mod tests {
     use QuantityDrawValue::*;
 
     // ── Observation anchors (gh#616) ─────────────────────────────────────────
-
-    /// The pair folds the run's observation times, and the offset is applied on
-    /// top of whichever end the anchor names. An offset applied to the WRONG end
-    /// would still produce a plausible in-window time, so pin both.
-    #[test]
-    fn obs_anchor_times_fold_and_resolve() {
-        use ir::anchor::{AnchoredTime, ObsAnchor};
-        let t = ObsAnchorTimes::of_times([21.0, 0.0, 14.0, 7.0]).expect("non-empty");
-        assert_eq!(t, ObsAnchorTimes { first: 0.0, last: 21.0 });
-        assert_eq!(t.at(AnchoredTime::bare(ObsAnchor::Last)), 21.0);
-        assert_eq!(t.at(AnchoredTime::bare(ObsAnchor::First)), 0.0);
-        assert_eq!(t.at(AnchoredTime { anchor: ObsAnchor::Last, offset: 28.0 }), 49.0);
-        assert_eq!(t.at(AnchoredTime { anchor: ObsAnchor::First, offset: -7.0 }), -7.0);
-    }
-
-    /// No observation times at all → `None`, so a caller cannot mistake an empty
-    /// stream set for an anchor at t = 0.
-    #[test]
-    fn obs_anchor_times_of_empty_is_none() {
-        assert_eq!(ObsAnchorTimes::of_times([]), None);
-    }
 
     /// The gate matches EVERY anchor form. Keyed on one variant (as it was
     /// before gh#616), a `first_obs` or offset quantity would slip past a

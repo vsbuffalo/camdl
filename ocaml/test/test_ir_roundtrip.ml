@@ -452,13 +452,31 @@ let no_anchor_wire_is_byte_identical_test () =
   Alcotest.(check string) "unanchored preset is unchanged from 0.31"
     {|{"name":"baseline","label":"default  (R0 ≈ 3)","params":{"beta":0.3,"gamma":0.1,"N0":1000.0,"I0":10.0},"enable":[],"disable":[],"t_end":80.0}|}
     (Yojson.Safe.to_string (Serde.preset_to_json baseline));
-  (* And the anchored form APPENDS exactly one key at the end. *)
+  (* And the anchored form APPENDS exactly one key at the end, with the horizon
+     emitted as `null`.
+
+     `null`, not `NaN`: the compiler bakes NaN for an unresolved anchored
+     horizon, but JSON HAS NO NaN LITERAL. Yojson will happily write a bare
+     `NaN` token, which `serde_json` then rejects — so an anchored model could
+     not be loaded by the runtime at all. The anchor field beside it carries what
+     the horizon is, and the reader restores the NaN from that. *)
   let anchored = { m.simulation with
                    t_end = Float.nan;
                    t_end_anchor = Some { Ir.anchor = Ir.AnchorLast; offset = 28.0 } } in
+  let anchored_json = Yojson.Safe.to_string (Serde.simulation_config_to_json anchored) in
   Alcotest.(check string) "an anchored simulation block appends one key"
-    {|{"t_start":0.0,"t_end":NaN,"time_semantics":"continuous","dt":null,"rng_seed":null,"t_end_anchor":{"anchor":"last_obs","offset":28.0}}|}
-    (Yojson.Safe.to_string (Serde.simulation_config_to_json anchored))
+    {|{"t_start":0.0,"t_end":null,"time_semantics":"continuous","dt":null,"rng_seed":null,"t_end_anchor":{"anchor":"last_obs","offset":28.0}}|}
+    anchored_json;
+  (* The property the string above is a proxy for, asserted directly: what we
+     emit must be parseable as JSON. A `NaN` token is not. *)
+  (match Yojson.Safe.from_string anchored_json with
+   | _ -> ()
+   | exception _ ->
+     Alcotest.failf "an anchored simulation block must be valid JSON: %s" anchored_json);
+  (* And it round-trips back to NaN, so the in-memory invariant survives. *)
+  let back = Serde.simulation_config_of_json (Yojson.Safe.from_string anchored_json) in
+  Alcotest.(check bool) "the anchored horizon reads back as NaN" true (Float.is_nan back.t_end);
+  Alcotest.(check bool) "and keeps its anchor" true (back.t_end_anchor = anchored.t_end_anchor)
 
 let () =
   let tests =
