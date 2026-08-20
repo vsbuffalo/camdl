@@ -88,6 +88,29 @@ Branch: `feat/aggregation-remaining` (off `main` @ `9643c246`).
       existing `CumulativeFlowSum`. E341 replaces the E100 fall-through for
       weighted / subtracted / state-mixed near-misses. Four tests, all
       mutation-checked; full `make test` green.
+
+### The `ir/VERSION` bump procedure, derived from `39f30ae0`
+
+`make update-golden` does **not** cover `ir/golden/` — that set is frozen
+(gh#384). But a version bump still has to touch it, because every golden carries
+an `ir_version` field in its envelope, and the Rust tests load those 17 files
+directly. The last bump hand-edited exactly that one line in each (17 files, 28
+insertions / 28 deletions — the version line and nothing else).
+
+So the atomic commit is six steps, not the four in `.claude/rules/ir-schema.md`:
+
+1. `ir/schema.json` + `ir/VERSION` (read it, take the next one)
+2. OCaml — `ocaml/lib/ir/ir.ml`, `ocaml/lib/ir/serde.ml`
+3. Rust — `rust/crates/ir/src/observation.rs`, and the **positional** hash tag
+   in `rust/crates/runid/src/ir_hash.rs` (`WeightedFlowSum` appends at **5**;
+   0..4 are taken and permanent)
+4. `make update-golden` — the regenerable sets
+5. **hand-bump `ir_version` in the 17 frozen `ir/golden/*.ir.json`** — the step
+   no target performs and no doc mentions
+6. full `make test` (~10 min), then one commit
+
+Blast radius last time: 125 files. Expect the same shape.
+
 - [ ] **4. Increment B (rest)** — `ir/VERSION` bump (read it, don't pin it).
       Land as a stacked sequence behind one bump, each piece green:
   - [ ] 4a. typed `dim_name` + goldens regenerated
