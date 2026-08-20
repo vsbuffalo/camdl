@@ -2763,6 +2763,13 @@ pub fn run_pgas(
     let trajectory;
     let current_transformed: Vec<f64>;
 
+    // Whether this call begins a chain (vs continues one). The chain-start
+    // refusal below applies only to a fresh start: a resumed θ already passed
+    // the check once, and re-running it on the restored state would refuse a
+    // chain that has been sampling happily. Same reasoning as PMMH's init-eval
+    // guard, which is likewise skipped on resume (`cli/src/fit/pmmh.rs`).
+    let is_fresh_start = resume_from.is_none();
+
     // Extract resume adaptation state (consumed separately from trajectory/params)
     let resume_nuts = resume_from.as_ref().map(|s| (
         s.mass_matrix.clone(), s.nuts_step_size,
@@ -2808,6 +2815,11 @@ pub fn run_pgas(
         // single-line "BUG: simulate_reference trajectory has -inf density at
         // own params" message lumped both together and accused step_one even
         // when the obs term was the cause.
+        //
+        // This block only EXPLAINS; it does not decide. A non-finite total
+        // here reappears in `current_ll` below (same trajectory, same params,
+        // plus the IVP term), where the gh#607 chain-start refusal turns it
+        // into a skipped chain.
         let sanity = complete_data_loglik(
             model, &trajectory, &current_params, observations,
             config.dt, obs_model, &[],  // empty IVP mappings
@@ -2954,6 +2966,77 @@ pub fn run_pgas(
             model.model.transitions.len(),
             model.source_groups.len());
     }
+
+    // gh#607. A start with zero posterior density is put ON PROBATION here and
+    // refused at the end of the first sweep (`start_at_zero_density` below) if
+    // it is still there. Seeding every rung with `−∞` and sampling 40 000
+    // sweeps anyway is what this replaces.
+    //
+    // The quantity is the one the chain is actually sampled on: the
+    // complete-data log-likelihood plus the log prior at θ₀ — the same
+    // definition as the `log_posterior` column the trace writer emits
+    // (`cli/src/fit/pgas.rs`), so a refusal names a number the user can find.
+    // The transform Jacobian is deliberately excluded, matching that column;
+    // `to_transformed` clamps into the declared support, so a start inside its
+    // bounds cannot make the Jacobian the non-finite term.
+    //
+    // WHY PROBATION AND NOT AN IMMEDIATE REFUSAL. `−∞` at (θ₀, X₀) is usually
+    // the OBSERVATION term, and that term is a property of the pair, not of θ₀
+    // alone: X₀ is one stochastic reference draw, and the X|θ,y move can — and
+    // routinely does — replace it with a trajectory that explains the data at
+    // the SAME θ₀. Measured on three of this repository's own PGAS fixtures
+    // (`fit_predict_e2e`, `contrasts_e2e`, `pgas_resume`): every one starts a
+    // chain at `−∞` and every one is finite by the first recorded sweep. An
+    // immediate refusal would have killed all three.
+    //
+    // WHY ONE SWEEP IS THE LINE. After a complete Gibbs sweep the chain has had
+    // every move the sampler offers. If it is still at `−∞`, θ can no longer
+    // move: the θ|X step scores each proposal against the current X, so with
+    // both current and proposed at `−∞` the MH ratio is NaN and rejects, and
+    // NUTS is worse — `log p = −∞` gives `h0 = +∞`, so every doubling trips
+    // `(h_new − h0).abs() > delta_max` and the tree stops at depth 0
+    // (`nuts.rs`). Each later sweep is then an independent retry of the SAME
+    // failed X-move at the SAME θ₀. That retry is not impossible, only
+    // vanishingly unlikely in practice: the production run that motivated this
+    // measured 40 000 consecutive failures, acceptance 0.000 and `n_divergent`
+    // 1.000 throughout, with ONE distinct parameter vector across 7 600
+    // retained draws.
+    //
+    // Contrast with PMMH/ODE-MH, which keep their warn-and-continue: their
+    // likelihood is MARGINAL in X (the filter re-integrates it at every
+    // proposal), so a different θ genuinely re-rolls the observation term and
+    // the `+∞` escape is reachable (gh#334, gh#471).
+    //
+    // Deliberately NOT auto-resampled. A start drawn from the prior that lands
+    // on an impossible region is information about the prior; silently
+    // redrawing it would hide that (gh#419 rejected auto-quarantine as policy).
+    //
+    // `Some(..)` carries the START's component breakdown — which term was
+    // non-finite is the diagnosis (`observation` = a bad start; `transition` =
+    // a step_one/density disagreement, i.e. a bug, gh#80) — so the refusal can
+    // report it after the probation sweep.
+    let start_at_zero_density: Option<(f64, f64, f64, f64, f64)> = if is_fresh_start {
+        let initial_log_prior: f64 = if2_params.iter().zip(priors.iter())
+            .map(|(spec, prior)| {
+                let theta = current_params[spec.index];
+                prior.log_density(theta, spec.to_transformed(theta))
+            })
+            .sum();
+        let initial_log_posterior = current_ll + initial_log_prior;
+        if initial_log_posterior.is_finite() {
+            None
+        } else {
+            Some((
+                initial_log_posterior,
+                current_components.transition,
+                current_components.observation,
+                current_components.ivp,
+                initial_log_prior,
+            ))
+        }
+    } else {
+        None
+    };
 
     // Check if gradients are available (compiler emitted rate_grad)
     let has_gradients = nuts_active(config.use_nuts, model);
@@ -3374,12 +3457,12 @@ pub fn run_pgas(
                     // true Metropolis probability is 1. Rejecting it freezes
                     // the parameter block for the rest of the run.
                     //
-                    // That state is reachable without anything going wrong
-                    // mid-run: `pgas.rs`'s initial-loglik check only WARNS on a
-                    // non-finite `current_ll` and falls through, seeding every
-                    // rung with it. And the whole-fit backstop (gh#226) fires
-                    // only when EVERY chain is `−∞`, so a mixed run exits 0
-                    // with one frozen chain folded into the posterior and R̂.
+                    // That state is still reachable mid-run. The chain-start
+                    // refusal above (gh#607) rules out only sweep 0: a rung
+                    // that starts finite can still walk into a `−∞` region
+                    // later — a CSMC refresh can hand it a trajectory whose
+                    // observation term is `−∞` at the current θ — and from
+                    // there the `+∞` escape is the only move out.
                     if crate::inference::mh_accept(log_alpha, rng.uniform().ln()) {
                         rungs[rung].params[spec.index] = theta_new;
                         rungs[rung].transformed[i] = z_new;
@@ -3433,6 +3516,44 @@ pub fn run_pgas(
                 cold_obs_ll = ll_components.observation;
             }
         } // end rung loop
+
+        // gh#607. END OF PROBATION. The chain started at zero posterior density
+        // and has now had one complete Gibbs sweep — a θ|X move and the X|θ,y
+        // move that is the only one able to rescue such a start. If NO rung
+        // reached finite density, refuse the chain here: the reasoning and the
+        // measured evidence are at `start_at_zero_density`'s definition.
+        //
+        // Placed before the swap, the callback, and the draw recorder, so a
+        // refused chain leaves no trace row, no retained draw, and no saved
+        // trajectory — nothing for a downstream number to pick up.
+        //
+        // ANY rung finite is enough, not just the cold one: a swap proposal
+        // from a `−∞` cold rung to a finite hot rung has `log α =
+        // (β_i − β_j)(ℓ_j − (−∞)) = +∞` and is accepted with certainty
+        // (`swap_log_alpha`), so the ladder can still pull the cold rung out.
+        // With the default single rung this reduces to "the cold rung".
+        if let Some((log_posterior, transition, observation, ivp, log_prior)) =
+            start_at_zero_density
+        {
+            if sweep == start_sweep {
+                let any_rung_finite = rungs.iter().any(|rung| {
+                    let rung_log_prior: f64 = if2_params.iter().zip(priors.iter())
+                        .map(|(spec, prior)| {
+                            let theta = rung.params[spec.index];
+                            prior.log_density(theta, spec.to_transformed(theta))
+                        })
+                        .sum();
+                    (rung.ll + rung_log_prior).is_finite()
+                });
+                if !any_rung_finite {
+                    return Err(SimError::NonFiniteChainStart {
+                        log_posterior, transition, observation, ivp, log_prior,
+                    });
+                }
+                eprintln!("  chain recovered from a non-finite start on its first \
+                           trajectory update (complete-data ll: {:.1})", rungs[0].ll);
+            }
+        }
 
         // ── Replica exchange: swap adjacent rungs ──
         if n_rungs > 1 {

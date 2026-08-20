@@ -117,6 +117,57 @@ pub enum SimError {
         budget_substeps: u64,
     },
 
+    /// gh#607. A PGAS chain's START has zero posterior density and did not
+    /// recover: the complete-data log-posterior at `(θ₀, X₀)` —
+    /// `log p(y, X₀ | θ₀) + log p(θ₀)` — is non-finite, and is STILL non-finite
+    /// after the sampler's first complete Gibbs sweep.
+    ///
+    /// The two-part test is load-bearing. A `−∞` at `(θ₀, X₀)` is usually the
+    /// observation term, which is a property of the PAIR: `X₀` is one
+    /// stochastic reference draw, and the `X|θ,y` move routinely replaces it
+    /// with a trajectory that explains the data at the same `θ₀` (measured on
+    /// three of this repository's own PGAS fixtures, all of which start a chain
+    /// at `−∞` and are finite by the first recorded sweep). Refusing on the
+    /// initial value alone would kill those chains.
+    ///
+    /// Once a full sweep has failed, though, the chain is frozen: the `θ|X`
+    /// step scores each proposal against the current `X`, so with both at `−∞`
+    /// the MH ratio is NaN and rejects, and NUTS is worse — `log p = −∞` gives
+    /// `h0 = +∞`, so `(h_new − h0).abs() > delta_max` flags every doubling
+    /// divergent and the tree stops at depth 0. Every later sweep is an
+    /// independent retry of the same failed `X`-move at the same `θ₀`. Measured
+    /// on the 40 000-sweep, 8-chain production fit that motivated this: 40 000
+    /// consecutive failures — acceptance 0.000 and `n_divergent` 1.000 on every
+    /// sweep, ONE distinct parameter vector across 7 600 retained draws, an
+    /// eighth of a 2 h 29 m run pooled into the posterior and R̂.
+    ///
+    /// Not `is_structural`: like `PFDegenerate` this is a property of the
+    /// chain's START, not of the model — sibling chains of the same fit run
+    /// normally. The driver (`cli/src/fit/pgas.rs`) turns it into a `BadInit`
+    /// diagnostic and skips the chain, erroring only when EVERY chain is
+    /// refused.
+    #[error("chain start has zero posterior density and did not recover on its \
+             first trajectory update: the initial complete-data log-posterior is \
+             {log_posterior} (log-likelihood terms: transition {transition}, \
+             observation {observation}, ivp {ivp}; log prior {log_prior})")]
+    NonFiniteChainStart {
+        /// `transition + observation + ivp + log_prior` — the number the
+        /// chain would have been seeded with.
+        log_posterior: f64,
+        /// Complete-data transition term. Non-finite here means a
+        /// `step_one` / `log_transition_density_substep` disagreement — a
+        /// bug, not a bad start (gh#80).
+        transition: f64,
+        /// Observation term `log p(y | X₀)`. The common cause: the reference
+        /// trajectory predicts zero where the data is positive.
+        observation: f64,
+        /// Initial-state (IVP) Binomial term.
+        ivp: f64,
+        /// `Σ log p(θ₀)` over the estimated parameters. Non-finite here means
+        /// the start is outside its own prior's support.
+        log_prior: f64,
+    },
+
     /// gh#81 Phase 2. A model parameter reached the rate evaluator
     /// already non-finite (NaN / ±Inf). The rate expression itself is
     /// innocent — propagating NaN through `beta * S * I / N` produces
@@ -285,9 +336,10 @@ impl SimError {
     ///
     /// `false` (reject as −∞): per-particle excursions, θ-dependent
     /// runtime conditions (`DivisionByZero`, `NegativePropensity`,
-    /// `AbsorbingState`), and the whole-call PF bail (`PFDegenerate`).
-    /// Init-eval callers treat the PF bail specially — a `BadInit` skip —
-    /// via the CLI init guard.
+    /// `AbsorbingState`), the whole-call PF bail (`PFDegenerate`), and the
+    /// PGAS chain-start refusal (`NonFiniteChainStart`). Init-eval callers
+    /// treat the last two specially — a `BadInit` skip — via the CLI init
+    /// guard and the PGAS driver respectively.
     pub fn is_structural(&self) -> bool {
         use NegativeCountCause::*;
         match self {
@@ -319,7 +371,12 @@ impl SimError {
             | SimError::AbsorbingState(_)
             | SimError::NumericalCollapse { .. }
             | SimError::NonFiniteParameter { .. }
-            | SimError::PFDegenerate { .. } => false,
+            | SimError::PFDegenerate { .. }
+            // A start with zero posterior density is a property of THIS
+            // chain's starting point, not of the model — the fit's other
+            // chains are unaffected, so the driver skips this one rather
+            // than aborting the run.
+            | SimError::NonFiniteChainStart { .. } => false,
         }
     }
 }
@@ -477,5 +534,34 @@ mod tests {
             cause: NegativeCountCause::BinomialOvershoot,
         }.is_structural());
         assert!(!SimError::AbsorbingState(0.0).is_structural());
+    }
+
+    /// gh#607. A PGAS chain start with zero posterior density must be
+    /// classified like `PFDegenerate`: NOT structural (the fit's other chains
+    /// are fine, so the driver skips this one and continues) and NOT
+    /// per-particle recoverable (there is no particle to kill — the whole
+    /// chain is refused before sweep 0).
+    ///
+    /// Classifying it structural would abort a multi-chain fit on one bad
+    /// start, which is the failure the skip exists to prevent.
+    #[test]
+    fn non_finite_chain_start_is_a_skip_not_a_fatal() {
+        let err = SimError::NonFiniteChainStart {
+            log_posterior: f64::NEG_INFINITY,
+            transition: -1234.5,
+            observation: f64::NEG_INFINITY,
+            ivp: 0.0,
+            log_prior: -2.5,
+        };
+        assert!(!err.is_structural(),
+            "a bad chain START must not abort the whole fit: {err}");
+        assert!(!err.is_per_particle_recoverable(),
+            "the chain is refused whole; there is no particle to absorb it: {err}");
+        // The components must survive into the message — the driver quotes
+        // them in the BadInit reason, and `observation = -inf` vs
+        // `transition = -inf` are different findings (bad start vs gh#80 bug).
+        let s = format!("{err}");
+        assert!(s.contains("observation -inf"), "message must name the components: {s}");
+        assert!(s.contains("log prior -2.5"), "message must name the prior term: {s}");
     }
 }

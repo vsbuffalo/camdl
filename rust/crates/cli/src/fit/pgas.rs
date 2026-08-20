@@ -534,8 +534,17 @@ pub fn run_stage(
 
     // Run chains in parallel (each chain is independent: own seed, own
     // trajectory, own RNG). Same pattern as PMMH.
+    //
+    // Each chain yields `Ok(Some(result))`, or `Ok(None)` when `run_pgas`
+    // refuses its start with `NonFiniteChainStart` (gh#607) — skipped with a
+    // `BadInit` diagnostic and omitted from every downstream number
+    // (draws.tsv, R̂/ESS, the MAP `fit_state`), surviving chains continue. An
+    // `Err` is a structural failure: the model/config cannot run, so the whole
+    // fit aborts rather than reporting a partial posterior — `collect`
+    // short-circuits on the first such error. Mirrors PMMH (`pmmh.rs`) and IF2
+    // (`runner.rs`), which do the same for `PFDegenerate`.
     use rayon::prelude::*;
-    let all_results: Vec<Result<(usize, Vec<PGASSweep>, Vec<f64>), String>> = (0..n_chains)
+    let all_results: Vec<Result<Option<(usize, Vec<PGASSweep>, Vec<f64>)>, String>> = (0..n_chains)
         .into_par_iter()
         .map(|chain_id| {
             let chain_seed = crate::util::derive_chain_seed(seed, chain_id);
@@ -688,7 +697,7 @@ pub fn run_stage(
                 heartbeat.bump(sweep as u64);
             };
 
-            let result = run_pgas(
+            let result = match run_pgas(
                 compiled,
                 &config.estimated_params,
                 &priors,
@@ -700,7 +709,47 @@ pub fn run_stage(
                 Some(&progress_cb),
                 resume_states[chain_id].clone(),
                 config_hash.clone(),
-            ).map_err(|e| format!("pgas chain {} error: {}", chain_id + 1, e))?;
+            ) {
+                Ok(r) => r,
+                // gh#607. The chain's start has zero posterior density and did
+                // not recover on its first trajectory update, so it could only
+                // have produced `-inf` draws for the whole run. Skip it with a
+                // loud `BadInit` diagnostic (collector + stderr) — never
+                // silently — and let the survivors finish.
+                Err(sim::error::SimError::NonFiniteChainStart {
+                    log_posterior, transition, observation, ivp, log_prior,
+                }) => {
+                    let reason = format!(
+                        "initial complete-data log-posterior is {}, still \
+                         non-finite after the first trajectory update \
+                         (log-likelihood terms: transition {:.4}, observation \
+                         {:.4}, ivp {:.4}; log prior {:.4})",
+                        log_posterior, transition, observation, ivp, log_prior);
+                    // gh#513: report the start THIS chain ran from, not the
+                    // configured one. `chain_starts[chain_id]` is the same
+                    // vector handed to `run_pgas` above and the same one
+                    // `write_chain_starts_tsv` recorded, so the diagnostic and
+                    // `chain_starts.tsv` name the same numbers.
+                    let params: std::collections::BTreeMap<String, f64> =
+                        config.estimated_params.iter()
+                            .map(|spec| (
+                                spec.name.clone(),
+                                chain_starts[chain_id][spec.index],
+                            ))
+                            .collect();
+                    collector.push(DiagnosticKind::BadInit {
+                        chain_id, params, reason: reason.clone(),
+                    });
+                    eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
+                        chain_id + 1, reason);
+                    // The bar is cleared in the post-loop finish; the skip
+                    // is already loud on stderr above.
+                    return Ok(None);
+                }
+                Err(e) => {
+                    return Err(format!("pgas chain {} error: {}", chain_id + 1, e));
+                }
+            };
 
             // Save resume state for future --resume
             let resume_path = chain_dir.join("resume_state.bin");
@@ -776,7 +825,7 @@ pub fn run_stage(
                 };
             }
 
-            Ok((chain_id, result.sweeps, result.acceptance_rates))
+            Ok(Some((chain_id, result.sweeps, result.acceptance_rates)))
         })
         .collect();
 
@@ -786,10 +835,52 @@ pub fn run_stage(
     // `acceptance rates:` report below carries the per-chain summary.
     for t in bars { t.finish(); }
 
-    // Unwrap results (propagate first error)
+    // Unwrap results (propagate first error), dropping the chains that were
+    // refused at their start (gh#607). From here on `all_results` holds only
+    // chains that actually sampled, so every downstream number — draws.tsv,
+    // R̂/ESS, the MAP `fit_state` — is over survivors alone.
     let all_results: Vec<(usize, Vec<PGASSweep>, Vec<f64>)> = all_results
         .into_iter()
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    // gh#607. Skip + continue: surface "ran K of N chains" so the user knows
+    // the downstream R̂/ESS exclude the skipped chains. This line is the
+    // load-bearing user-facing signal that a bad start was tolerated rather
+    // than silently dropped. Mirrors PMMH (`pmmh.rs`).
+    let n_good_chains = all_results.len();
+    if n_good_chains < n_chains {
+        eprintln!("\n\x1b[33mran {} of {} chains\x1b[0m \
+                   ({} skipped via BadInit; see diagnostics below)",
+            n_good_chains, n_chains, n_chains - n_good_chains);
+    }
+
+    // gh#607. Every chain was refused at its start — there is no posterior to
+    // pool. Render and persist the per-chain `BadInit` diagnostics and bail,
+    // rather than falling through to an `.expect()` on an empty result set.
+    // `InitialLoglikInfinite` rides along because that is exactly the
+    // situation, and it is the signal the gh#226 whole-fit backstop (which
+    // this refusal now pre-empts for the all-bad-start case) taught consumers
+    // to look for.
+    if all_results.is_empty() {
+        collector.push(DiagnosticKind::InitialLoglikInfinite);
+        collector.render_to_stderr();
+        let diag_path = stage_dir.join("diagnostics.json");
+        let _ = collector.write_json(&diag_path.to_string_lossy());
+        return Err(format!(
+            "pgas stage `{}`: all {} chain(s) were refused at their starting \
+             point — the complete-data log-posterior is non-finite for every \
+             one and stayed non-finite through its first trajectory update, so \
+             no chain could move. See `diagnostics.json` for the per-chain \
+             `bad_init` entries and `chain_starts.tsv` for the starts they \
+             name. Most often the starting values sit in an impossible region \
+             (try `--init lhs` or a different start); less often the data are \
+             impossible under this model — also check the observation model \
+             and parameter bounds.",
+            stage_name, n_chains));
+    }
 
     let elapsed = t0.elapsed();
 
@@ -971,13 +1062,17 @@ pub fn run_stage(
         .expect("any_new_sweeps guard ensures non-empty");
 
     // gh#226. Whole-fit backstop: the best complete-data log-likelihood
-    // across every chain's sweeps is non-finite → not one chain ever
-    // reached a finite anchor. run_pgas tolerates a non-finite init (it
-    // only warns), so an all-`-inf` surface would otherwise write a
+    // across every SURVIVING chain's sweeps is non-finite → not one chain
+    // ever reached a finite anchor, so the run would otherwise write a
     // degenerate fit_state (best loglik `-inf`) and exit 0. `best_sweep`
     // is the global maximum, so `no_finite_anchor(best)` is exactly
     // "every chain has no finite anchor"; a single finite sweep anywhere
     // makes it finite and the fit proceeds.
+    //
+    // The chain-start refusal (gh#607) now catches the special case where the
+    // `-inf` region starts at sweep 0, and the `is_empty` guard above handles
+    // the all-refused run. This backstop still covers the rest: a chain that
+    // starts finite and walks into a `-inf` region it cannot leave.
     if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr();
@@ -1016,7 +1111,9 @@ pub fn run_stage(
         initial_loglik: f64::NEG_INFINITY,
         best_chain: best_chain.0,
         n_chains,
-        n_good_chains: None,
+        // gh#607: `None` unless a chain was skipped, so a healthy fit's
+        // `fit_state.toml` is unchanged. Same convention as PMMH.
+        n_good_chains: if n_good_chains < n_chains { Some(n_good_chains) } else { None },
         start_values,
         rw_sd: std::collections::BTreeMap::new(),
         loglik_type: Some(LoglikType::CompleteData),
