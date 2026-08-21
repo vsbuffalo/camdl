@@ -6,7 +6,7 @@
 
 use crate::fit::state::FitState;
 use crate::fit::loglik::LoglikType;
-use crate::fit::runner::FitRunConfig;
+use crate::fit::runner::{FitRunConfig, StageConvergence};
 use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
@@ -20,7 +20,6 @@ use io::trajectories::{
 };
 use io::progress::{Heartbeat, RunState};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Trace column names for `CSMCDiagnostics::renewal_by_bin` (gh#688), one per
@@ -978,22 +977,9 @@ pub fn run_stage(
     }
 
     if n_chains > 1 {
-        eprintln!("\nRhat / ESS:");
-        for spec in &config.estimated_params {
-            if let Some(&rhat) = diagnostics.rhat.get(&spec.name) {
-                let status = if rhat < 1.1 { "\x1b[32m✓\x1b[0m" }
-                    else if rhat < 1.5 { "\x1b[33m~\x1b[0m" }
-                    else { "\x1b[31m✗\x1b[0m" };
-                let ess = diagnostics.ess.get(&spec.name).copied().unwrap_or(0.0);
-                eprintln!("  {:12} Rhat={:.3} {} ESS={:.0}", spec.name, rhat, status, ess);
-
-                if rhat > 1.1 {
-                    collector.push(DiagnosticKind::RhatHigh {
-                        param: spec.name.clone(), rhat, threshold: 1.1,
-                    });
-                }
-            }
-        }
+        // RHAT_REPORT_THRESHOLD is unchanged from the value this stage has
+        // always applied; only the STATISTIC it is applied to changed (gh#84).
+        eprint!("{}", diagnostics.report(&collector, super::runner::RHAT_REPORT_THRESHOLD));
     }
 
     // gh#audit-C7 + audit-H4. NUTS / tempering diagnostics surfaced from
@@ -1279,36 +1265,16 @@ pub fn run_stage(
 
 // ── Diagnostics ──────────────────────────────────────────────────
 
-struct Diagnostics {
-    rhat: HashMap<String, f64>,
-    ess: HashMap<String, f64>,
-    ess_per_chain: HashMap<String, Vec<f64>>,
-}
-
 fn compute_diagnostics(
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     estimated_params: &[EstimatedParam],
-) -> Diagnostics {
-    let mut rhat_map = HashMap::new();
-    let mut ess_map = HashMap::new();
-    let mut ess_per_chain_map = HashMap::new();
-
-    for spec in estimated_params {
+) -> StageConvergence {
+    StageConvergence::compute(estimated_params.iter().map(|spec| {
         let chains: Vec<Vec<f64>> = results.iter()
             .map(|(_, sweeps, _)| sweeps.iter().map(|s| s.params[spec.index]).collect())
             .collect();
-
-        let d = super::runner::compute_rhat_ess(&chains);
-        if d.rhat.is_finite() {
-            rhat_map.insert(spec.name.clone(), d.rhat);
-        }
-        ess_map.insert(spec.name.clone(), d.ess_total);
-        if !d.ess_per_chain.is_empty() {
-            ess_per_chain_map.insert(spec.name.clone(), d.ess_per_chain);
-        }
-    }
-
-    Diagnostics { rhat: rhat_map, ess: ess_map, ess_per_chain: ess_per_chain_map }
+        (spec.name.clone(), chains)
+    }))
 }
 
 fn write_summary(
@@ -1316,7 +1282,7 @@ fn write_summary(
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     _config: &FitRunConfig,
     thin: usize,
-    diagnostics: &Diagnostics,
+    diagnostics: &StageConvergence,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<Vec<f64>> = results.iter()
         .map(|(_, _, rates)| rates.clone())
@@ -1326,9 +1292,11 @@ fn write_summary(
         "stage": "pgas",
         "n_chains": results.len(),
         "acceptance_rates": acceptance_rates,
-        "rhat": diagnostics.rhat,
-        "ess": diagnostics.ess,
-        "ess_per_chain": diagnostics.ess_per_chain,
+        "rhat": diagnostics.rhat(),
+        "rhat_classic": diagnostics.rhat_classic(),
+        "ess": diagnostics.ess_bulk(),
+        "ess_tail": diagnostics.ess_tail(),
+        "ess_per_chain": diagnostics.ess_per_chain(),
         // Thinning factor: `n_samples` (kept draws) × `thin` = raw sampling
         // iterations, the thinning-invariant denominator for ESS/iteration.
         "thin": thin,

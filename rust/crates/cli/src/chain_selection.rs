@@ -262,18 +262,18 @@ pub struct SubsetDiagnostics {
     /// over this map is the max R̂ across the *estimated* params (mirrors
     /// `PosteriorDiagnostics::max_rhat`).
     pub rhat_per_param: BTreeMap<String, f64>,
-    /// Per-param ESS over the retained chains — one entry per scored param,
-    /// **including the non-finite ones**. A param whose R̂ is non-finite carries
-    /// a non-finite ESS because it was never assessable across chains (a
-    /// constant column: a fixed param swept in by the all-columns form); a param
-    /// whose R̂ exceeds 1.1 carries a non-finite ESS because pooling across
-    /// disagreeing chains is not meaningful.
+    /// Per-param bulk-ESS over the retained chains — one entry per scored
+    /// param, **including the non-finite ones**. A param whose R̂ is non-finite
+    /// was never assessable across chains (a constant column: a fixed param
+    /// swept in by the all-columns form) and carries a non-finite ESS too.
     ///
-    /// Those two are NOT interchangeable, so a bare `min` over this map is
-    /// wrong: skipping the second kind yields a minimum over the converged
-    /// subset, which *rises* as the fit gets worse (gh#687). Reduce it through
+    /// Bulk-ESS itself is never suppressed — it uses the between-chain variance
+    /// and stays meaningful however badly the chains disagree — so a `min` over
+    /// this map no longer skips the badly-mixing params and rises as a fit gets
+    /// worse (gh#687). Reduce it through
     /// [`PosteriorDiagnostics::min_ess_status`](crate::fit::method_result::PosteriorDiagnostics::min_ess_status),
-    /// which separates them by consulting [`Self::rhat_per_param`].
+    /// which still separates "not assessable" from "assessed but absent" for
+    /// diagnostics loaded from older runs.
     pub ess_per_param: BTreeMap<String, f64>,
     /// Retained draw count (rows kept).
     pub n_samples: usize,
@@ -341,7 +341,7 @@ pub fn recompute_subset_diagnostics(
         if d.rhat.is_finite() {
             rhat_per_param.insert(p.clone(), d.rhat);
         }
-        ess_per_param.insert(p.clone(), d.ess_total);
+        ess_per_param.insert(p.clone(), d.ess_bulk);
     }
 
     Ok(SubsetDiagnostics {

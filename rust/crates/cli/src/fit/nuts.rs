@@ -7,7 +7,7 @@
 //! fit_state output. On a stochastic backend, gradient-NUTS lives inside `pgas`,
 //! so this path is `ode`-only (routed by the method registry).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -445,39 +445,20 @@ pub fn run_stage(
 /// method routes through. `chain_samples[chain][draw][param]`, columns in
 /// `estimated_params` order. Mirrors PGAS's `compute_diagnostics`; the only
 /// nuts-specific part is the draw layout.
-struct NutsDiag {
-    rhat: BTreeMap<String, f64>,
-    ess: BTreeMap<String, f64>,
-    ess_per_chain: BTreeMap<String, Vec<f64>>,
-}
-
 fn nuts_diagnostics(
     estimated_params: &[sim::inference::types::EstimatedParam],
     chain_samples: &[&Vec<Vec<f64>>],
-) -> NutsDiag {
-    let mut rhat = BTreeMap::new();
-    let mut ess = BTreeMap::new();
-    let mut ess_per_chain = BTreeMap::new();
-    for (j, ep) in estimated_params.iter().enumerate() {
-        // Column j of each chain's draw matrix = this param's per-chain trace.
-        let chains: Vec<Vec<f64>> = chain_samples
-            .iter()
-            .map(|draws| draws.iter().map(|row| row[j]).collect())
-            .collect();
-        let d = super::runner::compute_rhat_ess(&chains);
-        // R̂ is NaN below the structural minimum (≥2 chains, ≥4 samples); only
-        // record it when finite, matching PGAS. ESS is always recorded (the
-        // gate on the *joint* sum lives inside `compute_rhat_ess`; a NaN ess
-        // serializes to null → the loader reads it as absent).
-        if d.rhat.is_finite() {
-            rhat.insert(ep.name.clone(), d.rhat);
-        }
-        ess.insert(ep.name.clone(), d.ess_total);
-        if !d.ess_per_chain.is_empty() {
-            ess_per_chain.insert(ep.name.clone(), d.ess_per_chain);
-        }
-    }
-    NutsDiag { rhat, ess, ess_per_chain }
+) -> super::runner::StageConvergence {
+    super::runner::StageConvergence::compute(
+        estimated_params.iter().enumerate().map(|(j, ep)| {
+            // Column j of each chain's draw matrix = this param's per-chain trace.
+            let chains: Vec<Vec<f64>> = chain_samples
+                .iter()
+                .map(|draws| draws.iter().map(|row| row[j]).collect())
+                .collect();
+            (ep.name.clone(), chains)
+        }),
+    )
 }
 
 /// Write `nuts_summary.json` — the R̂/ESS/thin the `MethodResult` loader reads.
@@ -485,15 +466,17 @@ fn nuts_diagnostics(
 fn write_nuts_summary(
     dir: &Path,
     n_chains: usize,
-    diag: &NutsDiag,
+    diag: &super::runner::StageConvergence,
     n_divergent: usize,
 ) -> Result<(), String> {
     let summary = serde_json::json!({
         "stage": "nuts",
         "n_chains": n_chains,
-        "rhat": diag.rhat,
-        "ess": diag.ess,
-        "ess_per_chain": diag.ess_per_chain,
+        "rhat": diag.rhat(),
+        "rhat_classic": diag.rhat_classic(),
+        "ess": diag.ess_bulk(),
+        "ess_tail": diag.ess_tail(),
+        "ess_per_chain": diag.ess_per_chain(),
         "n_divergent": n_divergent,
         // nuts draws are unthinned: n_samples (kept) × thin = raw sampling iters.
         "thin": 1,
