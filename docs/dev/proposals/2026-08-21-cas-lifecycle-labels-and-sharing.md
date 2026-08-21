@@ -1,144 +1,221 @@
-# CAS lifecycle: labels as refs, fits you can retire, and a bundle you can send
+# CAS lifecycle: a `store` namespace, labels that move, and a bundle you can send
 
 Date: 2026-08-21 Status: proposed Related: gh#594 (store-root model archive is
 last-writer-wins), gh#698 (gzip benchmark for `trajectories.tsv`), gh#699
-(`camdl list` does not complete on a 64-fit store)
+(`list` walks 550k sim leaves), gh#701 (the unlabelled-fits hint names a command
+that does not exist)
 
-## Three problems, one surface
+## What a real store looks like
 
-A results store accumulates. The ebola project's holds **64 fit directories**.
-Nothing in camdl retires a run, nothing addresses a run by a name a human chose,
-and nothing packages a run to send. Today those three are `rm -rf`, a hash
-prefix, and `tar` — with the store's own guarantees left at the door.
+The ebola-bdbv project's `results/` tree, measured:
 
-Measured, not asserted:
+| kind      |      dirs | leaves (`run.json`) |
+| --------- | --------: | ------------------: |
+| sims      | 2,735,850 |             550,647 |
+| ensembles |       262 |                  88 |
+| pfilters  |       227 |                  73 |
+| fits      |       654 |                  71 |
+| surveys   |         7 |                   2 |
 
-- `camdl list --root results` on that store **did not complete within 120
-  seconds**. Browsing already does not scale to the number of fits a real
-  project produces, which is the strongest argument that retiring runs is a
-  lifecycle need and not tidiness.
-- The store API (`runid::store`) is `new`, `lookup`, `commit_atomic`,
-  `claim_streaming`, `dir`, `write`, `finalize`. **There is no delete, archive,
-  prune or gc.** `camdl dev` offers `reindex`, `eval`, `compile`, `doctest`.
+**4.1 million files, 28 GB, and no run of any kind carries a label.** A single
+`simulate` over a posterior writes 6,000 leaves — 1,200 draws × 5 scenarios, one
+leaf per cell — so sims are 99.96% of the store and everything a person actually
+browses is the other 1,156 directories.
+
+Three things follow, and they are what this proposal is for. Nothing retires a
+run, so the tree only grows. Nothing addresses a run by a name a human chose, so
+every reference is an eight-hex prefix. Nothing packages a run to send, so
+sharing is `tar` with the store's guarantees left at the door.
+
+Two more measurements that shape the decisions below:
+
 - A fit directory is **37 MB**, of which `trajectories.tsv` is **15 MB** and
   `resume_state.bin` a further 0.2 MB. `camdl 'scope` reads **neither** — zero
   references in `camdl_watch/`.
 - Fit directories carry **no absolute paths** in `run.json`, `fit.toml.original`
   or `fit.meta.json`. A fit directory is relocatable as-is.
 
-## 1. Labels are git tags, and today they are not stored like one
+The store API (`runid::store`) is `new`, `lookup`, `commit_atomic`,
+`claim_streaming`, `dir`, `write`, `finalize`. **There is no delete, archive,
+prune or gc.**
 
-The design target is exactly git's: **a tag is a name kept beside the object
-store that points at an immutable object; it is not part of the object, and it
-is unique within the repository.** camdl gets the first half right and the
-second two wrong.
+## 0. One namespace: `camdl store`
 
-Right: a label is already outside identity. `RunProvenance` is documented
-"always skipped from the hash … must never be hashed"
-(`runid/src/inputs.rs:352`). Labelling cannot change a `run_id`, and this
-proposal does not change that.
+Today the store verbs are scattered across the top level (`list`, `show`, `cat`,
+`label`) and one is filed under `dev` (`reindex`), while the top level also
+holds the modelling verbs. `camdl list` does not say list _what_.
 
-Wrong, first: **a label is stored inside the object it names.** `cmd_label`
-(`cli/src/fit/mod.rs:2488`) rewrites the committed leaf — `write_fit_sidecar`
-for a fit segment, or a read-modify-`rename` of `run.json` for everything else.
-A content-addressed artifact is mutated after commit, every time someone names
-it. Git does not put the tag in the commit.
+**The seam: `camdl store` holds verbs whose subject is the store as a container
+of runs — find them, name them, retire them, move them in and out. Verbs that
+_produce_ or _analyse_ runs stay top level, even when they address a run by
+selector.**
 
-Wrong, second: **nothing enforces uniqueness.** `cmd_label` resolves its target
-by hash prefix and writes; it never scans other runs. Two runs can hold one
-label. That is inert while a label is display text and becomes a
-wrong-fit-packaged bug the moment `pack` accepts one.
+| moves to `camdl store`                    | stays top level                       |
+| ----------------------------------------- | ------------------------------------- |
+| `list`, `show`, `cat`, `label`            | `simulate`, `batch`, `fit`, `pfilter` |
+| `dev reindex` → `store reindex`           | `profile`, `survey`, `compare`        |
+| new: `archive`, `prune`, `pack`, `unpack` | `check`, `inspect`, `render`, `data`  |
 
-A third fact is worth stating because the directory names invite the opposite
-belief. `results/fits/fit_national_base-1c52e37a` is **not** a label: it is
+`compare` stays out because its subject is fits' predictive scores, not the
+store; `fit` takes a path without being a "path" command, and `compare` takes
+selectors without being a store command. `mre` stays out for the reason it was
+built: its subject is a bug report, and its output is not a store artifact.
+`reindex` moves out of `dev` because once `prune` exists, reindexing is part of
+the ordinary lifecycle rather than a maintenance escape hatch.
+
+Per the alpha posture there is no alias for the old spellings; the rename is
+atomic and the docs move with it.
+
+## 1. Labels move, and that is the point
+
+The motivating cases are a _front-runner_ model that keeps being the
+front-runner as it changes, and a _best-elpd_ that moves when a better fit
+lands. Both are **pointers that move**. In git terms that is branch behaviour,
+not tag behaviour: a tag is conventionally pinned, and moving one is an
+antipattern precisely because tags get published and cited. So camdl should take
+git's _storage_ model and reject its _immutability_ convention.
+
+What git gets right and camdl should copy is where the name lives. A tag sits in
+`refs/tags/`, beside the object store, never inside the object. camdl gets one
+of the three properties right and two wrong:
+
+**Right — a label is never hashed.** `RunProvenance` is documented "always
+skipped from the hash … must never be hashed" (`runid/src/inputs.rs:352`).
+Labelling cannot change a `run_id`, and this proposal does not change that.
+
+**Wrong — the label is stored inside the object it names.** `cmd_label`
+(`cli/src/fit/mod.rs:2488`) rewrites the committed leaf: `write_fit_sidecar` for
+a fit segment, a read-modify-`rename` of `run.json` for everything else. Naming
+a run mutates a content-addressed artifact after commit.
+
+**Wrong — nothing enforces uniqueness.** `cmd_label` resolves its _target_ by
+hash prefix and writes; it never scans other runs. Two runs can hold one name.
+Inert while a label is display text; a wrong-fit-packaged bug the moment `pack`
+accepts one.
+
+One more fact, because the directory names invite the opposite belief.
+`results/fits/fit_national_base-1c52e37a` is **not** a label: it is
 `runid::layout::path_label(stem)` — the fit.toml's _filename stem_, lowercased
 with non-`[a-z0-9_.-]` replaced by `_` — plus eight hex of the fit hash
 (`fit/cas.rs:419`). Stems are not unique; that store has three
-`fit_national_base_rho_high-*` directories. So the visible prefix cannot be an
-address, and no run in that store carries a label at all.
+`fit_national_base_rho_high-*` directories. The visible prefix is not an
+address.
 
-### Decision: move labels to a store-level ref map
+### Decision: a store-level ref map
 
-`<root>/labels.json`, a map from label to `{run_id, kind, created, message?}`,
-written atomically (tmp + rename), sitting beside `index.json`.
+`<root>/labels.json`, a map from label to
+`{run_id, kind, created, message?,
+history[]}`, written atomically (tmp +
+rename), beside `index.json`.
 
-- **Uniqueness is structural**, not a check someone can forget: it is a map key.
-- **Leaves become immutable again after commit.** Naming a run stops rewriting
-  it.
-- `--list`, `--delete` and move-with-`--force` become one-file operations rather
-  than leaf rewrites, which also makes them safe to run against a store while a
-  fit is streaming into it.
+- **Uniqueness is structural** — a map key, not a check someone forgets.
+- **Leaves become immutable again after commit.** Naming stops rewriting.
+- `--list`, `-d` and moves become one-file operations, safe to run against a
+  store while a fit streams into it.
 
-The dedicated `label` field in the leaf goes away. It is redundant for a
-run-time `--label` (argv is already recorded in provenance) and wrong for a
-post-hoc one. Per the alpha posture there is no compatibility shim:
-`camdl dev
-reindex` harvests any in-leaf labels into the map once. **This does
-not change a single `run_id`**, because the field was never hashed.
+The leaf's `label` field goes away: redundant for a run-time `--label` (argv is
+already in provenance) and wrong for a post-hoc one. `camdl store reindex`
+harvests any in-leaf labels once. **No `run_id` changes**, because the field was
+never hashed. `camdl 'scope` is unaffected — it reads `levels[].label`, the
+_factored level_ label of `record.rs:34`, and does not read `provenance.label`
+at all (`camdl_watch/sims.py:77`).
 
-`camdl 'scope` is unaffected: it reads `levels[].label` — the _factored level_
-label of `record.rs:34`, a different thing — and does not read
-`provenance.label` at all (`camdl_watch/sims.py:77`).
+### Decision: moving is ordinary, and recorded
 
-### Decision: the surface, and the naming rules git needed too
+`camdl store label front-runner <selector>` on a name already in use **moves
+it**, with no flag, and prints what it moved:
 
-```
-camdl label <name> <selector>     # create; refuses if taken
-camdl label <name> <selector> -f  # move (clears the previous holder)
-camdl label --list [glob]
-camdl label -d <name>
-```
+    front-runner: 1c52e37a → 8f67d9fb  (previous binding kept in history)
 
-- **Resolution is uniform wherever a run is named** — label, then stem, then
-  hash prefix. An ambiguous token errors and **lists the candidates** with hash,
-  kind and creation time; it never picks one.
-- **A label that is pure hex of four or more characters is refused.** It would
-  make that resolution order load-bearing rather than a convenience. Git guards
-  the same hazard for branch names.
-- **`/` is allowed and useful** — `review/national-v1` namespaces the way git
-  tags do. Labels never appear in filesystem paths under this design, so the
-  path-sanitising constraint that governs `path_label` does not apply to them.
-  `..` and leading/trailing `/` are refused.
-- Labels stay optional. The fallback is what people use now — the stem+hash
-  directory name — and it stays addressable, so nothing that works today stops.
+A `--force` gate was considered and rejected. The motivating use _is_ moving, so
+a gate would be typed on nearly every invocation, and a flag typed reflexively
+stops guarding the case it exists for — the accidental reuse of a name you
+forgot was taken. The printout is the guard, and
+`camdl store label --history
+front-runner` makes the accident recoverable rather
+than merely forbidden. For a local research store, recoverable beats prevented.
+
+**The reproducibility hazard this creates is real and is closed elsewhere.** If
+a report says "see fit `front-runner`" and the label later moves, that citation
+silently means something else. The fix is not friction at assignment; it is that
+**every durable artifact records the hash alongside the label** — pack
+manifests, `store show`, exported summaries all print `front-runner (1c52e37a)`.
+The rule, in one line for the docs: **name runs to find them; cite runs by
+hash.**
+
+### Decision: many labels per run, one run per label
+
+The map direction makes many-to-one free, and it is what git allows too — a
+commit can carry `v1.0` and `stable` at once. `best-elpd` and `front-runner`
+pointing at the same fit is a normal and informative state. The constraint runs
+the other way: one name resolves to one run. `store list` shows labels in a
+column, truncating past two with `+N`.
+
+### Decision: no hex ban — no precedence instead
+
+An earlier draft refused pure-hex labels so they could not be confused with hash
+prefixes. That is the wrong shape: it bans legitimate names (`cafe`, `face`,
+`beef`) to pre-empt a collision that has not happened.
+
+**Resolution has no precedence order.** A token is looked up as a label, a stem,
+and a hash prefix; if it matches exactly one run it resolves, and if it matches
+more than one it **errors and lists the candidates** with hash, kind and
+creation time. It never picks.
+
+This is simpler to explain than an order, safer than either order, and makes the
+hex question disappear: a hex-shaped label is fine until an actual hash prefix
+collides with it, at which point the error names the escape —
+
+    error: 'cafe' is ambiguous
+      label  cafe        → fit 8f67d9fb  bvd_national_base       2026-08-19
+      hash   cafe1d20…   → sim           bvd_national_delay      2026-08-20
+    disambiguate with 'label:cafe' or 'hash:cafe1d20'
+
+`/` is allowed and encouraged for namespacing (`review/national-v1`). Labels
+never appear in filesystem paths under this design, so the sanitising that
+governs `path_label` does not apply to them. `..` and leading/trailing `/` are
+refused.
 
 ## 2. Archive and prune
 
 **Archive is a reversible state, not a deletion.** An archived run stays on
-disk, stops appearing in `camdl list` and in `'scope`, and becomes the unit
+disk, stops appearing in `store list` and in `'scope`, and becomes the unit
 `prune` operates on. It is what lets someone clear a browsing surface without
 deciding, in that same moment, that a run is worthless.
 
 ```
-camdl archive <selector>...          # hide from list/'scope, keep on disk
-camdl archive --undo <selector>...
-camdl list --archived
-camdl prune --archived [--older-than 30d] [--dry-run]
+camdl store archive <selector>...          # hide from list/'scope, keep on disk
+camdl store archive --undo <selector>...
+camdl store list --archived
+camdl store prune --archived [--older-than 30d] [--dry-run]
 ```
 
 ### Decisions
 
 - **Archive state is a store-level set** (`<root>/archived.json`), for the same
-  reason labels are: a leaf that has been committed is not rewritten again. A
-  marker file inside the run would reintroduce exactly the mutation this
-  proposal removes from labelling.
+  reason labels are: a committed leaf is not rewritten again. A marker file
+  inside the run would reintroduce the exact mutation this removes from
+  labelling.
 - **`prune` refuses anything not archived.** Two steps, deliberately: archive is
   reversible and cheap, prune is neither. `--dry-run` prints what would go and
   its total size.
 - **Prune is whole-leaf only.** Removing part of a leaf leaves a directory that
   passes a path check and fails a content check — the store's worst state. If a
-  leaf cannot be removed entirely it is not removed.
-- **Pruning clears the run's labels and archive entry**, and then reindexes. A
+  leaf cannot be removed entirely, it is not removed.
+- **Pruning clears the run's labels and archive entry, then reindexes.** A
   dangling ref and a stale `index.json` are precisely the confusion this feature
   exists to reduce.
-- **Archived runs stay readable by hash.** `camdl show <hash>` works and says
+- **Archived runs stay readable by hash.** `store show <hash>` works and says
   the run is archived. Hiding is a browsing concern, not an access one.
+- **Archiving a sim archives its whole ensemble fan-out**, all 6,000 leaves, as
+  one operation against one selector. Anything that made a user archive cells
+  individually would be unusable on this store.
 
 ## 3. Pack and unpack
 
 ```
-camdl pack <selector>... -o review.camdl-fits.tar.zst [--with-paths] [--no-data]
-camdl unpack review.camdl-fits.tar.zst [--into DIR]
+camdl store pack <selector>... -o review.camdl-fits.tar.zst [--with-paths] [--no-data]
+camdl store unpack review.camdl-fits.tar.zst [--into DIR]
 ```
 
 `camdl mre fit` already bundles a fit's **input closure** so a recipient can
@@ -154,15 +231,27 @@ about 22 MB raw for that ebola fit, roughly 7 MB compressed.
 **`--with-paths` adds `trajectories.tsv`** (15 MB). Without it the recipient can
 view everything but cannot fork counterfactuals (`contrasts {}` needs saved
 paths) or forecast from the fitted state (`simulate --init-state fit` needs the
-terminal states). That is the trade, and the bundle manifest states it, so the
+terminal states). That is the trade, and the manifest states it, so the
 recipient learns the limitation from the artifact rather than from an error.
 
 `resume_state.bin` never travels: per-machine continuation state, not a result.
 
-**Labels travel as refs, and apply only if free** — git's `--tags` behaviour.
-The bundle carries its own `labels` section; on unpack, a free label is applied,
-a taken one is reported by name with both run ids and left unapplied. The
-recipient's names are theirs.
+### Labels travel, namespaced by the bundle
+
+Git tags do not auto-push because a repository is a **shared, long-lived
+namespace** that other people pin to; withholding is the safe default there. A
+camdl bundle is the opposite: a **point-to-point handoff**, where the label is
+often the entire content of the message — "look at `front-runner`". A recipient
+who gets `fit_national_base-1c52e37a` and no name has lost the one piece of
+information the sender most wanted to convey. So camdl departs from git here:
+**labels travel by default.**
+
+Collisions are avoided rather than resolved. **Incoming labels land under the
+bundle stem** — `front-runner` arrives as `review-2026-08/front-runner`. Nothing
+can clash with a name the recipient already uses, the provenance is legible in
+the name itself, `store label --list 'review-2026-08/*'` shows exactly what
+arrived, and two colleagues' bundles never collide with each other. `--flat`
+opts out and applies at top level, refusing-and-reporting on a real collision.
 
 ### Where it lands, and why not the results tree by default
 
@@ -199,22 +288,26 @@ Consequences, decided:
 
 - Labelling a run leaves every byte of its leaf unchanged, and its `run_id`
   unchanged — the sharpest available oracle for the ref move, and cheap.
-- A second `camdl label` with a taken name exits non-zero, names the holder, and
-  writes nothing.
-- A pure-hex label is refused; an ambiguous selector lists candidates and exits
-  non-zero rather than resolving.
+- Moving a label succeeds without a flag, prints both bindings, and `--history`
+  recovers the previous one.
+- Two labels on one run both resolve; one label on two runs is unrepresentable.
+- An ambiguous token exits non-zero listing candidates, and the `label:` /
+  `hash:` escapes each resolve to exactly one.
 - `prune` on an unarchived run refuses; on an archived one it removes the leaf,
-  clears its refs, and leaves `index.json` consistent (`camdl list` then
-  `camdl
-  show` on the removed hash both behave).
+  clears its refs, and leaves `index.json` consistent (`store list`, then
+  `store show` on the removed hash, both behave).
+- Archiving a 6,000-leaf sim by one selector hides all of it from `store list`
+  and from `'scope`, and `--undo` restores it.
 - A pack/unpack round-trip on a store copy reproduces every packed file
-  byte-identically, and `unpack` of a bundle with one corrupted byte fails.
-- Unpacking into a store that already holds one of the run ids refuses by
-  default and overwrites under `--force`.
+  byte-identically; a bundle with one corrupted byte fails.
+- An incoming label lands namespaced, and a bundle unpacked twice into one store
+  does not produce two conflicting refs.
 
 ## Not this proposal
 
 Compressing artifacts on disk (gh#698 — needs the benchmark first); the
-store-root model archive being last-writer-wins (gh#594); and making listing
-fast on a large store, which archiving mitigates but does not fix, and filed as
-gh#699 with a profile named as the first step.
+store-root model archive being last-writer-wins (gh#594); and the two questions
+in gh#699 — bounding `list`'s discovery by `--limit`/`--since` rather than
+filtering after it, and whether a posterior ensemble should be 6,000 store
+leaves at all. Archiving makes that fan-out survivable; it does not make it
+right, and the compact `ensembles/` kind already suggests the other answer.
