@@ -27,13 +27,114 @@ pub(crate) static FULL_PARSES: std::sync::atomic::AtomicUsize =
 // `ResolvedPriorEntry`, `ParameterProvenance`), with `write_fit_sidecar` /
 // `read_fit_sidecar` beside it there.
 
+/// The two identity fields a walk reads out of a `run.json` before deciding
+/// whether the record is worth materializing.
+struct RunHeader {
+    kind: ArtifactKind,
+    run_id: ContentHash,
+}
+
+/// Read `kind` + `run_id` out of `run.json` bytes WITHOUT materializing the
+/// rest of the record.
+///
+/// `RunRecord` serializes `format_version`, `kind`, `run_id` first (its field
+/// declaration order, `runid::record`), and this stops at the second of the
+/// two — so on a leaf record of several kilobytes it tokenizes roughly a
+/// hundred bytes, and `levels`, `artifacts`, `output_schema`, `inputs` and
+/// `provenance` are never even scanned, let alone allocated. Field order is a
+/// *speed* assumption only: a record that spells those two fields last still
+/// reads correctly here, just without the early exit.
+///
+/// `None` for anything that is not a JSON object carrying both fields —
+/// exactly the inputs on which the full `RunRecord` parse also fails, so
+/// gating on this can never drop a leaf [`walk_records`] would have kept.
+fn run_header(bytes: &[u8]) -> Option<RunHeader> {
+    use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
+
+    /// The header is handed back through `out` rather than as the visitor's
+    /// value because the visitor **aborts** once it has both fields, and an
+    /// aborted deserialization has no value to return.
+    struct HeaderVisitor<'a> {
+        out: &'a mut Option<RunHeader>,
+    }
+
+    impl<'de> Visitor<'de> for HeaderVisitor<'_> {
+        type Value = ();
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a run.json object carrying `kind` and `run_id`")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let mut kind: Option<ArtifactKind> = None;
+            let mut run_id: Option<ContentHash> = None;
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "kind" => kind = Some(map.next_value()?),
+                    "run_id" => run_id = Some(map.next_value()?),
+                    _ => {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                if let (Some(kind), Some(run_id)) = (kind, run_id) {
+                    *self.out = Some(RunHeader { kind, run_id });
+                    // Stop: everything after `run_id` in a leaf record is the
+                    // kilobytes we are here not to read. serde_json still wants
+                    // the closing brace, so the only way out mid-document is an
+                    // error the caller discards.
+                    return Err(A::Error::custom("header read complete"));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let mut out = None;
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    // The error is deliberately ignored: it is either the early-exit abort
+    // (with `out` set) or a malformed record (with `out` still `None`).
+    let _ = serde::Deserializer::deserialize_map(&mut de, HeaderVisitor { out: &mut out });
+    out
+}
+
+/// What a walk may rule out from a leaf's cheap header, before paying for the
+/// full `RunRecord` parse.
+///
+/// Both fields are one-sided: they may only rule out a leaf the caller was
+/// going to discard anyway, so a gated walk returns exactly the subset of
+/// [`walk_records`]'s result the caller would have kept. Nothing here can
+/// change *which* rows a command prints — only what it costs to find them.
+struct LeafGate<'a> {
+    /// Keep only leaves of this kind; `None` keeps every kind.
+    kind: Option<ArtifactKind>,
+    /// Skip leaves whose `run_id` is in this set (the per-cell members an
+    /// ensemble row already represents).
+    members: Option<&'a HashSet<ContentHash>>,
+}
+
+impl LeafGate<'_> {
+    /// Materialize every record found — the unfiltered walk.
+    const ANY: LeafGate<'static> = LeafGate { kind: None, members: None };
+
+    /// Whether reading the cheap header can rule anything out. When it cannot,
+    /// reading it would be pure overhead.
+    fn is_selective(&self) -> bool {
+        self.kind.is_some() || self.members.is_some_and(|m| !m.is_empty())
+    }
+
+    fn admits(&self, header: &RunHeader) -> bool {
+        self.kind.is_none_or(|k| k == header.kind)
+            && !self.members.is_some_and(|m| m.contains(&header.run_id))
+    }
+}
+
 /// Recursively collect every `(dir, RunRecord)` under `subtree` whose dir holds
-/// a parseable `RunRecord` `run.json`. Hidden dirs (`.staging`, `.quarantine`)
-/// are skipped. Descends through leaves too, but a leaf's declared child
-/// sub-artifacts under `obs/…` carry an `obs.json` (not a `run.json`), so they
-/// are not surfaced here as standalone records — they're reached as the
-/// trajectory leaf's `children`.
-pub fn walk_records(subtree: &Path) -> Vec<(PathBuf, RunRecord)> {
+/// a parseable `RunRecord` `run.json` **that `gate` admits**. Hidden dirs
+/// (`.staging`, `.quarantine`) are skipped. Descends through leaves too, but a
+/// leaf's declared child sub-artifacts under `obs/…` carry an `obs.json` (not a
+/// `run.json`), so they are not surfaced here as standalone records — they're
+/// reached as the trajectory leaf's `children`.
+fn walk_gated(subtree: &Path, gate: &LeafGate) -> Vec<(PathBuf, RunRecord)> {
     let mut out = Vec::new();
     if !subtree.exists() {
         return out;
@@ -43,10 +144,18 @@ pub fn walk_records(subtree: &Path) -> Vec<(PathBuf, RunRecord)> {
         let rj = dir.join("run.json");
         if rj.is_file() {
             if let Ok(bytes) = std::fs::read(&rj) {
-                #[cfg(test)]
-                FULL_PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if let Ok(rec) = serde_json::from_slice::<RunRecord>(&bytes) {
-                    out.push((dir.clone(), rec));
+                // The cheap header decides whether this record is worth
+                // materializing. A header that does not read could not have
+                // parsed as a full `RunRecord` either, so treating it as
+                // not-admitted drops exactly what the full parse dropped.
+                let admitted = !gate.is_selective()
+                    || run_header(&bytes).is_some_and(|h| gate.admits(&h));
+                if admitted {
+                    #[cfg(test)]
+                    FULL_PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(rec) = serde_json::from_slice::<RunRecord>(&bytes) {
+                        out.push((dir.clone(), rec));
+                    }
                 }
             }
         }
@@ -65,6 +174,27 @@ pub fn walk_records(subtree: &Path) -> Vec<(PathBuf, RunRecord)> {
         }
     }
     out
+}
+
+/// Every `RunRecord` under `subtree`, of every kind — the unfiltered walk.
+pub fn walk_records(subtree: &Path) -> Vec<(PathBuf, RunRecord)> {
+    walk_gated(subtree, &LeafGate::ANY)
+}
+
+/// Every leaf of `kind` under that kind's store partition (`sims/`, `fits/`,
+/// …), optionally skipping `members`. One walk behind all six per-kind
+/// accessors below, so the partition dir and the kind can never disagree —
+/// both come from [`ArtifactKind::store_dir`].
+fn walk_kind(
+    root: &Path,
+    kind: ArtifactKind,
+    members: Option<&HashSet<ContentHash>>,
+) -> Vec<Leaf> {
+    let gate = LeafGate { kind: Some(kind), members };
+    walk_gated(&root.join(kind.store_dir()), &gate)
+        .into_iter()
+        .map(|(dir, record)| Leaf { dir, record })
+        .collect()
 }
 
 /// A new-format leaf record with its directory, plus convenience accessors
@@ -132,11 +262,7 @@ fn resolve_prefix_indexed(
 
 /// All `sims/` leaves of kind `Sim` (new-format trajectory runs).
 pub fn walk_sim_leaves(root: &Path) -> Vec<Leaf> {
-    walk_records(&root.join("sims"))
-        .into_iter()
-        .filter(|(_, r)| r.kind == ArtifactKind::Sim)
-        .map(|(dir, record)| Leaf { dir, record })
-        .collect()
+    walk_kind(root, ArtifactKind::Sim, None)
 }
 
 /// All `sims/` leaves of kind `Sim` EXCEPT those whose `run_id` is in
@@ -146,9 +272,10 @@ pub fn walk_sim_leaves(root: &Path) -> Vec<Leaf> {
 /// Separate from [`walk_sim_leaves`] because the exclusion has to happen
 /// *inside* the walk: on the store in gh#699, 461,282 of 550,647 sim leaves
 /// are ensemble members, so discovering them only to drop them afterwards is
-/// the whole cost of the command.
+/// the whole cost of the command. A member is recognized from its `run_id`
+/// alone, which [`run_header`] reads without parsing the record.
 pub fn walk_sim_leaves_excluding(root: &Path, members: &HashSet<ContentHash>) -> Vec<Leaf> {
-    walk_sim_leaves(root).into_iter().filter(|l| !members.contains(&l.record.run_id)).collect()
+    walk_kind(root, ArtifactKind::Sim, Some(members))
 }
 
 /// New-format sims whose `run_id` hex matches `prefix` (for `show`/`cat`
@@ -160,11 +287,7 @@ pub fn resolve_sim_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 
 /// All `fits/` leaves of kind `FitStage` (new-format fit-stage runs, M3.2).
 pub fn walk_fit_leaves(root: &Path) -> Vec<Leaf> {
-    walk_records(&root.join("fits"))
-        .into_iter()
-        .filter(|(_, r)| r.kind == ArtifactKind::FitStage)
-        .map(|(dir, record)| Leaf { dir, record })
-        .collect()
+    walk_kind(root, ArtifactKind::FitStage, None)
 }
 
 /// New-format fit stages whose `run_id` hex matches `prefix` (for `show`/`cat`
@@ -177,11 +300,7 @@ pub fn resolve_fit_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 /// mini-fits, M3.3). Each is one `(grid point × seed × start)` cell under the
 /// factored `profile/point/stage/seed/start` tree.
 pub fn walk_profile_leaves(root: &Path) -> Vec<Leaf> {
-    walk_records(&root.join("profiles"))
-        .into_iter()
-        .filter(|(_, r)| r.kind == ArtifactKind::ProfilePoint)
-        .map(|(dir, record)| Leaf { dir, record })
-        .collect()
+    walk_kind(root, ArtifactKind::ProfilePoint, None)
 }
 
 /// New-format profile points whose `run_id` hex matches `prefix` (for
@@ -194,11 +313,7 @@ pub fn resolve_profile_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 /// M3.3). Each is one `(model × config × params × seed)` standalone eval —
 /// a single leaf, no grid.
 pub fn walk_pfilter_leaves(root: &Path) -> Vec<Leaf> {
-    walk_records(&root.join("pfilters"))
-        .into_iter()
-        .filter(|(_, r)| r.kind == ArtifactKind::Pfilter)
-        .map(|(dir, record)| Leaf { dir, record })
-        .collect()
+    walk_kind(root, ArtifactKind::Pfilter, None)
 }
 
 /// New-format pfilter evals whose `run_id` hex matches `prefix` (for
@@ -211,11 +326,7 @@ pub fn resolve_pfilter_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 /// surveys, M3.3). Each is one `(model × config × box × seed)` LHS landscape —
 /// a single leaf, the N points are within it (not an axis).
 pub fn walk_survey_leaves(root: &Path) -> Vec<Leaf> {
-    walk_records(&root.join("surveys"))
-        .into_iter()
-        .filter(|(_, r)| r.kind == ArtifactKind::Survey)
-        .map(|(dir, record)| Leaf { dir, record })
-        .collect()
+    walk_kind(root, ArtifactKind::Survey, None)
 }
 
 /// New-format surveys whose `run_id` hex matches `prefix` (for `show`/`cat`
@@ -228,11 +339,7 @@ pub fn resolve_survey_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 /// wide-format TSV of a multi-cell `simulate`). Each references its N per-cell
 /// `Sim` leaves via `deps`; the combined TSV is its `ensemble.tsv` artifact.
 pub fn walk_sim_ensemble_leaves(root: &Path) -> Vec<Leaf> {
-    walk_records(&root.join("ensembles"))
-        .into_iter()
-        .filter(|(_, r)| r.kind == ArtifactKind::SimEnsemble)
-        .map(|(dir, record)| Leaf { dir, record })
-        .collect()
+    walk_kind(root, ArtifactKind::SimEnsemble, None)
 }
 
 /// New-format ensembles whose `run_id` hex matches `prefix` (for `show`/`cat`
@@ -360,7 +467,6 @@ pub(crate) mod tests {
     /// represents — so those leaves must never cost a full `RunRecord` parse.
     /// The walk may only materialize the leaves that survive to be printed.
     #[test]
-    #[ignore = "red until walk_sim_leaves_excluding gates before the full parse (gh#699)"]
     fn ensemble_members_are_skipped_without_a_full_parse() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -386,5 +492,52 @@ pub(crate) mod tests {
             "ensemble members must not be fully parsed ({} sim leaves in the tree)",
             members.len() + free.len()
         );
+    }
+
+    /// `--kind sim` is the explicit request for the per-cell level, so the
+    /// unexcluded walk must still return the member leaves. The exclusion is
+    /// opt-in, never a property of the store.
+    #[test]
+    fn the_unexcluded_walk_still_returns_member_leaves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (members, free) = ensemble_heavy_store(root, 6, 2);
+
+        let mut got: Vec<String> =
+            walk_sim_leaves(root).iter().map(|l| l.run_id_hex()).collect();
+        got.sort();
+        let mut want: Vec<String> = members.into_iter().chain(free).collect();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    /// The header read stops at `run_id`: a record whose bytes AFTER `run_id`
+    /// are unparseable still yields a header, while the full `RunRecord` parse
+    /// of the same bytes fails. That gap is what the walk is buying — a
+    /// `serde_json::from_slice::<RunHeader>` would tokenize the whole document
+    /// and fail here too, so this test fails if the early exit is lost.
+    #[test]
+    fn run_header_stops_at_run_id() {
+        let bytes = format!(
+            r#"{{"format_version":1,"kind":"sim","run_id":"{}","levels":[ NOT JSON"#,
+            id("abcd")
+        );
+        let hdr = run_header(bytes.as_bytes()).expect("header reads before the garbage");
+        assert_eq!(hdr.kind, ArtifactKind::Sim);
+        assert_eq!(hdr.run_id.to_hex(), id("abcd"));
+        assert!(
+            serde_json::from_slice::<RunRecord>(bytes.as_bytes()).is_err(),
+            "the full record parse must fail on the same bytes"
+        );
+    }
+
+    /// Anything the header read rejects, the full parse rejects too — the
+    /// property that makes gating on the header safe. A `run.json` with no
+    /// `run_id` is dropped by both.
+    #[test]
+    fn a_record_without_identity_is_dropped_by_both_reads() {
+        let bytes = br#"{"format_version":1,"kind":"sim","status":"completed"}"#;
+        assert!(run_header(bytes).is_none());
+        assert!(serde_json::from_slice::<RunRecord>(bytes).is_err());
     }
 }
