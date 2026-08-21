@@ -26,14 +26,11 @@ struct SimRow {
     created: SystemTime,
 }
 
-/// Discover the new-format sim leaves under `root/sims/` for `list`, skipping
-/// the per-cell leaves the already-discovered ensemble rows represent.
-fn discover_sim_rows(
-    root: &str,
-    ensemble_members: &std::collections::HashSet<runid::ContentHash>,
-) -> Vec<SimRow> {
+/// Discover the new-format sim leaves under `root/sims/` for `list`, bounded
+/// by what the row filters below can already rule out.
+fn discover_sim_rows(root: &str, bounds: cas_read::Bounds) -> Vec<SimRow> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    cas_read::walk_sim_leaves_excluding(Path::new(root), ensemble_members)
+    cas_read::walk_sim_leaves_bounded(Path::new(root), bounds)
         .into_iter()
         .map(|leaf| {
             let created = leaf
@@ -166,10 +163,23 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         .flat_map(|e| e.leaf.record.deps.iter().map(|d| d.run_id))
         .collect();
 
+    // `--since` bounds DISCOVERY, not just the printed rows. A leaf
+    // directory's mtime is an upper bound on the `created_at` of the record
+    // inside it (the record is stamped before `run.json` is written into that
+    // directory), so an mtime older than the cutoff proves the row would be
+    // filtered out below — and the leaf need never be read. Only sims are
+    // bounded this way; that is where the leaves are (550,647 of 550,881 in
+    // gh#699), and the ensembles must stay unbounded because their `deps` have
+    // to name every member regardless of the ensemble's own age.
+    let since_cutoff = filter_since.and_then(|dur| SystemTime::now().checked_sub(dur));
+
     let runs = if !filter_kind.includes_sims() {
         Vec::new()
     } else {
-        discover_sim_rows(&root, &ensemble_member_ids)
+        discover_sim_rows(
+            &root,
+            cas_read::Bounds { skip: Some(&ensemble_member_ids), not_before: since_cutoff },
+        )
     };
     let fits = if !filter_kind.includes_fits() {
         Vec::new()
@@ -191,6 +201,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     } else {
         discover_pfilter_rows(&root)
     };
+
     let now = SystemTime::now();
 
     let mut filtered_runs: Vec<SimRow> = runs.into_iter()

@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use runid::{ArtifactKind, ContentHash, RunRecord};
 
@@ -16,7 +17,7 @@ use crate::cas_index;
 thread_local! {
     /// Full `RunRecord` parses performed by the walk **on this thread**.
     ///
-    /// The point of the gated walks below is that a leaf the caller is going
+    /// The point of the bounded walks below is that a leaf the caller is going
     /// to discard never costs a full parse — a claim about *work*, not about
     /// the rows returned, which are required to stay identical — so counting
     /// the parses is the only way to assert it. Thread-local because the test
@@ -101,34 +102,68 @@ fn run_header(bytes: &[u8]) -> Option<RunHeader> {
     out
 }
 
-/// What a walk may rule out from a leaf's cheap header, before paying for the
-/// full `RunRecord` parse.
+/// Slack allowed when treating a leaf directory's mtime as an upper bound on
+/// the record's `created_at`.
 ///
-/// Both fields are one-sided: they may only rule out a leaf the caller was
-/// going to discard anyway, so a gated walk returns exactly the subset of
-/// [`walk_records`]'s result the caller would have kept. Nothing here can
-/// change *which* rows a command prints — only what it costs to find them.
+/// The record is stamped in memory and then written into that directory, so
+/// `created_at <= mtime(dir)`. A filesystem that records mtime at one-second
+/// granularity can round the directory's timestamp *below* a sub-second
+/// `created_at`; two seconds is far more than any such rounding and far less
+/// than any `--since` a user types.
+const MTIME_BOUND_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Bounds a caller can put on a per-kind walk, decided from the leaf's cheap
+/// header and its directory mtime — before the full `RunRecord` parse.
+///
+/// Every bound is **one-sided**: it may only rule out a leaf the caller was
+/// going to discard anyway, so a bounded walk returns exactly the subset of
+/// the unbounded one the caller would have kept. Nothing here can change
+/// *which* rows a command prints — only what it costs to find them.
+#[derive(Default, Clone, Copy)]
+pub struct Bounds<'a> {
+    /// Skip leaves whose `run_id` is in this set — the per-cell members an
+    /// already-discovered ensemble row represents.
+    pub skip: Option<&'a HashSet<ContentHash>>,
+    /// Skip leaves whose directory mtime proves they were written before this
+    /// instant. `camdl list --since` passes `now - duration`: an older mtime
+    /// bounds `created_at` below the cutoff, so the row would be filtered out.
+    pub not_before: Option<SystemTime>,
+}
+
+impl Bounds<'_> {
+    /// `true` when `dir`'s mtime proves the record it holds is older than the
+    /// `--since` cutoff. Unknown mtime is never a proof — it declines to prune.
+    fn excluded_by_mtime(&self, dir: &Path) -> bool {
+        let Some(cutoff) = self.not_before else { return false };
+        let Ok(mtime) = std::fs::metadata(dir).and_then(|m| m.modified()) else {
+            return false;
+        };
+        mtime.checked_add(MTIME_BOUND_SLACK).is_some_and(|bound| bound < cutoff)
+    }
+}
+
+/// What a walk rules out before paying for the full `RunRecord` parse: the
+/// caller's [`Bounds`] plus, for a per-kind walk, the kind itself.
 struct LeafGate<'a> {
     /// Keep only leaves of this kind; `None` keeps every kind.
     kind: Option<ArtifactKind>,
-    /// Skip leaves whose `run_id` is in this set (the per-cell members an
-    /// ensemble row already represents).
-    members: Option<&'a HashSet<ContentHash>>,
+    bounds: Bounds<'a>,
 }
 
 impl LeafGate<'_> {
     /// Materialize every record found — the unfiltered walk.
-    const ANY: LeafGate<'static> = LeafGate { kind: None, members: None };
+    const ANY: LeafGate<'static> =
+        LeafGate { kind: None, bounds: Bounds { skip: None, not_before: None } };
 
     /// Whether reading the cheap header can rule anything out. When it cannot,
     /// reading it would be pure overhead.
     fn is_selective(&self) -> bool {
-        self.kind.is_some() || self.members.is_some_and(|m| !m.is_empty())
+        self.kind.is_some() || self.bounds.skip.is_some_and(|m| !m.is_empty())
     }
 
     fn admits(&self, header: &RunHeader) -> bool {
         self.kind.is_none_or(|k| k == header.kind)
-            && !self.members.is_some_and(|m| m.contains(&header.run_id))
+            && !self.bounds.skip.is_some_and(|m| m.contains(&header.run_id))
     }
 }
 
@@ -158,6 +193,10 @@ fn walk_gated(subtree: &Path, gate: &LeafGate) -> Vec<(PathBuf, RunRecord)> {
             }
         };
         let Some(rj) = run_json else { continue };
+        // `--since`, applied before any JSON is read.
+        if gate.bounds.excluded_by_mtime(&dir) {
+            continue;
+        }
         let Ok(bytes) = std::fs::read(&rj) else { continue };
         // The cheap header decides whether this record is worth materializing.
         // A header that does not read could not have parsed as a full
@@ -219,15 +258,11 @@ pub fn walk_records(subtree: &Path) -> Vec<(PathBuf, RunRecord)> {
 }
 
 /// Every leaf of `kind` under that kind's store partition (`sims/`, `fits/`,
-/// …), optionally skipping `members`. One walk behind all six per-kind
-/// accessors below, so the partition dir and the kind can never disagree —
-/// both come from [`ArtifactKind::store_dir`].
-fn walk_kind(
-    root: &Path,
-    kind: ArtifactKind,
-    members: Option<&HashSet<ContentHash>>,
-) -> Vec<Leaf> {
-    let gate = LeafGate { kind: Some(kind), members };
+/// …) that `bounds` admits. One walk behind all six per-kind accessors below,
+/// so the partition dir and the kind can never disagree — both come from
+/// [`ArtifactKind::store_dir`].
+fn walk_kind(root: &Path, kind: ArtifactKind, bounds: Bounds) -> Vec<Leaf> {
+    let gate = LeafGate { kind: Some(kind), bounds };
     walk_gated(&root.join(kind.store_dir()), &gate)
         .into_iter()
         .map(|(dir, record)| Leaf { dir, record })
@@ -299,7 +334,7 @@ fn resolve_prefix_indexed(
 
 /// All `sims/` leaves of kind `Sim` (new-format trajectory runs).
 pub fn walk_sim_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::Sim, None)
+    walk_kind(root, ArtifactKind::Sim, Bounds::default())
 }
 
 /// All `sims/` leaves of kind `Sim` EXCEPT those whose `run_id` is in
@@ -311,8 +346,8 @@ pub fn walk_sim_leaves(root: &Path) -> Vec<Leaf> {
 /// are ensemble members, so discovering them only to drop them afterwards is
 /// the whole cost of the command. A member is recognized from its `run_id`
 /// alone, which [`run_header`] reads without parsing the record.
-pub fn walk_sim_leaves_excluding(root: &Path, members: &HashSet<ContentHash>) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::Sim, Some(members))
+pub fn walk_sim_leaves_bounded(root: &Path, bounds: Bounds) -> Vec<Leaf> {
+    walk_kind(root, ArtifactKind::Sim, bounds)
 }
 
 /// New-format sims whose `run_id` hex matches `prefix` (for `show`/`cat`
@@ -324,7 +359,7 @@ pub fn resolve_sim_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 
 /// All `fits/` leaves of kind `FitStage` (new-format fit-stage runs, M3.2).
 pub fn walk_fit_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::FitStage, None)
+    walk_kind(root, ArtifactKind::FitStage, Bounds::default())
 }
 
 /// New-format fit stages whose `run_id` hex matches `prefix` (for `show`/`cat`
@@ -337,7 +372,7 @@ pub fn resolve_fit_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 /// mini-fits, M3.3). Each is one `(grid point × seed × start)` cell under the
 /// factored `profile/point/stage/seed/start` tree.
 pub fn walk_profile_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::ProfilePoint, None)
+    walk_kind(root, ArtifactKind::ProfilePoint, Bounds::default())
 }
 
 /// New-format profile points whose `run_id` hex matches `prefix` (for
@@ -350,7 +385,7 @@ pub fn resolve_profile_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 /// M3.3). Each is one `(model × config × params × seed)` standalone eval —
 /// a single leaf, no grid.
 pub fn walk_pfilter_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::Pfilter, None)
+    walk_kind(root, ArtifactKind::Pfilter, Bounds::default())
 }
 
 /// New-format pfilter evals whose `run_id` hex matches `prefix` (for
@@ -363,7 +398,7 @@ pub fn resolve_pfilter_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 /// surveys, M3.3). Each is one `(model × config × box × seed)` LHS landscape —
 /// a single leaf, the N points are within it (not an axis).
 pub fn walk_survey_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::Survey, None)
+    walk_kind(root, ArtifactKind::Survey, Bounds::default())
 }
 
 /// New-format surveys whose `run_id` hex matches `prefix` (for `show`/`cat`
@@ -376,7 +411,7 @@ pub fn resolve_survey_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 /// wide-format TSV of a multi-cell `simulate`). Each references its N per-cell
 /// `Sim` leaves via `deps`; the combined TSV is its `ensemble.tsv` artifact.
 pub fn walk_sim_ensemble_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::SimEnsemble, None)
+    walk_kind(root, ArtifactKind::SimEnsemble, Bounds::default())
 }
 
 /// New-format ensembles whose `run_id` hex matches `prefix` (for `show`/`cat`
@@ -496,6 +531,7 @@ pub(crate) mod tests {
     /// The walk may only materialize the leaves that survive to be printed.
     #[test]
     fn ensemble_members_are_skipped_without_a_full_parse() {
+        measuring();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let (members, free) = ensemble_heavy_store(root, 40, 5);
@@ -503,8 +539,8 @@ pub(crate) mod tests {
         let member_ids: HashSet<ContentHash> =
             members.iter().map(|m| ContentHash::from_hex(m).unwrap()).collect();
 
-        measuring();
-        let leaves = walk_sim_leaves_excluding(root, &member_ids);
+        let leaves =
+            walk_sim_leaves_bounded(root, Bounds { skip: Some(&member_ids), not_before: None });
 
         // Correctness: exactly the non-member leaves, unchanged.
         let mut got: Vec<String> = leaves.iter().map(|l| l.run_id_hex()).collect();
@@ -522,11 +558,82 @@ pub(crate) mod tests {
         );
     }
 
+    /// Backdate a directory's mtime by `age`, so the walk sees it as written
+    /// then. Returns the instant it was set to.
+    fn backdate(dir: &Path, age: std::time::Duration) -> SystemTime {
+        let when = SystemTime::now() - age;
+        let times = std::fs::FileTimes::new().set_accessed(when).set_modified(when);
+        std::fs::File::options().read(true).open(dir).unwrap().set_times(times).unwrap();
+        when
+    }
+
+    /// gh#699. `--since` bounds discovery, not just the printed rows: a leaf
+    /// directory's mtime is an upper bound on the `created_at` inside it, so a
+    /// leaf older than the cutoff must never be read or parsed.
+    #[test]
+    fn leaves_older_than_the_since_cutoff_are_never_read() {
+        use std::time::Duration;
+        measuring();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let old: Vec<String> = (0..12).map(|i| id(&format!("01d{i:02}"))).collect();
+        for (i, o) in old.iter().enumerate() {
+            let dir = plant_sim(root, &format!("m-1111/old{i}-2222"), o);
+            backdate(&dir, Duration::from_secs(30 * 24 * 3600));
+        }
+        let fresh: Vec<String> = (0..3).map(|i| id(&format!("0fe{i:02}"))).collect();
+        for (i, f) in fresh.iter().enumerate() {
+            plant_sim(root, &format!("m-1111/new{i}-3333"), f);
+        }
+
+        let cutoff = SystemTime::now() - Duration::from_secs(3600);
+        measuring();
+        let leaves =
+            walk_sim_leaves_bounded(root, Bounds { skip: None, not_before: Some(cutoff) });
+
+        let mut got: Vec<String> = leaves.iter().map(|l| l.run_id_hex()).collect();
+        got.sort();
+        let mut want = fresh.clone();
+        want.sort();
+        assert_eq!(got, want, "only the leaves inside the window are discovered");
+        assert_eq!(
+            full_parses(),
+            fresh.len(),
+            "leaves outside the --since window must not be read ({} in the tree)",
+            old.len() + fresh.len()
+        );
+    }
+
+    /// The mtime prune is one-sided. A store whose directory mtimes are NEWER
+    /// than the records inside them — every `cp -r`/`rsync` copy — must not
+    /// lose rows: the walk declines to prune and the `created_at` filter above
+    /// it does the real work.
+    #[test]
+    fn a_recently_copied_store_is_not_pruned() {
+        measuring();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // `plant_sim` stamps `created_at` in the past while the directories it
+        // makes carry today's mtime — exactly the copied-store shape.
+        let (_, free) = ensemble_heavy_store(root, 0, 4);
+
+        let cutoff = SystemTime::now() - std::time::Duration::from_secs(3600);
+        let leaves =
+            walk_sim_leaves_bounded(root, Bounds { skip: None, not_before: Some(cutoff) });
+        let mut got: Vec<String> = leaves.iter().map(|l| l.run_id_hex()).collect();
+        got.sort();
+        let mut want = free.clone();
+        want.sort();
+        assert_eq!(got, want, "a fresh mtime is never a proof that the record is old");
+    }
+
     /// `--kind sim` is the explicit request for the per-cell level, so the
     /// unexcluded walk must still return the member leaves. The exclusion is
     /// opt-in, never a property of the store.
     #[test]
     fn the_unexcluded_walk_still_returns_member_leaves() {
+        measuring();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let (members, free) = ensemble_heavy_store(root, 6, 2);
@@ -568,6 +675,7 @@ pub(crate) mod tests {
     #[test]
     #[cfg(unix)]
     fn symlinked_subtrees_and_records_are_still_walked() {
+        measuring();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 
