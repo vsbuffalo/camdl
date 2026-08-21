@@ -33,8 +33,9 @@ pub(crate) enum Mode {
 /// parameter, in sorted-name order). A leading `scenario` column precedes the
 /// `sweep:<param>` columns, which precede everything else.
 ///
-/// `simulate` passes [`DesignCoords::none`] (no scenario column, no sweep
-/// columns), keeping its output byte-identical.
+/// `simulate` populates the scenario from the cell it is rendering and passes
+/// an empty sweep. Whether the column is *printed* is a separate question,
+/// answered by whether the run has a scenario axis at all (gh#562).
 #[derive(Clone, Copy)]
 pub(crate) struct DesignCoords<'a> {
     /// The scenario this design cell belongs to. `None` means the run has **no
@@ -239,13 +240,16 @@ fn collect_qrefs(se: &ir::quantity::ScalarExpr, out: &mut Vec<String>) {
 /// `mode` selects banded (one column per draw → a quantile band) or point (one
 /// realization → a bare `value`).
 ///
-/// `coords` is the `fit predict` design overlay: a `Some` scenario prepends a
-/// leading `scenario` column to every TSV header + row and a `scenario` field to
-/// every manifest entry; a non-empty sweep prepends one `sweep:<param>` column
-/// per swept parameter (after the scenario column) and a `sweep` object to the
-/// manifest entry (the same way the predictive TSV tags its rows). The
-/// `simulate --quantities-out` caller passes [`DesignCoords::none`] (pools all
-/// cells into one band) and omits both — today's behaviour, unchanged.
+/// `coords` identifies the ONE design cell being rendered: a `Some` scenario
+/// prepends a leading `scenario` column to every TSV header + row and a
+/// `scenario` field to every manifest entry; a non-empty sweep prepends one
+/// `sweep:<param>` column per swept parameter (after the scenario column) and a
+/// `sweep` object to the manifest entry.
+///
+/// `None` means the run has no scenario axis — NOT "render these cells without
+/// a label". Both verbs now pass the cell's own scenario; the caller that used
+/// to hand this function several scenarios at once and no coordinate was
+/// gh#562.
 pub(crate) fn render_quantities(
     quantities: &[ir::quantity::Quantity],
     quant_draws: &[Vec<sim::quantity::QuantityResult>],
@@ -365,10 +369,9 @@ pub(crate) fn render_quantities(
             "unit": serde_json::Value::Null,
             "censoring": censoring,
         });
-        // The `fit predict` design overlay: one manifest entry per (quantity,
-        // scenario, sweep-cell), tagged so a consumer can group/join by scenario
-        // and sweep coordinate. Omitted for the simulate path (`DesignCoords::none`),
-        // keeping its manifest byte-identical.
+        // One manifest entry per (quantity, scenario, sweep-cell), tagged so a
+        // consumer can group/join by scenario and sweep coordinate. Absent only
+        // when the run has no scenario axis to report.
         if let Some(s) = coords.scenario {
             entry["scenario"] = serde_json::Value::String(s.to_string());
         }
