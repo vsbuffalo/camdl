@@ -52,6 +52,7 @@ use io::trajectories::SNAPSHOT_TIME_TOL;
 use sim::quantity::{QuantityDrawValue, QuantityEvaluator, QuantityResult};
 
 use crate::args::types::ForwardBackend;
+use crate::chain_selection::ChainSelection;
 use crate::fit::joint::{resolve_joint, LatentPath};
 use crate::fit::predict::write_tsv;
 use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
@@ -135,19 +136,52 @@ struct ArmDrawResult {
 /// resolve an anchor to the same instant; whether that instant lies inside the
 /// arm's `[fork, run_end]` replay window is then the ordinary in-window question
 /// `value_at` already answers by right-censoring.
+///
+/// `selection` is the run's `--exclude-chains` (gh#695). It is applied to the
+/// `(θ, X)` cloud through the draws authority, so a contrast bands over exactly
+/// the cloud the free-forward rows do — the alternative is an artifact whose
+/// manifest says a chain was excluded and whose numbers include it.
 pub fn emit_contrasts(
     segment: &Path,
     stage: Option<&str>,
+    selection: Option<&ChainSelection>,
     model: &ir::Model,
     backend: ForwardBackend,
     seed: u64,
     obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
 ) -> Result<Vec<PathBuf>, String> {
+    // The draws authority, carrying the run's chain selection: one resolve, used
+    // both for the (θ, X) cloud below and for the stage dir the saved paths are
+    // read from — so the filtered cloud and the paths can never come from
+    // different stages.
+    let pref = crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), stage)?
+        .with_selection(selection.cloned());
+
     // The forkable subset, classified by LatentPath. A point-estimate fit is
     // already refused upstream by `fit predict` (PlugIn treatment), so here we
-    // only see a posterior cloud.
-    let joint = resolve_joint(&segment.to_string_lossy(), stage)?;
+    // only see a posterior cloud. With a selection active every count below is
+    // over the RETAINED chains.
+    let joint = resolve_joint(&pref)?;
     if joint.n_forkable == 0 {
+        // Under an explicit `--exclude-chains`, "no forkable draws" is a
+        // statement about the SELECTION, not about the fit: the excluded chains
+        // held the saved paths. Emitting nothing (or an empty band) would read
+        // as "this fit cannot be contrasted", which is false. Refuse by name.
+        if let Some(info) = &joint.selection {
+            return Err(format!(
+                "contrasts: --exclude-chains {} leaves no forkable posterior draws — none of \
+                 the {} draws on the retained chain(s) {} carries a saved latent path X(T*), \
+                 so there is no cloud to fork {} contrast(s) from. The excluded chain(s) held \
+                 the saved paths.\n  \
+                 Fix: retain a chain that saved paths (`camdl fit summary` reports the \
+                 per-chain forkability), or re-fit with a PGAS stage that saves paths on \
+                 every chain.",
+                info.excluded_csv(),
+                joint.n_total,
+                info.kept.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(","),
+                model.contrasts.len(),
+            ));
+        }
         eprintln!(
             "fit predict: skipping {} contrast(s) — this fit has no forkable posterior \
              draws (0/{} have a usable latent state X(T*)). A conditioned contrast needs \
@@ -173,7 +207,25 @@ pub fn emit_contrasts(
         return Ok(Vec::new());
     }
 
-    // Honest denominator: a contrast bands over the forkable subset only.
+    // Honest denominator, part 1: WHICH cloud. A chain selection narrows the
+    // posterior before the forkable subset is taken, and a band over 25 of 25
+    // retained draws looks identical on paper to one over the whole fit — so
+    // the retained-chain scope is stated whenever a selection is active, not
+    // only when draws were also skipped for want of a path.
+    if let Some(info) = &joint.selection {
+        eprintln!(
+            "fit predict: contrasts band over the RETAINED chains — chain(s) {} excluded, \
+             {} of {} chains kept; {} of the {} retained draws carry a saved latent path \
+             X(T*).",
+            info.excluded_csv(),
+            info.kept.len(),
+            info.n_total,
+            joint.n_forkable,
+            joint.n_total,
+        );
+    }
+
+    // Honest denominator, part 2: a contrast bands over the forkable subset only.
     if joint.n_forkable < joint.n_total {
         eprintln!(
             "fit predict: contrasts band over the forkable subset — {}/{} draws have a \
@@ -294,7 +346,10 @@ pub fn emit_contrasts(
         }
     }
 
-    let stage_dir = resolve_stage_dir(segment, stage)?;
+    let stage_dir = pref
+        .draws_path
+        .parent()
+        .ok_or_else(|| format!("draws path has no parent: {}", pref.draws_path.display()))?;
     let col_spec = io::trajectories::TrajColumnSpec::from_model(model, &[]);
     let dt = model.simulation.dt.unwrap_or(1.0);
 
@@ -397,16 +452,6 @@ pub fn emit_contrasts(
         written.push(write_tsv(segment, "contrasts", &c.name, &content)?);
     }
     Ok(written)
-}
-
-/// `<stage_dir>` = the directory holding `draws.tsv` and the `chain_*/` trajectory
-/// subdirs, for [`io::trajectories::read_state_at`].
-fn resolve_stage_dir(segment: &Path, stage: Option<&str>) -> Result<PathBuf, String> {
-    let pref = crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), stage)?;
-    pref.draws_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| format!("draws path has no parent: {}", pref.draws_path.display()))
 }
 
 /// Refuse a contrast arm that declares a horizon the replay will not honour.

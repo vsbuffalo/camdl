@@ -704,7 +704,15 @@ fn resolve_paired_posterior(
         std::process::exit(1);
     });
     let columns = io::trajectories::TrajColumnSpec::from_model(&model, &[]);
-    let ens = crate::fit::joint::resolve_forecast_ensemble(fit_ref, None, &columns)
+    // The draws authority for this fit. `simulate` surfaces no `--exclude-chains`
+    // today, so no selection is attached and the cloud is the whole posterior;
+    // attaching one here is the entire change if the flag ever lands (gh#695).
+    let pref = crate::posterior_draws::resolve_posterior_draws(fit_ref, None)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+    let ens = crate::fit::joint::resolve_forecast_ensemble(&pref, &columns)
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
             std::process::exit(1);

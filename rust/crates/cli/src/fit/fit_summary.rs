@@ -622,7 +622,16 @@ fn format_text(
     // i.e. how many a counterfactual `compare`/contrast could fork. Shown only
     // for a posterior fit; an optimizer fit has no cloud, so `resolve_joint`
     // errors and the line is skipped.
-    if let Ok(j) = crate::fit::joint::resolve_joint(dir, args.stage.as_deref()) {
+    //
+    // The cloud is resolved under this command's own `--exclude-chains`, so the
+    // count describes the same posterior the rest of the summary reports —
+    // never the full cloud under a header that says chains were dropped
+    // (gh#695). The retained-chain scope is named on the line itself, because
+    // "24/24 forkable" reads identically whether it is a subset or the whole.
+    let joint = crate::posterior_draws::resolve_posterior_draws(dir, args.stage.as_deref())
+        .map(|p| p.with_selection(selection.cloned()))
+        .and_then(|p| crate::fit::joint::resolve_joint(&p));
+    if let Ok(j) = joint {
         println!();
         println!("  {}", fmt.bold("(θ, X) forkability"));
         let note = if j.n_forkable == j.n_total {
@@ -630,7 +639,13 @@ fn format_text(
         } else {
             fmt.dim("(partial — only path-saved draws can be conditioned-forked)")
         };
-        println!("    forkable draws: {}/{}  {}", j.n_forkable, j.n_total, note);
+        let scope = match &j.selection {
+            Some(info) => {
+                format!(" over the retained chains (chain(s) {} excluded)", info.excluded_csv())
+            }
+            None => String::new(),
+        };
+        println!("    forkable draws: {}/{}{}  {}", j.n_forkable, j.n_total, scope, note);
     }
 
     if strict && had_provenance_failure {

@@ -885,7 +885,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         .as_deref()
         .map(ChainSelection::parse_exclude)
         .transpose()?;
-    let fit_result = FitResult::resolve(&segment, args.stage.as_deref(), selection)?;
+    let fit_result = FitResult::resolve(&segment, args.stage.as_deref(), selection.clone())?;
     let treatment = fit_result.into_treatment();
     // The label the artifact carries, derived from the treatment before we
     // unwrap the cloud (v1 only ever reaches `posterior` here, but the label is
@@ -1735,10 +1735,15 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // draw from its smoothed X(T*) and bands the difference into
     // `contrasts/<name>.tsv`. A model with no `contrasts {}` is byte-identical
     // (this is a no-op). A non-forkable / ODE fit emits no file and a located note.
+    //
+    // The SAME `--exclude-chains` selection the free-forward cloud was resolved
+    // under is passed here: a contrast bands over the cloud this run's manifest
+    // describes, never over a chain the manifest says was dropped (gh#695).
     if !model.contrasts.is_empty() {
         let paths = crate::fit::contrasts::emit_contrasts(
             &segment,
             args.stage.as_deref(),
+            selection.as_ref(),
             &model,
             posterior.backend,
             seed,

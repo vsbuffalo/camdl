@@ -7,11 +7,20 @@
 //! contrast bands honestly over the subset, never silently over fewer draws than
 //! the parameter posterior.
 //!
+//! Both resolvers take the [`PosteriorDrawsRef`] — the draws authority — rather
+//! than a `(fit_ref, stage)` pair, and read the cloud through
+//! [`PosteriorDrawsRef::load_keyed_with_info`]. That is what makes a read-side
+//! chain selection (`--exclude-chains`) reach the joint: the filter is applied
+//! once, where the ref carries it, so a `(θ, X)` consumer cannot band over a
+//! chain the same command reports as excluded (gh#695).
+//!
 //! gh#322; docs/dev/proposals/2026-06-28-keyed-joint-param-trajectory-output.md.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
+use crate::chain_selection::SubsetInfo;
+use crate::posterior_draws::PosteriorDrawsRef;
 use crate::run_meta::InferenceBackend;
 
 /// Whether (and how) a posterior draw's latent state X is recoverable for a
@@ -59,8 +68,16 @@ pub struct JointEnsemble {
     pub draws: Vec<JointDraw>,
     /// Draws with a usable latent state (`Deterministic` + `Sampled`).
     pub n_forkable: usize,
-    /// All posterior draws (the parameter-posterior size).
+    /// The posterior draws this ensemble was resolved from — **after** any chain
+    /// selection. With `--exclude-chains` active it is the RETAINED count, so
+    /// `n_forkable`/`n_total` is the honest denominator pair for the cloud the
+    /// caller actually bands over, not for a cloud that includes dropped chains.
     pub n_total: usize,
+    /// The chain selection that produced this cloud (`--exclude-chains`), when
+    /// one was active; `None` is the full cloud. Carried so a consumer NAMES the
+    /// subset in its own output rather than reporting a subset count as if it
+    /// were the whole posterior (gh#695).
+    pub selection: Option<SubsetInfo>,
 }
 
 /// Classify each keyed draw against the set of `(chain, draw)` keys that have a
@@ -69,10 +86,15 @@ pub struct JointEnsemble {
 ///
 /// `is_ode`: a deterministic backend — every draw is `Deterministic` (X is
 /// recomputed from θ), so `traj_keys` is irrelevant.
+///
+/// `selection` is the provenance of the cloud handed in: `keyed` is expected to
+/// be POST-filter, so the counts derived here describe the retained cloud and
+/// the record travels with them.
 pub fn classify_joint(
     keyed: Vec<crate::KeyedDraw>,
     traj_keys: &BTreeSet<(usize, usize)>,
     is_ode: bool,
+    selection: Option<SubsetInfo>,
 ) -> JointEnsemble {
     let n_total = keyed.len();
     let mut n_forkable = 0usize;
@@ -95,7 +117,7 @@ pub fn classify_joint(
             JointDraw { params: d.params, latent }
         })
         .collect();
-    JointEnsemble { draws, n_forkable, n_total }
+    JointEnsemble { draws, n_forkable, n_total, selection }
 }
 
 /// Resolve a fit's keyed-joint `(θ, X)`: inner-join `draws.tsv` to the smoothed
@@ -104,9 +126,16 @@ pub fn classify_joint(
 /// - ODE fit → every draw is `Deterministic` (recompute X from θ).
 /// - chain-binomial fit → `Sampled` iff the draw's `(chain, draw)` has a saved
 ///   trajectory, else `NotSaved` (the partial join).
-pub fn resolve_joint(fit_ref: &str, stage: Option<&str>) -> Result<JointEnsemble, String> {
-    let pref = crate::posterior_draws::resolve_posterior_draws(fit_ref, stage)?;
-    let keyed = crate::load_draws_tsv_keyed(&pref.draws_path.to_string_lossy())?;
+///
+/// The cloud is read through the ref's own
+/// [`load_keyed_with_info`](PosteriorDrawsRef::load_keyed_with_info), so a
+/// selection attached with
+/// [`with_selection`](PosteriorDrawsRef::with_selection) is applied HERE — a
+/// `(θ, X)` consumer cannot fork a chain the same command excluded (gh#695).
+/// `trajectory_keys` still scans every `chain_*/` dir, which is harmless: a key
+/// belonging to a dropped chain has no retained draw to match.
+pub fn resolve_joint(pref: &PosteriorDrawsRef) -> Result<JointEnsemble, String> {
+    let (keyed, sel_info) = pref.load_keyed_with_info()?;
     let stage_dir = pref
         .draws_path
         .parent()
@@ -114,7 +143,7 @@ pub fn resolve_joint(fit_ref: &str, stage: Option<&str>) -> Result<JointEnsemble
 
     let is_ode = pref.backend == Some(InferenceBackend::Ode);
     let traj_keys = if is_ode { BTreeSet::new() } else { trajectory_keys(stage_dir) };
-    Ok(classify_joint(keyed, &traj_keys, is_ode))
+    Ok(classify_joint(keyed, &traj_keys, is_ode, sel_info))
 }
 
 // ── The terminal-origin specialization (gh#697) ─────────────────────────────
@@ -177,12 +206,16 @@ pub struct ForecastEnsemble {
 /// cloud a single forecast, so a disagreement is named rather than averaged).
 /// A fit with *no* saved paths returns an empty `draws` with the real
 /// `n_total`, so the caller can refuse with both numbers in hand.
+///
+/// Like [`resolve_joint`], the cloud comes through the ref's own load method, so
+/// whatever chain selection the ref carries is already applied when the pairing
+/// happens. `simulate` attaches none today (it has no `--exclude-chains`), so
+/// this is a no-op there — and the day it grows one, attaching it to the ref is
+/// the whole change (gh#695).
 pub fn resolve_forecast_ensemble(
-    fit_ref: &str,
-    stage: Option<&str>,
+    pref: &PosteriorDrawsRef,
     columns: &io::trajectories::TrajColumnSpec,
 ) -> Result<ForecastEnsemble, String> {
-    let pref = crate::posterior_draws::resolve_posterior_draws(fit_ref, stage)?;
     if pref.backend == Some(InferenceBackend::Ode) {
         return Err(format!(
             "--init-state fit: this fit ran on the ode backend, which stores no \
@@ -192,7 +225,7 @@ pub fn resolve_forecast_ensemble(
              from the model's own t_start with --draws posterior."
         ));
     }
-    let keyed = crate::load_draws_tsv_keyed(&pref.draws_path.to_string_lossy())?;
+    let (keyed, sel_info) = pref.load_keyed_with_info()?;
     let stage_dir = pref
         .draws_path
         .parent()
@@ -220,7 +253,7 @@ pub fn resolve_forecast_ensemble(
     }
 
     let traj_keys: BTreeSet<(usize, usize)> = terminal.keys().copied().collect();
-    let joint = classify_joint(keyed, &traj_keys, false);
+    let joint = classify_joint(keyed, &traj_keys, false, sel_info);
     let n_total = joint.n_total;
 
     let mut draws: Vec<ForecastDraw> = Vec::with_capacity(joint.n_forkable);
@@ -327,7 +360,7 @@ mod tests {
             draw(Some(1), Some(21)),
         ];
         let traj: BTreeSet<(usize, usize)> = [(0, 20), (1, 21)].into_iter().collect();
-        let j = classify_joint(keyed, &traj, false);
+        let j = classify_joint(keyed, &traj, false, None);
         assert_eq!(j.n_total, 4);
         assert_eq!(j.n_forkable, 2, "only the 2 path-saved draws are forkable");
         assert_eq!(j.draws[0].latent, LatentPath::Sampled { chain: 0, draw: 20 });
@@ -340,7 +373,7 @@ mod tests {
     fn ode_is_all_deterministic_regardless_of_traj() {
         let keyed = vec![draw(Some(0), Some(5)), draw(Some(0), Some(6))];
         // ODE ignores traj keys entirely — every draw recomputes X from θ.
-        let j = classify_joint(keyed, &BTreeSet::new(), true);
+        let j = classify_joint(keyed, &BTreeSet::new(), true, None);
         assert_eq!(j.n_forkable, 2);
         assert!(j.draws.iter().all(|d| d.latent == LatentPath::Deterministic));
     }
@@ -349,7 +382,7 @@ mod tests {
     fn keyless_stochastic_draws_are_notsaved() {
         // A pre-key draws.tsv (no chain/draw) → unjoinable → NotSaved.
         let keyed = vec![draw(None, None), draw(None, None)];
-        let j = classify_joint(keyed, &BTreeSet::new(), false);
+        let j = classify_joint(keyed, &BTreeSet::new(), false, None);
         assert_eq!(j.n_forkable, 0);
         assert!(j.draws.iter().all(|d| d.latent == LatentPath::NotSaved));
     }

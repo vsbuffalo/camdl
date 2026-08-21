@@ -4630,6 +4630,15 @@ Results are banded over the forkable draws into `contrasts/<name>.tsv`. A
 contrast with no toggled intervention (a parameter-only scenario) or one toggled
 by a parametric or reactive fire time is skipped with a note, never silently.
 
+**A chain selection reaches the contrast.** `fit predict --exclude-chains`
+narrows the forkable set to the retained chains before the fork, so a contrast
+bands over exactly the cloud `predictive.json`'s `chain_selection` block
+describes — the contrast's `n_used` and the free-forward rows' `n_draws` are one
+number. The retained-chain scope is printed alongside the count. Excluding
+chains narrows an already-partial set (only path-saved draws are forkable); if
+the intersection is empty the run is refused by name, never emitted as an empty
+band.
+
 **`--quantities-out` refuses a multi-scenario run.** `quantities { }` bands are
 taken over draws × replicates × seeds; scenario is a partition of that grid, not
 part of the band. Pooling them would produce one ribbon describing neither arm,
